@@ -17,7 +17,7 @@ func (h *Handler) Routes() http.Handler {
 	r.Post("/", h.create)
 	r.Get("/", h.list)
 	r.Get("/{id}", h.get)
-	r.Post("/{id}/launch", h.launch) // implemented in Task 8
+	r.Post("/{id}/launch", h.launch)
 	return r
 }
 

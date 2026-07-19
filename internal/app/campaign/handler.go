@@ -15,9 +15,12 @@ import (
 type Handler struct {
 	svc       *Service
 	jwtSecret []byte
+	enq       Enqueuer
 }
 
-func NewHandler(svc *Service, jwtSecret []byte) *Handler { return &Handler{svc: svc, jwtSecret: jwtSecret} }
+func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer) *Handler {
+	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq}
+}
 
 type createRequest struct {
 	Name      string `json:"name" validate:"required,min=1,max=200"`
@@ -100,8 +103,29 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
-// launch is a temporary stub; the real implementation (enqueueing sends and
-// transitioning the campaign to running) is added in Task 8.
+// launch transitions a draft campaign to running: it materializes sends for
+// every list member and enqueues a send:email task for each.
 func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
-	httpx.Error(w, http.StatusNotImplemented, "not implemented")
+	ws, ok := wsID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	n, err := h.svc.Launch(r.Context(), ws, id, h.enq)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrAlreadyLaunched):
+		httpx.Error(w, http.StatusConflict, "campaign already launched")
+	case errors.Is(err, ErrEmptyList):
+		httpx.Error(w, http.StatusUnprocessableEntity, "target list is empty")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not launch")
+	default:
+		httpx.JSON(w, http.StatusOK, map[string]int{"queued": n})
+	}
 }

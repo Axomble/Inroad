@@ -2,8 +2,11 @@ package campaign
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -21,6 +24,11 @@ type Store interface {
 	Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, error)
 	List(ctx context.Context, ws uuid.UUID) ([]gen.Campaign, error)
 	Stats(ctx context.Context, id uuid.UUID) (map[string]int64, error)
+	// EnqueueSends materializes one `sends` row per (campaign, list member)
+	// pair and returns the ids of the newly created rows.
+	EnqueueSends(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
+	// SetStatus transitions a campaign to the given status.
+	SetStatus(ctx context.Context, ws, id uuid.UUID, status CampaignStatus) error
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -58,4 +66,17 @@ func (s *PgStore) Stats(ctx context.Context, id uuid.UUID) (map[string]int64, er
 		out[r.Status] = r.N
 	}
 	return out, nil
+}
+
+func (s *PgStore) EnqueueSends(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
+	return s.q.EnqueueSends(ctx, gen.EnqueueSendsParams{ID: campaignID, WorkspaceID: ws})
+}
+
+func (s *PgStore) SetStatus(ctx context.Context, ws, id uuid.UUID, status CampaignStatus) error {
+	return s.q.SetCampaignStatus(ctx, gen.SetCampaignStatusParams{
+		ID:          id,
+		WorkspaceID: ws,
+		Status:      string(status),
+		LaunchedAt:  pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
 }

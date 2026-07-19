@@ -14,7 +14,15 @@ var (
 	ErrMailboxNotActive = errors.New("mailbox not found or not active")
 	ErrListMissing      = errors.New("list not found")
 	ErrValidation       = errors.New("invalid campaign input")
+	ErrAlreadyLaunched  = errors.New("campaign already launched")
+	ErrEmptyList        = errors.New("target list is empty")
 )
+
+// Enqueuer schedules a send:email task for a queued send. Satisfied by
+// *queue.Client; defined here so the domain doesn't depend on platform/queue.
+type Enqueuer interface {
+	EnqueueSend(sendID string) error
+}
 
 // Service implements campaign use cases. It depends on the Store and
 // Checker interfaces, not on the sqlc-backed struct or other domains'
@@ -59,4 +67,31 @@ func (s *Service) List(ctx context.Context, ws uuid.UUID) ([]gen.Campaign, error
 // Stats returns send counts grouped by status for the campaign.
 func (s *Service) Stats(ctx context.Context, id uuid.UUID) (map[string]int64, error) {
 	return s.store.Stats(ctx, id)
+}
+
+// Launch transitions a draft campaign to running: it materializes one `sends`
+// row per list member, flips the campaign status, and enqueues a send:email
+// task for every new row. It returns the number of sends queued.
+func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqueuer) (int, error) {
+	c, err := s.store.Get(ctx, ws, campaignID)
+	if err != nil {
+		return 0, ErrNotFound
+	}
+	if c.Status != string(StatusDraft) {
+		return 0, ErrAlreadyLaunched
+	}
+	ids, err := s.store.EnqueueSends(ctx, ws, campaignID)
+	if err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, ErrEmptyList
+	}
+	if err := s.store.SetStatus(ctx, ws, campaignID, StatusRunning); err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		_ = enq.EnqueueSend(id.String())
+	}
+	return len(ids), nil
 }
