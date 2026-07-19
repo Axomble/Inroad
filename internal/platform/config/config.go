@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -14,6 +15,12 @@ type Config struct {
 	RedisAddr   string
 	JWTSecret   []byte
 	MasterKey   []byte
+
+	// MailAllowPrivateHosts permits mailbox SMTP/IMAP hosts on RFC1918/ULA
+	// private ranges. Default true for self-hosted operators reaching internal
+	// mail servers; set false for multi-tenant Cloud. Loopback, link-local
+	// (incl. cloud metadata), and multicast are always blocked regardless.
+	MailAllowPrivateHosts bool
 }
 
 func Load() (*Config, error) {
@@ -39,6 +46,8 @@ func Load() (*Config, error) {
 	}
 	cfg.MasterKey = rawKey
 
+	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
+
 	return cfg, nil
 }
 
@@ -47,4 +56,12 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 }

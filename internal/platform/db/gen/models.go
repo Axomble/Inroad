@@ -9,6 +9,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Mailbox struct {
+	ID                 uuid.UUID          `json:"id"`
+	WorkspaceID        uuid.UUID          `json:"workspace_id"`
+	Provider           string             `json:"provider"`
+	Email              string             `json:"email"`
+	DisplayName        string             `json:"display_name"`
+	SmtpHost           string             `json:"smtp_host"`
+	SmtpPort           int32              `json:"smtp_port"`
+	SmtpUsername       string             `json:"smtp_username"`
+	ImapHost           string             `json:"imap_host"`
+	ImapPort           int32              `json:"imap_port"`
+	ImapUsername       string             `json:"imap_username"`
+	SecretCiphertext   string             `json:"secret_ciphertext"`
+	UseTls             bool               `json:"use_tls"`
+	DailyCap           int32              `json:"daily_cap"`
+	MinIntervalSeconds int32              `json:"min_interval_seconds"`
+	RampEnabled        bool               `json:"ramp_enabled"`
+	RampStartCap       int32              `json:"ramp_start_cap"`
+	RampDays           int32              `json:"ramp_days"`
+	Status             string             `json:"status"`
+	LastError          string             `json:"last_error"`
+	LastSendAt         pgtype.Timestamptz `json:"last_send_at"`
+	LastPollAt         pgtype.Timestamptz `json:"last_poll_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type User struct {
 	ID           uuid.UUID          `json:"id"`
 	WorkspaceID  uuid.UUID          `json:"workspace_id"`

@@ -1,0 +1,22 @@
+# Normalize all text files to LF in the repo and working tree (Go tooling,
+# gofmt, and shell scripts expect LF). Prevents CRLF churn on Windows.
+* text=auto eol=lf
+
+# Explicit source types
+*.go   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.jsx  text eol=lf
+*.json text eol=lf
+*.sql  text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+
+# Binary assets — never touch
+*.png  binary
+*.jpg  binary
+*.svg  binary
+*.ico  binary
