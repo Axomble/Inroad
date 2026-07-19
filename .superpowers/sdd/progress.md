@@ -54,5 +54,5 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
 ## Campaign Send execution (plan 2026-07-20-minimal-campaign-send.md), branch campaign-send
 Mode: subagent-driven (sequential, review per task). Toolchain PATH prefix required.
 Dev DB up on :5433, Redis up, API running in background.
-- Task 1 (schema/queries/enums/deps): dispatched
+- Task 1 (schema): complete (8b6ab3e) — build/vet clean, all constraints verified
 - Tasks 2-10: pending
