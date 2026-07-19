@@ -50,3 +50,9 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
 - .gitattributes LF; line endings normalized; gofmt clean.
 - VERIFIED e2e: 401 no-token, 200 [] scoped list, 422 SSRF metadata block, 422 conn-test reject.
 - Next: connect SUCCESS path (real mail server / greenmail), Gmail/M365 OAuth, then contacts.
+
+## Campaign Send execution (plan 2026-07-20-minimal-campaign-send.md), branch core-workflow
+Mode: subagent-driven (sequential, review per task). Toolchain PATH prefix required.
+Dev DB up on :5433, Redis up, API running in background.
+- Task 1 (schema/queries/enums/deps): dispatched
+- Tasks 2-10: pending
