@@ -14,6 +14,8 @@ import { Route as AppRouteImport } from './routes/app'
 import { Route as DemoRouteImport } from './routes/demo'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as AppIndexRouteImport } from './routes/app.index'
+import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
+import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 
 const IndexRoute = IndexRouteImport.update({
@@ -41,6 +43,16 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppCampaignsRoute = AppCampaignsRouteImport.update({
+  id: '/campaigns',
+  path: '/campaigns',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppContactsRoute = AppContactsRouteImport.update({
+  id: '/contacts',
+  path: '/contacts',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppMailboxesRoute = AppMailboxesRouteImport.update({
   id: '/mailboxes',
   path: '/mailboxes',
@@ -52,6 +64,8 @@ export interface FileRoutesByFullPath {
   '/app': typeof AppRouteWithChildren
   '/demo': typeof DemoRoute
   '/register': typeof RegisterRoute
+  '/app/campaigns': typeof AppCampaignsRoute
+  '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/': typeof AppIndexRoute
 }
@@ -59,6 +73,8 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/demo': typeof DemoRoute
   '/register': typeof RegisterRoute
+  '/app/campaigns': typeof AppCampaignsRoute
+  '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app': typeof AppIndexRoute
 }
@@ -68,20 +84,39 @@ export interface FileRoutesById {
   '/app': typeof AppRouteWithChildren
   '/demo': typeof DemoRoute
   '/register': typeof RegisterRoute
+  '/app/campaigns': typeof AppCampaignsRoute
+  '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/app' | '/demo' | '/register' | '/app/mailboxes' | '/app/'
+  fullPaths:
+    | '/'
+    | '/app'
+    | '/demo'
+    | '/register'
+    | '/app/campaigns'
+    | '/app/contacts'
+    | '/app/mailboxes'
+    | '/app/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/demo' | '/register' | '/app/mailboxes' | '/app'
+  to:
+    | '/'
+    | '/demo'
+    | '/register'
+    | '/app/campaigns'
+    | '/app/contacts'
+    | '/app/mailboxes'
+    | '/app'
   id:
     | '__root__'
     | '/'
     | '/app'
     | '/demo'
     | '/register'
+    | '/app/campaigns'
+    | '/app/contacts'
     | '/app/mailboxes'
     | '/app/'
   fileRoutesById: FileRoutesById
@@ -130,6 +165,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/campaigns': {
+      id: '/app/campaigns'
+      path: '/campaigns'
+      fullPath: '/app/campaigns'
+      preLoaderRoute: typeof AppCampaignsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/contacts': {
+      id: '/app/contacts'
+      path: '/contacts'
+      fullPath: '/app/contacts'
+      preLoaderRoute: typeof AppContactsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/mailboxes': {
       id: '/app/mailboxes'
       path: '/mailboxes'
@@ -141,11 +190,15 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppCampaignsRoute: typeof AppCampaignsRoute
+  AppContactsRoute: typeof AppContactsRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppCampaignsRoute: AppCampaignsRoute,
+  AppContactsRoute: AppContactsRoute,
   AppMailboxesRoute: AppMailboxesRoute,
   AppIndexRoute: AppIndexRoute,
 }
