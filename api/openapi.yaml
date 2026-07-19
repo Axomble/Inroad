@@ -1,0 +1,61 @@
+openapi: 3.0.3
+info:
+  title: Inroad API
+  version: 0.1.0
+servers:
+  - url: /api/v1
+paths:
+  /workspaces/register:
+    post:
+      operationId: register
+      tags: [workspaces]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '200':
+          description: Session token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { description: Validation error }
+  /workspaces/login:
+    post:
+      operationId: login
+      tags: [workspaces]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Session token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401': { description: Invalid credentials }
+components:
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [workspace_name, email, password]
+      properties:
+        workspace_name: { type: string }
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    TokenResponse:
+      type: object
+      required: [token, workspace_id, user_id]
+      properties:
+        token: { type: string }
+        workspace_id: { type: string }
+        user_id: { type: string }

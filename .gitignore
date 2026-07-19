@@ -1,0 +1,19 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Env / secrets
+.env
+*.local
+
+# Node
+web/node_modules/
+web/dist/
+
+# Build artifacts / scratch
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db

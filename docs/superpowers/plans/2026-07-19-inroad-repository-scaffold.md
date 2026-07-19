@@ -494,7 +494,12 @@ sql:
         sql_package: "pgx/v5"
         emit_json_tags: true
         emit_pointers_for_null_types: true
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
 ```
+
+> The `uuid` override makes sqlc emit `google/uuid.UUID` (with a `.String()` method) instead of the default `pgtype.UUID`. The pool in `db.go` registers the matching pgx codec so scanning works.
 
 - [ ] **Step 5: Generate sqlc code**
 
@@ -513,12 +518,23 @@ package db
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgxuuid "github.com/vgarvardt/pgx-google-uuid/v5"
 )
 
-// Connect opens a pgx connection pool and verifies connectivity.
+// Connect opens a pgx connection pool, registers the google/uuid codec so
+// sqlc's uuid.UUID columns scan correctly, and verifies connectivity.
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	cfg.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
+		pgxuuid.Register(conn.TypeMap())
+		return nil
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
