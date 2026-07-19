@@ -11,7 +11,7 @@ import { PasswordInput } from '@/components/ui/password-input'
 import { useAppDispatch } from '@/store/hooks'
 import { setSession } from '@/store/slices/auth'
 import { AuthLayout } from './auth-layout'
-import { useLoginMutation } from './api'
+import { useAuthLoginMutation } from './api'
 
 const schema = z.object({
   email: z.email('Enter a valid email address'),
@@ -27,20 +27,14 @@ export function LoginForm() {
     handleSubmit,
     formState: { errors },
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
-  const [login, { isLoading, error }] = useLoginMutation()
+  const [login, { isLoading, error }] = useAuthLoginMutation()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
 
   async function onSubmit(values: FormValues) {
     const result = await login({ loginRequest: values })
     if ('data' in result && result.data) {
-      dispatch(
-        setSession({
-          token: result.data.token,
-          userId: result.data.user_id,
-          workspaceId: result.data.workspace_id,
-        }),
-      )
+      dispatch(setSession(result.data))
       navigate({ to: '/app/mailboxes' })
     }
   }

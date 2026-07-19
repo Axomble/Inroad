@@ -9,5 +9,10 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
-  test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'], globals: true },
+  test: {
+    environment: 'jsdom',
+    environmentOptions: { jsdom: { url: 'http://localhost:5173/' } },
+    setupFiles: ['./src/test/setup.ts'],
+    globals: true,
+  },
 })

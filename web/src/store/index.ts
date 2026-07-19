@@ -11,8 +11,10 @@ const rootReducer = combineReducers({
   auth,
 })
 
-// Persist UI + session slices ONLY. The RTK Query `api` cache must never be persisted.
-const persistConfig = { key: 'inroad', storage, whitelist: ['ui', 'auth'] }
+// Persist the UI slice ONLY. The session lives in memory (restored from the
+// httpOnly refresh cookie on boot, see features/auth/use-auth-bootstrap.ts) and
+// the RTK Query `api` cache must never be persisted.
+const persistConfig = { key: 'inroad', storage, whitelist: ['ui'] }
 const persisted = persistReducer(persistConfig, rootReducer)
 
 export const store = configureStore({

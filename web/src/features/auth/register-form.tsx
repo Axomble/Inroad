@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
 import { useAppDispatch } from '@/store/hooks'
 import { setSession } from '@/store/slices/auth'
 import { AuthLayout } from './auth-layout'
-import { useRegisterMutation } from './api'
+import { useAuthRegisterMutation } from './api'
 
 const schema = z.object({
   workspaceName: z.string().min(2, 'Give your workspace a name'),
@@ -44,7 +44,7 @@ export function RegisterForm() {
     watch,
     formState: { errors },
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
-  const [registerAccount, { isLoading, error }] = useRegisterMutation()
+  const [registerAccount, { isLoading, error }] = useAuthRegisterMutation()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
 
@@ -59,13 +59,7 @@ export function RegisterForm() {
       },
     })
     if ('data' in result && result.data) {
-      dispatch(
-        setSession({
-          token: result.data.token,
-          userId: result.data.user_id,
-          workspaceId: result.data.workspace_id,
-        }),
-      )
+      dispatch(setSession(result.data))
       navigate({ to: '/app/mailboxes' })
     }
   }
