@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaultsAndOverrides(t *testing.T) {
@@ -32,5 +34,23 @@ func TestLoadRejectsMissingSecret(t *testing.T) {
 	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for empty JWT secret, got nil")
+	}
+}
+
+func TestLoadTokenDefaults(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.AccessTokenTTL != 15*time.Minute {
+		t.Fatalf("access ttl = %v", cfg.AccessTokenTTL)
+	}
+	if cfg.RefreshTokenTTL != 720*time.Hour {
+		t.Fatalf("refresh ttl = %v", cfg.RefreshTokenTTL)
+	}
+	if !cfg.CookieSecure {
+		t.Fatal("cookie secure should default true")
 	}
 }

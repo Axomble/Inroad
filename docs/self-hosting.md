@@ -8,7 +8,12 @@
     # Generate real secrets (the compose stack refuses to start without them):
     #   INROAD_JWT_SECRET   = openssl rand -base64 32
     #   INROAD_MASTER_KEY   = openssl rand -base64 32   (must decode to 32 bytes)
-    # Put both in .env, then:
+    # Authentication (optional; see .env.example for defaults):
+    #   INROAD_ACCESS_TOKEN_TTL  = 15m     (access token lifetime)
+    #   INROAD_REFRESH_TOKEN_TTL = 720h    (refresh token lifetime; default 30 days)
+    #   INROAD_COOKIE_SECURE     = true    (set to false for local http development)
+    #   INROAD_COOKIE_DOMAIN     =         (leave empty for localhost development)
+    # Put all in .env, then:
     docker compose up --build
 
 The API (with the built web UI) serves on http://localhost:8080. Migrations run

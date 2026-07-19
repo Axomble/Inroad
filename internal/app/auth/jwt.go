@@ -11,19 +11,25 @@ import (
 type Claims struct {
 	UserID      string
 	WorkspaceID string
+	Role        string
+	SessionID   string
 }
 
 type jwtClaims struct {
 	WorkspaceID string `json:"wid"`
+	Role        string `json:"role"`
+	SessionID   string `json:"sid"`
 	jwt.RegisteredClaims
 }
 
-func IssueToken(secret []byte, userID, workspaceID string, ttl time.Duration) (string, error) {
+func IssueToken(secret []byte, c Claims, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := jwtClaims{
-		WorkspaceID: workspaceID,
+		WorkspaceID: c.WorkspaceID,
+		Role:        c.Role,
+		SessionID:   c.SessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
+			Subject:   c.UserID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
@@ -42,5 +48,5 @@ func ParseToken(secret []byte, token string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{UserID: c.Subject, WorkspaceID: c.WorkspaceID}, nil
+	return Claims{UserID: c.Subject, WorkspaceID: c.WorkspaceID, Role: c.Role, SessionID: c.SessionID}, nil
 }

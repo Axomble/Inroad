@@ -1,0 +1,9 @@
+# OpenAPI lint config. Our contract exists to drive type-safe codegen (the
+# frontend RTK Query client), not published documentation yet — so the
+# doc-completeness rules below are relaxed. Structural/reference validation
+# stays strict via `recommended`.
+extends:
+  - recommended
+rules:
+  operation-summary: off   # summaries are doc polish; codegen doesn't need them
+  info-license: off        # license lives in LICENSE, not the API info block

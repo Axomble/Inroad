@@ -5,10 +5,11 @@ info:
 servers:
   - url: /api/v1
 paths:
-  /workspaces/register:
+  /auth/register:
     post:
-      operationId: register
-      tags: [workspaces]
+      operationId: authRegister
+      tags: [auth]
+      security: []
       requestBody:
         required: true
         content:
@@ -16,15 +17,17 @@ paths:
             schema: { $ref: '#/components/schemas/RegisterRequest' }
       responses:
         '200':
-          description: Session token
+          description: Session
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TokenResponse' }
+              schema: { $ref: '#/components/schemas/SessionResponse' }
         '400': { description: Validation error }
-  /workspaces/login:
+        '409': { description: Workspace or email already exists }
+  /auth/login:
     post:
-      operationId: login
-      tags: [workspaces]
+      operationId: authLogin
+      tags: [auth]
+      security: []
       requestBody:
         required: true
         content:
@@ -32,11 +35,76 @@ paths:
             schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
         '200':
-          description: Session token
+          description: Session
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TokenResponse' }
+              schema: { $ref: '#/components/schemas/SessionResponse' }
         '401': { description: Invalid credentials }
+  /auth/refresh:
+    post:
+      operationId: authRefresh
+      tags: [auth]
+      security: []
+      responses:
+        '200':
+          description: Refreshed session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '401': { description: Invalid or expired refresh token }
+  /auth/logout:
+    post:
+      operationId: authLogout
+      tags: [auth]
+      security: []
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string } } }
+  /auth/me:
+    get:
+      operationId: authMe
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current identity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResponse' }
+        '401': { description: Unauthorized }
+  /auth/logout-all:
+    post:
+      operationId: authLogoutAll
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Logged out of all sessions
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string } } }
+        '401': { description: Unauthorized }
+  /auth/switch-workspace:
+    post:
+      operationId: authSwitchWorkspace
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SwitchWorkspaceRequest' }
+      responses:
+        '200':
+          description: Switched active workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SwitchWorkspaceResponse' }
+        '401': { description: Unauthorized }
+        '403': { description: Not a member of the target workspace }
   /mailboxes:
     get:
       operationId: listMailboxes
@@ -123,6 +191,99 @@ paths:
               schema: { $ref: '#/components/schemas/Mailbox' }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /lists:
+    get:
+      operationId: listLists
+      tags: [lists]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Lists, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/List' } } } } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createList
+      tags: [lists]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string } } } } }
+      responses:
+        '200': { description: Created list, content: { application/json: { schema: { $ref: '#/components/schemas/List' } } } }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+  /contacts/import:
+    post:
+      operationId: importContacts
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: list, in: query, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { type: object, properties: { file: { type: string, format: binary } } }
+      responses:
+        '200': { description: Import result, content: { application/json: { schema: { $ref: '#/components/schemas/ImportResult' } } } }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: List not found }
+  /contacts:
+    get:
+      operationId: listContacts
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: list, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200': { description: Contacts, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Contact' } } } } }
+        '401': { description: Unauthorized }
+  /campaigns:
+    get:
+      operationId: listCampaigns
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Campaigns, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Campaign' } } } } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateCampaignRequest' } } }
+      responses:
+        '200': { description: Created campaign, content: { application/json: { schema: { $ref: '#/components/schemas/Campaign' } } } }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: List not found }
+        '422': { description: Mailbox not active }
+  /campaigns/{id}:
+    get:
+      operationId: getCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Campaign, content: { application/json: { schema: { $ref: '#/components/schemas/Campaign' } } } }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+  /campaigns/{id}/launch:
+    post:
+      operationId: launchCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Queued count, content: { application/json: { schema: { type: object, properties: { queued: { type: integer } } } } } }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Already launched }
+        '422': { description: Target list empty }
+# Note: the public unsubscribe endpoint GET /u/{token} is served outside the
+# /api/v1 base (browser-facing, returns HTML) and is intentionally not in this contract.
 components:
   securitySchemes:
     bearerAuth:
@@ -143,13 +304,48 @@ components:
       properties:
         email: { type: string, format: email }
         password: { type: string }
-    TokenResponse:
+    SessionResponse:
       type: object
-      required: [token, workspace_id, user_id]
+      required: [access_token, expires_in, user_id, active_workspace_id, role, memberships]
       properties:
-        token: { type: string }
-        workspace_id: { type: string }
+        access_token: { type: string }
+        expires_in: { type: integer }
         user_id: { type: string }
+        active_workspace_id: { type: string }
+        role: { type: string }
+        memberships:
+          type: array
+          items: { $ref: '#/components/schemas/Membership' }
+    Membership:
+      type: object
+      required: [workspace_id, workspace_name, role]
+      properties:
+        workspace_id: { type: string }
+        workspace_name: { type: string }
+        role: { type: string }
+    MeResponse:
+      type: object
+      required: [user_id, active_workspace_id, role, memberships]
+      properties:
+        user_id: { type: string }
+        active_workspace_id: { type: string }
+        role: { type: string }
+        memberships:
+          type: array
+          items: { $ref: '#/components/schemas/Membership' }
+    SwitchWorkspaceRequest:
+      type: object
+      required: [workspace_id]
+      properties:
+        workspace_id: { type: string }
+    SwitchWorkspaceResponse:
+      type: object
+      required: [access_token, expires_in, active_workspace_id, role]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer }
+        active_workspace_id: { type: string }
+        role: { type: string }
     ConnectMailboxRequest:
       type: object
       required: [email, smtp_host, smtp_port, imap_host, imap_port, secret]
@@ -186,3 +382,38 @@ components:
         status: { type: string }
         last_error: { type: string }
         created_at: { type: string, format: date-time }
+    List:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    ImportResult:
+      type: object
+      properties:
+        imported: { type: integer }
+        skipped: { type: integer }
+        duplicates: { type: integer }
+    Contact:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        first_name: { type: string }
+    Campaign:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        subject: { type: string }
+        status: { type: string }
+        stats: { type: object, additionalProperties: { type: integer } }
+    CreateCampaignRequest:
+      type: object
+      required: [name, mailbox_id, list_id, subject]
+      properties:
+        name: { type: string }
+        mailbox_id: { type: string, format: uuid }
+        list_id: { type: string, format: uuid }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string }

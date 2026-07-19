@@ -40,7 +40,7 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
   buildability; revisit if noisy in diffs.
 - Machine note: native postgresql-x64-18 holds host :5432; dev DB uses :5433.
 
-## Core workflow — mailbox connect (branch core-workflow)
+## Core workflow — mailbox connect (branch campaign-send)
 - Apache 2.0 LICENSE+NOTICE; scaffold merged to main.
 - Standard: idiomatic identifiers, kebab files, snake_case at boundaries, domain repo interfaces (DIP). In CLAUDE.md.
 - mailboxes schema + sqlc; platform/mail (SMTP/IMAP tester) with SSRF guard.
@@ -50,3 +50,15 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
 - .gitattributes LF; line endings normalized; gofmt clean.
 - VERIFIED e2e: 401 no-token, 200 [] scoped list, 422 SSRF metadata block, 422 conn-test reject.
 - Next: connect SUCCESS path (real mail server / greenmail), Gmail/M365 OAuth, then contacts.
+
+## Campaign Send execution (plan 2026-07-20-minimal-campaign-send.md), branch campaign-send
+Mode: subagent-driven (sequential, review per task). Toolchain PATH prefix required.
+Dev DB up on :5433, Redis up, API running in background.
+- Task 1 (schema): complete (8b6ab3e) — build/vet clean, all constraints verified
+
+- Task 2 (validate): complete (controller inline)
+- Task 3 (list domain): complete (recovered via cherry-pick after external branch switch)
+- RECOVERY NOTE: working tree was switched to core-workflow externally (IDE/user) mid-run;
+  Task 3 commit briefly landed there; recovered by returning to feature/campaign-send + cherry-pick.
+  DO NOT switch git branches while agent execution is running.
+- Tasks 4-10: pending

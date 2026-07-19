@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -21,6 +22,15 @@ type Config struct {
 	// mail servers; set false for multi-tenant Cloud. Loopback, link-local
 	// (incl. cloud metadata), and multicast are always blocked regardless.
 	MailAllowPrivateHosts bool
+
+	// PublicURL is the externally-reachable base URL used to build links
+	// (e.g. unsubscribe) embedded in outbound email.
+	PublicURL string
+
+	AccessTokenTTL  time.Duration
+	RefreshTokenTTL time.Duration
+	CookieSecure    bool
+	CookieDomain    string
 }
 
 func Load() (*Config, error) {
@@ -47,6 +57,12 @@ func Load() (*Config, error) {
 	cfg.MasterKey = rawKey
 
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
+	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
+
+	cfg.AccessTokenTTL = getenvDuration("INROAD_ACCESS_TOKEN_TTL", 15*time.Minute)
+	cfg.RefreshTokenTTL = getenvDuration("INROAD_REFRESH_TOKEN_TTL", 720*time.Hour)
+	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
+	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
 
 	return cfg, nil
 }
@@ -64,4 +80,13 @@ func getenvBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+}
+
+func getenvDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
 }

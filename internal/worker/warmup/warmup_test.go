@@ -14,6 +14,12 @@ type fakeCore struct{ exists bool }
 
 func (f fakeCore) MailboxExists(context.Context, string) (bool, error) { return f.exists, nil }
 
+func (f fakeCore) GetSendJob(context.Context, string) (coreapi.SendJob, error) {
+	return coreapi.SendJob{}, nil
+}
+
+func (f fakeCore) MarkSend(context.Context, string, coreapi.SendResult) error { return nil }
+
 var _ coreapi.Client = fakeCore{}
 
 func TestWarmupHandlerSkipsUnknownMailbox(t *testing.T) {
