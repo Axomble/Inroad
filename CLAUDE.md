@@ -43,6 +43,11 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
 
 Tests: `make test` (unit) · `make test-integration` (needs `make db-up`).
 
+## More docs
+- `docs/security.md` — security invariants that must never be broken (read before touching creds, outbound dials, or tenant queries).
+- `docs/architecture.md` — architecture notes. `docs/self-hosting.md` — deploy guide.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and implementation plans.
+
 ## Environment note (this machine)
 
 Go/sqlc/migrate are installed but NOT on the default shell PATH, and shell state doesn't persist between commands. Prefix Go commands with:
