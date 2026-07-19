@@ -243,6 +243,7 @@ Run: `go test ./internal/platform/validate/` → FAIL (`undefined: Struct`).
 package validate
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -262,37 +263,30 @@ func (e *Error) Error() string {
 	return "validation failed: " + strings.Join(parts, "; ")
 }
 
-// Struct validates v by its `validate` tags. Returns nil or *Error.
+// Struct validates s by its `validate` tags. Returns nil or *Error.
 func Struct(s any) error {
 	err := v.Struct(s)
 	if err == nil {
 		return nil
 	}
 	var verrs validator.ValidationErrors
-	if !asValidationErrors(err, &verrs) {
+	if !errors.As(err, &verrs) {
 		return err
 	}
-	fields := make(map[string]string, len(verrs(verrs)))
+	fields := make(map[string]string, len(verrs))
 	for _, fe := range verrs {
 		fields[fe.Field()] = fe.Tag()
 	}
 	return &Error{Fields: fields}
 }
 
-func verrs(v validator.ValidationErrors) validator.ValidationErrors { return v }
-
-func asValidationErrors(err error, target *validator.ValidationErrors) bool {
-	if ve, ok := err.(validator.ValidationErrors); ok {
-		*target = ve
-		return true
-	}
-	return false
-}
-
 // IsValidationError reports whether err is a *Error.
 func IsValidationError(err error) (*Error, bool) {
-	e, ok := err.(*Error)
-	return e, ok
+	var e *Error
+	if errors.As(err, &e) {
+		return e, true
+	}
+	return nil, false
 }
 ```
 
