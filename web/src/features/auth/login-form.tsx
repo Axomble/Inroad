@@ -3,13 +3,16 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
+import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useAppDispatch } from '@/store/hooks'
+import { setSession } from '@/store/slices/auth'
 import { useLoginMutation } from './api'
 
 const schema = z.object({
-  email: z.string().email('Enter a valid email address'),
+  email: z.email('Enter a valid email address'),
   password: z.string().min(1, 'Enter your password'),
 })
 type FormValues = z.infer<typeof schema>
@@ -22,7 +25,23 @@ export function LoginForm() {
     handleSubmit,
     formState: { errors },
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
-  const [login, { isLoading, data, error }] = useLoginMutation()
+  const [login, { isLoading, error }] = useLoginMutation()
+  const dispatch = useAppDispatch()
+  const navigate = useNavigate()
+
+  async function onSubmit(values: FormValues) {
+    const result = await login({ loginRequest: values })
+    if ('data' in result && result.data) {
+      dispatch(
+        setSession({
+          token: result.data.token,
+          userId: result.data.user_id,
+          workspaceId: result.data.workspace_id,
+        }),
+      )
+      navigate({ to: '/app/mailboxes' })
+    }
+  }
 
   return (
     <main className="grid min-h-dvh place-items-center bg-background px-4">
@@ -44,7 +63,7 @@ export function LoginForm() {
         </div>
 
         <form
-          onSubmit={handleSubmit((v) => login({ loginRequest: v }))}
+          onSubmit={handleSubmit(onSubmit)}
           noValidate
           className="flex flex-col gap-4 rounded-xl border border-border bg-card p-6 shadow-[0_12px_30px_rgba(0,0,0,0.28)]"
         >
@@ -97,12 +116,6 @@ export function LoginForm() {
             {isLoading && <Loader2 className="animate-spin" />}
             {isLoading ? 'Signing in…' : 'Log in'}
           </Button>
-
-          {data && (
-            <p className="text-center text-xs text-muted-foreground">
-              Signed in as <span className="font-mono text-foreground">{data.user_id}</span>
-            </p>
-          )}
         </form>
 
         <p className="mt-5 text-center text-sm text-muted-foreground">
