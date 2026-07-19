@@ -5,28 +5,37 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
-	"strconv"
 	"time"
 
 	"github.com/emersion/go-imap/client"
 )
 
-// NetTester is the production ConnectionTester that dials real SMTP/IMAP servers.
+// NetTester is the production ConnectionTester that dials real SMTP/IMAP
+// servers. It applies SSRF protection (see vetAddr): dangerous/internal targets
+// are always rejected; private RFC1918/ULA ranges are rejected unless
+// AllowPrivate is set (self-hosted operators reaching internal mail servers).
 type NetTester struct {
-	Timeout time.Duration
+	Timeout      time.Duration
+	AllowPrivate bool
 }
 
 // NewNetTester returns a NetTester with a sane default dial timeout.
-func NewNetTester() *NetTester { return &NetTester{Timeout: 15 * time.Second} }
+// allowPrivate permits RFC1918/ULA hosts (default for self-hosted Core; Cloud
+// deployments pass false).
+func NewNetTester(allowPrivate bool) *NetTester {
+	return &NetTester{Timeout: 15 * time.Second, AllowPrivate: allowPrivate}
+}
 
 // TestSMTP dials the SMTP server, negotiates TLS, and authenticates — without
 // sending any mail. Port 465 uses implicit TLS; other ports use STARTTLS when
 // UseTLS is set.
 func (t *NetTester) TestSMTP(cfg SMTPConfig) error {
-	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	addr, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, t.AllowPrivate)
+	if err != nil {
+		return err
+	}
 
 	var c *smtp.Client
-	var err error
 	if cfg.Port == 465 {
 		conn, derr := tls.DialWithDialer(&net.Dialer{Timeout: t.Timeout}, "tcp", addr, &tls.Config{ServerName: cfg.Host})
 		if derr != nil {
@@ -66,10 +75,12 @@ func (t *NetTester) TestSMTP(cfg SMTPConfig) error {
 // TestIMAP dials the IMAP server, negotiates TLS, and logs in, then logs out.
 // Port 143 upgrades via STARTTLS; other ports use implicit TLS.
 func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
-	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, t.AllowPrivate)
+	if err != nil {
+		return err
+	}
 
 	var c *client.Client
-	var err error
 	if cfg.Port == 143 {
 		if c, err = client.Dial(addr); err == nil {
 			err = c.StartTLS(&tls.Config{ServerName: cfg.Host})

@@ -6,12 +6,15 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/inroad/inroad/internal/app/mailbox"
 	"github.com/inroad/inroad/internal/app/workspace"
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/log"
+	"github.com/inroad/inroad/internal/platform/mail"
 )
 
 func main() {
@@ -32,11 +35,22 @@ func main() {
 	}
 	defer pool.Close()
 
+	sealer, err := crypto.NewSealer(cfg.MasterKey)
+	if err != nil {
+		logger.Error("sealer init failed", "err", err)
+		os.Exit(1)
+	}
+
 	queries := gen.New(pool)
 	wsHandler := workspace.NewHandler(workspace.NewService(workspace.NewStore(queries)), cfg.JWTSecret)
+	mbHandler := mailbox.NewHandler(
+		mailbox.NewService(mailbox.NewPgStore(queries), mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer),
+		cfg.JWTSecret,
+	)
 
 	router := httpx.NewRouter(logger)
 	router.Mount("/api/v1/workspaces", wsHandler.Routes())
+	router.Mount("/api/v1/mailboxes", mbHandler.Routes())
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
 	logger.Info("api listening", "addr", cfg.HTTPAddr)
