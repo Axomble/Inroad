@@ -4,9 +4,14 @@ import { vi } from 'vitest'
 import { store } from '../../store'
 import { LoginForm } from './login-form'
 
-// LoginForm uses the router's useNavigate on success; stub it for the unit test.
+// LoginForm uses the router's useNavigate + Link; stub them for the unit test.
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => () => {},
+  Link: ({ to, children, ...props }: { to: string; children: React.ReactNode }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
 }))
 
 test('renders email and password fields', () => {
@@ -15,6 +20,6 @@ test('renders email and password fields', () => {
       <LoginForm />
     </Provider>,
   )
-  expect(screen.getByLabelText(/email/i)).toBeInTheDocument()
-  expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+  expect(screen.getByLabelText('Email')).toBeInTheDocument()
+  expect(screen.getByLabelText('Password')).toBeInTheDocument()
 })

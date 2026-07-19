@@ -3,12 +3,14 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
-import { useNavigate } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { PasswordInput } from '@/components/ui/password-input'
 import { useAppDispatch } from '@/store/hooks'
 import { setSession } from '@/store/slices/auth'
+import { AuthLayout } from './auth-layout'
 import { useLoginMutation } from './api'
 
 const schema = z.object({
@@ -44,87 +46,80 @@ export function LoginForm() {
   }
 
   return (
-    <main className="grid min-h-dvh place-items-center bg-background px-4">
-      {/* ambient glow, matches the console chrome */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 [background:radial-gradient(900px_460px_at_78%_-10%,rgba(124,92,255,0.16),transparent_60%),radial-gradient(680px_380px_at_8%_110%,rgba(245,165,36,0.07),transparent_55%)]"
-      />
+    <AuthLayout>
+      <div className="auth-rise mb-7" style={{ animationDelay: '120ms' }}>
+        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-faint">Welcome back</p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Sign in to your workspace</h1>
+      </div>
 
-      <div className="relative w-full max-w-sm">
-        <div className="mb-6 flex flex-col items-center gap-3 text-center">
-          <div className="grid size-10 place-items-center rounded-lg bg-primary text-lg font-bold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_0_var(--primary-edge),0_8px_20px_rgba(124,92,255,0.35)]">
-            I
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight text-foreground">Sign in to Inroad</h1>
-            <p className="mt-1 text-sm text-muted-foreground">Welcome back — sign in to your workspace.</p>
-          </div>
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
+        <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '180ms' }}>
+          <Label htmlFor={emailId}>Email</Label>
+          <Input
+            id={emailId}
+            type="email"
+            autoComplete="email"
+            autoFocus
+            placeholder="you@company.com"
+            aria-invalid={!!errors.email}
+            {...register('email')}
+          />
+          {errors.email && (
+            <span role="alert" className="text-xs text-danger">
+              {errors.email.message}
+            </span>
+          )}
         </div>
 
-        <form
-          onSubmit={handleSubmit(onSubmit)}
-          noValidate
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-6 shadow-[0_12px_30px_rgba(0,0,0,0.28)]"
-        >
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor={emailId}>Email</Label>
-            <Input
-              id={emailId}
-              type="email"
-              autoComplete="email"
-              placeholder="you@company.com"
-              aria-invalid={!!errors.email}
-              {...register('email')}
-            />
-            {errors.email && (
-              <span role="alert" className="text-xs text-danger">
-                {errors.email.message}
-              </span>
-            )}
+        <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '240ms' }}>
+          <div className="flex items-center justify-between">
+            <Label htmlFor={passwordId}>Password</Label>
+            <a href="#" className="text-xs text-muted-foreground transition-colors hover:text-primary">
+              Forgot password?
+            </a>
           </div>
-
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between">
-              <Label htmlFor={passwordId}>Password</Label>
-              <a href="#" className="text-xs text-primary hover:underline">
-                Forgot password?
-              </a>
-            </div>
-            <Input
-              id={passwordId}
-              type="password"
-              autoComplete="current-password"
-              placeholder="••••••••"
-              aria-invalid={!!errors.password}
-              {...register('password')}
-            />
-            {errors.password && (
-              <span role="alert" className="text-xs text-danger">
-                {errors.password.message}
-              </span>
-            )}
-          </div>
-
-          {error && (
-            <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-              We couldn't sign you in. Check your email and password, then try again.
-            </p>
+          <PasswordInput
+            id={passwordId}
+            autoComplete="current-password"
+            placeholder="Enter your password"
+            aria-invalid={!!errors.password}
+            {...register('password')}
+          />
+          {errors.password && (
+            <span role="alert" className="text-xs text-danger">
+              {errors.password.message}
+            </span>
           )}
+        </div>
 
-          <Button type="submit" variant="primary" className="mt-1 w-full" disabled={isLoading}>
-            {isLoading && <Loader2 className="animate-spin" />}
-            {isLoading ? 'Signing in…' : 'Log in'}
-          </Button>
-        </form>
+        {error && (
+          <p
+            role="alert"
+            className="auth-rise rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"
+          >
+            We couldn't sign you in. Check your email and password, then try again.
+          </p>
+        )}
 
-        <p className="mt-5 text-center text-sm text-muted-foreground">
-          New to Inroad?{' '}
-          <a href="#" className="font-medium text-primary hover:underline">
-            Create an account
-          </a>
-        </p>
-      </div>
-    </main>
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          className="auth-rise mt-1 w-full"
+          style={{ animationDelay: '300ms' }}
+          disabled={isLoading}
+        >
+          {isLoading && <Loader2 className="animate-spin" />}
+          {isLoading ? 'Signing in…' : 'Log in'}
+        </Button>
+      </form>
+
+      <p className="auth-rise mt-6 text-center text-sm text-muted-foreground" style={{ animationDelay: '340ms' }}>
+        New to Inroad?{' '}
+        <Link to="/register" className="font-medium text-primary hover:underline">
+          Create an account
+        </Link>
+      </p>
+    </AuthLayout>
   )
 }

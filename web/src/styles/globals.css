@@ -231,6 +231,17 @@ body {
   }
 }
 
+/* Staggered entrance for auth/first-paint surfaces. Delay set inline per item. */
+@keyframes auth-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+.auth-rise { animation: auth-rise 0.55s cubic-bezier(0.3, 0.7, 0.4, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-rise { animation: none; }
+}
+
 /* Warmup "heat" pulse — used only on warmup indicators. */
 @keyframes warm-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--warm); }
