@@ -24,3 +24,7 @@ Web app:
 - `web/`        React SPA
 - `deploy/`     Docker + compose + systemd
 - `docs/`       architecture + self-hosting guides
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
