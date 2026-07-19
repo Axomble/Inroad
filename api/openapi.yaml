@@ -9,6 +9,7 @@ paths:
     post:
       operationId: register
       tags: [workspaces]
+      security: []
       requestBody:
         required: true
         content:
@@ -25,6 +26,7 @@ paths:
     post:
       operationId: login
       tags: [workspaces]
+      security: []
       requestBody:
         required: true
         content:
