@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/inroad/inroad/internal/app/workspace"
+	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/db"
-	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
 func main() {
@@ -25,15 +25,17 @@ func main() {
 	}
 	defer pool.Close()
 
-	svc := workspace.NewService(workspace.NewStore(gen.New(pool)))
-	res, err := svc.Register(ctx, workspace.RegisterInput{
+	svc := identity.NewService(identity.NewStore(pool), time.Hour)
+	sess, err := svc.Register(ctx, identity.RegisterInput{
 		WorkspaceName: "Demo Workspace",
 		Email:         "demo@inroad.test",
 		Password:      "demodemo",
+		UserAgent:     "seed",
+		IP:            "",
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "seed:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("seeded workspace=%s user=%s (login demo@inroad.test / demodemo)\n", res.WorkspaceID, res.UserID)
+	fmt.Printf("seeded workspace=%s user=%s (login demo@inroad.test / demodemo)\n", sess.WorkspaceID, sess.UserID)
 }

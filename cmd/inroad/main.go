@@ -10,10 +10,10 @@ import (
 
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
+	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
 	"github.com/inroad/inroad/internal/app/suppression"
-	"github.com/inroad/inroad/internal/app/workspace"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
@@ -49,7 +49,10 @@ func main() {
 	}
 
 	queries := gen.New(pool)
-	wsHandler := workspace.NewHandler(workspace.NewService(workspace.NewStore(queries)), cfg.JWTSecret)
+	identHandler := identity.NewHandler(
+		identity.NewService(identity.NewStore(pool), cfg.RefreshTokenTTL),
+		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
+	)
 	mailboxStore := mailbox.NewPgStore(queries)
 	mbHandler := mailbox.NewHandler(
 		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer),
@@ -65,7 +68,7 @@ func main() {
 	suppStore := suppression.NewStore(queries)
 
 	router := httpx.NewRouter(logger)
-	router.Mount("/api/v1/workspaces", wsHandler.Routes())
+	router.Mount("/api/v1/auth", identHandler.Routes(cfg.JWTSecret))
 	router.Mount("/api/v1/mailboxes", mbHandler.Routes())
 	router.Mount("/api/v1/lists", list.NewHandler(listSvc, cfg.JWTSecret).Routes())
 	// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
