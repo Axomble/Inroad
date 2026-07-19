@@ -5,9 +5,56 @@
 package gen
 
 import (
+	"database/sql/driver"
+	"fmt"
+	"net/netip"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type MemberRole string
+
+const (
+	MemberRoleOwner  MemberRole = "owner"
+	MemberRoleAdmin  MemberRole = "admin"
+	MemberRoleMember MemberRole = "member"
+)
+
+func (e *MemberRole) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = MemberRole(s)
+	case string:
+		*e = MemberRole(s)
+	default:
+		return fmt.Errorf("unsupported scan type for MemberRole: %T", src)
+	}
+	return nil
+}
+
+type NullMemberRole struct {
+	MemberRole MemberRole `json:"member_role"`
+	Valid      bool       `json:"valid"` // Valid is true if MemberRole is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullMemberRole) Scan(value interface{}) error {
+	if value == nil {
+		ns.MemberRole, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.MemberRole.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullMemberRole) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.MemberRole), nil
+}
 
 type Campaign struct {
 	ID          uuid.UUID          `json:"id"`
@@ -87,6 +134,19 @@ type Send struct {
 	SentAt      pgtype.Timestamptz `json:"sent_at"`
 }
 
+type Session struct {
+	ID          uuid.UUID          `json:"id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	TokenHash   []byte             `json:"token_hash"`
+	FamilyID    uuid.UUID          `json:"family_id"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	UserAgent   *string            `json:"user_agent"`
+	Ip          *netip.Addr        `json:"ip"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Suppression struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
@@ -96,16 +156,24 @@ type Suppression struct {
 }
 
 type User struct {
-	ID           uuid.UUID          `json:"id"`
-	WorkspaceID  uuid.UUID          `json:"workspace_id"`
-	Email        string             `json:"email"`
-	PasswordHash string             `json:"password_hash"`
-	Role         string             `json:"role"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ID              uuid.UUID          `json:"id"`
+	Email           string             `json:"email"`
+	PasswordHash    string             `json:"password_hash"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
 type Workspace struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkspaceMember struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	Role        MemberRole         `json:"role"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
 }
