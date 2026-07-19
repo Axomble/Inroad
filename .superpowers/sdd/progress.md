@@ -24,8 +24,18 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
 - CLAUDE.md: complete (commit 9184844)
 - Wave 1 Go (config/log, httpx, crypto, queue, auth): complete (commit 115189c, all tests pass)
 - Task 13 web: built & passing (codegen/vitest/build all PASS); kebab-case rename in progress
-- Wave 2 (in flight): workspace (Task 8+9), coreapi+worker (Task 10)
-- Task 11 (cmd entrypoints): pending — needs workspace+coreapi+worker
-- Task 14 (deploy+docs): pending
-- Integration gate (docker db-up, run -tags=integration): pending
-- Final review + finish branch: pending
+- Wave 2: complete (commit a788482) — workspace, coreapi, worker; all tests pass
+- Task 11 (cmd entrypoints): complete (commit 683c6ab, controller)
+- Task 14 (deploy+docs): complete (commit bf486ac)
+- Integration gate: PASS — migrate + workspace integration test vs real Postgres (host 5433);
+  e2e API smoke test (healthz/register/login 200, wrong-pw 401) through running server
+- Module: anchor removed, `go mod tidy` clean; full build + `go test ./...` + vet + gofmt all clean
+- SCAFFOLD COMPLETE on branch `scaffold` (8 commits b6fa13d..bf486ac). Pending: merge to main.
+
+## Known minor items (for a future pass, non-blocking)
+- cmd/migrate + cmd/seed call config.Load() which requires JWT_SECRET + MASTER_KEY
+  even though they only need DATABASE_URL. Consider a lighter config for those.
+- cmd/worker/main.go builds a throwaway logger then rebuilds it after config load.
+- Generated files committed (web/src/store/api.ts, routeTree.gen.ts) — intentional for
+  buildability; revisit if noisy in diffs.
+- Machine note: native postgresql-x64-18 holds host :5432; dev DB uses :5433.
