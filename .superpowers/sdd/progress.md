@@ -39,3 +39,14 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
 - Generated files committed (web/src/store/api.ts, routeTree.gen.ts) — intentional for
   buildability; revisit if noisy in diffs.
 - Machine note: native postgresql-x64-18 holds host :5432; dev DB uses :5433.
+
+## Core workflow — mailbox connect (branch core-workflow)
+- Apache 2.0 LICENSE+NOTICE; scaffold merged to main.
+- Standard: idiomatic identifiers, kebab files, snake_case at boundaries, domain repo interfaces (DIP). In CLAUDE.md.
+- mailboxes schema + sqlc; platform/mail (SMTP/IMAP tester) with SSRF guard.
+- coreapi now DB-backed (real MailboxExists); worker still imports no db.
+- mailbox domain (Store iface, connect+test+seal, auth-scoped routes); OpenAPI + bearer.
+- SSRF guard: block loopback/link-local(metadata)/multicast always; private via INROAD_MAIL_ALLOW_PRIVATE_HOSTS (default true); mail-port allowlist; dial resolved IP.
+- .gitattributes LF; line endings normalized; gofmt clean.
+- VERIFIED e2e: 401 no-token, 200 [] scoped list, 422 SSRF metadata block, 422 conn-test reject.
+- Next: connect SUCCESS path (real mail server / greenmail), Gmail/M365 OAuth, then contacts.
