@@ -1,19 +1,28 @@
 package auth
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHashAndCheckPassword(t *testing.T) {
-	hash, err := HashPassword("s3cret-pw")
+	hash, err := HashPassword("correct horse battery staple")
 	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
+		t.Fatalf("hash: %v", err)
 	}
-	if hash == "s3cret-pw" {
-		t.Fatal("hash equals plaintext")
+	if !strings.HasPrefix(hash, "$argon2id$") {
+		t.Fatalf("expected argon2id encoding, got %q", hash)
 	}
-	if !CheckPassword(hash, "s3cret-pw") {
-		t.Error("CheckPassword returned false for correct password")
+	if !CheckPassword(hash, "correct horse battery staple") {
+		t.Fatal("correct password rejected")
 	}
-	if CheckPassword(hash, "wrong") {
-		t.Error("CheckPassword returned true for wrong password")
+	if CheckPassword(hash, "wrong password") {
+		t.Fatal("wrong password accepted")
+	}
+}
+
+func TestCheckPasswordRejectsGarbage(t *testing.T) {
+	if CheckPassword("not-a-real-hash", "x") {
+		t.Fatal("garbage hash accepted")
 	}
 }
