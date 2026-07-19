@@ -32,6 +32,7 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
 - **Frontend:** `routes/*` compose from `features/*`; `features/*` never import each other; redux-persist whitelists UI slices only (never the RTK Query `api` reducer); `store/api.ts` is generated, never hand-edited.
 - **Secrets:** never commit; `.env` is gitignored, `.env.example` holds placeholders.
 - **Commits:** conventional (`feat:`, `chore:`, `test:`, `docs:`).
+- **Branches:** prefix by type — `feature/…`, `fix/…`, `chore/…`. Never commit feature work directly to `main`; branch, then merge.
 
 ## Dev
 
