@@ -55,4 +55,10 @@ Go convention (underscore only for _test.go / build tags). Recorded in CLAUDE.md
 Mode: subagent-driven (sequential, review per task). Toolchain PATH prefix required.
 Dev DB up on :5433, Redis up, API running in background.
 - Task 1 (schema): complete (8b6ab3e) — build/vet clean, all constraints verified
-- Tasks 2-10: pending
+
+- Task 2 (validate): complete (controller inline)
+- Task 3 (list domain): complete (recovered via cherry-pick after external branch switch)
+- RECOVERY NOTE: working tree was switched to core-workflow externally (IDE/user) mid-run;
+  Task 3 commit briefly landed there; recovered by returning to feature/campaign-send + cherry-pick.
+  DO NOT switch git branches while agent execution is running.
+- Tasks 4-10: pending
