@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
@@ -27,9 +26,9 @@ func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	listID, err := uuid.Parse(chi.URLParam(r, "id"))
+	listID, err := uuid.Parse(r.URL.Query().Get("list"))
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "bad list id")
+		httpx.Error(w, http.StatusBadRequest, "list query param required")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
