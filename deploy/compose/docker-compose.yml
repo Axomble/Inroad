@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: inroad
+      POSTGRES_PASSWORD: inroad
+      POSTGRES_DB: inroad
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inroad"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+    environment:
+      INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
+      INROAD_REDIS_ADDR: redis:6379
+      INROAD_JWT_SECRET: dev-jwt-secret-dev-jwt-secret-32b
+      INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    command: ["sh", "-c", "migrate up && inroad"]
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
+      INROAD_REDIS_ADDR: redis:6379
+      INROAD_JWT_SECRET: dev-jwt-secret-dev-jwt-secret-32b
+      INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    depends_on:
+      redis: { condition: service_started }
+volumes:
+  pgdata:

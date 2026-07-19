@@ -21,7 +21,11 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
 
 ## Conventions
 
-- **File names: snake_case everywhere** — Go (`user_store.go`) and TS/TSX (`login_form.tsx`, `empty_api.ts`). No camelCase/PascalCase/kebab file names. Identifiers still follow each language (Go exported = PascalCase, React components = PascalCase, TS vars = camelCase) — only the *file name* is snake_case. Tool-mandated exceptions: `__root.tsx` (router), `docker-compose*.yml`, `*.sql.go` (sqlc), `go.mod`.
+- **File names — kebab-case on the frontend, lowercase on the Go backend. No camelCase/PascalCase file names anywhere.**
+  - **Frontend (TS/TSX):** kebab-case, e.g. `login-form.tsx`, `empty-api.ts`, `openapi-codegen.ts`.
+  - **Go backend:** Go-idiomatic lowercase — single word (`store.go`, `password.go`); underscore ONLY where the language forces it (`_test.go`, build-constraint suffixes like `_linux.go`). Hyphens are not used in Go files (the toolchain reserves underscores for build constraints).
+  - Identifiers always follow the language: Go exported = PascalCase, React components = PascalCase (`export function LoginForm`), TS vars = camelCase. Only the *file name* changes.
+  - Tool-mandated exceptions (leave as-is): `__root.tsx` (router), `docker-compose*.yml`, `*.sql.go` (sqlc), `go.mod`, `tsconfig*.json`, `vite.config.ts`.
 - **Backend layering:** `app/*` may import `platform/*`, never the reverse; `app/*` packages don't import each other; workers use `coreapi` only; routes registered per-domain via `Routes() http.Handler`.
 - **Frontend:** `routes/*` compose from `features/*`; `features/*` never import each other; redux-persist whitelists UI slices only (never the RTK Query `api` reducer); `store/api.ts` is generated, never hand-edited.
 - **Secrets:** never commit; `.env` is gitignored, `.env.example` holds placeholders.

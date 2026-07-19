@@ -1,0 +1,3 @@
+# Convenience wrapper so `docker compose up` works from the repo root.
+include:
+  - deploy/compose/docker-compose.yml

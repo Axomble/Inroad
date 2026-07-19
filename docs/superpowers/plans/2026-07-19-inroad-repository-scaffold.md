@@ -2192,10 +2192,12 @@ git commit -m "feat: add OpenAPI contract for register/login"
 **Files:**
 - Create: `web/package.json`, `web/vite.config.ts`, `web/tsconfig.json`, `web/index.html`, `web/components.json`
 - Create: `web/src/main.tsx`, `web/src/styles/globals.css`
-- Create: `web/src/store/index.ts`, `web/src/store/emptyApi.ts`, `web/src/store/slices/ui.ts`
+- Create: `web/src/store/index.ts`, `web/src/store/empty-api.ts`, `web/src/store/slices/ui.ts`
 - Create: `web/src/routes/__root.tsx`, `web/src/routes/index.tsx`
-- Create: `web/src/features/auth/api.ts`, `web/src/features/auth/LoginForm.tsx`, `web/src/features/auth/LoginForm.test.tsx`
+- Create: `web/src/features/auth/api.ts`, `web/src/features/auth/login-form.tsx`, `web/src/features/auth/login-form.test.tsx`
 - Create: `web/openapi-codegen.ts`, `web/vitest.config.ts`, `web/src/test/setup.ts`
+
+> **File naming (per CLAUDE.md):** frontend files are **kebab-case** (`login-form.tsx`, `empty-api.ts`); component identifiers stay PascalCase (`export function LoginForm`). The code blocks below may show older camelCase names — use the kebab-case names above and update imports accordingly.
 - Delete: `web/.gitkeep`
 
 **Interfaces:**

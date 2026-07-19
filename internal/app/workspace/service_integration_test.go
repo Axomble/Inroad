@@ -15,7 +15,7 @@ func dsn() string {
 	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
 		return v
 	}
-	return "postgres://inroad:inroad@localhost:5432/inroad?sslmode=disable"
+	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
 }
 
 func newService(t *testing.T) *Service {
