@@ -30,3 +30,12 @@ func TestRequireRoleRejectsInsufficient(t *testing.T) {
 		t.Fatalf("member should not satisfy admin, got %d", w.Code)
 	}
 }
+
+func TestRequireRolePanicsOnUnknownRole(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("RequireRole should panic on unknown role")
+		}
+	}()
+	RequireRole("nonexistent-role")
+}

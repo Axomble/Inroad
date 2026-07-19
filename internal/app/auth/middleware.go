@@ -41,7 +41,10 @@ var roleRank = map[string]int{"member": 1, "admin": 2, "owner": 3}
 // RequireRole rejects (403) callers whose workspace role ranks below min.
 // Must run after RequireAuth.
 func RequireRole(min string) func(http.Handler) http.Handler {
-	want := roleRank[min]
+	want, ok := roleRank[min]
+	if !ok {
+		panic("auth.RequireRole: unknown role " + min)
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c, ok := UserFromContext(r.Context())
