@@ -3,30 +3,30 @@
 **Date:** 2026-07-19
 **Status:** Approved design, pre-implementation
 **Source PRD:** `PRD.md` (Draft v1)
-**Informed by:** structural analysis of `warmbly/warmbly` (Go/Rust/Elixir/React/Swift polyglot monorepo)
+**Informed by:** structural analysis of a mature polyglot reference implementation (Go/Rust/Elixir/React/Swift monorepo)
 
 ---
 
 ## 1. Purpose & Scope
 
-Defines the complete file/folder infrastructure for Outpost, a self-hostable cold email sequencing + mailbox warmup platform (open-core competitor to Instantly/Smartlead, structural successor to Warmbly). This spec covers repository layout, layering rules, and the frontend/backend library set. It does **not** cover feature implementation details — those follow in per-feature plans.
+Defines the complete file/folder infrastructure for Outpost, a self-hostable cold email sequencing + mailbox warmup platform (open-core competitor to Instantly/Smartlead, a leaner single-stack successor to prior polyglot attempts). This spec covers repository layout, layering rules, and the frontend/backend library set. It does **not** cover feature implementation details — those follow in per-feature plans.
 
 ## 2. Locked Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
 | Repo shape | **Single monorepo, single license** | Solo-builder velocity; Core/Cloud physical split (`ee/` dir or split repos) deferred until Cloud work begins. License choice (Apache vs AGPL) remains open per PRD §14.3 — must be decided before public launch. |
-| Backend | **Go end-to-end** (API + workers) | PRD principle #2 ("one stack, deeply understood"). Rejects Warmbly's 5-runtime sprawl (Go+Rust+Elixir+TS+Swift). |
+| Backend | **Go end-to-end** (API + workers) | PRD principle #2 ("one stack, deeply understood"). Rejects the reference stack's 5-runtime sprawl (Go+Rust+Elixir+TS+Swift). |
 | Data access | **pgx/v5 + sqlc** (hand-written SQL, generated type-safe Go) + **squirrel** escape hatch for runtime-dynamic queries (dynamic segments) | Deliverability tooling is query-heavy (pacing loops, reputation windows, funnel aggregations) — SQL must stay visible and tunable. ORM rejected. |
-| Queue | **Redis + asynq** | Replaces Warmbly's Kafka+Zookeeper+Schema Registry. Redis-persisted job state satisfies PRD §11 restart-survival. |
+| Queue | **Redis + asynq** | Replaces the reference stack's Kafka+Zookeeper+Schema Registry. Redis-persisted job state satisfies PRD §11 restart-survival. |
 | Migrations | **golang-migrate**, embedded via `go:embed`, applied on boot | Migrations are the single schema source of truth (no vestigial `schema.sql`). |
-| Frontend | **One React app** (`web/`), role-gated lazy-loaded admin section | Separate admin app (Warmbly-style) deferred to Cloud-era back-office needs. |
+| Frontend | **One React app** (`web/`), role-gated lazy-loaded admin section | A separate admin app deferred to Cloud-era back-office needs. |
 | Realtime | **gorilla/websocket in the Go API** | No separate realtime service at v1 scale (PRD §8). |
-| Tracking | **Routes in the Go API** (`internal/app/tracking` package) | Promotable to its own binary later without rewrite. Server-side ticket redirects (`/c/<uuid>`), never `?url=` params (no open-redirect surface — pattern adopted from Warmbly). |
-| Plane split | **`coreapi` seam from day one**: workers never touch Postgres; v1 uses an in-process implementation, v2 swaps in HTTP | Warmbly's best architectural idea, adopted at interface level now, paid for only when worker fleets scale out. |
+| Tracking | **Routes in the Go API** (`internal/app/tracking` package) | Promotable to its own binary later without rewrite. Server-side ticket redirects (`/c/<uuid>`), never `?url=` params (no open-redirect surface — an established anti-open-redirect pattern). |
+| Plane split | **`coreapi` seam from day one**: workers never touch Postgres; v1 uses an in-process implementation, v2 swaps in HTTP | the strongest idea from the reference architecture, adopted at interface level now, paid for only when worker fleets scale out. |
 | Docs site | **Deferred to Phase 1 launch** (Astro + Starlight under `site/`) | Repo-root markdown `docs/` suffices for dogfood phase. |
 
-## 3. What We Copy From Warmbly vs. Reject
+## 3. Prior-Art Patterns: Adopt vs. Reject
 
 **Copy (patterns):** `cmd/` thin entrypoints; feature-sliced `internal/app/<domain>` packages; embedded numbered migrations; full-stack docker-compose with mail mocks; control/execution plane boundary; envelope encryption (per-tenant DEKs); server-side tracking tickets.
 

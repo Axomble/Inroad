@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: inroad
-      POSTGRES_PASSWORD: inroad
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inroad}
       POSTGRES_DB: inroad
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
@@ -18,10 +18,10 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api
     environment:
-      INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
+      INROAD_DATABASE_URL: postgres://inroad:${POSTGRES_PASSWORD:-inroad}@postgres:5432/inroad?sslmode=disable
       INROAD_REDIS_ADDR: redis:6379
-      INROAD_JWT_SECRET: dev-jwt-secret-dev-jwt-secret-32b
-      INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:?set INROAD_JWT_SECRET in .env (openssl rand -base64 32)}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:?set INROAD_MASTER_KEY in .env (base64 of 32 bytes)}
     command: ["sh", "-c", "migrate up && inroad"]
     ports: ["8080:8080"]
     depends_on:
@@ -32,10 +32,10 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.worker
     environment:
-      INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
+      INROAD_DATABASE_URL: postgres://inroad:${POSTGRES_PASSWORD:-inroad}@postgres:5432/inroad?sslmode=disable
       INROAD_REDIS_ADDR: redis:6379
-      INROAD_JWT_SECRET: dev-jwt-secret-dev-jwt-secret-32b
-      INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:?set INROAD_JWT_SECRET in .env (openssl rand -base64 32)}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:?set INROAD_MASTER_KEY in .env (base64 of 32 bytes)}
     depends_on:
       redis: { condition: service_started }
 volumes:

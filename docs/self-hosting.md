@@ -5,6 +5,10 @@
 
 ## Run
     cp .env.example .env
+    # Generate real secrets (the compose stack refuses to start without them):
+    #   INROAD_JWT_SECRET   = openssl rand -base64 32
+    #   INROAD_MASTER_KEY   = openssl rand -base64 32   (must decode to 32 bytes)
+    # Put both in .env, then:
     docker compose up --build
 
 The API (with the built web UI) serves on http://localhost:8080. Migrations run
