@@ -13,8 +13,15 @@ import (
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
+// Sender sends one email over SMTP. Defined here (consumer side) so the handler
+// depends on the behavior, not the concrete *mail.NetSender — which lets tests
+// inject a fake and exercise the full pipeline without a live SMTP server.
+type Sender interface {
+	Send(cfg mail.SMTPConfig, msg mail.Message) (messageID string, err error)
+}
+
 // Handler returns an asynq handler for send:email tasks.
-func Handler(core coreapi.Client, sender *mail.NetSender, enq *queue.Client) func(context.Context, *asynq.Task) error {
+func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.SendEmailPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
