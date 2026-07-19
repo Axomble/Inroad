@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -48,11 +49,19 @@ type sessionResponse struct {
 }
 
 // clientMeta extracts the user-agent and bare client IP from the request.
-// RemoteAddr is "host:port"; the service's parseIP wants a bare IP (an IP
-// with a stray port fails to parse and is stored as NULL), so the port is
-// stripped here before it ever reaches the service layer.
+// RemoteAddr is "host:port" (or "[ipv6]:port"); the service's parseIP wants
+// a bare IP (an IP with a stray port fails to parse and is stored as NULL),
+// so the port is stripped here before it ever reaches the service layer.
+// net.SplitHostPort correctly unwraps bracketed IPv6 addresses, unlike a
+// naive split on ":" which mangles them (an IPv6 address itself contains
+// colons). If RemoteAddr has no port (or isn't in host:port form), fall
+// back to using it as-is.
 func clientMeta(r *http.Request) (ua, ip string) {
-	return r.UserAgent(), strings.Split(r.RemoteAddr, ":")[0]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.UserAgent(), r.RemoteAddr
+	}
+	return r.UserAgent(), host
 }
 
 func toMembershipDTOs(mems []Membership) []membershipDTO {

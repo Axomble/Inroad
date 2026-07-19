@@ -5,7 +5,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *;
 -- name: GetSessionByHash :one
 SELECT * FROM sessions WHERE token_hash = $1;
 
--- name: RevokeSession :exec
+-- name: RevokeSession :execrows
 UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL;
 
 -- name: RevokeFamily :exec

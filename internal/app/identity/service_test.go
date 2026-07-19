@@ -24,6 +24,12 @@ type fakeStore struct {
 	registerErr error
 	nextWS      uuid.UUID
 	nextUser    uuid.UUID
+
+	// preRevokeSession, when set, runs at the top of RevokeSession before it
+	// reads the session row. Tests use it to simulate a concurrent request
+	// revoking the same session between this call's read and write, so the
+	// TOCTOU reuse gate in Service.Refresh can be exercised deterministically.
+	preRevokeSession func(id uuid.UUID)
 }
 
 func newFakeStore() *fakeStore {
@@ -106,14 +112,25 @@ func (f *fakeStore) GetSessionByHash(ctx context.Context, hash []byte) (gen.Sess
 	return f.sessions[id], nil
 }
 
-func (f *fakeStore) RevokeSession(ctx context.Context, id uuid.UUID) error {
+// RevokeSession mirrors the real store's :execrows semantics: it reports
+// how many rows it actually flipped from not-revoked to revoked. A row
+// that's already revoked (e.g. a concurrent caller won the race) yields 0
+// rows affected rather than an error, matching Postgres's UPDATE ... WHERE
+// revoked_at IS NULL behavior.
+func (f *fakeStore) RevokeSession(ctx context.Context, id uuid.UUID) (int64, error) {
+	if f.preRevokeSession != nil {
+		f.preRevokeSession(id)
+	}
 	row, ok := f.sessions[id]
 	if !ok {
-		return errors.New("not found")
+		return 0, errors.New("not found")
+	}
+	if row.RevokedAt.Valid {
+		return 0, nil
 	}
 	row.RevokedAt = pgxTimestamp(time.Now())
 	f.sessions[id] = row
-	return nil
+	return 1, nil
 }
 
 func (f *fakeStore) RevokeFamily(ctx context.Context, familyID uuid.UUID) error {
@@ -246,6 +263,45 @@ func TestRefreshReuseRevokesFamily(t *testing.T) {
 	for _, row := range store.sessions {
 		if row.UserID == reg.UserID && !row.RevokedAt.Valid {
 			t.Fatalf("expected all sessions in family revoked after reuse detection, session %s still active", row.ID)
+		}
+	}
+}
+
+// TestRefreshConcurrentReuseRevokesFamily exercises the TOCTOU gate directly:
+// even when GetSessionByHash sees a not-yet-revoked, not-expired row (so the
+// early reuse check passes), a concurrent rotation of the exact same session
+// can win the race and revoke it first. RevokeSession must then report 0
+// rows affected, and Refresh must treat that as reuse - revoking the whole
+// family and returning ErrRefreshInvalid - rather than proceeding to mint a
+// successor session (which would fork the family and let both sides of the
+// race keep working).
+func TestRefreshConcurrentReuseRevokesFamily(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, time.Hour)
+
+	reg, err := svc.Register(context.Background(), RegisterInput{
+		WorkspaceName: "Acme", Email: "owner@acme.test", Password: "s3cret-pw", UserAgent: "ua", IP: "1.2.3.4",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Simulate another request's Refresh call revoking this same session
+	// between our GetSessionByHash read and our RevokeSession write.
+	store.preRevokeSession = func(id uuid.UUID) {
+		row := store.sessions[id]
+		row.RevokedAt = pgxTimestamp(time.Now())
+		store.sessions[id] = row
+	}
+
+	_, err = svc.Refresh(context.Background(), reg.RawRefresh, "ua", "1.2.3.4")
+	if !errors.Is(err, ErrRefreshInvalid) {
+		t.Fatalf("expected ErrRefreshInvalid on concurrent reuse, got %v", err)
+	}
+
+	for _, row := range store.sessions {
+		if row.UserID == reg.UserID && !row.RevokedAt.Valid {
+			t.Fatalf("expected all sessions in family revoked after concurrent-reuse detection, session %s still active", row.ID)
 		}
 	}
 }

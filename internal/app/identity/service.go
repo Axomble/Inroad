@@ -18,6 +18,23 @@ var (
 	ErrNotMember          = errors.New("not a member of target workspace")
 )
 
+// dummyHash is a real argon2id hash of an arbitrary, unused password,
+// computed once at process start. Login runs auth.CheckPassword against it
+// on the "user not found" path so that a nonexistent email takes the same
+// wall-clock time as a wrong password on a real account - closing a timing
+// side-channel that would otherwise let an attacker enumerate valid emails.
+var dummyHash = mustHashDummyPassword()
+
+func mustHashDummyPassword() string {
+	h, err := auth.HashPassword("correct-horse-battery-staple-dummy")
+	if err != nil {
+		// HashPassword only fails if crypto/rand can't be read, which would
+		// make the whole process unusable anyway.
+		panic("identity: could not compute dummy password hash: " + err.Error())
+	}
+	return h
+}
+
 // Membership is a single workspace a user belongs to, as returned to
 // callers (handlers, other services) - decoupled from the sqlc row shape.
 type Membership struct {
@@ -54,7 +71,7 @@ type storeIface interface {
 	TouchMemberLastSeen(ctx context.Context, wsID, userID uuid.UUID) error
 	CreateSession(ctx context.Context, arg gen.CreateSessionParams) (gen.Session, error)
 	GetSessionByHash(ctx context.Context, hash []byte) (gen.Session, error)
-	RevokeSession(ctx context.Context, id uuid.UUID) error
+	RevokeSession(ctx context.Context, id uuid.UUID) (int64, error)
 	RevokeFamily(ctx context.Context, familyID uuid.UUID) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
 	RepointSessionWorkspace(ctx context.Context, id, wsID uuid.UUID) error
@@ -119,7 +136,15 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (Session, erro
 // family.
 func (s *Service) Login(ctx context.Context, email, pw, ua, ip string) (Session, error) {
 	user, err := s.store.GetUserByEmail(ctx, email)
-	if err != nil || !auth.CheckPassword(user.PasswordHash, pw) {
+	if err != nil {
+		// No such user: still run an argon2 comparison (against a fixed
+		// dummy hash) so this path costs the same as a wrong-password
+		// rejection below. Without this, response timing would leak whether
+		// an email is registered.
+		auth.CheckPassword(dummyHash, pw)
+		return Session{}, ErrInvalidCredentials
+	}
+	if !auth.CheckPassword(user.PasswordHash, pw) {
 		return Session{}, ErrInvalidCredentials
 	}
 	mems, err := s.memberships(ctx, user.ID)
@@ -140,6 +165,16 @@ func (s *Service) Login(ctx context.Context, email, pw, ua, ip string) (Session,
 // hash, revoked, and replaced with a new one in the same family. If the
 // presented token is unknown, already revoked, or expired, the entire
 // family is revoked (reuse detection) and an error is returned.
+//
+// The revoke-then-rotate step is guarded against a TOCTOU race: two
+// concurrent Refresh calls for the same token could both pass the
+// not-revoked check above before either writes. RevokeSession reports how
+// many rows it actually flipped (0 or 1); only the caller that wins the race
+// (n==1) proceeds to mint a successor. The loser (n==0) treats this exactly
+// like reuse of an already-revoked token and revokes the whole family,
+// since observing 0 rows here means some other write revoked this exact
+// session between our read and our write - i.e. genuine concurrent use of
+// the same refresh token.
 func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, error) {
 	row, err := s.store.GetSessionByHash(ctx, auth.HashRefreshToken(raw))
 	if err != nil {
@@ -150,8 +185,15 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 		_ = s.store.RevokeFamily(ctx, row.FamilyID)
 		return Session{}, ErrRefreshInvalid
 	}
-	if err := s.store.RevokeSession(ctx, row.ID); err != nil {
+	n, err := s.store.RevokeSession(ctx, row.ID)
+	if err != nil {
 		return Session{}, err
+	}
+	if n == 0 {
+		// Lost the race: someone else already revoked/rotated this session
+		// between our read and our write. Treat as reuse.
+		_ = s.store.RevokeFamily(ctx, row.FamilyID)
+		return Session{}, ErrRefreshInvalid
 	}
 	member, err := s.store.GetMember(ctx, row.WorkspaceID, row.UserID)
 	if err != nil {

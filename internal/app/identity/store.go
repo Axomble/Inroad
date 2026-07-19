@@ -99,8 +99,10 @@ func (s *Store) GetSessionByHash(ctx context.Context, tokenHash []byte) (gen.Ses
 	return s.q.GetSessionByHash(ctx, tokenHash)
 }
 
-// RevokeSession marks a single session as revoked.
-func (s *Store) RevokeSession(ctx context.Context, id uuid.UUID) error {
+// RevokeSession marks a single session as revoked, returning the number of
+// rows actually flipped (0 if the session was already revoked or doesn't
+// exist, letting the caller detect a concurrent revoke).
+func (s *Store) RevokeSession(ctx context.Context, id uuid.UUID) (int64, error) {
 	return s.q.RevokeSession(ctx, id)
 }
 
