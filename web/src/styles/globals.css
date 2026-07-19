@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-500: oklch(0.62 0.19 255);
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root { color-scheme: light dark; }
+body { @apply bg-white text-neutral-900 antialiased; }
