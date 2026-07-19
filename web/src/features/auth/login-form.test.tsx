@@ -9,6 +9,6 @@ test('renders email and password fields', () => {
       <LoginForm />
     </Provider>,
   )
-  expect(screen.getByLabelText('email')).toBeInTheDocument()
-  expect(screen.getByLabelText('password')).toBeInTheDocument()
+  expect(screen.getByLabelText(/email/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
 })

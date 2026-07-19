@@ -1,9 +1,243 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
-@theme {
-  --color-brand-500: oklch(0.62 0.19 255);
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+/* Dark is the default theme; add `.light` on <html> to switch. */
+@custom-variant dark (&:where(:root:not(.light) *));
+
+/* ============================================================
+   Design tokens — the single source of truth for color.
+   Feature screens consume the Tailwind utilities generated from
+   these (bg-surface, text-muted-foreground, border-border, …),
+   never raw hex or slate-*.
+   ============================================================ */
+:root {
+  --radius: 0.55rem;
+
+  /* neutrals — purple-biased, not pure grey */
+  --background:     #14101c;
+  --foreground:     #edeaf4;
+  --rail:           #171320;
+  --surface:        #1c1726;
+  --surface-2:      #241d31;
+  --border:         #2e2740;
+  --border-strong:  #3a3350;
+  --muted-foreground: #9a93ad;
+  --faint:          #6f6885;
+
+  /* accent — blurple, spent on the primary action */
+  --primary:            #7c5cff;
+  --primary-foreground: #ffffff;
+  --primary-top:        #8a6bff;
+  --primary-bot:        #6a45f2;
+  --primary-edge:       #4a2fc0;
+
+  /* shadcn-compatible aliases */
+  --card:                 var(--surface);
+  --card-foreground:      var(--foreground);
+  --popover:              #201a2b;
+  --popover-foreground:   var(--foreground);
+  --secondary:            var(--surface-2);
+  --secondary-foreground: var(--foreground);
+  --muted:                var(--surface-2);
+  --accent:               #2a2338;
+  --accent-foreground:    var(--foreground);
+  --input:                var(--border);
+  --ring:                 var(--primary);
+
+  /* reserved warm — mailbox warmup / "heat" ONLY */
+  --warm:            #f5a524;
+  --warm-foreground: #2a1a02;
+  --warm-top:        #f7b23f;
+  --warm-bot:        #ec9410;
+  --warm-edge:       #b06d05;
+
+  /* semantic */
+  --ok:                  #34d399;
+  --warn:                #f5a524;
+  --danger:              #fb6d77;
+  --destructive:         #fb6d77;
+  --destructive-foreground: #ffffff;
+
+  /* neutral tactile control edge */
+  --control-edge: #100c18;
+
+  /* charts: violet, cyan, emerald, amber, rose */
+  --chart-1: #7c5cff;
+  --chart-2: #38bdf8;
+  --chart-3: #34d399;
+  --chart-4: #f5a524;
+  --chart-5: #fb6d77;
 }
 
-:root { color-scheme: light dark; }
-body { @apply bg-white text-neutral-900 antialiased; }
+.light {
+  --background:     #f6f5fa;
+  --foreground:     #1a1526;
+  --rail:           #efedf6;
+  --surface:        #ffffff;
+  --surface-2:      #f2f0f8;
+  --border:         #e4e1ee;
+  --border-strong:  #d6d2e6;
+  --muted-foreground: #6a6480;
+  --faint:          #948da8;
+
+  --popover:            #ffffff;
+  --accent:             #f2f0f8;
+  --primary-edge:       #5a3fd6;
+  --warm-foreground:    #ffffff;
+  --warm-edge:          #c67f0a;
+  --control-edge:       #cdc8dd;
+}
+
+/* Map tokens -> Tailwind v4 utilities. */
+@theme inline {
+  --color-background:      var(--background);
+  --color-foreground:      var(--foreground);
+  --color-rail:            var(--rail);
+  --color-surface:         var(--surface);
+  --color-surface-2:       var(--surface-2);
+  --color-border:          var(--border);
+  --color-border-strong:   var(--border-strong);
+  --color-faint:           var(--faint);
+
+  --color-card:                 var(--card);
+  --color-card-foreground:      var(--card-foreground);
+  --color-popover:              var(--popover);
+  --color-popover-foreground:   var(--popover-foreground);
+  --color-primary:              var(--primary);
+  --color-primary-foreground:   var(--primary-foreground);
+  --color-secondary:            var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted:                var(--muted);
+  --color-muted-foreground:     var(--muted-foreground);
+  --color-accent:               var(--accent);
+  --color-accent-foreground:    var(--accent-foreground);
+  --color-destructive:          var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-input:                var(--input);
+  --color-ring:                 var(--ring);
+
+  --color-warm:            var(--warm);
+  --color-warm-foreground: var(--warm-foreground);
+  --color-ok:              var(--ok);
+  --color-warn:            var(--warn);
+  --color-danger:          var(--danger);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* back-compat: the old brand utility now maps to the accent */
+  --color-brand-500: var(--primary);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+:root { color-scheme: dark; }
+.light { color-scheme: light; }
+
+body {
+  @apply bg-background text-foreground antialiased;
+  font-family: var(--font-sans);
+}
+
+/* ============================================================
+   Tactile controls — the signature interaction.
+   A hard, non-blurred bottom "lip" + inset highlight makes a
+   control stand proud of the surface; it lifts on hover and
+   recesses on press. Variant classes set the three --tactile-*
+   vars; this layer turns them into the physics.
+   ============================================================ */
+@layer components {
+  .tactile {
+    position: relative;
+    border: 1px solid var(--tactile-border, var(--border-strong));
+    background: linear-gradient(var(--tactile-top, var(--surface-2)), var(--tactile-bot, var(--surface)));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.10),
+      0 2px 0 var(--tactile-edge, var(--control-edge)),
+      0 5px 12px rgba(0, 0, 0, 0.30);
+    transition:
+      transform 130ms cubic-bezier(0.3, 0.7, 0.4, 1),
+      box-shadow 130ms cubic-bezier(0.3, 0.7, 0.4, 1),
+      filter 130ms;
+  }
+  .tactile:hover {
+    transform: translateY(-1.5px);
+    filter: brightness(1.06);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 3.5px 0 var(--tactile-edge, var(--control-edge)),
+      0 9px 20px rgba(0, 0, 0, 0.34);
+  }
+  .tactile:active {
+    transform: translateY(2px);
+    filter: brightness(0.98);
+    box-shadow:
+      inset 0 2px 4px rgba(0, 0, 0, 0.45),
+      0 0 0 var(--tactile-edge, var(--control-edge)),
+      0 1px 2px rgba(0, 0, 0, 0.30);
+    transition-duration: 34ms;
+  }
+  .tactile:disabled,
+  .tactile[aria-disabled="true"] {
+    transform: none;
+    filter: none;
+    opacity: 0.5;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 1px 0 var(--tactile-edge, var(--control-edge));
+    cursor: not-allowed;
+  }
+
+  /* shallower lip for toolbar chips */
+  .tactile-shallow {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 1.5px 0 var(--tactile-edge, var(--control-edge));
+  }
+  .tactile-shallow:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.09),
+      0 2.5px 0 var(--tactile-edge, var(--control-edge));
+  }
+  .tactile-shallow:active {
+    transform: translateY(1.5px);
+    box-shadow:
+      inset 0 1px 3px rgba(0, 0, 0, 0.40),
+      0 0 0 var(--tactile-edge, var(--control-edge));
+    transition-duration: 30ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tactile,
+  .tactile-shallow {
+    transition: none;
+  }
+  .tactile:hover,
+  .tactile:active,
+  .tactile-shallow:hover,
+  .tactile-shallow:active {
+    transform: none;
+  }
+}
+
+/* Warmup "heat" pulse — used only on warmup indicators. */
+@keyframes warm-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--warm); }
+  50%      { opacity: 0.75; box-shadow: 0 0 8px 1px var(--warm); }
+}
+.warm-pulse { animation: warm-pulse 2.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .warm-pulse { animation: none; }
+}
