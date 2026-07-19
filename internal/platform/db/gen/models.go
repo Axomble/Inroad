@@ -9,6 +9,44 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Campaign struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	ListID      uuid.UUID          `json:"list_id"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	BodyHtml    string             `json:"body_html"`
+	Status      string             `json:"status"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	LaunchedAt  pgtype.Timestamptz `json:"launched_at"`
+}
+
+type Contact struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	Email        string             `json:"email"`
+	FirstName    string             `json:"first_name"`
+	LastName     string             `json:"last_name"`
+	Company      string             `json:"company"`
+	CustomFields []byte             `json:"custom_fields"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type List struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ListMember struct {
+	ListID    uuid.UUID          `json:"list_id"`
+	ContactID uuid.UUID          `json:"contact_id"`
+	AddedAt   pgtype.Timestamptz `json:"added_at"`
+}
+
 type Mailbox struct {
 	ID                 uuid.UUID          `json:"id"`
 	WorkspaceID        uuid.UUID          `json:"workspace_id"`
@@ -33,6 +71,28 @@ type Mailbox struct {
 	LastSendAt         pgtype.Timestamptz `json:"last_send_at"`
 	LastPollAt         pgtype.Timestamptz `json:"last_poll_at"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type Send struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	ContactID   uuid.UUID          `json:"contact_id"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	ToEmail     string             `json:"to_email"`
+	Status      string             `json:"status"`
+	Error       string             `json:"error"`
+	MessageID   string             `json:"message_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+}
+
+type Suppression struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Email       string             `json:"email"`
+	Reason      string             `json:"reason"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type User struct {
