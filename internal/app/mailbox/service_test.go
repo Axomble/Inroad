@@ -16,22 +16,30 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 )
 
+// storeRow is the fakeStore's internal shape: MailboxSafe plus the sealed
+// secret, so the fake can round-trip what the sqlc-backed Store would
+// while still hiding SecretCiphertext behind the Store interface.
+type storeRow struct {
+	safe   MailboxSafe
+	secret string
+}
+
 // fakeStore is an in-memory Store used to unit test Service without a
 // database. It enforces the same workspace scoping a real Postgres-backed
 // Store would.
 type fakeStore struct {
 	mu   sync.Mutex
-	rows map[uuid.UUID]gen.Mailbox
+	rows map[uuid.UUID]storeRow
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{rows: make(map[uuid.UUID]gen.Mailbox)}
+	return &fakeStore{rows: make(map[uuid.UUID]storeRow)}
 }
 
-func (s *fakeStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (gen.Mailbox, error) {
+func (s *fakeStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (MailboxSafe, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := gen.Mailbox{
+	m := MailboxSafe{
 		ID:                 uuid.New(),
 		WorkspaceID:        arg.WorkspaceID,
 		Provider:           arg.Provider,
@@ -43,7 +51,6 @@ func (s *fakeStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (ge
 		ImapHost:           arg.ImapHost,
 		ImapPort:           arg.ImapPort,
 		ImapUsername:       arg.ImapUsername,
-		SecretCiphertext:   arg.SecretCiphertext,
 		UseTls:             arg.UseTls,
 		DailyCap:           arg.DailyCap,
 		MinIntervalSeconds: arg.MinIntervalSeconds,
@@ -53,27 +60,27 @@ func (s *fakeStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (ge
 		Status:             "active", // mirrors the DB column default
 		CreatedAt:          pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	}
-	s.rows[m.ID] = m
+	s.rows[m.ID] = storeRow{safe: m, secret: arg.SecretCiphertext}
 	return m, nil
 }
 
-func (s *fakeStore) Get(ctx context.Context, workspaceID, id uuid.UUID) (gen.Mailbox, error) {
+func (s *fakeStore) Get(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, ok := s.rows[id]
-	if !ok || m.WorkspaceID != workspaceID {
-		return gen.Mailbox{}, errors.New("not found")
+	r, ok := s.rows[id]
+	if !ok || r.safe.WorkspaceID != workspaceID {
+		return MailboxSafe{}, errors.New("not found")
 	}
-	return m, nil
+	return r.safe, nil
 }
 
-func (s *fakeStore) List(ctx context.Context, workspaceID uuid.UUID) ([]gen.Mailbox, error) {
+func (s *fakeStore) List(ctx context.Context, workspaceID uuid.UUID) ([]MailboxSafe, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var out []gen.Mailbox
-	for _, m := range s.rows {
-		if m.WorkspaceID == workspaceID {
-			out = append(out, m)
+	var out []MailboxSafe
+	for _, r := range s.rows {
+		if r.safe.WorkspaceID == workspaceID {
+			out = append(out, r.safe)
 		}
 	}
 	return out, nil
@@ -83,32 +90,32 @@ func (s *fakeStore) CountByEmail(ctx context.Context, workspaceID uuid.UUID, ema
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var count int64
-	for _, m := range s.rows {
-		if m.WorkspaceID == workspaceID && m.Email == email {
+	for _, r := range s.rows {
+		if r.safe.WorkspaceID == workspaceID && r.safe.Email == email {
 			count++
 		}
 	}
 	return count, nil
 }
 
-func (s *fakeStore) UpdateStatus(ctx context.Context, workspaceID, id uuid.UUID, status, lastErr string) (gen.Mailbox, error) {
+func (s *fakeStore) UpdateStatus(ctx context.Context, workspaceID, id uuid.UUID, status, lastErr string) (MailboxSafe, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, ok := s.rows[id]
-	if !ok || m.WorkspaceID != workspaceID {
-		return gen.Mailbox{}, errors.New("not found")
+	r, ok := s.rows[id]
+	if !ok || r.safe.WorkspaceID != workspaceID {
+		return MailboxSafe{}, errors.New("not found")
 	}
-	m.Status = status
-	m.LastError = lastErr
-	s.rows[id] = m
-	return m, nil
+	r.safe.Status = status
+	r.safe.LastError = lastErr
+	s.rows[id] = r
+	return r.safe, nil
 }
 
 func (s *fakeStore) Delete(ctx context.Context, workspaceID, id uuid.UUID) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, ok := s.rows[id]
-	if !ok || m.WorkspaceID != workspaceID {
+	r, ok := s.rows[id]
+	if !ok || r.safe.WorkspaceID != workspaceID {
 		return 0, nil
 	}
 	delete(s.rows, id)
@@ -157,10 +164,19 @@ func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 		t.Fatalf("ConnectSMTP() error = %v", err)
 	}
 
-	if m.SecretCiphertext == "" {
+	// SecretCiphertext deliberately isn't on MailboxSafe (the public shape) —
+	// we verify sealing indirectly by reaching into the fakeStore's private
+	// row and confirming the stored secret is non-empty and not the plaintext.
+	store.mu.Lock()
+	row, ok := store.rows[m.ID]
+	store.mu.Unlock()
+	if !ok {
+		t.Fatal("created mailbox missing from fakeStore")
+	}
+	if row.secret == "" {
 		t.Fatal("SecretCiphertext is empty, expected a sealed value")
 	}
-	if m.SecretCiphertext == in.Secret {
+	if row.secret == in.Secret {
 		t.Fatal("SecretCiphertext equals the plaintext secret, expected it to be sealed")
 	}
 

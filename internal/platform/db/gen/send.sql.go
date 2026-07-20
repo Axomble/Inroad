@@ -92,40 +92,8 @@ func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCa
 	return i, err
 }
 
-const listStuckQueuedSends = `-- name: ListStuckQueuedSends :many
-SELECT id, workspace_id FROM sends
-WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
-ORDER BY created_at ASC
-LIMIT 500
-`
-
-type ListStuckQueuedSendsRow struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]ListStuckQueuedSendsRow, error) {
-	rows, err := q.db.Query(ctx, listStuckQueuedSends)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListStuckQueuedSendsRow
-	for rows.Next() {
-		var i ListStuckQueuedSendsRow
-		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getSendBundle = `-- name: GetSendBundle :one
-SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id,
+SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html,
        m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
@@ -147,6 +115,7 @@ type GetSendBundleRow struct {
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
 	ToEmail          string             `json:"to_email"`
 	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	Attempts         int32              `json:"attempts"`
 	FirstName        string             `json:"first_name"`
 	Subject          string             `json:"subject"`
 	BodyText         string             `json:"body_text"`
@@ -165,6 +134,10 @@ type GetSendBundleRow struct {
 	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
 }
 
+// Bundle is workspace-scoped: even though sendID is a UUID (unguessable in
+// practice), pinning workspace_id in the WHERE clause forces a not-found
+// verdict if a worker somehow processes a send id from another tenant.
+// Defense in depth on top of the queue-side ownership.
 func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (GetSendBundleRow, error) {
 	row := q.db.QueryRow(ctx, getSendBundle, arg.ID, arg.WorkspaceID)
 	var i GetSendBundleRow
@@ -173,6 +146,7 @@ func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (G
 		&i.WorkspaceID,
 		&i.ToEmail,
 		&i.MailboxID,
+		&i.Attempts,
 		&i.FirstName,
 		&i.Subject,
 		&i.BodyText,
@@ -191,6 +165,64 @@ func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (G
 		&i.MailboxCreatedAt,
 	)
 	return i, err
+}
+
+const incrementSendAttempts = `-- name: IncrementSendAttempts :one
+UPDATE sends SET attempts = attempts + 1
+WHERE id = $1 AND workspace_id = $2
+RETURNING attempts
+`
+
+type IncrementSendAttemptsParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Bumps the attempts counter and returns the new value so the worker can
+// decide whether to fail the send instead of re-enqueuing indefinitely.
+func (q *Queries) IncrementSendAttempts(ctx context.Context, arg IncrementSendAttemptsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, incrementSendAttempts, arg.ID, arg.WorkspaceID)
+	var attempts int32
+	err := row.Scan(&attempts)
+	return attempts, err
+}
+
+const listStuckQueuedSends = `-- name: ListStuckQueuedSends :many
+SELECT id, workspace_id FROM sends
+WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
+ORDER BY created_at ASC
+LIMIT 500
+`
+
+type ListStuckQueuedSendsRow struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// ListStuckQueuedSends returns sends that are still 'queued' more than two
+// minutes after creation. The sweeper re-enqueues these — a launch that
+// failed to enqueue partway (or a redis blip) would otherwise leave them
+// orphaned. Capped so a single sweep tick can't monopolize the worker.
+// workspace_id travels along so the re-enqueued task carries the pin the
+// worker will use in its subsequent DB lookups.
+func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]ListStuckQueuedSendsRow, error) {
+	rows, err := q.db.Query(ctx, listStuckQueuedSends)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStuckQueuedSendsRow
+	for rows.Next() {
+		var i ListStuckQueuedSendsRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setSendResult = `-- name: SetSendResult :exec

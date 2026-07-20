@@ -28,6 +28,9 @@ type CountSendsByStatusRow struct {
 	N      int64  `json:"n"`
 }
 
+// Workspace-scoped for defense in depth: even if a caller supplies a
+// campaign id from another tenant, the workspace filter forces a 0-row
+// result rather than leaking counts across tenants.
 func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatusParams) ([]CountSendsByStatusRow, error) {
 	rows, err := q.db.Query(ctx, countSendsByStatus, arg.CampaignID, arg.WorkspaceID)
 	if err != nil {

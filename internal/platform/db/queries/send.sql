@@ -12,7 +12,7 @@ RETURNING id;
 -- practice), pinning workspace_id in the WHERE clause forces a not-found
 -- verdict if a worker somehow processes a send id from another tenant.
 -- Defense in depth on top of the queue-side ownership.
-SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id,
+SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html,
        m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
@@ -44,3 +44,9 @@ SELECT id, workspace_id FROM sends
 WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
 ORDER BY created_at ASC
 LIMIT 500;
+-- name: IncrementSendAttempts :one
+-- Bumps the attempts counter and returns the new value so the worker can
+-- decide whether to fail the send instead of re-enqueuing indefinitely.
+UPDATE sends SET attempts = attempts + 1
+WHERE id = $1 AND workspace_id = $2
+RETURNING attempts;

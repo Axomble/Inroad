@@ -24,6 +24,10 @@ func (f fakeCore) ListStuckQueuedSends(context.Context) ([]coreapi.StuckSend, er
 	return nil, nil
 }
 
+func (f fakeCore) IncrementSendAttempts(context.Context, string, string) (int, error) {
+	return 0, nil
+}
+
 var _ coreapi.Client = fakeCore{}
 
 func TestWarmupHandlerSkipsUnknownMailbox(t *testing.T) {

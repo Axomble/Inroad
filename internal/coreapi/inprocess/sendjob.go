@@ -57,6 +57,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 	return coreapi.SendJob{
 		SendID:            sendID,
 		WorkspaceID:       b.WorkspaceID.String(),
+		Attempts:          int(b.Attempts),
 		Suppressed:        suppressed,
 		EffectiveDailyCap: cap,
 		SentToday:         int(sentToday),
@@ -71,9 +72,28 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		SMTPHost:          b.SmtpHost,
 		SMTPPort:          int(b.SmtpPort),
 		SMTPUsername:      b.SmtpUsername,
-		SMTPPassword:      string(password),
+		SMTPPassword:      password,
 		UseTLS:            b.UseTls,
 	}, nil
+}
+
+// IncrementSendAttempts bumps the counter and returns the new value.
+// workspaceID is pinned so a cross-tenant task can't skew another
+// workspace's counter.
+func (c client) IncrementSendAttempts(ctx context.Context, sendID, workspaceID string) (int, error) {
+	id, err := uuid.Parse(sendID)
+	if err != nil {
+		return 0, err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := c.q.IncrementSendAttempts(ctx, gen.IncrementSendAttemptsParams{ID: id, WorkspaceID: ws})
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 // MarkSend records the outcome of a send attempt. workspaceID is pinned

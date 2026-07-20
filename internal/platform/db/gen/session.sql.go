@@ -86,6 +86,10 @@ type RepointSessionWorkspaceParams struct {
 	UserID      uuid.UUID `json:"user_id"`
 }
 
+// user_id is included in the WHERE clause so a caller can only ever
+// repoint their OWN session, never someone else's — even if a session id
+// somehow leaked into a caller's context. RowsAffected() lets the service
+// surface a 403 when the (session, user) pair doesn't match.
 func (q *Queries) RepointSessionWorkspace(ctx context.Context, arg RepointSessionWorkspaceParams) (int64, error) {
 	result, err := q.db.Exec(ctx, repointSessionWorkspace, arg.ID, arg.WorkspaceID, arg.UserID)
 	if err != nil {

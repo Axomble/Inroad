@@ -29,6 +29,11 @@ type Client interface {
 	// after creation. Consumed by the periodic sweeper to re-enqueue
 	// anything the launcher missed.
 	ListStuckQueuedSends(ctx context.Context) ([]StuckSend, error)
+	// IncrementSendAttempts bumps the send's attempts counter and returns
+	// the new value. Used by the cap-exceeded re-enqueue path to break out
+	// of the loop when a send keeps hitting a daily cap it will never
+	// clear.
+	IncrementSendAttempts(ctx context.Context, sendID, workspaceID string) (int, error)
 }
 
 // StuckSend is a (send id, workspace id) pair from the reconciler query.
@@ -38,10 +43,13 @@ type StuckSend struct {
 }
 
 // SendJob is everything the worker needs to send one email — including the
-// decrypted SMTP password (in-memory only, never logged).
+// decrypted SMTP password (in-memory only, never logged). SMTPPassword is
+// a []byte so the worker can zeroize it after use; a Go string would be
+// immutable and hang around in memory until GC.
 type SendJob struct {
 	SendID            string
 	WorkspaceID       string
+	Attempts          int
 	Suppressed        bool
 	EffectiveDailyCap int
 	SentToday         int
@@ -56,7 +64,7 @@ type SendJob struct {
 	SMTPHost          string
 	SMTPPort          int
 	SMTPUsername      string
-	SMTPPassword      string
+	SMTPPassword      []byte
 	UseTLS            bool
 }
 

@@ -26,6 +26,10 @@ func (f *fakeCore) ListStuckQueuedSends(context.Context) ([]coreapi.StuckSend, e
 	return f.stuck, f.err
 }
 
+func (f *fakeCore) IncrementSendAttempts(context.Context, string, string) (int, error) {
+	return 0, nil
+}
+
 type fakeSendEnqueuer struct {
 	fail     map[string]bool
 	enqueued []string

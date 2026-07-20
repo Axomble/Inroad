@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
-	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
@@ -62,7 +62,7 @@ type mailboxResponse struct {
 	CreatedAt          string `json:"created_at"`
 }
 
-func toResponse(m gen.Mailbox) mailboxResponse {
+func toResponse(m MailboxSafe) mailboxResponse {
 	return mailboxResponse{
 		ID:                 m.ID.String(),
 		Email:              m.Email,
@@ -82,11 +82,9 @@ func toResponse(m gen.Mailbox) mailboxResponse {
 		RampDays:           m.RampDays,
 		Status:             m.Status,
 		LastError:          m.LastError,
-		CreatedAt:          m.CreatedAt.Time.Format(timeLayout),
+		CreatedAt:          m.CreatedAt.Time.Format(time.RFC3339),
 	}
 }
-
-const timeLayout = "2006-01-02T15:04:05Z07:00"
 
 // workspaceID extracts the authenticated caller's workspace id from context.
 func workspaceID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
