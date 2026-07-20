@@ -1,6 +1,7 @@
 package suppression
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -10,15 +11,21 @@ import (
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
 
+// Adder is the subset of the store the handler needs. Defined at the
+// consumer so unit tests can inject a fake without a database.
+type Adder interface {
+	Add(ctx context.Context, workspaceID uuid.UUID, email, reason string) error
+}
+
 // Handler serves the public, stateless unsubscribe endpoint.
 type Handler struct {
 	secret []byte
-	store  *Store
+	store  Adder
 }
 
 // NewHandler builds a Handler that verifies tokens with secret and records
 // suppressions via store.
-func NewHandler(secret []byte, store *Store) *Handler { return &Handler{secret: secret, store: store} }
+func NewHandler(secret []byte, store Adder) *Handler { return &Handler{secret: secret, store: store} }
 
 // unsubscribePOST is the RFC 8058 one-click endpoint: the token is verified
 // and the suppression row is inserted here. Email preview scanners (Gmail
