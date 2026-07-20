@@ -24,6 +24,11 @@ type SendEmailPayload struct {
 	SendID string `json:"send_id"`
 }
 
+// TaskSweepStuck is the periodic reconcile task that re-enqueues sends left
+// in 'queued' longer than the reconcile window. Scheduled by the worker's
+// asynq.Scheduler every 2 minutes.
+const TaskSweepStuck = "send:sweep_stuck"
+
 // Client enqueues tasks onto Redis.
 type Client struct {
 	inner *asynq.Client
@@ -64,13 +69,50 @@ func (c *Client) EnqueueSendIn(sendID string, d time.Duration) error {
 
 func (c *Client) Close() error { return c.inner.Close() }
 
-// NewServer builds an asynq processing server.
-func NewServer(redisAddr string, logger *slog.Logger) *asynq.Server {
+// NewServer builds an asynq processing server. Concurrency defaults to 10
+// when concurrency <= 0. The provided *slog.Logger is adapted to asynq's
+// Logger interface so worker log lines flow through the same structured
+// sink as the rest of the app.
+func NewServer(redisAddr string, logger *slog.Logger, concurrency int) *asynq.Server {
+	if concurrency <= 0 {
+		concurrency = 10
+	}
 	return asynq.NewServer(
 		asynq.RedisClientOpt{Addr: redisAddr},
-		asynq.Config{Concurrency: 10},
+		asynq.Config{
+			Concurrency: concurrency,
+			Logger:      newAsynqLogger(logger),
+		},
 	)
 }
 
 // NewMux returns an empty task router for worker handlers to register on.
 func NewMux() *asynq.ServeMux { return asynq.NewServeMux() }
+
+// NewScheduler builds an asynq scheduler bound to the same Redis instance
+// the worker consumes from. Registered periodic tasks are enqueued on
+// their cron interval; the worker picks them up like any other task.
+func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
+	return asynq.NewScheduler(
+		asynq.RedisClientOpt{Addr: redisAddr},
+		&asynq.SchedulerOpts{Logger: newAsynqLogger(logger)},
+	)
+}
+
+// RegisterSweepStuck registers the periodic stuck-send sweep on the
+// scheduler. Runs every 2 minutes to match the "stuck > 2 minutes" query.
+func RegisterSweepStuck(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 2m", asynq.NewTask(TaskSweepStuck, nil))
+	return err
+}
+
+// asynqLogger adapts *slog.Logger to asynq.Logger.
+type asynqLogger struct{ l *slog.Logger }
+
+func newAsynqLogger(l *slog.Logger) *asynqLogger { return &asynqLogger{l: l} }
+
+func (a *asynqLogger) Debug(args ...any) { a.l.Debug("asynq", "msg", args) }
+func (a *asynqLogger) Info(args ...any)  { a.l.Info("asynq", "msg", args) }
+func (a *asynqLogger) Warn(args ...any)  { a.l.Warn("asynq", "msg", args) }
+func (a *asynqLogger) Error(args ...any) { a.l.Error("asynq", "msg", args) }
+func (a *asynqLogger) Fatal(args ...any) { a.l.Error("asynq-fatal", "msg", args) }

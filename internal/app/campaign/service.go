@@ -64,34 +64,56 @@ func (s *Service) List(ctx context.Context, ws uuid.UUID) ([]gen.Campaign, error
 	return s.store.List(ctx, ws)
 }
 
-// Stats returns send counts grouped by status for the campaign.
-func (s *Service) Stats(ctx context.Context, id uuid.UUID) (map[string]int64, error) {
-	return s.store.Stats(ctx, id)
+// Stats returns send counts grouped by status for the campaign. The
+// workspace id is included so a cross-tenant campaign id yields empty
+// results rather than leaking counts (defense in depth on top of the
+// ownership check the caller has already run via Get).
+func (s *Service) Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64, error) {
+	return s.store.Stats(ctx, ws, id)
+}
+
+// LaunchResult reports the outcome of a Launch call. TotalSends is the
+// number of send rows the DB transaction created; EnqueuedCount and
+// FailedEnqueueCount split that total by whether each id made it onto
+// the queue. A non-zero FailedEnqueueCount is not a hard failure — the
+// stuck-send sweeper reconciles unqueued rows on its next tick — but
+// the counts are surfaced so callers can log/alert.
+type LaunchResult struct {
+	TotalSends         int
+	EnqueuedCount      int
+	FailedEnqueueCount int
 }
 
 // Launch transitions a draft campaign to running: it materializes one `sends`
-// row per list member, flips the campaign status, and enqueues a send:email
-// task for every new row. It returns the number of sends queued.
-func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqueuer) (int, error) {
+// row per list member and flips the campaign status atomically (via
+// store.LaunchTx), then enqueues a send:email task for every new row.
+//
+// Enqueue errors are counted and returned, not swallowed: the DB writes are
+// already committed, so rolling back would drop legitimate work; the
+// stuck-send sweeper (queue.TaskSweepStuck) re-enqueues any orphaned rows
+// on the next tick.
+func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqueuer) (LaunchResult, error) {
 	c, err := s.store.Get(ctx, ws, campaignID)
 	if err != nil {
-		return 0, ErrNotFound
+		return LaunchResult{}, ErrNotFound
 	}
 	if c.Status != string(StatusDraft) {
-		return 0, ErrAlreadyLaunched
+		return LaunchResult{}, ErrAlreadyLaunched
 	}
-	ids, err := s.store.EnqueueSends(ctx, ws, campaignID)
+	ids, err := s.store.LaunchTx(ctx, ws, campaignID)
 	if err != nil {
-		return 0, err
+		return LaunchResult{}, err
 	}
 	if len(ids) == 0 {
-		return 0, ErrEmptyList
+		return LaunchResult{}, ErrEmptyList
 	}
-	if err := s.store.SetStatus(ctx, ws, campaignID, StatusRunning); err != nil {
-		return 0, err
-	}
+	res := LaunchResult{TotalSends: len(ids)}
 	for _, id := range ids {
-		_ = enq.EnqueueSend(id.String())
+		if err := enq.EnqueueSend(id.String()); err != nil {
+			res.FailedEnqueueCount++
+			continue
+		}
+		res.EnqueuedCount++
 	}
-	return len(ids), nil
+	return res, nil
 }

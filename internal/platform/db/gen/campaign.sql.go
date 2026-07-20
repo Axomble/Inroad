@@ -13,16 +13,23 @@ import (
 )
 
 const countSendsByStatus = `-- name: CountSendsByStatus :many
-SELECT status, count(*) AS n FROM sends WHERE campaign_id = $1 GROUP BY status
+SELECT status, count(*) AS n FROM sends
+WHERE campaign_id = $1 AND workspace_id = $2
+GROUP BY status
 `
+
+type CountSendsByStatusParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
 
 type CountSendsByStatusRow struct {
 	Status string `json:"status"`
 	N      int64  `json:"n"`
 }
 
-func (q *Queries) CountSendsByStatus(ctx context.Context, campaignID uuid.UUID) ([]CountSendsByStatusRow, error) {
-	rows, err := q.db.Query(ctx, countSendsByStatus, campaignID)
+func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatusParams) ([]CountSendsByStatusRow, error) {
+	rows, err := q.db.Query(ctx, countSendsByStatus, arg.CampaignID, arg.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}

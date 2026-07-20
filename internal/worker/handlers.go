@@ -14,4 +14,5 @@ import (
 func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.NetSender, enq *queue.Client) {
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.Handler(core))
 	mux.HandleFunc(queue.TaskSendEmail, sender.Handler(core, sndr, enq))
+	mux.HandleFunc(queue.TaskSweepStuck, sender.SweepStuckHandler(core, enq))
 }

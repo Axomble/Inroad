@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -23,12 +24,12 @@ type Store interface {
 	Create(ctx context.Context, ws uuid.UUID, in CreateInput) (gen.Campaign, error)
 	Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, error)
 	List(ctx context.Context, ws uuid.UUID) ([]gen.Campaign, error)
-	Stats(ctx context.Context, id uuid.UUID) (map[string]int64, error)
-	// EnqueueSends materializes one `sends` row per (campaign, list member)
-	// pair and returns the ids of the newly created rows.
-	EnqueueSends(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
-	// SetStatus transitions a campaign to the given status.
-	SetStatus(ctx context.Context, ws, id uuid.UUID, status CampaignStatus) error
+	Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64, error)
+	// LaunchTx materializes one `sends` row per (campaign, list member) pair
+	// AND transitions the campaign to running, atomically. Returns the ids of
+	// newly created rows. Either both writes commit or neither does — a
+	// partial launch cannot leak a mixed status.
+	LaunchTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -40,9 +41,17 @@ type Checker interface {
 }
 
 // PgStore implements Store by wrapping sqlc-generated queries.
-type PgStore struct{ q *gen.Queries }
+type PgStore struct {
+	pool *pgxpool.Pool
+	q    *gen.Queries
+}
 
-func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
+// NewPgStore constructs a PgStore backed by the given connection pool. The
+// pool is used for LaunchTx's transaction; every other method flows through
+// the pool-bound *gen.Queries.
+func NewPgStore(pool *pgxpool.Pool) *PgStore {
+	return &PgStore{pool: pool, q: gen.New(pool)}
+}
 
 func (s *PgStore) Create(ctx context.Context, ws uuid.UUID, in CreateInput) (gen.Campaign, error) {
 	return s.q.CreateCampaign(ctx, gen.CreateCampaignParams{
@@ -56,8 +65,8 @@ func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, erro
 func (s *PgStore) List(ctx context.Context, ws uuid.UUID) ([]gen.Campaign, error) {
 	return s.q.ListCampaigns(ctx, ws)
 }
-func (s *PgStore) Stats(ctx context.Context, id uuid.UUID) (map[string]int64, error) {
-	rows, err := s.q.CountSendsByStatus(ctx, id)
+func (s *PgStore) Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64, error) {
+	rows, err := s.q.CountSendsByStatus(ctx, gen.CountSendsByStatusParams{CampaignID: id, WorkspaceID: ws})
 	if err != nil {
 		return nil, err
 	}
@@ -68,15 +77,36 @@ func (s *PgStore) Stats(ctx context.Context, id uuid.UUID) (map[string]int64, er
 	return out, nil
 }
 
-func (s *PgStore) EnqueueSends(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
-	return s.q.EnqueueSends(ctx, gen.EnqueueSendsParams{ID: campaignID, WorkspaceID: ws})
-}
+// LaunchTx enqueues sends and flips status to running in a single database
+// transaction. If either write fails the transaction is rolled back, leaving
+// the campaign as draft with no sends created.
+func (s *PgStore) LaunchTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
 
-func (s *PgStore) SetStatus(ctx context.Context, ws, id uuid.UUID, status CampaignStatus) error {
-	return s.q.SetCampaignStatus(ctx, gen.SetCampaignStatusParams{
-		ID:          id,
+	qtx := s.q.WithTx(tx)
+	ids, err := qtx.EnqueueSends(ctx, gen.EnqueueSendsParams{ID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		// Empty target list: don't flip status, don't commit. The service layer
+		// maps this to ErrEmptyList.
+		return nil, nil
+	}
+	if err := qtx.SetCampaignStatus(ctx, gen.SetCampaignStatusParams{
+		ID:          campaignID,
 		WorkspaceID: ws,
-		Status:      string(status),
+		Status:      string(StatusRunning),
 		LaunchedAt:  pgtype.Timestamptz{Time: time.Now(), Valid: true},
-	})
+	}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }

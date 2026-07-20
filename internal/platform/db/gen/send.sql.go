@@ -87,6 +87,33 @@ func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCa
 	return i, err
 }
 
+const listStuckQueuedSends = `-- name: ListStuckQueuedSends :many
+SELECT id FROM sends
+WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
+ORDER BY created_at ASC
+LIMIT 500
+`
+
+func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listStuckQueuedSends)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getSendBundle = `-- name: GetSendBundle :one
 SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id,
        ct.first_name, cam.subject, cam.body_text, cam.body_html,

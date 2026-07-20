@@ -12,6 +12,10 @@ type Client interface {
 	GetSendJob(ctx context.Context, sendID string) (SendJob, error)
 	// MarkSend records the outcome of a send attempt.
 	MarkSend(ctx context.Context, sendID string, res SendResult) error
+	// ListStuckQueuedSends returns send ids that are still 'queued' more than
+	// the reconcile window (currently 2 minutes) after creation. Consumed by
+	// the periodic sweeper to re-enqueue anything the launcher missed.
+	ListStuckQueuedSends(ctx context.Context) ([]string, error)
 }
 
 // SendJob is everything the worker needs to send one email — including the

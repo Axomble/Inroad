@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -9,9 +10,12 @@ import (
 )
 
 type fakeStore struct {
-	status    string
-	sendIDs   []uuid.UUID
-	setStatus CampaignStatus
+	status  string
+	sendIDs []uuid.UUID
+	// launchCalled is set to true when LaunchTx runs so tests can assert
+	// the tx path is actually exercised (not the removed EnqueueSends+SetStatus
+	// two-step).
+	launchCalled bool
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
@@ -21,14 +25,27 @@ func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (gen.Campaign, er
 	return gen.Campaign{Status: f.status}, nil
 }
 func (*fakeStore) List(context.Context, uuid.UUID) ([]gen.Campaign, error) { return nil, nil }
-func (*fakeStore) Stats(context.Context, uuid.UUID) (map[string]int64, error) {
+func (*fakeStore) Stats(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
 	return nil, nil
 }
-func (f *fakeStore) EnqueueSends(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
+func (f *fakeStore) LaunchTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
+	f.launchCalled = true
 	return f.sendIDs, nil
 }
-func (f *fakeStore) SetStatus(_ context.Context, _, _ uuid.UUID, status CampaignStatus) error {
-	f.setStatus = status
+
+// selectiveEnqueuer succeeds on any id it hasn't been told to fail. Used to
+// prove the service tallies partial-enqueue failures rather than swallowing
+// them.
+type selectiveEnqueuer struct {
+	fail     map[string]bool
+	enqueued []string
+}
+
+func (s *selectiveEnqueuer) EnqueueSend(sendID string) error {
+	if s.fail[sendID] {
+		return errors.New("redis unavailable")
+	}
+	s.enqueued = append(s.enqueued, sendID)
 	return nil
 }
 
@@ -87,17 +104,42 @@ func TestLaunchSucceeds(t *testing.T) {
 	store := &fakeStore{status: string(StatusDraft), sendIDs: ids}
 	enq := &fakeEnqueuer{}
 	svc := NewService(store, okChecker{active: true})
-	n, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
+	res, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if n != len(ids) {
-		t.Fatalf("queued: got %d want %d", n, len(ids))
+	if res.EnqueuedCount != len(ids) {
+		t.Fatalf("queued: got %d want %d", res.EnqueuedCount, len(ids))
+	}
+	if res.TotalSends != len(ids) {
+		t.Fatalf("total sends: got %d want %d", res.TotalSends, len(ids))
+	}
+	if res.FailedEnqueueCount != 0 {
+		t.Fatalf("expected no failed enqueues, got %d", res.FailedEnqueueCount)
 	}
 	if len(enq.enqueued) != len(ids) {
 		t.Fatalf("enqueued: got %d want %d", len(enq.enqueued), len(ids))
 	}
-	if store.setStatus != StatusRunning {
-		t.Fatalf("status: got %q want %q", store.setStatus, StatusRunning)
+	if !store.launchCalled {
+		t.Fatal("expected LaunchTx to be called")
+	}
+}
+
+// TestLaunchCountsPartialEnqueueFailures proves the service no longer
+// swallows enqueue errors - a redis blip that drops individual ids must show
+// up in FailedEnqueueCount, so callers can log/alert and the stuck-send
+// sweeper knows there's work to reconcile.
+func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
+	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	store := &fakeStore{status: string(StatusDraft), sendIDs: ids}
+	enq := &selectiveEnqueuer{fail: map[string]bool{ids[1].String(): true}}
+	svc := NewService(store, okChecker{active: true})
+
+	res, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.TotalSends != 3 || res.EnqueuedCount != 2 || res.FailedEnqueueCount != 1 {
+		t.Fatalf("counts wrong: %+v", res)
 	}
 }

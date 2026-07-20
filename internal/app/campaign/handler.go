@@ -82,7 +82,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
 		return
 	}
-	stats, _ := h.svc.Stats(r.Context(), id)
+	stats, _ := h.svc.Stats(r.Context(), ws, id)
 	httpx.JSON(w, http.StatusOK, toResponse(c, stats))
 }
 
@@ -115,7 +115,7 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	n, err := h.svc.Launch(r.Context(), ws, id, h.enq)
+	res, err := h.svc.Launch(r.Context(), ws, id, h.enq)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not found")
@@ -126,6 +126,12 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not launch")
 	default:
-		httpx.JSON(w, http.StatusOK, map[string]int{"queued": n})
+		// "queued" preserves the existing client contract; the split-out fields
+		// let callers spot partial-enqueue outcomes without breaking the shape.
+		httpx.JSON(w, http.StatusOK, map[string]int{
+			"queued":               res.EnqueuedCount,
+			"total_sends":          res.TotalSends,
+			"failed_enqueue_count": res.FailedEnqueueCount,
+		})
 	}
 }

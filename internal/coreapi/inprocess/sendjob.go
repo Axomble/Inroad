@@ -75,3 +75,17 @@ func (c client) MarkSend(ctx context.Context, sendID string, res coreapi.SendRes
 		Error:     res.Err,
 	})
 }
+
+// ListStuckQueuedSends returns send ids stuck in 'queued' longer than the
+// reconcile window. Consumed by the periodic sweeper.
+func (c client) ListStuckQueuedSends(ctx context.Context) ([]string, error) {
+	ids, err := c.q.ListStuckQueuedSends(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out, nil
+}

@@ -29,3 +29,12 @@ WHERE mailbox_id = $1 AND status = 'sent' AND sent_at::date = (now() AT TIME ZON
 SELECT count(*) FROM sends WHERE campaign_id = $1 AND status = 'queued';
 -- name: GetCampaignIDForSend :one
 SELECT campaign_id, workspace_id FROM sends WHERE id = $1;
+-- name: ListStuckQueuedSends :many
+-- ListStuckQueuedSends returns sends that are still 'queued' more than two
+-- minutes after creation. The sweeper re-enqueues these — a launch that
+-- failed to enqueue partway (or a redis blip) would otherwise leave them
+-- orphaned. Capped so a single sweep tick can't monopolize the worker.
+SELECT id FROM sends
+WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
+ORDER BY created_at ASC
+LIMIT 500;

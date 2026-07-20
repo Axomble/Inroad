@@ -64,7 +64,7 @@ func main() {
 	listSvc := list.NewService(list.NewPgStore(queries))
 	contactSvc := contact.NewService(contact.NewPgStore(queries), listSvc)
 	// checker adapts the mailbox and list stores for campaign ownership checks.
-	campaignSvc := campaign.NewService(campaign.NewPgStore(queries), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
+	campaignSvc := campaign.NewService(campaign.NewPgStore(pool), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
 	suppStore := suppression.NewStore(queries)
 
 	router := httpx.NewRouter(logger)
