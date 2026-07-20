@@ -5,6 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"net/http"
+
+	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
 const CSRFCookieName = "csrf_token"
@@ -24,7 +26,7 @@ func RequireCSRF(next http.Handler) http.Handler {
 		cookie, err := r.Cookie(CSRFCookieName)
 		header := r.Header.Get(CSRFHeaderName)
 		if err != nil || header == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(header)) != 1 {
-			http.Error(w, `{"error":"csrf token mismatch"}`, http.StatusForbidden)
+			httpx.Error(w, http.StatusForbidden, "csrf token mismatch")
 			return
 		}
 		next.ServeHTTP(w, r)

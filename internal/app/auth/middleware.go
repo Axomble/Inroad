@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
 type ctxKey struct{}
@@ -16,12 +18,12 @@ func RequireAuth(secret []byte) func(http.Handler) http.Handler {
 			h := r.Header.Get("Authorization")
 			token, ok := strings.CutPrefix(h, "Bearer ")
 			if !ok {
-				http.Error(w, `{"error":"missing bearer token"}`, http.StatusUnauthorized)
+				httpx.Error(w, http.StatusUnauthorized, "missing bearer token")
 				return
 			}
 			claims, err := ParseToken(secret, token)
 			if err != nil {
-				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+				httpx.Error(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
 			ctx := context.WithValue(r.Context(), ctxKey{}, claims)
@@ -49,7 +51,7 @@ func RequireRole(min string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c, ok := UserFromContext(r.Context())
 			if !ok || roleRank[c.Role] < want {
-				http.Error(w, `{"error":"insufficient role"}`, http.StatusForbidden)
+				httpx.Error(w, http.StatusForbidden, "insufficient role")
 				return
 			}
 			next.ServeHTTP(w, r)

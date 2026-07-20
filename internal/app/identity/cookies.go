@@ -11,11 +11,14 @@ const refreshCookieName = "inroad_refresh"
 
 // setRefreshCookie sets the httpOnly refresh-token cookie, scoped to the
 // auth endpoints only (so it is never sent to the rest of the API surface).
+// SameSite=Strict: the refresh cookie should never accompany a cross-site
+// request, which is stricter than the CSRF cookie (Lax, because the CSRF
+// header still gates state changes).
 func (h *Handler) setRefreshCookie(w http.ResponseWriter, raw string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: refreshCookieName, Value: raw, Path: "/api/v1/auth",
 		Domain: h.cookieDomain, HttpOnly: true, Secure: h.cookieSecure,
-		SameSite: http.SameSiteLaxMode, MaxAge: int(h.refreshTTL.Seconds()),
+		SameSite: http.SameSiteStrictMode, MaxAge: int(h.refreshTTL.Seconds()),
 	})
 }
 

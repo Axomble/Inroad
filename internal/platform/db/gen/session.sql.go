@@ -76,18 +76,22 @@ func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Sessi
 	return i, err
 }
 
-const repointSessionWorkspace = `-- name: RepointSessionWorkspace :exec
-UPDATE sessions SET workspace_id = $2 WHERE id = $1
+const repointSessionWorkspace = `-- name: RepointSessionWorkspace :execrows
+UPDATE sessions SET workspace_id = $2 WHERE id = $1 AND user_id = $3
 `
 
 type RepointSessionWorkspaceParams struct {
 	ID          uuid.UUID `json:"id"`
 	WorkspaceID uuid.UUID `json:"workspace_id"`
+	UserID      uuid.UUID `json:"user_id"`
 }
 
-func (q *Queries) RepointSessionWorkspace(ctx context.Context, arg RepointSessionWorkspaceParams) error {
-	_, err := q.db.Exec(ctx, repointSessionWorkspace, arg.ID, arg.WorkspaceID)
-	return err
+func (q *Queries) RepointSessionWorkspace(ctx context.Context, arg RepointSessionWorkspaceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, repointSessionWorkspace, arg.ID, arg.WorkspaceID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const revokeAllForUser = `-- name: RevokeAllForUser :exec

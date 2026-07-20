@@ -18,19 +18,32 @@ import (
 // Handler exposes the identity domain (register/login/refresh/logout,
 // session introspection, and workspace switching) over HTTP.
 type Handler struct {
-	svc          *Service
-	jwtSecret    []byte
-	accessTTL    time.Duration
-	refreshTTL   time.Duration
-	cookieSecure bool
-	cookieDomain string
+	svc            *Service
+	jwtSecret      []byte
+	accessTTL      time.Duration
+	refreshTTL     time.Duration
+	cookieSecure   bool
+	cookieDomain   string
+	trustedProxies []*net.IPNet
 }
 
 // NewHandler constructs a Handler backed by svc. accessTTL/refreshTTL size
 // the access token and refresh cookie lifetimes; cookieSecure/cookieDomain
 // control the cookie attributes (Secure should be true outside local dev).
-func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret, accessTTL: accessTTL, refreshTTL: refreshTTL, cookieSecure: cookieSecure, cookieDomain: cookieDomain}
+// trustedProxies is the CIDR list whose X-Forwarded-For / X-Real-IP the
+// handler will honor; unparsable entries are silently dropped (loudness
+// belongs in cmd startup, not per-request).
+func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string, trustedProxies []string) *Handler {
+	nets := make([]*net.IPNet, 0, len(trustedProxies))
+	for _, c := range trustedProxies {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return &Handler{
+		svc: svc, jwtSecret: jwtSecret, accessTTL: accessTTL, refreshTTL: refreshTTL,
+		cookieSecure: cookieSecure, cookieDomain: cookieDomain, trustedProxies: nets,
+	}
 }
 
 type membershipDTO struct {
@@ -56,13 +69,59 @@ type sessionResponse struct {
 // naive split on ":" which mangles them (an IPv6 address itself contains
 // colons). If RemoteAddr has no port (or isn't in host:port form), fall
 // back to using it as-is.
-func clientMeta(r *http.Request) (ua, ip string) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.UserAgent(), r.RemoteAddr
+//
+// When RemoteAddr matches one of h.trustedProxies, X-Forwarded-For's
+// leftmost IP (or, absent that, X-Real-IP) is preferred — behind a reverse
+// proxy those headers carry the original client. Trusting them
+// unconditionally would let any caller spoof their IP, so trust is opt-in
+// via INROAD_TRUSTED_PROXIES.
+func (h *Handler) clientMeta(r *http.Request) (ua, ip string) {
+	direct := remoteIPOnly(r.RemoteAddr)
+	if h.isTrustedProxy(direct) {
+		if v := r.Header.Get("X-Forwarded-For"); v != "" {
+			// Leftmost = original client; anything to the right is a hop.
+			if i := indexComma(v); i > 0 {
+				return r.UserAgent(), trimSpace(v[:i])
+			}
+			return r.UserAgent(), trimSpace(v)
+		}
+		if v := r.Header.Get("X-Real-IP"); v != "" {
+			return r.UserAgent(), trimSpace(v)
+		}
 	}
-	return r.UserAgent(), host
+	return r.UserAgent(), direct
 }
+
+// remoteIPOnly strips the port from a RemoteAddr, or returns it unchanged
+// if no port is present (e.g. a fuzz-test injecting a bare IP).
+func remoteIPOnly(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+func (h *Handler) isTrustedProxy(ipStr string) bool {
+	if ipStr == "" || len(h.trustedProxies) == 0 {
+		return false
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range h.trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// indexComma returns the index of the first comma in s, or -1 if none.
+func indexComma(s string) int { return strings.IndexByte(s, ',') }
+
+func trimSpace(s string) string { return strings.TrimSpace(s) }
 
 func toMembershipDTOs(mems []Membership) []membershipDTO {
 	dto := make([]membershipDTO, len(mems))
@@ -109,10 +168,16 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "workspace_name, email, and 8+ char password required")
 		return
 	}
-	ua, ip := clientMeta(r)
+	ua, ip := h.clientMeta(r)
 	sess, err := h.svc.Register(r.Context(), RegisterInput{WorkspaceName: body.WorkspaceName, Email: body.Email, Password: body.Password, UserAgent: ua, IP: ip})
 	if err != nil {
 		if isUniqueViolation(err) {
+			// Constant-time noop: burn the same argon2 wall-clock cost the
+			// "user exists + wrong password" login path incurs, so a 409
+			// response is indistinguishable from a 401 by timing. Without
+			// this, an attacker could probe /register to enumerate emails
+			// (fast 409 = registered; slow response = brand-new user).
+			auth.CheckPassword(dummyHash, body.Password)
 			httpx.Error(w, http.StatusConflict, "email already registered")
 			return
 		}
@@ -131,7 +196,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	ua, ip := clientMeta(r)
+	ua, ip := h.clientMeta(r)
 	sess, err := h.svc.Login(r.Context(), body.Email, body.Password, ua, ip)
 	if err != nil {
 		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
@@ -146,7 +211,7 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "no refresh token")
 		return
 	}
-	ua, ip := clientMeta(r)
+	ua, ip := h.clientMeta(r)
 	sess, err := h.svc.Refresh(r.Context(), c.Value, ua, ip)
 	if err != nil {
 		h.clearCookies(w)
@@ -245,9 +310,10 @@ func (h *Handler) switchWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 // isUniqueViolation reports whether err represents a Postgres unique-key
-// violation (SQLSTATE 23505), e.g. a duplicate email on registration. It
-// checks the typed pgconn.PgError first, falling back to a substring match
-// so tests can simulate the condition without a real database error.
+// violation (SQLSTATE 23505), e.g. a duplicate email on registration.
+// Typed pgconn.PgError only — the substring fallback would fire on any
+// error whose message happened to contain "23505", including a message a
+// caller partially controls.
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false
@@ -256,5 +322,5 @@ func isUniqueViolation(err error) bool {
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == "23505"
 	}
-	return strings.Contains(err.Error(), "23505")
+	return false
 }

@@ -16,12 +16,22 @@ type fakeStore struct {
 	// the tx path is actually exercised (not the removed EnqueueSends+SetStatus
 	// two-step).
 	launchCalled bool
+	// campaigns keyed by (workspaceID, campaignID). Used by the cross-tenant
+	// test to prove Get returns ErrNotFound for a campaign in another workspace.
+	campaigns map[[2]uuid.UUID]gen.Campaign
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
 	return gen.Campaign{ID: uuid.New(), Name: in.Name, Subject: in.Subject}, nil
 }
-func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (gen.Campaign, error) {
+func (f *fakeStore) Get(_ context.Context, ws, id uuid.UUID) (gen.Campaign, error) {
+	if f.campaigns != nil {
+		c, ok := f.campaigns[[2]uuid.UUID{ws, id}]
+		if !ok {
+			return gen.Campaign{}, errNotFound
+		}
+		return c, nil
+	}
 	return gen.Campaign{Status: f.status}, nil
 }
 func (*fakeStore) List(context.Context, uuid.UUID) ([]gen.Campaign, error) { return nil, nil }
@@ -32,6 +42,11 @@ func (f *fakeStore) LaunchTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID
 	f.launchCalled = true
 	return f.sendIDs, nil
 }
+
+// errNotFound is what the sqlc-backed Get returns when the row isn't in the
+// caller's workspace (pgx.ErrNoRows). The fake stands in with a sentinel so
+// tests don't have to import pgx.
+var errNotFound = errors.New("no rows")
 
 // selectiveEnqueuer succeeds on any id it hasn't been told to fail. Used to
 // prove the service tallies partial-enqueue failures rather than swallowing
@@ -141,5 +156,27 @@ func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
 	}
 	if res.TotalSends != 3 || res.EnqueuedCount != 2 || res.FailedEnqueueCount != 1 {
 		t.Fatalf("counts wrong: %+v", res)
+	}
+}
+
+// TestCrossTenantGetReturnsNotFound guards defense-in-depth on the read
+// path: Get is workspace-scoped at the SQL layer (see queries/campaign.sql
+// "WHERE id = $1 AND workspace_id = $2"), so a caller supplying a campaign
+// id that belongs to a different tenant must see "not found", not another
+// tenant's campaign row.
+func TestCrossTenantGetReturnsNotFound(t *testing.T) {
+	otherWS := uuid.New()
+	callerWS := uuid.New()
+	campaignID := uuid.New()
+
+	store := &fakeStore{
+		campaigns: map[[2]uuid.UUID]gen.Campaign{
+			{otherWS, campaignID}: {ID: campaignID, WorkspaceID: otherWS, Name: "foreign"},
+		},
+	}
+	svc := NewService(store, okChecker{active: true})
+
+	if _, err := svc.Get(context.Background(), callerWS, campaignID); err != errNotFound {
+		t.Fatalf("expected cross-tenant Get to fail with not-found, got %v", err)
 	}
 }
