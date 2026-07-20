@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
@@ -26,11 +29,13 @@ import (
 
 func main() {
 	cfg, err := config.Load()
-	logger := log.New(cfgEnv(cfg))
 	if err != nil {
-		logger.Error("config load failed", "err", err)
+		// Exit before building the logger: config failure could hide log
+		// options; matching cmd/migrate keeps bad-config output uniform.
+		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	logger := log.New(cfg.Env)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -52,6 +57,7 @@ func main() {
 	identHandler := identity.NewHandler(
 		identity.NewService(identity.NewStore(pool), cfg.RefreshTokenTTL),
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
+		cfg.TrustedProxies,
 	)
 	mailboxStore := mailbox.NewPgStore(queries)
 	mbHandler := mailbox.NewHandler(
@@ -62,9 +68,12 @@ func main() {
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
 	listSvc := list.NewService(list.NewPgStore(queries))
-	contactSvc := contact.NewService(contact.NewPgStore(queries), listSvc)
+	// contact takes only a small ListChecker interface (not the whole list
+	// service) so the contact package doesn't have to import app/list —
+	// keeps the "app packages don't import each other" invariant intact.
+	contactSvc := contact.NewService(contact.NewPgStore(queries), listCheckerAdapter{lists: listSvc})
 	// checker adapts the mailbox and list stores for campaign ownership checks.
-	campaignSvc := campaign.NewService(campaign.NewPgStore(queries), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
+	campaignSvc := campaign.NewService(campaign.NewPgStore(pool), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
 	suppStore := suppression.NewStore(queries)
 
 	router := httpx.NewRouter(logger)
@@ -86,14 +95,6 @@ func main() {
 	}
 }
 
-// cfgEnv tolerates a nil config so we can still build a logger for the error path.
-func cfgEnv(cfg *config.Config) string {
-	if cfg == nil {
-		return "development"
-	}
-	return cfg.Env
-}
-
 // ownershipChecker adapts the mailbox and list stores to campaign.Checker so
 // campaign creation/launch can verify cross-domain references belong to the
 // caller's workspace without the campaign package importing those domains.
@@ -103,18 +104,46 @@ type ownershipChecker struct {
 }
 
 // MailboxActive reports whether mailboxID exists in the workspace and is
-// active. A missing mailbox is reported as inactive, not a hard error, so a
-// bad/foreign id simply fails the ownership check.
+// active. A missing mailbox (pgx.ErrNoRows) is (false, nil) — a legitimate
+// "not yours or gone" answer that shouldn't 500 the caller. Any other
+// error surfaces so callers see genuine DB failures instead of silent
+// misses.
 func (o ownershipChecker) MailboxActive(ctx context.Context, ws, mailboxID uuid.UUID) (bool, error) {
 	m, err := o.mailboxes.Get(ctx, ws, mailboxID)
 	if err != nil {
-		return false, nil
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
 	}
 	return m.Status == "active", nil
 }
 
-// ListExists reports whether listID exists in the workspace.
+// ListExists reports whether listID exists in the workspace. Same treatment
+// as MailboxActive: no-rows is not an error, anything else is.
 func (o ownershipChecker) ListExists(ctx context.Context, ws, listID uuid.UUID) (bool, error) {
 	_, err := o.lists.Get(ctx, ws, listID)
-	return err == nil, nil
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// listCheckerAdapter satisfies contact.ListChecker so the contact package
+// doesn't have to import app/list directly. Same distinction as
+// ownershipChecker: pgx.ErrNoRows → (false, nil); real DB errors surface.
+type listCheckerAdapter struct{ lists *list.Service }
+
+func (a listCheckerAdapter) ListExists(ctx context.Context, ws, listID uuid.UUID) (bool, error) {
+	_, err := a.lists.Get(ctx, ws, listID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }

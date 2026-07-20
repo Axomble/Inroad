@@ -64,7 +64,7 @@ type RegisterInput struct {
 // storeIface lists exactly the Store methods the service depends on, so
 // tests can inject an in-memory fake (dependency inversion; see CLAUDE.md).
 type storeIface interface {
-	RegisterTx(ctx context.Context, wsName, email, hash string) (uuid.UUID, uuid.UUID, error)
+	RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterTxResult, error)
 	GetUserByEmail(ctx context.Context, email string) (gen.User, error)
 	ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]gen.ListMembersByUserRow, error)
 	GetMember(ctx context.Context, wsID, userID uuid.UUID) (gen.WorkspaceMember, error)
@@ -74,7 +74,7 @@ type storeIface interface {
 	RevokeSession(ctx context.Context, id uuid.UUID) (int64, error)
 	RevokeFamily(ctx context.Context, familyID uuid.UUID) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
-	RepointSessionWorkspace(ctx context.Context, id, wsID uuid.UUID) error
+	RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error
 }
 
 // Service implements the core auth logic: registration, login, refresh
@@ -110,25 +110,47 @@ func (s *Service) newSessionRow(ctx context.Context, userID, wsID, familyID uuid
 	return row.ID, raw, nil
 }
 
-// Register creates a new workspace, owner user, and first session
-// atomically (via store.RegisterTx), then starts a brand-new refresh-token
-// family for the session.
+// Register creates a new workspace, owner user, owner membership, AND the
+// first refresh-token session — all inside a single database transaction
+// via store.RegisterTx. A partial register can no longer leave a user with
+// no session (previously two round-trips: RegisterTx then CreateSession
+// outside the tx; a crash between them left orphans).
+//
+// The refresh token is minted here so the raw form never has to be scanned
+// out of the DB — only the hash lives in the transaction, and the raw
+// token is returned to the caller for the response cookie.
 func (s *Service) Register(ctx context.Context, in RegisterInput) (Session, error) {
 	hash, err := auth.HashPassword(in.Password)
 	if err != nil {
 		return Session{}, err
 	}
-	wsID, userID, err := s.store.RegisterTx(ctx, in.WorkspaceName, in.Email, hash)
-	if err != nil {
-		return Session{}, err // handler maps unique-violation -> 409
-	}
-	fam := uuid.New()
-	sid, raw, err := s.newSessionRow(ctx, userID, wsID, fam, in.UserAgent, in.IP)
+	raw, tokHash, err := auth.NewRefreshToken()
 	if err != nil {
 		return Session{}, err
 	}
-	mems, _ := s.memberships(ctx, userID)
-	return Session{UserID: userID, WorkspaceID: wsID, Role: "owner", SessionID: sid, RawRefresh: raw, Memberships: mems}, nil
+	fam := uuid.New()
+	res, err := s.store.RegisterTx(ctx, RegisterTxParams{
+		WorkspaceName: in.WorkspaceName,
+		Email:         in.Email,
+		PasswordHash:  hash,
+		SessionParams: gen.CreateSessionParams{
+			// UserID/WorkspaceID are filled in by RegisterTx from the rows it
+			// just inserted — the caller can't know them yet.
+			TokenHash: tokHash,
+			FamilyID:  fam,
+			ExpiresAt: pgxTimestamp(time.Now().Add(s.refreshTTL)),
+			UserAgent: ptr(in.UserAgent),
+			Ip:        parseIP(in.IP),
+		},
+	})
+	if err != nil {
+		return Session{}, err // handler maps unique-violation -> 409
+	}
+	mems, _ := s.memberships(ctx, res.UserID)
+	return Session{
+		UserID: res.UserID, WorkspaceID: res.WorkspaceID, Role: "owner",
+		SessionID: res.SessionID, RawRefresh: raw, Memberships: mems,
+	}, nil
 }
 
 // Login verifies credentials, activates the user's most-recently-seen
@@ -225,13 +247,16 @@ func (s *Service) LogoutAll(ctx context.Context, userID uuid.UUID) error {
 
 // SwitchWorkspace repoints an existing session at a different workspace the
 // user is a member of, returning the new active workspace and the user's
-// role there. Returns ErrNotMember if the user does not belong to target.
+// role there. Returns ErrNotMember if the user does not belong to target,
+// or if the session id isn't owned by the caller (the SQL WHERE clause
+// binds session id + user id together — a mismatched pair yields 0 rows
+// affected, surfaced here as ErrNotMember).
 func (s *Service) SwitchWorkspace(ctx context.Context, sessionID, userID, target uuid.UUID) (uuid.UUID, string, error) {
 	m, err := s.store.GetMember(ctx, target, userID)
 	if err != nil {
 		return uuid.Nil, "", ErrNotMember
 	}
-	if err := s.store.RepointSessionWorkspace(ctx, sessionID, target); err != nil {
+	if err := s.store.RepointSessionWorkspace(ctx, sessionID, userID, target); err != nil {
 		return uuid.Nil, "", err
 	}
 	_ = s.store.TouchMemberLastSeen(ctx, target, userID)

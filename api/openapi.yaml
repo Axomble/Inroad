@@ -282,8 +282,36 @@ paths:
         '404': { description: Not found }
         '409': { description: Already launched }
         '422': { description: Target list empty }
-# Note: the public unsubscribe endpoint GET /u/{token} is served outside the
-# /api/v1 base (browser-facing, returns HTML) and is intentionally not in this contract.
+  # The unsubscribe endpoint is served outside the /api/v1 base — it is
+  # public and browser-facing (no auth, returns HTML). RFC 8058 requires the
+  # state change to live on POST so email preview scanners auto-following
+  # GETs don't silently unsubscribe every recipient.
+  /u/{token}:
+    servers: [{ url: / }]
+    get:
+      operationId: unsubscribeConfirmPage
+      tags: [unsubscribe]
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: HTML confirmation page with a form that POSTs back
+          content:
+            text/html:
+              schema: { type: string }
+        '400': { description: Malformed or invalid token }
+    post:
+      operationId: unsubscribe
+      tags: [unsubscribe]
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: Suppression recorded (idempotent)
+          content:
+            text/html:
+              schema: { type: string }
+        '400': { description: Malformed or invalid token }
 components:
   securitySchemes:
     bearerAuth:

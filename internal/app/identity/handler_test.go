@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -18,7 +18,7 @@ import (
 
 func newTestHandler(store *fakeStore) *Handler {
 	svc := NewService(store, time.Hour)
-	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "")
+	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil)
 }
 
 func doRequest(h http.HandlerFunc, method, path string, body any) *httptest.ResponseRecorder {
@@ -135,7 +135,11 @@ func TestRegisterSuccessSetsRefreshCookieAndToken(t *testing.T) {
 
 func TestRegisterDuplicateEmailReturns409(t *testing.T) {
 	store := newFakeStore()
-	store.registerErr = errors.New(`duplicate key value violates unique constraint "users_email_key" (SQLSTATE 23505)`)
+	// Use a real *pgconn.PgError so isUniqueViolation's errors.As path fires —
+	// the substring-fallback branch that used to match on "23505" was
+	// removed (a caller-influenced error message shouldn't be enough to
+	// coax a 409 out of the server).
+	store.registerErr = &pgconn.PgError{Code: "23505"}
 
 	h := newTestHandler(store)
 	w := doRequest(h.register, http.MethodPost, "/register", map[string]string{

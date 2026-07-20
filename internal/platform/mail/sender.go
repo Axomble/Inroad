@@ -1,7 +1,9 @@
 package mail
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"time"
 
 	gomail "github.com/wneessen/go-mail"
@@ -34,8 +36,14 @@ func NewNetSender(allowPrivate bool) *NetSender {
 // used for connection testing before ever dialing out. Port 465 uses
 // implicit TLS; other ports use STARTTLS when UseTLS is set, or no
 // encryption otherwise. On success it returns the generated Message-ID.
+//
+// The vetted ip:port is dialed directly via WithDialContextFunc; cfg.Host is
+// preserved only as the TLS SNI / AUTH server name. This closes the
+// DNS-rebinding window between validation and connection: the underlying
+// gomail client never re-resolves the hostname.
 func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
-	if _, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, s.AllowPrivate); err != nil {
+	addr, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, s.AllowPrivate)
+	if err != nil {
 		return "", err
 	}
 
@@ -63,12 +71,20 @@ func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
 	}
 	m.SetMessageID()
 
+	dialer := &net.Dialer{Timeout: s.Timeout}
+	dialFn := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		// Ignore gomail's address argument (built from cfg.Host); always dial the
+		// pre-vetted ip:port instead so hostname re-resolution can't slip in.
+		return dialer.DialContext(ctx, "tcp", addr)
+	}
+
 	opts := []gomail.Option{
 		gomail.WithPort(cfg.Port),
 		gomail.WithUsername(cfg.Username),
 		gomail.WithPassword(cfg.Password),
 		gomail.WithSMTPAuth(gomail.SMTPAuthPlain),
 		gomail.WithTimeout(s.Timeout),
+		gomail.WithDialContextFunc(dialFn),
 	}
 	switch {
 	case cfg.Port == 465:

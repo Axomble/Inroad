@@ -86,7 +86,7 @@ const (
 // ConnectSMTP validates input, dedupes on email, verifies the credentials
 // against real SMTP/IMAP servers, seals the secret, and persists the
 // mailbox. Nothing is persisted if the connection test fails.
-func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in ConnectInput) (gen.Mailbox, error) {
+func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in ConnectInput) (MailboxSafe, error) {
 	if in.SMTPUsername == "" {
 		in.SMTPUsername = in.Email
 	}
@@ -94,15 +94,15 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		in.IMAPUsername = in.Email
 	}
 	if err := in.validate(); err != nil {
-		return gen.Mailbox{}, err
+		return MailboxSafe{}, err
 	}
 
 	count, err := s.store.CountByEmail(ctx, workspaceID, in.Email)
 	if err != nil {
-		return gen.Mailbox{}, err
+		return MailboxSafe{}, err
 	}
 	if count > 0 {
-		return gen.Mailbox{}, ErrDuplicateMailbox
+		return MailboxSafe{}, ErrDuplicateMailbox
 	}
 
 	if err := s.tester.TestSMTP(mail.SMTPConfig{
@@ -112,7 +112,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		Password: in.Secret,
 		UseTLS:   in.UseTLS,
 	}); err != nil {
-		return gen.Mailbox{}, fmt.Errorf("%w: smtp: %v", ErrConnectionTestFailed, err)
+		return MailboxSafe{}, fmt.Errorf("%w: smtp: %v", ErrConnectionTestFailed, err)
 	}
 	if err := s.tester.TestIMAP(mail.IMAPConfig{
 		Host:     in.IMAPHost,
@@ -120,12 +120,12 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		Username: in.IMAPUsername,
 		Password: in.Secret,
 	}); err != nil {
-		return gen.Mailbox{}, fmt.Errorf("%w: imap: %v", ErrConnectionTestFailed, err)
+		return MailboxSafe{}, fmt.Errorf("%w: imap: %v", ErrConnectionTestFailed, err)
 	}
 
 	ciphertext, err := s.sealer.Seal([]byte(in.Secret))
 	if err != nil {
-		return gen.Mailbox{}, err
+		return MailboxSafe{}, err
 	}
 
 	return s.store.Create(ctx, gen.CreateMailboxParams{
@@ -150,22 +150,22 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 }
 
 // List returns every mailbox connected in the workspace.
-func (s *Service) List(ctx context.Context, workspaceID uuid.UUID) ([]gen.Mailbox, error) {
+func (s *Service) List(ctx context.Context, workspaceID uuid.UUID) ([]MailboxSafe, error) {
 	return s.store.List(ctx, workspaceID)
 }
 
 // Get returns a single mailbox, scoped to the workspace.
-func (s *Service) Get(ctx context.Context, workspaceID, id uuid.UUID) (gen.Mailbox, error) {
+func (s *Service) Get(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
 	return s.store.Get(ctx, workspaceID, id)
 }
 
 // Pause stops a mailbox from sending or polling without deleting it.
-func (s *Service) Pause(ctx context.Context, workspaceID, id uuid.UUID) (gen.Mailbox, error) {
+func (s *Service) Pause(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
 	return s.store.UpdateStatus(ctx, workspaceID, id, "paused", "")
 }
 
 // Resume re-activates a paused mailbox.
-func (s *Service) Resume(ctx context.Context, workspaceID, id uuid.UUID) (gen.Mailbox, error) {
+func (s *Service) Resume(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
 	return s.store.UpdateStatus(ctx, workspaceID, id, "active", "")
 }
 

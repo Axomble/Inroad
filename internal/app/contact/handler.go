@@ -3,12 +3,10 @@ package contact
 import (
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
-	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
@@ -22,7 +20,7 @@ type Handler struct {
 func NewHandler(svc *Service, jwtSecret []byte) *Handler { return &Handler{svc: svc, jwtSecret: jwtSecret} }
 
 func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
-	ws, ok := wsID(w, r)
+	ws, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -40,7 +38,7 @@ func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	res, err := h.svc.ImportCSV(r.Context(), ws, listID, file)
-	if errors.Is(err, list.ErrNotFound) {
+	if errors.Is(err, ErrListNotFound) {
 		httpx.Error(w, http.StatusNotFound, "list not found")
 		return
 	}
@@ -52,7 +50,7 @@ func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listContacts(w http.ResponseWriter, r *http.Request) {
-	ws, ok := wsID(w, r)
+	ws, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -61,8 +59,7 @@ func (h *Handler) listContacts(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "list query param required")
 		return
 	}
-	limit := clamp(atoiDefault(r.URL.Query().Get("limit"), 50), 1, 200)
-	offset := max0(atoiDefault(r.URL.Query().Get("offset"), 0))
+	limit, offset := httpx.LimitOffset(r, 50, 200)
 	cs, err := h.svc.ListByList(r.Context(), ws, listID, int32(limit), int32(offset))
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not list contacts")
@@ -80,42 +77,3 @@ func (h *Handler) listContacts(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
-func wsID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	claims, ok := auth.UserFromContext(r.Context())
-	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
-		return uuid.Nil, false
-	}
-	id, err := uuid.Parse(claims.WorkspaceID)
-	if err != nil {
-		httpx.Error(w, http.StatusUnauthorized, "bad workspace")
-		return uuid.Nil, false
-	}
-	return id, true
-}
-
-func atoiDefault(s string, d int) int {
-	if s == "" {
-		return d
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		return d
-	}
-	return n
-}
-func clamp(n, lo, hi int) int {
-	if n < lo {
-		return lo
-	}
-	if n > hi {
-		return hi
-	}
-	return n
-}
-func max0(n int) int {
-	if n < 0 {
-		return 0
-	}
-	return n
-}

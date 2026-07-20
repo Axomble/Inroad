@@ -6,12 +6,15 @@ import (
 	"time"
 )
 
-// NewServer builds an http.Server with sane timeouts.
+// NewServer builds an http.Server with sane timeouts. ReadTimeout caps
+// slow-body attacks (Slowloris variant that dribbles body bytes after the
+// headers finish); ReadHeaderTimeout alone leaves that window open.
 func NewServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -9,32 +10,63 @@ import (
 )
 
 type fakeStore struct {
-	status    string
-	sendIDs   []uuid.UUID
-	setStatus CampaignStatus
+	status  string
+	sendIDs []uuid.UUID
+	// launchCalled is set to true when LaunchTx runs so tests can assert
+	// the tx path is actually exercised (not the removed EnqueueSends+SetStatus
+	// two-step).
+	launchCalled bool
+	// campaigns keyed by (workspaceID, campaignID). Used by the cross-tenant
+	// test to prove Get returns ErrNotFound for a campaign in another workspace.
+	campaigns map[[2]uuid.UUID]gen.Campaign
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
 	return gen.Campaign{ID: uuid.New(), Name: in.Name, Subject: in.Subject}, nil
 }
-func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (gen.Campaign, error) {
+func (f *fakeStore) Get(_ context.Context, ws, id uuid.UUID) (gen.Campaign, error) {
+	if f.campaigns != nil {
+		c, ok := f.campaigns[[2]uuid.UUID{ws, id}]
+		if !ok {
+			return gen.Campaign{}, errNotFound
+		}
+		return c, nil
+	}
 	return gen.Campaign{Status: f.status}, nil
 }
 func (*fakeStore) List(context.Context, uuid.UUID) ([]gen.Campaign, error) { return nil, nil }
-func (*fakeStore) Stats(context.Context, uuid.UUID) (map[string]int64, error) {
+func (*fakeStore) Stats(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
 	return nil, nil
 }
-func (f *fakeStore) EnqueueSends(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
+func (f *fakeStore) LaunchTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
+	f.launchCalled = true
 	return f.sendIDs, nil
 }
-func (f *fakeStore) SetStatus(_ context.Context, _, _ uuid.UUID, status CampaignStatus) error {
-	f.setStatus = status
+
+// errNotFound is what the sqlc-backed Get returns when the row isn't in the
+// caller's workspace (pgx.ErrNoRows). The fake stands in with a sentinel so
+// tests don't have to import pgx.
+var errNotFound = errors.New("no rows")
+
+// selectiveEnqueuer succeeds on any id it hasn't been told to fail. Used to
+// prove the service tallies partial-enqueue failures rather than swallowing
+// them.
+type selectiveEnqueuer struct {
+	fail     map[string]bool
+	enqueued []string
+}
+
+func (s *selectiveEnqueuer) EnqueueSend(sendID, _ string) error {
+	if s.fail[sendID] {
+		return errors.New("redis unavailable")
+	}
+	s.enqueued = append(s.enqueued, sendID)
 	return nil
 }
 
 type fakeEnqueuer struct{ enqueued []string }
 
-func (f *fakeEnqueuer) EnqueueSend(sendID string) error {
+func (f *fakeEnqueuer) EnqueueSend(sendID, _ string) error {
 	f.enqueued = append(f.enqueued, sendID)
 	return nil
 }
@@ -87,17 +119,64 @@ func TestLaunchSucceeds(t *testing.T) {
 	store := &fakeStore{status: string(StatusDraft), sendIDs: ids}
 	enq := &fakeEnqueuer{}
 	svc := NewService(store, okChecker{active: true})
-	n, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
+	res, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if n != len(ids) {
-		t.Fatalf("queued: got %d want %d", n, len(ids))
+	if res.EnqueuedCount != len(ids) {
+		t.Fatalf("queued: got %d want %d", res.EnqueuedCount, len(ids))
+	}
+	if res.TotalSends != len(ids) {
+		t.Fatalf("total sends: got %d want %d", res.TotalSends, len(ids))
+	}
+	if res.FailedEnqueueCount != 0 {
+		t.Fatalf("expected no failed enqueues, got %d", res.FailedEnqueueCount)
 	}
 	if len(enq.enqueued) != len(ids) {
 		t.Fatalf("enqueued: got %d want %d", len(enq.enqueued), len(ids))
 	}
-	if store.setStatus != StatusRunning {
-		t.Fatalf("status: got %q want %q", store.setStatus, StatusRunning)
+	if !store.launchCalled {
+		t.Fatal("expected LaunchTx to be called")
+	}
+}
+
+// TestLaunchCountsPartialEnqueueFailures proves the service no longer
+// swallows enqueue errors - a redis blip that drops individual ids must show
+// up in FailedEnqueueCount, so callers can log/alert and the stuck-send
+// sweeper knows there's work to reconcile.
+func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
+	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	store := &fakeStore{status: string(StatusDraft), sendIDs: ids}
+	enq := &selectiveEnqueuer{fail: map[string]bool{ids[1].String(): true}}
+	svc := NewService(store, okChecker{active: true})
+
+	res, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if res.TotalSends != 3 || res.EnqueuedCount != 2 || res.FailedEnqueueCount != 1 {
+		t.Fatalf("counts wrong: %+v", res)
+	}
+}
+
+// TestCrossTenantGetReturnsNotFound guards defense-in-depth on the read
+// path: Get is workspace-scoped at the SQL layer (see queries/campaign.sql
+// "WHERE id = $1 AND workspace_id = $2"), so a caller supplying a campaign
+// id that belongs to a different tenant must see "not found", not another
+// tenant's campaign row.
+func TestCrossTenantGetReturnsNotFound(t *testing.T) {
+	otherWS := uuid.New()
+	callerWS := uuid.New()
+	campaignID := uuid.New()
+
+	store := &fakeStore{
+		campaigns: map[[2]uuid.UUID]gen.Campaign{
+			{otherWS, campaignID}: {ID: campaignID, WorkspaceID: otherWS, Name: "foreign"},
+		},
+	}
+	svc := NewService(store, okChecker{active: true})
+
+	if _, err := svc.Get(context.Background(), callerWS, campaignID); err != errNotFound {
+		t.Fatalf("expected cross-tenant Get to fail with not-found, got %v", err)
 	}
 }
