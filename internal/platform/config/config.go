@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,6 +32,19 @@ type Config struct {
 	RefreshTokenTTL time.Duration
 	CookieSecure    bool
 	CookieDomain    string
+
+	// WorkerConcurrency caps how many asynq tasks the worker processes
+	// simultaneously. Default 10; tune per SMTP throughput.
+	WorkerConcurrency int
+
+	// LogLevel is one of debug/info/warn/error. When empty, the logger
+	// falls back to env-based defaults (debug in development, info elsewhere).
+	LogLevel string
+
+	// TrustedProxies is a list of CIDRs whose X-Forwarded-For / X-Real-IP
+	// headers the app will trust. Empty = trust none (default). Only the
+	// leftmost IP of X-Forwarded-For is consumed.
+	TrustedProxies []string
 }
 
 func Load() (*Config, error) {
@@ -63,8 +77,26 @@ func Load() (*Config, error) {
 	cfg.RefreshTokenTTL = getenvDuration("INROAD_REFRESH_TOKEN_TTL", 720*time.Hour)
 	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
+	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
+	cfg.LogLevel = strings.ToLower(getenv("INROAD_LOG_LEVEL", ""))
+	if raw := os.Getenv("INROAD_TRUSTED_PROXIES"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				cfg.TrustedProxies = append(cfg.TrustedProxies, s)
+			}
+		}
+	}
 
 	return cfg, nil
+}
+
+func getenvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
 }
 
 func getenv(key, fallback string) string {

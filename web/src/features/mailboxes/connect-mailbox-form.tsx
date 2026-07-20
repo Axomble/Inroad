@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useId, type ReactElement } from 'react'
+import { useId } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -8,14 +8,16 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useConnectMailboxMutation } from './api'
 
+const PORT_ERROR = 'Port must be between 1 and 65535'
+
 const schema = z.object({
   email: z.email('Enter a valid email'),
   display_name: z.string().optional(),
   smtp_host: z.string().min(1, 'Required'),
-  smtp_port: z.number({ message: 'Port' }).int().positive('Port'),
+  smtp_port: z.number({ message: PORT_ERROR }).int().min(1, PORT_ERROR).max(65535, PORT_ERROR),
   smtp_username: z.string().optional(),
   imap_host: z.string().min(1, 'Required'),
-  imap_port: z.number({ message: 'Port' }).int().positive('Port'),
+  imap_port: z.number({ message: PORT_ERROR }).int().min(1, PORT_ERROR).max(65535, PORT_ERROR),
   imap_username: z.string().optional(),
   secret: z.string().min(1, 'Required'),
   use_tls: z.boolean(),
@@ -56,39 +58,91 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
       <form onSubmit={handleSubmit(onSubmit)} noValidate className="grid gap-4 p-5">
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Email" error={errors.email?.message}>
-            <Input type="email" autoComplete="off" placeholder="sender@company.com" aria-invalid={!!errors.email} {...register('email')} />
+            {(id) => (
+              <Input
+                id={id}
+                type="email"
+                autoComplete="off"
+                placeholder="sender@company.com"
+                aria-invalid={!!errors.email}
+                {...register('email')}
+              />
+            )}
           </Field>
           <Field label="Display name" hint="optional">
-            <Input placeholder="Sales — Company" {...register('display_name')} />
+            {(id) => <Input id={id} placeholder="Sales — Company" {...register('display_name')} />}
           </Field>
         </div>
 
         <div className="grid gap-4 md:grid-cols-3">
           <Field label="SMTP host" error={errors.smtp_host?.message} className="md:col-span-2">
-            <Input placeholder="smtp.company.com" aria-invalid={!!errors.smtp_host} {...register('smtp_host')} />
+            {(id) => (
+              <Input
+                id={id}
+                placeholder="smtp.company.com"
+                aria-invalid={!!errors.smtp_host}
+                {...register('smtp_host')}
+              />
+            )}
           </Field>
           <Field label="SMTP port" error={errors.smtp_port?.message}>
-            <Input type="number" inputMode="numeric" aria-invalid={!!errors.smtp_port} {...register('smtp_port', { valueAsNumber: true })} />
+            {(id) => (
+              <Input
+                id={id}
+                type="number"
+                inputMode="numeric"
+                aria-invalid={!!errors.smtp_port}
+                {...register('smtp_port', { valueAsNumber: true })}
+              />
+            )}
           </Field>
           <Field label="SMTP username" hint="defaults to email" className="md:col-span-3">
-            <Input placeholder="sender@company.com" {...register('smtp_username')} />
+            {(id) => (
+              <Input id={id} placeholder="sender@company.com" {...register('smtp_username')} />
+            )}
           </Field>
         </div>
 
         <div className="grid gap-4 md:grid-cols-3">
           <Field label="IMAP host" error={errors.imap_host?.message} className="md:col-span-2">
-            <Input placeholder="imap.company.com" aria-invalid={!!errors.imap_host} {...register('imap_host')} />
+            {(id) => (
+              <Input
+                id={id}
+                placeholder="imap.company.com"
+                aria-invalid={!!errors.imap_host}
+                {...register('imap_host')}
+              />
+            )}
           </Field>
           <Field label="IMAP port" error={errors.imap_port?.message}>
-            <Input type="number" inputMode="numeric" aria-invalid={!!errors.imap_port} {...register('imap_port', { valueAsNumber: true })} />
+            {(id) => (
+              <Input
+                id={id}
+                type="number"
+                inputMode="numeric"
+                aria-invalid={!!errors.imap_port}
+                {...register('imap_port', { valueAsNumber: true })}
+              />
+            )}
           </Field>
           <Field label="IMAP username" hint="defaults to email" className="md:col-span-3">
-            <Input placeholder="sender@company.com" {...register('imap_username')} />
+            {(id) => (
+              <Input id={id} placeholder="sender@company.com" {...register('imap_username')} />
+            )}
           </Field>
         </div>
 
         <Field label="Password / app password" error={errors.secret?.message}>
-          <Input type="password" autoComplete="off" placeholder="••••••••" aria-invalid={!!errors.secret} {...register('secret')} />
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              autoComplete="off"
+              placeholder="••••••••"
+              aria-invalid={!!errors.secret}
+              {...register('secret')}
+            />
+          )}
         </Field>
 
         <label htmlFor={tlsId} className="flex items-center gap-2 text-[13px] text-muted-foreground">
@@ -116,6 +170,12 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
   )
 }
 
+/**
+ * Field wraps a labelled control. Uses a render-prop so the caller receives
+ * the generated id and passes it to the control directly — no `cloneElement`
+ * indirection, no unclear type overrides, and refs / event handlers flow
+ * through the way you'd expect.
+ */
 function Field({
   label,
   hint,
@@ -127,20 +187,16 @@ function Field({
   hint?: string
   error?: string
   className?: string
-  children: React.ReactNode
+  children: (id: string) => React.ReactNode
 }) {
   const id = useId()
-  // Associate the label with the control by injecting the generated id.
-  const control = isValidElement(children)
-    ? cloneElement(children as ReactElement<{ id?: string }>, { id })
-    : children
   return (
     <div className={className}>
       <div className="mb-1.5 flex items-center gap-2">
         <Label htmlFor={id}>{label}</Label>
         {hint && <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">{hint}</span>}
       </div>
-      <div>{control}</div>
+      <div>{children(id)}</div>
       {error && (
         <span role="alert" className="mt-1 block text-xs text-danger">
           {error}

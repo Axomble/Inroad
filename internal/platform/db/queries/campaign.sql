@@ -9,4 +9,9 @@ SELECT * FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC;
 UPDATE campaigns SET status = $3, launched_at = COALESCE(launched_at, $4)
 WHERE id = $1 AND workspace_id = $2;
 -- name: CountSendsByStatus :many
-SELECT status, count(*) AS n FROM sends WHERE campaign_id = $1 GROUP BY status;
+-- Workspace-scoped for defense in depth: even if a caller supplies a
+-- campaign id from another tenant, the workspace filter forces a 0-row
+-- result rather than leaking counts across tenants.
+SELECT status, count(*) AS n FROM sends
+WHERE campaign_id = $1 AND workspace_id = $2
+GROUP BY status;

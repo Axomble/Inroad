@@ -43,21 +43,34 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) RegisterTx(ctx context.Context, wsName, email, hash string) (uuid.UUID, uuid.UUID, error) {
+func (f *fakeStore) RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterTxResult, error) {
 	if f.registerErr != nil {
-		return uuid.Nil, uuid.Nil, f.registerErr
+		return RegisterTxResult{}, f.registerErr
 	}
 	wsID := uuid.New()
 	userID := uuid.New()
-	user := gen.User{ID: userID, Email: email, PasswordHash: hash}
-	f.users[email] = user
+	sessionID := uuid.New()
+	user := gen.User{ID: userID, Email: arg.Email, PasswordHash: arg.PasswordHash}
+	f.users[arg.Email] = user
 	f.usersByID[userID] = user
 	member := gen.WorkspaceMember{ID: uuid.New(), WorkspaceID: wsID, UserID: userID, Role: gen.MemberRoleOwner}
 	f.memberByPair[[2]uuid.UUID{wsID, userID}] = member
 	f.members[userID] = append(f.members[userID], gen.ListMembersByUserRow{
-		ID: member.ID, WorkspaceID: wsID, UserID: userID, Role: gen.MemberRoleOwner, WorkspaceName: wsName,
+		ID: member.ID, WorkspaceID: wsID, UserID: userID, Role: gen.MemberRoleOwner, WorkspaceName: arg.WorkspaceName,
 	})
-	return wsID, userID, nil
+	// The real store creates the session inside the same transaction; the fake
+	// mirrors that so tests exercise the same shape.
+	sp := arg.SessionParams
+	sp.UserID = userID
+	sp.WorkspaceID = wsID
+	row := gen.Session{
+		ID: sessionID, UserID: userID, WorkspaceID: wsID,
+		TokenHash: sp.TokenHash, FamilyID: sp.FamilyID, ExpiresAt: sp.ExpiresAt,
+		UserAgent: sp.UserAgent, Ip: sp.Ip,
+	}
+	f.sessions[sessionID] = row
+	f.sessionsByHash[hashKey(sp.TokenHash)] = sessionID
+	return RegisterTxResult{WorkspaceID: wsID, UserID: userID, SessionID: sessionID}, nil
 }
 
 func (f *fakeStore) GetUserByEmail(ctx context.Context, email string) (gen.User, error) {
@@ -153,10 +166,16 @@ func (f *fakeStore) RevokeAllForUser(ctx context.Context, userID uuid.UUID) erro
 	return nil
 }
 
-func (f *fakeStore) RepointSessionWorkspace(ctx context.Context, id, wsID uuid.UUID) error {
+func (f *fakeStore) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error {
 	row, ok := f.sessions[id]
 	if !ok {
-		return errors.New("not found")
+		return ErrNotMember
+	}
+	// The real store's WHERE binds (id, user_id) together: mismatched pairs
+	// yield 0 rows affected and surface as ErrNotMember. The fake mirrors
+	// that so cross-tenant IDOR tests exercise the same path.
+	if row.UserID != userID {
+		return ErrNotMember
 	}
 	row.WorkspaceID = wsID
 	f.sessions[id] = row
@@ -317,5 +336,51 @@ func TestSwitchWorkspaceNonMember(t *testing.T) {
 	_, _, err := svc.SwitchWorkspace(context.Background(), sessionID, userID, target)
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("expected ErrNotMember, got %v", err)
+	}
+}
+
+// TestSwitchWorkspaceForeignSessionIDRejected drives the IDOR guard: even a
+// caller who is a member of the target workspace cannot repoint a session
+// row that belongs to somebody else. RepointSessionWorkspace's WHERE binds
+// (id, user_id) together — a mismatched pair yields 0 rows affected and
+// the service surfaces ErrNotMember. Without the user_id filter (the
+// pre-fix behavior) a stolen or guessed session id would let an attacker
+// steer another user's session to a workspace they controlled.
+func TestSwitchWorkspaceForeignSessionIDRejected(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, time.Hour)
+
+	// Register two users, each with their own session.
+	victim, err := svc.Register(context.Background(), RegisterInput{
+		WorkspaceName: "Victim Inc", Email: "victim@example.test", Password: "s3cret-pw",
+	})
+	if err != nil {
+		t.Fatalf("Register victim: %v", err)
+	}
+	attacker, err := svc.Register(context.Background(), RegisterInput{
+		WorkspaceName: "Attacker Inc", Email: "attacker@example.test", Password: "s3cret-pw",
+	})
+	if err != nil {
+		t.Fatalf("Register attacker: %v", err)
+	}
+
+	// Give attacker membership in a third workspace they'd like to hijack the
+	// victim's session into.
+	target := uuid.New()
+	store.memberByPair[[2]uuid.UUID{target, attacker.UserID}] = gen.WorkspaceMember{
+		ID: uuid.New(), WorkspaceID: target, UserID: attacker.UserID, Role: gen.MemberRoleMember,
+	}
+
+	// Attacker attempts to repoint victim.SessionID (which they somehow
+	// guessed / stole) — attacker.UserID doesn't own it, so the store must
+	// treat this as a non-membership event.
+	_, _, err = svc.SwitchWorkspace(context.Background(), victim.SessionID, attacker.UserID, target)
+	if !errors.Is(err, ErrNotMember) {
+		t.Fatalf("expected ErrNotMember on foreign session repoint, got %v", err)
+	}
+
+	// The victim's session must still point at its original workspace.
+	if store.sessions[victim.SessionID].WorkspaceID != victim.WorkspaceID {
+		t.Fatal("victim session was silently repointed by attacker")
 	}
 }

@@ -23,29 +23,34 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool, q: gen.New(pool)}
 }
 
-// RegisterTx creates a workspace, a user, and an owner membership linking
-// them, all in a single transaction. It returns the new workspace and user
-// IDs, or an error if any step fails (the transaction is rolled back).
-func (s *Store) RegisterTx(ctx context.Context, wsName, email, hash string) (wsID, userID uuid.UUID, err error) {
+// RegisterTx creates a workspace, an owner user, membership, AND the first
+// refresh-token session for that user — all in a single database
+// transaction. Either every row lands or none does; a partial register can
+// no longer leave a user with no workspace or a workspace with no session.
+//
+// Returns the new workspace id, user id, and session id. The session row is
+// built from arg.SessionParams; the caller minted the token hash and family
+// id (see identity.Service.Register).
+func (s *Store) RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterTxResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return RegisterTxResult{}, err
 	}
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
 
-	ws, err := qtx.CreateWorkspace(ctx, wsName)
+	ws, err := qtx.CreateWorkspace(ctx, arg.WorkspaceName)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return RegisterTxResult{}, err
 	}
 
 	user, err := qtx.CreateUser(ctx, gen.CreateUserParams{
-		Email:        email,
-		PasswordHash: hash,
+		Email:        arg.Email,
+		PasswordHash: arg.PasswordHash,
 	})
 	if err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return RegisterTxResult{}, err
 	}
 
 	if _, err = qtx.CreateMember(ctx, gen.CreateMemberParams{
@@ -53,14 +58,48 @@ func (s *Store) RegisterTx(ctx context.Context, wsName, email, hash string) (wsI
 		UserID:      user.ID,
 		Role:        gen.MemberRoleOwner,
 	}); err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return RegisterTxResult{}, err
+	}
+
+	// Session is created inside the same tx: if any earlier step (or the
+	// commit itself) fails, no session row lingers for a user that isn't
+	// there. UserID/WorkspaceID come from the just-inserted rows above.
+	sp := arg.SessionParams
+	sp.UserID = user.ID
+	sp.WorkspaceID = ws.ID
+	session, err := qtx.CreateSession(ctx, sp)
+	if err != nil {
+		return RegisterTxResult{}, err
 	}
 
 	if err = tx.Commit(ctx); err != nil {
-		return uuid.Nil, uuid.Nil, err
+		return RegisterTxResult{}, err
 	}
 
-	return ws.ID, user.ID, nil
+	return RegisterTxResult{
+		WorkspaceID: ws.ID,
+		UserID:      user.ID,
+		SessionID:   session.ID,
+	}, nil
+}
+
+// RegisterTxParams carries the inputs RegisterTx needs. SessionParams
+// carries the token hash, family id, expires_at, and client metadata for
+// the initial session row — UserID and WorkspaceID are ignored here
+// (RegisterTx fills them in from the rows it just inserted).
+type RegisterTxParams struct {
+	WorkspaceName string
+	Email         string
+	PasswordHash  string
+	SessionParams gen.CreateSessionParams
+}
+
+// RegisterTxResult is the tuple of ids the caller needs to keep going
+// (issue an access token, set cookies, load memberships).
+type RegisterTxResult struct {
+	WorkspaceID uuid.UUID
+	UserID      uuid.UUID
+	SessionID   uuid.UUID
 }
 
 // GetUserByEmail returns the user with the given email.
@@ -117,7 +156,18 @@ func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
 }
 
 // RepointSessionWorkspace switches a session's active workspace (used when a
-// user swaps workspace context without re-authenticating).
-func (s *Store) RepointSessionWorkspace(ctx context.Context, id, wsID uuid.UUID) error {
-	return s.q.RepointSessionWorkspace(ctx, gen.RepointSessionWorkspaceParams{ID: id, WorkspaceID: wsID})
+// user swaps workspace context without re-authenticating). The userID is
+// checked in the WHERE clause so callers can only ever repoint their own
+// sessions; a 0-row result means the (session, user) pair didn't match.
+func (s *Store) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error {
+	n, err := s.q.RepointSessionWorkspace(ctx, gen.RepointSessionWorkspaceParams{
+		ID: id, WorkspaceID: wsID, UserID: userID,
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotMember
+	}
+	return nil
 }

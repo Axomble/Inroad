@@ -1,7 +1,8 @@
 import { createFileRoute, redirect, Outlet } from '@tanstack/react-router'
-import { store } from '@/store'
 import { runAuthBootstrap } from '@/features/auth/use-auth-bootstrap'
 import { AppShell } from '@/components/layout/app-shell'
+import { AuthHeader } from '@/features/auth/auth-header'
+import { useAuthGuard } from '@/features/auth/use-auth-guard'
 
 /**
  * Authenticated app layout. Guards every /app/* route: no in-memory session ->
@@ -10,9 +11,13 @@ import { AppShell } from '@/components/layout/app-shell'
  * bootstrap before deciding — this is what keeps an authenticated reload from
  * bouncing to `/` while the refresh request is still in flight. Renders the
  * shell (header + sidebar) around the routed content.
+ *
+ * The store is pulled from router context rather than imported directly so
+ * this module stays testable — a test can `createRouter` with any store shape.
  */
 export const Route = createFileRoute('/app')({
-  beforeLoad: async () => {
+  beforeLoad: async ({ context }) => {
+    const { store } = context
     if (store.getState().auth.status === 'idle') {
       await runAuthBootstrap(store.dispatch)
     }
@@ -24,8 +29,12 @@ export const Route = createFileRoute('/app')({
 })
 
 function AppLayout() {
+  // Watch the in-memory access token: if it clears mid-session (a background
+  // reauth failure, for example) the user goes back to the login page instead
+  // of staring at a broken-looking app shell.
+  useAuthGuard()
   return (
-    <AppShell>
+    <AppShell rightSlot={<AuthHeader />}>
       <Outlet />
     </AppShell>
   )

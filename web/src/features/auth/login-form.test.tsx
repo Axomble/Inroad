@@ -1,7 +1,6 @@
-import { render, screen } from '@testing-library/react'
-import { Provider } from 'react-redux'
+import { screen } from '@testing-library/react'
 import { vi } from 'vitest'
-import { store } from '../../store'
+import { renderWithProviders } from '@/test/render-with-providers'
 import { LoginForm } from './login-form'
 
 // LoginForm uses the router's useNavigate + Link; stub them for the unit test.
@@ -15,11 +14,7 @@ vi.mock('@tanstack/react-router', () => ({
 }))
 
 test('renders email and password fields', () => {
-  render(
-    <Provider store={store}>
-      <LoginForm />
-    </Provider>,
-  )
+  renderWithProviders(<LoginForm />)
   expect(screen.getByLabelText('Email')).toBeInTheDocument()
   expect(screen.getByLabelText('Password')).toBeInTheDocument()
 })

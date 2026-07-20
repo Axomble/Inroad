@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/validate"
 )
@@ -24,7 +25,7 @@ type listResponse struct {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	ws, ok := workspaceID(w, r)
+	ws, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -46,7 +47,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	ws, ok := workspaceID(w, r)
+	ws, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}

@@ -14,5 +14,9 @@ UPDATE sessions SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NU
 -- name: RevokeAllForUser :exec
 UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL;
 
--- name: RepointSessionWorkspace :exec
-UPDATE sessions SET workspace_id = $2 WHERE id = $1;
+-- name: RepointSessionWorkspace :execrows
+-- user_id is included in the WHERE clause so a caller can only ever
+-- repoint their OWN session, never someone else's — even if a session id
+-- somehow leaked into a caller's context. RowsAffected() lets the service
+-- surface a 403 when the (session, user) pair doesn't match.
+UPDATE sessions SET workspace_id = $2 WHERE id = $1 AND user_id = $3;

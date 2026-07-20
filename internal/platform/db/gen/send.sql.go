@@ -13,11 +13,16 @@ import (
 )
 
 const countQueuedByCampaign = `-- name: CountQueuedByCampaign :one
-SELECT count(*) FROM sends WHERE campaign_id = $1 AND status = 'queued'
+SELECT count(*) FROM sends WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'queued'
 `
 
-func (q *Queries) CountQueuedByCampaign(ctx context.Context, campaignID uuid.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countQueuedByCampaign, campaignID)
+type CountQueuedByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) CountQueuedByCampaign(ctx context.Context, arg CountQueuedByCampaignParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countQueuedByCampaign, arg.CampaignID, arg.WorkspaceID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -88,7 +93,7 @@ func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCa
 }
 
 const getSendBundle = `-- name: GetSendBundle :one
-SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id,
+SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html,
        m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
@@ -97,14 +102,20 @@ FROM sends s
 JOIN campaigns cam ON cam.id = s.campaign_id
 JOIN contacts ct ON ct.id = s.contact_id
 JOIN mailboxes m ON m.id = s.mailbox_id
-WHERE s.id = $1
+WHERE s.id = $1 AND s.workspace_id = $2
 `
+
+type GetSendBundleParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
 
 type GetSendBundleRow struct {
 	SendID           uuid.UUID          `json:"send_id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
 	ToEmail          string             `json:"to_email"`
 	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	Attempts         int32              `json:"attempts"`
 	FirstName        string             `json:"first_name"`
 	Subject          string             `json:"subject"`
 	BodyText         string             `json:"body_text"`
@@ -123,14 +134,19 @@ type GetSendBundleRow struct {
 	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
 }
 
-func (q *Queries) GetSendBundle(ctx context.Context, id uuid.UUID) (GetSendBundleRow, error) {
-	row := q.db.QueryRow(ctx, getSendBundle, id)
+// Bundle is workspace-scoped: even though sendID is a UUID (unguessable in
+// practice), pinning workspace_id in the WHERE clause forces a not-found
+// verdict if a worker somehow processes a send id from another tenant.
+// Defense in depth on top of the queue-side ownership.
+func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (GetSendBundleRow, error) {
+	row := q.db.QueryRow(ctx, getSendBundle, arg.ID, arg.WorkspaceID)
 	var i GetSendBundleRow
 	err := row.Scan(
 		&i.SendID,
 		&i.WorkspaceID,
 		&i.ToEmail,
 		&i.MailboxID,
+		&i.Attempts,
 		&i.FirstName,
 		&i.Subject,
 		&i.BodyText,
@@ -151,17 +167,76 @@ func (q *Queries) GetSendBundle(ctx context.Context, id uuid.UUID) (GetSendBundl
 	return i, err
 }
 
+const incrementSendAttempts = `-- name: IncrementSendAttempts :one
+UPDATE sends SET attempts = attempts + 1
+WHERE id = $1 AND workspace_id = $2
+RETURNING attempts
+`
+
+type IncrementSendAttemptsParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Bumps the attempts counter and returns the new value so the worker can
+// decide whether to fail the send instead of re-enqueuing indefinitely.
+func (q *Queries) IncrementSendAttempts(ctx context.Context, arg IncrementSendAttemptsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, incrementSendAttempts, arg.ID, arg.WorkspaceID)
+	var attempts int32
+	err := row.Scan(&attempts)
+	return attempts, err
+}
+
+const listStuckQueuedSends = `-- name: ListStuckQueuedSends :many
+SELECT id, workspace_id FROM sends
+WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
+ORDER BY created_at ASC
+LIMIT 500
+`
+
+type ListStuckQueuedSendsRow struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// ListStuckQueuedSends returns sends that are still 'queued' more than two
+// minutes after creation. The sweeper re-enqueues these — a launch that
+// failed to enqueue partway (or a redis blip) would otherwise leave them
+// orphaned. Capped so a single sweep tick can't monopolize the worker.
+// workspace_id travels along so the re-enqueued task carries the pin the
+// worker will use in its subsequent DB lookups.
+func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]ListStuckQueuedSendsRow, error) {
+	rows, err := q.db.Query(ctx, listStuckQueuedSends)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStuckQueuedSendsRow
+	for rows.Next() {
+		var i ListStuckQueuedSendsRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setSendResult = `-- name: SetSendResult :exec
 UPDATE sends SET status = $2, message_id = $3, error = $4,
        sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
-WHERE id = $1
+WHERE id = $1 AND workspace_id = $5
 `
 
 type SetSendResultParams struct {
-	ID        uuid.UUID `json:"id"`
-	Status    string    `json:"status"`
-	MessageID string    `json:"message_id"`
-	Error     string    `json:"error"`
+	ID          uuid.UUID `json:"id"`
+	Status      string    `json:"status"`
+	MessageID   string    `json:"message_id"`
+	Error       string    `json:"error"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
 func (q *Queries) SetSendResult(ctx context.Context, arg SetSendResultParams) error {
@@ -170,6 +245,7 @@ func (q *Queries) SetSendResult(ctx context.Context, arg SetSendResultParams) er
 		arg.Status,
 		arg.MessageID,
 		arg.Error,
+		arg.WorkspaceID,
 	)
 	return err
 }

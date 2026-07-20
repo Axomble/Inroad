@@ -132,6 +132,7 @@ type Send struct {
 	MessageID   string             `json:"message_id"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	Attempts    int32              `json:"attempts"`
 }
 
 type Session struct {

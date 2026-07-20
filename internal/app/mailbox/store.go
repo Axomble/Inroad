@@ -16,12 +16,18 @@ import (
 // Store is the repository interface this domain depends on. It is defined
 // here (by the consumer), not by the persistence layer, so the service can
 // be unit-tested against a fake without a database.
+//
+// Every method returns MailboxSafe (never gen.Mailbox) so SecretCiphertext
+// can't leak out of this package. The one exception is the internal
+// getWithSecret path (unexported) that the worker's coreapi in-process
+// client uses via its own DB access — control-plane callers only ever
+// touch the safe view.
 type Store interface {
-	Create(ctx context.Context, arg gen.CreateMailboxParams) (gen.Mailbox, error)
-	Get(ctx context.Context, workspaceID, id uuid.UUID) (gen.Mailbox, error)
-	List(ctx context.Context, workspaceID uuid.UUID) ([]gen.Mailbox, error)
+	Create(ctx context.Context, arg gen.CreateMailboxParams) (MailboxSafe, error)
+	Get(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error)
+	List(ctx context.Context, workspaceID uuid.UUID) ([]MailboxSafe, error)
 	CountByEmail(ctx context.Context, workspaceID uuid.UUID, email string) (int64, error)
-	UpdateStatus(ctx context.Context, workspaceID, id uuid.UUID, status, lastErr string) (gen.Mailbox, error)
+	UpdateStatus(ctx context.Context, workspaceID, id uuid.UUID, status, lastErr string) (MailboxSafe, error)
 	Delete(ctx context.Context, workspaceID, id uuid.UUID) (int64, error)
 }
 
@@ -35,29 +41,49 @@ type PgStore struct {
 
 func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
 
-func (s *PgStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (gen.Mailbox, error) {
-	return s.q.CreateMailbox(ctx, arg)
+func (s *PgStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (MailboxSafe, error) {
+	m, err := s.q.CreateMailbox(ctx, arg)
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	return safeFromGen(m), nil
 }
 
-func (s *PgStore) Get(ctx context.Context, workspaceID, id uuid.UUID) (gen.Mailbox, error) {
-	return s.q.GetMailbox(ctx, gen.GetMailboxParams{ID: id, WorkspaceID: workspaceID})
+func (s *PgStore) Get(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
+	m, err := s.q.GetMailbox(ctx, gen.GetMailboxParams{ID: id, WorkspaceID: workspaceID})
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	return safeFromGen(m), nil
 }
 
-func (s *PgStore) List(ctx context.Context, workspaceID uuid.UUID) ([]gen.Mailbox, error) {
-	return s.q.ListMailboxes(ctx, workspaceID)
+func (s *PgStore) List(ctx context.Context, workspaceID uuid.UUID) ([]MailboxSafe, error) {
+	rows, err := s.q.ListMailboxes(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MailboxSafe, len(rows))
+	for i, m := range rows {
+		out[i] = safeFromGen(m)
+	}
+	return out, nil
 }
 
 func (s *PgStore) CountByEmail(ctx context.Context, workspaceID uuid.UUID, email string) (int64, error) {
 	return s.q.CountMailboxByEmail(ctx, gen.CountMailboxByEmailParams{WorkspaceID: workspaceID, Email: email})
 }
 
-func (s *PgStore) UpdateStatus(ctx context.Context, workspaceID, id uuid.UUID, status, lastErr string) (gen.Mailbox, error) {
-	return s.q.UpdateMailboxStatus(ctx, gen.UpdateMailboxStatusParams{
+func (s *PgStore) UpdateStatus(ctx context.Context, workspaceID, id uuid.UUID, status, lastErr string) (MailboxSafe, error) {
+	m, err := s.q.UpdateMailboxStatus(ctx, gen.UpdateMailboxStatusParams{
 		ID:          id,
 		WorkspaceID: workspaceID,
 		Status:      status,
 		LastError:   lastErr,
 	})
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	return safeFromGen(m), nil
 }
 
 func (s *PgStore) Delete(ctx context.Context, workspaceID, id uuid.UUID) (int64, error) {

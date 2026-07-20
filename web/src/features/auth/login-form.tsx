@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { PasswordInput } from '@/components/ui/password-input'
 import { useAppDispatch } from '@/store/hooks'
-import { setSession } from '@/store/slices/auth'
+import { setSession, setUserIdentity } from '@/store/slices/auth'
 import { AuthLayout } from './auth-layout'
 import { useAuthLoginMutation } from './api'
 
@@ -35,6 +35,9 @@ export function LoginForm() {
     const result = await login({ loginRequest: values })
     if ('data' in result && result.data) {
       dispatch(setSession(result.data))
+      // The current session response doesn't carry the user's email; capture
+      // it from the form so the avatar/menu can show real initials.
+      dispatch(setUserIdentity({ email: values.email }))
       navigate({ to: '/app/mailboxes' })
     }
   }

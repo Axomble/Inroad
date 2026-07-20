@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
@@ -10,12 +10,15 @@ import { Label } from '@/components/ui/label'
 import { PasswordInput } from '@/components/ui/password-input'
 import { cn } from '@/lib/utils'
 import { useAppDispatch } from '@/store/hooks'
-import { setSession } from '@/store/slices/auth'
+import { setSession, setUserIdentity } from '@/store/slices/auth'
 import { AuthLayout } from './auth-layout'
 import { useAuthRegisterMutation } from './api'
 
+// Field names match the API DTO snake_case wire shape (see RegisterRequest in
+// store/api.ts) so we can hand `values` straight to the mutation without a
+// manual field-by-field rename step.
 const schema = z.object({
-  workspaceName: z.string().min(2, 'Give your workspace a name'),
+  workspace_name: z.string().min(2, 'Give your workspace a name'),
   email: z.email('Enter a valid email address'),
   password: z.string().min(8, 'Use at least 8 characters'),
 })
@@ -40,26 +43,27 @@ export function RegisterForm() {
   const passwordId = useId()
   const {
     register,
+    control,
     handleSubmit,
-    watch,
     formState: { errors },
   } = useForm<FormValues>({ resolver: zodResolver(schema) })
   const [registerAccount, { isLoading, error }] = useAuthRegisterMutation()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
 
-  const pwScore = strength(watch('password') ?? '')
+  // `useWatch({ control, name })` subscribes THIS component to only the
+  // password field, unlike `watch('password')` which subscribes it to the
+  // whole form and re-renders on every keystroke in any input.
+  const password = useWatch({ control, name: 'password' }) ?? ''
+  const pwScore = strength(password)
 
   async function onSubmit(values: FormValues) {
-    const result = await registerAccount({
-      registerRequest: {
-        workspace_name: values.workspaceName,
-        email: values.email,
-        password: values.password,
-      },
-    })
+    const result = await registerAccount({ registerRequest: values })
     if ('data' in result && result.data) {
       dispatch(setSession(result.data))
+      // Capture the form's email for the header avatar until the API exposes
+      // it on the session response.
+      dispatch(setUserIdentity({ email: values.email }))
       navigate({ to: '/app/mailboxes' })
     }
   }
@@ -79,12 +83,12 @@ export function RegisterForm() {
             autoComplete="organization"
             autoFocus
             placeholder="Acme Outbound"
-            aria-invalid={!!errors.workspaceName}
-            {...register('workspaceName')}
+            aria-invalid={!!errors.workspace_name}
+            {...register('workspace_name')}
           />
-          {errors.workspaceName && (
+          {errors.workspace_name && (
             <span role="alert" className="text-xs text-danger">
-              {errors.workspaceName.message}
+              {errors.workspace_name.message}
             </span>
           )}
         </div>
@@ -115,7 +119,7 @@ export function RegisterForm() {
             aria-invalid={!!errors.password}
             {...register('password')}
           />
-          <div className="mt-1 flex items-center gap-2" aria-hidden={!watch('password')}>
+          <div className="mt-1 flex items-center gap-2" aria-hidden={!password}>
             <div className="flex flex-1 gap-1">
               {[1, 2, 3, 4].map((seg) => (
                 <span

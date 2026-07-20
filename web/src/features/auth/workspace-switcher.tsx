@@ -45,6 +45,17 @@ export function WorkspaceSwitcher() {
     if (workspaceId === activeWorkspaceId || isLoading) return
     const result = await switchWorkspace({ switchWorkspaceRequest: { workspace_id: workspaceId } })
     if ('data' in result && result.data) {
+      // Abort every RTK Query request that was in flight against the previous
+      // workspace before flipping the active token. Otherwise a slow response
+      // can land after `setActiveWorkspace`, get parsed against the new
+      // workspace's cache, and briefly show old data (or crash a component
+      // expecting new-shape data). `getRunningQueriesThunk` returns undefined
+      // when nothing is subscribed — guard both branches.
+      const runningQueries = dispatch(api.util.getRunningQueriesThunk())
+      const runningMutations = dispatch(api.util.getRunningMutationsThunk())
+      for (const q of runningQueries ?? []) q.abort()
+      for (const m of runningMutations ?? []) m.abort()
+
       dispatch(
         setActiveWorkspace({
           activeWorkspaceId: result.data.active_workspace_id,

@@ -68,7 +68,7 @@ func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
 
 	h := NewHandler(
 		NewService(NewStore(pool), testRefreshTTL),
-		testJWTSecret, testAccessTTL, testRefreshTTL, false, "",
+		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil,
 	)
 
 	r := chi.NewRouter()

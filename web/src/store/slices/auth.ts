@@ -20,6 +20,15 @@ export interface SessionResponse {
   active_workspace_id: string
   role: string
   memberships: Membership[]
+  /**
+   * Optional identity fields. The current openapi schema doesn't include them
+   * yet; the slice stores them if a future /auth/me / session response starts
+   * returning them, so the avatar/menu can show something friendlier than a
+   * role initial. `email` also survives client-side because we set it from
+   * the login/register form input (see setUserIdentity).
+   */
+  email?: string
+  name?: string
 }
 
 /**
@@ -32,6 +41,8 @@ export interface SessionResponse {
 export interface AuthState {
   accessToken: string | null
   userId: string | null
+  userEmail: string | null
+  userName: string | null
   activeWorkspaceId: string | null
   role: string | null
   memberships: Membership[]
@@ -46,6 +57,8 @@ export interface AuthState {
 const initialState: AuthState = {
   accessToken: null,
   userId: null,
+  userEmail: null,
+  userName: null,
   activeWorkspaceId: null,
   role: null,
   memberships: [],
@@ -62,11 +75,22 @@ const authSlice = createSlice({
       state.activeWorkspaceId = action.payload.active_workspace_id
       state.role = action.payload.role
       state.memberships = action.payload.memberships
+      if (action.payload.email !== undefined) state.userEmail = action.payload.email
+      if (action.payload.name !== undefined) state.userName = action.payload.name
       state.status = 'authed'
+    },
+    setUserIdentity: (
+      state,
+      action: PayloadAction<{ email?: string | null; name?: string | null }>,
+    ) => {
+      if (action.payload.email !== undefined) state.userEmail = action.payload.email
+      if (action.payload.name !== undefined) state.userName = action.payload.name
     },
     clearSession: (state) => {
       state.accessToken = null
       state.userId = null
+      state.userEmail = null
+      state.userName = null
       state.activeWorkspaceId = null
       state.role = null
       state.memberships = []
@@ -83,5 +107,5 @@ const authSlice = createSlice({
   },
 })
 
-export const { setSession, clearSession, setActiveWorkspace } = authSlice.actions
+export const { setSession, setUserIdentity, clearSession, setActiveWorkspace } = authSlice.actions
 export default authSlice.reducer

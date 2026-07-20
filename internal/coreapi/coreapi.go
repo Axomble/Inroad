@@ -3,21 +3,53 @@
 // future HTTP implementation swaps in without changing worker code.
 package coreapi
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrCrossTenant is returned when a coreapi implementation detects a row
+// whose workspace_id does not match the one the caller pinned. Normally
+// impossible with the SQL WHERE clause pin, but the belt-and-braces check
+// exists so future refactors that relax the pin still fail closed.
+var ErrCrossTenant = errors.New("coreapi: cross-tenant access rejected")
 
 type Client interface {
 	// MailboxExists reports whether a mailbox is present and active.
 	MailboxExists(ctx context.Context, id string) (bool, error)
 	// GetSendJob loads everything the worker needs to send one email.
-	GetSendJob(ctx context.Context, sendID string) (SendJob, error)
-	// MarkSend records the outcome of a send attempt.
-	MarkSend(ctx context.Context, sendID string, res SendResult) error
+	// WorkspaceID is pinned in the SQL WHERE clause (defense in depth on top
+	// of the unguessable send UUID); mismatch yields a not-found error.
+	GetSendJob(ctx context.Context, sendID, workspaceID string) (SendJob, error)
+	// MarkSend records the outcome of a send attempt. Same workspace
+	// pinning as GetSendJob.
+	MarkSend(ctx context.Context, sendID, workspaceID string, res SendResult) error
+	// ListStuckQueuedSends returns send ids (with their workspace) that are
+	// still 'queued' more than the reconcile window (currently 2 minutes)
+	// after creation. Consumed by the periodic sweeper to re-enqueue
+	// anything the launcher missed.
+	ListStuckQueuedSends(ctx context.Context) ([]StuckSend, error)
+	// IncrementSendAttempts bumps the send's attempts counter and returns
+	// the new value. Used by the cap-exceeded re-enqueue path to break out
+	// of the loop when a send keeps hitting a daily cap it will never
+	// clear.
+	IncrementSendAttempts(ctx context.Context, sendID, workspaceID string) (int, error)
+}
+
+// StuckSend is a (send id, workspace id) pair from the reconciler query.
+type StuckSend struct {
+	SendID      string
+	WorkspaceID string
 }
 
 // SendJob is everything the worker needs to send one email — including the
-// decrypted SMTP password (in-memory only, never logged).
+// decrypted SMTP password (in-memory only, never logged). SMTPPassword is
+// a []byte so the worker can zeroize it after use; a Go string would be
+// immutable and hang around in memory until GC.
 type SendJob struct {
 	SendID            string
+	WorkspaceID       string
+	Attempts          int
 	Suppressed        bool
 	EffectiveDailyCap int
 	SentToday         int
@@ -32,7 +64,7 @@ type SendJob struct {
 	SMTPHost          string
 	SMTPPort          int
 	SMTPUsername      string
-	SMTPPassword      string
+	SMTPPassword      []byte
 	UseTLS            bool
 }
 
