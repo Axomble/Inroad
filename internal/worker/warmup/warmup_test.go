@@ -14,11 +14,15 @@ type fakeCore struct{ exists bool }
 
 func (f fakeCore) MailboxExists(context.Context, string) (bool, error) { return f.exists, nil }
 
-func (f fakeCore) GetSendJob(context.Context, string) (coreapi.SendJob, error) {
+func (f fakeCore) GetSendJob(context.Context, string, string) (coreapi.SendJob, error) {
 	return coreapi.SendJob{}, nil
 }
 
-func (f fakeCore) MarkSend(context.Context, string, coreapi.SendResult) error { return nil }
+func (f fakeCore) MarkSend(context.Context, string, string, coreapi.SendResult) error { return nil }
+
+func (f fakeCore) ListStuckQueuedSends(context.Context) ([]coreapi.StuckSend, error) {
+	return nil, nil
+}
 
 var _ coreapi.Client = fakeCore{}
 

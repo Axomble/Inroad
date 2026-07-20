@@ -19,9 +19,12 @@ type WarmupTickPayload struct {
 
 const TaskSendEmail = "send:email"
 
-// SendEmailPayload is the body of a send:email task.
+// SendEmailPayload is the body of a send:email task. WorkspaceID is
+// included so the worker's DB lookups can pin `workspace_id` in the WHERE
+// clause — defense in depth on top of the unguessable SendID UUID.
 type SendEmailPayload struct {
-	SendID string `json:"send_id"`
+	SendID      string `json:"send_id"`
+	WorkspaceID string `json:"workspace_id"`
 }
 
 // TaskSweepStuck is the periodic reconcile task that re-enqueues sends left
@@ -47,9 +50,11 @@ func (c *Client) EnqueueWarmupTick(mailboxID string) error {
 	return err
 }
 
-// EnqueueSend enqueues a send:email task for immediate processing.
-func (c *Client) EnqueueSend(sendID string) error {
-	b, err := json.Marshal(SendEmailPayload{SendID: sendID})
+// EnqueueSend enqueues a send:email task for immediate processing. Both
+// ids travel in the payload so the worker can pin workspace_id in its
+// DB lookups (defense in depth on top of the UUID sendID).
+func (c *Client) EnqueueSend(sendID, workspaceID string) error {
+	b, err := json.Marshal(SendEmailPayload{SendID: sendID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
@@ -58,8 +63,8 @@ func (c *Client) EnqueueSend(sendID string) error {
 }
 
 // EnqueueSendIn enqueues a send:email task to be processed after delay d.
-func (c *Client) EnqueueSendIn(sendID string, d time.Duration) error {
-	b, err := json.Marshal(SendEmailPayload{SendID: sendID})
+func (c *Client) EnqueueSendIn(sendID, workspaceID string, d time.Duration) error {
+	b, err := json.Marshal(SendEmailPayload{SendID: sendID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}

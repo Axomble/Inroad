@@ -20,8 +20,10 @@ var (
 
 // Enqueuer schedules a send:email task for a queued send. Satisfied by
 // *queue.Client; defined here so the domain doesn't depend on platform/queue.
+// workspaceID travels alongside sendID so the worker can pin workspace_id
+// in its DB WHERE clauses (defense in depth on top of the UUID sendID).
 type Enqueuer interface {
-	EnqueueSend(sendID string) error
+	EnqueueSend(sendID, workspaceID string) error
 }
 
 // Service implements campaign use cases. It depends on the Store and
@@ -109,7 +111,7 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 	}
 	res := LaunchResult{TotalSends: len(ids)}
 	for _, id := range ids {
-		if err := enq.EnqueueSend(id.String()); err != nil {
+		if err := enq.EnqueueSend(id.String(), ws.String()); err != nil {
 			res.FailedEnqueueCount++
 			continue
 		}

@@ -122,7 +122,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 	handler := Handler(core, fs, enq)
 
 	for _, id := range sendIDs {
-		payload, _ := json.Marshal(queue.SendEmailPayload{SendID: id.String()})
+		payload, _ := json.Marshal(queue.SendEmailPayload{SendID: id.String(), WorkspaceID: ws.ID.String()})
 		if err := handler(ctx, asynq.NewTask(queue.TaskSendEmail, payload)); err != nil {
 			t.Fatalf("handler: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 	}
 
 	// Every send row for the campaign is now 'sent'.
-	rows, err := q.CountSendsByStatus(ctx, cam.ID)
+	rows, err := q.CountSendsByStatus(ctx, gen.CountSendsByStatusParams{CampaignID: cam.ID, WorkspaceID: ws.ID})
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}

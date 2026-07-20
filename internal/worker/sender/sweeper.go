@@ -11,9 +11,10 @@ import (
 
 // SendEnqueuer is the subset of *queue.Client the sweeper needs. Defined at
 // the consumer so tests can inject a fake without pulling in the concrete
-// asynq-backed client.
+// asynq-backed client. workspaceID accompanies sendID so re-enqueued tasks
+// carry the pin the worker will use in its DB lookups.
 type SendEnqueuer interface {
-	EnqueueSend(sendID string) error
+	EnqueueSend(sendID, workspaceID string) error
 }
 
 // SweepStuckHandler returns an asynq handler that re-enqueues sends stuck in
@@ -28,20 +29,20 @@ type SendEnqueuer interface {
 // harmlessly re-processes.
 func SweepStuckHandler(core coreapi.Client, enq SendEnqueuer) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, _ *asynq.Task) error {
-		ids, err := core.ListStuckQueuedSends(ctx)
+		rows, err := core.ListStuckQueuedSends(ctx)
 		if err != nil {
 			return err
 		}
-		if len(ids) == 0 {
+		if len(rows) == 0 {
 			return nil
 		}
 		var failures int
-		for _, id := range ids {
-			if err := enq.EnqueueSend(id); err != nil {
+		for _, row := range rows {
+			if err := enq.EnqueueSend(row.SendID, row.WorkspaceID); err != nil {
 				failures++
 			}
 		}
-		slog.Info("sweep_stuck", "candidates", len(ids), "reenqueue_failures", failures)
+		slog.Info("sweep_stuck", "candidates", len(rows), "reenqueue_failures", failures)
 		return nil
 	}
 }

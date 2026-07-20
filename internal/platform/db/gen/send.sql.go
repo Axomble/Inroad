@@ -13,11 +13,16 @@ import (
 )
 
 const countQueuedByCampaign = `-- name: CountQueuedByCampaign :one
-SELECT count(*) FROM sends WHERE campaign_id = $1 AND status = 'queued'
+SELECT count(*) FROM sends WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'queued'
 `
 
-func (q *Queries) CountQueuedByCampaign(ctx context.Context, campaignID uuid.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countQueuedByCampaign, campaignID)
+type CountQueuedByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) CountQueuedByCampaign(ctx context.Context, arg CountQueuedByCampaignParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countQueuedByCampaign, arg.CampaignID, arg.WorkspaceID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -88,25 +93,30 @@ func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCa
 }
 
 const listStuckQueuedSends = `-- name: ListStuckQueuedSends :many
-SELECT id FROM sends
+SELECT id, workspace_id FROM sends
 WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
 ORDER BY created_at ASC
 LIMIT 500
 `
 
-func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]uuid.UUID, error) {
+type ListStuckQueuedSendsRow struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]ListStuckQueuedSendsRow, error) {
 	rows, err := q.db.Query(ctx, listStuckQueuedSends)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []uuid.UUID
+	var items []ListStuckQueuedSendsRow
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var i ListStuckQueuedSendsRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
 			return nil, err
 		}
-		items = append(items, id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -124,8 +134,13 @@ FROM sends s
 JOIN campaigns cam ON cam.id = s.campaign_id
 JOIN contacts ct ON ct.id = s.contact_id
 JOIN mailboxes m ON m.id = s.mailbox_id
-WHERE s.id = $1
+WHERE s.id = $1 AND s.workspace_id = $2
 `
+
+type GetSendBundleParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
 
 type GetSendBundleRow struct {
 	SendID           uuid.UUID          `json:"send_id"`
@@ -150,8 +165,8 @@ type GetSendBundleRow struct {
 	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
 }
 
-func (q *Queries) GetSendBundle(ctx context.Context, id uuid.UUID) (GetSendBundleRow, error) {
-	row := q.db.QueryRow(ctx, getSendBundle, id)
+func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (GetSendBundleRow, error) {
+	row := q.db.QueryRow(ctx, getSendBundle, arg.ID, arg.WorkspaceID)
 	var i GetSendBundleRow
 	err := row.Scan(
 		&i.SendID,
@@ -181,14 +196,15 @@ func (q *Queries) GetSendBundle(ctx context.Context, id uuid.UUID) (GetSendBundl
 const setSendResult = `-- name: SetSendResult :exec
 UPDATE sends SET status = $2, message_id = $3, error = $4,
        sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
-WHERE id = $1
+WHERE id = $1 AND workspace_id = $5
 `
 
 type SetSendResultParams struct {
-	ID        uuid.UUID `json:"id"`
-	Status    string    `json:"status"`
-	MessageID string    `json:"message_id"`
-	Error     string    `json:"error"`
+	ID          uuid.UUID `json:"id"`
+	Status      string    `json:"status"`
+	MessageID   string    `json:"message_id"`
+	Error       string    `json:"error"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
 func (q *Queries) SetSendResult(ctx context.Context, arg SetSendResultParams) error {
@@ -197,6 +213,7 @@ func (q *Queries) SetSendResult(ctx context.Context, arg SetSendResultParams) er
 		arg.Status,
 		arg.MessageID,
 		arg.Error,
+		arg.WorkspaceID,
 	)
 	return err
 }

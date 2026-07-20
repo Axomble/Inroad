@@ -56,7 +56,7 @@ type selectiveEnqueuer struct {
 	enqueued []string
 }
 
-func (s *selectiveEnqueuer) EnqueueSend(sendID string) error {
+func (s *selectiveEnqueuer) EnqueueSend(sendID, _ string) error {
 	if s.fail[sendID] {
 		return errors.New("redis unavailable")
 	}
@@ -66,7 +66,7 @@ func (s *selectiveEnqueuer) EnqueueSend(sendID string) error {
 
 type fakeEnqueuer struct{ enqueued []string }
 
-func (f *fakeEnqueuer) EnqueueSend(sendID string) error {
+func (f *fakeEnqueuer) EnqueueSend(sendID, _ string) error {
 	f.enqueued = append(f.enqueued, sendID)
 	return nil
 }

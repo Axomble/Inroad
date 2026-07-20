@@ -27,16 +27,16 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
 			return err
 		}
-		job, err := core.GetSendJob(ctx, p.SendID)
+		job, err := core.GetSendJob(ctx, p.SendID, p.WorkspaceID)
 		if err != nil {
 			return err
 		}
 		if job.Suppressed {
-			return core.MarkSend(ctx, p.SendID, coreapi.SendResult{Status: "skipped"})
+			return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "skipped"})
 		}
 		if job.SentToday >= job.EffectiveDailyCap {
 			// Over today's cap: retry in the next daily window, leave status queued.
-			return enq.EnqueueSendIn(p.SendID, 6*time.Hour)
+			return enq.EnqueueSendIn(p.SendID, p.WorkspaceID, 6*time.Hour)
 		}
 
 		// Subject is a header, treated as text: no HTML escape.
@@ -55,9 +55,9 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context
 			},
 		)
 		if sendErr != nil {
-			return core.MarkSend(ctx, p.SendID, coreapi.SendResult{Status: "failed", Err: sendErr.Error()})
+			return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "failed", Err: sendErr.Error()})
 		}
-		return core.MarkSend(ctx, p.SendID, coreapi.SendResult{Status: "sent", MessageID: msgID})
+		return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "sent", MessageID: msgID})
 	}
 }
 

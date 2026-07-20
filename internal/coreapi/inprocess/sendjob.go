@@ -13,14 +13,27 @@ import (
 
 // GetSendJob joins the send/campaign/contact/mailbox rows, decrypts the SMTP
 // password, checks suppression, and computes today's ramp-aware send cap.
-func (c client) GetSendJob(ctx context.Context, sendID string) (coreapi.SendJob, error) {
+// workspaceID is pinned in the SQL WHERE so a task from a different tenant
+// (or a corrupted payload) yields a not-found error rather than reading
+// another workspace's row.
+func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (coreapi.SendJob, error) {
 	id, err := uuid.Parse(sendID)
 	if err != nil {
 		return coreapi.SendJob{}, err
 	}
-	b, err := c.q.GetSendBundle(ctx, id)
+	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.SendJob{}, err
+	}
+	b, err := c.q.GetSendBundle(ctx, gen.GetSendBundleParams{ID: id, WorkspaceID: ws})
+	if err != nil {
+		return coreapi.SendJob{}, err
+	}
+	// Belt-and-braces: the SQL pin already guarantees this, but if a future
+	// migration ever relaxes the WHERE clause this assertion still fails
+	// closed instead of leaking another tenant's row.
+	if b.WorkspaceID != ws {
+		return coreapi.SendJob{}, coreapi.ErrCrossTenant
 	}
 	password, err := c.sealer.Open(b.SecretCiphertext)
 	if err != nil {
@@ -43,6 +56,7 @@ func (c client) GetSendJob(ctx context.Context, sendID string) (coreapi.SendJob,
 
 	return coreapi.SendJob{
 		SendID:            sendID,
+		WorkspaceID:       b.WorkspaceID.String(),
 		Suppressed:        suppressed,
 		EffectiveDailyCap: cap,
 		SentToday:         int(sentToday),
@@ -62,30 +76,38 @@ func (c client) GetSendJob(ctx context.Context, sendID string) (coreapi.SendJob,
 	}, nil
 }
 
-// MarkSend records the outcome of a send attempt.
-func (c client) MarkSend(ctx context.Context, sendID string, res coreapi.SendResult) error {
+// MarkSend records the outcome of a send attempt. workspaceID is pinned
+// alongside sendID so a stray/spoofed task can't clobber a row in another
+// tenant.
+func (c client) MarkSend(ctx context.Context, sendID, workspaceID string, res coreapi.SendResult) error {
 	id, err := uuid.Parse(sendID)
 	if err != nil {
 		return err
 	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
 	return c.q.SetSendResult(ctx, gen.SetSendResultParams{
-		ID:        id,
-		Status:    res.Status,
-		MessageID: res.MessageID,
-		Error:     res.Err,
+		ID:          id,
+		Status:      res.Status,
+		MessageID:   res.MessageID,
+		Error:       res.Err,
+		WorkspaceID: ws,
 	})
 }
 
-// ListStuckQueuedSends returns send ids stuck in 'queued' longer than the
-// reconcile window. Consumed by the periodic sweeper.
-func (c client) ListStuckQueuedSends(ctx context.Context) ([]string, error) {
-	ids, err := c.q.ListStuckQueuedSends(ctx)
+// ListStuckQueuedSends returns (send id, workspace id) pairs stuck in
+// 'queued' longer than the reconcile window. Consumed by the periodic
+// sweeper.
+func (c client) ListStuckQueuedSends(ctx context.Context) ([]coreapi.StuckSend, error) {
+	rows, err := c.q.ListStuckQueuedSends(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
+	out := make([]coreapi.StuckSend, len(rows))
+	for i, r := range rows {
+		out[i] = coreapi.StuckSend{SendID: r.ID.String(), WorkspaceID: r.WorkspaceID.String()}
 	}
 	return out, nil
 }
