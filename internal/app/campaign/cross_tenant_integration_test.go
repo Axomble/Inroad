@@ -51,7 +51,7 @@ func TestCrossTenantGetIsNotFound(t *testing.T) {
 		WorkspaceID: wsB.ID, Provider: "smtp", Email: "b@x.test", DisplayName: "B",
 		SmtpHost: "smtp.x", SmtpPort: 587, SmtpUsername: "b@x.test",
 		ImapHost: "imap.x", ImapPort: 993, ImapUsername: "b@x.test",
-		SecretCiphertext: []byte("ct"), UseTls: true, DailyCap: 50,
+		SecretCiphertext: "ct", UseTls: true, DailyCap: 50,
 		MinIntervalSeconds: 120, RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {
