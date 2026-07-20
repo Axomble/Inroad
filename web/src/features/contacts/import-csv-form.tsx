@@ -1,26 +1,22 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { Loader2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useAppSelector } from '@/store/hooks'
 import type { ImportResult } from '@/store/api'
+import { useImportContactsCsvMutation } from './api'
 
 /**
  * CSV import control.
  *
- * The generated `useImportContactsMutation` hook (store/api.ts) types its arg
- * as `{ list: string, body: { file?: Blob } }`, but RTK Query's `fetchBaseQuery`
- * treats any plain object body as JSON: it runs `isJsonifiable(body)` (true for
- * `{ file }`, a plain object) and then `JSON.stringify`s it, which serializes a
- * File/Blob to `"{}"` — the bytes never leave the browser. There is no way to
- * make the generated hook send `multipart/form-data` without hand-editing the
- * generated client, which is off-limits. So this posts a real `FormData` body
- * directly with `fetch`, reusing the same bearer-token-from-the-auth-slice +
- * same-origin-`/api/v1` conventions as `store/empty-api.ts`. The backend route
- * (`contacts.Routes`) is bearer-authenticated only (no CSRF double-submit is
- * required off of the cookie, unlike `/auth/refresh`), so no CSRF header is
- * needed here.
+ * The generated `useImportContactsMutation` in store/api.ts types its body as
+ * `{ file?: Blob }`, but RTK Query's fetchBaseQuery treats plain objects as
+ * JSON: it would `JSON.stringify` the File to `"{}"` and the bytes would never
+ * leave the browser. Our feature's `api.ts` overrides that with an
+ * `importContactsCsv` mutation that builds a real `FormData` body — which
+ * fetchBaseQuery passes through untouched — so the file actually uploads.
+ * Going through RTKQ (rather than a raw `fetch`) keeps reauth-on-401 in play
+ * and lets the mutation invalidate the Contact list tag on success.
  */
 function importErrorMessage(status?: number): string {
   if (status === 404) return 'List not found.'
@@ -35,40 +31,28 @@ export function ImportCsvForm({
   listId: string
   onImported: (result: ImportResult) => void
 }) {
-  const accessToken = useAppSelector((s) => s.auth.accessToken)
   const [file, setFile] = useState<File | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const inputId = useId()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [importCsv, { isLoading }] = useImportContactsCsvMutation()
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!file) return
-    setIsLoading(true)
     setError(null)
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const res = await fetch(
-        `${window.location.origin}/api/v1/contacts/import?list=${encodeURIComponent(listId)}`,
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: accessToken ? { authorization: `Bearer ${accessToken}` } : undefined,
-          body: formData,
-        },
-      )
-      if (!res.ok) {
-        setError(importErrorMessage(res.status))
-        return
-      }
-      const result = (await res.json()) as ImportResult
+    const result = await importCsv({ list: listId, file })
+    if ('error' in result && result.error) {
+      const status = (result.error as { status?: number }).status
+      setError(importErrorMessage(status))
+      return
+    }
+    if ('data' in result && result.data) {
+      onImported(result.data)
+      // Clear both the DOM value AND local state, so re-selecting the same
+      // file re-fires the input's change event.
+      if (inputRef.current) inputRef.current.value = ''
       setFile(null)
-      onImported(result)
-    } catch {
-      setError("Couldn't reach the server. Please try again.")
-    } finally {
-      setIsLoading(false)
     }
   }
 
@@ -78,6 +62,7 @@ export function ImportCsvForm({
         <Label htmlFor={inputId}>Import CSV</Label>
         <Input
           id={inputId}
+          ref={inputRef}
           type="file"
           accept=".csv,text/csv"
           className="mt-1.5"

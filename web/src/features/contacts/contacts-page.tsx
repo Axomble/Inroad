@@ -114,8 +114,13 @@ function ContactsPane({
 }) {
   const [offset, setOffset] = useState(0)
   const limit = 50
-  const { data, isLoading, refetch } = useListContactsQuery({ list: listId, limit, offset })
-  const contacts = data ?? []
+  // Fetch one extra row so we can distinguish "exactly `limit` results" (no
+  // next page) from "at least `limit`+1 results" (next page available). The
+  // extra row is trimmed off before render.
+  const { data, isLoading } = useListContactsQuery({ list: listId, limit: limit + 1, offset })
+  const fetched = data ?? []
+  const hasMore = fetched.length > limit
+  const contacts = hasMore ? fetched.slice(0, limit) : fetched
 
   useEffect(() => {
     setOffset(0)
@@ -124,13 +129,7 @@ function ContactsPane({
   return (
     <>
       <SectionBar label={listName || 'List'} count={contacts.length}>
-        <ImportCsvForm
-          listId={listId}
-          onImported={(result) => {
-            onImported(result)
-            refetch()
-          }}
-        />
+        <ImportCsvForm listId={listId} onImported={onImported} />
       </SectionBar>
 
       <div className="flex-1 overflow-y-auto">
@@ -171,7 +170,7 @@ function ContactsPane({
         <Button
           variant="ghost"
           size="sm"
-          disabled={contacts.length < limit}
+          disabled={!hasMore}
           onClick={() => setOffset((o) => o + limit)}
         >
           Next

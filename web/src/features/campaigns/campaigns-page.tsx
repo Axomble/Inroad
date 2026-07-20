@@ -19,7 +19,7 @@ import { CampaignForm } from './campaign-form'
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
-  const { data: campaigns = [], isLoading, refetch } = useListCampaignsQuery()
+  const { data: campaigns = [], isLoading } = useListCampaignsQuery()
 
   const count = (s: string) => campaigns.filter((c) => c.status === s).length
 
@@ -45,10 +45,7 @@ export function CampaignsPage() {
       <PageBody>
         {showForm && (
           <CampaignForm
-            onDone={() => {
-              setShowForm(false)
-              refetch()
-            }}
+            onDone={() => setShowForm(false)}
             onCancel={() => setShowForm(false)}
           />
         )}
@@ -76,7 +73,6 @@ export function CampaignsPage() {
                 campaign={c}
                 selected={c.id === selected}
                 onSelect={() => setSelected(c.id === selected ? null : (c.id ?? null))}
-                onChanged={refetch}
               />
             ))}
           </ul>
@@ -90,12 +86,10 @@ function CampaignRow({
   campaign,
   selected,
   onSelect,
-  onChanged,
 }: {
   campaign: Campaign
   selected: boolean
   onSelect: () => void
-  onChanged: () => void
 }) {
   const [launch, { isLoading }] = useLaunchCampaignMutation()
   const [error, setError] = useState<string | null>(null)
@@ -107,9 +101,7 @@ function CampaignRow({
     if ('error' in res) {
       const status = (res.error as { status?: number })?.status
       setError(status === 409 ? 'Already launched.' : status === 422 ? 'Target list is empty.' : 'Launch failed.')
-      return
     }
-    onChanged()
   }
 
   return (

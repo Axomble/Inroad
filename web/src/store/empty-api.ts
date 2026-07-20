@@ -26,12 +26,14 @@ type SessionResponse = {
 }
 
 const rawBaseQuery = fetchBaseQuery({
-  // An absolute URL (rather than a bare '/api/v1') so relative-URL resolution
-  // doesn't depend on a browser Document — jsdom in unit tests, and Node's
-  // fetch/Request generally, have no notion of "the current page" to resolve
-  // against. `window.location.origin` is always same-origin in prod (the SPA
-  // and API share an origin behind the reverse proxy / Vite dev proxy).
-  baseUrl: `${window.location.origin}/api/v1`,
+  // Deployment-configurable base URL. Falls back to same-origin `/api/v1` for
+  // the default self-hosted setup where the SPA and API share an origin (via
+  // the reverse proxy / Vite dev proxy). VITE_API_BASE_URL lets a hoster point
+  // the SPA at a different API host (e.g. `https://api.example.com/v1`).
+  // A leading protocol/host in the value is respected; a bare path is resolved
+  // against the current page — safe in the browser, and vitest configures
+  // jsdom's URL so tests can hit `document.location.origin` too.
+  baseUrl: import.meta.env.VITE_API_BASE_URL ?? '/api/v1',
   // Send the httpOnly refresh cookie + readable csrf_token cookie to every request.
   credentials: 'include',
   // Attach the in-memory access token (auth slice) as a Bearer token, and echo
@@ -89,5 +91,9 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
 export const emptyApi = createApi({
   reducerPath: 'api',
   baseQuery: baseQueryWithReauth,
+  // Tag types are declared centrally so every feature slice can add
+  // providesTags/invalidatesTags in its own `enhanceEndpoints` block without
+  // needing to redeclare them (and without silently typo'ing a new tag name).
+  tagTypes: ['Mailbox', 'Campaign', 'List', 'Contact', 'Session'] as const,
   endpoints: () => ({}),
 })
