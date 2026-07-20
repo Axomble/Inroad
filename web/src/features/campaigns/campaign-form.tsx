@@ -7,7 +7,11 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
-import { useCreateCampaignMutation, useListMailboxesQuery, useListListsQuery } from './api'
+import { useCreateCampaignMutation } from './api'
+// Cross-feature query-hook imports are allowed for read-only reference data
+// (see features/campaigns/api.ts). Cross-feature UI imports remain forbidden.
+import { useListMailboxesQuery } from '@/features/mailboxes/api'
+import { useListListsQuery } from '@/features/contacts/api'
 
 const schema = z.object({
   name: z.string().min(1, 'Required'),
