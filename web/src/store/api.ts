@@ -138,6 +138,15 @@ const injectedRtkApi = api.injectEndpoints({
         method: "POST",
       }),
     }),
+    unsubscribeConfirmPage: build.query<
+      UnsubscribeConfirmPageApiResponse,
+      UnsubscribeConfirmPageApiArg
+    >({
+      query: (queryArg) => ({ url: `/u/${queryArg.token}` }),
+    }),
+    unsubscribe: build.mutation<UnsubscribeApiResponse, UnsubscribeApiArg>({
+      query: (queryArg) => ({ url: `/u/${queryArg.token}`, method: "POST" }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -232,6 +241,14 @@ export type LaunchCampaignApiResponse = /** status 200 Queued count */ {
 };
 export type LaunchCampaignApiArg = {
   id: string;
+};
+export type UnsubscribeConfirmPageApiResponse = unknown;
+export type UnsubscribeConfirmPageApiArg = {
+  token: string;
+};
+export type UnsubscribeApiResponse = unknown;
+export type UnsubscribeApiArg = {
+  token: string;
 };
 export type Membership = {
   workspace_id: string;
@@ -356,4 +373,6 @@ export const {
   useCreateCampaignMutation,
   useGetCampaignQuery,
   useLaunchCampaignMutation,
+  useUnsubscribeConfirmPageQuery,
+  useUnsubscribeMutation,
 } = injectedRtkApi;
