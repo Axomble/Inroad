@@ -1,5 +1,13 @@
-// Package suppression handles the do-not-contact list and stateless unsubscribe.
-package suppression
+// Package unsub owns the stateless HMAC unsubscribe-token codec.
+//
+// Placement rationale: suppression is a business domain, but the token
+// helpers are cross-cutting utility. Placing them here lets both the
+// suppression HTTP handler AND the send job's URL builder (coreapi
+// in-process) depend on the same primitive without either owning it — a
+// domain package depending on another (`inprocess` -> `suppression`) would
+// break the "app packages don't import each other" invariant. See
+// docs/architecture.md.
+package unsub
 
 import (
 	"crypto/hmac"
@@ -13,11 +21,14 @@ import (
 func MakeToken(secret []byte, workspaceID, email string) string {
 	payload := workspaceID + ":" + email
 	sig := sign(secret, payload)
-	return b64(payload) + "." + b64(sig)
+	return b64([]byte(payload)) + "." + b64(sig)
 }
 
 // ParseToken verifies the HMAC and returns the workspace id and email.
-func ParseToken(secret []byte, token string) (string, string, bool) {
+// Ok is false for a malformed token, a bad signature, or missing fields —
+// callers should treat all three as "invalid unsubscribe link" without
+// distinguishing them (no oracle for the attacker).
+func ParseToken(secret []byte, token string) (workspaceID, email string, ok bool) {
 	dot := strings.IndexByte(token, '.')
 	if dot < 0 {
 		return "", "", false
@@ -45,13 +56,6 @@ func sign(secret []byte, payload string) []byte {
 	h.Write([]byte(payload))
 	return h.Sum(nil)
 }
-func b64(b any) string {
-	switch v := b.(type) {
-	case string:
-		return base64.RawURLEncoding.EncodeToString([]byte(v))
-	case []byte:
-		return base64.RawURLEncoding.EncodeToString(v)
-	}
-	return ""
-}
+
+func b64(b []byte) string          { return base64.RawURLEncoding.EncodeToString(b) }
 func unb64(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }

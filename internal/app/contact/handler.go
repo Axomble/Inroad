@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
-	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
@@ -40,7 +39,7 @@ func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	res, err := h.svc.ImportCSV(r.Context(), ws, listID, file)
-	if errors.Is(err, list.ErrNotFound) {
+	if errors.Is(err, ErrListNotFound) {
 		httpx.Error(w, http.StatusNotFound, "list not found")
 		return
 	}

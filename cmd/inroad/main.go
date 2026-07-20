@@ -68,7 +68,10 @@ func main() {
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
 	listSvc := list.NewService(list.NewPgStore(queries))
-	contactSvc := contact.NewService(contact.NewPgStore(queries), listSvc)
+	// contact takes only a small ListChecker interface (not the whole list
+	// service) so the contact package doesn't have to import app/list —
+	// keeps the "app packages don't import each other" invariant intact.
+	contactSvc := contact.NewService(contact.NewPgStore(queries), listCheckerAdapter{lists: listSvc})
 	// checker adapts the mailbox and list stores for campaign ownership checks.
 	campaignSvc := campaign.NewService(campaign.NewPgStore(pool), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
 	suppStore := suppression.NewStore(queries)
@@ -120,6 +123,22 @@ func (o ownershipChecker) MailboxActive(ctx context.Context, ws, mailboxID uuid.
 // as MailboxActive: no-rows is not an error, anything else is.
 func (o ownershipChecker) ListExists(ctx context.Context, ws, listID uuid.UUID) (bool, error) {
 	_, err := o.lists.Get(ctx, ws, listID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// listCheckerAdapter satisfies contact.ListChecker so the contact package
+// doesn't have to import app/list directly. Same distinction as
+// ownershipChecker: pgx.ErrNoRows → (false, nil); real DB errors surface.
+type listCheckerAdapter struct{ lists *list.Service }
+
+func (a listCheckerAdapter) ListExists(ctx context.Context, ws, listID uuid.UUID) (bool, error) {
+	_, err := a.lists.Get(ctx, ws, listID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil

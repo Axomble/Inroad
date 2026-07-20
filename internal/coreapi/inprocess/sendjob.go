@@ -6,9 +6,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/unsub"
 )
 
 // GetSendJob joins the send/campaign/contact/mailbox rows, decrypts the SMTP
@@ -39,7 +39,7 @@ func (c client) GetSendJob(ctx context.Context, sendID string) (coreapi.SendJob,
 	}
 	ageDays := int(time.Since(b.MailboxCreatedAt.Time).Hours() / 24)
 	cap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
-	token := suppression.MakeToken(c.jwtSecret, b.WorkspaceID.String(), b.ToEmail)
+	token := unsub.MakeToken(c.jwtSecret, b.WorkspaceID.String(), b.ToEmail)
 
 	return coreapi.SendJob{
 		SendID:            sendID,
