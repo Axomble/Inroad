@@ -10,6 +10,16 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, StatStrip, Stat, PageBody, EmptyBlock } from '@/components/layout/page'
 import type { Mailbox } from '@/store/api'
@@ -24,7 +34,7 @@ import { ConnectMailboxForm } from './connect-mailbox-form'
 
 export function MailboxesPage() {
   const [showConnect, setShowConnect] = useState(false)
-  const { data, isLoading, refetch } = useListMailboxesQuery()
+  const { data, isLoading } = useListMailboxesQuery()
   const mailboxes = data ?? []
 
   const count = (s: string) => mailboxes.filter((m) => m.status === s).length
@@ -51,10 +61,7 @@ export function MailboxesPage() {
       <PageBody>
         {showConnect && (
           <ConnectMailboxForm
-            onDone={() => {
-              setShowConnect(false)
-              refetch()
-            }}
+            onDone={() => setShowConnect(false)}
             onCancel={() => setShowConnect(false)}
           />
         )}
@@ -75,7 +82,7 @@ export function MailboxesPage() {
         ) : (
           <ul>
             {mailboxes.map((m) => (
-              <MailboxRow key={m.id} mailbox={m} onChanged={refetch} />
+              <MailboxRow key={m.id} mailbox={m} />
             ))}
           </ul>
         )}
@@ -84,23 +91,23 @@ export function MailboxesPage() {
   )
 }
 
-function MailboxRow({ mailbox, onChanged }: { mailbox: Mailbox; onChanged: () => void }) {
-  const [pause] = usePauseMailboxMutation()
-  const [resume] = useResumeMailboxMutation()
-  const [remove] = useDeleteMailboxMutation()
+function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
+  const [pause, pauseState] = usePauseMailboxMutation()
+  const [resume, resumeState] = useResumeMailboxMutation()
+  const [remove, removeState] = useDeleteMailboxMutation()
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const id = mailbox.id ?? ''
+  const busy = pauseState.isLoading || resumeState.isLoading || removeState.isLoading
 
   async function onPause() {
     await pause({ id })
-    onChanged()
   }
   async function onResume() {
     await resume({ id })
-    onChanged()
   }
   async function onDelete() {
     await remove({ id })
-    onChanged()
+    setConfirmDelete(false)
   }
 
   return (
@@ -130,16 +137,52 @@ function MailboxRow({ mailbox, onChanged }: { mailbox: Mailbox; onChanged: () =>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           {mailbox.status === 'paused' ? (
-            <DropdownMenuItem onClick={onResume}>Resume</DropdownMenuItem>
+            <DropdownMenuItem disabled={busy} onClick={onResume}>
+              Resume
+            </DropdownMenuItem>
           ) : (
-            <DropdownMenuItem onClick={onPause}>Pause</DropdownMenuItem>
+            <DropdownMenuItem disabled={busy} onClick={onPause}>
+              Pause
+            </DropdownMenuItem>
           )}
           <DropdownMenuSeparator />
-          <DropdownMenuItem className="text-danger" onClick={onDelete}>
+          <DropdownMenuItem
+            className="text-danger"
+            disabled={busy}
+            onSelect={(e) => {
+              e.preventDefault()
+              setConfirmDelete(true)
+            }}
+          >
             Delete
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this mailbox?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {mailbox.email} will be disconnected. Any in-flight sends from this mailbox will fail.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={removeState.isLoading}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-danger text-destructive-foreground hover:bg-danger/90"
+              disabled={removeState.isLoading}
+              onClick={(e) => {
+                e.preventDefault()
+                void onDelete()
+              }}
+            >
+              Delete mailbox
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </li>
   )
 }

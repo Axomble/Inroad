@@ -11,7 +11,13 @@ import { AppSidebar } from './app-sidebar'
  * where it meets the chrome). Below md the sidebar collapses to a drawer;
  * its open state lives in the `ui` redux slice.
  */
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  rightSlot,
+}: {
+  children: React.ReactNode
+  rightSlot?: React.ReactNode
+}) {
   const open = useAppSelector((s) => s.ui.sidebarOpen)
   const dispatch = useAppDispatch()
   const close = () => {
@@ -21,7 +27,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <TooltipProvider>
       <div className="flex h-dvh flex-col overflow-hidden bg-rail text-foreground">
-        <AppHeader onToggleNav={() => dispatch(toggleSidebar())} />
+        <AppHeader onToggleNav={() => dispatch(toggleSidebar())} rightSlot={rightSlot} />
 
         <div className="flex min-h-0 flex-1">
           {/* Desktop sidebar */}
