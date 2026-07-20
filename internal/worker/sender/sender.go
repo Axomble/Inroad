@@ -39,11 +39,12 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context
 			return enq.EnqueueSendIn(p.SendID, 6*time.Hour)
 		}
 
-		subject := personalize(job.Subject, job.FirstName, job.ToEmail)
-		bodyText := withUnsubText(personalize(job.BodyText, job.FirstName, job.ToEmail), job.UnsubURL)
+		// Subject is a header, treated as text: no HTML escape.
+		subject := personalizeText(job.Subject, job.FirstName, job.ToEmail)
+		bodyText := withUnsubText(personalizeText(job.BodyText, job.FirstName, job.ToEmail), job.UnsubURL)
 		bodyHTML := ""
 		if job.BodyHTML != "" {
-			bodyHTML = withUnsubHTML(personalize(job.BodyHTML, job.FirstName, job.ToEmail), job.UnsubURL)
+			bodyHTML = withUnsubHTML(personalizeHTML(job.BodyHTML, job.FirstName, job.ToEmail), job.UnsubURL)
 		}
 
 		msgID, sendErr := sender.Send(
