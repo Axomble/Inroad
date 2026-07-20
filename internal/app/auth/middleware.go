@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
@@ -36,6 +38,24 @@ func RequireAuth(secret []byte) func(http.Handler) http.Handler {
 func UserFromContext(ctx context.Context) (Claims, bool) {
 	c, ok := ctx.Value(ctxKey{}).(Claims)
 	return c, ok
+}
+
+// WorkspaceID extracts and parses the caller's workspace id from the JWT
+// claims stashed on the request context. On failure it writes the HTTP
+// error and returns ok=false so the handler can `return` immediately.
+// Shared by every route that scopes work to a workspace.
+func WorkspaceID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	claims, ok := UserFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(claims.WorkspaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "bad workspace")
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 var roleRank = map[string]int{"member": 1, "admin": 2, "owner": 3}

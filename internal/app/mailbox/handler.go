@@ -86,21 +86,6 @@ func toResponse(m MailboxSafe) mailboxResponse {
 	}
 }
 
-// workspaceID extracts the authenticated caller's workspace id from context.
-func workspaceID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	claims, ok := auth.UserFromContext(r.Context())
-	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "missing auth claims")
-		return uuid.UUID{}, false
-	}
-	wid, err := uuid.Parse(claims.WorkspaceID)
-	if err != nil {
-		httpx.Error(w, http.StatusUnauthorized, "invalid workspace id")
-		return uuid.UUID{}, false
-	}
-	return wid, true
-}
-
 // writeErr maps domain errors to HTTP status codes.
 func writeErr(w http.ResponseWriter, err error) {
 	switch {
@@ -118,7 +103,7 @@ func writeErr(w http.ResponseWriter, err error) {
 }
 
 func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
-	wid, ok := workspaceID(w, r)
+	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -147,7 +132,7 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	wid, ok := workspaceID(w, r)
+	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -164,7 +149,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
-	wid, ok := workspaceID(w, r)
+	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -182,7 +167,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
-	wid, ok := workspaceID(w, r)
+	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -200,7 +185,7 @@ func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
-	wid, ok := workspaceID(w, r)
+	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
@@ -218,7 +203,7 @@ func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	wid, ok := workspaceID(w, r)
+	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
 		return
 	}
