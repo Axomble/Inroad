@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -11,11 +12,11 @@ import (
 
 type fakeStore struct {
 	status  string
-	sendIDs []uuid.UUID
-	// launchCalled is set to true when LaunchTx runs so tests can assert
-	// the tx path is actually exercised (not the removed EnqueueSends+SetStatus
-	// two-step).
-	launchCalled bool
+	sendIDs []uuid.UUID // enrollment ids returned by EnrollTx
+	steps   int64       // CountSteps result
+	// enrollCalled is set to true when EnrollTx runs so tests can assert the
+	// tx path is actually exercised.
+	enrollCalled bool
 	// campaigns keyed by (workspaceID, campaignID). Used by the cross-tenant
 	// test to prove Get returns ErrNotFound for a campaign in another workspace.
 	campaigns map[[2]uuid.UUID]gen.Campaign
@@ -38,10 +39,14 @@ func (*fakeStore) List(context.Context, uuid.UUID) ([]gen.Campaign, error) { ret
 func (*fakeStore) Stats(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
 	return nil, nil
 }
-func (f *fakeStore) LaunchTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
-	f.launchCalled = true
+func (f *fakeStore) CountSteps(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
+	return f.steps, nil
+}
+func (f *fakeStore) EnrollTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
+	f.enrollCalled = true
 	return f.sendIDs, nil
 }
+func (*fakeStore) Reschedule(context.Context, uuid.UUID, uuid.UUID, time.Time) error { return nil }
 
 // errNotFound is what the sqlc-backed Get returns when the row isn't in the
 // caller's workspace (pgx.ErrNoRows). The fake stands in with a sentinel so
@@ -56,18 +61,18 @@ type selectiveEnqueuer struct {
 	enqueued []string
 }
 
-func (s *selectiveEnqueuer) EnqueueSend(sendID, _ string) error {
-	if s.fail[sendID] {
+func (s *selectiveEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, _ time.Time) error {
+	if s.fail[enrollmentID] {
 		return errors.New("redis unavailable")
 	}
-	s.enqueued = append(s.enqueued, sendID)
+	s.enqueued = append(s.enqueued, enrollmentID)
 	return nil
 }
 
 type fakeEnqueuer struct{ enqueued []string }
 
-func (f *fakeEnqueuer) EnqueueSend(sendID, _ string) error {
-	f.enqueued = append(f.enqueued, sendID)
+func (f *fakeEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, _ time.Time) error {
+	f.enqueued = append(f.enqueued, enrollmentID)
 	return nil
 }
 
@@ -106,8 +111,18 @@ func TestLaunchRejectsAlreadyLaunched(t *testing.T) {
 	}
 }
 
+func TestLaunchRejectsNoSteps(t *testing.T) {
+	// A draft campaign with a non-empty list but zero steps can't launch.
+	svc := NewService(&fakeStore{status: string(StatusDraft), steps: 0}, okChecker{active: true})
+	_, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), &fakeEnqueuer{})
+	if err != ErrNoSteps {
+		t.Fatalf("expected ErrNoSteps, got %v", err)
+	}
+}
+
 func TestLaunchRejectsEmptyList(t *testing.T) {
-	svc := NewService(&fakeStore{status: string(StatusDraft)}, okChecker{active: true})
+	// Steps exist, but EnrollTx returns no enrollments (empty list).
+	svc := NewService(&fakeStore{status: string(StatusDraft), steps: 1}, okChecker{active: true})
 	_, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), &fakeEnqueuer{})
 	if err != ErrEmptyList {
 		t.Fatalf("expected ErrEmptyList, got %v", err)
@@ -116,7 +131,7 @@ func TestLaunchRejectsEmptyList(t *testing.T) {
 
 func TestLaunchSucceeds(t *testing.T) {
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
-	store := &fakeStore{status: string(StatusDraft), sendIDs: ids}
+	store := &fakeStore{status: string(StatusDraft), steps: 2, sendIDs: ids}
 	enq := &fakeEnqueuer{}
 	svc := NewService(store, okChecker{active: true})
 	res, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
@@ -126,8 +141,8 @@ func TestLaunchSucceeds(t *testing.T) {
 	if res.EnqueuedCount != len(ids) {
 		t.Fatalf("queued: got %d want %d", res.EnqueuedCount, len(ids))
 	}
-	if res.TotalSends != len(ids) {
-		t.Fatalf("total sends: got %d want %d", res.TotalSends, len(ids))
+	if res.TotalEnrolled != len(ids) {
+		t.Fatalf("total enrolled: got %d want %d", res.TotalEnrolled, len(ids))
 	}
 	if res.FailedEnqueueCount != 0 {
 		t.Fatalf("expected no failed enqueues, got %d", res.FailedEnqueueCount)
@@ -135,8 +150,8 @@ func TestLaunchSucceeds(t *testing.T) {
 	if len(enq.enqueued) != len(ids) {
 		t.Fatalf("enqueued: got %d want %d", len(enq.enqueued), len(ids))
 	}
-	if !store.launchCalled {
-		t.Fatal("expected LaunchTx to be called")
+	if !store.enrollCalled {
+		t.Fatal("expected EnrollTx to be called")
 	}
 }
 
@@ -146,7 +161,7 @@ func TestLaunchSucceeds(t *testing.T) {
 // sweeper knows there's work to reconcile.
 func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
-	store := &fakeStore{status: string(StatusDraft), sendIDs: ids}
+	store := &fakeStore{status: string(StatusDraft), steps: 1, sendIDs: ids}
 	enq := &selectiveEnqueuer{fail: map[string]bool{ids[1].String(): true}}
 	svc := NewService(store, okChecker{active: true})
 
@@ -154,7 +169,7 @@ func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if res.TotalSends != 3 || res.EnqueuedCount != 2 || res.FailedEnqueueCount != 1 {
+	if res.TotalEnrolled != 3 || res.EnqueuedCount != 2 || res.FailedEnqueueCount != 1 {
 		t.Fatalf("counts wrong: %+v", res)
 	}
 }

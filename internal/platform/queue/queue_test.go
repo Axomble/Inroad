@@ -22,3 +22,20 @@ func TestWarmupTickPayloadRoundTrip(t *testing.T) {
 		t.Errorf("TaskWarmupTick = %q", TaskWarmupTick)
 	}
 }
+
+func TestAdvancePayloadRoundTrip(t *testing.T) {
+	b, err := json.Marshal(AdvancePayload{EnrollmentID: "e1", WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got AdvancePayload
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.EnrollmentID != "e1" || got.WorkspaceID != "w1" {
+		t.Errorf("round-trip mismatch: %+v", got)
+	}
+	if TaskSequenceAdvance != "sequence:advance" || TaskSweepEnrollments != "sequence:sweep_stuck_enrollments" {
+		t.Errorf("task name drift: %q %q", TaskSequenceAdvance, TaskSweepEnrollments)
+	}
+}

@@ -25,11 +25,15 @@ type Store interface {
 	Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, error)
 	List(ctx context.Context, ws uuid.UUID) ([]gen.Campaign, error)
 	Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64, error)
-	// LaunchTx materializes one `sends` row per (campaign, list member) pair
-	// AND transitions the campaign to running, atomically. Returns the ids of
-	// newly created rows. Either both writes commit or neither does — a
-	// partial launch cannot leak a mixed status.
-	LaunchTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
+	// CountSteps returns how many sequence_steps the campaign has. Launch
+	// requires ≥1 (backfill/Create seed step 1 for the single-message flow).
+	CountSteps(ctx context.Context, ws, campaignID uuid.UUID) (int64, error)
+	// EnrollTx materializes one sequence_enrollment per (campaign, list member)
+	// AND transitions the campaign to running, atomically. Returns the new
+	// enrollment ids. Either both writes commit or neither does.
+	EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
+	// Reschedule re-stamps an active enrollment's next_due_at (launch stagger).
+	Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at time.Time) error
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -53,10 +57,44 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 	return &PgStore{pool: pool, q: gen.New(pool)}
 }
 
+// Create persists the campaign AND seeds step 1 from its inline subject/body
+// in one transaction, so the single-message POST /campaigns → launch flow
+// yields a one-step sequence (spec §2 backward compat). Multi-step callers add
+// further steps via the steps API.
 func (s *PgStore) Create(ctx context.Context, ws uuid.UUID, in CreateInput) (gen.Campaign, error) {
-	return s.q.CreateCampaign(ctx, gen.CreateCampaignParams{
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return gen.Campaign{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := s.q.WithTx(tx)
+
+	c, err := qtx.CreateCampaign(ctx, gen.CreateCampaignParams{
 		WorkspaceID: ws, Name: in.Name, MailboxID: in.MailboxID, ListID: in.ListID,
 		Subject: in.Subject, BodyText: in.BodyText, BodyHtml: in.BodyHTML,
+	})
+	if err != nil {
+		return gen.Campaign{}, err
+	}
+	if _, err := qtx.CreateStep(ctx, gen.CreateStepParams{
+		WorkspaceID: ws, CampaignID: c.ID, StepOrder: 1, DelaySeconds: 0,
+		Subject: in.Subject, BodyText: in.BodyText, BodyHtml: in.BodyHTML,
+	}); err != nil {
+		return gen.Campaign{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return gen.Campaign{}, err
+	}
+	return c, nil
+}
+
+func (s *PgStore) CountSteps(ctx context.Context, ws, campaignID uuid.UUID) (int64, error) {
+	return s.q.CountStepsByCampaign(ctx, gen.CountStepsByCampaignParams{CampaignID: campaignID, WorkspaceID: ws})
+}
+
+func (s *PgStore) Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at time.Time) error {
+	return s.q.SetEnrollmentDue(ctx, gen.SetEnrollmentDueParams{
+		ID: enrollmentID, WorkspaceID: ws, NextDueAt: pgtype.Timestamptz{Time: at, Valid: true},
 	})
 }
 func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, error) {
@@ -77,10 +115,11 @@ func (s *PgStore) Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64
 	return out, nil
 }
 
-// LaunchTx enqueues sends and flips status to running in a single database
-// transaction. If either write fails the transaction is rolled back, leaving
-// the campaign as draft with no sends created.
-func (s *PgStore) LaunchTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
+// EnrollTx materializes one enrollment per list member and flips status to
+// running in a single transaction. If either write fails the transaction rolls
+// back, leaving the campaign draft with no enrollments. An empty target list
+// commits nothing and returns no ids (service maps that to ErrEmptyList).
+func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -88,13 +127,11 @@ func (s *PgStore) LaunchTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uui
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	ids, err := qtx.EnqueueSends(ctx, gen.EnqueueSendsParams{ID: campaignID, WorkspaceID: ws})
+	ids, err := qtx.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: campaignID, WorkspaceID: ws})
 	if err != nil {
 		return nil, err
 	}
 	if len(ids) == 0 {
-		// Empty target list: don't flip status, don't commit. The service layer
-		// maps this to ErrEmptyList.
 		return nil, nil
 	}
 	if err := qtx.SetCampaignStatus(ctx, gen.SetCampaignStatusParams{

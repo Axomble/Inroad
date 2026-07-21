@@ -124,6 +124,8 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "campaign already launched")
 	case errors.Is(err, ErrEmptyList):
 		httpx.Error(w, http.StatusUnprocessableEntity, "target list is empty")
+	case errors.Is(err, ErrNoSteps):
+		httpx.Error(w, http.StatusUnprocessableEntity, "campaign has no sequence steps")
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not launch")
 	default:
@@ -131,7 +133,7 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		// let callers spot partial-enqueue outcomes without breaking the shape.
 		httpx.JSON(w, http.StatusOK, map[string]int{
 			"queued":               res.EnqueuedCount,
-			"total_sends":          res.TotalSends,
+			"total_enrolled":       res.TotalEnrolled,
 			"failed_enqueue_count": res.FailedEnqueueCount,
 		})
 	}
