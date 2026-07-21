@@ -55,6 +55,10 @@ func main() {
 		logger.Error("scheduler register failed", "err", err)
 		os.Exit(1)
 	}
+	if err := queue.RegisterSweepEnrollments(sch); err != nil {
+		logger.Error("scheduler register (enrollments) failed", "err", err)
+		os.Exit(1)
+	}
 	go func() {
 		if err := sch.Run(); err != nil {
 			logger.Error("scheduler exited", "err", err)
