@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -18,6 +19,10 @@ type client struct {
 	sealer    *crypto.Sealer
 	jwtSecret []byte
 	publicURL string
+	// enroll owns the enrollment state machine (advance/complete/stop). The
+	// control plane composes the domain service here so the MarkStep* coreapi
+	// methods delegate the transition to a single, unit-tested place.
+	enroll *enrollment.Service
 }
 
 // New returns the in-process coreapi client backed by the given queries. The
@@ -25,7 +30,10 @@ type client struct {
 // unsubscribe tokens; publicURL is the base URL used to build unsubscribe
 // links.
 func New(q *gen.Queries, sealer *crypto.Sealer, jwtSecret []byte, publicURL string) coreapi.Client {
-	return client{q: q, sealer: sealer, jwtSecret: jwtSecret, publicURL: publicURL}
+	return client{
+		q: q, sealer: sealer, jwtSecret: jwtSecret, publicURL: publicURL,
+		enroll: enrollment.NewService(enrollment.NewPgStore(q)),
+	}
 }
 
 func (c client) MailboxExists(ctx context.Context, id string) (bool, error) {

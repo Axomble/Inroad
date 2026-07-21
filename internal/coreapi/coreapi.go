@@ -6,6 +6,7 @@ package coreapi
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrCrossTenant is returned when a coreapi implementation detects a row
@@ -34,6 +35,87 @@ type Client interface {
 	// of the loop when a send keeps hitting a daily cap it will never
 	// clear.
 	IncrementSendAttempts(ctx context.Context, sendID, workspaceID string) (int, error)
+
+	// --- Multi-step sequencing (sequence:advance path) ---
+
+	// GetStepSendJob loads everything needed to send the enrollment's next due
+	// step (current_step+1): resolved step content, personalization vars,
+	// threading headers, cap gate, and decrypted transport. Read-only — it
+	// creates no rows, so a suppressed/capped step leaves no orphan. workspaceID
+	// is pinned in the SQL WHERE (defense in depth on the enrollment UUID).
+	GetStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (StepSendJob, error)
+	// MarkStepSent records the step's send (one sends row, with result) and
+	// advances the enrollment cursor via the enrollment state machine — the
+	// single insertion point for the current_step transition and cadence.
+	// Returns whether the enrollment completed and, if not, when the next step
+	// is due.
+	MarkStepSent(ctx context.Context, enrollmentID, workspaceID string, res StepResult) (Advance, error)
+	// MarkStepStopped halts an enrollment (the single stop entry point). reason
+	// is one of the enrollment stop reasons (e.g. "suppressed").
+	MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error
+	// ListDueEnrollments returns active enrollments whose next_due_at passed the
+	// reconcile window. Consumed by the periodic enrollment sweeper.
+	ListDueEnrollments(ctx context.Context) ([]DueEnrollment, error)
+}
+
+// ContactVars are the personalization values for a contact, applied worker-side
+// to the raw step templates ({{first_name}}, {{custom.<key>}}, …).
+type ContactVars struct {
+	FirstName string
+	LastName  string
+	Email     string
+	Company   string
+	Custom    map[string]string
+}
+
+// StepSendJob is everything the sequence:advance worker needs to send one
+// step-email. Skip is true when the enrollment is no longer active (stopped or
+// completed) or has no next step — the worker no-ops. SMTPPassword is []byte so
+// the worker can zeroize it after use.
+type StepSendJob struct {
+	Skip              bool
+	EnrollmentID      string
+	WorkspaceID       string
+	StepOrder         int
+	LastStep          bool
+	Suppressed        bool
+	EffectiveDailyCap int
+	SentToday         int
+	ToEmail           string
+	Vars              ContactVars
+	Subject           string
+	BodyText          string
+	BodyHTML          string
+	UnsubURL          string
+	InReplyTo         string
+	References        string
+	FromEmail         string
+	FromName          string
+	SMTPHost          string
+	SMTPPort          int
+	SMTPUsername      string
+	SMTPPassword      []byte
+	UseTLS            bool
+}
+
+// StepResult is the outcome of one step send.
+type StepResult struct {
+	Status    string // "sent" | "failed"
+	MessageID string
+	Err       string
+}
+
+// Advance tells the worker whether the enrollment finished and, if not, when
+// the next step is due (so it can schedule the next sequence:advance).
+type Advance struct {
+	Completed bool
+	NextDueAt time.Time
+}
+
+// DueEnrollment is an (enrollment id, workspace id) pair from the sweeper query.
+type DueEnrollment struct {
+	EnrollmentID string
+	WorkspaceID  string
 }
 
 // StuckSend is a (send id, workspace id) pair from the reconciler query.
