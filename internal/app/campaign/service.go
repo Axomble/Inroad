@@ -85,6 +85,37 @@ func (s *Service) Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64
 	return s.store.Stats(ctx, ws, id)
 }
 
+// CampaignDetail is the extended GET /campaigns/{id} payload: the campaign, its
+// ordered steps, send counts by status, and enrollment counts by status.
+type CampaignDetail struct {
+	Campaign    gen.Campaign
+	Steps       []gen.SequenceStep
+	SendStats   map[string]int64
+	Enrollments map[string]int64
+}
+
+// Detail loads the campaign plus its steps and rollup counts, all
+// workspace-scoped (a cross-tenant id yields ErrNotFound before any child read).
+func (s *Service) Detail(ctx context.Context, ws, id uuid.UUID) (CampaignDetail, error) {
+	c, err := s.store.Get(ctx, ws, id)
+	if err != nil {
+		return CampaignDetail{}, ErrNotFound
+	}
+	steps, err := s.store.ListSteps(ctx, ws, id)
+	if err != nil {
+		return CampaignDetail{}, err
+	}
+	sends, err := s.store.Stats(ctx, ws, id)
+	if err != nil {
+		return CampaignDetail{}, err
+	}
+	enr, err := s.store.EnrollmentCounts(ctx, ws, id)
+	if err != nil {
+		return CampaignDetail{}, err
+	}
+	return CampaignDetail{Campaign: c, Steps: steps, SendStats: sends, Enrollments: enr}, nil
+}
+
 // LaunchResult reports the outcome of a Launch call. TotalEnrolled is the
 // number of enrollments the DB transaction created; EnqueuedCount and
 // FailedEnqueueCount split that total by whether each enrollment's step-1

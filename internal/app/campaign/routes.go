@@ -30,3 +30,39 @@ type campaignResponse struct {
 func toResponse(c gen.Campaign, stats map[string]int64) campaignResponse {
 	return campaignResponse{ID: c.ID.String(), Name: c.Name, Subject: c.Subject, Status: c.Status, Stats: stats}
 }
+
+// stepView is a step in the campaign detail response.
+type stepView struct {
+	ID           string `json:"id"`
+	StepOrder    int32  `json:"step_order"`
+	DelaySeconds int32  `json:"delay_seconds"`
+	Subject      string `json:"subject"`
+	BodyText     string `json:"body_text"`
+	BodyHTML     string `json:"body_html"`
+}
+
+// campaignDetailResponse is the GET /campaigns/{id} payload: campaign summary
+// plus its steps, send stats, and enrollment counts by status.
+type campaignDetailResponse struct {
+	ID          string           `json:"id"`
+	Name        string           `json:"name"`
+	Subject     string           `json:"subject"`
+	Status      string           `json:"status"`
+	Stats       map[string]int64 `json:"stats,omitempty"`
+	Enrollments map[string]int64 `json:"enrollments,omitempty"`
+	Steps       []stepView       `json:"steps"`
+}
+
+func toDetailResponse(d CampaignDetail) campaignDetailResponse {
+	steps := make([]stepView, 0, len(d.Steps))
+	for _, s := range d.Steps {
+		steps = append(steps, stepView{
+			ID: s.ID.String(), StepOrder: s.StepOrder, DelaySeconds: s.DelaySeconds,
+			Subject: s.Subject, BodyText: s.BodyText, BodyHTML: s.BodyHtml,
+		})
+	}
+	return campaignDetailResponse{
+		ID: d.Campaign.ID.String(), Name: d.Campaign.Name, Subject: d.Campaign.Subject,
+		Status: d.Campaign.Status, Stats: d.SendStats, Enrollments: d.Enrollments, Steps: steps,
+	}
+}

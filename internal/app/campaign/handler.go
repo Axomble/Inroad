@@ -78,13 +78,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	c, err := h.svc.Get(r.Context(), ws, id)
+	d, err := h.svc.Detail(r.Context(), ws, id)
 	if err != nil {
 		httpx.Error(w, http.StatusNotFound, "not found")
 		return
 	}
-	stats, _ := h.svc.Stats(r.Context(), ws, id)
-	httpx.JSON(w, http.StatusOK, toResponse(c, stats))
+	httpx.JSON(w, http.StatusOK, toDetailResponse(d))
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {

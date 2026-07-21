@@ -20,6 +20,9 @@ type fakeStore struct {
 	// campaigns keyed by (workspaceID, campaignID). Used by the cross-tenant
 	// test to prove Get returns ErrNotFound for a campaign in another workspace.
 	campaigns map[[2]uuid.UUID]gen.Campaign
+	// detail-view fixtures.
+	stepList     []gen.SequenceStep
+	enrollCounts map[string]int64
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
@@ -47,6 +50,12 @@ func (f *fakeStore) EnrollTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID
 	return f.sendIDs, nil
 }
 func (*fakeStore) Reschedule(context.Context, uuid.UUID, uuid.UUID, time.Time) error { return nil }
+func (f *fakeStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
+	return f.stepList, nil
+}
+func (f *fakeStore) EnrollmentCounts(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
+	return f.enrollCounts, nil
+}
 
 // errNotFound is what the sqlc-backed Get returns when the row isn't in the
 // caller's workspace (pgx.ErrNoRows). The fake stands in with a sentinel so
@@ -171,6 +180,36 @@ func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
 	}
 	if res.TotalEnrolled != 3 || res.EnqueuedCount != 2 || res.FailedEnqueueCount != 1 {
 		t.Fatalf("counts wrong: %+v", res)
+	}
+}
+
+func TestDetailIncludesStepsAndEnrollmentCounts(t *testing.T) {
+	ws, id := uuid.New(), uuid.New()
+	store := &fakeStore{
+		campaigns:    map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws, Name: "Q3", Status: "running"}},
+		stepList:     []gen.SequenceStep{{StepOrder: 1}, {StepOrder: 2}},
+		enrollCounts: map[string]int64{"active": 5, "completed": 1},
+	}
+	svc := NewService(store, okChecker{active: true})
+	d, err := svc.Detail(context.Background(), ws, id)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if len(d.Steps) != 2 {
+		t.Fatalf("want 2 steps, got %d", len(d.Steps))
+	}
+	if d.Enrollments["active"] != 5 || d.Enrollments["completed"] != 1 {
+		t.Fatalf("enrollment counts wrong: %+v", d.Enrollments)
+	}
+}
+
+func TestDetailCrossTenantIsNotFound(t *testing.T) {
+	store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{
+		{uuid.New(), uuid.New()}: {Name: "foreign"},
+	}}
+	svc := NewService(store, okChecker{active: true})
+	if _, err := svc.Detail(context.Background(), uuid.New(), uuid.New()); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound for cross-tenant detail, got %v", err)
 	}
 }
 

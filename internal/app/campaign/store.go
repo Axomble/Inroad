@@ -34,6 +34,10 @@ type Store interface {
 	EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
 	// Reschedule re-stamps an active enrollment's next_due_at (launch stagger).
 	Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at time.Time) error
+	// ListSteps returns the campaign's ordered steps (for the detail view).
+	ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error)
+	// EnrollmentCounts returns enrollment counts grouped by status.
+	EnrollmentCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error)
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -96,6 +100,22 @@ func (s *PgStore) Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at
 	return s.q.SetEnrollmentDue(ctx, gen.SetEnrollmentDueParams{
 		ID: enrollmentID, WorkspaceID: ws, NextDueAt: pgtype.Timestamptz{Time: at, Valid: true},
 	})
+}
+
+func (s *PgStore) ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error) {
+	return s.q.ListStepsByCampaign(ctx, gen.ListStepsByCampaignParams{CampaignID: campaignID, WorkspaceID: ws})
+}
+
+func (s *PgStore) EnrollmentCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error) {
+	rows, err := s.q.CountEnrollmentsByStatus(ctx, gen.CountEnrollmentsByStatusParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		out[r.Status] = r.N
+	}
+	return out, nil
 }
 func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, error) {
 	return s.q.GetCampaign(ctx, gen.GetCampaignParams{ID: id, WorkspaceID: ws})
