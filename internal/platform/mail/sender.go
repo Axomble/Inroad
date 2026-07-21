@@ -16,6 +16,12 @@ type Message struct {
 	Subject             string
 	BodyText, BodyHTML  string
 	ListUnsubscribe     string // full URL for the List-Unsubscribe header + footer
+	// Threading headers for multi-step sequences. InReplyTo is the parent
+	// step's Message-ID; References is the accumulated chain. Both empty on a
+	// thread's first message. Dormant until reply detection lands, but sent
+	// now so replies thread correctly in the recipient's client.
+	InReplyTo  string
+	References string
 }
 
 // NetSender sends mail over SMTP, applying the same SSRF host vetting as the
@@ -47,29 +53,10 @@ func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
 		return "", err
 	}
 
-	m := gomail.NewMsg()
-	if err := m.FromFormat(msg.FromName, msg.FromEmail); err != nil {
-		return "", fmt.Errorf("from: %w", err)
+	m, err := buildMessage(msg)
+	if err != nil {
+		return "", err
 	}
-	if err := m.To(msg.To); err != nil {
-		return "", fmt.Errorf("to: %w", err)
-	}
-	m.Subject(msg.Subject)
-	if msg.BodyText != "" {
-		m.SetBodyString(gomail.TypeTextPlain, msg.BodyText)
-	}
-	if msg.BodyHTML != "" {
-		if msg.BodyText != "" {
-			m.AddAlternativeString(gomail.TypeTextHTML, msg.BodyHTML)
-		} else {
-			m.SetBodyString(gomail.TypeTextHTML, msg.BodyHTML)
-		}
-	}
-	if msg.ListUnsubscribe != "" {
-		m.SetListUnsubscribe(msg.ListUnsubscribe)
-		m.SetListUnsubscribePost()
-	}
-	m.SetMessageID()
 
 	dialer := &net.Dialer{Timeout: s.Timeout}
 	dialFn := func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -103,4 +90,42 @@ func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
 		return "", fmt.Errorf("send: %w", err)
 	}
 	return m.GetMessageID(), nil
+}
+
+// buildMessage assembles the gomail message (headers, bodies, threading)
+// without dialing, so the composition — including In-Reply-To/References — is
+// unit-testable independent of any SMTP server.
+func buildMessage(msg Message) (*gomail.Msg, error) {
+	m := gomail.NewMsg()
+	if err := m.FromFormat(msg.FromName, msg.FromEmail); err != nil {
+		return nil, fmt.Errorf("from: %w", err)
+	}
+	if err := m.To(msg.To); err != nil {
+		return nil, fmt.Errorf("to: %w", err)
+	}
+	m.Subject(msg.Subject)
+	if msg.BodyText != "" {
+		m.SetBodyString(gomail.TypeTextPlain, msg.BodyText)
+	}
+	if msg.BodyHTML != "" {
+		if msg.BodyText != "" {
+			m.AddAlternativeString(gomail.TypeTextHTML, msg.BodyHTML)
+		} else {
+			m.SetBodyString(gomail.TypeTextHTML, msg.BodyHTML)
+		}
+	}
+	if msg.ListUnsubscribe != "" {
+		m.SetListUnsubscribe(msg.ListUnsubscribe)
+		m.SetListUnsubscribePost()
+	}
+	// Threading: set only when present (a thread's first message has neither),
+	// so root messages don't carry empty In-Reply-To/References headers.
+	if msg.InReplyTo != "" {
+		m.SetGenHeader(gomail.HeaderInReplyTo, msg.InReplyTo)
+	}
+	if msg.References != "" {
+		m.SetGenHeader(gomail.HeaderReferences, msg.References)
+	}
+	m.SetMessageID()
+	return m, nil
 }
