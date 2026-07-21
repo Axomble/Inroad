@@ -9,6 +9,11 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
+// SubRouter registers additional routes onto the campaign router. Sub-resources
+// (sequence steps) implement it so they live under /campaigns/{id} and inherit
+// the auth middleware — chi disallows two routers mounted at the same prefix.
+type SubRouter interface{ Register(r chi.Router) }
+
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(auth.RequireAuth(h.jwtSecret))
@@ -16,6 +21,9 @@ func (h *Handler) Routes() http.Handler {
 	r.Get("/", h.list)
 	r.Get("/{id}", h.get)
 	r.Post("/{id}/launch", h.launch)
+	for _, s := range h.subs {
+		s.Register(r)
+	}
 	return r
 }
 

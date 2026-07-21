@@ -17,10 +17,15 @@ type Handler struct {
 	svc       *Service
 	jwtSecret []byte
 	enq       Enqueuer
+	subs      []SubRouter
 }
 
-func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq}
+// NewHandler builds the campaign handler. Optional subs register additional
+// routes under the campaign scope (e.g. sequence steps at /{id}/steps) so
+// sub-resources share the {id} param and auth middleware without campaign
+// importing their packages.
+func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer, subs ...SubRouter) *Handler {
+	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq, subs: subs}
 }
 
 type createRequest struct {
