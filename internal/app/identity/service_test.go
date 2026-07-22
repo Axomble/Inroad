@@ -19,7 +19,8 @@ type fakeStore struct {
 	members        map[uuid.UUID][]gen.ListMembersByUserRow // by user id
 	memberByPair   map[[2]uuid.UUID]gen.WorkspaceMember     // [wsID, userID] -> member
 	sessions       map[uuid.UUID]gen.Session
-	sessionsByHash map[string]uuid.UUID // hex(hash) -> session id
+	sessionsByHash map[string]uuid.UUID      // hex(hash) -> session id
+	tokens         map[string]*fakeUserToken // hashKey(hash) -> token
 
 	registerErr error
 	nextWS      uuid.UUID
@@ -40,6 +41,7 @@ func newFakeStore() *fakeStore {
 		memberByPair:   map[[2]uuid.UUID]gen.WorkspaceMember{},
 		sessions:       map[uuid.UUID]gen.Session{},
 		sessionsByHash: map[string]uuid.UUID{},
+		tokens:         map[string]*fakeUserToken{},
 	}
 }
 

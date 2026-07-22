@@ -3,12 +3,22 @@ package identity
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
+
+// ErrTokenInvalid is returned by ConsumeUserToken when the presented raw
+// token doesn't match a stored hash for the given kind, or the matching row
+// is already consumed or expired.
+var ErrTokenInvalid = errors.New("token invalid or expired")
 
 // Store wraps the sqlc-generated queries for the identity domain (users,
 // workspaces, workspace members, sessions) and adds the one multi-statement
@@ -153,6 +163,56 @@ func (s *Store) RevokeFamily(ctx context.Context, familyID uuid.UUID) error {
 // RevokeAllForUser marks every active session belonging to a user as revoked.
 func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
 	return s.q.RevokeAllForUser(ctx, userID)
+}
+
+// IssueUserToken mints a new opaque single-use token of the given kind
+// (email verify, password reset, ...) for userID, persisting only its
+// SHA-256 hash with an expiry of ttl from now. Returns the raw token for the
+// caller to embed in a link/email; the raw value is never stored.
+func (s *Store) IssueUserToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration) (string, error) {
+	raw, hash, err := auth.NewOpaqueToken()
+	if err != nil {
+		return "", err
+	}
+	_, err = s.q.CreateUserToken(ctx, gen.CreateUserTokenParams{
+		UserID:    userID,
+		Kind:      gen.UserTokenKind(kind),
+		TokenHash: hash,
+		ExpiresAt: pgxTimestamp(time.Now().Add(ttl)),
+	})
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// ConsumeUserToken looks up a user token by the hash of raw and kind, and
+// atomically marks it consumed (single-use). Returns ErrTokenInvalid if no
+// matching, unconsumed, unexpired row exists — a wrong token, a kind
+// mismatch, a replay, or an expired token all look identical to the caller.
+func (s *Store) ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error) {
+	uid, err := s.q.ConsumeUserToken(ctx, gen.ConsumeUserTokenParams{
+		TokenHash: auth.HashToken(raw),
+		Kind:      gen.UserTokenKind(kind),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrTokenInvalid
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return uid, nil
+}
+
+// CountRecentUserTokens returns how many tokens of kind have been issued to
+// userID since the given time, for rate-limiting repeated issuance (e.g.
+// password-reset requests).
+func (s *Store) CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error) {
+	return s.q.CountRecentUserTokens(ctx, gen.CountRecentUserTokensParams{
+		UserID:    userID,
+		Kind:      gen.UserTokenKind(kind),
+		CreatedAt: pgtype.Timestamptz{Time: since, Valid: true},
+	})
 }
 
 // RepointSessionWorkspace switches a session's active workspace (used when a

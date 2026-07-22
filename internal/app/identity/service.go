@@ -75,6 +75,9 @@ type storeIface interface {
 	RevokeFamily(ctx context.Context, familyID uuid.UUID) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
 	RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error
+	IssueUserToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration) (string, error)
+	ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error)
+	CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error)
 }
 
 // Service implements the core auth logic: registration, login, refresh
