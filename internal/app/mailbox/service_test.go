@@ -28,8 +28,12 @@ type storeRow struct {
 // database. It enforces the same workspace scoping a real Postgres-backed
 // Store would.
 type fakeStore struct {
-	mu   sync.Mutex
-	rows map[uuid.UUID]storeRow
+	mu sync.Mutex
+	// lastCreate records the params of the most recent Create call so OAuth
+	// tests can assert the sealed token landed in SecretCiphertext without a
+	// getWithSecret path (MailboxSafe deliberately omits the ciphertext).
+	lastCreate gen.CreateMailboxParams
+	rows       map[uuid.UUID]storeRow
 }
 
 func newFakeStore() *fakeStore {
@@ -39,6 +43,7 @@ func newFakeStore() *fakeStore {
 func (s *fakeStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (MailboxSafe, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.lastCreate = arg
 	m := MailboxSafe{
 		ID:                 uuid.New(),
 		WorkspaceID:        arg.WorkspaceID,
@@ -155,7 +160,7 @@ func validConnectInput() ConnectInput {
 
 func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t))
+	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	in := validConnectInput()
@@ -191,7 +196,7 @@ func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 
 func TestConnectSMTP_ConnectionTestFailureDoesNotPersist(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{smtpErr: errors.New("dial tcp: connection refused")}, newTestSealer(t))
+	svc := NewService(store, &fakeTester{smtpErr: errors.New("dial tcp: connection refused")}, newTestSealer(t), mail.GoogleOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	_, err := svc.ConnectSMTP(context.Background(), workspaceID, validConnectInput())
@@ -213,7 +218,7 @@ func TestConnectSMTP_ConnectionTestFailureDoesNotPersist(t *testing.T) {
 
 func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t))
+	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	in := validConnectInput()
@@ -229,7 +234,7 @@ func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 
 func TestPauseThenGetShowsPausedStatus(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t))
+	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	m, err := svc.ConnectSMTP(context.Background(), workspaceID, validConnectInput())

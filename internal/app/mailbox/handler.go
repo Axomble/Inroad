@@ -3,7 +3,9 @@ package mailbox
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -11,16 +13,23 @@ import (
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/httpx"
+	"github.com/inroad/inroad/internal/platform/oauthstate"
 )
 
 // Handler exposes the mailbox domain over HTTP. Authentication is applied by
 // the protected router group (see cmd/inroad), not here.
+//
+// jwtSecret signs/verifies the OAuth `state` parameter; appBaseURL is the
+// frontend origin the public callback 302s back to. Both are only used by the
+// Gmail OAuth surface (startGoogleOAuth / googleCallback).
 type Handler struct {
-	svc *Service
+	svc        *Service
+	jwtSecret  []byte
+	appBaseURL string
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, jwtSecret []byte, appBaseURL string) *Handler {
+	return &Handler{svc: svc, jwtSecret: jwtSecret, appBaseURL: appBaseURL}
 }
 
 // connectRequest is the wire shape for POST /. It maps 1:1 onto ConnectInput.
@@ -217,4 +226,72 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// startGoogleOAuth (protected) begins the Gmail connect flow. It reads the
+// workspace from the JWT, signs a 10-minute state binding the callback to that
+// workspace, and returns the Google consent URL for the SPA to redirect to.
+// access_type=offline + prompt=consent force a refresh token every time.
+func (h *Handler) startGoogleOAuth(w http.ResponseWriter, r *http.Request) {
+	wid, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	// State signing stays here (the handler holds jwtSecret); the oauth2 details
+	// live behind the service seam.
+	state := oauthstate.Sign(h.jwtSecret, wid.String(), time.Now(), 10*time.Minute)
+	authURL, err := h.svc.GoogleAuthCodeURL(state)
+	if err != nil {
+		if errors.Is(err, ErrOAuthDisabled) {
+			httpx.Error(w, http.StatusNotImplemented, "gmail oauth not configured")
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"auth_url": authURL})
+}
+
+// googleCallback (public) is the top-level browser navigation Google redirects
+// to. It cannot rely on the JWT cookie (SameSite on a cross-site redirect), so
+// it authenticates from the signed state and derives the workspace from it --
+// never from a request param. It is a browser navigation, so it never returns a
+// 5xx: every outcome 302s back to the SPA with connected=<email> or
+// oauth_error=<reason>; server-side detail is logged, never leaked to the URL.
+func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	redirect := func(query string) {
+		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query, http.StatusFound)
+	}
+	if q.Get("error") != "" || q.Get("code") == "" {
+		redirect("oauth_error=denied")
+		return
+	}
+	wid, err := oauthstate.Verify(h.jwtSecret, q.Get("state"), time.Now())
+	if err != nil {
+		redirect("oauth_error=bad_state")
+		return
+	}
+	wsID, err := uuid.Parse(wid)
+	if err != nil {
+		redirect("oauth_error=bad_state")
+		return
+	}
+	m, err := h.svc.CompleteGoogleOAuth(r.Context(), q.Get("code"), wsID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrDuplicateMailbox):
+			redirect("oauth_error=already_connected")
+		case errors.Is(err, ErrOAuthDisabled):
+			redirect("oauth_error=disabled")
+		case errors.Is(err, ErrValidation):
+			redirect("oauth_error=no_email")
+		default:
+			// Log the detail server-side; never surface internals to the browser.
+			slog.Error("mailbox: gmail oauth callback failed", "err", err)
+			redirect("oauth_error=exchange_failed")
+		}
+		return
+	}
+	redirect("connected=" + url.QueryEscape(m.Email))
 }

@@ -33,10 +33,16 @@ type Service struct {
 	store  Store
 	tester mail.ConnectionTester
 	sealer *crypto.Sealer
+	// oauth holds the app's Google OAuth client config (zero value = Gmail
+	// OAuth disabled); exchanger performs the authorization-code exchange (a
+	// seam so tests fake it without hitting Google). Both drive the Gmail
+	// connect flow in oauth.go.
+	oauth     mail.GoogleOAuth
+	exchanger TokenExchanger
 }
 
-func NewService(store Store, tester mail.ConnectionTester, sealer *crypto.Sealer) *Service {
-	return &Service{store: store, tester: tester, sealer: sealer}
+func NewService(store Store, tester mail.ConnectionTester, sealer *crypto.Sealer, oauth mail.GoogleOAuth, exchanger TokenExchanger) *Service {
+	return &Service{store: store, tester: tester, sealer: sealer, oauth: oauth, exchanger: exchanger}
 }
 
 // ConnectInput carries the fields needed to connect a new SMTP/IMAP mailbox.
