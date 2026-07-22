@@ -45,6 +45,23 @@ type Config struct {
 	// headers the app will trust. Empty = trust none (default). Only the
 	// leftmost IP of X-Forwarded-For is consumed.
 	TrustedProxies []string
+
+	// TransactionalDriver selects the notify.Sender used for system email:
+	// "console" (default, logs only) or "smtp" (dials SystemSMTP*).
+	TransactionalDriver string
+	SystemSMTPHost      string
+	SystemSMTPPort      int
+	SystemSMTPUsername  string
+	SystemSMTPPassword  string
+	SystemEmailFrom     string
+
+	// AppBaseURL is the frontend origin used to build links (verify/reset/
+	// invite) embedded in transactional email.
+	AppBaseURL string
+
+	EmailVerifyTTL   time.Duration
+	PasswordResetTTL time.Duration
+	InviteTTL        time.Duration
 }
 
 func Load() (*Config, error) {
@@ -86,6 +103,17 @@ func Load() (*Config, error) {
 			}
 		}
 	}
+
+	cfg.TransactionalDriver = getenv("INROAD_TRANSACTIONAL_DRIVER", "console")
+	cfg.SystemSMTPHost = getenv("INROAD_SYSTEM_SMTP_HOST", "")
+	cfg.SystemSMTPPort = getenvInt("INROAD_SYSTEM_SMTP_PORT", 587)
+	cfg.SystemSMTPUsername = getenv("INROAD_SYSTEM_SMTP_USERNAME", "")
+	cfg.SystemSMTPPassword = getenv("INROAD_SYSTEM_SMTP_PASSWORD", "")
+	cfg.SystemEmailFrom = getenv("INROAD_SYSTEM_EMAIL_FROM", "")
+	cfg.AppBaseURL = getenv("INROAD_APP_BASE_URL", "http://localhost:5173")
+	cfg.EmailVerifyTTL = getenvDuration("INROAD_EMAIL_VERIFY_TTL", 24*time.Hour)
+	cfg.PasswordResetTTL = getenvDuration("INROAD_PASSWORD_RESET_TTL", time.Hour)
+	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
 
 	return cfg, nil
 }
