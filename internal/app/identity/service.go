@@ -84,6 +84,7 @@ type storeIface interface {
 	ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error)
 	CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error)
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
+	IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error)
 	ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error)
 	CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error)
 	ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]gen.WorkspaceInvite, error)
@@ -449,6 +450,13 @@ func (s *Service) SwitchWorkspace(ctx context.Context, sessionID, userID, target
 // Memberships returns every workspace the user belongs to.
 func (s *Service) Memberships(ctx context.Context, userID uuid.UUID) ([]Membership, error) {
 	return s.memberships(ctx, userID)
+}
+
+// IsEmailVerified reports whether userID has confirmed their email address.
+// A thin pass-through so /auth/me can surface the same freshly-looked-up
+// state RequireVerified gates on (see identity.Store.IsEmailVerified).
+func (s *Service) IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error) {
+	return s.store.IsEmailVerified(ctx, userID)
 }
 
 func (s *Service) memberships(ctx context.Context, userID uuid.UUID) ([]Membership, error) {

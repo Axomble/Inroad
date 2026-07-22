@@ -383,6 +383,8 @@ export type MeResponse = {
   active_workspace_id: string;
   role: string;
   memberships: Membership[];
+  /** Whether the caller has confirmed their email address. */
+  email_verified: boolean;
 };
 export type SwitchWorkspaceResponse = {
   access_token: string;

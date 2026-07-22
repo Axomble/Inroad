@@ -10,17 +10,27 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as DemoRouteImport } from './routes/demo'
+import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as RegisterRouteImport } from './routes/register'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
+import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AcceptInviteRoute = AcceptInviteRouteImport.update({
+  id: '/accept-invite',
+  path: '/accept-invite',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppRoute = AppRouteImport.update({
@@ -33,9 +43,24 @@ const DemoRoute = DemoRouteImport.update({
   path: '/demo',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
+  id: '/forgot-password',
+  path: '/forgot-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
   path: '/register',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AppIndexRoute = AppIndexRouteImport.update({
@@ -58,74 +83,113 @@ const AppMailboxesRoute = AppMailboxesRouteImport.update({
   path: '/mailboxes',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsTeamRoute = AppSettingsTeamRouteImport.update({
+  id: '/settings/team',
+  path: '/settings/team',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/accept-invite': typeof AcceptInviteRoute
   '/app': typeof AppRouteWithChildren
   '/demo': typeof DemoRoute
+  '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/campaigns': typeof AppCampaignsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/': typeof AppIndexRoute
+  '/app/settings/team': typeof AppSettingsTeamRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/accept-invite': typeof AcceptInviteRoute
   '/demo': typeof DemoRoute
+  '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/campaigns': typeof AppCampaignsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app': typeof AppIndexRoute
+  '/app/settings/team': typeof AppSettingsTeamRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/accept-invite': typeof AcceptInviteRoute
   '/app': typeof AppRouteWithChildren
   '/demo': typeof DemoRoute
+  '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/app/campaigns': typeof AppCampaignsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/': typeof AppIndexRoute
+  '/app/settings/team': typeof AppSettingsTeamRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/accept-invite'
     | '/app'
     | '/demo'
+    | '/forgot-password'
     | '/register'
+    | '/reset-password'
+    | '/verify-email'
     | '/app/campaigns'
     | '/app/contacts'
     | '/app/mailboxes'
     | '/app/'
+    | '/app/settings/team'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/accept-invite'
     | '/demo'
+    | '/forgot-password'
     | '/register'
+    | '/reset-password'
+    | '/verify-email'
     | '/app/campaigns'
     | '/app/contacts'
     | '/app/mailboxes'
     | '/app'
+    | '/app/settings/team'
   id:
     | '__root__'
     | '/'
+    | '/accept-invite'
     | '/app'
     | '/demo'
+    | '/forgot-password'
     | '/register'
+    | '/reset-password'
+    | '/verify-email'
     | '/app/campaigns'
     | '/app/contacts'
     | '/app/mailboxes'
     | '/app/'
+    | '/app/settings/team'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AcceptInviteRoute: typeof AcceptInviteRoute
   AppRoute: typeof AppRouteWithChildren
   DemoRoute: typeof DemoRoute
+  ForgotPasswordRoute: typeof ForgotPasswordRoute
   RegisterRoute: typeof RegisterRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
+  VerifyEmailRoute: typeof VerifyEmailRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -135,6 +199,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accept-invite': {
+      id: '/accept-invite'
+      path: '/accept-invite'
+      fullPath: '/accept-invite'
+      preLoaderRoute: typeof AcceptInviteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/app': {
@@ -151,11 +222,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DemoRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/forgot-password': {
+      id: '/forgot-password'
+      path: '/forgot-password'
+      fullPath: '/forgot-password'
+      preLoaderRoute: typeof ForgotPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/register': {
       id: '/register'
       path: '/register'
       fullPath: '/register'
       preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/verify-email': {
+      id: '/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof VerifyEmailRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/app/': {
@@ -186,6 +278,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMailboxesRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/team': {
+      id: '/app/settings/team'
+      path: '/settings/team'
+      fullPath: '/app/settings/team'
+      preLoaderRoute: typeof AppSettingsTeamRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -194,6 +293,7 @@ interface AppRouteChildren {
   AppContactsRoute: typeof AppContactsRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppSettingsTeamRoute: typeof AppSettingsTeamRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -201,15 +301,20 @@ const AppRouteChildren: AppRouteChildren = {
   AppContactsRoute: AppContactsRoute,
   AppMailboxesRoute: AppMailboxesRoute,
   AppIndexRoute: AppIndexRoute,
+  AppSettingsTeamRoute: AppSettingsTeamRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AcceptInviteRoute: AcceptInviteRoute,
   AppRoute: AppRouteWithChildren,
   DemoRoute: DemoRoute,
+  ForgotPasswordRoute: ForgotPasswordRoute,
   RegisterRoute: RegisterRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -242,9 +242,14 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "could not load memberships")
 		return
 	}
+	verified, err := h.svc.IsEmailVerified(r.Context(), uid)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not load verification status")
+		return
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"user_id": claims.UserID, "active_workspace_id": claims.WorkspaceID,
-		"role": claims.Role, "memberships": toMembershipDTOs(mems),
+		"role": claims.Role, "memberships": toMembershipDTOs(mems), "email_verified": verified,
 	})
 }
 

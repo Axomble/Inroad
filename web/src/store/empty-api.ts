@@ -85,6 +85,14 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
     }
   }
 
+  // A gated action (campaign launch, mailbox create) answers 403
+  // email_not_verified — refetch `authMe` everywhere it's subscribed (the
+  // app-wide unverified banner) so the prompt shows up immediately instead
+  // of on its next natural poll.
+  if (result.error?.status === 403 && (result.error.data as { error?: string } | undefined)?.error === 'email_not_verified') {
+    api.dispatch(emptyApi.util.invalidateTags([{ type: 'Session', id: 'CURRENT' }]))
+  }
+
   return result
 }
 
@@ -94,6 +102,6 @@ export const emptyApi = createApi({
   // Tag types are declared centrally so every feature slice can add
   // providesTags/invalidatesTags in its own `enhanceEndpoints` block without
   // needing to redeclare them (and without silently typo'ing a new tag name).
-  tagTypes: ['Mailbox', 'Campaign', 'List', 'Contact', 'Session'] as const,
+  tagTypes: ['Mailbox', 'Campaign', 'List', 'Contact', 'Session', 'Invite'] as const,
   endpoints: () => ({}),
 })

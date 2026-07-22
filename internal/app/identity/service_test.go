@@ -121,6 +121,10 @@ func (f *fakeStore) ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]
 	return f.members[userID], nil
 }
 
+func (f *fakeStore) IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error) {
+	return f.usersByID[userID].EmailVerifiedAt.Valid, nil
+}
+
 func (f *fakeStore) GetMember(ctx context.Context, wsID, userID uuid.UUID) (gen.WorkspaceMember, error) {
 	m, ok := f.memberByPair[[2]uuid.UUID{wsID, userID}]
 	if !ok {

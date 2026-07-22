@@ -6,10 +6,15 @@ import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
 
 /**
- * Authenticated app frame: fixed-viewport header + sidebar over the chrome,
- * with the content surface reading as one continuous frame (rounded top-left
- * where it meets the chrome). Below md the sidebar collapses to a drawer;
- * its open state lives in the `ui` redux slice.
+ * Authenticated app frame: header + sidebar over the chrome, with the
+ * content surface reading as one continuous frame (rounded top-left where it
+ * meets the chrome). Below md the sidebar collapses to a drawer; its open
+ * state lives in the `ui` redux slice.
+ *
+ * Sizes to `h-full` rather than owning the viewport height itself — the
+ * caller (`routes/app.tsx`) reserves `h-dvh` on an outer wrapper so it can
+ * stack an unverified-email banner above the shell without either
+ * overflowing the viewport or fighting this component's internal flex math.
  */
 export function AppShell({
   children,
@@ -26,7 +31,7 @@ export function AppShell({
 
   return (
     <TooltipProvider>
-      <div className="flex h-dvh flex-col overflow-hidden bg-rail text-foreground">
+      <div className="flex h-full flex-col overflow-hidden bg-rail text-foreground">
         <AppHeader onToggleNav={() => dispatch(toggleSidebar())} rightSlot={rightSlot} />
 
         <div className="flex min-h-0 flex-1">

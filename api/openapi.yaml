@@ -459,7 +459,7 @@ components:
         role: { type: string }
     MeResponse:
       type: object
-      required: [user_id, active_workspace_id, role, memberships]
+      required: [user_id, active_workspace_id, role, memberships, email_verified]
       properties:
         user_id: { type: string }
         active_workspace_id: { type: string }
@@ -467,6 +467,7 @@ components:
         memberships:
           type: array
           items: { $ref: '#/components/schemas/Membership' }
+        email_verified: { type: boolean, description: Whether the caller has confirmed their email address. }
     SwitchWorkspaceRequest:
       type: object
       required: [workspace_id]
