@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,9 +82,13 @@ func advanceTask(t *testing.T) *asynq.Task {
 	return asynq.NewTask(queue.TaskSequenceAdvance, b)
 }
 
+const testBaseURL = "https://app.test"
+
+var testTrackingSecret = []byte("0123456789abcdef0123456789abcdef")
+
 func run(t *testing.T, core coreapi.Client, s Sender, enq Enqueuer) error {
 	t.Helper()
-	return AdvanceHandler(core, s, enq)(context.Background(), advanceTask(t))
+	return AdvanceHandler(core, s, enq, testBaseURL, testTrackingSecret)(context.Background(), advanceTask(t))
 }
 
 func TestAdvanceSkipIsNoOp(t *testing.T) {
@@ -196,6 +201,47 @@ func TestAdvanceCompletedDoesNotReschedule(t *testing.T) {
 	}
 	if enq.atCalled {
 		t.Fatal("completed enrollment must not schedule another advance")
+	}
+}
+
+// TestAdvanceInjectsTrackingWhenEnabled proves the step-send path rewrites
+// the HTML body's links and appends an open pixel when the job's campaign has
+// tracking enabled, using the job's (pre-generated) SendID as the token
+// subject, and leaves the unsubscribe link untouched.
+func TestAdvanceInjectsTrackingWhenEnabled(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{
+		EffectiveDailyCap: 100, SentToday: 0, ToEmail: "a@b.io", SendID: "22222222-2222-4222-8222-222222222222",
+		Subject: "Hi", BodyText: "yo",
+		BodyHTML:        `<html><body><a href="https://example.com/x">click</a></body></html>`,
+		UnsubURL:        testBaseURL + "/u/tok",
+		TrackingEnabled: true,
+	}}
+	snd, enq := &fakeSender{id: "<mid@x>"}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snd.sent.BodyHTML, "/t/c/") || !strings.Contains(snd.sent.BodyHTML, "/t/o/") {
+		t.Errorf("expected rewritten click link + open pixel, got %q", snd.sent.BodyHTML)
+	}
+	if !strings.Contains(snd.sent.BodyHTML, testBaseURL+"/u/tok") {
+		t.Errorf("unsubscribe link must remain untouched, got %q", snd.sent.BodyHTML)
+	}
+}
+
+// TestAdvanceSkipsTrackingWhenDisabled proves TrackingEnabled=false leaves the
+// step's HTML body unrewritten.
+func TestAdvanceSkipsTrackingWhenDisabled(t *testing.T) {
+	html := `<html><body><a href="https://example.com/x">click</a></body></html>`
+	core := &stubCore{job: coreapi.StepSendJob{
+		EffectiveDailyCap: 100, ToEmail: "a@b.io", SendID: "22222222-2222-4222-8222-222222222222",
+		Subject: "Hi", BodyText: "yo", BodyHTML: html, TrackingEnabled: false,
+	}}
+	snd, enq := &fakeSender{id: "<mid@x>"}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snd.sent.BodyHTML, "/t/c/") || strings.Contains(snd.sent.BodyHTML, "/t/o/") {
+		t.Errorf("tracking disabled must leave the HTML unrewritten, got %q", snd.sent.BodyHTML)
 	}
 }
 

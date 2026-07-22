@@ -18,6 +18,12 @@ type Config struct {
 	JWTSecret   []byte
 	MasterKey   []byte
 
+	// TrackingSecret signs open/click tracking tokens (internal/platform/track).
+	// Dedicated so rotating tracking links doesn't invalidate sessions; falls
+	// back to JWTSecret when unset, so self-hosters aren't forced to mint a
+	// second secret on upgrade.
+	TrackingSecret []byte
+
 	// MailAllowPrivateHosts permits mailbox SMTP/IMAP hosts on RFC1918/ULA
 	// private ranges. Default true for self-hosted operators reaching internal
 	// mail servers; set false for multi-tenant Cloud. Loopback, link-local
@@ -77,6 +83,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("INROAD_JWT_SECRET must be set and at least 16 bytes")
 	}
 	cfg.JWTSecret = []byte(secret)
+
+	if trackingSecret := os.Getenv("INROAD_TRACKING_SECRET"); trackingSecret != "" {
+		// Same floor as INROAD_JWT_SECRET: an explicitly-set weak secret fails
+		// closed rather than silently signing tracking tokens with a guessable
+		// key. The fallback below inherits JWTSecret, which already met this
+		// bar, so it needs no separate check.
+		if len(trackingSecret) < 16 {
+			return nil, fmt.Errorf("INROAD_TRACKING_SECRET must be at least 16 bytes")
+		}
+		cfg.TrackingSecret = []byte(trackingSecret)
+	} else {
+		cfg.TrackingSecret = cfg.JWTSecret
+	}
 
 	rawKey, err := base64.StdEncoding.DecodeString(os.Getenv("INROAD_MASTER_KEY"))
 	if err != nil {

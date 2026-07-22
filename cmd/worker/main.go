@@ -72,7 +72,7 @@ func main() {
 
 	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency)
 	mux := queue.NewMux()
-	worker.Register(mux, core, sndr, reader, enq)
+	worker.Register(mux, core, sndr, reader, enq, cfg.PublicURL, cfg.TrackingSecret)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {

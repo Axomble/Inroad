@@ -78,6 +78,15 @@ WHERE id = $1 AND workspace_id = $2 AND thread_root_id = '';
 SELECT status, count(*) AS n FROM sequence_enrollments
 WHERE campaign_id = $1 AND workspace_id = $2 GROUP BY status;
 
+-- name: CountEnrollmentsByStopReason :many
+-- Terminal (stopped) enrollments grouped by stop_reason, for the per-campaign
+-- reply/bounce/unsubscribe metrics rollup. Distinct from
+-- CountEnrollmentsByStatus, which groups by lifecycle status
+-- (active/completed/stopped) for the detail view's enrollment-count widget.
+SELECT stop_reason, count(*) AS n FROM sequence_enrollments
+WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'stopped'
+GROUP BY stop_reason;
+
 -- name: ListDueEnrollments :many
 -- Sweeper hot path: active enrollments whose next_due_at passed the reconcile
 -- window. Served by the partial idx_enrollments_due. Capped so one sweep tick

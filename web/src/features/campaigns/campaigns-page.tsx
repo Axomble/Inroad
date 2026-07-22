@@ -15,6 +15,7 @@ import type { Campaign } from '@/store/api'
 import { useListCampaignsQuery, useGetCampaignQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
+import { MetricsPanel } from './metrics-panel'
 
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
@@ -173,6 +174,10 @@ function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
           <Stat label="Failed" value={n('failed')} dot={<Dot className="bg-danger" />} />
           <Stat label="Skipped" value={n('skipped')} dot={<Dot className="bg-warn" />} />
         </div>
+      )}
+
+      {!isLoading && (
+        <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
       )}
     </div>
   )

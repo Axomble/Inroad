@@ -97,6 +97,46 @@ func (q *Queries) CountEnrollmentsByStatus(ctx context.Context, arg CountEnrollm
 	return items, nil
 }
 
+const countEnrollmentsByStopReason = `-- name: CountEnrollmentsByStopReason :many
+SELECT stop_reason, count(*) AS n FROM sequence_enrollments
+WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'stopped'
+GROUP BY stop_reason
+`
+
+type CountEnrollmentsByStopReasonParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type CountEnrollmentsByStopReasonRow struct {
+	StopReason *string `json:"stop_reason"`
+	N          int64   `json:"n"`
+}
+
+// Terminal (stopped) enrollments grouped by stop_reason, for the per-campaign
+// reply/bounce/unsubscribe metrics rollup. Distinct from
+// CountEnrollmentsByStatus, which groups by lifecycle status
+// (active/completed/stopped) for the detail view's enrollment-count widget.
+func (q *Queries) CountEnrollmentsByStopReason(ctx context.Context, arg CountEnrollmentsByStopReasonParams) ([]CountEnrollmentsByStopReasonRow, error) {
+	rows, err := q.db.Query(ctx, countEnrollmentsByStopReason, arg.CampaignID, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountEnrollmentsByStopReasonRow
+	for rows.Next() {
+		var i CountEnrollmentsByStopReasonRow
+		if err := rows.Scan(&i.StopReason, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const enrollListMembers = `-- name: EnrollListMembers :many
 INSERT INTO sequence_enrollments (workspace_id, campaign_id, contact_id, next_due_at)
 SELECT cam.workspace_id, cam.id, lm.contact_id,

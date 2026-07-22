@@ -49,6 +49,17 @@ type Store interface {
 	ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error)
 	// EnrollmentCounts returns enrollment counts grouped by status.
 	EnrollmentCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error)
+	// EngagementCounts returns (opensIndicative, clicks) sourced from
+	// tracking_events: opens via the human-open filter (CountHumanOpens),
+	// clicks via CountEngagedSendsByKind.
+	EngagementCounts(ctx context.Context, ws, campaignID uuid.UUID) (opens, clicks int64, err error)
+	// StopReasonCounts returns terminal-enrollment counts keyed by stop_reason
+	// (replied/bounced/suppressed/manual/failed) for the reply/bounce/unsub
+	// metrics rollup. Distinct from EnrollmentCounts, which groups by
+	// lifecycle status.
+	StopReasonCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error)
+	// SetTracking flips the campaign's tracking_enabled flag.
+	SetTracking(ctx context.Context, ws, campaignID uuid.UUID, enabled bool) error
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -128,6 +139,53 @@ func (s *PgStore) EnrollmentCounts(ctx context.Context, ws, campaignID uuid.UUID
 	}
 	return out, nil
 }
+
+// EngagementCounts aggregates the two tracking-event-derived metrics: opens
+// (human-open filtered) and clicks (the reliable signal). CountEngagedSendsByKind
+// returns a row per kind present in the campaign's events; a campaign with no
+// clicks yet simply has no 'click' row, so the loop leaves clicks at 0.
+func (s *PgStore) EngagementCounts(ctx context.Context, ws, campaignID uuid.UUID) (int64, int64, error) {
+	opens, err := s.q.CountHumanOpens(ctx, gen.CountHumanOpensParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return 0, 0, err
+	}
+	rows, err := s.q.CountEngagedSendsByKind(ctx, gen.CountEngagedSendsByKindParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return 0, 0, err
+	}
+	var clicks int64
+	for _, r := range rows {
+		if r.Kind == gen.TrackingEventKindClick {
+			clicks = r.N
+		}
+	}
+	return opens, clicks, nil
+}
+
+func (s *PgStore) StopReasonCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error) {
+	rows, err := s.q.CountEnrollmentsByStopReason(ctx, gen.CountEnrollmentsByStopReasonParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		// stop_reason is nullable in the DB (CHECK allows NULL); StopEnrollment
+		// always sets one, so a nil here would be a data anomaly rather than
+		// normal flow. Skip it rather than panic on the dereference.
+		if r.StopReason == nil {
+			continue
+		}
+		out[*r.StopReason] = r.N
+	}
+	return out, nil
+}
+
+func (s *PgStore) SetTracking(ctx context.Context, ws, campaignID uuid.UUID, enabled bool) error {
+	return s.q.SetCampaignTracking(ctx, gen.SetCampaignTrackingParams{
+		ID: campaignID, WorkspaceID: ws, TrackingEnabled: enabled,
+	})
+}
+
 func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.Campaign, error) {
 	return s.q.GetCampaign(ctx, gen.GetCampaignParams{ID: id, WorkspaceID: ws})
 }
