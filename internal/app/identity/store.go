@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/app/auth"
@@ -211,8 +210,14 @@ func (s *Store) CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kin
 	return s.q.CountRecentUserTokens(ctx, gen.CountRecentUserTokensParams{
 		UserID:    userID,
 		Kind:      gen.UserTokenKind(kind),
-		CreatedAt: pgtype.Timestamptz{Time: since, Valid: true},
+		CreatedAt: pgxTimestamp(since),
 	})
+}
+
+// SetEmailVerified marks a user's email as verified (sets email_verified_at
+// to now).
+func (s *Store) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
+	return s.q.SetEmailVerified(ctx, id)
 }
 
 // RepointSessionWorkspace switches a session's active workspace (used when a

@@ -28,6 +28,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
@@ -57,9 +58,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	sender, err := notify.New(notify.Config{
+		Driver: cfg.TransactionalDriver, SMTPHost: cfg.SystemSMTPHost, SMTPPort: cfg.SystemSMTPPort,
+		SMTPUsername: cfg.SystemSMTPUsername, SMTPPassword: cfg.SystemSMTPPassword, From: cfg.SystemEmailFrom,
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Error("transactional sender init failed", "err", err)
+		os.Exit(1)
+	}
+
 	queries := gen.New(pool)
 	identHandler := identity.NewHandler(
-		identity.NewService(identity.NewStore(pool), cfg.RefreshTokenTTL),
+		identity.NewService(identity.NewStore(pool), cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
+			cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL),
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
 		cfg.TrustedProxies,
 	)

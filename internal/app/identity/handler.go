@@ -13,6 +13,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/httpx"
+	"github.com/inroad/inroad/internal/platform/validate"
 )
 
 // Handler exposes the identity domain (register/login/refresh/logout,
@@ -307,6 +308,53 @@ func (h *Handler) switchWorkspace(w http.ResponseWriter, r *http.Request) {
 		"access_token": access, "expires_in": int(h.accessTTL.Seconds()),
 		"active_workspace_id": activeWS.String(), "role": role,
 	})
+}
+
+// verifyEmail consumes an email_verify token and marks the owning user's
+// email verified. Public: the token itself is the credential, so no bearer
+// auth is required (a user isn't logged in yet on some flows, e.g. clicking
+// the link from a fresh signup on another device).
+func (h *Handler) verifyEmail(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"token" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.svc.VerifyEmail(r.Context(), body.Token); err != nil {
+		if errors.Is(err, ErrTokenInvalid) {
+			httpx.Error(w, http.StatusBadRequest, "invalid or expired token")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, "could not verify email")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resendVerification re-sends the verification email for the authenticated
+// caller, rate-limited to at most one every 60 seconds.
+func (h *Handler) resendVerification(w http.ResponseWriter, r *http.Request) {
+	claims, _ := auth.UserFromContext(r.Context())
+	uid, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	if err := h.svc.ResendVerification(r.Context(), uid); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			httpx.Error(w, http.StatusTooManyRequests, "too many requests, try again shortly")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, "could not resend verification email")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // isUniqueViolation reports whether err represents a Postgres unique-key

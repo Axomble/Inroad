@@ -18,11 +18,13 @@ func (h *Handler) Routes(secret []byte) http.Handler {
 	r.Post("/login", h.login)
 	r.With(auth.RequireCSRF).Post("/refresh", h.refresh)
 	r.With(auth.RequireCSRF).Post("/logout", h.logout)
+	r.Post("/verify-email", h.verifyEmail)
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.RequireAuth(secret))
 		pr.Get("/me", h.me)
 		pr.Post("/logout-all", h.logoutAll)
 		pr.Post("/switch-workspace", h.switchWorkspace)
+		pr.Post("/verify-email/resend", h.resendVerification)
 	})
 	return r
 }

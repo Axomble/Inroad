@@ -3,12 +3,15 @@ package identity
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/notify"
 )
 
 var (
@@ -16,6 +19,7 @@ var (
 	ErrNoWorkspace        = errors.New("user has no workspace")
 	ErrRefreshInvalid     = errors.New("refresh token invalid")
 	ErrNotMember          = errors.New("not a member of target workspace")
+	ErrRateLimited        = errors.New("too many requests")
 )
 
 // dummyHash is a real argon2id hash of an arbitrary, unused password,
@@ -78,19 +82,32 @@ type storeIface interface {
 	IssueUserToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration) (string, error)
 	ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error)
 	CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error)
+	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 }
 
 // Service implements the core auth logic: registration, login, refresh
-// rotation with reuse detection, logout, and workspace switching.
+// rotation with reuse detection, logout, workspace switching, and email
+// verification.
 type Service struct {
 	store      storeIface
 	refreshTTL time.Duration
+	sender     notify.Sender
+	appBaseURL string
+	verifyTTL  time.Duration
+	resetTTL   time.Duration
+	inviteTTL  time.Duration
 }
 
 // NewService constructs a Service backed by store, issuing refresh tokens
-// that expire after refreshTTL.
-func NewService(store storeIface, refreshTTL time.Duration) *Service {
-	return &Service{store: store, refreshTTL: refreshTTL}
+// that expire after refreshTTL. sender delivers transactional email
+// (verify/reset/invite); appBaseURL is the frontend origin links are built
+// against; verifyTTL/resetTTL/inviteTTL size the lifetime of each single-use
+// token kind.
+func NewService(store storeIface, refreshTTL time.Duration, sender notify.Sender, appBaseURL string, verifyTTL, resetTTL, inviteTTL time.Duration) *Service {
+	return &Service{
+		store: store, refreshTTL: refreshTTL, sender: sender, appBaseURL: appBaseURL,
+		verifyTTL: verifyTTL, resetTTL: resetTTL, inviteTTL: inviteTTL,
+	}
 }
 
 func (s *Service) newSessionRow(ctx context.Context, userID, wsID, familyID uuid.UUID, ua, ip string) (uuid.UUID, string, error) {
@@ -149,11 +166,91 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (Session, erro
 	if err != nil {
 		return Session{}, err // handler maps unique-violation -> 409
 	}
+	// Email verification is best-effort: a failure to issue the token or
+	// send the email must never fail registration, or a transactional-email
+	// outage would lock every new signup out of an account they legitimately
+	// created. The user simply stays unverified until they hit "resend".
+	if tokRaw, err := s.store.IssueUserToken(ctx, res.UserID, "email_verify", s.verifyTTL); err != nil {
+		slog.Error("identity: failed to issue verification token", "err", err, "user_id", res.UserID)
+	} else {
+		link := s.appBaseURL + "/verify-email?token=" + url.QueryEscape(tokRaw)
+		if err := s.sender.Send(ctx, notify.VerifyEmail(link)); err != nil {
+			slog.Error("identity: failed to send verification email", "err", err, "user_id", res.UserID)
+		}
+	}
 	mems, _ := s.memberships(ctx, res.UserID)
 	return Session{
 		UserID: res.UserID, WorkspaceID: res.WorkspaceID, Role: "owner",
 		SessionID: res.SessionID, RawRefresh: raw, Memberships: mems,
 	}, nil
+}
+
+// VerifyEmail atomically consumes an email_verify token and, if valid, marks
+// the owning user's email as verified. ConsumeUserToken enforces single-use
+// and expiry server-side in one statement, so there is no separate
+// check-then-act window for a token to be replayed in.
+func (s *Service) VerifyEmail(ctx context.Context, raw string) error {
+	uid, err := s.store.ConsumeUserToken(ctx, raw, "email_verify")
+	if err != nil {
+		return err // ErrTokenInvalid
+	}
+	return s.store.SetEmailVerified(ctx, uid)
+}
+
+// tokenRateLimitWindow and tokenRateLimitHourlyMax bound how often a single
+// user can trigger a fresh single-use token (email verify, password reset,
+// ...): at most one per cooldown window, and no more than the hourly cap
+// even if each individual request clears the cooldown.
+const (
+	tokenRateLimitWindow    = time.Minute
+	tokenRateLimitHourlyMax = 5
+)
+
+// tokenRateLimited reports whether userID has requested a fresh token of
+// kind too recently: either one was issued within the last minute (cooldown
+// between individual requests), or tokenRateLimitHourlyMax or more have been
+// issued within the last hour (a coarser cap bounding how many emails a
+// single account can trigger even if every individual request waits out the
+// cooldown - e.g. an email-bomb attempt spaced just over 60s apart).
+//
+// Both checks are a plain count-then-issue read with no locking against the
+// caller's later IssueUserToken call, so a tight race between concurrent
+// requests could let a handful of extra sends through the window. This is
+// accepted for now: the hourly cap bounds the resulting blast radius, and
+// DB-level locking (e.g. an advisory lock keyed on user+kind) is deferred as
+// a possible future hardening rather than done here.
+func (s *Service) tokenRateLimited(ctx context.Context, userID uuid.UUID, kind string) (bool, error) {
+	nRecent, err := s.store.CountRecentUserTokens(ctx, userID, kind, time.Now().Add(-tokenRateLimitWindow))
+	if err != nil {
+		return false, err
+	}
+	if nRecent > 0 {
+		return true, nil
+	}
+	nHour, err := s.store.CountRecentUserTokens(ctx, userID, kind, time.Now().Add(-time.Hour))
+	if err != nil {
+		return false, err
+	}
+	return nHour >= tokenRateLimitHourlyMax, nil
+}
+
+// ResendVerification issues a fresh email_verify token and re-sends the
+// verification email, rejecting with ErrRateLimited if the caller is within
+// the cooldown window or has hit the hourly cap (see tokenRateLimited).
+func (s *Service) ResendVerification(ctx context.Context, userID uuid.UUID) error {
+	limited, err := s.tokenRateLimited(ctx, userID, "email_verify")
+	if err != nil {
+		return err
+	}
+	if limited {
+		return ErrRateLimited
+	}
+	raw, err := s.store.IssueUserToken(ctx, userID, "email_verify", s.verifyTTL)
+	if err != nil {
+		return err
+	}
+	link := s.appBaseURL + "/verify-email?token=" + url.QueryEscape(raw)
+	return s.sender.Send(ctx, notify.VerifyEmail(link))
 }
 
 // Login verifies credentials, activates the user's most-recently-seen
