@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -15,14 +16,15 @@ type SubRouter interface{ Register(r chi.Router) }
 
 // Routes returns this domain's HTTP surface. Every route requires an
 // authenticated caller; auth is enforced by the protected router group (see
-// cmd/inroad), and sub-resources registered here inherit it by being mounted
-// under /campaigns.
-func (h *Handler) Routes() http.Handler {
+// cmd/inroad). launch additionally requires a verified email (checker); and
+// sub-resources (sequence steps) registered here inherit the group's auth by
+// being mounted under /campaigns.
+func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r := chi.NewRouter()
 	r.Post("/", h.create)
 	r.Get("/", h.list)
 	r.Get("/{id}", h.get)
-	r.Post("/{id}/launch", h.launch)
+	r.With(auth.RequireVerified(checker)).Post("/{id}/launch", h.launch)
 	for _, s := range h.subs {
 		s.Register(r)
 	}

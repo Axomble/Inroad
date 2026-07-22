@@ -29,6 +29,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
@@ -58,9 +59,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	sender, err := notify.New(notify.Config{
+		Driver: cfg.TransactionalDriver, SMTPHost: cfg.SystemSMTPHost, SMTPPort: cfg.SystemSMTPPort,
+		SMTPUsername: cfg.SystemSMTPUsername, SMTPPassword: cfg.SystemSMTPPassword, From: cfg.SystemEmailFrom,
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Error("transactional sender init failed", "err", err)
+		os.Exit(1)
+	}
+
 	queries := gen.New(pool)
+	identStore := identity.NewStore(pool)
 	identHandler := identity.NewHandler(
-		identity.NewService(identity.NewStore(pool), cfg.RefreshTokenTTL),
+		identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
+			cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL),
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
 		cfg.TrustedProxies,
 	)
@@ -105,7 +118,7 @@ func main() {
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 	}
 	protected := []mount{
-		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes()},
+		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},
 		{pattern: "/api/v1/lists", handler: list.NewHandler(listSvc).Routes()},
 		// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
 		// overlap with /api/v1/lists that would otherwise 404 the import route.
@@ -113,8 +126,10 @@ func main() {
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
 		// /campaigns/{id}/steps lives under the protected group and inherits its
-		// RequireAuth — no separate mount, no per-step guard needed.
-		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes()},
+		// RequireAuth. Routes(identStore) additionally applies RequireVerified to
+		// /launch (email-gated sending).
+		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes(identStore)},
+		{pattern: "/api/v1/workspaces", handler: identHandler.InviteRoutes()},
 	}
 	router := buildRouter(logger, cfg.JWTSecret, public, protected)
 

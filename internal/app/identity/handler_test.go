@@ -17,7 +17,7 @@ import (
 )
 
 func newTestHandler(store *fakeStore) *Handler {
-	svc := NewService(store, time.Hour)
+	svc := newTestService(store)
 	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil)
 }
 
@@ -165,6 +165,57 @@ func TestRefreshFailureClearsCookiesAndReturns401(t *testing.T) {
 		if c.Name == refreshCookieName && c.MaxAge >= 0 {
 			t.Fatal("expected refresh cookie to be cleared (MaxAge < 0)")
 		}
+	}
+}
+
+// TestMeIncludesEmailVerified drives /auth/me through RequireAuth and checks
+// the response reflects the user's verification state: unverified right
+// after register, then true once the store marks email_verified_at set. The
+// frontend's unverified banner (Task 9) has no other way to learn this —
+// SessionResponse omits it deliberately (verification is checked fresh by DB
+// lookup, not baked into the JWT; see RequireVerified).
+func TestMeIncludesEmailVerified(t *testing.T) {
+	store := newFakeStore()
+	h := newTestHandler(store)
+
+	reg, err := h.svc.Register(context.Background(), RegisterInput{
+		WorkspaceName: "Acme", Email: "owner@acme.test", Password: "s3cret-pw", UserAgent: "ua", IP: "1.2.3.4",
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	access, err := auth.IssueToken(h.jwtSecret, auth.Claims{
+		UserID: reg.UserID.String(), WorkspaceID: reg.WorkspaceID.String(), Role: reg.Role, SessionID: reg.SessionID.String(),
+	}, h.accessTTL)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	callMe := func() map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/me", nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		w := httptest.NewRecorder()
+		auth.RequireAuth(h.jwtSecret)(http.HandlerFunc(h.me)).ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return body
+	}
+
+	if verified, _ := callMe()["email_verified"].(bool); verified {
+		t.Fatal("expected email_verified: false right after register")
+	}
+
+	u := store.usersByID[reg.UserID]
+	u.EmailVerifiedAt = pgxTimestamp(time.Now())
+	store.usersByID[reg.UserID] = u
+
+	if verified, _ := callMe()["email_verified"].(bool); !verified {
+		t.Fatal("expected email_verified: true once email_verified_at is set")
 	}
 }
 

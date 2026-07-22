@@ -3,12 +3,21 @@ package identity
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
+
+// ErrTokenInvalid is returned by ConsumeUserToken when the presented raw
+// token doesn't match a stored hash for the given kind, or the matching row
+// is already consumed or expired.
+var ErrTokenInvalid = errors.New("token invalid or expired")
 
 // Store wraps the sqlc-generated queries for the identity domain (users,
 // workspaces, workspace members, sessions) and adds the one multi-statement
@@ -112,6 +121,18 @@ func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error)
 	return s.q.GetUserByID(ctx, id)
 }
 
+// IsEmailVerified reports whether userID has confirmed their email address.
+// Satisfies auth.VerifiedChecker so RequireVerified can gate routes without
+// the auth package importing identity. Reuses GetUserByID rather than adding
+// a new sqlc query since email_verified_at is already selected there.
+func (s *Store) IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error) {
+	u, err := s.q.GetUserByID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return u.EmailVerifiedAt.Valid, nil
+}
+
 // ListMembersByUser returns every workspace membership (with workspace name)
 // for the given user, most recently seen first.
 func (s *Store) ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]gen.ListMembersByUserRow, error) {
@@ -153,6 +174,248 @@ func (s *Store) RevokeFamily(ctx context.Context, familyID uuid.UUID) error {
 // RevokeAllForUser marks every active session belonging to a user as revoked.
 func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
 	return s.q.RevokeAllForUser(ctx, userID)
+}
+
+// IssueUserToken mints a new opaque single-use token of the given kind
+// (email verify, password reset, ...) for userID, persisting only its
+// SHA-256 hash with an expiry of ttl from now. Returns the raw token for the
+// caller to embed in a link/email; the raw value is never stored.
+func (s *Store) IssueUserToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration) (string, error) {
+	raw, hash, err := auth.NewOpaqueToken()
+	if err != nil {
+		return "", err
+	}
+	_, err = s.q.CreateUserToken(ctx, gen.CreateUserTokenParams{
+		UserID:    userID,
+		Kind:      gen.UserTokenKind(kind),
+		TokenHash: hash,
+		ExpiresAt: pgxTimestamp(time.Now().Add(ttl)),
+	})
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// ConsumeUserToken looks up a user token by the hash of raw and kind, and
+// atomically marks it consumed (single-use). Returns ErrTokenInvalid if no
+// matching, unconsumed, unexpired row exists — a wrong token, a kind
+// mismatch, a replay, or an expired token all look identical to the caller.
+func (s *Store) ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error) {
+	uid, err := s.q.ConsumeUserToken(ctx, gen.ConsumeUserTokenParams{
+		TokenHash: auth.HashToken(raw),
+		Kind:      gen.UserTokenKind(kind),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrTokenInvalid
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return uid, nil
+}
+
+// CountRecentUserTokens returns how many tokens of kind have been issued to
+// userID since the given time, for rate-limiting repeated issuance (e.g.
+// password-reset requests).
+func (s *Store) CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error) {
+	return s.q.CountRecentUserTokens(ctx, gen.CountRecentUserTokensParams{
+		UserID:    userID,
+		Kind:      gen.UserTokenKind(kind),
+		CreatedAt: pgxTimestamp(since),
+	})
+}
+
+// SetEmailVerified marks a user's email as verified (sets email_verified_at
+// to now).
+func (s *Store) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
+	return s.q.SetEmailVerified(ctx, id)
+}
+
+// UpdatePasswordHash overwrites a user's password_hash (used by password
+// reset).
+func (s *Store) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error {
+	return s.q.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: id, PasswordHash: hash})
+}
+
+// ResetPasswordTx atomically consumes a password_reset token, overwrites the
+// owning user's password_hash, and revokes every one of their sessions - all
+// in a single transaction, so a crash between steps can never leave the hash
+// updated with old sessions still live (or the reverse). Mirrors RegisterTx's
+// pattern of running several statements as one qtx-scoped unit.
+func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+
+	uid, err := qtx.ConsumeUserToken(ctx, gen.ConsumeUserTokenParams{
+		TokenHash: auth.HashToken(rawToken),
+		Kind:      gen.UserTokenKind(kind),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrTokenInvalid
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := qtx.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: uid, PasswordHash: newHash}); err != nil {
+		return uuid.Nil, err
+	}
+	if err := qtx.RevokeAllForUser(ctx, uid); err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, err
+	}
+	return uid, nil
+}
+
+// CreateInvite persists a new pending workspace invite. A second pending
+// invite for the same (workspace, email) pair fails with a unique-violation
+// (the partial index on workspace_invites) - the caller (Service.CreateInvite)
+// maps that to ErrInviteExists.
+func (s *Store) CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error) {
+	return s.q.CreateInvite(ctx, arg)
+}
+
+// ListPendingInvites returns every pending invite for a workspace.
+func (s *Store) ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]gen.WorkspaceInvite, error) {
+	return s.q.ListPendingInvites(ctx, wsID)
+}
+
+// RevokeInvite marks a pending invite revoked, scoped to its workspace. An
+// invite that's missing, belongs to a different workspace, or is no longer
+// pending silently affects 0 rows - matching the underlying UPDATE ... WHERE.
+func (s *Store) RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) error {
+	return s.q.RevokeInvite(ctx, arg)
+}
+
+// GetWorkspace returns the workspace with the given id.
+func (s *Store) GetWorkspace(ctx context.Context, id uuid.UUID) (gen.Workspace, error) {
+	return s.q.GetWorkspace(ctx, id)
+}
+
+// AcceptInviteTxParams carries the inputs AcceptInviteTx needs.
+// SessionParams mirrors RegisterTx's convention: UserID/WorkspaceID are
+// ignored here - the tx fills them in from the invite it resolves.
+// PasswordHash is nil unless the invited email has no existing account, in
+// which case it must be set (or the tx returns ErrPasswordRequired).
+type AcceptInviteTxParams struct {
+	RawToken      string
+	PasswordHash  *string
+	SessionParams gen.CreateSessionParams
+}
+
+// AcceptInviteTxResult is the tuple of ids/role the caller needs to build a
+// Session.
+type AcceptInviteTxResult struct {
+	WorkspaceID uuid.UUID
+	UserID      uuid.UUID
+	Role        string
+	SessionID   uuid.UUID
+}
+
+// AcceptInviteTx atomically consumes a workspace invite in a single
+// transaction: validates the token by hash (pending, unexpired), resolves the
+// invited email to an existing user or creates one (requiring
+// arg.PasswordHash), adds their workspace_members row at the invite's role
+// (or leaves an existing membership's role untouched - see below), marks the
+// invite accepted, marks the resolved user's email verified (the invite
+// itself proves inbox ownership), and mints the first session - mirroring
+// RegisterTx's "everything or nothing" shape so a crash mid-accept can never
+// leave a consumed invite with no membership, or a new account with no
+// session.
+func (s *Store) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (AcceptInviteTxResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return AcceptInviteTxResult{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+
+	invite, err := qtx.GetInviteByHash(ctx, auth.HashToken(arg.RawToken))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AcceptInviteTxResult{}, ErrTokenInvalid
+		}
+		return AcceptInviteTxResult{}, err
+	}
+	if invite.Status != gen.InviteStatusPending || time.Now().After(pgxTime(invite.ExpiresAt)) {
+		return AcceptInviteTxResult{}, ErrTokenInvalid
+	}
+
+	var userID uuid.UUID
+	existing, err := qtx.GetUserByEmail(ctx, invite.Email)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		if arg.PasswordHash == nil {
+			return AcceptInviteTxResult{}, ErrPasswordRequired
+		}
+		created, err := qtx.CreateUser(ctx, gen.CreateUserParams{Email: invite.Email, PasswordHash: *arg.PasswordHash})
+		if err != nil {
+			return AcceptInviteTxResult{}, err
+		}
+		userID = created.ID
+	case err != nil:
+		return AcceptInviteTxResult{}, err
+	default:
+		userID = existing.ID
+	}
+	if err := qtx.SetEmailVerified(ctx, userID); err != nil {
+		return AcceptInviteTxResult{}, err
+	}
+
+	// Accepting an invite must ADD a membership, never mutate an existing
+	// one's role - a role change is a separate, explicit admin action. Without
+	// this check, an owner or admin invited (accidentally or maliciously) at
+	// a lower role would be silently downgraded the moment they accepted.
+	role := invite.Role
+	member, err := qtx.GetMember(ctx, gen.GetMemberParams{WorkspaceID: invite.WorkspaceID, UserID: userID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		if _, err := qtx.CreateMember(ctx, gen.CreateMemberParams{
+			WorkspaceID: invite.WorkspaceID, UserID: userID, Role: invite.Role,
+		}); err != nil {
+			return AcceptInviteTxResult{}, err
+		}
+	case err != nil:
+		return AcceptInviteTxResult{}, err
+	default:
+		role = member.Role // already a member: keep their existing role
+	}
+	// Guarded UPDATE ... WHERE status='pending': 0 rows means a concurrent
+	// accept already flipped this invite between our earlier status check and
+	// here. Row-level locking inside the transaction serializes a race here -
+	// the first accept's UPDATE wins and this one sees ErrNoRows.
+	if _, err := qtx.MarkInviteAccepted(ctx, invite.ID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AcceptInviteTxResult{}, ErrTokenInvalid
+		}
+		return AcceptInviteTxResult{}, err
+	}
+
+	sp := arg.SessionParams
+	sp.UserID = userID
+	sp.WorkspaceID = invite.WorkspaceID
+	session, err := qtx.CreateSession(ctx, sp)
+	if err != nil {
+		return AcceptInviteTxResult{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return AcceptInviteTxResult{}, err
+	}
+
+	return AcceptInviteTxResult{
+		WorkspaceID: invite.WorkspaceID, UserID: userID, Role: string(role), SessionID: session.ID,
+	}, nil
 }
 
 // RepointSessionWorkspace switches a session's active workspace (used when a

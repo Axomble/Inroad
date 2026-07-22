@@ -67,7 +67,7 @@ func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
 	t.Cleanup(pool.Close)
 
 	h := NewHandler(
-		NewService(NewStore(pool), testRefreshTTL),
+		NewService(NewStore(pool), testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
 		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil,
 	)
 

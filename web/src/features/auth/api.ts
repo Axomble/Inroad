@@ -30,6 +30,15 @@ const authApi = api.enhanceEndpoints({
     authSwitchWorkspace: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
     },
+    // Marks the account verified server-side — refetch `authMe` so the
+    // unverified banner (subscribed everywhere in the app shell) clears
+    // immediately instead of waiting for its next natural refetch.
+    authVerifyEmail: {
+      invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
+    authAcceptInvite: {
+      invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
   },
 })
 
@@ -41,4 +50,9 @@ export const {
   useAuthMeQuery,
   useAuthLogoutAllMutation,
   useAuthSwitchWorkspaceMutation,
+  useAuthVerifyEmailMutation,
+  useAuthResendVerificationMutation,
+  useAuthForgotPasswordMutation,
+  useAuthResetPasswordMutation,
+  useAuthAcceptInviteMutation,
 } = authApi

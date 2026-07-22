@@ -1,6 +1,8 @@
 // Package mail provides SMTP/IMAP connectivity checks used when connecting a
 // mailbox, and (later) sending and polling. It is the only place raw SMTP/IMAP
-// clients are imported.
+// clients are imported for per-user (caller-supplied) mailbox hosts; the
+// operator's system mailbox for transactional email is handled separately by
+// platform/notify.
 package mail
 
 // SMTPConfig holds the outbound settings for a mailbox.

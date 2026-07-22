@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Mail, Megaphone, Users, LayoutDashboard, type LucideIcon } from 'lucide-react'
+import { Mail, Megaphone, Users, LayoutDashboard, Settings, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -19,6 +19,7 @@ const NAV: NavItem[] = [
   { label: 'Mailboxes', to: '/app/mailboxes', icon: Mail },
   { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
   { label: 'Contacts', to: '/app/contacts', icon: Users },
+  { label: 'Team', to: '/app/settings/team', icon: Settings },
 ]
 
 function NavRow({ item }: { item: NavItem }) {

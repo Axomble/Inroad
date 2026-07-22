@@ -9,6 +9,7 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/notify"
 )
 
 func main() {
@@ -25,7 +26,13 @@ func main() {
 	}
 	defer pool.Close()
 
-	svc := identity.NewService(identity.NewStore(pool), time.Hour)
+	sender, err := notify.New(notify.Config{}) // console driver: seed doesn't need real delivery
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "notify:", err)
+		os.Exit(1)
+	}
+	svc := identity.NewService(identity.NewStore(pool), time.Hour, sender, cfg.AppBaseURL,
+		cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL)
 	sess, err := svc.Register(ctx, identity.RegisterInput{
 		WorkspaceName: "Demo Workspace",
 		Email:         "demo@inroad.test",

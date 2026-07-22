@@ -3,6 +3,7 @@ import { runAuthBootstrap } from '@/features/auth/use-auth-bootstrap'
 import { AppShell } from '@/components/layout/app-shell'
 import { AuthHeader } from '@/features/auth/auth-header'
 import { useAuthGuard } from '@/features/auth/use-auth-guard'
+import { UnverifiedBanner } from '@/features/auth/unverified-banner'
 
 /**
  * Authenticated app layout. Guards every /app/* route: no in-memory session ->
@@ -34,8 +35,17 @@ function AppLayout() {
   // of staring at a broken-looking app shell.
   useAuthGuard()
   return (
-    <AppShell rightSlot={<AuthHeader />}>
-      <Outlet />
-    </AppShell>
+    <div className="flex h-dvh flex-col">
+      <UnverifiedBanner />
+      {/* AppShell fills whatever height remains below the banner (h-full,
+          not h-dvh — this wrapper owns the viewport height so the banner
+          can take its own space above the shell without either overflowing
+          or fighting AppShell's internal flex layout). */}
+      <div className="min-h-0 flex-1">
+        <AppShell rightSlot={<AuthHeader />}>
+          <Outlet />
+        </AppShell>
+      </div>
+    </div>
   )
 }
