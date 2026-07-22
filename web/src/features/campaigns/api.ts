@@ -25,6 +25,11 @@ const campaignApi = api.enhanceEndpoints({
     createCampaign: {
       invalidatesTags: [{ type: 'Campaign', id: 'LIST' }],
     },
+    // The tracking-toggle response only echoes `tracking_enabled` — invalidate
+    // the detail tag so the rest of the campaign view (metrics, stats) refetches.
+    updateCampaignTracking: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Campaign', id: arg.id }],
+    },
     launchCampaign: {
       invalidatesTags: (_result, _error, arg) => [
         { type: 'Campaign', id: arg.id },
@@ -39,4 +44,5 @@ export const {
   useGetCampaignQuery,
   useCreateCampaignMutation,
   useLaunchCampaignMutation,
+  useUpdateCampaignTrackingMutation,
 } = campaignApi
