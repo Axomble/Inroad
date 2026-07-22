@@ -13,6 +13,49 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type InviteStatus string
+
+const (
+	InviteStatusPending  InviteStatus = "pending"
+	InviteStatusAccepted InviteStatus = "accepted"
+	InviteStatusRevoked  InviteStatus = "revoked"
+)
+
+func (e *InviteStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = InviteStatus(s)
+	case string:
+		*e = InviteStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for InviteStatus: %T", src)
+	}
+	return nil
+}
+
+type NullInviteStatus struct {
+	InviteStatus InviteStatus `json:"invite_status"`
+	Valid        bool         `json:"valid"` // Valid is true if InviteStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullInviteStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.InviteStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.InviteStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullInviteStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.InviteStatus), nil
+}
+
 type MemberRole string
 
 const (
@@ -54,6 +97,48 @@ func (ns NullMemberRole) Value() (driver.Value, error) {
 		return nil, nil
 	}
 	return string(ns.MemberRole), nil
+}
+
+type UserTokenKind string
+
+const (
+	UserTokenKindEmailVerify   UserTokenKind = "email_verify"
+	UserTokenKindPasswordReset UserTokenKind = "password_reset"
+)
+
+func (e *UserTokenKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = UserTokenKind(s)
+	case string:
+		*e = UserTokenKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for UserTokenKind: %T", src)
+	}
+	return nil
+}
+
+type NullUserTokenKind struct {
+	UserTokenKind UserTokenKind `json:"user_token_kind"`
+	Valid         bool          `json:"valid"` // Valid is true if UserTokenKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullUserTokenKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.UserTokenKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.UserTokenKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullUserTokenKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.UserTokenKind), nil
 }
 
 type Campaign struct {
@@ -164,10 +249,33 @@ type User struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+type UserToken struct {
+	ID         uuid.UUID          `json:"id"`
+	UserID     uuid.UUID          `json:"user_id"`
+	Kind       UserTokenKind      `json:"kind"`
+	TokenHash  []byte             `json:"token_hash"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 type Workspace struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkspaceInvite struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Email       string             `json:"email"`
+	Role        MemberRole         `json:"role"`
+	TokenHash   []byte             `json:"token_hash"`
+	InvitedBy   uuid.UUID          `json:"invited_by"`
+	Status      InviteStatus       `json:"status"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	AcceptedAt  pgtype.Timestamptz `json:"accepted_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type WorkspaceMember struct {

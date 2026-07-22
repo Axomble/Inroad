@@ -66,3 +66,26 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 	)
 	return i, err
 }
+
+const setEmailVerified = `-- name: SetEmailVerified :exec
+UPDATE users SET email_verified_at = now() WHERE id = $1
+`
+
+func (q *Queries) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, setEmailVerified, id)
+	return err
+}
+
+const updatePasswordHash = `-- name: UpdatePasswordHash :exec
+UPDATE users SET password_hash = $2 WHERE id = $1
+`
+
+type UpdatePasswordHashParams struct {
+	ID           uuid.UUID `json:"id"`
+	PasswordHash string    `json:"password_hash"`
+}
+
+func (q *Queries) UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error {
+	_, err := q.db.Exec(ctx, updatePasswordHash, arg.ID, arg.PasswordHash)
+	return err
+}
