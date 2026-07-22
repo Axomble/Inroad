@@ -61,7 +61,7 @@ type InboxPollPayload struct {
 }
 
 // TaskInboxSweep is the periodic reconcile that enqueues an inbox:poll task
-// for every active mailbox with reply detection enabled.
+// for every active mailbox.
 const TaskInboxSweep = "inbox:sweep"
 
 // Client enqueues tasks onto Redis.
@@ -187,7 +187,7 @@ func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
 }
 
 // RegisterInboxSweep registers the periodic inbox:sweep. Runs every 3
-// minutes to fan out inbox:poll tasks for active reply-detection mailboxes.
+// minutes to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 3m", asynq.NewTask(TaskInboxSweep, nil))
 	return err

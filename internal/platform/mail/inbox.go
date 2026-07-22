@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/client"
 )
 
 // NetInboxReader is the production InboxReader. It applies the same SSRF
@@ -26,6 +27,47 @@ func NewNetInboxReader(allowPrivate bool) *NetInboxReader {
 	return &NetInboxReader{Timeout: 15 * time.Second, AllowPrivate: allowPrivate}
 }
 
+// selectInboxReadOnly dials (SSRF-vetted), logs in, and SELECTs INBOX
+// read-only, returning the open client (caller must Logout) and its mailbox
+// status. Shared by Fetch and CurrentState so both go through one vetted
+// dial path.
+func (r *NetInboxReader) selectInboxReadOnly(cfg IMAPConfig) (*client.Client, *imap.MailboxStatus, error) {
+	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	c, err := dialIMAP(addr, cfg, r.Timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := c.Login(cfg.Username, cfg.Password); err != nil {
+		_ = c.Logout()
+		return nil, nil, fmt.Errorf("imap login: %w", err)
+	}
+
+	mbox, err := c.Select("INBOX", true) // read-only
+	if err != nil {
+		_ = c.Logout()
+		return nil, nil, fmt.Errorf("imap select: %w", err)
+	}
+	return c, mbox, nil
+}
+
+// CurrentState returns INBOX's current UIDVALIDITY and UIDNEXT — a
+// read-only SELECT that fetches no message bodies. Used by the poll handler
+// to detect a UIDVALIDITY reset and to establish a first-poll baseline
+// without crawling the mailbox's pre-existing history.
+func (r *NetInboxReader) CurrentState(cfg IMAPConfig) (uidValidity, uidNext uint32, err error) {
+	c, mbox, err := r.selectInboxReadOnly(cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = c.Logout() }()
+	return mbox.UidValidity, mbox.UidNext, nil
+}
+
 // Fetch logs into cfg's INBOX read-only and returns messages with
 // UID > sinceUID, capped at maxN, plus the mailbox's UIDVALIDITY. maxN must
 // be positive: it bounds the IMAP UID range requested from the server (see
@@ -37,25 +79,11 @@ func (r *NetInboxReader) Fetch(cfg IMAPConfig, sinceUID uint32, maxN int) ([]Inb
 		return nil, 0, fmt.Errorf("mail: Fetch requires maxN > 0, got %d", maxN)
 	}
 
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	c, err := dialIMAP(addr, cfg, r.Timeout)
+	c, mbox, err := r.selectInboxReadOnly(cfg)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer func() { _ = c.Logout() }()
-
-	if err := c.Login(cfg.Username, cfg.Password); err != nil {
-		return nil, 0, fmt.Errorf("imap login: %w", err)
-	}
-
-	mbox, err := c.Select("INBOX", true) // read-only
-	if err != nil {
-		return nil, 0, fmt.Errorf("imap select: %w", err)
-	}
 	uidValidity := mbox.UidValidity
 
 	seqset := uidRangeSeqSet(sinceUID, maxN)

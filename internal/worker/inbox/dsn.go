@@ -1,7 +1,9 @@
-// Package inbox contains the pure per-message logic for reply and bounce
-// detection: parsing delivery-status notifications (DSNs) and matching
-// threading headers back to our own sent mail. No I/O — the IMAP fetch lives
-// in platform/mail, the DB access lives behind coreapi.
+// Package inbox is the execution-plane reply & bounce detection engine.
+// dsn.go and reply.go are the pure per-message logic — parsing delivery-status
+// notifications (DSNs) and matching threading headers back to our own sent
+// mail — with no I/O of their own. poll.go and sweep.go are the asynq
+// handlers that drive them: the IMAP fetch lives behind platform/mail, the DB
+// access behind coreapi.
 package inbox
 
 import (

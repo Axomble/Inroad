@@ -53,4 +53,9 @@ type InboxReader interface {
 	// IMAPConfig keeps mailbox credential wiring identical to
 	// ConnectionTester.TestIMAP.
 	Fetch(cfg IMAPConfig, sinceUID uint32, maxN int) (msgs []InboundMessage, uidValidity uint32, err error)
+	// CurrentState reports INBOX's current UIDVALIDITY and UIDNEXT via a
+	// read-only SELECT, without fetching any message bodies. The poll handler
+	// uses it to detect a UIDVALIDITY reset and to establish a first-poll
+	// baseline (see Fetch's callers) without pulling any mail over the wire.
+	CurrentState(cfg IMAPConfig) (uidValidity, uidNext uint32, err error)
 }
