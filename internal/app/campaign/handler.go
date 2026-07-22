@@ -13,19 +13,21 @@ import (
 	"github.com/inroad/inroad/internal/platform/validate"
 )
 
+// Handler exposes the campaign domain over HTTP. Authentication is applied by
+// the protected router group (see cmd/inroad), not here.
 type Handler struct {
-	svc       *Service
-	jwtSecret []byte
-	enq       Enqueuer
-	subs      []SubRouter
+	svc  *Service
+	enq  Enqueuer
+	subs []SubRouter
 }
 
 // NewHandler builds the campaign handler. Optional subs register additional
 // routes under the campaign scope (e.g. sequence steps at /{id}/steps) so
-// sub-resources share the {id} param and auth middleware without campaign
-// importing their packages.
-func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer, subs ...SubRouter) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq, subs: subs}
+// sub-resources share the {id} param and the protected group's auth without
+// campaign importing their packages. Auth is applied by the protected router
+// group (see cmd/inroad), so the handler no longer carries a jwtSecret.
+func NewHandler(svc *Service, enq Enqueuer, subs ...SubRouter) *Handler {
+	return &Handler{svc: svc, enq: enq, subs: subs}
 }
 
 type createRequest struct {

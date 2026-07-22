@@ -9,12 +9,13 @@ import (
 	"github.com/inroad/inroad/internal/platform/validate"
 )
 
+// Handler exposes the list domain over HTTP. Authentication is applied by the
+// protected router group (see cmd/inroad), not here.
 type Handler struct {
-	svc       *Service
-	jwtSecret []byte
+	svc *Service
 }
 
-func NewHandler(svc *Service, jwtSecret []byte) *Handler { return &Handler{svc: svc, jwtSecret: jwtSecret} }
+func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 type createRequest struct {
 	Name string `json:"name" validate:"required,min=1,max=200"`

@@ -5,7 +5,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -14,9 +13,12 @@ import (
 // the auth middleware — chi disallows two routers mounted at the same prefix.
 type SubRouter interface{ Register(r chi.Router) }
 
+// Routes returns this domain's HTTP surface. Every route requires an
+// authenticated caller; auth is enforced by the protected router group (see
+// cmd/inroad), and sub-resources registered here inherit it by being mounted
+// under /campaigns.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(auth.RequireAuth(h.jwtSecret))
 	r.Post("/", h.create)
 	r.Get("/", h.list)
 	r.Get("/{id}", h.get)

@@ -12,12 +12,13 @@ import (
 
 const maxUploadBytes = 10 << 20 // 10 MB
 
+// Handler exposes the contact domain over HTTP. Authentication is applied by
+// the protected router group (see cmd/inroad), not here.
 type Handler struct {
-	svc       *Service
-	jwtSecret []byte
+	svc *Service
 }
 
-func NewHandler(svc *Service, jwtSecret []byte) *Handler { return &Handler{svc: svc, jwtSecret: jwtSecret} }
+func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
 	ws, ok := auth.WorkspaceID(w, r)
@@ -76,4 +77,3 @@ func (h *Handler) listContacts(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, out)
 }
-
