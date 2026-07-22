@@ -36,3 +36,15 @@ DELETE FROM mailboxes WHERE id = $1 AND workspace_id = $2;
 
 -- name: MailboxExists :one
 SELECT EXISTS (SELECT 1 FROM mailboxes WHERE id = $1 AND status = 'active');
+
+-- name: ListActiveMailboxes :many
+-- Mailboxes eligible for inbox polling (reply/bounce detection). The poller
+-- iterates these and calls GetMailbox per id to get IMAP config + cursor.
+SELECT id, workspace_id FROM mailboxes WHERE status = 'active';
+
+-- name: SetInboxCursor :exec
+-- Persists the IMAP poll cursor after a poll pass, so the next pass resumes
+-- from inbox_last_seen_uid (or resyncs from scratch if inbox_uid_validity
+-- has changed underneath it — an IMAP server-side UIDVALIDITY bump).
+UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4
+WHERE id = $1 AND workspace_id = $2;

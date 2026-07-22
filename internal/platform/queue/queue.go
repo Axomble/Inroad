@@ -49,6 +49,21 @@ type AdvancePayload struct {
 // committed rows but Redis enqueue failed, or a scheduled task was lost).
 const TaskSweepEnrollments = "sequence:sweep_stuck_enrollments"
 
+// TaskInboxPoll polls one mailbox's inbox for replies/bounces via IMAP.
+const TaskInboxPoll = "inbox:poll"
+
+// InboxPollPayload is the body of an inbox:poll task. WorkspaceID travels
+// alongside MailboxID so the worker can pin workspace_id in its DB lookups
+// (defense in depth on the unguessable mailbox UUID).
+type InboxPollPayload struct {
+	MailboxID   string `json:"mailbox_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// TaskInboxSweep is the periodic reconcile that enqueues an inbox:poll task
+// for every active mailbox.
+const TaskInboxSweep = "inbox:sweep"
+
 // Client enqueues tasks onto Redis.
 type Client struct {
 	inner *asynq.Client
@@ -115,6 +130,16 @@ func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, opts ...asynq.
 	return err
 }
 
+// EnqueueInboxPoll enqueues an inbox:poll task for immediate processing.
+func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
+	b, err := json.Marshal(InboxPollPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
+	if err != nil {
+		return err
+	}
+	_, err = c.inner.Enqueue(asynq.NewTask(TaskInboxPoll, b))
+	return err
+}
+
 func (c *Client) Close() error { return c.inner.Close() }
 
 // NewServer builds an asynq processing server. Concurrency defaults to 10
@@ -158,6 +183,13 @@ func RegisterSweepStuck(sch *asynq.Scheduler) error {
 // Runs every 5 minutes to match the enrollment sweeper's "> 5 minutes" window.
 func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 5m", asynq.NewTask(TaskSweepEnrollments, nil))
+	return err
+}
+
+// RegisterInboxSweep registers the periodic inbox:sweep. Runs every 3
+// minutes to fan out inbox:poll tasks for every active mailbox.
+func RegisterInboxSweep(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 3m", asynq.NewTask(TaskInboxSweep, nil))
 	return err
 }
 

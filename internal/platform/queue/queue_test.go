@@ -39,3 +39,20 @@ func TestAdvancePayloadRoundTrip(t *testing.T) {
 		t.Errorf("task name drift: %q %q", TaskSequenceAdvance, TaskSweepEnrollments)
 	}
 }
+
+func TestInboxPollPayloadRoundTrip(t *testing.T) {
+	b, err := json.Marshal(InboxPollPayload{MailboxID: "mb-1", WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got InboxPollPayload
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.MailboxID != "mb-1" || got.WorkspaceID != "w1" {
+		t.Errorf("round-trip mismatch: %+v", got)
+	}
+	if TaskInboxSweep != "inbox:sweep" || TaskInboxPoll != "inbox:poll" {
+		t.Errorf("task name drift: %q %q", TaskInboxSweep, TaskInboxPoll)
+	}
+}

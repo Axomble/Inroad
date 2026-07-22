@@ -15,6 +15,11 @@ import (
 // exists so future refactors that relax the pin still fail closed.
 var ErrCrossTenant = errors.New("coreapi: cross-tenant access rejected")
 
+// ErrNoMatch is returned by FindSendByMessageID when no send matches the
+// inbound Message-ID (e.g. a reply/bounce referencing a message this
+// workspace never sent).
+var ErrNoMatch = errors.New("coreapi: no matching send")
+
 type Client interface {
 	// MailboxExists reports whether a mailbox is present and active.
 	MailboxExists(ctx context.Context, id string) (bool, error)
@@ -63,6 +68,31 @@ type Client interface {
 	// ListDueEnrollments returns active enrollments whose next_due_at passed the
 	// reconcile window. Consumed by the periodic enrollment sweeper.
 	ListDueEnrollments(ctx context.Context) ([]DueEnrollment, error)
+
+	// --- Reply & bounce detection (inbox poll path) ---
+
+	// ListActiveMailboxes returns (id, workspace id) pairs for every mailbox
+	// eligible for inbox polling. Consumed by the periodic poll-queue enqueuer.
+	ListActiveMailboxes(ctx context.Context) ([]MailboxRef, error)
+	// GetInboxPollJob loads one mailbox's IMAP connection details, decrypted
+	// credential, and stored poll cursor. workspaceID is pinned in the SQL
+	// WHERE (defense in depth on the unguessable mailbox UUID).
+	GetInboxPollJob(ctx context.Context, mailboxID, workspaceID string) (InboxPollJob, error)
+	// SetInboxCursor persists the IMAP poll cursor after a poll pass, so the
+	// next pass resumes from LastSeenUID (or resyncs from scratch if
+	// UIDValidity changed underneath it). workspaceID pinned as above.
+	SetInboxCursor(ctx context.Context, mailboxID, workspaceID string, lastSeenUID, uidValidity uint32) error
+	// FindSendByMessageID matches an inbound reply/bounce's Message-ID back to
+	// the send that caused it, workspace-scoped. Returns ErrNoMatch when
+	// nothing matches.
+	FindSendByMessageID(ctx context.Context, workspaceID, messageID string) (SendRef, error)
+	// MarkReplied halts the enrollment (if any) on an inbound reply.
+	MarkReplied(ctx context.Context, enrollmentID, workspaceID string) error
+	// MarkBounced records a hard bounce: halts the enrollment (if any) and
+	// suppresses the address. hard distinguishes hard from soft bounces; soft
+	// bounces are logged by the caller and never reach this method with
+	// hard=true.
+	MarkBounced(ctx context.Context, enrollmentID, workspaceID, email string, hard bool) error
 }
 
 // ContactVars are the personalization values for a contact, applied worker-side
@@ -141,6 +171,37 @@ type DueEnrollment struct {
 type StuckSend struct {
 	SendID      string
 	WorkspaceID string
+}
+
+// MailboxRef is a (mailbox id, workspace id) pair from ListActiveMailboxes.
+type MailboxRef struct {
+	ID          string
+	WorkspaceID string
+}
+
+// InboxPollJob is everything the inbox poller needs to open one mailbox's
+// IMAP connection and resume from its stored cursor. Password is []byte (not
+// a Go string) so the poller can zeroize it after use — same rationale as
+// StepSendJob.SMTPPassword. LastSeenUID/UIDValidity are the persisted poll
+// cursor: a UIDVALIDITY change means the server renumbered the mailbox and
+// the poller must resync from scratch.
+type InboxPollJob struct {
+	Host        string
+	Port        int
+	Username    string
+	Password    []byte
+	UseTLS      bool
+	LastSeenUID uint32
+	UIDValidity uint32
+}
+
+// SendRef identifies the send an inbound reply/bounce matched, and the
+// enrollment (if any) it belongs to. EnrollmentID is "" when the matched send
+// has no enrollment — the legacy direct-send path.
+type SendRef struct {
+	SendID       string
+	EnrollmentID string
+	ContactEmail string
 }
 
 // SendJob is everything the worker needs to send one email — including the

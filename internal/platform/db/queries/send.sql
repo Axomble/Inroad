@@ -61,3 +61,19 @@ LIMIT 500;
 UPDATE sends SET attempts = attempts + 1
 WHERE id = $1 AND workspace_id = $2
 RETURNING attempts;
+-- name: GetSendByMessageID :one
+-- Match an inbound reply/bounce back to the send that caused it, workspace-scoped.
+-- sends has no enrollment_id of its own, so this left-joins sequence_enrollments
+-- via (campaign_id, contact_id) — unique on that table, so the join is 1:1. A
+-- legacy direct send with no active sequence has no enrollment row, so
+-- enrollment_id comes back null; the handler treats that as "no enrollment to
+-- stop". message_id has no uniqueness constraint, so ORDER BY created_at DESC
+-- makes the LIMIT 1 deterministic: the most recent send wins if it's ever
+-- non-unique.
+SELECT s.id, s.contact_id, s.to_email, e.id AS enrollment_id
+FROM sends s
+LEFT JOIN sequence_enrollments e
+    ON e.campaign_id = s.campaign_id AND e.contact_id = s.contact_id
+WHERE s.workspace_id = $1 AND s.message_id = $2 AND s.message_id <> ''
+ORDER BY s.created_at DESC
+LIMIT 1;

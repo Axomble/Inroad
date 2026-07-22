@@ -43,6 +43,7 @@ func main() {
 	// implementation is wired here at the composition root.
 	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL)
 	sndr := mail.NewNetSender(cfg.MailAllowPrivateHosts)
+	reader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
 
@@ -58,6 +59,10 @@ func main() {
 		logger.Error("scheduler register (enrollments) failed", "err", err)
 		os.Exit(1)
 	}
+	if err := queue.RegisterInboxSweep(sch); err != nil {
+		logger.Error("scheduler register (inbox sweep) failed", "err", err)
+		os.Exit(1)
+	}
 	go func() {
 		if err := sch.Run(); err != nil {
 			logger.Error("scheduler exited", "err", err)
@@ -67,7 +72,7 @@ func main() {
 
 	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency)
 	mux := queue.NewMux()
-	worker.Register(mux, core, sndr, enq)
+	worker.Register(mux, core, sndr, reader, enq)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
