@@ -167,9 +167,21 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	// step recomputes the same id — see stepSendIDNamespace.
 	sendID := deriveStepSendID(b.CampaignID, b.ContactID, nextOrder)
 
-	password, err := c.sealer.Open(b.SecretCiphertext)
-	if err != nil {
-		return coreapi.StepSendJob{}, err
+	// Transport dispatch on the mailbox provider (see GetSendJob): gmail returns
+	// a refreshed short-lived access token and no password; smtp unseals the
+	// stored password unchanged.
+	var accessToken, password []byte
+	if b.Provider == "gmail" {
+		at, err := c.gmailAccessToken(ctx, b.MailboxID, ws, b.SecretCiphertext)
+		if err != nil {
+			return coreapi.StepSendJob{}, err
+		}
+		accessToken = []byte(at)
+	} else {
+		password, err = c.sealer.Open(b.SecretCiphertext)
+		if err != nil {
+			return coreapi.StepSendJob{}, err
+		}
 	}
 	suppressed, err := c.q.IsSuppressed(ctx, gen.IsSuppressedParams{WorkspaceID: ws, Lower: b.ToEmail})
 	if err != nil {
@@ -197,7 +209,9 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		Subject: replySubject(nextOrder, step.Subject, threadSubject), ThreadSubject: threadSubject,
 		BodyText: step.BodyText, BodyHTML: step.BodyHtml, TrackingEnabled: b.TrackingEnabled,
 		UnsubURL: c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
-		FromEmail: b.FromEmail, FromName: b.FromName, SMTPHost: b.SmtpHost, SMTPPort: int(b.SmtpPort),
+		FromEmail: b.FromEmail, FromName: b.FromName,
+		Provider: b.Provider, AccessToken: accessToken,
+		SMTPHost: b.SmtpHost, SMTPPort: int(b.SmtpPort),
 		SMTPUsername: b.SmtpUsername, SMTPPassword: password, UseTLS: b.UseTls,
 	}, nil
 }

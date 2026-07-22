@@ -149,11 +149,16 @@ type StepSendJob struct {
 	TrackingEnabled bool
 	FromEmail       string
 	FromName        string
-	SMTPHost        string
-	SMTPPort        int
-	SMTPUsername    string
-	SMTPPassword    []byte
-	UseTLS          bool
+	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
+	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
+	// SMTPPassword. For gmail the SMTP* fields are empty.
+	Provider     string
+	AccessToken  []byte
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword []byte
+	UseTLS       bool
 }
 
 // StepResult is the outcome of one step send.
@@ -240,6 +245,11 @@ type SendJob struct {
 	// TrackingEnabled mirrors the campaign's tracking_enabled column; see
 	// StepSendJob.TrackingEnabled for the injection contract.
 	TrackingEnabled bool
+	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
+	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
+	// SMTPPassword. For gmail the SMTP* fields are empty.
+	Provider    string
+	AccessToken []byte
 }
 
 // SendResult is the outcome of a single send attempt.

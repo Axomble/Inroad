@@ -6,7 +6,7 @@ SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        e.status, e.thread_root_id,
        cam.id AS campaign_id, cam.mailbox_id, cam.tracking_enabled,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
-       m.email AS from_email, m.display_name AS from_name,
+       m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at

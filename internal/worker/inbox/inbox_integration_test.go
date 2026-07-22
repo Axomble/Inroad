@@ -135,7 +135,7 @@ func seedActiveEnrollment(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	eid := ids[0].ID
 
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
-	core := inprocess.New(pool, sealer, sealerKey, "https://app.test")
+	core := inprocess.New(pool, sealer, sealerKey, "https://app.test", mail.GoogleOAuth{})
 
 	job, err := core.GetStepSendJob(ctx, eid.String(), ws.ID.String())
 	if err != nil {

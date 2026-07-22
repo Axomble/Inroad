@@ -14,7 +14,7 @@ RETURNING id;
 -- Defense in depth on top of the queue-side ownership.
 SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html, cam.tracking_enabled,
-       m.email AS from_email, m.display_name AS from_name,
+       m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days, m.created_at AS mailbox_created_at
 FROM sends s

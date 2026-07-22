@@ -38,10 +38,11 @@ func (s *stubCore) MarkSend(_ context.Context, _, _ string, res coreapi.SendResu
 // build tag) to avoid a redeclaration when both compile together.
 type stubSender struct {
 	sent mail.Message
+	tj   mail.OutboundJob
 }
 
-func (f *stubSender) Send(_ mail.SMTPConfig, m mail.Message) (string, error) {
-	f.sent = m
+func (f *stubSender) Send(_ context.Context, tj mail.OutboundJob, m mail.Message) (string, error) {
+	f.tj, f.sent = tj, m
 	return "<mid@x>", nil
 }
 
@@ -61,7 +62,7 @@ func sendTask(t *testing.T) *asynq.Task {
 func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 	core := &stubCore{job: coreapi.SendJob{
 		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
-		Subject: "Hi", BodyText: "hello",
+		Provider: "smtp", Subject: "Hi", BodyText: "hello",
 		BodyHTML:        `<html><body><p>hello <a href="https://example.com/x">click</a></p></body></html>`,
 		UnsubURL:        testBaseURL + "/u/tok",
 		TrackingEnabled: true,
@@ -70,6 +71,11 @@ func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 	h := Handler(core, snd, nil, testBaseURL, testTrackingSecret)
 	if err := h(context.Background(), sendTask(t)); err != nil {
 		t.Fatal(err)
+	}
+	// The job's provider must propagate into the dispatched OutboundJob so
+	// MultiSender routes to the right transport (default SMTP path here).
+	if snd.tj.Provider != "smtp" {
+		t.Errorf("expected OutboundJob.Provider=smtp, got %q", snd.tj.Provider)
 	}
 	if !strings.Contains(snd.sent.BodyHTML, "/t/c/") {
 		t.Errorf("expected a rewritten click link, got %q", snd.sent.BodyHTML)

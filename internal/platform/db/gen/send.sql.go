@@ -106,7 +106,7 @@ func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCa
 const getSendBundle = `-- name: GetSendBundle :one
 SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html, cam.tracking_enabled,
-       m.email AS from_email, m.display_name AS from_name,
+       m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days, m.created_at AS mailbox_created_at
 FROM sends s
@@ -132,6 +132,7 @@ type GetSendBundleRow struct {
 	BodyText         string             `json:"body_text"`
 	BodyHtml         string             `json:"body_html"`
 	TrackingEnabled  bool               `json:"tracking_enabled"`
+	Provider         string             `json:"provider"`
 	FromEmail        string             `json:"from_email"`
 	FromName         string             `json:"from_name"`
 	SmtpHost         string             `json:"smtp_host"`
@@ -164,6 +165,7 @@ func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (G
 		&i.BodyText,
 		&i.BodyHtml,
 		&i.TrackingEnabled,
+		&i.Provider,
 		&i.FromEmail,
 		&i.FromName,
 		&i.SmtpHost,

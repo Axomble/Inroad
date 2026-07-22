@@ -18,11 +18,11 @@ import (
 	"github.com/inroad/inroad/internal/worker/track"
 )
 
-// Sender sends one email over SMTP (same contract as the direct sender).
-// Defined here so tests inject a fake and exercise the pipeline without a live
-// server.
+// Sender sends one email through the transport the job's Provider selects (same
+// contract as the direct sender). Defined here so tests inject a fake and
+// exercise the pipeline without a live server.
 type Sender interface {
-	Send(cfg mail.SMTPConfig, msg mail.Message) (messageID string, err error)
+	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
 }
 
 // Enqueuer schedules the next advance. Satisfied by *queue.Client.
@@ -67,6 +67,8 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			return err
 		}
 		defer zeroize(job.SMTPPassword)
+		// The gmail access token is a decrypted secret too; wipe it after use.
+		defer zeroize(job.AccessToken)
 
 		// Enrollment no longer active (stopped/completed) or no next step.
 		if job.Skip {
@@ -113,8 +115,12 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			}
 		}
 
-		msgID, sendErr := sender.Send(
-			mail.SMTPConfig{Host: job.SMTPHost, Port: job.SMTPPort, Username: job.SMTPUsername, Password: string(job.SMTPPassword), UseTLS: job.UseTLS},
+		msgID, sendErr := sender.Send(ctx,
+			mail.OutboundJob{
+				Provider: job.Provider, Host: job.SMTPHost, Port: job.SMTPPort,
+				Username: job.SMTPUsername, Password: string(job.SMTPPassword), UseTLS: job.UseTLS,
+				AccessToken: string(job.AccessToken),
+			},
 			mail.Message{
 				FromEmail: job.FromEmail, FromName: job.FromName, To: job.ToEmail,
 				Subject: subject, BodyText: bodyText, BodyHTML: bodyHTML,

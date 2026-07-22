@@ -41,8 +41,15 @@ func main() {
 
 	// The worker package depends only on coreapi.Client; the DB-backed
 	// implementation is wired here at the composition root.
-	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL)
-	sndr := mail.NewNetSender(cfg.MailAllowPrivateHosts)
+	googleOAuth := mail.GoogleOAuth{
+		ClientID:     cfg.GoogleClientID,
+		ClientSecret: cfg.GoogleClientSecret,
+		RedirectURL:  cfg.GoogleRedirectURL,
+	}
+	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL, googleOAuth)
+	// MultiSender dispatches SMTP vs Gmail on the job's Provider; the SMTP leg
+	// keeps the SSRF-vetted NetSender, the Gmail leg uses the fixed Google host.
+	sndr := mail.NewMultiSender(mail.NewNetSender(cfg.MailAllowPrivateHosts), mail.NewGmailSender())
 	reader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()

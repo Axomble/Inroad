@@ -13,6 +13,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/mail"
 )
 
 type client struct {
@@ -21,6 +22,10 @@ type client struct {
 	sealer    *crypto.Sealer
 	jwtSecret []byte
 	publicURL string
+	// googleOAuth is the app's Google OAuth client config. Used to refresh a
+	// gmail mailbox's access token at job-build time (see gmailAccessToken). Zero
+	// value = disabled: gmail jobs then fail cleanly.
+	googleOAuth mail.GoogleOAuth
 	// enroll owns the enrollment state machine (advance/complete/stop). The
 	// control plane composes the domain service here so the MarkStep* coreapi
 	// methods delegate the transition to a single, unit-tested place.
@@ -30,13 +35,16 @@ type client struct {
 // New returns the in-process coreapi client backed by the given connection
 // pool. The pool backs the pool-bound *gen.Queries for reads and lets
 // MarkStepSent run the record+advance writes in one transaction. The sealer
-// decrypts stored SMTP credentials; jwtSecret signs stateless unsubscribe
-// tokens; publicURL is the base URL used to build unsubscribe links.
-func New(pool *pgxpool.Pool, sealer *crypto.Sealer, jwtSecret []byte, publicURL string) coreapi.Client {
+// decrypts stored SMTP credentials (and sealed OAuth tokens); jwtSecret signs
+// stateless unsubscribe tokens; publicURL is the base URL used to build
+// unsubscribe links; googleOAuth refreshes gmail mailboxes' access tokens at
+// job-build time (zero value disables Gmail).
+func New(pool *pgxpool.Pool, sealer *crypto.Sealer, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth) coreapi.Client {
 	q := gen.New(pool)
 	return client{
 		pool: pool, q: q, sealer: sealer, jwtSecret: jwtSecret, publicURL: publicURL,
-		enroll: enrollment.NewService(enrollment.NewPgStore(q)),
+		googleOAuth: googleOAuth,
+		enroll:      enrollment.NewService(enrollment.NewPgStore(q)),
 	}
 }
 
