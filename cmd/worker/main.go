@@ -9,7 +9,6 @@ import (
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
-	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
@@ -42,7 +41,7 @@ func main() {
 
 	// The worker package depends only on coreapi.Client; the DB-backed
 	// implementation is wired here at the composition root.
-	core := inprocess.New(gen.New(pool), sealer, cfg.JWTSecret, cfg.PublicURL)
+	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL)
 	sndr := mail.NewNetSender(cfg.MailAllowPrivateHosts)
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
@@ -53,6 +52,10 @@ func main() {
 	sch := queue.NewScheduler(cfg.RedisAddr, logger)
 	if err := queue.RegisterSweepStuck(sch); err != nil {
 		logger.Error("scheduler register failed", "err", err)
+		os.Exit(1)
+	}
+	if err := queue.RegisterSweepEnrollments(sch); err != nil {
+		logger.Error("scheduler register (enrollments) failed", "err", err)
 		os.Exit(1)
 	}
 	go func() {

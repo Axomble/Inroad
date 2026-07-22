@@ -115,7 +115,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("expected 2 sends enqueued, got %d", len(sendIDs))
 	}
 
-	core := inprocess.New(q, sealer, []byte("0123456789abcdef0123456789abcdef"), "https://app.test")
+	core := inprocess.New(pool, sealer, []byte("0123456789abcdef0123456789abcdef"), "https://app.test")
 	fs := &fakeSender{}
 	enq := queue.NewClient(redisAddr())
 	defer enq.Close()

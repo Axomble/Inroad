@@ -206,18 +206,50 @@ type Mailbox struct {
 }
 
 type Send struct {
-	ID          uuid.UUID          `json:"id"`
-	WorkspaceID uuid.UUID          `json:"workspace_id"`
-	CampaignID  uuid.UUID          `json:"campaign_id"`
-	ContactID   uuid.UUID          `json:"contact_id"`
-	MailboxID   uuid.UUID          `json:"mailbox_id"`
-	ToEmail     string             `json:"to_email"`
-	Status      string             `json:"status"`
-	Error       string             `json:"error"`
-	MessageID   string             `json:"message_id"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	SentAt      pgtype.Timestamptz `json:"sent_at"`
-	Attempts    int32              `json:"attempts"`
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	CampaignID       uuid.UUID          `json:"campaign_id"`
+	ContactID        uuid.UUID          `json:"contact_id"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	ToEmail          string             `json:"to_email"`
+	Status           string             `json:"status"`
+	Error            string             `json:"error"`
+	MessageID        string             `json:"message_id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	SentAt           pgtype.Timestamptz `json:"sent_at"`
+	Attempts         int32              `json:"attempts"`
+	StepOrder        int32              `json:"step_order"`
+	ReferencesHeader string             `json:"references_header"`
+}
+
+type SequenceEnrollment struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	CampaignID   uuid.UUID          `json:"campaign_id"`
+	ContactID    uuid.UUID          `json:"contact_id"`
+	CurrentStep  int32              `json:"current_step"`
+	Status       string             `json:"status"`
+	StopReason   *string            `json:"stop_reason"`
+	EnrolledAt   pgtype.Timestamptz `json:"enrolled_at"`
+	LastSentAt   pgtype.Timestamptz `json:"last_sent_at"`
+	NextDueAt    pgtype.Timestamptz `json:"next_due_at"`
+	ThreadRootID string             `json:"thread_root_id"`
+	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
+	StoppedAt    pgtype.Timestamptz `json:"stopped_at"`
+	CapDeferrals int32              `json:"cap_deferrals"`
+}
+
+type SequenceStep struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	CampaignID   uuid.UUID          `json:"campaign_id"`
+	StepOrder    int32              `json:"step_order"`
+	DelaySeconds int32              `json:"delay_seconds"`
+	Subject      string             `json:"subject"`
+	BodyText     string             `json:"body_text"`
+	BodyHtml     string             `json:"body_html"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Session struct {

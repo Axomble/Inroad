@@ -32,6 +32,23 @@ type SendEmailPayload struct {
 // asynq.Scheduler every 2 minutes.
 const TaskSweepStuck = "send:sweep_stuck"
 
+// TaskSequenceAdvance drives one step of a contact's enrollment: send the due
+// step, then (lazy chain) schedule the next. One task per enrollment per step.
+const TaskSequenceAdvance = "sequence:advance"
+
+// AdvancePayload is the body of a sequence:advance task. WorkspaceID travels
+// alongside EnrollmentID so the worker can pin workspace_id in its DB lookups
+// (defense in depth on the unguessable enrollment UUID).
+type AdvancePayload struct {
+	EnrollmentID string `json:"enrollment_id"`
+	WorkspaceID  string `json:"workspace_id"`
+}
+
+// TaskSweepEnrollments is the periodic reconcile that re-enqueues active
+// enrollments whose next_due_at passed without a live advance task (launch
+// committed rows but Redis enqueue failed, or a scheduled task was lost).
+const TaskSweepEnrollments = "sequence:sweep_stuck_enrollments"
+
 // Client enqueues tasks onto Redis.
 type Client struct {
 	inner *asynq.Client
@@ -72,6 +89,32 @@ func (c *Client) EnqueueSendIn(sendID, workspaceID string, d time.Duration) erro
 	return err
 }
 
+// EnqueueAdvance enqueues a sequence:advance task for immediate processing.
+func (c *Client) EnqueueAdvance(enrollmentID, workspaceID string) error {
+	return c.enqueueAdvance(enrollmentID, workspaceID)
+}
+
+// EnqueueAdvanceAt enqueues a sequence:advance task to run at time t (used by
+// launch stagger and the lazy chain's next-step scheduling).
+func (c *Client) EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error {
+	return c.enqueueAdvance(enrollmentID, workspaceID, asynq.ProcessAt(t))
+}
+
+// EnqueueAdvanceIn enqueues a sequence:advance task after delay d (used by the
+// cap-exceeded backoff).
+func (c *Client) EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error {
+	return c.enqueueAdvance(enrollmentID, workspaceID, asynq.ProcessIn(d))
+}
+
+func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, opts ...asynq.Option) error {
+	b, err := json.Marshal(AdvancePayload{EnrollmentID: enrollmentID, WorkspaceID: workspaceID})
+	if err != nil {
+		return err
+	}
+	_, err = c.inner.Enqueue(asynq.NewTask(TaskSequenceAdvance, b), opts...)
+	return err
+}
+
 func (c *Client) Close() error { return c.inner.Close() }
 
 // NewServer builds an asynq processing server. Concurrency defaults to 10
@@ -108,6 +151,13 @@ func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
 // scheduler. Runs every 2 minutes to match the "stuck > 2 minutes" query.
 func RegisterSweepStuck(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 2m", asynq.NewTask(TaskSweepStuck, nil))
+	return err
+}
+
+// RegisterSweepEnrollments registers the periodic due-enrollment reconcile.
+// Runs every 5 minutes to match the enrollment sweeper's "> 5 minutes" window.
+func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskSweepEnrollments, nil))
 	return err
 }
 
