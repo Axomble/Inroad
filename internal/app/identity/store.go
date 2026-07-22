@@ -390,7 +390,14 @@ func (s *Store) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (A
 	default:
 		role = member.Role // already a member: keep their existing role
 	}
-	if err := qtx.MarkInviteAccepted(ctx, invite.ID); err != nil {
+	// Guarded UPDATE ... WHERE status='pending': 0 rows means a concurrent
+	// accept already flipped this invite between our earlier status check and
+	// here. Row-level locking inside the transaction serializes a race here -
+	// the first accept's UPDATE wins and this one sees ErrNoRows.
+	if _, err := qtx.MarkInviteAccepted(ctx, invite.ID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AcceptInviteTxResult{}, ErrTokenInvalid
+		}
 		return AcceptInviteTxResult{}, err
 	}
 

@@ -135,13 +135,20 @@ func (q *Queries) ListPendingInvites(ctx context.Context, workspaceID uuid.UUID)
 	return items, nil
 }
 
-const markInviteAccepted = `-- name: MarkInviteAccepted :exec
-UPDATE workspace_invites SET status = 'accepted', accepted_at = now() WHERE id = $1
+const markInviteAccepted = `-- name: MarkInviteAccepted :one
+UPDATE workspace_invites SET status = 'accepted', accepted_at = now()
+WHERE id = $1 AND status = 'pending'
+RETURNING id
 `
 
-func (q *Queries) MarkInviteAccepted(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, markInviteAccepted, id)
-	return err
+// Single-use guard: only flips a still-pending invite, mirroring
+// ConsumeUserToken's atomic check-and-consume. 0 rows means someone else
+// (a concurrent accept) already resolved this invite.
+func (q *Queries) MarkInviteAccepted(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, markInviteAccepted, id)
+	var id_2 uuid.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
 }
 
 const revokeInvite = `-- name: RevokeInvite :exec

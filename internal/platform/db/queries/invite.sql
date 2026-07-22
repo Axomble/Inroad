@@ -12,8 +12,13 @@ SELECT * FROM workspace_invites WHERE workspace_id = $1 AND status = 'pending' O
 UPDATE workspace_invites SET status = 'revoked'
 WHERE id = $1 AND workspace_id = $2 AND status = 'pending';
 
--- name: MarkInviteAccepted :exec
-UPDATE workspace_invites SET status = 'accepted', accepted_at = now() WHERE id = $1;
+-- name: MarkInviteAccepted :one
+-- Single-use guard: only flips a still-pending invite, mirroring
+-- ConsumeUserToken's atomic check-and-consume. 0 rows means someone else
+-- (a concurrent accept) already resolved this invite.
+UPDATE workspace_invites SET status = 'accepted', accepted_at = now()
+WHERE id = $1 AND status = 'pending'
+RETURNING id;
 
 -- name: GetPendingInviteForEmail :one
 SELECT * FROM workspace_invites WHERE workspace_id = $1 AND email = $2 AND status = 'pending';

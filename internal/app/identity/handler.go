@@ -157,16 +157,16 @@ func (h *Handler) issueSession(w http.ResponseWriter, sess Session) {
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		WorkspaceName string `json:"workspace_name"`
-		Email         string `json:"email"`
-		Password      string `json:"password"`
+		WorkspaceName string `json:"workspace_name" validate:"required,min=1,max=200"`
+		Email         string `json:"email" validate:"required,email"`
+		Password      string `json:"password" validate:"required,min=8"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if body.WorkspaceName == "" || body.Email == "" || len(body.Password) < 8 {
-		httpx.Error(w, http.StatusBadRequest, "workspace_name, email, and 8+ char password required")
+	if err := validate.Struct(body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	ua, ip := h.clientMeta(r)
