@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -83,6 +84,7 @@ type storeIface interface {
 	ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error)
 	CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error)
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
+	ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error)
 }
 
 // Service implements the core auth logic: registration, login, refresh
@@ -96,6 +98,13 @@ type Service struct {
 	verifyTTL  time.Duration
 	resetTTL   time.Duration
 	inviteTTL  time.Duration
+
+	// dispatch runs a func off the request path. ForgotPassword uses it to
+	// defer everything past the initial user lookup (rate-limit check, token
+	// issuance, send) so a known email doesn't cost measurably more wall-clock
+	// time than an unknown one - defaults to a bare goroutine in production;
+	// tests override it to run inline for determinism.
+	dispatch func(func())
 }
 
 // NewService constructs a Service backed by store, issuing refresh tokens
@@ -107,6 +116,7 @@ func NewService(store storeIface, refreshTTL time.Duration, sender notify.Sender
 	return &Service{
 		store: store, refreshTTL: refreshTTL, sender: sender, appBaseURL: appBaseURL,
 		verifyTTL: verifyTTL, resetTTL: resetTTL, inviteTTL: inviteTTL,
+		dispatch: func(f func()) { go f() },
 	}
 }
 
@@ -251,6 +261,74 @@ func (s *Service) ResendVerification(ctx context.Context, userID uuid.UUID) erro
 	}
 	link := s.appBaseURL + "/verify-email?token=" + url.QueryEscape(raw)
 	return s.sender.Send(ctx, notify.VerifyEmail(link))
+}
+
+// ForgotPassword issues a password_reset token and emails a reset link, but
+// never signals to the caller whether the address belongs to a real account:
+// an unknown email, a rate-limited request, and a successfully sent email all
+// return nil, in about the same amount of time. Only the user lookup runs
+// synchronously (both the known and unknown path pay its cost); everything
+// past it - the rate-limit check, minting a token, sending the email - runs
+// on s.dispatch instead of inline. Without that, a known email would cost a
+// counting query, an INSERT, and a synchronous SMTP round-trip (up to ~30s)
+// more than an unknown one, which is itself the account-existence leak this
+// method exists to close. Errors from the deferred work are logged, not
+// returned - by the time it runs, ForgotPassword has already answered the
+// caller.
+func (s *Service) ForgotPassword(ctx context.Context, email string) error {
+	user, err := s.store.GetUserByEmail(ctx, email)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("identity: forgot-password lookup failed", "err", err)
+		}
+		return nil // unknown email (or a lookup failure): no account-existence leak
+	}
+	s.dispatch(func() {
+		// The request context is cancelled once ForgotPassword returns, which
+		// happens before (or concurrently with) this closure running - so it
+		// must not be reused here. A bounded timeout still caps how long a
+		// stuck SMTP send can run in the background.
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		limited, err := s.tokenRateLimited(bgCtx, user.ID, "password_reset")
+		if err != nil {
+			slog.Error("identity: forgot-password rate-limit check failed", "err", err, "user_id", user.ID)
+			return
+		}
+		if limited {
+			return
+		}
+		raw, err := s.store.IssueUserToken(bgCtx, user.ID, "password_reset", s.resetTTL)
+		if err != nil {
+			slog.Error("identity: failed to issue password_reset token", "err", err, "user_id", user.ID)
+			return
+		}
+		link := s.appBaseURL + "/reset-password?token=" + url.QueryEscape(raw)
+		if err := s.sender.Send(bgCtx, notify.ResetEmail(link)); err != nil {
+			slog.Error("identity: failed to send reset email", "err", err, "user_id", user.ID)
+		}
+	})
+	return nil
+}
+
+// ResetPassword hashes newPassword, then atomically consumes the presented
+// password_reset token, overwrites the owning user's password hash, and
+// revokes every one of their active sessions across all devices, via
+// Store.ResetPasswordTx - the three writes either all land or none does, so
+// a crash mid-reset can't leave the hash changed with old sessions still
+// live (or the reverse). Revoking everything (rather than just the family
+// the caller happens to be using, if any) is deliberate: whoever is
+// resetting the password - the legitimate owner recovering a compromised
+// account, or an attacker who just took it over - the other party's existing
+// sessions must not survive the reset.
+func (s *Service) ResetPassword(ctx context.Context, raw, newPassword string) error {
+	hash, err := auth.HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	_, err = s.store.ResetPasswordTx(ctx, raw, "password_reset", hash)
+	return err // ErrTokenInvalid on a bad/expired/already-consumed token
 }
 
 // Login verifies credentials, activates the user's most-recently-seen

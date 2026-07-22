@@ -337,6 +337,54 @@ func (h *Handler) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// forgotPassword issues a password_reset token and emails a reset link, but
+// always answers 204 - whether the email belongs to a real account, is
+// rate-limited, or genuinely gets a reset link sent are all indistinguishable
+// to the caller. Public: this is exactly the "I forgot my password" entry
+// point, so there's no session to require.
+func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email string `json:"email" validate:"required,email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = h.svc.ForgotPassword(r.Context(), body.Email)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resetPassword consumes a password_reset token and sets a new password,
+// revoking every existing session for the owning user. Public: like
+// verifyEmail, the token itself is the credential.
+func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token       string `json:"token" validate:"required"`
+		NewPassword string `json:"new_password" validate:"required,min=8"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := validate.Struct(body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := h.svc.ResetPassword(r.Context(), body.Token, body.NewPassword); err != nil {
+		if errors.Is(err, ErrTokenInvalid) {
+			httpx.Error(w, http.StatusBadRequest, "invalid or expired token")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, "could not reset password")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // resendVerification re-sends the verification email for the authenticated
 // caller, rate-limited to at most one every 60 seconds.
 func (h *Handler) resendVerification(w http.ResponseWriter, r *http.Request) {

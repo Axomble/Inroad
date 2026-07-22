@@ -19,6 +19,14 @@ func (h *Handler) Routes(secret []byte) http.Handler {
 	r.With(auth.RequireCSRF).Post("/refresh", h.refresh)
 	r.With(auth.RequireCSRF).Post("/logout", h.logout)
 	r.Post("/verify-email", h.verifyEmail)
+	// forgot/reset are pre-authentication flows, unlike refresh/logout: a
+	// logged-out caller has no csrf_token cookie, so the double-submit gate
+	// would 403 the exact users who need these. The CSRF threat model doesn't
+	// apply here either - forgot acts on an arbitrary body email with no
+	// ambient cookie authority, and reset's out-of-band single-use token is
+	// itself the credential and can't be CSRF-forged.
+	r.Post("/password/forgot", h.forgotPassword)
+	r.Post("/password/reset", h.resetPassword)
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.RequireAuth(secret))
 		pr.Get("/me", h.me)

@@ -220,6 +220,50 @@ func (s *Store) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return s.q.SetEmailVerified(ctx, id)
 }
 
+// UpdatePasswordHash overwrites a user's password_hash (used by password
+// reset).
+func (s *Store) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error {
+	return s.q.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: id, PasswordHash: hash})
+}
+
+// ResetPasswordTx atomically consumes a password_reset token, overwrites the
+// owning user's password_hash, and revokes every one of their sessions - all
+// in a single transaction, so a crash between steps can never leave the hash
+// updated with old sessions still live (or the reverse). Mirrors RegisterTx's
+// pattern of running several statements as one qtx-scoped unit.
+func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+
+	uid, err := qtx.ConsumeUserToken(ctx, gen.ConsumeUserTokenParams{
+		TokenHash: auth.HashToken(rawToken),
+		Kind:      gen.UserTokenKind(kind),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrTokenInvalid
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := qtx.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: uid, PasswordHash: newHash}); err != nil {
+		return uuid.Nil, err
+	}
+	if err := qtx.RevokeAllForUser(ctx, uid); err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, err
+	}
+	return uid, nil
+}
+
 // RepointSessionWorkspace switches a session's active workspace (used when a
 // user swaps workspace context without re-authenticating). The userID is
 // checked in the WHERE clause so callers can only ever repoint their own

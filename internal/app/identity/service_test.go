@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -28,8 +29,13 @@ func (f *fakeSender) Send(ctx context.Context, m notify.Message) error {
 
 // newTestService builds a Service wired to a no-op fakeSender and short but
 // non-zero TTLs, for tests that don't care about email-verification details.
+// dispatch is overridden to run inline rather than in a goroutine, so tests
+// asserting on ForgotPassword's deferred side effects (rate-limit check,
+// token issuance, send) stay deterministic.
 func newTestService(store storeIface) *Service {
-	return NewService(store, time.Hour, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+	svc := NewService(store, time.Hour, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+	svc.dispatch = func(f func()) { f() }
+	return svc
 }
 
 // fakeStore is an in-memory implementation of storeIface for unit tests.
@@ -95,10 +101,14 @@ func (f *fakeStore) RegisterTx(ctx context.Context, arg RegisterTxParams) (Regis
 	return RegisterTxResult{WorkspaceID: wsID, UserID: userID, SessionID: sessionID}, nil
 }
 
+// GetUserByEmail returns pgx.ErrNoRows on a miss, matching the real store's
+// pass-through of pgx's "no rows" error - callers (ForgotPassword) branch on
+// that specific error to distinguish "unknown email" from a genuine lookup
+// failure.
 func (f *fakeStore) GetUserByEmail(ctx context.Context, email string) (gen.User, error) {
 	u, ok := f.users[email]
 	if !ok {
-		return gen.User{}, errors.New("not found")
+		return gen.User{}, pgx.ErrNoRows
 	}
 	return u, nil
 }
@@ -197,6 +207,37 @@ func (f *fakeStore) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	f.usersByID[id] = u
 	f.users[u.Email] = u
 	return nil
+}
+
+// UpdatePasswordHash overwrites the stored user's password_hash, mirroring
+// the real store's targeted UPDATE.
+func (f *fakeStore) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash string) error {
+	u, ok := f.usersByID[id]
+	if !ok {
+		return errors.New("not found")
+	}
+	u.PasswordHash = hash
+	f.usersByID[id] = u
+	f.users[u.Email] = u
+	return nil
+}
+
+// ResetPasswordTx mirrors the real store's atomic reset transaction: it
+// consumes the token, then overwrites the password hash and revokes every
+// session for the resulting user id, so tests can assert on either outcome
+// via the same fake maps used elsewhere.
+func (f *fakeStore) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error) {
+	uid, err := f.ConsumeUserToken(ctx, rawToken, kind)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := f.UpdatePasswordHash(ctx, uid, newHash); err != nil {
+		return uuid.Nil, err
+	}
+	if err := f.RevokeAllForUser(ctx, uid); err != nil {
+		return uuid.Nil, err
+	}
+	return uid, nil
 }
 
 func (f *fakeStore) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error {
@@ -517,5 +558,152 @@ func TestResendVerificationHourlyCap(t *testing.T) {
 
 	if err := svc.ResendVerification(context.Background(), userID); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited on 6th resend within the hourly cap, got %v", err)
+	}
+}
+
+// TestForgotPasswordUnknownEmailNoLeakNoSend confirms an email with no
+// matching account returns nil (never an error the handler could map to a
+// distinguishing status code) and never reaches the sender - the two
+// observable signals (response, email sent) must both stay silent so a
+// caller can't enumerate registered addresses.
+func TestForgotPasswordUnknownEmailNoLeakNoSend(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeSender{}
+	svc := NewService(store, time.Hour, sender, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+	svc.dispatch = func(f func()) { f() }
+
+	if err := svc.ForgotPassword(context.Background(), "nobody@acme.test"); err != nil {
+		t.Fatalf("ForgotPassword: expected nil error for unknown email, got %v", err)
+	}
+	if sender.last.TextBody != "" {
+		t.Fatalf("expected no email sent for unknown address, got body %q", sender.last.TextBody)
+	}
+}
+
+// TestForgotPasswordKnownSendsReset confirms a known email gets a reset link
+// emailed via notify.ResetEmail.
+func TestForgotPasswordKnownSendsReset(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeSender{}
+	svc := NewService(store, time.Hour, sender, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+	svc.dispatch = func(f func()) { f() }
+
+	userID := uuid.New()
+	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test"}
+	store.users["owner@acme.test"] = store.usersByID[userID]
+
+	if err := svc.ForgotPassword(context.Background(), "owner@acme.test"); err != nil {
+		t.Fatalf("ForgotPassword: %v", err)
+	}
+	if !strings.Contains(sender.last.TextBody, "https://app.example.test/reset-password?token=") {
+		t.Fatalf("expected reset link in sent email body, got %q", sender.last.TextBody)
+	}
+}
+
+// TestForgotPasswordRateLimited confirms a second request within the
+// tokenRateLimited cooldown window is silently throttled: the call still
+// returns nil (no leak) but the sender is not invoked again.
+func TestForgotPasswordRateLimited(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeSender{}
+	svc := NewService(store, time.Hour, sender, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+	svc.dispatch = func(f func()) { f() }
+
+	userID := uuid.New()
+	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test"}
+	store.users["owner@acme.test"] = store.usersByID[userID]
+
+	if err := svc.ForgotPassword(context.Background(), "owner@acme.test"); err != nil {
+		t.Fatalf("first ForgotPassword: %v", err)
+	}
+	sender.last = notify.Message{}
+
+	if err := svc.ForgotPassword(context.Background(), "owner@acme.test"); err != nil {
+		t.Fatalf("second ForgotPassword: expected nil (no leak) even when rate-limited, got %v", err)
+	}
+	if sender.last.TextBody != "" {
+		t.Fatalf("expected no email sent on rate-limited request, got body %q", sender.last.TextBody)
+	}
+}
+
+// TestForgotPasswordDefersSideEffectsToDispatcher drives the dispatcher seam
+// directly: with dispatch overridden to queue the closure instead of running
+// it, ForgotPassword must return before the rate-limit check / token issuance
+// / send happen. This is what makes the known-email path cost the same
+// wall-clock time as the unknown-email path from the caller's perspective -
+// the expensive work happens after the response, not before it.
+func TestForgotPasswordDefersSideEffectsToDispatcher(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeSender{}
+	svc := NewService(store, time.Hour, sender, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+
+	var queued func()
+	svc.dispatch = func(f func()) { queued = f } // queue, don't run
+
+	userID := uuid.New()
+	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test"}
+	store.users["owner@acme.test"] = store.usersByID[userID]
+
+	if err := svc.ForgotPassword(context.Background(), "owner@acme.test"); err != nil {
+		t.Fatalf("ForgotPassword: %v", err)
+	}
+	if sender.last.TextBody != "" {
+		t.Fatal("expected no email sent before the dispatched closure runs")
+	}
+	if queued == nil {
+		t.Fatal("expected ForgotPassword to hand a closure to dispatch")
+	}
+
+	queued() // now run the deferred side effects
+	if !strings.Contains(sender.last.TextBody, "https://app.example.test/reset-password?token=") {
+		t.Fatalf("expected reset link in sent email body after running the queued closure, got %q", sender.last.TextBody)
+	}
+}
+
+// TestResetPasswordSetsHashAndRevokesSessions drives the happy path: a valid
+// password_reset token consumes exactly once, the user's password_hash is
+// overwritten, and every active session for that user is revoked - so a
+// password reset can't be undermined by a still-live session from before the
+// attacker (or the legitimate owner, recovering from a compromise) reset it.
+func TestResetPasswordSetsHashAndRevokesSessions(t *testing.T) {
+	store := newFakeStore()
+	svc := newTestService(store)
+
+	userID := uuid.New()
+	oldHash, err := auth.HashPassword("old-password-123")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test", PasswordHash: oldHash}
+	store.users["owner@acme.test"] = store.usersByID[userID]
+
+	// An active session that must be revoked by ResetPassword.
+	sessionID := uuid.New()
+	store.sessions[sessionID] = gen.Session{ID: sessionID, UserID: userID, FamilyID: uuid.New()}
+
+	raw, err := store.IssueUserToken(context.Background(), userID, "password_reset", time.Hour)
+	if err != nil {
+		t.Fatalf("IssueUserToken: %v", err)
+	}
+
+	if err := svc.ResetPassword(context.Background(), raw, "brand-new-password-456"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if !auth.CheckPassword(store.usersByID[userID].PasswordHash, "brand-new-password-456") {
+		t.Fatal("expected password_hash to be updated to the new password")
+	}
+	if !store.sessions[sessionID].RevokedAt.Valid {
+		t.Fatal("expected the user's existing session to be revoked after reset")
+	}
+}
+
+// TestResetPasswordInvalidToken confirms a bogus/expired/already-consumed
+// token is rejected with ErrTokenInvalid and never touches the password hash.
+func TestResetPasswordInvalidToken(t *testing.T) {
+	store := newFakeStore()
+	svc := newTestService(store)
+
+	if err := svc.ResetPassword(context.Background(), "not-a-real-token", "brand-new-password-456"); !errors.Is(err, ErrTokenInvalid) {
+		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
 }
