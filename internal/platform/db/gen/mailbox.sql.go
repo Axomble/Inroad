@@ -43,7 +43,7 @@ INSERT INTO mailboxes (
     $13, $14,
     $15, $16, $17
 )
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor
 `
 
 type CreateMailboxParams struct {
@@ -113,6 +113,7 @@ func (q *Queries) CreateMailbox(ctx context.Context, arg CreateMailboxParams) (M
 		&i.CreatedAt,
 		&i.InboxLastSeenUid,
 		&i.InboxUidValidity,
+		&i.InboxCursor,
 	)
 	return i, err
 }
@@ -135,7 +136,7 @@ func (q *Queries) DeleteMailbox(ctx context.Context, arg DeleteMailboxParams) (i
 }
 
 const getMailbox = `-- name: GetMailbox :one
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity FROM mailboxes WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor FROM mailboxes WHERE id = $1 AND workspace_id = $2
 `
 
 type GetMailboxParams struct {
@@ -172,6 +173,7 @@ func (q *Queries) GetMailbox(ctx context.Context, arg GetMailboxParams) (Mailbox
 		&i.CreatedAt,
 		&i.InboxLastSeenUid,
 		&i.InboxUidValidity,
+		&i.InboxCursor,
 	)
 	return i, err
 }
@@ -208,7 +210,7 @@ func (q *Queries) ListActiveMailboxes(ctx context.Context) ([]ListActiveMailboxe
 }
 
 const listMailboxes = `-- name: ListMailboxes :many
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]Mailbox, error) {
@@ -246,6 +248,7 @@ func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]M
 			&i.CreatedAt,
 			&i.InboxLastSeenUid,
 			&i.InboxUidValidity,
+			&i.InboxCursor,
 		); err != nil {
 			return nil, err
 		}
@@ -293,11 +296,46 @@ func (q *Queries) SetInboxCursor(ctx context.Context, arg SetInboxCursorParams) 
 	return err
 }
 
+const setInboxCursorString = `-- name: SetInboxCursorString :exec
+UPDATE mailboxes SET inbox_cursor = $3, last_poll_at = now()
+WHERE id = $1 AND workspace_id = $2
+`
+
+type SetInboxCursorStringParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	InboxCursor string    `json:"inbox_cursor"`
+}
+
+// Persists an opaque provider cursor (Gmail historyId) after a poll pass.
+func (q *Queries) SetInboxCursorString(ctx context.Context, arg SetInboxCursorStringParams) error {
+	_, err := q.db.Exec(ctx, setInboxCursorString, arg.ID, arg.WorkspaceID, arg.InboxCursor)
+	return err
+}
+
+const updateMailboxSecret = `-- name: UpdateMailboxSecret :exec
+UPDATE mailboxes SET secret_ciphertext = $3
+WHERE id = $1 AND workspace_id = $2
+`
+
+type UpdateMailboxSecretParams struct {
+	ID               uuid.UUID `json:"id"`
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
+	SecretCiphertext string    `json:"secret_ciphertext"`
+}
+
+// Overwrites the sealed credential. Used by the coreapi token-refresh path when
+// an OAuth access/refresh token is rotated, so the new token is persisted.
+func (q *Queries) UpdateMailboxSecret(ctx context.Context, arg UpdateMailboxSecretParams) error {
+	_, err := q.db.Exec(ctx, updateMailboxSecret, arg.ID, arg.WorkspaceID, arg.SecretCiphertext)
+	return err
+}
+
 const updateMailboxStatus = `-- name: UpdateMailboxStatus :one
 UPDATE mailboxes
 SET status = $3, last_error = $4
 WHERE id = $1 AND workspace_id = $2
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor
 `
 
 type UpdateMailboxStatusParams struct {
@@ -341,6 +379,7 @@ func (q *Queries) UpdateMailboxStatus(ctx context.Context, arg UpdateMailboxStat
 		&i.CreatedAt,
 		&i.InboxLastSeenUid,
 		&i.InboxUidValidity,
+		&i.InboxCursor,
 	)
 	return i, err
 }
