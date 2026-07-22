@@ -62,17 +62,9 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader) func(context.Cont
 		if err != nil {
 			return err
 		}
-		if len(msgs) == 0 {
-			return nil
-		}
 
 		var replies, bounces, skipped int
-		maxUID := job.LastSeenUID
 		for _, msg := range msgs {
-			if msg.UID > maxUID {
-				maxUID = msg.UID
-			}
-
 			matched, err := processMessage(ctx, core, p.WorkspaceID, msg, &replies, &bounces)
 			if err != nil {
 				return err
@@ -84,14 +76,39 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader) func(context.Cont
 
 		slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID,
 			"messages", len(msgs), "replies", replies, "bounces", bounces, "skipped", skipped)
-		return core.SetInboxCursor(ctx, p.MailboxID, p.WorkspaceID, maxUID, uidValidity)
+		return core.SetInboxCursor(ctx, p.MailboxID, p.WorkspaceID, scannedWindowTop(job.LastSeenUID, uidNext), uidValidity)
 	}
 }
 
+// scannedWindowTop is the highest UID a successful bounded Fetch(sinceUID,
+// fetchBatchSize) has definitively examined — sinceUID+fetchBatchSize,
+// capped at the mailbox's current head (uidNext-1, guarded against a
+// misbehaving uidNext==0). The cursor always advances to this value after a
+// successful fetch+process pass, regardless of how many messages actually
+// existed in that range: a UID absent from the range (expunged or never
+// assigned) is a gap, not unprocessed mail, so leaving the cursor at the old
+// max-processed-UID (or unmoved, on an empty batch) would re-scan the same
+// stalled window forever while newer mail sits above it, silently killing
+// detection for that mailbox.
+func scannedWindowTop(sinceUID, uidNext uint32) uint32 {
+	var head uint32
+	if uidNext > 0 {
+		head = uidNext - 1
+	}
+	top := sinceUID + uint32(fetchBatchSize)
+	if top > head {
+		top = head
+	}
+	return top
+}
+
 // processMessage classifies one fetched message and takes the corresponding
-// action, bumping *replies/*bounces on a match. It reports whether the
-// message matched anything (a bounce or a reply) — used only for the
-// skipped-count in the poll summary log.
+// action. *bounces is bumped on a hard bounce that gets marked; *replies is
+// bumped only when a matched reply actually calls MarkReplied (i.e. the
+// matched send has an enrollment — a match against the legacy direct-send
+// path has nothing to stop, so it isn't counted as an engaged reply). The
+// returned bool reports whether the message matched anything (a bounce or a
+// reply) — used only for the skipped-count in the poll summary log.
 func processMessage(ctx context.Context, core coreapi.Client, workspaceID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
 	d := ParseDSN(msg.Header, msg.ContentType, msg.Body)
 	if d.Kind != NotABounce {
@@ -133,8 +150,8 @@ func processMessage(ctx context.Context, core coreapi.Client, workspaceID string
 			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID); err != nil {
 				return false, err
 			}
+			*replies++
 		}
-		*replies++
 		return true, nil
 	}
 	return false, nil

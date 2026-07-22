@@ -260,14 +260,41 @@ func TestPollNoMatchIsIgnoredButCursorAdvances(t *testing.T) {
 	}
 }
 
-func TestPollNoMessagesLeavesCursorUnchanged(t *testing.T) {
+// TestPollZeroMessagesAdvancesCursorPastStalledWindow guards against a
+// permanent stall: a successful bounded Fetch has definitively examined
+// every UID up to LastSeenUID+fetchBatchSize, regardless of whether any of
+// them actually held mail. If every UID in that window is a gap (expunged
+// or never assigned) while newer mail sits above the window, the cursor
+// must still advance to the scanned-window top — otherwise the next poll
+// re-scans the exact same empty range forever and detection silently dies
+// for this mailbox.
+func TestPollZeroMessagesAdvancesCursorPastStalledWindow(t *testing.T) {
 	core := &stubCore{job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10}}
-	reader := &fakeReader{uidValidity: 5, uidNext: 10} // no new messages
+	reader := &fakeReader{uidValidity: 5, uidNext: 510} // far more mail above the fetch window
 	if err := runPoll(t, core, reader); err != nil {
 		t.Fatal(err)
 	}
-	if core.cursorSet {
-		t.Fatal("a zero-message poll must not touch the cursor")
+	if !core.cursorSet || core.cursorUID != 10+fetchBatchSize || core.cursorValidity != 5 {
+		t.Fatalf("expected cursor advanced to the scanned window top (%d), got %d set=%v", 10+fetchBatchSize, core.cursorUID, core.cursorSet)
+	}
+}
+
+// TestPollSparseWindowAdvancesToWindowTopNotMessageUID locks in the same
+// invariant for a window that isn't entirely empty: one message near the
+// bottom of the fetch window must not leave the cursor stuck near the
+// bottom either — the whole window was scanned, so the cursor advances to
+// its top, not to the last message's UID.
+func TestPollSparseWindowAdvancesToWindowTopNotMessageUID(t *testing.T) {
+	core := &stubCore{job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10}}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 1000, // plenty more mail above the window
+		msgs: []mail.InboundMessage{inboundMsg(t, 15, replyFixture("<unknown@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if !core.cursorSet || core.cursorUID != 10+fetchBatchSize {
+		t.Fatalf("expected cursor advanced to the scanned window top (%d), not the message's UID, got %d", 10+fetchBatchSize, core.cursorUID)
 	}
 }
 
