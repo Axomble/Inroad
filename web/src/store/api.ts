@@ -40,6 +40,77 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.switchWorkspaceRequest,
       }),
     }),
+    authVerifyEmail: build.mutation<
+      AuthVerifyEmailApiResponse,
+      AuthVerifyEmailApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/verify-email`,
+        method: "POST",
+        body: queryArg.verifyEmailRequest,
+      }),
+    }),
+    authResendVerification: build.mutation<
+      AuthResendVerificationApiResponse,
+      AuthResendVerificationApiArg
+    >({
+      query: () => ({ url: `/auth/verify-email/resend`, method: "POST" }),
+    }),
+    authForgotPassword: build.mutation<
+      AuthForgotPasswordApiResponse,
+      AuthForgotPasswordApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/password/forgot`,
+        method: "POST",
+        body: queryArg.forgotPasswordRequest,
+      }),
+    }),
+    authResetPassword: build.mutation<
+      AuthResetPasswordApiResponse,
+      AuthResetPasswordApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/password/reset`,
+        method: "POST",
+        body: queryArg.resetPasswordRequest,
+      }),
+    }),
+    authAcceptInvite: build.mutation<
+      AuthAcceptInviteApiResponse,
+      AuthAcceptInviteApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/invites/accept`,
+        method: "POST",
+        body: queryArg.acceptInviteRequest,
+      }),
+    }),
+    createWorkspaceInvite: build.mutation<
+      CreateWorkspaceInviteApiResponse,
+      CreateWorkspaceInviteApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/workspaces/${queryArg.id}/invites`,
+        method: "POST",
+        body: queryArg.createInviteRequest,
+      }),
+    }),
+    listWorkspaceInvites: build.query<
+      ListWorkspaceInvitesApiResponse,
+      ListWorkspaceInvitesApiArg
+    >({
+      query: (queryArg) => ({ url: `/workspaces/${queryArg.id}/invites` }),
+    }),
+    revokeWorkspaceInvite: build.mutation<
+      RevokeWorkspaceInviteApiResponse,
+      RevokeWorkspaceInviteApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/workspaces/${queryArg.id}/invites/${queryArg.inviteId}`,
+        method: "DELETE",
+      }),
+    }),
     listMailboxes: build.query<ListMailboxesApiResponse, ListMailboxesApiArg>({
       query: () => ({ url: `/mailboxes` }),
     }),
@@ -178,6 +249,41 @@ export type AuthSwitchWorkspaceApiResponse =
 export type AuthSwitchWorkspaceApiArg = {
   switchWorkspaceRequest: SwitchWorkspaceRequest;
 };
+export type AuthVerifyEmailApiResponse = unknown;
+export type AuthVerifyEmailApiArg = {
+  verifyEmailRequest: VerifyEmailRequest;
+};
+export type AuthResendVerificationApiResponse = unknown;
+export type AuthResendVerificationApiArg = void;
+export type AuthForgotPasswordApiResponse = unknown;
+export type AuthForgotPasswordApiArg = {
+  forgotPasswordRequest: ForgotPasswordRequest;
+};
+export type AuthResetPasswordApiResponse = unknown;
+export type AuthResetPasswordApiArg = {
+  resetPasswordRequest: ResetPasswordRequest;
+};
+export type AuthAcceptInviteApiResponse =
+  /** status 200 Session */ SessionResponse;
+export type AuthAcceptInviteApiArg = {
+  acceptInviteRequest: AcceptInviteRequest;
+};
+export type CreateWorkspaceInviteApiResponse =
+  /** status 201 Created invite */ Invite;
+export type CreateWorkspaceInviteApiArg = {
+  id: string;
+  createInviteRequest: CreateInviteRequest;
+};
+export type ListWorkspaceInvitesApiResponse =
+  /** status 200 Pending invites */ Invite[];
+export type ListWorkspaceInvitesApiArg = {
+  id: string;
+};
+export type RevokeWorkspaceInviteApiResponse = unknown;
+export type RevokeWorkspaceInviteApiArg = {
+  id: string;
+  inviteId: string;
+};
 export type ListMailboxesApiResponse =
   /** status 200 Mailboxes in the workspace */ Mailbox[];
 export type ListMailboxesApiArg = void;
@@ -287,6 +393,32 @@ export type SwitchWorkspaceResponse = {
 export type SwitchWorkspaceRequest = {
   workspace_id: string;
 };
+export type VerifyEmailRequest = {
+  token: string;
+};
+export type ForgotPasswordRequest = {
+  email: string;
+};
+export type ResetPasswordRequest = {
+  token: string;
+  new_password: string;
+};
+export type AcceptInviteRequest = {
+  token: string;
+  password?: string;
+};
+export type Invite = {
+  id?: string;
+  email?: string;
+  role?: string;
+  status?: string;
+  expires_at?: string;
+  created_at?: string;
+};
+export type CreateInviteRequest = {
+  email: string;
+  role: "admin" | "member";
+};
 export type Mailbox = {
   id?: string;
   email?: string;
@@ -359,6 +491,14 @@ export const {
   useAuthMeQuery,
   useAuthLogoutAllMutation,
   useAuthSwitchWorkspaceMutation,
+  useAuthVerifyEmailMutation,
+  useAuthResendVerificationMutation,
+  useAuthForgotPasswordMutation,
+  useAuthResetPasswordMutation,
+  useAuthAcceptInviteMutation,
+  useCreateWorkspaceInviteMutation,
+  useListWorkspaceInvitesQuery,
+  useRevokeWorkspaceInviteMutation,
   useListMailboxesQuery,
   useConnectMailboxMutation,
   useGetMailboxQuery,
