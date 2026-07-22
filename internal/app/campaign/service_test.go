@@ -292,17 +292,22 @@ func TestCrossTenantGetReturnsNotFound(t *testing.T) {
 }
 
 // TestDetailMetricsComputesRates proves Metrics aggregates the seeded raw
-// counts and turns them into rates, including the stop_reason -> field
-// mapping (unsub comes from 'suppressed', not the workspace suppression
-// table -- see stopReasonSuppressed in service.go).
+// counts and turns them into rates using their respective denominators:
+// OpenRate/ClickRate against Sent (per-send), ReplyRate/BounceRate/UnsubRate
+// against the enrolled-contact total (per-contact, sum of Enrollments) --
+// including the stop_reason -> field mapping (unsub comes from 'suppressed',
+// not the workspace suppression table -- see stopReasonSuppressed in
+// service.go). Sent (200) and enrolled (50) are deliberately different so a
+// regression back to a single shared denominator would be caught.
 func TestDetailMetricsComputesRates(t *testing.T) {
 	ws, id := uuid.New(), uuid.New()
 	store := &fakeStore{
-		campaigns:   map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws, Status: "running"}},
-		sendStats:   map[string]int64{"sent": 100, "queued": 5},
-		opens:       40,
-		clicks:      20,
-		stopReasons: map[string]int64{"replied": 10, "bounced": 5, "suppressed": 2, "manual": 1},
+		campaigns:    map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws, Status: "running"}},
+		sendStats:    map[string]int64{"sent": 200, "queued": 5},
+		opens:        40,
+		clicks:       20,
+		stopReasons:  map[string]int64{"replied": 10, "bounced": 5, "suppressed": 2, "manual": 1},
+		enrollCounts: map[string]int64{"active": 30, "completed": 15, "stopped": 5}, // sums to 50
 	}
 	svc := NewService(store, okChecker{active: true})
 	d, err := svc.Detail(context.Background(), ws, id)
@@ -310,16 +315,49 @@ func TestDetailMetricsComputesRates(t *testing.T) {
 		t.Fatalf("Detail: %v", err)
 	}
 	m := d.Metrics
-	if m.Sent != 100 || m.OpensIndicative != 40 || m.Clicks != 20 || m.Replies != 10 || m.Bounces != 5 || m.Unsubscribes != 2 {
+	if m.Sent != 200 || m.OpensIndicative != 40 || m.Clicks != 20 || m.Replies != 10 || m.Bounces != 5 || m.Unsubscribes != 2 {
 		t.Fatalf("counts wrong: %+v", m)
 	}
-	if m.OpenRate != 0.4 || m.ClickRate != 0.2 || m.ReplyRate != 0.1 || m.BounceRate != 0.05 || m.UnsubRate != 0.02 {
-		t.Fatalf("rates wrong: %+v", m)
+	if m.OpenRate != 0.2 || m.ClickRate != 0.1 {
+		t.Fatalf("per-send rates wrong: OpenRate=%v ClickRate=%v", m.OpenRate, m.ClickRate)
+	}
+	if m.ReplyRate != 0.2 || m.BounceRate != 0.1 || m.UnsubRate != 0.04 {
+		t.Fatalf("per-contact rates wrong: ReplyRate=%v BounceRate=%v UnsubRate=%v", m.ReplyRate, m.BounceRate, m.UnsubRate)
+	}
+}
+
+// TestDetailMetricsReplyRateUsesEnrolledDenominator is the direct regression
+// guard for the multi-step undercounting bug: a 3-step campaign sends 3x per
+// contact, so dividing per-contact reply/bounce/unsub counts by the per-send
+// Sent total reads ~3x low. sent=300 (100 contacts x 3 steps), enrolled=100,
+// replies=100 (every contact replied) must yield ReplyRate==1.0, not 0.33.
+// OpenRate/ClickRate stay on the Sent denominator (per-send is correct there).
+func TestDetailMetricsReplyRateUsesEnrolledDenominator(t *testing.T) {
+	ws, id := uuid.New(), uuid.New()
+	store := &fakeStore{
+		campaigns:    map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws, Status: "running"}},
+		sendStats:    map[string]int64{"sent": 300},
+		opens:        30,
+		clicks:       15,
+		stopReasons:  map[string]int64{"replied": 100},
+		enrollCounts: map[string]int64{"completed": 100},
+	}
+	svc := NewService(store, okChecker{active: true})
+	d, err := svc.Detail(context.Background(), ws, id)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if got := d.Metrics.ReplyRate; got != 1.0 {
+		t.Fatalf("expected ReplyRate=1.0 (100 replies / 100 enrolled), got %v -- looks like it divided by Sent instead", got)
+	}
+	if got := d.Metrics.OpenRate; got != 0.1 { // 30 opens / 300 sent -- still per-send, unaffected by the fix
+		t.Fatalf("expected OpenRate=0.1 (per-send, unaffected), got %v", got)
 	}
 }
 
 // TestDetailMetricsZeroSentGuardsDivideByZero covers a draft or just-launched
-// campaign with no sends yet: all rates must come back 0, not NaN/Inf.
+// campaign with no sends/enrollments yet: all rates must come back 0, not
+// NaN/Inf, regardless of which denominator (Sent or totalEnrolled) is zero.
 func TestDetailMetricsZeroSentGuardsDivideByZero(t *testing.T) {
 	ws, id := uuid.New(), uuid.New()
 	store := &fakeStore{
@@ -337,7 +375,7 @@ func TestDetailMetricsZeroSentGuardsDivideByZero(t *testing.T) {
 		t.Fatalf("expected Sent=0, got %d", m.Sent)
 	}
 	if m.OpenRate != 0 || m.ClickRate != 0 || m.ReplyRate != 0 || m.BounceRate != 0 || m.UnsubRate != 0 {
-		t.Fatalf("expected all rates 0 for Sent=0, got %+v", m)
+		t.Fatalf("expected all rates 0 for Sent=0/enrolled=0, got %+v", m)
 	}
 }
 

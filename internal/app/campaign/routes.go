@@ -74,6 +74,10 @@ type campaignDetailResponse struct {
 // are fractions in 0..1 rounded to 4 decimal places (e.g. 0.4123 == 41.23%);
 // the frontend formats them as percentages. opens_indicative/open_rate are
 // proxy-filtered but remain approximate -- clicks are the reliable signal.
+// NOTE for the frontend tooltip: open_rate/click_rate are per-send (a
+// multi-step campaign sends multiple times per contact), while
+// reply_rate/bounce_rate/unsub_rate are per-contact (an enrollment stops at
+// most once) -- see Metrics in service.go for the full rationale.
 type metricsResponse struct {
 	Sent            int64   `json:"sent"`
 	OpensIndicative int64   `json:"opens_indicative"`

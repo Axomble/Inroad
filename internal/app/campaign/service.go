@@ -92,11 +92,21 @@ type CampaignDetail struct {
 }
 
 // Metrics is the per-campaign engagement rollup shown on GET /campaigns/{id}.
-// Counts are raw aggregates; rates are Count/Sent as a 0..1 fraction, guarded
-// to 0 when Sent is 0 (a draft or just-launched campaign) rather than
-// dividing by zero. OpensIndicative is proxy-filtered (CountHumanOpens
-// excludes known prefetch UAs and near-instant fetches) but remains an
-// approximation -- clicks are the reliable signal.
+// Counts are raw aggregates. Rates use TWO different denominators, guarded to
+// 0 when their denominator is 0 rather than dividing by zero:
+//   - OpenRate/ClickRate = OpensIndicative|Clicks / Sent (per-send: a
+//     multi-step campaign sends several times per contact, and opens/clicks
+//     are tracked per send).
+//   - ReplyRate/BounceRate/UnsubRate = Replies|Bounces|Unsubscribes /
+//     totalEnrolled (per-contact: an enrollment stops at most once, so
+//     dividing by the per-send Sent count would read ~Nx low on an N-step
+//     campaign). totalEnrolled is the sum of Enrollments (each row is one
+//     contact's enrollment, exactly one per contact for the campaign's
+//     lifetime -- active + completed + stopped).
+//
+// OpensIndicative is proxy-filtered (CountHumanOpens excludes known
+// prefetch UAs and near-instant fetches) but remains an approximation --
+// clicks are the reliable signal.
 type Metrics struct {
 	Sent            int64
 	OpensIndicative int64
@@ -123,25 +133,40 @@ const (
 	stopReasonSuppressed = "suppressed"
 )
 
-// computeMetrics turns raw counts into a Metrics snapshot, guarding
-// divide-by-zero when the campaign has no sends yet.
-func computeMetrics(sent, opens, clicks int64, stopReasons map[string]int64) Metrics {
+// computeMetrics turns raw counts into a Metrics snapshot. sent (per-send)
+// and totalEnrolled (per-contact) are independent denominators -- see the
+// Metrics doc comment -- each guarded to 0 rather than dividing by zero.
+func computeMetrics(sent, totalEnrolled, opens, clicks int64, stopReasons map[string]int64) Metrics {
 	m := Metrics{
 		Sent: sent, OpensIndicative: opens, Clicks: clicks,
 		Replies:      stopReasons[stopReasonReplied],
 		Bounces:      stopReasons[stopReasonBounced],
 		Unsubscribes: stopReasons[stopReasonSuppressed],
 	}
-	if sent == 0 {
-		return m
+	if sent > 0 {
+		total := float64(sent)
+		m.OpenRate = float64(m.OpensIndicative) / total
+		m.ClickRate = float64(m.Clicks) / total
 	}
-	total := float64(sent)
-	m.OpenRate = float64(m.OpensIndicative) / total
-	m.ClickRate = float64(m.Clicks) / total
-	m.ReplyRate = float64(m.Replies) / total
-	m.BounceRate = float64(m.Bounces) / total
-	m.UnsubRate = float64(m.Unsubscribes) / total
+	if totalEnrolled > 0 {
+		enrolled := float64(totalEnrolled)
+		m.ReplyRate = float64(m.Replies) / enrolled
+		m.BounceRate = float64(m.Bounces) / enrolled
+		m.UnsubRate = float64(m.Unsubscribes) / enrolled
+	}
 	return m
+}
+
+// sumCounts adds up every value in a status/reason -> count map, e.g. to
+// turn Enrollments (grouped by lifecycle status) into a total enrolled-contact
+// count (each enrollment row is exactly one contact, for the campaign's
+// lifetime).
+func sumCounts(counts map[string]int64) int64 {
+	var total int64
+	for _, n := range counts {
+		total += n
+	}
+	return total
 }
 
 // metricsCacheTTL bounds how long the raw engagement aggregates (opens,
@@ -207,9 +232,10 @@ func (c *metricsCache) set(ws, id uuid.UUID, raw rawEngagement) {
 // metrics, all workspace-scoped (a cross-tenant id yields ErrNotFound before
 // any child read). The query-heavy engagement aggregates (opens/clicks/
 // stop-reasons) are served from a short-TTL cache (metricsCacheTTL) so
-// repeated dashboard loads don't re-run those queries every time; Sent and
-// every rate are always recomputed from the fresh Stats() call so
-// Metrics.Sent can never diverge from the response's top-level stats.sent.
+// repeated dashboard loads don't re-run those queries every time; Sent,
+// totalEnrolled (sumCounts(enr)), and every rate are always recomputed from
+// the fresh Stats()/EnrollmentCounts() calls so Metrics.Sent can never
+// diverge from the response's top-level stats.sent.
 func (s *Service) Detail(ctx context.Context, ws, id uuid.UUID) (CampaignDetail, error) {
 	c, err := s.store.Get(ctx, ws, id)
 	if err != nil {
@@ -240,7 +266,7 @@ func (s *Service) Detail(ctx context.Context, ws, id uuid.UUID) (CampaignDetail,
 		raw = rawEngagement{opens: opens, clicks: clicks, stopReasons: stopReasons}
 		s.metrics.set(ws, id, raw)
 	}
-	metrics := computeMetrics(sends["sent"], raw.opens, raw.clicks, raw.stopReasons)
+	metrics := computeMetrics(sends["sent"], sumCounts(enr), raw.opens, raw.clicks, raw.stopReasons)
 	return CampaignDetail{Campaign: c, Steps: steps, SendStats: sends, Enrollments: enr, Metrics: metrics}, nil
 }
 
