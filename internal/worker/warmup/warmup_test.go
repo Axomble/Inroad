@@ -28,6 +28,24 @@ func (f fakeCore) IncrementSendAttempts(context.Context, string, string) (int, e
 	return 0, nil
 }
 
+func (f fakeCore) GetStepSendJob(context.Context, string, string) (coreapi.StepSendJob, error) {
+	return coreapi.StepSendJob{}, nil
+}
+
+func (f fakeCore) MarkStepSent(context.Context, coreapi.StepSendJob, coreapi.StepResult) (coreapi.Advance, error) {
+	return coreapi.Advance{}, nil
+}
+
+func (f fakeCore) MarkStepStopped(context.Context, string, string, string) error { return nil }
+
+func (f fakeCore) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
+	return 0, nil
+}
+
+func (f fakeCore) ListDueEnrollments(context.Context) ([]coreapi.DueEnrollment, error) {
+	return nil, nil
+}
+
 var _ coreapi.Client = fakeCore{}
 
 func TestWarmupHandlerSkipsUnknownMailbox(t *testing.T) {

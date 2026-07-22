@@ -11,6 +11,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/worker/personalize"
 )
 
 // Sender sends one email over SMTP. Defined here (consumer side) so the handler
@@ -64,11 +65,12 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context
 		}
 
 		// Subject is a header, treated as text: no HTML escape.
-		subject := personalizeText(job.Subject, job.FirstName, job.ToEmail)
-		bodyText := withUnsubText(personalizeText(job.BodyText, job.FirstName, job.ToEmail), job.UnsubURL)
+		vars := personalize.Vars{FirstName: job.FirstName, Email: job.ToEmail}
+		subject := personalize.Text(job.Subject, vars)
+		bodyText := withUnsubText(personalize.Text(job.BodyText, vars), job.UnsubURL)
 		bodyHTML := ""
 		if job.BodyHTML != "" {
-			bodyHTML = withUnsubHTML(personalizeHTML(job.BodyHTML, job.FirstName, job.ToEmail), job.UnsubURL)
+			bodyHTML = withUnsubHTML(personalize.HTML(job.BodyHTML, vars), job.UnsubURL)
 		}
 
 		msgID, sendErr := sender.Send(

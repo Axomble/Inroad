@@ -7,6 +7,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker/sender"
+	"github.com/inroad/inroad/internal/worker/sequence"
 	"github.com/inroad/inroad/internal/worker/warmup"
 )
 
@@ -15,4 +16,7 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.NetSender, en
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.Handler(core))
 	mux.HandleFunc(queue.TaskSendEmail, sender.Handler(core, sndr, enq))
 	mux.HandleFunc(queue.TaskSweepStuck, sender.SweepStuckHandler(core, enq))
+	// Multi-step sequencing: advance one step per task (lazy chain) + reconcile.
+	mux.HandleFunc(queue.TaskSequenceAdvance, sequence.AdvanceHandler(core, sndr, enq))
+	mux.HandleFunc(queue.TaskSweepEnrollments, sequence.SweepHandler(core, enq))
 }
