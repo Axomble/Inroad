@@ -26,6 +26,10 @@ func NewNetTester(allowPrivate bool) *NetTester {
 	return &NetTester{Timeout: 15 * time.Second, AllowPrivate: allowPrivate}
 }
 
+// defaultIMAPTimeout bounds dialIMAP when the caller leaves Timeout unset (its
+// zero value), so a hung IMAP server can never block a caller forever.
+const defaultIMAPTimeout = 30 * time.Second
+
 // TestSMTP dials the SMTP server, negotiates TLS, and authenticates — without
 // sending any mail. Port 465 uses implicit TLS; other ports use STARTTLS when
 // UseTLS is set.
@@ -80,16 +84,9 @@ func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
 		return err
 	}
 
-	var c *client.Client
-	if cfg.Port == 143 {
-		if c, err = client.Dial(addr); err == nil {
-			err = c.StartTLS(&tls.Config{ServerName: cfg.Host})
-		}
-	} else {
-		c, err = client.DialTLS(addr, &tls.Config{ServerName: cfg.Host})
-	}
+	c, err := dialIMAP(addr, cfg, t.Timeout)
 	if err != nil {
-		return fmt.Errorf("imap dial: %w", err)
+		return err
 	}
 	defer func() { _ = c.Logout() }()
 
@@ -97,4 +94,38 @@ func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
 		return fmt.Errorf("imap login: %w", err)
 	}
 	return nil
+}
+
+// dialIMAP connects to addr (an already-vetted "ip:port" string — see vetAddr)
+// and negotiates TLS: port 143 dials plaintext then upgrades via STARTTLS;
+// other ports (993) dial with implicit TLS. cfg.Host is kept as the TLS
+// ServerName even though addr is the resolved IP, so certificate validation
+// still checks against the hostname the caller asked for. Shared by TestIMAP
+// and NetInboxReader.Fetch so both go through one SSRF-guarded dial path.
+//
+// timeout bounds both the initial dial+greeting (via a net.Dialer deadline)
+// and every subsequent IMAP command — STARTTLS, LOGIN, SELECT, FETCH, ... —
+// via go-imap's per-command deadline (Client.Timeout), so a hung server can
+// never block the caller indefinitely. A timeout <= 0 falls back to
+// defaultIMAPTimeout.
+func dialIMAP(addr string, cfg IMAPConfig, timeout time.Duration) (*client.Client, error) {
+	if timeout <= 0 {
+		timeout = defaultIMAPTimeout
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+
+	var c *client.Client
+	var err error
+	if cfg.Port == 143 {
+		if c, err = client.DialWithDialer(dialer, addr); err == nil {
+			err = c.StartTLS(&tls.Config{ServerName: cfg.Host})
+		}
+	} else {
+		c, err = client.DialWithDialerTLS(dialer, addr, &tls.Config{ServerName: cfg.Host})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("imap dial: %w", err)
+	}
+	c.Timeout = timeout
+	return c, nil
 }
