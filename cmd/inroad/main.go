@@ -16,6 +16,7 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
+	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -73,7 +74,14 @@ func main() {
 	// keeps the "app packages don't import each other" invariant intact.
 	contactSvc := contact.NewService(contact.NewPgStore(queries), listCheckerAdapter{lists: listSvc})
 	// checker adapts the mailbox and list stores for campaign ownership checks.
-	campaignSvc := campaign.NewService(campaign.NewPgStore(pool), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
+	campaignStore := campaign.NewPgStore(pool)
+	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
+	// Sequence steps live under /campaigns/{id}/steps; the step service checks
+	// campaign status (draft-gating) via an adapter over the campaign store.
+	stepHandler := sequencestep.NewHandler(
+		sequencestep.NewService(sequencestep.NewPgStore(queries), campaignStatusChecker{campaigns: campaignStore}),
+		cfg.JWTSecret,
+	)
 	suppStore := suppression.NewStore(queries)
 
 	router := httpx.NewRouter(logger)
@@ -84,7 +92,7 @@ func main() {
 	// overlap with /api/v1/lists that would otherwise 404 the import route.
 	// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 	router.Mount("/api/v1/contacts", contact.NewHandler(contactSvc, cfg.JWTSecret).Routes())
-	router.Mount("/api/v1/campaigns", campaign.NewHandler(campaignSvc, cfg.JWTSecret, enq).Routes())
+	router.Mount("/api/v1/campaigns", campaign.NewHandler(campaignSvc, cfg.JWTSecret, enq, stepHandler).Routes())
 	router.Mount("/u", suppression.NewHandler(cfg.JWTSecret, suppStore).Routes())
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
@@ -130,6 +138,20 @@ func (o ownershipChecker) ListExists(ctx context.Context, ws, listID uuid.UUID) 
 		return false, err
 	}
 	return true, nil
+}
+
+// campaignStatusChecker adapts the campaign store to sequencestep.CampaignChecker
+// so the steps domain can draft-gate structural edits without importing the
+// campaign package. A missing campaign surfaces as an error, which the step
+// service maps to "campaign not found" (404).
+type campaignStatusChecker struct{ campaigns *campaign.PgStore }
+
+func (c campaignStatusChecker) CampaignStatus(ctx context.Context, ws, campaignID uuid.UUID) (string, error) {
+	cam, err := c.campaigns.Get(ctx, ws, campaignID)
+	if err != nil {
+		return "", err
+	}
+	return cam.Status, nil
 }
 
 // listCheckerAdapter satisfies contact.ListChecker so the contact package

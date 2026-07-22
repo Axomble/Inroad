@@ -30,9 +30,20 @@ func (q *Queries) CountQueuedByCampaign(ctx context.Context, arg CountQueuedByCa
 
 const countSentToday = `-- name: CountSentToday :one
 SELECT count(*) FROM sends
-WHERE mailbox_id = $1 AND status = 'sent' AND sent_at::date = (now() AT TIME ZONE 'utc')::date
+WHERE mailbox_id = $1 AND status = 'sent'
+  AND sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+  AND sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day'
 `
 
+// Sends today for a mailbox, counted over the UTC calendar day. The half-open
+// range is explicitly UTC (date_trunc on now() AT TIME ZONE 'utc'), so it counts
+// the UTC day unconditionally. This matches the old
+// sent_at::date = (now() AT TIME ZONE 'utc')::date only when the session
+// TimeZone is UTC; the new form is in fact more correct, being UTC-day
+// regardless of the session TimeZone. Expressed as a sargable half-open range on
+// sent_at so the partial index idx_sends_mailbox_sent
+// (mailbox_id, sent_at WHERE status='sent') can range-seek instead of casting
+// every row's sent_at. Runs on every advance/send.
 func (q *Queries) CountSentToday(ctx context.Context, mailboxID uuid.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countSentToday, mailboxID)
 	var count int64

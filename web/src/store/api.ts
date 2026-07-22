@@ -129,6 +129,29 @@ const injectedRtkApi = api.injectEndpoints({
     getCampaign: build.query<GetCampaignApiResponse, GetCampaignApiArg>({
       query: (queryArg) => ({ url: `/campaigns/${queryArg.id}` }),
     }),
+    listSteps: build.query<ListStepsApiResponse, ListStepsApiArg>({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/steps` }),
+    }),
+    createStep: build.mutation<CreateStepApiResponse, CreateStepApiArg>({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps`,
+        method: "POST",
+        body: queryArg.stepRequest,
+      }),
+    }),
+    updateStep: build.mutation<UpdateStepApiResponse, UpdateStepApiArg>({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}`,
+        method: "PUT",
+        body: queryArg.stepRequest,
+      }),
+    }),
+    deleteStep: build.mutation<DeleteStepApiResponse, DeleteStepApiArg>({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}`,
+        method: "DELETE",
+      }),
+    }),
     launchCampaign: build.mutation<
       LaunchCampaignApiResponse,
       LaunchCampaignApiArg
@@ -232,13 +255,40 @@ export type CreateCampaignApiResponse =
 export type CreateCampaignApiArg = {
   createCampaignRequest: CreateCampaignRequest;
 };
-export type GetCampaignApiResponse = /** status 200 Campaign */ Campaign;
+export type GetCampaignApiResponse =
+  /** status 200 Campaign with steps + enrollment counts */ CampaignDetail;
 export type GetCampaignApiArg = {
   id: string;
 };
-export type LaunchCampaignApiResponse = /** status 200 Queued count */ {
-  queued?: number;
+export type ListStepsApiResponse =
+  /** status 200 Steps in order */ SequenceStep[];
+export type ListStepsApiArg = {
+  id: string;
 };
+export type CreateStepApiResponse =
+  /** status 200 Created step (appended at end) */ SequenceStep;
+export type CreateStepApiArg = {
+  id: string;
+  stepRequest: StepRequest;
+};
+export type UpdateStepApiResponse =
+  /** status 200 Updated step (content edits allowed while running — live-reference) */ SequenceStep;
+export type UpdateStepApiArg = {
+  id: string;
+  stepId: string;
+  stepRequest: StepRequest;
+};
+export type DeleteStepApiResponse = unknown;
+export type DeleteStepApiArg = {
+  id: string;
+  stepId: string;
+};
+export type LaunchCampaignApiResponse =
+  /** status 200 Enrollment + queue counts */ {
+    queued?: number;
+    total_enrolled?: number;
+    failed_enqueue_count?: number;
+  };
 export type LaunchCampaignApiArg = {
   id: string;
 };
@@ -351,6 +401,36 @@ export type CreateCampaignRequest = {
   body_text?: string;
   body_html?: string;
 };
+export type SequenceStep = {
+  id?: string;
+  step_order?: number;
+  /** wait after the previous step's send before this one */
+  delay_seconds?: number;
+  subject?: string;
+  body_text?: string;
+  body_html?: string;
+};
+export type CampaignDetail = {
+  id?: string;
+  name?: string;
+  subject?: string;
+  status?: string;
+  /** send counts by status */
+  stats?: {
+    [key: string]: number;
+  };
+  /** enrollment counts by status */
+  enrollments?: {
+    [key: string]: number;
+  };
+  steps?: SequenceStep[];
+};
+export type StepRequest = {
+  delay_seconds?: number;
+  subject?: string;
+  body_text?: string;
+  body_html?: string;
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -372,6 +452,10 @@ export const {
   useListCampaignsQuery,
   useCreateCampaignMutation,
   useGetCampaignQuery,
+  useListStepsQuery,
+  useCreateStepMutation,
+  useUpdateStepMutation,
+  useDeleteStepMutation,
   useLaunchCampaignMutation,
   useUnsubscribeConfirmPageQuery,
   useUnsubscribeMutation,

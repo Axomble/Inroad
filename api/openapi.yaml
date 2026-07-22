@@ -267,9 +267,61 @@ paths:
       security: [{ bearerAuth: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
-        '200': { description: Campaign, content: { application/json: { schema: { $ref: '#/components/schemas/Campaign' } } } }
+        '200': { description: Campaign with steps + enrollment counts, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignDetail' } } } }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /campaigns/{id}/steps:
+    get:
+      operationId: listSteps
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Steps in order, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/SequenceStep' } } } } }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+    post:
+      operationId: createStep
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepRequest' } } }
+      responses:
+        '200': { description: Created step (appended at end), content: { application/json: { schema: { $ref: '#/components/schemas/SequenceStep' } } } }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '409': { description: Campaign not draft (structural edits are draft-only) }
+  /campaigns/{id}/steps/{stepId}:
+    put:
+      operationId: updateStep
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepRequest' } } }
+      responses:
+        '200': { description: Updated step (content edits allowed while running — live-reference), content: { application/json: { schema: { $ref: '#/components/schemas/SequenceStep' } } } }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign or step not found }
+    delete:
+      operationId: deleteStep
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign or step not found }
+        '409': { description: Campaign not draft (delete is a structural edit) }
   /campaigns/{id}/launch:
     post:
       operationId: launchCampaign
@@ -277,11 +329,20 @@ paths:
       security: [{ bearerAuth: [] }]
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
-        '200': { description: Queued count, content: { application/json: { schema: { type: object, properties: { queued: { type: integer } } } } } }
+        '200':
+          description: Enrollment + queue counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: integer }
+                  total_enrolled: { type: integer }
+                  failed_enqueue_count: { type: integer }
         '401': { description: Unauthorized }
         '404': { description: Not found }
         '409': { description: Already launched }
-        '422': { description: Target list empty }
+        '422': { description: Target list empty or campaign has no steps }
   # The unsubscribe endpoint is served outside the /api/v1 base — it is
   # public and browser-facing (no auth, returns HTML). RFC 8058 requires the
   # state change to live on POST so email preview scanners auto-following
@@ -435,6 +496,32 @@ components:
         subject: { type: string }
         status: { type: string }
         stats: { type: object, additionalProperties: { type: integer } }
+    CampaignDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        subject: { type: string }
+        status: { type: string }
+        stats: { type: object, additionalProperties: { type: integer }, description: send counts by status }
+        enrollments: { type: object, additionalProperties: { type: integer }, description: enrollment counts by status }
+        steps: { type: array, items: { $ref: '#/components/schemas/SequenceStep' } }
+    SequenceStep:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        step_order: { type: integer }
+        delay_seconds: { type: integer, description: wait after the previous step's send before this one }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string }
+    StepRequest:
+      type: object
+      properties:
+        delay_seconds: { type: integer, minimum: 0 }
+        subject: { type: string, maxLength: 500 }
+        body_text: { type: string }
+        body_html: { type: string }
     CreateCampaignRequest:
       type: object
       required: [name, mailbox_id, list_id, subject]

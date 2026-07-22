@@ -17,10 +17,15 @@ type Handler struct {
 	svc       *Service
 	jwtSecret []byte
 	enq       Enqueuer
+	subs      []SubRouter
 }
 
-func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq}
+// NewHandler builds the campaign handler. Optional subs register additional
+// routes under the campaign scope (e.g. sequence steps at /{id}/steps) so
+// sub-resources share the {id} param and auth middleware without campaign
+// importing their packages.
+func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer, subs ...SubRouter) *Handler {
+	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq, subs: subs}
 }
 
 type createRequest struct {
@@ -78,13 +83,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	c, err := h.svc.Get(r.Context(), ws, id)
+	d, err := h.svc.Detail(r.Context(), ws, id)
 	if err != nil {
 		httpx.Error(w, http.StatusNotFound, "not found")
 		return
 	}
-	stats, _ := h.svc.Stats(r.Context(), ws, id)
-	httpx.JSON(w, http.StatusOK, toResponse(c, stats))
+	httpx.JSON(w, http.StatusOK, toDetailResponse(d))
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +128,8 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "campaign already launched")
 	case errors.Is(err, ErrEmptyList):
 		httpx.Error(w, http.StatusUnprocessableEntity, "target list is empty")
+	case errors.Is(err, ErrNoSteps):
+		httpx.Error(w, http.StatusUnprocessableEntity, "campaign has no sequence steps")
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not launch")
 	default:
@@ -131,7 +137,7 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		// let callers spot partial-enqueue outcomes without breaking the shape.
 		httpx.JSON(w, http.StatusOK, map[string]int{
 			"queued":               res.EnqueuedCount,
-			"total_sends":          res.TotalSends,
+			"total_enrolled":       res.TotalEnrolled,
 			"failed_enqueue_count": res.FailedEnqueueCount,
 		})
 	}
