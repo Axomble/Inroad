@@ -3,20 +3,26 @@ package inprocess
 import "testing"
 
 func TestReplySubjectStep1Verbatim(t *testing.T) {
-	if got := replySubject(1, "Intro"); got != "Intro" {
+	if got := replySubject(1, "Intro", ""); got != "Intro" {
 		t.Fatalf("step 1 subject should be verbatim, got %q", got)
 	}
 }
 
-func TestReplySubjectPrefixesFromStep2(t *testing.T) {
-	if got := replySubject(2, "Following up"); got != "Re: Following up" {
-		t.Fatalf("got %q", got)
+func TestReplySubjectEmptyStep2UsesThreadSubject(t *testing.T) {
+	// A5: step >1 with an empty subject replies in-thread on the step-1 subject.
+	if got := replySubject(2, "", "Intro"); got != "Re: Intro" {
+		t.Fatalf("empty step-2 subject should reply on thread subject, got %q", got)
 	}
 }
 
-func TestReplySubjectNoDoubleRe(t *testing.T) {
-	if got := replySubject(3, "Re: Intro"); got != "Re: Intro" {
-		t.Fatalf("got %q", got)
+func TestReplySubjectNonEmptyStep2Verbatim(t *testing.T) {
+	// A5: a non-empty later-step subject is a deliberate new subject, used as-is
+	// (threading is carried by In-Reply-To/References, not the subject).
+	if got := replySubject(2, "Follow up", "Intro"); got != "Follow up" {
+		t.Fatalf("non-empty step-2 subject should be verbatim, got %q", got)
+	}
+	if got := replySubject(3, "Re: Intro", "Intro"); got != "Re: Intro" {
+		t.Fatalf("non-empty subject must not be double-prefixed, got %q", got)
 	}
 }
 

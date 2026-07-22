@@ -46,13 +46,20 @@ type Client interface {
 	GetStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (StepSendJob, error)
 	// MarkStepSent records the step's send (one sends row, with result) and
 	// advances the enrollment cursor via the enrollment state machine — the
-	// single insertion point for the current_step transition and cadence.
-	// Returns whether the enrollment completed and, if not, when the next step
-	// is due.
-	MarkStepSent(ctx context.Context, enrollmentID, workspaceID string, res StepResult) (Advance, error)
+	// single insertion point for the current_step transition and cadence, run in
+	// one transaction. It takes the StepSendJob returned by GetStepSendJob so the
+	// immutable values (campaign/contact/mailbox ids, resolved step, references,
+	// next-step delay) are reused rather than re-queried. Returns whether the
+	// enrollment completed and, if not, when the next step is due.
+	MarkStepSent(ctx context.Context, job StepSendJob, res StepResult) (Advance, error)
 	// MarkStepStopped halts an enrollment (the single stop entry point). reason
 	// is one of the enrollment stop reasons (e.g. "suppressed").
 	MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error
+	// IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter
+	// and returns the new value. Mirrors IncrementSendAttempts on the direct-send
+	// path: the advance handler uses it to break out of the cap-defer loop when a
+	// mailbox cap is never clearing.
+	IncrementEnrollmentCapDeferrals(ctx context.Context, enrollmentID, workspaceID string) (int, error)
 	// ListDueEnrollments returns active enrollments whose next_due_at passed the
 	// reconcile window. Consumed by the periodic enrollment sweeper.
 	ListDueEnrollments(ctx context.Context) ([]DueEnrollment, error)
@@ -72,11 +79,22 @@ type ContactVars struct {
 // step-email. Skip is true when the enrollment is no longer active (stopped or
 // completed) or has no next step — the worker no-ops. SMTPPassword is []byte so
 // the worker can zeroize it after use.
+//
+// The worker passes the job back to MarkStepSent unchanged, so it also carries
+// the routing/cadence values MarkStepSent needs to record the send and advance
+// the cursor without re-querying: CampaignID/ContactID/MailboxID (send row),
+// CurrentStep (the cursor before this send), NextDelaySeconds (delay of the step
+// after this one; 0 when LastStep), and References (the stored references chain).
 type StepSendJob struct {
 	Skip              bool
 	EnrollmentID      string
 	WorkspaceID       string
+	CampaignID        string
+	ContactID         string
+	MailboxID         string
+	CurrentStep       int
 	StepOrder         int
+	NextDelaySeconds  int
 	LastStep          bool
 	Suppressed        bool
 	EffectiveDailyCap int
@@ -84,6 +102,7 @@ type StepSendJob struct {
 	ToEmail           string
 	Vars              ContactVars
 	Subject           string
+	ThreadSubject     string
 	BodyText          string
 	BodyHTML          string
 	UnsubURL          string

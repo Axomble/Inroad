@@ -34,10 +34,20 @@ type Enqueuer interface {
 // mailbox's daily cap. Matches the direct sender's 6h re-enqueue.
 const capBackoff = 6 * time.Hour
 
-// stopReasonSuppressed mirrors enrollment.StopSuppressed. Duplicated as a
-// string constant here because the worker reaches the enrollment domain only
-// through coreapi (app/* isolation); the value must stay identical.
-const stopReasonSuppressed = "suppressed"
+// maxCapDeferrals bounds the cap-exceeded re-enqueue loop, mirroring
+// sender.maxSendAttempts: an enrollment that keeps hitting a daily cap it can
+// never clear (mis-set cap, stuck sent-today counter) is failed instead of
+// deferring forever.
+const maxCapDeferrals = 30
+
+// stopReasonSuppressed / stopReasonFailed mirror enrollment.StopSuppressed and
+// enrollment.StopFailed. Duplicated as string constants here because the worker
+// reaches the enrollment domain only through coreapi (app/* isolation); the
+// values must stay identical.
+const (
+	stopReasonSuppressed = "suppressed"
+	stopReasonFailed     = "failed"
+)
 
 // AdvanceHandler returns an asynq handler for sequence:advance tasks. It owns
 // the whole step lifecycle: fetch the due step, personalize, build a threaded
@@ -62,9 +72,24 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(conte
 		if job.Suppressed {
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonSuppressed)
 		}
+		if job.EffectiveDailyCap <= 0 {
+			// Degenerate cap (daily_cap=0, or ramp_start_cap=0 on a brand-new
+			// mailbox): this enrollment can never send. Stop it 'failed' rather
+			// than deferring forever.
+			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
+		}
 		if job.SentToday >= job.EffectiveDailyCap {
-			// Over today's cap: retry this enrollment later; leave it active and
-			// its cursor unchanged so the same step is re-attempted.
+			// Over today's cap: bump the deferral counter and retry later,
+			// leaving the cursor unchanged so the same step is re-attempted —
+			// but fail out if we've deferred too long, so a permanently mis-set
+			// cap can't re-enqueue this enrollment indefinitely.
+			n, err := core.IncrementEnrollmentCapDeferrals(ctx, p.EnrollmentID, p.WorkspaceID)
+			if err != nil {
+				return err
+			}
+			if n > maxCapDeferrals {
+				return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
+			}
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, capBackoff)
 		}
 
@@ -95,7 +120,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(conte
 			// policy may be preferred; revisit.
 			res = coreapi.StepResult{Status: "failed", Err: sendErr.Error()}
 		}
-		adv, err := core.MarkStepSent(ctx, p.EnrollmentID, p.WorkspaceID, res)
+		adv, err := core.MarkStepSent(ctx, job, res)
 		if err != nil {
 			return err
 		}

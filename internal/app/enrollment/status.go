@@ -23,4 +23,8 @@ const (
 	StopBounced    StopReason = "bounced"
 	StopSuppressed StopReason = "suppressed"
 	StopManual     StopReason = "manual"
+	// StopFailed halts an enrollment the sequence engine can no longer make
+	// progress on: a degenerate mailbox cap of 0, or a cap-defer loop that has
+	// exceeded its ceiling without ever clearing.
+	StopFailed StopReason = "failed"
 )

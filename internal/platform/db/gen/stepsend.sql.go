@@ -127,6 +127,7 @@ const recordStepSend = `-- name: RecordStepSend :one
 INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email,
                    step_order, references_header, status, message_id, error, sent_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CASE WHEN $8 = 'sent' THEN now() ELSE NULL END)
+ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL DO NOTHING
 RETURNING id
 `
 
@@ -146,7 +147,10 @@ type RecordStepSendParams struct {
 // Insert the send row for one step WITH its result in a single write (the
 // advance handler sends first, then records). Keeps GetStepSendJob read-only so
 // a suppressed/capped step never leaves an orphan queued row. sent_at is set
-// only on success.
+// only on success. ON CONFLICT makes a duplicate advance a no-op against the
+// (campaign, contact, step_order) idempotency index (migration 000008): the
+// duplicate inserts no row and returns none (sql.ErrNoRows), which the caller
+// treats as already-recorded.
 func (q *Queries) RecordStepSend(ctx context.Context, arg RecordStepSendParams) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, recordStepSend,
 		arg.WorkspaceID,

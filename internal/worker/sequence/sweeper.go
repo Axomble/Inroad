@@ -15,8 +15,9 @@ import (
 // half of the lazy chain.
 //
 // Idempotent: a duplicate advance is harmless — GetStepSendJob no-ops on a
-// stopped/completed enrollment (Skip), and re-sending a step at-least-once is
-// the accepted trade-off (no per-step unique constraint, per spec).
+// stopped/completed enrollment (Skip), and the (campaign, contact, step_order)
+// unique index added in migration 000008 is the backstop: RecordStepSend's ON
+// CONFLICT makes a re-sent step a no-op on the sends row rather than a duplicate.
 func SweepHandler(core coreapi.Client, enq Enqueuer) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, _ *asynq.Task) error {
 		rows, err := core.ListDueEnrollments(ctx)

@@ -151,6 +151,7 @@ type SequenceEnrollment struct {
 	ThreadRootID string             `json:"thread_root_id"`
 	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
 	StoppedAt    pgtype.Timestamptz `json:"stopped_at"`
+	CapDeferrals int32              `json:"cap_deferrals"`
 }
 
 type SequenceStep struct {

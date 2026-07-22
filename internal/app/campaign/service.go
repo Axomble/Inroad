@@ -28,13 +28,6 @@ type Enqueuer interface {
 	EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error
 }
 
-// staggerInterval spreads step-1 sends across enrollments so a launch of N
-// contacts doesn't burst the mailbox. NOTE: the spec's exact stagger formula
-// (§4.1 step 3) was not available; this modest fixed interval is a placeholder
-// — the per-mailbox cap/ramp gate does the real pacing. Revisit against the
-// spec.
-const staggerInterval = 2 * time.Second
-
 // Service implements campaign use cases. It depends on the Store and
 // Checker interfaces, not on the sqlc-backed struct or other domains'
 // concrete stores -- dependency inversion.
@@ -152,25 +145,23 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 	if steps == 0 {
 		return LaunchResult{}, ErrNoSteps
 	}
-	ids, err := s.store.EnrollTx(ctx, ws, campaignID)
+	enrollments, err := s.store.EnrollTx(ctx, ws, campaignID)
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	if len(ids) == 0 {
+	if len(enrollments) == 0 {
 		return LaunchResult{}, ErrEmptyList
 	}
-	res := LaunchResult{TotalEnrolled: len(ids)}
-	base := time.Now()
-	for i, id := range ids {
-		at := base.Add(time.Duration(i) * staggerInterval)
-		// Keep next_due_at in sync with the scheduled task so the sweeper's
-		// "overdue" check doesn't re-fire an enrollment whose stagger slot
-		// hasn't arrived. A reschedule failure is non-fatal (sweeper reconciles).
-		if err := s.store.Reschedule(ctx, ws, id, at); err != nil {
-			res.FailedEnqueueCount++
-			continue
-		}
-		if err := enq.EnqueueAdvanceAt(id.String(), ws.String(), at); err != nil {
+	res := LaunchResult{TotalEnrolled: len(enrollments)}
+	for _, e := range enrollments {
+		// EnrollListMembers already staggered next_due_at at insert time; we
+		// enqueue each advance at exactly that DB-assigned time (asynq needs one
+		// task per enrollment) so the scheduled task and the enrollment's due
+		// cursor are identical by construction — never recompute the stagger in
+		// Go, since RETURNING row order isn't guaranteed to match the window
+		// ORDER BY. A failed enqueue is non-fatal — the enrollment sweeper
+		// reconciles it next tick.
+		if err := enq.EnqueueAdvanceAt(e.ID.String(), ws.String(), e.NextDueAt); err != nil {
 			res.FailedEnqueueCount++
 			continue
 		}

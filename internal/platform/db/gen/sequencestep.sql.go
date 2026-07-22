@@ -82,6 +82,40 @@ func (q *Queries) DeleteStep(ctx context.Context, arg DeleteStepParams) error {
 	return err
 }
 
+const getNextStep = `-- name: GetNextStep :one
+SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at FROM sequence_steps
+WHERE campaign_id = $1 AND workspace_id = $2 AND step_order > $3
+ORDER BY step_order ASC LIMIT 1
+`
+
+type GetNextStepParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	StepOrder   int32     `json:"step_order"`
+}
+
+// The first step whose step_order is greater than $3, tolerating gaps left by
+// DeleteStep (which does not renumber). Used to resolve the enrollment's next
+// due step and to detect the last step: sql.ErrNoRows means no further step
+// exists, so the enrollment is complete.
+func (q *Queries) GetNextStep(ctx context.Context, arg GetNextStepParams) (SequenceStep, error) {
+	row := q.db.QueryRow(ctx, getNextStep, arg.CampaignID, arg.WorkspaceID, arg.StepOrder)
+	var i SequenceStep
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.CampaignID,
+		&i.StepOrder,
+		&i.DelaySeconds,
+		&i.Subject,
+		&i.BodyText,
+		&i.BodyHtml,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getStep = `-- name: GetStep :one
 SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at FROM sequence_steps WHERE id = $1 AND workspace_id = $2
 `

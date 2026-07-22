@@ -32,11 +32,15 @@ func (f fakeCore) GetStepSendJob(context.Context, string, string) (coreapi.StepS
 	return coreapi.StepSendJob{}, nil
 }
 
-func (f fakeCore) MarkStepSent(context.Context, string, string, coreapi.StepResult) (coreapi.Advance, error) {
+func (f fakeCore) MarkStepSent(context.Context, coreapi.StepSendJob, coreapi.StepResult) (coreapi.Advance, error) {
 	return coreapi.Advance{}, nil
 }
 
 func (f fakeCore) MarkStepStopped(context.Context, string, string, string) error { return nil }
+
+func (f fakeCore) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
+	return 0, nil
+}
 
 func (f fakeCore) ListDueEnrollments(context.Context) ([]coreapi.DueEnrollment, error) {
 	return nil, nil

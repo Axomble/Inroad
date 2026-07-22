@@ -7,12 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
@@ -66,8 +66,9 @@ type itFixture struct {
 
 // seedCampaign builds a workspace + mailbox + list + one contact + campaign
 // with the given step (subject, body, delaySeconds) list, and enrolls the
-// contact. Returns the enrollment id.
-func seedCampaign(t *testing.T, ctx context.Context, q *gen.Queries, sealer *crypto.Sealer, steps [][3]string) itFixture {
+// contact. Returns the enrollment id. The pool backs the coreapi client (its
+// MarkStepSent opens a transaction), while q is used for direct seeding.
+func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.Queries, sealer *crypto.Sealer, steps [][3]string) itFixture {
 	t.Helper()
 	ct, err := sealer.Seal([]byte("smtp-app-password"))
 	if err != nil {
@@ -120,7 +121,7 @@ func seedCampaign(t *testing.T, ctx context.Context, q *gen.Queries, sealer *cry
 	}
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
 	return itFixture{
-		q: q, core: inprocess.New(q, sealer, sealerKey, "https://app.test"),
+		q: q, core: inprocess.New(pool, sealer, sealerKey, "https://app.test"),
 		ws: ws.ID, campaignID: cam.ID, contactID: c.ID, email: email,
 	}
 }
@@ -142,7 +143,7 @@ func newSealer(t *testing.T) *crypto.Sealer {
 	return s
 }
 
-func connect(t *testing.T) (*gen.Queries, func()) {
+func connect(t *testing.T) (*pgxpool.Pool, *gen.Queries, func()) {
 	t.Helper()
 	ctx := context.Background()
 	if err := db.Migrate(dsn()); err != nil {
@@ -152,7 +153,7 @@ func connect(t *testing.T) (*gen.Queries, func()) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	return gen.New(pool), pool.Close
+	return pool, gen.New(pool), pool.Close
 }
 
 // TestSequenceMultiStepThreaded drives a 2-step sequence end-to-end against
@@ -161,19 +162,22 @@ func connect(t *testing.T) (*gen.Queries, func()) {
 // subject), and that the enrollment completes.
 func TestSequenceMultiStepThreaded(t *testing.T) {
 	ctx := context.Background()
-	q, closeFn := connect(t)
+	pool, q, closeFn := connect(t)
 	defer closeFn()
 	sealer := newSealer(t)
 
-	fx := seedCampaign(t, ctx, q, sealer, [][3]string{
+	// Step 2 leaves its subject empty: per spec A5 that means "reply in thread"
+	// → the send subject becomes "Re: <step-1 subject>". (A non-empty step-2
+	// subject would be a deliberate new subject used verbatim, still threaded.)
+	fx := seedCampaign(t, ctx, pool, q, sealer, [][3]string{
 		{"Hi {{first_name}}", "Hello {{first_name}}", "0"},
-		{"Following up {{first_name}}", "Just checking in", "0"},
+		{"", "Just checking in", "0"},
 	})
 	ids, err := q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: fx.campaignID, WorkspaceID: fx.ws})
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("enroll: %v ids=%d", err, len(ids))
 	}
-	eid := ids[0].String()
+	eid := ids[0].ID.String()
 	snd, enq := &itSender{}, newITEnq()
 
 	// Step 1.
@@ -193,15 +197,17 @@ func TestSequenceMultiStepThreaded(t *testing.T) {
 	if len(snd.sent) != 2 {
 		t.Fatalf("expected 2 sends, got %d", len(snd.sent))
 	}
-	if !strings.HasPrefix(snd.sent[1].Subject, "Re: Following up") {
-		t.Fatalf("step 2 subject should be a reply, got %q", snd.sent[1].Subject)
+	// Empty step-2 subject ⇒ "Re: <step-1 subject>" (step-1 subject personalized:
+	// "Hi {{first_name}}" → "Hi Alice").
+	if snd.sent[1].Subject != "Re: Hi Alice" {
+		t.Fatalf("step 2 subject should be a threaded reply, got %q", snd.sent[1].Subject)
 	}
 	if snd.sent[1].InReplyTo == "" {
 		t.Fatalf("step 2 must thread onto step 1 (In-Reply-To set)")
 	}
 
 	// Enrollment completed at step 2.
-	e, err := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: ids[0], WorkspaceID: fx.ws})
+	e, err := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: ids[0].ID, WorkspaceID: fx.ws})
 	if err != nil {
 		t.Fatalf("get enrollment: %v", err)
 	}
@@ -214,27 +220,78 @@ func TestSequenceMultiStepThreaded(t *testing.T) {
 // single-message shape) enrolls and completes after a single advance.
 func TestSequenceBackwardCompatSingleStep(t *testing.T) {
 	ctx := context.Background()
-	q, closeFn := connect(t)
+	pool, q, closeFn := connect(t)
 	defer closeFn()
 	sealer := newSealer(t)
 
-	fx := seedCampaign(t, ctx, q, sealer, [][3]string{{"Solo {{first_name}}", "One and done", "0"}})
+	fx := seedCampaign(t, ctx, pool, q, sealer, [][3]string{{"Solo {{first_name}}", "One and done", "0"}})
 	ids, err := q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: fx.campaignID, WorkspaceID: fx.ws})
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("enroll: %v", err)
 	}
 	snd, enq := &itSender{}, newITEnq()
-	advance(t, fx.core, snd, enq, ids[0].String(), fx.ws.String())
+	advance(t, fx.core, snd, enq, ids[0].ID.String(), fx.ws.String())
 
 	if len(snd.sent) != 1 || snd.sent[0].Subject != "Solo Alice" {
 		t.Fatalf("single-step send wrong: %+v", snd.sent)
 	}
-	if _, ok := enq.at[ids[0].String()]; ok {
+	if _, ok := enq.at[ids[0].ID.String()]; ok {
 		t.Fatal("single-step campaign must not schedule a next step")
 	}
-	e, _ := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: ids[0], WorkspaceID: fx.ws})
+	e, _ := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: ids[0].ID, WorkspaceID: fx.ws})
 	if e.Status != "completed" {
 		t.Fatalf("expected completed, got %s", e.Status)
+	}
+}
+
+// TestSequenceCapDeferralsResetOnSend proves cap_deferrals is a CONSECUTIVE
+// counter, reset to 0 whenever a step successfully sends (AdvanceEnrollmentStep
+// / CompleteEnrollment), not a lifetime total. A long healthy campaign that
+// occasionally brushes the daily cap between sends must never accumulate past
+// maxCapDeferrals and be wrongly failed.
+func TestSequenceCapDeferralsResetOnSend(t *testing.T) {
+	ctx := context.Background()
+	pool, q, closeFn := connect(t)
+	defer closeFn()
+	sealer := newSealer(t)
+
+	fx := seedCampaign(t, ctx, pool, q, sealer, [][3]string{
+		{"Hi {{first_name}}", "Hello", "0"},
+		{"Follow up", "Ping", "0"},
+	})
+	ids, err := q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: fx.campaignID, WorkspaceID: fx.ws})
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("enroll: %v", err)
+	}
+	eid := ids[0].ID
+
+	// Simulate a run of cap-defers before the send lands.
+	for i := 0; i < 5; i++ {
+		if _, err := q.IncrementEnrollmentCapDeferrals(ctx, gen.IncrementEnrollmentCapDeferralsParams{ID: eid, WorkspaceID: fx.ws}); err != nil {
+			t.Fatalf("increment cap_deferrals: %v", err)
+		}
+	}
+	e, _ := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: eid, WorkspaceID: fx.ws})
+	if e.CapDeferrals != 5 {
+		t.Fatalf("precondition: want cap_deferrals=5, got %d", e.CapDeferrals)
+	}
+
+	// Step 1 sends → AdvanceEnrollmentStep must reset the counter.
+	snd, enq := &itSender{}, newITEnq()
+	advance(t, fx.core, snd, enq, eid.String(), fx.ws.String())
+	e, _ = q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: eid, WorkspaceID: fx.ws})
+	if e.CapDeferrals != 0 {
+		t.Fatalf("cap_deferrals must reset to 0 on a successful send, got %d", e.CapDeferrals)
+	}
+
+	// A fresh defer after the reset starts the count over (consecutive, not
+	// lifetime): the next bump is 1, not 6.
+	n, err := q.IncrementEnrollmentCapDeferrals(ctx, gen.IncrementEnrollmentCapDeferralsParams{ID: eid, WorkspaceID: fx.ws})
+	if err != nil {
+		t.Fatalf("increment after reset: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("post-reset counter must be consecutive (want 1), got %d", n)
 	}
 }
 
@@ -242,11 +299,11 @@ func TestSequenceBackwardCompatSingleStep(t *testing.T) {
 // emailed) on advance.
 func TestSequenceStopOnSuppression(t *testing.T) {
 	ctx := context.Background()
-	q, closeFn := connect(t)
+	pool, q, closeFn := connect(t)
 	defer closeFn()
 	sealer := newSealer(t)
 
-	fx := seedCampaign(t, ctx, q, sealer, [][3]string{
+	fx := seedCampaign(t, ctx, pool, q, sealer, [][3]string{
 		{"Hi {{first_name}}", "Hello", "0"},
 		{"Follow up", "Ping", "0"},
 	})
@@ -258,12 +315,12 @@ func TestSequenceStopOnSuppression(t *testing.T) {
 		t.Fatalf("enroll: %v", err)
 	}
 	snd, enq := &itSender{}, newITEnq()
-	advance(t, fx.core, snd, enq, ids[0].String(), fx.ws.String())
+	advance(t, fx.core, snd, enq, ids[0].ID.String(), fx.ws.String())
 
 	if len(snd.sent) != 0 {
 		t.Fatalf("suppressed contact must not be emailed, sent %d", len(snd.sent))
 	}
-	e, _ := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: ids[0], WorkspaceID: fx.ws})
+	e, _ := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: ids[0].ID, WorkspaceID: fx.ws})
 	if e.Status != "stopped" || e.StopReason == nil || *e.StopReason != "suppressed" {
 		t.Fatalf("expected stopped/suppressed, got status=%s reason=%v", e.Status, e.StopReason)
 	}

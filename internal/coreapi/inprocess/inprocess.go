@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
@@ -15,6 +16,7 @@ import (
 )
 
 type client struct {
+	pool      *pgxpool.Pool
 	q         *gen.Queries
 	sealer    *crypto.Sealer
 	jwtSecret []byte
@@ -25,13 +27,15 @@ type client struct {
 	enroll *enrollment.Service
 }
 
-// New returns the in-process coreapi client backed by the given queries. The
-// sealer decrypts stored SMTP credentials; jwtSecret signs stateless
-// unsubscribe tokens; publicURL is the base URL used to build unsubscribe
-// links.
-func New(q *gen.Queries, sealer *crypto.Sealer, jwtSecret []byte, publicURL string) coreapi.Client {
+// New returns the in-process coreapi client backed by the given connection
+// pool. The pool backs the pool-bound *gen.Queries for reads and lets
+// MarkStepSent run the record+advance writes in one transaction. The sealer
+// decrypts stored SMTP credentials; jwtSecret signs stateless unsubscribe
+// tokens; publicURL is the base URL used to build unsubscribe links.
+func New(pool *pgxpool.Pool, sealer *crypto.Sealer, jwtSecret []byte, publicURL string) coreapi.Client {
+	q := gen.New(pool)
 	return client{
-		q: q, sealer: sealer, jwtSecret: jwtSecret, publicURL: publicURL,
+		pool: pool, q: q, sealer: sealer, jwtSecret: jwtSecret, publicURL: publicURL,
 		enroll: enrollment.NewService(enrollment.NewPgStore(q)),
 	}
 }

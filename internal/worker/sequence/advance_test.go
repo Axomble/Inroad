@@ -19,23 +19,29 @@ import (
 // which is what we want if the handler unexpectedly reaches for one.
 type stubCore struct {
 	coreapi.Client
-	job     coreapi.StepSendJob
-	jobErr  error
-	adv     coreapi.Advance
-	sent    *coreapi.StepResult
-	stopped string
+	job       coreapi.StepSendJob
+	jobErr    error
+	adv       coreapi.Advance
+	sent      *coreapi.StepResult
+	stopped   string
+	deferrals int // value returned by IncrementEnrollmentCapDeferrals
+	incrCalls int
 }
 
 func (s *stubCore) GetStepSendJob(context.Context, string, string) (coreapi.StepSendJob, error) {
 	return s.job, s.jobErr
 }
-func (s *stubCore) MarkStepSent(_ context.Context, _, _ string, res coreapi.StepResult) (coreapi.Advance, error) {
+func (s *stubCore) MarkStepSent(_ context.Context, _ coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error) {
 	s.sent = &res
 	return s.adv, nil
 }
 func (s *stubCore) MarkStepStopped(_ context.Context, _, _, reason string) error {
 	s.stopped = reason
 	return nil
+}
+func (s *stubCore) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
+	s.incrCalls++
+	return s.deferrals, nil
 }
 
 type fakeSender struct {
@@ -119,6 +125,36 @@ func TestAdvanceOverCapReEnqueues(t *testing.T) {
 	}
 	if core.sent != nil {
 		t.Fatal("over-cap must not advance the cursor")
+	}
+}
+
+func TestAdvanceZeroCapStopsFailed(t *testing.T) {
+	// Degenerate cap: cannot ever send. Must stop 'failed', not defer forever.
+	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 0, SentToday: 0}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if core.stopped != "failed" {
+		t.Fatalf("want stop reason failed, got %q", core.stopped)
+	}
+	if enq.inCalled || enq.atCalled || snd.called || core.incrCalls != 0 {
+		t.Fatalf("zero-cap must stop without deferring/sending: %+v", core)
+	}
+}
+
+func TestAdvanceCapDeferralCeilingStopsFailed(t *testing.T) {
+	// Over cap AND past the deferral ceiling: stop 'failed' instead of re-enqueue.
+	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50}, deferrals: maxCapDeferrals + 1}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if core.stopped != "failed" {
+		t.Fatalf("want stop reason failed at deferral ceiling, got %q", core.stopped)
+	}
+	if enq.inCalled {
+		t.Fatal("past the ceiling must not re-enqueue")
 	}
 }
 

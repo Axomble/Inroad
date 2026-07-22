@@ -17,6 +17,16 @@ type CreateInput struct {
 	MailboxID, ListID                 uuid.UUID
 }
 
+// Enrollment is a newly created enrollment returned by EnrollTx: its id and the
+// staggered next_due_at the DB assigned at insert time. Launch enqueues each
+// advance at exactly this NextDueAt so the scheduled task and the enrollment's
+// due cursor stay aligned by construction (Postgres doesn't guarantee RETURNING
+// row order, so the value must travel with the id rather than be recomputed).
+type Enrollment struct {
+	ID        uuid.UUID
+	NextDueAt time.Time
+}
+
 // Store is the repository interface this domain depends on. It is defined
 // here (by the consumer), not by the persistence layer, so the service can
 // be unit-tested against a fake without a database.
@@ -30,8 +40,9 @@ type Store interface {
 	CountSteps(ctx context.Context, ws, campaignID uuid.UUID) (int64, error)
 	// EnrollTx materializes one sequence_enrollment per (campaign, list member)
 	// AND transitions the campaign to running, atomically. Returns the new
-	// enrollment ids. Either both writes commit or neither does.
-	EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
+	// enrollments (id + the staggered next_due_at the DB assigned). Either both
+	// writes commit or neither does.
+	EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]Enrollment, error)
 	// Reschedule re-stamps an active enrollment's next_due_at (launch stagger).
 	Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at time.Time) error
 	// ListSteps returns the campaign's ordered steps (for the detail view).
@@ -139,7 +150,7 @@ func (s *PgStore) Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64
 // running in a single transaction. If either write fails the transaction rolls
 // back, leaving the campaign draft with no enrollments. An empty target list
 // commits nothing and returns no ids (service maps that to ErrEmptyList).
-func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
+func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]Enrollment, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -147,11 +158,11 @@ func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uui
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	ids, err := qtx.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: campaignID, WorkspaceID: ws})
+	rows, err := qtx.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: campaignID, WorkspaceID: ws})
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
+	if len(rows) == 0 {
 		return nil, nil
 	}
 	if err := qtx.SetCampaignStatus(ctx, gen.SetCampaignStatusParams{
@@ -165,5 +176,9 @@ func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]uui
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return ids, nil
+	enrollments := make([]Enrollment, len(rows))
+	for i, r := range rows {
+		enrollments[i] = Enrollment{ID: r.ID, NextDueAt: r.NextDueAt.Time}
+	}
+	return enrollments, nil
 }

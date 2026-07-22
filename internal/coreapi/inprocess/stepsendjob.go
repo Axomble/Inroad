@@ -3,11 +3,13 @@ package inprocess
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
@@ -15,15 +17,17 @@ import (
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
 
-// replySubject synthesizes the subject line for a step. Step 1 uses its subject
-// verbatim; from step 2 the subject is prefixed with "Re: " (idempotently) so
-// the message reads as a follow-up in the thread. Clients thread on the
-// In-Reply-To/References headers, so this is cosmetic but expected.
-func replySubject(order int, stepSubject string) string {
-	if order <= 1 || strings.HasPrefix(stepSubject, "Re: ") {
+// replySubject synthesizes the subject line for a step (spec A5). Step 1 uses
+// its own subject verbatim. From step 2, an empty step subject means "reply in
+// thread" → "Re: <step-1 subject>" (threadSubject); a non-empty step subject is
+// a deliberate new subject and is used verbatim (still threaded via the
+// In-Reply-To/References headers). threadSubject is the step-1 raw subject and
+// is only consulted for the empty-subject case.
+func replySubject(order int, stepSubject, threadSubject string) string {
+	if order <= 1 || stepSubject != "" {
 		return stepSubject
 	}
-	return "Re: " + stepSubject
+	return "Re: " + threadSubject
 }
 
 // decodeCustom turns the contact's custom_fields JSONB into the string map the
@@ -92,18 +96,46 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{Skip: true}, nil
 	}
 
-	nextOrder := int(b.CurrentStep) + 1
-	step, err := c.q.GetStepByOrder(ctx, gen.GetStepByOrderParams{
-		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: int32(nextOrder),
+	// Resolve the next step by order rather than current_step+1: DeleteStep does
+	// not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep skips gaps;
+	// ErrNoRows means the cursor is at/after the last step → done.
+	step, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
+		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: b.CurrentStep,
 	})
 	if err != nil {
-		// No such step (cursor already at/after the last step). Treat as done;
-		// the worker no-ops and MarkStepSent isn't called.
-		return coreapi.StepSendJob{Skip: true}, nil
-	}
-	maxOrder, err := c.q.MaxStepOrder(ctx, gen.MaxStepOrderParams{CampaignID: b.CampaignID, WorkspaceID: ws})
-	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return coreapi.StepSendJob{Skip: true}, nil
+		}
 		return coreapi.StepSendJob{}, err
+	}
+	nextOrder := int(step.StepOrder)
+
+	// Is there a step after this one? Its existence decides last-step; its delay
+	// is the cadence gap to the following send. One query answers both.
+	after, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
+		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: step.StepOrder,
+	})
+	lastStep := errors.Is(err, pgx.ErrNoRows)
+	if err != nil && !lastStep {
+		return coreapi.StepSendJob{}, err
+	}
+	nextDelay := 0
+	if !lastStep {
+		nextDelay = int(after.DelaySeconds)
+	}
+
+	// Thread subject is only needed to build "Re: <step-1 subject>" for a
+	// later step that left its own subject empty (spec A5). Step 1 (deleted)
+	// missing → leave empty, replySubject then yields a bare "Re: ".
+	threadSubject := ""
+	if nextOrder > 1 {
+		if s1, serr := c.q.GetStepByOrder(ctx, gen.GetStepByOrderParams{
+			CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: 1,
+		}); serr == nil {
+			threadSubject = s1.Subject
+		} else if !errors.Is(serr, pgx.ErrNoRows) {
+			return coreapi.StepSendJob{}, serr
+		}
 	}
 
 	inReplyTo, references := c.threading(ctx, nextOrder, b.CampaignID, b.ContactID, b.ThreadRootID)
@@ -126,14 +158,16 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 
 	return coreapi.StepSendJob{
 		EnrollmentID: enrollmentID, WorkspaceID: ws.String(),
-		StepOrder: nextOrder, LastStep: nextOrder >= int(maxOrder),
+		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: b.MailboxID.String(),
+		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
 		Suppressed: suppressed, EffectiveDailyCap: cap, SentToday: int(sentToday),
 		ToEmail: b.ToEmail,
 		Vars: coreapi.ContactVars{
 			FirstName: b.FirstName, LastName: b.LastName, Email: b.ToEmail,
 			Company: b.Company, Custom: decodeCustom(b.CustomFields),
 		},
-		Subject: replySubject(nextOrder, step.Subject), BodyText: step.BodyText, BodyHTML: step.BodyHtml,
+		Subject: replySubject(nextOrder, step.Subject, threadSubject), ThreadSubject: threadSubject,
+		BodyText: step.BodyText, BodyHTML: step.BodyHtml,
 		UnsubURL: c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
 		FromEmail: b.FromEmail, FromName: b.FromName, SMTPHost: b.SmtpHost, SMTPPort: int(b.SmtpPort),
 		SMTPUsername: b.SmtpUsername, SMTPPassword: password, UseTLS: b.UseTls,
@@ -141,40 +175,38 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 }
 
 // MarkStepSent records the step send (one sends row, with result) and advances
-// the enrollment cursor via the enrollment state machine. Returns whether the
-// enrollment completed and the next due time.
-func (c client) MarkStepSent(ctx context.Context, enrollmentID, workspaceID string, res coreapi.StepResult) (coreapi.Advance, error) {
-	eid, err := uuid.Parse(enrollmentID)
+// the enrollment cursor via the enrollment state machine, in one transaction.
+// It reuses the immutable values GetStepSendJob already resolved (carried on the
+// job) rather than re-fetching the bundle, next step and references. Returns
+// whether the enrollment completed and the next due time.
+//
+// Tenant safety: cross-tenant reads are rejected in GetStepSendJob (which built
+// the job); here workspace_id is pinned on every write (the send row's
+// workspace_id value and each enrollment UPDATE's WHERE), so a mismatch cannot
+// touch another tenant's rows.
+func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error) {
+	eid, err := uuid.Parse(job.EnrollmentID)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	ws, err := uuid.Parse(workspaceID)
+	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	b, err := c.q.GetStepEnrollmentBundle(ctx, gen.GetStepEnrollmentBundleParams{ID: eid, WorkspaceID: ws})
+	campaignID, err := uuid.Parse(job.CampaignID)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	if b.WorkspaceID != ws {
-		return coreapi.Advance{}, coreapi.ErrCrossTenant
-	}
-	sentStep := int(b.CurrentStep) + 1
-	maxOrder, err := c.q.MaxStepOrder(ctx, gen.MaxStepOrderParams{CampaignID: b.CampaignID, WorkspaceID: ws})
+	contactID, err := uuid.Parse(job.ContactID)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	lastStep := sentStep >= int(maxOrder)
-
-	_, references := c.threading(ctx, sentStep, b.CampaignID, b.ContactID, b.ThreadRootID)
-
-	if _, err := c.q.RecordStepSend(ctx, gen.RecordStepSendParams{
-		WorkspaceID: ws, CampaignID: b.CampaignID, ContactID: b.ContactID, MailboxID: b.MailboxID,
-		ToEmail: b.ToEmail, StepOrder: int32(sentStep), ReferencesHeader: references,
-		Status: res.Status, MessageID: res.MessageID, Error: res.Err,
-	}); err != nil {
+	mailboxID, err := uuid.Parse(job.MailboxID)
+	if err != nil {
 		return coreapi.Advance{}, err
 	}
+	sentStep := job.StepOrder
+	lastStep := job.LastStep
 
 	// Step 1's Message-ID becomes the thread root for the References chain.
 	threadRoot := ""
@@ -183,19 +215,38 @@ func (c client) MarkStepSent(ctx context.Context, enrollmentID, workspaceID stri
 	}
 	var nextDueAt time.Time
 	if !lastStep {
-		next, nerr := c.q.GetStepByOrder(ctx, gen.GetStepByOrderParams{
-			CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: int32(sentStep + 1),
-		})
-		delay := int32(0)
-		if nerr == nil {
-			delay = next.DelaySeconds
-		}
 		// Cadence reference point is the send time (now); the enrollment stamps
 		// last_sent_at=now() in the same transition.
-		nextDueAt = time.Now().Add(time.Duration(delay) * time.Second)
+		nextDueAt = time.Now().Add(time.Duration(job.NextDelaySeconds) * time.Second)
 	}
 
-	if err := c.enroll.MarkStepSent(ctx, ws, eid, int32(sentStep), nextDueAt, lastStep, threadRoot); err != nil {
+	// One transaction (spec §6): the send row and the cursor advance commit
+	// together so a crash between them can't leave a recorded send with a stale
+	// cursor, or an advanced cursor with no send row.
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return coreapi.Advance{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := c.q.WithTx(tx)
+
+	// ON CONFLICT DO NOTHING → a duplicate advance (sweeper racing the lazy
+	// chain) inserts no second row and returns ErrNoRows; treat that as
+	// already-recorded and still advance (current_step is set absolutely, so a
+	// repeat is idempotent).
+	if _, err := qtx.RecordStepSend(ctx, gen.RecordStepSendParams{
+		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
+		ToEmail: job.ToEmail, StepOrder: int32(sentStep), ReferencesHeader: job.References,
+		Status: res.Status, MessageID: res.MessageID, Error: res.Err,
+	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return coreapi.Advance{}, err
+	}
+
+	enrollTx := enrollment.NewService(enrollment.NewPgStore(qtx))
+	if err := enrollTx.MarkStepSent(ctx, ws, eid, int32(sentStep), nextDueAt, lastStep, threadRoot); err != nil {
+		return coreapi.Advance{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return coreapi.Advance{}, err
 	}
 	return coreapi.Advance{Completed: lastStep, NextDueAt: nextDueAt}, nil
@@ -212,6 +263,21 @@ func (c client) MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, 
 		return err
 	}
 	return c.enroll.MarkStepStopped(ctx, ws, eid, enrollment.StopReason(reason))
+}
+
+// IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter
+// and returns the new value (workspace-pinned).
+func (c client) IncrementEnrollmentCapDeferrals(ctx context.Context, enrollmentID, workspaceID string) (int, error) {
+	eid, err := uuid.Parse(enrollmentID)
+	if err != nil {
+		return 0, err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := c.q.IncrementEnrollmentCapDeferrals(ctx, gen.IncrementEnrollmentCapDeferralsParams{ID: eid, WorkspaceID: ws})
+	return int(n), err
 }
 
 // ListDueEnrollments returns active enrollments past their due window for the

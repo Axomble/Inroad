@@ -37,7 +37,15 @@ type PgStore struct{ q *gen.Queries }
 func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
 
 func (s *PgStore) Enroll(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error) {
-	return s.q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: campaignID, WorkspaceID: ws})
+	rows, err := s.q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	return ids, nil
 }
 func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.SequenceEnrollment, error) {
 	return s.q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: id, WorkspaceID: ws})

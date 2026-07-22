@@ -11,9 +11,9 @@ import (
 )
 
 type fakeStore struct {
-	status  string
-	sendIDs []uuid.UUID // enrollment ids returned by EnrollTx
-	steps   int64       // CountSteps result
+	status      string
+	enrollments []Enrollment // enrollments returned by EnrollTx
+	steps       int64        // CountSteps result
 	// enrollCalled is set to true when EnrollTx runs so tests can assert the
 	// tx path is actually exercised.
 	enrollCalled bool
@@ -45,9 +45,9 @@ func (*fakeStore) Stats(context.Context, uuid.UUID, uuid.UUID) (map[string]int64
 func (f *fakeStore) CountSteps(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
 	return f.steps, nil
 }
-func (f *fakeStore) EnrollTx(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
+func (f *fakeStore) EnrollTx(context.Context, uuid.UUID, uuid.UUID) ([]Enrollment, error) {
 	f.enrollCalled = true
-	return f.sendIDs, nil
+	return f.enrollments, nil
 }
 func (*fakeStore) Reschedule(context.Context, uuid.UUID, uuid.UUID, time.Time) error { return nil }
 func (f *fakeStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
@@ -78,10 +78,19 @@ func (s *selectiveEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, _ time.Time
 	return nil
 }
 
-type fakeEnqueuer struct{ enqueued []string }
+type fakeEnqueuer struct {
+	enqueued []string
+	// at records the ProcessAt time each advance was scheduled with, keyed by
+	// enrollment id, so a test can assert it equals the enrollment's next_due_at.
+	at map[string]time.Time
+}
 
-func (f *fakeEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, _ time.Time) error {
+func (f *fakeEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, t time.Time) error {
 	f.enqueued = append(f.enqueued, enrollmentID)
+	if f.at == nil {
+		f.at = map[string]time.Time{}
+	}
+	f.at[enrollmentID] = t
 	return nil
 }
 
@@ -139,25 +148,40 @@ func TestLaunchRejectsEmptyList(t *testing.T) {
 }
 
 func TestLaunchSucceeds(t *testing.T) {
-	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
-	store := &fakeStore{status: string(StatusDraft), steps: 2, sendIDs: ids}
+	// Distinct next_due_at per enrollment (the staggered values EnrollListMembers
+	// assigns) so the alignment assertion below is meaningful.
+	base := time.Now()
+	enrollments := []Enrollment{
+		{ID: uuid.New(), NextDueAt: base},
+		{ID: uuid.New(), NextDueAt: base.Add(2 * time.Second)},
+		{ID: uuid.New(), NextDueAt: base.Add(4 * time.Second)},
+	}
+	store := &fakeStore{status: string(StatusDraft), steps: 2, enrollments: enrollments}
 	enq := &fakeEnqueuer{}
 	svc := NewService(store, okChecker{active: true})
 	res, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), enq)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if res.EnqueuedCount != len(ids) {
-		t.Fatalf("queued: got %d want %d", res.EnqueuedCount, len(ids))
+	if res.EnqueuedCount != len(enrollments) {
+		t.Fatalf("queued: got %d want %d", res.EnqueuedCount, len(enrollments))
 	}
-	if res.TotalEnrolled != len(ids) {
-		t.Fatalf("total enrolled: got %d want %d", res.TotalEnrolled, len(ids))
+	if res.TotalEnrolled != len(enrollments) {
+		t.Fatalf("total enrolled: got %d want %d", res.TotalEnrolled, len(enrollments))
 	}
 	if res.FailedEnqueueCount != 0 {
 		t.Fatalf("expected no failed enqueues, got %d", res.FailedEnqueueCount)
 	}
-	if len(enq.enqueued) != len(ids) {
-		t.Fatalf("enqueued: got %d want %d", len(enq.enqueued), len(ids))
+	if len(enq.enqueued) != len(enrollments) {
+		t.Fatalf("enqueued: got %d want %d", len(enq.enqueued), len(enrollments))
+	}
+	// Fix B: each advance is scheduled at exactly the enrollment's DB-assigned
+	// next_due_at, not a Go-recomputed offset — so the scheduled task and the
+	// sweeper's due cursor stay aligned.
+	for _, e := range enrollments {
+		if got := enq.at[e.ID.String()]; !got.Equal(e.NextDueAt) {
+			t.Fatalf("enqueue ETA for %s: got %v want %v", e.ID, got, e.NextDueAt)
+		}
 	}
 	if !store.enrollCalled {
 		t.Fatal("expected EnrollTx to be called")
@@ -170,7 +194,8 @@ func TestLaunchSucceeds(t *testing.T) {
 // sweeper knows there's work to reconcile.
 func TestLaunchCountsPartialEnqueueFailures(t *testing.T) {
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
-	store := &fakeStore{status: string(StatusDraft), steps: 1, sendIDs: ids}
+	enrollments := []Enrollment{{ID: ids[0]}, {ID: ids[1]}, {ID: ids[2]}}
+	store := &fakeStore{status: string(StatusDraft), steps: 1, enrollments: enrollments}
 	enq := &selectiveEnqueuer{fail: map[string]bool{ids[1].String(): true}}
 	svc := NewService(store, okChecker{active: true})
 
