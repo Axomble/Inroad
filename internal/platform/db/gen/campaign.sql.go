@@ -53,7 +53,7 @@ func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatus
 
 const createCampaign = `-- name: CreateCampaign :one
 INSERT INTO campaigns (workspace_id, name, mailbox_id, list_id, subject, body_text, body_html)
-VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at
+VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled
 `
 
 type CreateCampaignParams struct {
@@ -89,12 +89,13 @@ func (q *Queries) CreateCampaign(ctx context.Context, arg CreateCampaignParams) 
 		&i.Status,
 		&i.CreatedAt,
 		&i.LaunchedAt,
+		&i.TrackingEnabled,
 	)
 	return i, err
 }
 
 const getCampaign = `-- name: GetCampaign :one
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at FROM campaigns WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled FROM campaigns WHERE id = $1 AND workspace_id = $2
 `
 
 type GetCampaignParams struct {
@@ -117,12 +118,13 @@ func (q *Queries) GetCampaign(ctx context.Context, arg GetCampaignParams) (Campa
 		&i.Status,
 		&i.CreatedAt,
 		&i.LaunchedAt,
+		&i.TrackingEnabled,
 	)
 	return i, err
 }
 
 const listCampaigns = `-- name: ListCampaigns :many
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]Campaign, error) {
@@ -146,6 +148,7 @@ func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]C
 			&i.Status,
 			&i.CreatedAt,
 			&i.LaunchedAt,
+			&i.TrackingEnabled,
 		); err != nil {
 			return nil, err
 		}
@@ -176,5 +179,20 @@ func (q *Queries) SetCampaignStatus(ctx context.Context, arg SetCampaignStatusPa
 		arg.Status,
 		arg.LaunchedAt,
 	)
+	return err
+}
+
+const setCampaignTracking = `-- name: SetCampaignTracking :exec
+UPDATE campaigns SET tracking_enabled = $3 WHERE id = $1 AND workspace_id = $2
+`
+
+type SetCampaignTrackingParams struct {
+	ID              uuid.UUID `json:"id"`
+	WorkspaceID     uuid.UUID `json:"workspace_id"`
+	TrackingEnabled bool      `json:"tracking_enabled"`
+}
+
+func (q *Queries) SetCampaignTracking(ctx context.Context, arg SetCampaignTrackingParams) error {
+	_, err := q.db.Exec(ctx, setCampaignTracking, arg.ID, arg.WorkspaceID, arg.TrackingEnabled)
 	return err
 }

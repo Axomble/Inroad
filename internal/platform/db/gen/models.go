@@ -99,6 +99,48 @@ func (ns NullMemberRole) Value() (driver.Value, error) {
 	return string(ns.MemberRole), nil
 }
 
+type TrackingEventKind string
+
+const (
+	TrackingEventKindOpen  TrackingEventKind = "open"
+	TrackingEventKindClick TrackingEventKind = "click"
+)
+
+func (e *TrackingEventKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = TrackingEventKind(s)
+	case string:
+		*e = TrackingEventKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for TrackingEventKind: %T", src)
+	}
+	return nil
+}
+
+type NullTrackingEventKind struct {
+	TrackingEventKind TrackingEventKind `json:"tracking_event_kind"`
+	Valid             bool              `json:"valid"` // Valid is true if TrackingEventKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullTrackingEventKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.TrackingEventKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.TrackingEventKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullTrackingEventKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.TrackingEventKind), nil
+}
+
 type UserTokenKind string
 
 const (
@@ -142,17 +184,18 @@ func (ns NullUserTokenKind) Value() (driver.Value, error) {
 }
 
 type Campaign struct {
-	ID          uuid.UUID          `json:"id"`
-	WorkspaceID uuid.UUID          `json:"workspace_id"`
-	Name        string             `json:"name"`
-	MailboxID   uuid.UUID          `json:"mailbox_id"`
-	ListID      uuid.UUID          `json:"list_id"`
-	Subject     string             `json:"subject"`
-	BodyText    string             `json:"body_text"`
-	BodyHtml    string             `json:"body_html"`
-	Status      string             `json:"status"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	LaunchedAt  pgtype.Timestamptz `json:"launched_at"`
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	Name            string             `json:"name"`
+	MailboxID       uuid.UUID          `json:"mailbox_id"`
+	ListID          uuid.UUID          `json:"list_id"`
+	Subject         string             `json:"subject"`
+	BodyText        string             `json:"body_text"`
+	BodyHtml        string             `json:"body_html"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	LaunchedAt      pgtype.Timestamptz `json:"launched_at"`
+	TrackingEnabled bool               `json:"tracking_enabled"`
 }
 
 type Contact struct {
@@ -272,6 +315,17 @@ type Suppression struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	Email       string             `json:"email"`
 	Reason      string             `json:"reason"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type TrackingEvent struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	SendID      uuid.UUID          `json:"send_id"`
+	Kind        TrackingEventKind  `json:"kind"`
+	Url         string             `json:"url"`
+	UserAgent   string             `json:"user_agent"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
