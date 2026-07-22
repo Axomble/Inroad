@@ -85,6 +85,11 @@ type storeIface interface {
 	CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error)
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 	ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error)
+	CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error)
+	ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]gen.WorkspaceInvite, error)
+	RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) error
+	GetWorkspace(ctx context.Context, id uuid.UUID) (gen.Workspace, error)
+	AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (AcceptInviteTxResult, error)
 }
 
 // Service implements the core auth logic: registration, login, refresh

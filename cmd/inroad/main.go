@@ -117,6 +117,7 @@ func main() {
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
 		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq).Routes(identStore)},
+		{pattern: "/api/v1/workspaces", handler: identHandler.InviteRoutes()},
 	}
 	router := buildRouter(logger, cfg.JWTSecret, public, protected)
 

@@ -47,6 +47,8 @@ type fakeStore struct {
 	sessions       map[uuid.UUID]gen.Session
 	sessionsByHash map[string]uuid.UUID      // hex(hash) -> session id
 	tokens         map[string]*fakeUserToken // hashKey(hash) -> token
+	invites        map[uuid.UUID]gen.WorkspaceInvite
+	workspaces     map[uuid.UUID]gen.Workspace
 
 	registerErr error
 	nextWS      uuid.UUID
@@ -68,6 +70,8 @@ func newFakeStore() *fakeStore {
 		sessions:       map[uuid.UUID]gen.Session{},
 		sessionsByHash: map[string]uuid.UUID{},
 		tokens:         map[string]*fakeUserToken{},
+		invites:        map[uuid.UUID]gen.WorkspaceInvite{},
+		workspaces:     map[uuid.UUID]gen.Workspace{},
 	}
 }
 
