@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,10 +35,11 @@ type Enqueuer interface {
 type Service struct {
 	store   Store
 	checker Checker
+	metrics *metricsCache
 }
 
 func NewService(store Store, checker Checker) *Service {
-	return &Service{store: store, checker: checker}
+	return &Service{store: store, checker: checker, metrics: newMetricsCache(metricsCacheTTL)}
 }
 
 // Create verifies the mailbox is active and the list exists in the
@@ -79,16 +81,135 @@ func (s *Service) Stats(ctx context.Context, ws, id uuid.UUID) (map[string]int64
 }
 
 // CampaignDetail is the extended GET /campaigns/{id} payload: the campaign, its
-// ordered steps, send counts by status, and enrollment counts by status.
+// ordered steps, send counts by status, enrollment counts by status, and the
+// engagement Metrics rollup.
 type CampaignDetail struct {
 	Campaign    gen.Campaign
 	Steps       []gen.SequenceStep
 	SendStats   map[string]int64
 	Enrollments map[string]int64
+	Metrics     Metrics
 }
 
-// Detail loads the campaign plus its steps and rollup counts, all
-// workspace-scoped (a cross-tenant id yields ErrNotFound before any child read).
+// Metrics is the per-campaign engagement rollup shown on GET /campaigns/{id}.
+// Counts are raw aggregates; rates are Count/Sent as a 0..1 fraction, guarded
+// to 0 when Sent is 0 (a draft or just-launched campaign) rather than
+// dividing by zero. OpensIndicative is proxy-filtered (CountHumanOpens
+// excludes known prefetch UAs and near-instant fetches) but remains an
+// approximation -- clicks are the reliable signal.
+type Metrics struct {
+	Sent            int64
+	OpensIndicative int64
+	Clicks          int64
+	Replies         int64
+	Bounces         int64
+	Unsubscribes    int64
+
+	OpenRate   float64
+	ClickRate  float64
+	ReplyRate  float64
+	BounceRate float64
+	UnsubRate  float64
+}
+
+// stop_reason values that feed the Metrics rollup. Duplicated as plain
+// strings (rather than importing internal/app/enrollment's StopReason
+// constants) because app/* packages must not import each other -- see
+// internal/app/enrollment/status.go for the canonical definitions these
+// mirror.
+const (
+	stopReasonReplied    = "replied"
+	stopReasonBounced    = "bounced"
+	stopReasonSuppressed = "suppressed"
+)
+
+// computeMetrics turns raw counts into a Metrics snapshot, guarding
+// divide-by-zero when the campaign has no sends yet.
+func computeMetrics(sent, opens, clicks int64, stopReasons map[string]int64) Metrics {
+	m := Metrics{
+		Sent: sent, OpensIndicative: opens, Clicks: clicks,
+		Replies:      stopReasons[stopReasonReplied],
+		Bounces:      stopReasons[stopReasonBounced],
+		Unsubscribes: stopReasons[stopReasonSuppressed],
+	}
+	if sent == 0 {
+		return m
+	}
+	total := float64(sent)
+	m.OpenRate = float64(m.OpensIndicative) / total
+	m.ClickRate = float64(m.Clicks) / total
+	m.ReplyRate = float64(m.Replies) / total
+	m.BounceRate = float64(m.Bounces) / total
+	m.UnsubRate = float64(m.Unsubscribes) / total
+	return m
+}
+
+// metricsCacheTTL bounds how long the raw engagement aggregates (opens,
+// clicks, stop-reason counts) are served from cache before being recomputed.
+// Those three queries touch tracking_events and sequence_enrollments
+// (COUNT(DISTINCT)/GROUP BY reads); a dashboard polling GET /campaigns/{id}
+// every few seconds would otherwise re-run all of them on every load.
+// Sent (and therefore every rate) is NOT cached -- it's recomputed from the
+// always-fresh Stats() call on every request, so Metrics.Sent never diverges
+// from the response's top-level stats.sent. Tradeoff: OpensIndicative/Clicks/
+// Replies/Bounces/Unsubscribes (the counts, not the rates) can lag the true
+// values by up to this TTL. A rollup table is the next-step scale path if
+// this cache isn't enough; out of scope here.
+const metricsCacheTTL = 45 * time.Second
+
+// rawEngagement holds the query-heavy aggregates that back Metrics, cached
+// independently of Sent (see metricsCacheTTL).
+type rawEngagement struct {
+	opens, clicks int64
+	stopReasons   map[string]int64
+}
+
+// metricsCacheEntry pairs a raw aggregate snapshot with its expiry.
+type metricsCacheEntry struct {
+	raw     rawEngagement
+	expires time.Time
+}
+
+// metricsCache is a mutex-guarded, per-campaign TTL cache for the
+// query-heavy engagement aggregates (opens/clicks/stop-reasons). Deliberately
+// minimal: no eviction or background sweep, entries are simply overwritten on
+// recompute. The map is bounded by the number of distinct campaigns viewed
+// within the TTL window, which is small relative to the cost of
+// re-aggregating on every dashboard poll.
+type metricsCache struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	now     func() time.Time
+	entries map[[2]uuid.UUID]metricsCacheEntry
+}
+
+func newMetricsCache(ttl time.Duration) *metricsCache {
+	return &metricsCache{ttl: ttl, now: time.Now, entries: make(map[[2]uuid.UUID]metricsCacheEntry)}
+}
+
+func (c *metricsCache) get(ws, id uuid.UUID) (rawEngagement, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[[2]uuid.UUID{ws, id}]
+	if !ok || c.now().After(e.expires) {
+		return rawEngagement{}, false
+	}
+	return e.raw, true
+}
+
+func (c *metricsCache) set(ws, id uuid.UUID, raw rawEngagement) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[[2]uuid.UUID{ws, id}] = metricsCacheEntry{raw: raw, expires: c.now().Add(c.ttl)}
+}
+
+// Detail loads the campaign plus its steps, rollup counts, and engagement
+// metrics, all workspace-scoped (a cross-tenant id yields ErrNotFound before
+// any child read). The query-heavy engagement aggregates (opens/clicks/
+// stop-reasons) are served from a short-TTL cache (metricsCacheTTL) so
+// repeated dashboard loads don't re-run those queries every time; Sent and
+// every rate are always recomputed from the fresh Stats() call so
+// Metrics.Sent can never diverge from the response's top-level stats.sent.
 func (s *Service) Detail(ctx context.Context, ws, id uuid.UUID) (CampaignDetail, error) {
 	c, err := s.store.Get(ctx, ws, id)
 	if err != nil {
@@ -106,7 +227,31 @@ func (s *Service) Detail(ctx context.Context, ws, id uuid.UUID) (CampaignDetail,
 	if err != nil {
 		return CampaignDetail{}, err
 	}
-	return CampaignDetail{Campaign: c, Steps: steps, SendStats: sends, Enrollments: enr}, nil
+	raw, ok := s.metrics.get(ws, id)
+	if !ok {
+		opens, clicks, err := s.store.EngagementCounts(ctx, ws, id)
+		if err != nil {
+			return CampaignDetail{}, err
+		}
+		stopReasons, err := s.store.StopReasonCounts(ctx, ws, id)
+		if err != nil {
+			return CampaignDetail{}, err
+		}
+		raw = rawEngagement{opens: opens, clicks: clicks, stopReasons: stopReasons}
+		s.metrics.set(ws, id, raw)
+	}
+	metrics := computeMetrics(sends["sent"], raw.opens, raw.clicks, raw.stopReasons)
+	return CampaignDetail{Campaign: c, Steps: steps, SendStats: sends, Enrollments: enr, Metrics: metrics}, nil
+}
+
+// SetTracking flips the campaign's tracking-enabled flag, workspace-scoped.
+// Editable regardless of campaign status: tracking only affects sends going
+// out after the flag changes, so there's no reason to restrict it to draft.
+func (s *Service) SetTracking(ctx context.Context, ws, id uuid.UUID, enabled bool) error {
+	if _, err := s.store.Get(ctx, ws, id); err != nil {
+		return ErrNotFound
+	}
+	return s.store.SetTracking(ctx, ws, id, enabled)
 }
 
 // LaunchResult reports the outcome of a Launch call. TotalEnrolled is the

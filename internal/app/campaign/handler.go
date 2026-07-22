@@ -110,6 +110,36 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
+type trackingRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// toggleTracking handles PUT /campaigns/{id}/tracking.
+func (h *Handler) toggleTracking(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var req trackingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	switch err := h.svc.SetTracking(r.Context(), ws, id, req.Enabled); {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not update tracking")
+	default:
+		httpx.JSON(w, http.StatusOK, map[string]bool{"tracking_enabled": req.Enabled})
+	}
+}
+
 // launch transitions a draft campaign to running: it materializes sends for
 // every list member and enqueues a send:email task for each.
 func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
