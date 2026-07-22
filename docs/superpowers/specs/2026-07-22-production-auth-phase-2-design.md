@@ -111,7 +111,11 @@ dependency to the coordinator. (Pre-production, no data to preserve — per Phas
 
 ## 3. Endpoints
 
-Public (no access token; state-changers CSRF-gated like Phase 1 refresh/logout):
+Public (no access token). These are **pre-authentication, token-based flows, so
+they are NOT CSRF-gated** (unlike Phase 1 refresh/logout, which act on the ambient
+session cookie): a logged-out caller has no CSRF cookie, and each endpoint's
+protection comes from its own out-of-band single-use token (or, for forgot, the
+absence of any ambient authority — it only acts on a body email):
 - `POST /api/v1/auth/verify-email {token}` → set `email_verified_at`, consume.
 - `POST /api/v1/auth/password/forgot {email}` → always 200; issue+email reset token if user exists.
 - `POST /api/v1/auth/password/reset {token, new_password}` → set hash, consume, revoke all sessions.
@@ -166,8 +170,12 @@ in the last hour. `forgot` still returns 200 when throttled (no signal leak).
 
 No existence leak on forgot (A6). Tokens: opaque, SHA-256 at rest, single-use,
 short TTL (A5), timing-safe lookup by hash. Reset revokes all sessions (A7).
-Invite-accept verifies email and is workspace/role-scoped. CSRF on public
-state-changing endpoints. `RequireRole(admin)` on invite management. Every new
+Invite-accept verifies email and is workspace/role-scoped (add-only: accepting
+never changes an existing member's role). The public token flows (verify/forgot/
+reset/accept) are intentionally NOT CSRF-gated — their credential is the
+out-of-band token, and there is no ambient cookie authority to protect; only the
+cookie-session flows (refresh/logout) carry CSRF. `RequireRole(admin)` on invite
+management, with `workspace_id` taken from the JWT (not the path). Every new
 query workspace/user-scoped. Transactional system SMTP credentials from env,
 never logged; the sender never logs token values (log the *event*, not the link).
 
