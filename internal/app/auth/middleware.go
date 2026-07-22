@@ -58,6 +58,43 @@ func WorkspaceID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	return id, true
 }
 
+// VerifiedChecker looks up whether a user has confirmed their email address.
+// Satisfied by identity.Store; kept as a tiny interface here so auth doesn't
+// import the identity package.
+type VerifiedChecker interface {
+	IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error)
+}
+
+// RequireVerified rejects callers whose email isn't verified yet (403
+// email_not_verified). Must run after RequireAuth: it reads UserID from the
+// claims RequireAuth stashed on the context.
+func RequireVerified(c VerifiedChecker) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := UserFromContext(r.Context())
+			if !ok {
+				httpx.Error(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			uid, err := uuid.Parse(claims.UserID)
+			if err != nil {
+				httpx.Error(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			verified, err := c.IsEmailVerified(r.Context(), uid)
+			if err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "verify check failed")
+				return
+			}
+			if !verified {
+				httpx.Error(w, http.StatusForbidden, "email_not_verified")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 var roleRank = map[string]int{"member": 1, "admin": 2, "owner": 3}
 
 // RequireRole rejects (403) callers whose workspace role ranks below min.

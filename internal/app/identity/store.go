@@ -121,6 +121,18 @@ func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error)
 	return s.q.GetUserByID(ctx, id)
 }
 
+// IsEmailVerified reports whether userID has confirmed their email address.
+// Satisfies auth.VerifiedChecker so RequireVerified can gate routes without
+// the auth package importing identity. Reuses GetUserByID rather than adding
+// a new sqlc query since email_verified_at is already selected there.
+func (s *Store) IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error) {
+	u, err := s.q.GetUserByID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return u.EmailVerifiedAt.Valid, nil
+}
+
 // ListMembersByUser returns every workspace membership (with workspace name)
 // for the given user, most recently seen first.
 func (s *Store) ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]gen.ListMembersByUserRow, error) {

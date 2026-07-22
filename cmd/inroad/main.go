@@ -69,8 +69,9 @@ func main() {
 	}
 
 	queries := gen.New(pool)
+	identStore := identity.NewStore(pool)
 	identHandler := identity.NewHandler(
-		identity.NewService(identity.NewStore(pool), cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
+		identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
 			cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL),
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
 		cfg.TrustedProxies,
@@ -109,13 +110,13 @@ func main() {
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 	}
 	protected := []mount{
-		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes()},
+		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},
 		{pattern: "/api/v1/lists", handler: list.NewHandler(listSvc).Routes()},
 		// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
 		// overlap with /api/v1/lists that would otherwise 404 the import route.
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
-		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq).Routes()},
+		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq).Routes(identStore)},
 	}
 	router := buildRouter(logger, cfg.JWTSecret, public, protected)
 
