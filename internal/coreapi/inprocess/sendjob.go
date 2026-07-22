@@ -66,6 +66,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		Subject:           b.Subject,
 		BodyText:          b.BodyText,
 		BodyHTML:          b.BodyHtml,
+		TrackingEnabled:   b.TrackingEnabled,
 		UnsubURL:          c.publicURL + "/u/" + token,
 		FromEmail:         b.FromEmail,
 		FromName:          b.FromName,

@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker/personalize"
+	"github.com/inroad/inroad/internal/worker/track"
 )
 
 // Sender sends one email over SMTP (same contract as the direct sender).
@@ -52,8 +53,10 @@ const (
 // AdvanceHandler returns an asynq handler for sequence:advance tasks. It owns
 // the whole step lifecycle: fetch the due step, personalize, build a threaded
 // MIME message, send over SMTP, record the result + advance the cursor, and
-// (lazy chain) schedule the next step — or stop.
-func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.Context, *asynq.Task) error {
+// (lazy chain) schedule the next step — or stop. publicURL and trackingSecret
+// are the base URL and HMAC secret used to build/sign open and click tracking
+// links (internal/worker/track) when the step's campaign has tracking enabled.
+func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL string, trackingSecret []byte) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.AdvancePayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -102,6 +105,12 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(conte
 		bodyHTML := ""
 		if job.BodyHTML != "" {
 			bodyHTML = withUnsubHTML(personalize.HTML(job.BodyHTML, vars), job.UnsubURL)
+			// Tracking rewrite runs AFTER the unsub footer so the unsubscribe
+			// link is present in the body when RewriteHTML skips it (never
+			// click-tracked).
+			if job.TrackingEnabled {
+				bodyHTML = track.RewriteHTML(bodyHTML, publicURL, job.SendID, trackingSecret)
+			}
 		}
 
 		msgID, sendErr := sender.Send(

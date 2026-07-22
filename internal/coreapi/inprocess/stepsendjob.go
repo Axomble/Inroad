@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,24 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
+
+// stepSendIDNamespace is a fixed namespace for deriving each step-send's id
+// deterministically (uuid.NewSHA1) from (campaign, contact, step_order) —
+// the same tuple RecordStepSend's idempotency index is keyed on. A retried or
+// raced advance (sweeper vs. the lazy chain) then recomputes the identical
+// id, so every copy of a step's tracking tokens (embedded in the email body
+// before the send row exists) resolve to the one canonical sends row instead
+// of orphaning a dead id when only the first delivery's row survives the
+// ON CONFLICT DO NOTHING. The value itself is arbitrary — it only needs to be
+// fixed across process restarts.
+var stepSendIDNamespace = uuid.MustParse("6f1b1a1e-6b7a-4c9e-9c1e-9b8e2a7d5f3a")
+
+// deriveStepSendID computes the deterministic send id for one (campaign,
+// contact, step_order) — see stepSendIDNamespace.
+func deriveStepSendID(campaignID, contactID uuid.UUID, stepOrder int) uuid.UUID {
+	key := campaignID.String() + "|" + contactID.String() + "|" + strconv.Itoa(stepOrder)
+	return uuid.NewSHA1(stepSendIDNamespace, []byte(key))
+}
 
 // replySubject synthesizes the subject line for a step (spec A5). Step 1 uses
 // its own subject verbatim. From step 2, an empty step subject means "reply in
@@ -140,6 +159,14 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 
 	inReplyTo, references := c.threading(ctx, nextOrder, b.CampaignID, b.ContactID, b.ThreadRootID)
 
+	// Derived now, before the step is sent, so the worker can embed it in
+	// tracking tokens at MIME-build time; MarkStepSent writes it back as the
+	// send row's id (RecordStepSend takes an explicit id rather than the
+	// column default) so events recorded against it line up with that row.
+	// Deterministic (not uuid.New()) so a retried/raced advance for the same
+	// step recomputes the same id — see stepSendIDNamespace.
+	sendID := deriveStepSendID(b.CampaignID, b.ContactID, nextOrder)
+
 	password, err := c.sealer.Open(b.SecretCiphertext)
 	if err != nil {
 		return coreapi.StepSendJob{}, err
@@ -159,6 +186,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	return coreapi.StepSendJob{
 		EnrollmentID: enrollmentID, WorkspaceID: ws.String(),
 		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: b.MailboxID.String(),
+		SendID:      sendID.String(),
 		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
 		Suppressed: suppressed, EffectiveDailyCap: cap, SentToday: int(sentToday),
 		ToEmail: b.ToEmail,
@@ -167,7 +195,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 			Company: b.Company, Custom: decodeCustom(b.CustomFields),
 		},
 		Subject: replySubject(nextOrder, step.Subject, threadSubject), ThreadSubject: threadSubject,
-		BodyText: step.BodyText, BodyHTML: step.BodyHtml,
+		BodyText: step.BodyText, BodyHTML: step.BodyHtml, TrackingEnabled: b.TrackingEnabled,
 		UnsubURL: c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
 		FromEmail: b.FromEmail, FromName: b.FromName, SMTPHost: b.SmtpHost, SMTPPort: int(b.SmtpPort),
 		SMTPUsername: b.SmtpUsername, SMTPPassword: password, UseTLS: b.UseTls,
@@ -205,6 +233,10 @@ func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res c
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
+	sendID, err := uuid.Parse(job.SendID)
+	if err != nil {
+		return coreapi.Advance{}, err
+	}
 	sentStep := job.StepOrder
 	lastStep := job.LastStep
 
@@ -235,6 +267,7 @@ func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res c
 	// already-recorded and still advance (current_step is set absolutely, so a
 	// repeat is idempotent).
 	if _, err := qtx.RecordStepSend(ctx, gen.RecordStepSendParams{
+		ID:          sendID,
 		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
 		ToEmail: job.ToEmail, StepOrder: int32(sentStep), ReferencesHeader: job.References,
 		Status: res.Status, MessageID: res.MessageID, Error: res.Err,

@@ -116,12 +116,17 @@ type ContactVars struct {
 // CurrentStep (the cursor before this send), NextDelaySeconds (delay of the step
 // after this one; 0 when LastStep), and References (the stored references chain).
 type StepSendJob struct {
-	Skip              bool
-	EnrollmentID      string
-	WorkspaceID       string
-	CampaignID        string
-	ContactID         string
-	MailboxID         string
+	Skip         bool
+	EnrollmentID string
+	WorkspaceID  string
+	CampaignID   string
+	ContactID    string
+	MailboxID    string
+	// SendID is generated up front (before the step is sent) so the worker can
+	// embed it in tracking tokens at MIME-build time; MarkStepSent writes it as
+	// the sends row's id, so the events recorded against it (via the pixel/
+	// click endpoints) line up with the eventual send row.
+	SendID            string
 	CurrentStep       int
 	StepOrder         int
 	NextDelaySeconds  int
@@ -138,13 +143,17 @@ type StepSendJob struct {
 	UnsubURL          string
 	InReplyTo         string
 	References        string
-	FromEmail         string
-	FromName          string
-	SMTPHost          string
-	SMTPPort          int
-	SMTPUsername      string
-	SMTPPassword      []byte
-	UseTLS            bool
+	// TrackingEnabled mirrors the campaign's tracking_enabled column: when true
+	// and BodyHTML is non-empty, the worker rewrites links and appends an open
+	// pixel before sending.
+	TrackingEnabled bool
+	FromEmail       string
+	FromName        string
+	SMTPHost        string
+	SMTPPort        int
+	SMTPUsername    string
+	SMTPPassword    []byte
+	UseTLS          bool
 }
 
 // StepResult is the outcome of one step send.
@@ -228,6 +237,9 @@ type SendJob struct {
 	SMTPUsername      string
 	SMTPPassword      []byte
 	UseTLS            bool
+	// TrackingEnabled mirrors the campaign's tracking_enabled column; see
+	// StepSendJob.TrackingEnabled for the injection contract.
+	TrackingEnabled bool
 }
 
 // SendResult is the outcome of a single send attempt.

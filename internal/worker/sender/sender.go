@@ -12,6 +12,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker/personalize"
+	"github.com/inroad/inroad/internal/worker/track"
 )
 
 // Sender sends one email over SMTP. Defined here (consumer side) so the handler
@@ -26,8 +27,11 @@ type Sender interface {
 // stuck sent-today counter) doesn't cycle forever.
 const maxSendAttempts = 30
 
-// Handler returns an asynq handler for send:email tasks.
-func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context.Context, *asynq.Task) error {
+// Handler returns an asynq handler for send:email tasks. publicURL and
+// trackingSecret are the base URL and HMAC secret used to build/sign open and
+// click tracking links (internal/worker/track) when the job's campaign has
+// tracking enabled.
+func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL string, trackingSecret []byte) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.SendEmailPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -71,6 +75,12 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client) func(context
 		bodyHTML := ""
 		if job.BodyHTML != "" {
 			bodyHTML = withUnsubHTML(personalize.HTML(job.BodyHTML, vars), job.UnsubURL)
+			// Tracking rewrite runs AFTER the unsub footer so the unsubscribe
+			// link is present in the body when RewriteHTML skips it (never
+			// click-tracked).
+			if job.TrackingEnabled {
+				bodyHTML = track.RewriteHTML(bodyHTML, publicURL, job.SendID, trackingSecret)
+			}
 		}
 
 		msgID, sendErr := sender.Send(

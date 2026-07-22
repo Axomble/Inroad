@@ -119,7 +119,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 	fs := &fakeSender{}
 	enq := queue.NewClient(redisAddr())
 	defer enq.Close()
-	handler := Handler(core, fs, enq)
+	handler := Handler(core, fs, enq, "https://app.test", []byte("0123456789abcdef0123456789abcdef"))
 
 	for _, id := range sendIDs {
 		payload, _ := json.Marshal(queue.SendEmailPayload{SendID: id.String(), WorkspaceID: ws.ID.String()})
