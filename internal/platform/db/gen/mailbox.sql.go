@@ -43,7 +43,7 @@ INSERT INTO mailboxes (
     $13, $14,
     $15, $16, $17
 )
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity
 `
 
 type CreateMailboxParams struct {
@@ -111,6 +111,8 @@ func (q *Queries) CreateMailbox(ctx context.Context, arg CreateMailboxParams) (M
 		&i.LastSendAt,
 		&i.LastPollAt,
 		&i.CreatedAt,
+		&i.InboxLastSeenUid,
+		&i.InboxUidValidity,
 	)
 	return i, err
 }
@@ -133,7 +135,7 @@ func (q *Queries) DeleteMailbox(ctx context.Context, arg DeleteMailboxParams) (i
 }
 
 const getMailbox = `-- name: GetMailbox :one
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at FROM mailboxes WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity FROM mailboxes WHERE id = $1 AND workspace_id = $2
 `
 
 type GetMailboxParams struct {
@@ -168,12 +170,45 @@ func (q *Queries) GetMailbox(ctx context.Context, arg GetMailboxParams) (Mailbox
 		&i.LastSendAt,
 		&i.LastPollAt,
 		&i.CreatedAt,
+		&i.InboxLastSeenUid,
+		&i.InboxUidValidity,
 	)
 	return i, err
 }
 
+const listActiveMailboxes = `-- name: ListActiveMailboxes :many
+SELECT id, workspace_id FROM mailboxes WHERE status = 'active'
+`
+
+type ListActiveMailboxesRow struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Mailboxes eligible for inbox polling (reply/bounce detection). The poller
+// iterates these and calls GetMailbox per id to get IMAP config + cursor.
+func (q *Queries) ListActiveMailboxes(ctx context.Context) ([]ListActiveMailboxesRow, error) {
+	rows, err := q.db.Query(ctx, listActiveMailboxes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveMailboxesRow
+	for rows.Next() {
+		var i ListActiveMailboxesRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMailboxes = `-- name: ListMailboxes :many
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]Mailbox, error) {
@@ -209,6 +244,8 @@ func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]M
 			&i.LastSendAt,
 			&i.LastPollAt,
 			&i.CreatedAt,
+			&i.InboxLastSeenUid,
+			&i.InboxUidValidity,
 		); err != nil {
 			return nil, err
 		}
@@ -231,11 +268,36 @@ func (q *Queries) MailboxExists(ctx context.Context, id uuid.UUID) (bool, error)
 	return exists, err
 }
 
+const setInboxCursor = `-- name: SetInboxCursor :exec
+UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4
+WHERE id = $1 AND workspace_id = $2
+`
+
+type SetInboxCursorParams struct {
+	ID               uuid.UUID `json:"id"`
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
+	InboxLastSeenUid int64     `json:"inbox_last_seen_uid"`
+	InboxUidValidity int64     `json:"inbox_uid_validity"`
+}
+
+// Persists the IMAP poll cursor after a poll pass, so the next pass resumes
+// from inbox_last_seen_uid (or resyncs from scratch if inbox_uid_validity
+// has changed underneath it — an IMAP server-side UIDVALIDITY bump).
+func (q *Queries) SetInboxCursor(ctx context.Context, arg SetInboxCursorParams) error {
+	_, err := q.db.Exec(ctx, setInboxCursor,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.InboxLastSeenUid,
+		arg.InboxUidValidity,
+	)
+	return err
+}
+
 const updateMailboxStatus = `-- name: UpdateMailboxStatus :one
 UPDATE mailboxes
 SET status = $3, last_error = $4
 WHERE id = $1 AND workspace_id = $2
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity
 `
 
 type UpdateMailboxStatusParams struct {
@@ -277,6 +339,8 @@ func (q *Queries) UpdateMailboxStatus(ctx context.Context, arg UpdateMailboxStat
 		&i.LastSendAt,
 		&i.LastPollAt,
 		&i.CreatedAt,
+		&i.InboxLastSeenUid,
+		&i.InboxUidValidity,
 	)
 	return i, err
 }
