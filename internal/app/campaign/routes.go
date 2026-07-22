@@ -5,13 +5,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
+// Routes returns this domain's HTTP surface. Every route requires an
+// authenticated caller; auth is enforced by the protected router group.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(auth.RequireAuth(h.jwtSecret))
 	r.Post("/", h.create)
 	r.Get("/", h.list)
 	r.Get("/{id}", h.get)

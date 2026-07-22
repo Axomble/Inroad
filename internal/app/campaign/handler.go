@@ -13,14 +13,15 @@ import (
 	"github.com/inroad/inroad/internal/platform/validate"
 )
 
+// Handler exposes the campaign domain over HTTP. Authentication is applied by
+// the protected router group (see cmd/inroad), not here.
 type Handler struct {
-	svc       *Service
-	jwtSecret []byte
-	enq       Enqueuer
+	svc *Service
+	enq Enqueuer
 }
 
-func NewHandler(svc *Service, jwtSecret []byte, enq Enqueuer) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret, enq: enq}
+func NewHandler(svc *Service, enq Enqueuer) *Handler {
+	return &Handler{svc: svc, enq: enq}
 }
 
 type createRequest struct {

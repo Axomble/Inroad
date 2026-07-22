@@ -13,14 +13,14 @@ import (
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
-// Handler exposes the mailbox domain over HTTP.
+// Handler exposes the mailbox domain over HTTP. Authentication is applied by
+// the protected router group (see cmd/inroad), not here.
 type Handler struct {
-	svc       *Service
-	jwtSecret []byte
+	svc *Service
 }
 
-func NewHandler(svc *Service, jwtSecret []byte) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret}
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
 }
 
 // connectRequest is the wire shape for POST /. It maps 1:1 onto ConnectInput.

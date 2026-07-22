@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
 	"github.com/inroad/inroad/internal/app/identity"
@@ -62,7 +66,6 @@ func main() {
 	mailboxStore := mailbox.NewPgStore(queries)
 	mbHandler := mailbox.NewHandler(
 		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer),
-		cfg.JWTSecret,
 	)
 
 	enq := queue.NewClient(cfg.RedisAddr)
@@ -76,16 +79,33 @@ func main() {
 	campaignSvc := campaign.NewService(campaign.NewPgStore(pool), ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
 	suppStore := suppression.NewStore(queries)
 
-	router := httpx.NewRouter(logger)
-	router.Mount("/api/v1/auth", identHandler.Routes(cfg.JWTSecret))
-	router.Mount("/api/v1/mailboxes", mbHandler.Routes())
-	router.Mount("/api/v1/lists", list.NewHandler(listSvc, cfg.JWTSecret).Routes())
-	// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
-	// overlap with /api/v1/lists that would otherwise 404 the import route.
-	// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
-	router.Mount("/api/v1/contacts", contact.NewHandler(contactSvc, cfg.JWTSecret).Routes())
-	router.Mount("/api/v1/campaigns", campaign.NewHandler(campaignSvc, cfg.JWTSecret, enq).Routes())
-	router.Mount("/u", suppression.NewHandler(cfg.JWTSecret, suppStore).Routes())
+	// Deny-by-default routing. Two groups:
+	//   public    - reachable without an access token. Either genuinely open
+	//               (/healthz from NewRouter, the /u unsubscribe link) or
+	//               self-guarding: the identity handler interleaves public
+	//               register/login, CSRF-gated refresh/logout, and
+	//               token-protected me/logout-all/switch-workspace under one
+	//               /api/v1/auth prefix, so it applies auth internally rather
+	//               than via the blanket group (chi can't Mount two subrouters
+	//               on the same prefix, and refresh/logout must work once the
+	//               access token has expired).
+	//   protected - wrapped ONCE by auth.RequireAuth at the group root. Any
+	//               route mounted here is authenticated by default, so a new
+	//               domain that forgets its own middleware still fails closed.
+	public := []mount{
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(cfg.JWTSecret)},
+		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
+	}
+	protected := []mount{
+		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes()},
+		{pattern: "/api/v1/lists", handler: list.NewHandler(listSvc).Routes()},
+		// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
+		// overlap with /api/v1/lists that would otherwise 404 the import route.
+		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
+		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
+		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq).Routes()},
+	}
+	router := buildRouter(logger, cfg.JWTSecret, public, protected)
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
 	logger.Info("api listening", "addr", cfg.HTTPAddr)
@@ -93,6 +113,31 @@ func main() {
 		logger.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// mount pairs a URL prefix with the handler served under it.
+type mount struct {
+	pattern string
+	handler http.Handler
+}
+
+// buildRouter assembles the API router with a deny-by-default posture. Public
+// mounts are served as-is; every protected mount is wrapped once, at the group
+// root, by auth.RequireAuth(secret). A route added under the protected group is
+// therefore authenticated whether or not it wires up any middleware of its own
+// -- forgetting a per-domain guard can no longer expose a route.
+func buildRouter(logger *slog.Logger, secret []byte, public, protected []mount) *chi.Mux {
+	r := httpx.NewRouter(logger)
+	for _, m := range public {
+		r.Mount(m.pattern, m.handler)
+	}
+	r.Group(func(pr chi.Router) {
+		pr.Use(auth.RequireAuth(secret))
+		for _, m := range protected {
+			pr.Mount(m.pattern, m.handler)
+		}
+	})
+	return r
 }
 
 // ownershipChecker adapts the mailbox and list stores to campaign.Checker so
