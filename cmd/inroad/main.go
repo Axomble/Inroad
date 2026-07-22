@@ -22,6 +22,7 @@ import (
 	"github.com/inroad/inroad/internal/app/mailbox"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
+	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
@@ -99,6 +100,7 @@ func main() {
 		cfg.JWTSecret,
 	)
 	suppStore := suppression.NewStore(queries)
+	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
 	// Deny-by-default routing. Two groups:
 	//   public    - reachable without an access token. Either genuinely open
@@ -116,6 +118,9 @@ func main() {
 	public := []mount{
 		{pattern: "/api/v1/auth", handler: identHandler.Routes(cfg.JWTSecret)},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
+		// Recipients follow open-pixel/click-redirect links unauthenticated,
+		// same as /u — mounted here, not the protected group.
+		{pattern: "/t", handler: trackHandler.Routes()},
 	}
 	protected := []mount{
 		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},

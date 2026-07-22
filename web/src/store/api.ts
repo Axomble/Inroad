@@ -200,6 +200,16 @@ const injectedRtkApi = api.injectEndpoints({
     getCampaign: build.query<GetCampaignApiResponse, GetCampaignApiArg>({
       query: (queryArg) => ({ url: `/campaigns/${queryArg.id}` }),
     }),
+    updateCampaignTracking: build.mutation<
+      UpdateCampaignTrackingApiResponse,
+      UpdateCampaignTrackingApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/tracking`,
+        method: "PUT",
+        body: queryArg.updateCampaignTrackingRequest,
+      }),
+    }),
     listSteps: build.query<ListStepsApiResponse, ListStepsApiArg>({
       query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/steps` }),
     }),
@@ -240,6 +250,12 @@ const injectedRtkApi = api.injectEndpoints({
     }),
     unsubscribe: build.mutation<UnsubscribeApiResponse, UnsubscribeApiArg>({
       query: (queryArg) => ({ url: `/u/${queryArg.token}`, method: "POST" }),
+    }),
+    trackOpen: build.query<TrackOpenApiResponse, TrackOpenApiArg>({
+      query: (queryArg) => ({ url: `/t/o/${queryArg.token}.gif` }),
+    }),
+    trackClick: build.query<TrackClickApiResponse, TrackClickApiArg>({
+      query: (queryArg) => ({ url: `/t/c/${queryArg.token}` }),
     }),
   }),
   overrideExisting: false,
@@ -366,6 +382,14 @@ export type GetCampaignApiResponse =
 export type GetCampaignApiArg = {
   id: string;
 };
+export type UpdateCampaignTrackingApiResponse =
+  /** status 200 Tracking flag updated */ {
+    tracking_enabled?: boolean;
+  };
+export type UpdateCampaignTrackingApiArg = {
+  id: string;
+  updateCampaignTrackingRequest: UpdateCampaignTrackingRequest;
+};
 export type ListStepsApiResponse =
   /** status 200 Steps in order */ SequenceStep[];
 export type ListStepsApiArg = {
@@ -404,6 +428,14 @@ export type UnsubscribeConfirmPageApiArg = {
 };
 export type UnsubscribeApiResponse = unknown;
 export type UnsubscribeApiArg = {
+  token: string;
+};
+export type TrackOpenApiResponse = unknown;
+export type TrackOpenApiArg = {
+  token: string;
+};
+export type TrackClickApiResponse = unknown;
+export type TrackClickApiArg = {
   token: string;
 };
 export type Membership = {
@@ -544,11 +576,26 @@ export type SequenceStep = {
   body_text?: string;
   body_html?: string;
 };
+export type Metrics = {
+  sent?: number;
+  opens_indicative?: number;
+  clicks?: number;
+  replies?: number;
+  bounces?: number;
+  unsubscribes?: number;
+  open_rate?: number;
+  click_rate?: number;
+  reply_rate?: number;
+  bounce_rate?: number;
+  unsub_rate?: number;
+};
 export type CampaignDetail = {
   id?: string;
   name?: string;
   subject?: string;
   status?: string;
+  /** Whether open/click tracking is injected into this campaign's sends. */
+  tracking_enabled?: boolean;
   /** send counts by status */
   stats?: {
     [key: string]: number;
@@ -558,6 +605,10 @@ export type CampaignDetail = {
     [key: string]: number;
   };
   steps?: SequenceStep[];
+  metrics?: Metrics;
+};
+export type UpdateCampaignTrackingRequest = {
+  enabled?: boolean;
 };
 export type StepRequest = {
   delay_seconds?: number;
@@ -594,6 +645,7 @@ export const {
   useListCampaignsQuery,
   useCreateCampaignMutation,
   useGetCampaignQuery,
+  useUpdateCampaignTrackingMutation,
   useListStepsQuery,
   useCreateStepMutation,
   useUpdateStepMutation,
@@ -601,4 +653,6 @@ export const {
   useLaunchCampaignMutation,
   useUnsubscribeConfirmPageQuery,
   useUnsubscribeMutation,
+  useTrackOpenQuery,
+  useTrackClickQuery,
 } = injectedRtkApi;

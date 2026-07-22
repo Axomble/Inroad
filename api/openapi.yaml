@@ -376,6 +376,27 @@ paths:
         '200': { description: Campaign with steps + enrollment counts, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignDetail' } } } }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /campaigns/{id}/tracking:
+    put:
+      operationId: updateCampaignTracking
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdateCampaignTrackingRequest' } } }
+      responses:
+        '200':
+          description: Tracking flag updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tracking_enabled: { type: boolean }
+        '400': { description: Invalid JSON }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
   /campaigns/{id}/steps:
     get:
       operationId: listSteps
@@ -479,6 +500,34 @@ paths:
             text/html:
               schema: { type: string }
         '400': { description: Malformed or invalid token }
+  # Open-pixel + click-redirect endpoints a recipient's mail client follows
+  # unauthenticated, mirroring /u above -- also served outside the /api/v1
+  # base. Not called by the SPA; documented here for completeness.
+  /t/o/{token}.gif:
+    servers: [{ url: / }]
+    get:
+      operationId: trackOpen
+      tags: [tracking]
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: >-
+            1x1 transparent GIF, always -- served identically whether or not
+            the token is valid, so the endpoint can never become an oracle.
+          content:
+            image/gif:
+              schema: { type: string, format: binary }
+  /t/c/{token}:
+    servers: [{ url: / }]
+    get:
+      operationId: trackClick
+      tags: [tracking]
+      security: []
+      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        '302': { description: Redirect to the signed destination URL }
+        '404': { description: Malformed/tampered token or unknown send -- no redirect, nothing recorded }
 components:
   securitySchemes:
     bearerAuth:
@@ -647,9 +696,29 @@ components:
         name: { type: string }
         subject: { type: string }
         status: { type: string }
+        tracking_enabled: { type: boolean, description: Whether open/click tracking is injected into this campaign's sends. }
         stats: { type: object, additionalProperties: { type: integer }, description: send counts by status }
         enrollments: { type: object, additionalProperties: { type: integer }, description: enrollment counts by status }
         steps: { type: array, items: { $ref: '#/components/schemas/SequenceStep' } }
+        metrics: { $ref: '#/components/schemas/Metrics' }
+    Metrics:
+      type: object
+      description: >-
+        Per-campaign engagement rollup. Rates are fractions in 0..1 rounded to
+        4 decimal places. opens_indicative/open_rate are proxy-filtered but
+        remain approximate -- clicks are the reliable signal.
+      properties:
+        sent: { type: integer }
+        opens_indicative: { type: integer }
+        clicks: { type: integer }
+        replies: { type: integer }
+        bounces: { type: integer }
+        unsubscribes: { type: integer }
+        open_rate: { type: number }
+        click_rate: { type: number }
+        reply_rate: { type: number }
+        bounce_rate: { type: number }
+        unsub_rate: { type: number }
     SequenceStep:
       type: object
       properties:
@@ -676,3 +745,7 @@ components:
         subject: { type: string }
         body_text: { type: string }
         body_html: { type: string }
+    UpdateCampaignTrackingRequest:
+      type: object
+      properties:
+        enabled: { type: boolean }
