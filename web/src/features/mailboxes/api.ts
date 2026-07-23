@@ -2,7 +2,15 @@
 // query/mutation shapes; here we layer cache tags on top via
 // `enhanceEndpoints` so listing invalidations happen automatically after any
 // mutation — no more hand-rolled `refetch()` calls in components.
+//
+// The Gmail OAuth "start" endpoint isn't in the OpenAPI-generated client (it
+// returns an opaque auth_url and is a browser-redirect flow), so it's layered
+// on here with `injectEndpoints` rather than hand-editing the generated
+// store/api.ts.
 import { api } from '@/store/api'
+
+/** Response from POST /mailboxes/oauth/google/start. */
+export type StartGoogleOauthResponse = { auth_url: string }
 
 const mailboxApi = api.enhanceEndpoints({
   addTagTypes: ['Mailbox'],
@@ -41,6 +49,12 @@ const mailboxApi = api.enhanceEndpoints({
       ],
     },
   },
+}).injectEndpoints({
+  endpoints: (build) => ({
+    startGoogleOauth: build.mutation<StartGoogleOauthResponse, void>({
+      query: () => ({ url: '/mailboxes/oauth/google/start', method: 'POST' }),
+    }),
+  }),
 })
 
 export const {
@@ -50,4 +64,5 @@ export const {
   usePauseMailboxMutation,
   useResumeMailboxMutation,
   useDeleteMailboxMutation,
+  useStartGoogleOauthMutation,
 } = mailboxApi
