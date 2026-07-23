@@ -33,7 +33,7 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
         {/* top + bottom vignette to seat the overlay copy */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 [background:linear-gradient(to_bottom,rgba(15,11,22,0.55),transparent_28%,transparent_60%,rgba(15,11,22,0.85))]"
+          className="pointer-events-none absolute inset-0 [background:linear-gradient(to_bottom,rgba(255,255,255,0.7),transparent_30%,transparent_58%,rgba(255,255,255,0.92))] dark:[background:linear-gradient(to_bottom,rgba(11,14,10,0.7),transparent_30%,transparent_58%,rgba(11,14,10,0.92))]"
         />
         <div className="relative z-10 flex h-full flex-col justify-between p-12">
           <div className="flex items-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.18em] text-warm">

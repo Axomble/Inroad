@@ -18,16 +18,16 @@ export const buttonVariants = cva(
     variants: {
       variant: {
         primary:
-          'tactile text-primary-foreground border-transparent [--tactile-top:var(--primary-top)] [--tactile-bot:var(--primary-bot)] [--tactile-edge:var(--primary-edge)]',
+          'tactile text-primary-foreground border-transparent [--tactile-top:var(--primary-top)] [--tactile-bot:var(--primary-bot)] [--tactile-edge:var(--primary-edge)] [--tactile-glow:var(--primary-glow)] [--tactile-glow-hover:var(--primary-glow-hover)]',
         warm: 'tactile text-warm-foreground border-transparent [--tactile-top:var(--warm-top)] [--tactile-bot:var(--warm-bot)] [--tactile-edge:var(--warm-edge)]',
         secondary:
           'tactile text-foreground [--tactile-top:var(--surface-2)] [--tactile-bot:var(--surface)] [--tactile-edge:var(--control-edge)]',
         destructive:
-          'tactile text-destructive-foreground border-transparent [--tactile-top:var(--danger)] [--tactile-bot:var(--danger)] [--tactile-edge:#a5323c]',
+          'tactile text-destructive-foreground border-transparent [--tactile-top:var(--danger)] [--tactile-bot:var(--danger)] [--tactile-edge:var(--danger-edge)]',
         outline:
           'border border-border-strong bg-transparent text-foreground hover:bg-surface-2',
         ghost: 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-        link: 'text-primary underline-offset-4 hover:underline',
+        link: 'text-accent-ink underline-offset-4 hover:underline',
         chip: 'tactile tactile-shallow rounded-lg text-foreground font-medium [--tactile-top:var(--surface-2)] [--tactile-bot:var(--surface)] [--tactile-edge:var(--control-edge)]',
       },
       size: {

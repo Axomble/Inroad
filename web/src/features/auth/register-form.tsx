@@ -168,7 +168,7 @@ export function RegisterForm() {
 
       <p className="auth-rise mt-6 text-center text-sm text-muted-foreground" style={{ animationDelay: '360ms' }}>
         Already have an account?{' '}
-        <Link to="/" className="font-medium text-primary hover:underline">
+        <Link to="/" className="font-medium text-accent-ink hover:underline">
           Sign in
         </Link>
       </p>
