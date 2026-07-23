@@ -7,12 +7,22 @@ import { useEffect, useRef } from 'react'
  * not decoration. Canvas keeps it cheap; honors prefers-reduced-motion by
  * painting a single static frame.
  *
- * Colors are hardcoded to the design tokens (see globals.css) because a canvas
- * can't cheaply read CSS custom properties per frame.
+ * Colors mirror the "Volt" design tokens (see globals.css). A canvas can't
+ * cheaply read CSS custom properties, so the values are inlined — keep them in
+ * sync with the tokens. `palette()` follows the active theme (light default,
+ * `.dark` opt-in); a classList check per frame is cheap and auto-adapts if a
+ * theme toggle is added. On light the lime is deepened from --primary so the
+ * moving dots stay legible on the white ground.
  */
-const VIOLET = '#7c5cff'
-const AMBER = '#f5a524'
-const INK = '#0f0b16'
+const ORANGE = '#ff7a1a' // warmup "heat" — bright in both themes
+const OK = 'rgba(23,184,119,0.85)' // inbox arrival flash
+
+function palette() {
+  const dark = document.documentElement.classList.contains('dark')
+  return dark
+    ? { top: '#0f130a', bot: '#0b0e0a', grid: 'rgba(234,240,222,0.05)', zone: 'rgba(195,245,60,0.5)', accent: '#c3f53c' }
+    : { top: '#ffffff', bot: '#eef2e2', grid: 'rgba(18,22,11,0.05)', zone: 'rgba(139,190,0,0.55)', accent: '#8bbe00' }
+}
 
 interface Particle {
   from: number // node index
@@ -81,10 +91,10 @@ export function AuthShowcase() {
       return mt * mt * p0 + 2 * mt * t * p1 + t * t * p2
     }
 
-    function drawGrid() {
+    function drawGrid(grid: string) {
       ctx!.save()
       ctx!.globalAlpha = 0.5
-      ctx!.fillStyle = 'rgba(124,92,255,0.12)'
+      ctx!.fillStyle = grid
       const gap = 26
       for (let x = gap; x < width; x += gap) {
         for (let y = gap; y < height; y += gap) {
@@ -97,22 +107,23 @@ export function AuthShowcase() {
     }
 
     function frame(elapsed: number) {
+      const pal = palette()
       ctx!.clearRect(0, 0, width, height)
 
       // ground
       const bg = ctx!.createLinearGradient(0, 0, width, height)
-      bg.addColorStop(0, '#171022')
-      bg.addColorStop(1, INK)
+      bg.addColorStop(0, pal.top)
+      bg.addColorStop(1, pal.bot)
       ctx!.fillStyle = bg
       ctx!.fillRect(0, 0, width, height)
 
-      drawGrid()
+      drawGrid(pal.grid)
 
       const target = inbox()
 
       // inbox landing zone
       ctx!.save()
-      ctx!.strokeStyle = 'rgba(124,92,255,0.5)'
+      ctx!.strokeStyle = pal.zone
       ctx!.lineWidth = 1.5
       ctx!.beginPath()
       ctx!.roundRect(target.x - 30, target.y - 34, 60, 68, 10)
@@ -131,8 +142,8 @@ export function AuthShowcase() {
 
         // faint trail line
         ctx!.save()
-        ctx!.globalAlpha = 0.12 * (1 - p.t)
-        ctx!.strokeStyle = VIOLET
+        ctx!.globalAlpha = 0.16 * (1 - p.t)
+        ctx!.strokeStyle = pal.accent
         ctx!.lineWidth = 1
         ctx!.beginPath()
         ctx!.moveTo(n.x, n.y)
@@ -143,8 +154,8 @@ export function AuthShowcase() {
         // the message
         ctx!.save()
         ctx!.shadowBlur = 10
-        ctx!.shadowColor = VIOLET
-        ctx!.fillStyle = VIOLET
+        ctx!.shadowColor = pal.accent
+        ctx!.fillStyle = pal.accent
         ctx!.globalAlpha = Math.min(1, p.t * 3)
         ctx!.beginPath()
         ctx!.arc(x, y, 2.6, 0, Math.PI * 2)
@@ -155,7 +166,7 @@ export function AuthShowcase() {
           particles.splice(i, 1)
           // arrival flash
           ctx!.save()
-          ctx!.strokeStyle = 'rgba(52,211,153,0.7)'
+          ctx!.strokeStyle = OK
           ctx!.lineWidth = 2
           ctx!.beginPath()
           ctx!.arc(target.x, target.y, 8, 0, Math.PI * 2)
@@ -170,8 +181,8 @@ export function AuthShowcase() {
         const glow = n.warmth * pulse
         ctx!.save()
         ctx!.shadowBlur = 14 * glow
-        ctx!.shadowColor = AMBER
-        ctx!.fillStyle = `rgba(245,165,36,${0.35 + 0.5 * glow})`
+        ctx!.shadowColor = ORANGE
+        ctx!.fillStyle = `rgba(255,122,26,${0.4 + 0.5 * glow})`
         ctx!.beginPath()
         ctx!.roundRect(n.x - 5, n.y - 5, 10, 10, 3)
         ctx!.fill()

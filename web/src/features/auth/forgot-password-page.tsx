@@ -40,7 +40,7 @@ export function ForgotPasswordPage() {
     return (
       <AuthLayout>
         <div className="flex flex-col items-center gap-4 text-center">
-          <MailCheck className="size-8 text-primary" />
+          <MailCheck className="size-8 text-accent-ink" />
           <div>
             <h1 className="text-xl font-semibold tracking-tight text-foreground">Check your inbox</h1>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -92,7 +92,7 @@ export function ForgotPasswordPage() {
 
       <p className="mt-6 text-center text-sm text-muted-foreground">
         Remembered it?{' '}
-        <Link to="/" className="font-medium text-primary hover:underline">
+        <Link to="/" className="font-medium text-accent-ink hover:underline">
           Sign in
         </Link>
       </p>

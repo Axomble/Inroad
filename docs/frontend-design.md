@@ -12,62 +12,85 @@ truth for how the UI looks, behaves, and is composed. Feature work should read t
 
 ## 1. Design language
 
-**A dark, data-dense operator console.** Deep purple-black surfaces, hairline dividers instead of cards
-with gutters, tiny tracked labels, and monospace for every number and identifier. Structure comes from
-rules and alignment, not shadows and rounded boxes.
+**A bright, data-dense operator console with an electric edge — "Volt".** A white/paper ground, ink
+text, hairline dividers instead of cards with gutters, tiny tracked labels, and monospace for every
+number and identifier. Structure comes from rules and alignment, not shadows and rounded boxes. Against
+that quiet white, one **electric yellow-green** accent does all the shouting — a Web3-adjacent charge
+that marks what matters and nothing else.
 
 Three principles:
 
-1. **One accent, spent deliberately.** A single "blurple" marks *the* primary action on a screen. A
-   second warm hue (amber) is reserved for exactly one concept — **mailbox warmup / "heat"** — because
-   that is the act this product is named for. Everything else is neutral. Color that means something
-   stays meaningful.
-2. **Tactile controls.** Buttons stand slightly proud of the surface, lift to meet the cursor, and press
-   *into* the page. Interactive things look interactive and feel physical. (See §5.)
+1. **One accent, spent deliberately.** A single electric-lime ("volt") marks *the* primary action on a
+   screen and the active nav item. Because lime's luminance is too high to carry text on white, it lives
+   in **fills, active states, and glow — never in type**; all text is ink, and lime buttons are
+   black-on-lime. A second hue, **electric orange**, is reserved for exactly one concept — **mailbox
+   warmup / "heat"** — because that is the act this product is named for. Everything else is neutral.
+   Color that means something stays meaningful.
+2. **Tactile controls, "charged".** Buttons stand slightly proud of the surface, lift to meet the cursor,
+   and press *into* the page. The primary button adds a soft electric-lime **glow** that intensifies on
+   hover — the signature moment. Interactive things look interactive and feel physical. (See §5.)
 3. **Quietly alive.** Live counts, status dots, and small motion motifs make the shell read as a running
    operation. Motion is subtle, meaningful, and always gated behind `prefers-reduced-motion`.
 
-We deliberately commit to **dark as the primary theme**; a light theme is fully supported through tokens
-but dark is the default the product is designed in.
+We commit to **light as the primary theme** — it is the default (`:root`, no class needed) and the mode
+the product is designed in. A recolored dark theme is fully supported through the same tokens and is
+opt-in via a `.dark` class on `<html>` (the toggle control itself is future work).
 
 ---
 
 ## 2. Color tokens
 
 All color lives as CSS custom properties in `web/src/styles/globals.css` and is exposed to Tailwind v4
-through `@theme inline`. **Never hardcode a hex or a raw `slate-*`/`violet-*` utility in a feature
-screen** — consume the semantic token (`bg-surface`, `text-muted`, `border-border`, `text-primary`).
-That single rule is what keeps the app re-themable.
+through `@theme inline`. **Never hardcode a hex or a raw `slate-*`/`lime-*` utility in a feature
+screen** — consume the semantic token (`bg-surface`, `text-muted-foreground`, `border-border`,
+`text-primary`). That single rule is what keeps the app re-themable. `:root` holds the light (default)
+values; `:root.dark` overrides only what changes for dark. The accent lime is shared by both themes.
 
 ### Semantic roles
 
-| Token | Dark value | Role |
-|---|---|---|
-| `--background` | `#14101c` | App ground (deepest) |
-| `--rail` | `#171320` | Sidebar / chrome |
-| `--surface` | `#1c1726` | Raised panels, header, toolbars |
-| `--surface-2` | `#241d31` | Inputs, chips, nested surfaces |
-| `--border` | `#2e2740` | Hairline dividers |
-| `--border-strong` | `#3a3350` | Control borders |
-| `--foreground` | `#edeaf4` | Primary text |
-| `--muted` | `#9a93ad` | Secondary text |
-| `--faint` | `#6f6885` | Labels, IDs, disabled |
-| `--primary` | `#7c5cff` | Accent — primary actions, active nav |
-| `--warm` | `#f5a524` | Reserved: warmup / heat only |
-| `--ok` | `#34d399` | Healthy, sending, live |
-| `--warn` | `#f5a524` | Warning, paused |
-| `--danger` | `#fb6d77` | Error, failing, destructive |
+| Token | Light value (default) | Dark value | Role |
+|---|---|---|---|
+| `--background` | `#f7f9f1` | `#0b0e0a` | App ground |
+| `--rail` | `#fbfcf6` | `#0f130a` | Sidebar / chrome |
+| `--surface` | `#ffffff` | `#13160f` | Raised panels, header, toolbars |
+| `--surface-2` | `#f0f3e6` | `#1a1e14` | Inputs, chips, nested surfaces |
+| `--border` | `#e3e8d6` | `#282d1f` | Hairline dividers |
+| `--border-strong` | `#cfd6bc` | `#38402c` | Control borders |
+| `--foreground` | `#12160b` | `#eaf0de` | Primary text (ink) |
+| `--muted-foreground` | `#565e48` | `#a7b096` | Secondary text |
+| `--faint` | `#6e745c` | `#79826a` | Labels, IDs, disabled |
+| `--primary` | `#c3f53c` | `#c3f53c` | Accent (lime) — **fills / active / glow only** |
+| `--primary-foreground` | `#12160b` | `#10140a` | Ink on lime (buttons) — never white |
+| `--accent-ink` | `#567200` | `#c3f53c` | Lime as **text / links / icons** (reads on white) |
+| `--ring` | `#7fa800` | `#c3f53c` | Focus ring (deepened on white) |
+| `--warm` | `#b85600` | `#ff7a1a` | Reserved: warmup / heat only (orange) |
+| `--ok` | `#0a7d4f` | `#34d399` | Healthy, sending, live (emerald) |
+| `--warn` | `#8f6200` | `#f5a524` | Warning, paused (amber) |
+| `--danger` | `#cb2f38` | `#fb6d77` | Error, failing, destructive |
+
+> `--muted` (no `-foreground`) is a *background* alias of `--surface-2`, not the secondary-text color —
+> secondary text is `--muted-foreground`. `--warm` (orange) and `--warn` (amber) are deliberately
+> distinct hues so the "heat" signal never reads as a generic warning.
+>
+> **Why the accents differ by theme.** These hues carry small text (error messages, status pills,
+> eyebrows), so on white they are *deepened* to clear 4.5:1; on near-black the brighter values read
+> better. Lime is the exception — it must stay bright as a fill, so it never carries text directly;
+> lime-colored type uses `--accent-ink` instead. `--warm-top/-bot` keep a brighter gradient so the
+> warmup *button* stays vivid even though the base `--warm` is text-legible.
 
 ### Chart hues
 
-`--chart-1..5` = violet, cyan, emerald, amber, rose. Ordered so the first two carry the most weight and
+`--chart-1..5` = lime, teal, indigo, orange, red. Ordered so the first two carry the most weight and
 stay distinguishable for the most common colorblindness types.
 
 ### Rules
 
 - **Accent discipline:** one `primary` button per screen region. If two things look primary, one is wrong.
-- **Warm is sacred:** `--warm` appears only on warmup surfaces (warmup toggles, the "Warming" stat, the
-  ramp indicator). Using it as a generic highlight dilutes the one signal that's ours.
+- **Lime is fill, not type:** `--primary` never carries text (it fails contrast on white). It appears as
+  fills, active states, the primary-button glow, and `--chart-1`. When you need lime-colored *text* (a
+  link, an accent icon), use `text-accent-ink`, never `text-primary`.
+- **Warm is sacred:** `--warm` (orange) appears only on warmup surfaces (warmup toggles, the "Warming"
+  stat, the ramp indicator). Using it as a generic highlight dilutes the one signal that's ours.
 - **Semantic ≠ accent:** good/warn/critical are their own scale and never stand in for the accent.
 - **Contrast floor:** body text ≥ 4.5:1, large text ≥ 3:1, in both themes. Verify when adding tokens.
 
@@ -141,16 +164,22 @@ sideways.
 ## 5. The tactile button (signature interaction)
 
 Depth is built from a **hard, non-blurred bottom edge** (the "lip") plus an **inset top highlight** — not
-a soft drop shadow. Three states:
+a soft drop shadow. The highlight and ambient values are theme tokens (`--tactile-hi`, `--tactile-ambient`,
+`--tactile-ambient-hover`), so the effect reads correctly on white as well as on near-black — light tunes
+them softer. Three states:
 
-1. **Rest** — stands taller: `box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 2px 0 <edge>, 0 5px 12px rgba(0,0,0,.3)`.
+1. **Rest** — stands taller: `inset 0 1px 0 var(--tactile-hi), 0 2px 0 <edge>, 0 5px 12px var(--tactile-ambient)`.
 2. **Hover** — lifts `translateY(-1.5px)` and brightens, to greet the cursor.
 3. **Active** — recesses: lip collapses to `0`, inset shadow appears, drops `translateY(2px)` in ~34ms so
    the press feels instant.
 
+**The signature glow.** The primary variant threads an electric-lime halo into the same shadow list via
+`--tactile-glow` (transparent by default, so only primary lights up), intensifying to `--tactile-glow-hover`
+on hover. This is the one bold moment; secondary/outline/chip controls stay quiet.
+
 Timing is asymmetric on purpose: springy ~130ms return, snappy ~34ms press. All of this is encoded in the
-`Button` variants and a `.btn-tactile` utility layer in `globals.css`, and is disabled under
-`prefers-reduced-motion`. Filter chips use the same physics with a shallower lip.
+`Button` variants and the `.tactile` / `.tactile-shallow` utility layer in `globals.css`, and is disabled
+under `prefers-reduced-motion`. Filter chips use the same physics with a shallower lip.
 
 Two button systems, both tactile:
 

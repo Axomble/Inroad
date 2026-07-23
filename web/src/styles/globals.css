@@ -1,91 +1,134 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* Dark is the default theme; add `.light` on <html> to switch. */
-@custom-variant dark (&:where(:root:not(.light) *));
+/* Light is the default theme; add `.dark` on <html> to switch. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* ============================================================
    Design tokens — the single source of truth for color.
    Feature screens consume the Tailwind utilities generated from
    these (bg-surface, text-muted-foreground, border-border, …),
    never raw hex or slate-*.
+
+   Palette: "Volt" — white ground, electric yellow-green accent.
+   The lime accent carries fills / active state / the signature
+   glow; it NEVER carries text (its luminance fails contrast on
+   white). All text is ink; buttons are black-on-lime.
    ============================================================ */
 :root {
   --radius: 0.55rem;
 
-  /* neutrals — purple-biased, not pure grey */
-  --background:     #14101c;
-  --foreground:     #edeaf4;
-  --rail:           #171320;
-  --surface:        #1c1726;
-  --surface-2:      #241d31;
-  --border:         #2e2740;
-  --border-strong:  #3a3350;
-  --muted-foreground: #9a93ad;
-  --faint:          #6f6885;
+  /* neutrals — faint lime-tinted paper, not pure grey */
+  --background:     #f7f9f1;
+  --foreground:     #12160b;
+  --rail:           #fbfcf6;
+  --surface:        #ffffff;
+  --surface-2:      #f0f3e6;
+  --border:         #e3e8d6;
+  --border-strong:  #cfd6bc;
+  --muted-foreground: #565e48;
+  --faint:          #6e745c;
 
-  /* accent — blurple, spent on the primary action */
-  --primary:            #7c5cff;
-  --primary-foreground: #ffffff;
-  --primary-top:        #8a6bff;
-  --primary-bot:        #6a45f2;
-  --primary-edge:       #4a2fc0;
+  /* accent — electric lime "volt", spent on the primary action */
+  --primary:            #c3f53c;
+  --primary-foreground: #12160b; /* ink on lime — never white */
+  --primary-top:        #d4f962;
+  --primary-bot:        #b2e81e;
+  --primary-edge:       #6e9200;
+  /* the signature "charged" glow (a box-shadow value, per theme) */
+  --primary-glow:       0 6px 20px -2px rgba(178, 232, 30, 0.50);
+  --primary-glow-hover: 0 10px 30px 0 rgba(178, 232, 30, 0.68);
+  /* accent as TEXT / links — deepened so it reads on white. The bright
+     --primary is a FILL only (it fails contrast as text); anything that
+     is lime-colored *type* uses --accent-ink instead. */
+  --accent-ink:         #567200;
 
   /* shadcn-compatible aliases */
   --card:                 var(--surface);
   --card-foreground:      var(--foreground);
-  --popover:              #201a2b;
+  --popover:              #ffffff;
   --popover-foreground:   var(--foreground);
   --secondary:            var(--surface-2);
   --secondary-foreground: var(--foreground);
   --muted:                var(--surface-2);
-  --accent:               #2a2338;
+  --accent:               #eaf0d8;
   --accent-foreground:    var(--foreground);
   --input:                var(--border);
-  --ring:                 var(--primary);
+  --ring:                 #7fa800; /* deep lime — visible focus ring on white */
 
-  /* reserved warm — mailbox warmup / "heat" ONLY */
-  --warm:            #f5a524;
-  --warm-foreground: #2a1a02;
-  --warm-top:        #f7b23f;
-  --warm-bot:        #ec9410;
-  --warm-edge:       #b06d05;
+  /* reserved warm — mailbox warmup / "heat" ONLY (orange, distinct from
+     the lime accent AND from --warn). The base is deep enough to read as
+     text on white; the button fill keeps a brighter top/bot gradient. */
+  --warm:            #b85600;
+  --warm-foreground: #ffffff;
+  --warm-top:        #ff9038;
+  --warm-bot:        #f26600;
+  --warm-edge:       #a84300;
 
-  /* semantic */
-  --ok:                  #34d399;
-  --warn:                #f5a524;
-  --danger:              #fb6d77;
-  --destructive:         #fb6d77;
+  /* semantic — deepened for legibility as text on white (≥4.5:1). Dark
+     restores the brighter values these had. */
+  --ok:                  #0a7d4f;
+  --warn:                #8f6200;
+  --danger:              #cb2f38;
+  --danger-edge:         #a5323c;
+  --destructive:         #cb2f38;
   --destructive-foreground: #ffffff;
 
-  /* neutral tactile control edge */
-  --control-edge: #100c18;
+  /* neutral tactile control edge + light-tuned depth.
+     On white the "proud" effect comes from the lip + a soft
+     ambient shadow, not a heavy black drop shadow. */
+  --control-edge:          #d3d9c4;
+  --tactile-hi:            rgba(255, 255, 255, 0.65);
+  --tactile-ambient:       rgba(24, 34, 0, 0.13);
+  --tactile-ambient-hover: rgba(24, 34, 0, 0.18);
+  /* recessed inset for inputs — soft on white */
+  --input-inset:           rgba(24, 34, 0, 0.10);
 
-  /* charts: violet, cyan, emerald, amber, rose */
-  --chart-1: #7c5cff;
-  --chart-2: #38bdf8;
-  --chart-3: #34d399;
-  --chart-4: #f5a524;
-  --chart-5: #fb6d77;
+  /* charts: lime, teal, indigo, orange, red */
+  --chart-1: #b2e81e;
+  --chart-2: #17b0c4;
+  --chart-3: #6366f1;
+  --chart-4: #ff7a1a;
+  --chart-5: #e5484d;
+
+  color-scheme: light;
 }
 
-.light {
-  --background:     #f6f5fa;
-  --foreground:     #1a1526;
-  --rail:           #efedf6;
-  --surface:        #ffffff;
-  --surface-2:      #f2f0f8;
-  --border:         #e4e1ee;
-  --border-strong:  #d6d2e6;
-  --muted-foreground: #6a6480;
-  --faint:          #948da8;
+/* Recolored dark — opt-in via `.dark` on <html>. Neutral near-black
+   with a whisper of green so the shared lime accent pops. */
+:root.dark {
+  --background:     #0b0e0a;
+  --foreground:     #eaf0de;
+  --rail:           #0f130a;
+  --surface:        #13160f;
+  --surface-2:      #1a1e14;
+  --border:         #282d1f;
+  --border-strong:  #38402c;
+  --muted-foreground: #a7b096;
+  --faint:          #79826a;
 
-  --popover:            #ffffff;
-  --accent:             #f2f0f8;
-  --primary-edge:       #5a3fd6;
-  --warm-foreground:    #ffffff;
-  --warm-edge:          #c67f0a;
-  --control-edge:       #cdc8dd;
+  --popover:            #161a10;
+  --accent:             #1f2417;
+  --primary-foreground: #10140a;   /* still ink on lime */
+  --accent-ink:         #c3f53c;   /* lime reads fine as text on dark */
+  --ring:               #c3f53c;
+
+  /* brighter accents read better on near-black than the deepened
+     light-mode bases */
+  --warm:               #ff7a1a;
+  --warm-foreground:    #1a0e00;
+  --ok:                 #34d399;
+  --warn:               #f5a524;
+  --danger:             #fb6d77;
+  --destructive:        #fb6d77;
+
+  --control-edge:          #05070a;
+  --tactile-hi:            rgba(255, 255, 255, 0.10);
+  --tactile-ambient:       rgba(0, 0, 0, 0.30);
+  --tactile-ambient-hover: rgba(0, 0, 0, 0.34);
+  --input-inset:           rgba(0, 0, 0, 0.28);
+
+  color-scheme: dark;
 }
 
 /* Map tokens -> Tailwind v4 utilities. */
@@ -105,6 +148,7 @@
   --color-popover-foreground:   var(--popover-foreground);
   --color-primary:              var(--primary);
   --color-primary-foreground:   var(--primary-foreground);
+  --color-accent-ink:           var(--accent-ink);
   --color-secondary:            var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted:                var(--muted);
@@ -140,9 +184,6 @@
   --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 
-:root { color-scheme: dark; }
-.light { color-scheme: light; }
-
 body {
   @apply bg-background text-foreground antialiased;
   font-family: var(--font-sans);
@@ -152,8 +193,14 @@ body {
    Tactile controls — the signature interaction.
    A hard, non-blurred bottom "lip" + inset highlight makes a
    control stand proud of the surface; it lifts on hover and
-   recesses on press. Variant classes set the three --tactile-*
-   vars; this layer turns them into the physics.
+   recesses on press. Variant classes set the --tactile-* vars;
+   this layer turns them into the physics.
+
+   Depth colors (highlight, ambient) are theme tokens so the
+   effect reads correctly on white as well as on near-black.
+   The optional lime "charged" glow is threaded into the shadow
+   list via --tactile-glow (transparent by default), so only the
+   primary variant lights up — secondary/chip stay quiet.
    ============================================================ */
 @layer components {
   .tactile {
@@ -161,9 +208,10 @@ body {
     border: 1px solid var(--tactile-border, var(--border-strong));
     background: linear-gradient(var(--tactile-top, var(--surface-2)), var(--tactile-bot, var(--surface)));
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.10),
+      inset 0 1px 0 var(--tactile-hi),
       0 2px 0 var(--tactile-edge, var(--control-edge)),
-      0 5px 12px rgba(0, 0, 0, 0.30);
+      0 5px 12px var(--tactile-ambient),
+      var(--tactile-glow, 0 0 #0000);
     transition:
       transform 130ms cubic-bezier(0.3, 0.7, 0.4, 1),
       box-shadow 130ms cubic-bezier(0.3, 0.7, 0.4, 1),
@@ -171,19 +219,21 @@ body {
   }
   .tactile:hover {
     transform: translateY(-1.5px);
-    filter: brightness(1.06);
+    filter: brightness(1.04);
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      inset 0 1px 0 var(--tactile-hi),
       0 3.5px 0 var(--tactile-edge, var(--control-edge)),
-      0 9px 20px rgba(0, 0, 0, 0.34);
+      0 9px 20px var(--tactile-ambient-hover),
+      var(--tactile-glow-hover, var(--tactile-glow, 0 0 #0000));
   }
   .tactile:active {
     transform: translateY(2px);
     filter: brightness(0.98);
     box-shadow:
-      inset 0 2px 4px rgba(0, 0, 0, 0.45),
+      inset 0 2px 4px rgba(0, 0, 0, 0.30),
       0 0 0 var(--tactile-edge, var(--control-edge)),
-      0 1px 2px rgba(0, 0, 0, 0.30);
+      0 1px 2px var(--tactile-ambient),
+      var(--tactile-glow, 0 0 #0000);
     transition-duration: 34ms;
   }
   .tactile:disabled,
@@ -192,7 +242,7 @@ body {
     filter: none;
     opacity: 0.5;
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      inset 0 1px 0 var(--tactile-hi),
       0 1px 0 var(--tactile-edge, var(--control-edge));
     cursor: not-allowed;
   }
@@ -200,19 +250,19 @@ body {
   /* shallower lip for toolbar chips */
   .tactile-shallow {
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      inset 0 1px 0 var(--tactile-hi),
       0 1.5px 0 var(--tactile-edge, var(--control-edge));
   }
   .tactile-shallow:hover {
     transform: translateY(-1px);
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.09),
+      inset 0 1px 0 var(--tactile-hi),
       0 2.5px 0 var(--tactile-edge, var(--control-edge));
   }
   .tactile-shallow:active {
     transform: translateY(1.5px);
     box-shadow:
-      inset 0 1px 3px rgba(0, 0, 0, 0.40),
+      inset 0 1px 3px rgba(0, 0, 0, 0.30),
       0 0 0 var(--tactile-edge, var(--control-edge));
     transition-duration: 30ms;
   }

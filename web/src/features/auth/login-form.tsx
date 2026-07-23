@@ -71,7 +71,7 @@ export function LoginForm() {
         <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '240ms' }}>
           <div className="flex items-center justify-between">
             <Label htmlFor={passwordId}>Password</Label>
-            <a href="#" className="text-xs text-muted-foreground transition-colors hover:text-primary">
+            <a href="#" className="text-xs text-muted-foreground transition-colors hover:text-accent-ink">
               Forgot password?
             </a>
           </div>
@@ -113,7 +113,7 @@ export function LoginForm() {
 
       <p className="auth-rise mt-6 text-center text-sm text-muted-foreground" style={{ animationDelay: '340ms' }}>
         New to Inroad?{' '}
-        <Link to="/register" className="font-medium text-primary hover:underline">
+        <Link to="/register" className="font-medium text-accent-ink hover:underline">
           Create an account
         </Link>
       </p>
