@@ -54,6 +54,9 @@ type stubCore struct {
 	cursorUID      uint32
 	cursorValidity uint32
 
+	cursorStringSet bool
+	cursorString    string
+
 	replied []string
 	bounced []bouncedCall
 
@@ -75,6 +78,32 @@ func (s *stubCore) SetInboxCursor(_ context.Context, _, _ string, uid, validity 
 	s.cursorSet = true
 	s.cursorUID, s.cursorValidity = uid, validity
 	return nil
+}
+
+func (s *stubCore) SetInboxCursorString(_ context.Context, _, _, cursor string) error {
+	s.cursorStringSet = true
+	s.cursorString = cursor
+	return nil
+}
+
+// fakeGmailReader is a test double for the GmailFetcher seam. It records the
+// cursor it was resumed from and returns canned messages + a new cursor.
+type fakeGmailReader struct {
+	msgs      []mail.InboundMessage
+	newCursor string
+	fetchErr  error
+
+	fetchCalled bool
+	sinceCursor string
+}
+
+func (f *fakeGmailReader) Fetch(_ context.Context, _ string, sinceHistoryID string, _ int) ([]mail.InboundMessage, string, error) {
+	f.fetchCalled = true
+	f.sinceCursor = sinceHistoryID
+	if f.fetchErr != nil {
+		return nil, "", f.fetchErr
+	}
+	return f.msgs, f.newCursor, nil
 }
 
 func (s *stubCore) FindSendByMessageID(_ context.Context, _, messageID string) (coreapi.SendRef, error) {
@@ -126,7 +155,14 @@ func autoReplyFixture(inReplyTo string) string {
 
 func runPoll(t *testing.T, core coreapi.Client, reader mail.InboxReader) error {
 	t.Helper()
-	return PollHandler(core, reader)(context.Background(), pollTask(t))
+	// nil Gmail reader: every runPoll test drives the smtp/IMAP path (job.Provider
+	// defaults to "", so the gmail branch is never taken and the reader is unused).
+	return PollHandler(core, reader, nil)(context.Background(), pollTask(t))
+}
+
+func runGmailPoll(t *testing.T, core coreapi.Client, gmail GmailFetcher) error {
+	t.Helper()
+	return PollHandler(core, nil, gmail)(context.Background(), pollTask(t))
 }
 
 func TestPollFirstPollBaselinesWithoutFetching(t *testing.T) {
@@ -357,5 +393,72 @@ func TestPollPropagatesFetchError(t *testing.T) {
 	}
 	if core.cursorSet {
 		t.Fatal("a failed Fetch must not persist a cursor")
+	}
+}
+
+// TestPollGmailProviderUsesGmailReaderAndSharedClassification proves the
+// provider branch: a gmail job resumes the GmailReader from the opaque cursor,
+// runs the SAME reply/bounce classification (a reply here marks the enrollment
+// replied), and persists the advanced cursor via SetInboxCursorString — never
+// touching the IMAP UID cursor path.
+func TestPollGmailProviderUsesGmailReaderAndSharedClassification(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{Provider: "gmail", AccessToken: []byte("tok"), Cursor: "1000"},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	gmail := &fakeGmailReader{
+		newCursor: "2000",
+		msgs:      []mail.InboundMessage{inboundMsg(t, 0, replyFixture("<root@x>"))},
+	}
+	if err := runGmailPoll(t, core, gmail); err != nil {
+		t.Fatal(err)
+	}
+	if !gmail.fetchCalled || gmail.sinceCursor != "1000" {
+		t.Fatalf("expected GmailReader resumed from cursor 1000, got called=%v since=%q", gmail.fetchCalled, gmail.sinceCursor)
+	}
+	if len(core.replied) != 1 || core.replied[0] != "e1" {
+		t.Fatalf("expected shared classification to MarkReplied(e1), got %v", core.replied)
+	}
+	if !core.cursorStringSet || core.cursorString != "2000" {
+		t.Fatalf("expected opaque cursor advanced to 2000, got %q set=%v", core.cursorString, core.cursorStringSet)
+	}
+	if core.cursorSet {
+		t.Fatal("gmail path must not touch the IMAP UID cursor")
+	}
+}
+
+// TestPollGmailBounceMarksBounced proves the gmail path shares the DSN parser:
+// a bounce DSN fetched by the GmailReader marks the enrollment bounced.
+func TestPollGmailBounceMarksBounced(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{Provider: "gmail", AccessToken: []byte("tok"), Cursor: "1000"},
+		sendRefs: map[string]coreapi.SendRef{"<orig@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "nobody@recipient.example.com"}},
+	}
+	gmail := &fakeGmailReader{
+		newCursor: "2000",
+		msgs:      []mail.InboundMessage{inboundMsg(t, 0, hardBounceDSN)},
+	}
+	if err := runGmailPoll(t, core, gmail); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.bounced) != 1 || !core.bounced[0].hard || core.bounced[0].enrollmentID != "e1" {
+		t.Fatalf("expected a hard MarkBounced(e1), got %v", core.bounced)
+	}
+	if !core.cursorStringSet || core.cursorString != "2000" {
+		t.Fatalf("expected opaque cursor advanced to 2000, got %q", core.cursorString)
+	}
+}
+
+// TestPollGmailPropagatesFetchError proves a Gmail Fetch failure surfaces to
+// asynq and no cursor is persisted (the pass retries from the same cursor).
+func TestPollGmailPropagatesFetchError(t *testing.T) {
+	want := errors.New("gmail api down")
+	core := &stubCore{job: coreapi.InboxPollJob{Provider: "gmail", AccessToken: []byte("tok"), Cursor: "1000"}}
+	gmail := &fakeGmailReader{fetchErr: want}
+	if err := runGmailPoll(t, core, gmail); !errors.Is(err, want) {
+		t.Fatalf("expected gmail reader error to propagate, got %v", err)
+	}
+	if core.cursorStringSet {
+		t.Fatal("a failed gmail Fetch must not persist a cursor")
 	}
 }

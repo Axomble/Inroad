@@ -62,12 +62,26 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 	if m.WorkspaceID != ws {
 		return coreapi.InboxPollJob{}, coreapi.ErrCrossTenant
 	}
+	// Transport dispatch on the mailbox provider (parallel to GetStepSendJob):
+	// gmail resolves a refreshed short-lived access token and resumes from the
+	// opaque inbox_cursor (historyId), leaving the IMAP UID cursor columns zero;
+	// smtp unseals the stored IMAP password and resumes from the UID cursor.
+	if m.Provider == "gmail" {
+		at, err := c.gmailAccessToken(ctx, id, ws, m.SecretCiphertext)
+		if err != nil {
+			return coreapi.InboxPollJob{}, err
+		}
+		return coreapi.InboxPollJob{
+			Provider: "gmail", AccessToken: []byte(at), Cursor: m.InboxCursor,
+		}, nil
+	}
 	password, err := c.sealer.Open(m.SecretCiphertext)
 	if err != nil {
 		return coreapi.InboxPollJob{}, err
 	}
 	return coreapi.InboxPollJob{
-		Host: m.ImapHost, Port: int(m.ImapPort), Username: m.ImapUsername, Password: password,
+		Provider: "smtp",
+		Host:     m.ImapHost, Port: int(m.ImapPort), Username: m.ImapUsername, Password: password,
 		UseTLS: m.UseTls, LastSeenUID: uint32(m.InboxLastSeenUid), UIDValidity: uint32(m.InboxUidValidity),
 	}, nil
 }
@@ -85,6 +99,23 @@ func (c client) SetInboxCursor(ctx context.Context, mailboxID, workspaceID strin
 	return c.q.SetInboxCursor(ctx, gen.SetInboxCursorParams{
 		ID: id, WorkspaceID: ws,
 		InboxLastSeenUid: int64(lastSeenUID), InboxUidValidity: int64(uidValidity),
+	})
+}
+
+// SetInboxCursorString persists the opaque provider cursor (Gmail historyId)
+// after a poll pass, workspace-pinned. The IMAP UID cursor columns are left
+// untouched so the two transports never clobber each other's cursor.
+func (c client) SetInboxCursorString(ctx context.Context, mailboxID, workspaceID, cursor string) error {
+	id, err := uuid.Parse(mailboxID)
+	if err != nil {
+		return err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
+	return c.q.SetInboxCursorString(ctx, gen.SetInboxCursorStringParams{
+		ID: id, WorkspaceID: ws, InboxCursor: cursor,
 	})
 }
 

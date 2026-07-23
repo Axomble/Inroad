@@ -79,8 +79,15 @@ func main() {
 		cfg.TrustedProxies,
 	)
 	mailboxStore := mailbox.NewPgStore(queries)
+	googleOAuth := mail.GoogleOAuth{
+		ClientID:     cfg.GoogleClientID,
+		ClientSecret: cfg.GoogleClientSecret,
+		RedirectURL:  cfg.GoogleRedirectURL,
+	}
 	mbHandler := mailbox.NewHandler(
-		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer),
+		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer,
+			googleOAuth, mailbox.NewGoogleExchanger(googleOAuth)),
+		cfg.JWTSecret, cfg.AppBaseURL,
 	)
 
 	enq := queue.NewClient(cfg.RedisAddr)
@@ -121,6 +128,10 @@ func main() {
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
 		{pattern: "/t", handler: trackHandler.Routes()},
+		// Gmail OAuth callback is a top-level browser navigation from Google;
+		// it authenticates from the signed state, not the JWT cookie, so it
+		// mounts here rather than the protected group.
+		{pattern: "/oauth", handler: mbHandler.CallbackRoutes()},
 	}
 	protected := []mount{
 		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},

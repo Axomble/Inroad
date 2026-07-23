@@ -248,6 +248,7 @@ type Mailbox struct {
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 	InboxLastSeenUid   int64              `json:"inbox_last_seen_uid"`
 	InboxUidValidity   int64              `json:"inbox_uid_validity"`
+	InboxCursor        string             `json:"inbox_cursor"`
 }
 
 type Send struct {

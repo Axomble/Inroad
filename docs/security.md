@@ -36,13 +36,45 @@ or SSRF. (Not a full threat model; that's future work.)
 7. **JWT is HS256 and the signing method is verified on parse** (`auth.ParseToken`
    rejects non-HMAC alg). Tokens carry `sub` (user) and `wid` (workspace) only.
 
+## OAuth (mailbox connect)
+8. **OAuth tokens are secrets, treated exactly like SMTP passwords.** The Gmail
+   `oauth2.Token` (access + refresh) is sealed at rest via `crypto.Sealer` into
+   `mailboxes.secret_ciphertext`, never logged, and never returned in an API
+   response (`mailboxResponse` omits it, same as SMTP creds). On a job, the
+   access token is a `[]byte` and is zeroized after the send/poll — like
+   `SMTPPassword`. The worker never receives the refresh token, only a
+   short-lived access token for one API call.
+9. **Token refresh + reseal + persist happen ONLY in the control plane**
+   (`coreapi` inprocess `gmailAccessToken`), which holds the pool and sealer.
+   The worker never refreshes, re-seals, or writes a token. A rotated refresh
+   token is re-sealed and persisted at job-build time so it is not silently
+   lost.
+10. **The callback derives `workspace_id` only from a verified signed `state`,
+    never from a request param.** `state` is HMAC-signed (SHA-256, `JWTSecret`)
+    with a 10-minute TTL (`internal/platform/oauthstate`). The HMAC proves the
+    server minted it and the TTL bounds replay — the public callback carries no
+    JWT cookie (top-level redirect from Google), so the state IS the auth. Every
+    mailbox the callback creates is pinned to that workspace, so no cross-tenant
+    write is possible. **Residual risk:** there is no server-side single-use
+    nonce store yet, so a `state` URL leaked within its 10-minute window would
+    let an attacker bind *their own* Gmail mailbox into the victim's workspace
+    (low value, bounded, no data read). A single-use nonce store is the phase-2
+    hardening.
+11. **No new SSRF surface.** Gmail API, Google token, and OpenID userinfo calls
+    all go to fixed Google hosts, not user-controlled input, so they do not go
+    through (and do not need) the `mail.vetAddr` guard.
+
 ## Deferred (documented, not yet built)
 - KMS-backed data-encryption keys (Cloud) — today a single local master key.
 - Rate limiting / abuse controls on auth and connect endpoints.
 - Audit log for sensitive actions (mailbox connect/disconnect, settings changes).
+- Server-side single-use nonce store for the OAuth `state` (see invariant 10).
 
 ## Checklist for a security-sensitive change
 - [ ] New stored credential? → sealed via `crypto.Sealer`, absent from responses/logs.
 - [ ] New outbound dial to a user-supplied host? → routed through the SSRF guard.
 - [ ] New tenant-scoped query? → filtered by `workspace_id` from the JWT.
 - [ ] New secret/config? → env-loaded, fail-closed in compose, in `.env.example`.
+- [ ] New OAuth/state-authenticated flow? → `state` HMAC-signed + TTL; tenant
+      derived from the verified state, not a request param; token refresh stays
+      in the control plane.

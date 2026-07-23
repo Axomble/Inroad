@@ -82,6 +82,10 @@ type Client interface {
 	// next pass resumes from LastSeenUID (or resyncs from scratch if
 	// UIDValidity changed underneath it). workspaceID pinned as above.
 	SetInboxCursor(ctx context.Context, mailboxID, workspaceID string, lastSeenUID, uidValidity uint32) error
+	// SetInboxCursorString persists an opaque provider cursor (Gmail historyId)
+	// after a poll pass for API-provider mailboxes; the IMAP UID cursor columns
+	// are left untouched. workspaceID pinned as above.
+	SetInboxCursorString(ctx context.Context, mailboxID, workspaceID, cursor string) error
 	// FindSendByMessageID matches an inbound reply/bounce's Message-ID back to
 	// the send that caused it, workspace-scoped. Returns ErrNoMatch when
 	// nothing matches.
@@ -149,11 +153,16 @@ type StepSendJob struct {
 	TrackingEnabled bool
 	FromEmail       string
 	FromName        string
-	SMTPHost        string
-	SMTPPort        int
-	SMTPUsername    string
-	SMTPPassword    []byte
-	UseTLS          bool
+	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
+	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
+	// SMTPPassword. For gmail the SMTP* fields are empty.
+	Provider     string
+	AccessToken  []byte
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword []byte
+	UseTLS       bool
 }
 
 // StepResult is the outcome of one step send.
@@ -195,6 +204,13 @@ type MailboxRef struct {
 // cursor: a UIDVALIDITY change means the server renumbered the mailbox and
 // the poller must resync from scratch.
 type InboxPollJob struct {
+	// Provider selects the inbox transport ("smtp" | "gmail"). For gmail the IMAP
+	// fields are zero and AccessToken/Cursor carry the decrypted OAuth bearer and
+	// the opaque historyId cursor; AccessToken is zeroized after the poll like
+	// Password. For smtp the AccessToken/Cursor fields are empty.
+	Provider    string
+	AccessToken []byte
+	Cursor      string
 	Host        string
 	Port        int
 	Username    string
@@ -240,6 +256,11 @@ type SendJob struct {
 	// TrackingEnabled mirrors the campaign's tracking_enabled column; see
 	// StepSendJob.TrackingEnabled for the injection contract.
 	TrackingEnabled bool
+	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
+	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
+	// SMTPPassword. For gmail the SMTP* fields are empty.
+	Provider    string
+	AccessToken []byte
 }
 
 // SendResult is the outcome of a single send attempt.

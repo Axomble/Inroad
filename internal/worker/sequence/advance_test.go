@@ -52,7 +52,7 @@ type fakeSender struct {
 	err    error
 }
 
-func (f *fakeSender) Send(_ mail.SMTPConfig, m mail.Message) (string, error) {
+func (f *fakeSender) Send(_ context.Context, _ mail.OutboundJob, m mail.Message) (string, error) {
 	f.called, f.sent = true, m
 	return f.id, f.err
 }

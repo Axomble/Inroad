@@ -65,6 +65,12 @@ type Config struct {
 	// invite) embedded in transactional email.
 	AppBaseURL string
 
+	// Google OAuth (mailbox connect via Gmail). Empty client id/secret disables
+	// Gmail OAuth: the start endpoint returns 501 and gmail jobs fail cleanly.
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURL  string
+
 	EmailVerifyTTL   time.Duration
 	PasswordResetTTL time.Duration
 	InviteTTL        time.Duration
@@ -130,6 +136,9 @@ func Load() (*Config, error) {
 	cfg.SystemSMTPPassword = getenv("INROAD_SYSTEM_SMTP_PASSWORD", "")
 	cfg.SystemEmailFrom = getenv("INROAD_SYSTEM_EMAIL_FROM", "")
 	cfg.AppBaseURL = getenv("INROAD_APP_BASE_URL", "http://localhost:5173")
+	cfg.GoogleClientID = getenv("INROAD_GOOGLE_CLIENT_ID", "")
+	cfg.GoogleClientSecret = getenv("INROAD_GOOGLE_CLIENT_SECRET", "")
+	cfg.GoogleRedirectURL = getenv("INROAD_GOOGLE_REDIRECT_URL", cfg.PublicURL+"/oauth/google/callback")
 	cfg.EmailVerifyTTL = getenvDuration("INROAD_EMAIL_VERIFY_TTL", 24*time.Hour)
 	cfg.PasswordResetTTL = getenvDuration("INROAD_PASSWORD_RESET_TTL", time.Hour)
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)

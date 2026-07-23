@@ -36,7 +36,7 @@ type itSender struct {
 	n    int
 }
 
-func (s *itSender) Send(_ mail.SMTPConfig, m mail.Message) (string, error) {
+func (s *itSender) Send(_ context.Context, _ mail.OutboundJob, m mail.Message) (string, error) {
 	s.sent = append(s.sent, m)
 	s.n++
 	return "<msg-" + string(rune('a'+s.n)) + "@inroad>", nil
@@ -121,7 +121,7 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 	}
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
 	return itFixture{
-		q: q, core: inprocess.New(pool, sealer, sealerKey, "https://app.test"),
+		q: q, core: inprocess.New(pool, sealer, sealerKey, "https://app.test", mail.GoogleOAuth{}),
 		ws: ws.ID, campaignID: cam.ID, contactID: c.ID, email: email,
 	}
 }

@@ -38,10 +38,11 @@ func (s *stubCore) MarkSend(_ context.Context, _, _ string, res coreapi.SendResu
 // build tag) to avoid a redeclaration when both compile together.
 type stubSender struct {
 	sent mail.Message
+	tj   mail.OutboundJob
 }
 
-func (f *stubSender) Send(_ mail.SMTPConfig, m mail.Message) (string, error) {
-	f.sent = m
+func (f *stubSender) Send(_ context.Context, tj mail.OutboundJob, m mail.Message) (string, error) {
+	f.tj, f.sent = tj, m
 	return "<mid@x>", nil
 }
 
@@ -61,7 +62,7 @@ func sendTask(t *testing.T) *asynq.Task {
 func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 	core := &stubCore{job: coreapi.SendJob{
 		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
-		Subject: "Hi", BodyText: "hello",
+		Provider: "smtp", Subject: "Hi", BodyText: "hello",
 		BodyHTML:        `<html><body><p>hello <a href="https://example.com/x">click</a></p></body></html>`,
 		UnsubURL:        testBaseURL + "/u/tok",
 		TrackingEnabled: true,
@@ -70,6 +71,11 @@ func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 	h := Handler(core, snd, nil, testBaseURL, testTrackingSecret)
 	if err := h(context.Background(), sendTask(t)); err != nil {
 		t.Fatal(err)
+	}
+	// The job's provider must propagate into the dispatched OutboundJob so
+	// MultiSender routes to the right transport (default SMTP path here).
+	if snd.tj.Provider != "smtp" {
+		t.Errorf("expected OutboundJob.Provider=smtp, got %q", snd.tj.Provider)
 	}
 	if !strings.Contains(snd.sent.BodyHTML, "/t/c/") {
 		t.Errorf("expected a rewritten click link, got %q", snd.sent.BodyHTML)
@@ -82,6 +88,29 @@ func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 	}
 	if strings.Contains(snd.sent.BodyText, "/t/") {
 		t.Errorf("plain-text body must never be rewritten, got %q", snd.sent.BodyText)
+	}
+}
+
+// TestHandlerGmailProviderDispatchesAccessToken proves the outbound Gmail path:
+// a job with Provider="gmail" and a decrypted access token propagates both into
+// the dispatched OutboundJob, so MultiSender routes to the Gmail transport with
+// the right bearer (rather than the SMTP leg).
+func TestHandlerGmailProviderDispatchesAccessToken(t *testing.T) {
+	core := &stubCore{job: coreapi.SendJob{
+		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
+		Provider: "gmail", AccessToken: []byte("ya29.access-token"),
+		Subject: "Hi", BodyText: "hello",
+	}}
+	snd := &stubSender{}
+	h := Handler(core, snd, nil, testBaseURL, testTrackingSecret)
+	if err := h(context.Background(), sendTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if snd.tj.Provider != "gmail" {
+		t.Errorf("expected OutboundJob.Provider=gmail, got %q", snd.tj.Provider)
+	}
+	if snd.tj.AccessToken != "ya29.access-token" {
+		t.Errorf("expected the job's access token forwarded to the OutboundJob, got %q", snd.tj.AccessToken)
 	}
 }
 

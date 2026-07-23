@@ -18,11 +18,22 @@ import (
 // request itself, not just the returned slice).
 const fetchBatchSize = 200
 
-// PollHandler returns an asynq handler for inbox:poll tasks. It opens one
-// mailbox's IMAP connection, establishes/validates the poll baseline via
-// CurrentState, fetches anything new since the stored cursor, classifies
-// each message as a bounce/reply/neither, and persists the advanced cursor.
-func PollHandler(core coreapi.Client, reader mail.InboxReader) func(context.Context, *asynq.Task) error {
+// GmailFetcher polls a Gmail mailbox for new inbound messages via the Gmail API,
+// resuming from an opaque historyId cursor. *mail.GmailReader satisfies it; the
+// worker depends on the interface so it can be unit-tested with a fake (the
+// concrete reader's wire seam is unexported). It is the provider-parallel of
+// mail.InboxReader for the API transport.
+type GmailFetcher interface {
+	Fetch(ctx context.Context, accessToken, sinceHistoryID string, maxN int) (msgs []mail.InboundMessage, newCursor string, err error)
+}
+
+// PollHandler returns an asynq handler for inbox:poll tasks. It dispatches on
+// the mailbox provider: gmail polls via the Gmail API (opaque historyId cursor),
+// smtp opens the mailbox's IMAP connection, establishes/validates the poll
+// baseline via CurrentState, and fetches anything new since the stored UID
+// cursor. Both paths run the SAME reply/bounce classification (processMessage)
+// and persist their respective cursor.
+func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPollPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -32,6 +43,10 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader) func(context.Cont
 		job, err := core.GetInboxPollJob(ctx, p.MailboxID, p.WorkspaceID)
 		if err != nil {
 			return err
+		}
+
+		if job.Provider == "gmail" {
+			return pollGmail(ctx, core, gmail, p, job)
 		}
 		defer zeroize(job.Password)
 
@@ -100,6 +115,35 @@ func scannedWindowTop(sinceUID, uidNext uint32) uint32 {
 		top = head
 	}
 	return top
+}
+
+// pollGmail runs one inbox poll pass for a gmail mailbox: fetch new messages
+// since the opaque historyId cursor, classify each with the SAME processMessage
+// path as IMAP (ParseDSN + reply matcher), and persist the advanced cursor via
+// SetInboxCursorString (the IMAP UID cursor columns are untouched). The
+// short-lived access token is zeroized after the pass, like the IMAP password.
+func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
+	defer zeroize(job.AccessToken)
+
+	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
+	if err != nil {
+		return err
+	}
+
+	var replies, bounces, skipped int
+	for _, msg := range msgs {
+		matched, err := processMessage(ctx, core, p.WorkspaceID, msg, &replies, &bounces)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			skipped++
+		}
+	}
+
+	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", "gmail",
+		"messages", len(msgs), "replies", replies, "bounces", bounces, "skipped", skipped)
+	return core.SetInboxCursorString(ctx, p.MailboxID, p.WorkspaceID, newCursor)
 }
 
 // processMessage classifies one fetched message and takes the corresponding

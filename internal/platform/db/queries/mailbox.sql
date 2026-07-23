@@ -48,3 +48,14 @@ SELECT id, workspace_id FROM mailboxes WHERE status = 'active';
 -- has changed underneath it — an IMAP server-side UIDVALIDITY bump).
 UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4
 WHERE id = $1 AND workspace_id = $2;
+
+-- name: UpdateMailboxSecret :exec
+-- Overwrites the sealed credential. Used by the coreapi token-refresh path when
+-- an OAuth access/refresh token is rotated, so the new token is persisted.
+UPDATE mailboxes SET secret_ciphertext = $3
+WHERE id = $1 AND workspace_id = $2;
+
+-- name: SetInboxCursorString :exec
+-- Persists an opaque provider cursor (Gmail historyId) after a poll pass.
+UPDATE mailboxes SET inbox_cursor = $3, last_poll_at = now()
+WHERE id = $1 AND workspace_id = $2;

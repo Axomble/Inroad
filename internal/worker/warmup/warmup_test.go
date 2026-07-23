@@ -56,6 +56,8 @@ func (f fakeCore) GetInboxPollJob(context.Context, string, string) (coreapi.Inbo
 
 func (f fakeCore) SetInboxCursor(context.Context, string, string, uint32, uint32) error { return nil }
 
+func (f fakeCore) SetInboxCursorString(context.Context, string, string, string) error { return nil }
+
 func (f fakeCore) FindSendByMessageID(context.Context, string, string) (coreapi.SendRef, error) {
 	return coreapi.SendRef{}, nil
 }

@@ -18,3 +18,7 @@ web/dist/
 .DS_Store
 Thumbs.db
 *.exe
+
+# Session tooling
+.playwright-mcp/
+.claude/

@@ -15,11 +15,12 @@ import (
 	"github.com/inroad/inroad/internal/worker/track"
 )
 
-// Sender sends one email over SMTP. Defined here (consumer side) so the handler
-// depends on the behavior, not the concrete *mail.NetSender — which lets tests
-// inject a fake and exercise the full pipeline without a live SMTP server.
+// Sender sends one email through whichever transport the job's Provider selects
+// (SMTP or Gmail). Defined here (consumer side) so the handler depends on the
+// behavior, not the concrete *mail.MultiSender — which lets tests inject a fake
+// and exercise the full pipeline without a live server.
 type Sender interface {
-	Send(cfg mail.SMTPConfig, msg mail.Message) (messageID string, err error)
+	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
 }
 
 // maxSendAttempts caps the cap-exceeded re-enqueue loop so a send that
@@ -48,6 +49,9 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL st
 		// so wiping this closes the window an in-process memory dump would
 		// have to catch.
 		defer zeroize(job.SMTPPassword)
+		// The gmail access token is a decrypted secret too; wipe it after the send
+		// for the same reason as the SMTP password.
+		defer zeroize(job.AccessToken)
 
 		if job.Suppressed {
 			return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "skipped"})
@@ -83,8 +87,12 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL st
 			}
 		}
 
-		msgID, sendErr := sender.Send(
-			mail.SMTPConfig{Host: job.SMTPHost, Port: job.SMTPPort, Username: job.SMTPUsername, Password: string(job.SMTPPassword), UseTLS: job.UseTLS},
+		msgID, sendErr := sender.Send(ctx,
+			mail.OutboundJob{
+				Provider: job.Provider, Host: job.SMTPHost, Port: job.SMTPPort,
+				Username: job.SMTPUsername, Password: string(job.SMTPPassword), UseTLS: job.UseTLS,
+				AccessToken: string(job.AccessToken),
+			},
 			mail.Message{
 				FromEmail: job.FromEmail, FromName: job.FromName, To: job.ToEmail,
 				Subject: subject, BodyText: bodyText, BodyHTML: bodyHTML, ListUnsubscribe: job.UnsubURL,

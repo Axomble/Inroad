@@ -35,9 +35,21 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 	if b.WorkspaceID != ws {
 		return coreapi.SendJob{}, coreapi.ErrCrossTenant
 	}
-	password, err := c.sealer.Open(b.SecretCiphertext)
-	if err != nil {
-		return coreapi.SendJob{}, err
+	// Transport dispatch on the mailbox provider. gmail: refresh+return a
+	// short-lived access token (reseal handled in coreapi), no password unseal.
+	// smtp (default): unseal the stored password exactly as before.
+	var accessToken, password []byte
+	if b.Provider == "gmail" {
+		at, err := c.gmailAccessToken(ctx, b.MailboxID, ws, b.SecretCiphertext)
+		if err != nil {
+			return coreapi.SendJob{}, err
+		}
+		accessToken = []byte(at)
+	} else {
+		password, err = c.sealer.Open(b.SecretCiphertext)
+		if err != nil {
+			return coreapi.SendJob{}, err
+		}
 	}
 	suppressed, err := c.q.IsSuppressed(ctx, gen.IsSuppressedParams{
 		WorkspaceID: b.WorkspaceID,
@@ -70,6 +82,8 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		UnsubURL:          c.publicURL + "/u/" + token,
 		FromEmail:         b.FromEmail,
 		FromName:          b.FromName,
+		Provider:          b.Provider,
+		AccessToken:       accessToken,
 		SMTPHost:          b.SmtpHost,
 		SMTPPort:          int(b.SmtpPort),
 		SMTPUsername:      b.SmtpUsername,
