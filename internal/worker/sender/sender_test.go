@@ -91,6 +91,29 @@ func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 	}
 }
 
+// TestHandlerGmailProviderDispatchesAccessToken proves the outbound Gmail path:
+// a job with Provider="gmail" and a decrypted access token propagates both into
+// the dispatched OutboundJob, so MultiSender routes to the Gmail transport with
+// the right bearer (rather than the SMTP leg).
+func TestHandlerGmailProviderDispatchesAccessToken(t *testing.T) {
+	core := &stubCore{job: coreapi.SendJob{
+		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
+		Provider: "gmail", AccessToken: []byte("ya29.access-token"),
+		Subject: "Hi", BodyText: "hello",
+	}}
+	snd := &stubSender{}
+	h := Handler(core, snd, nil, testBaseURL, testTrackingSecret)
+	if err := h(context.Background(), sendTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if snd.tj.Provider != "gmail" {
+		t.Errorf("expected OutboundJob.Provider=gmail, got %q", snd.tj.Provider)
+	}
+	if snd.tj.AccessToken != "ya29.access-token" {
+		t.Errorf("expected the job's access token forwarded to the OutboundJob, got %q", snd.tj.AccessToken)
+	}
+}
+
 // TestHandlerSkipsTrackingWhenDisabled proves TrackingEnabled=false leaves the
 // HTML body exactly as personalize+withUnsubHTML produced it — no pixel, no
 // rewritten links.

@@ -169,6 +169,71 @@ func TestGoogleCallbackValidStateCreatesMailbox(t *testing.T) {
 	}
 }
 
+// TestGoogleCallbackProviderErrorRedirectsDenied covers the branch where Google
+// bounces the user back with ?error (e.g. the user declined consent): no code is
+// usable, so the callback must redirect with oauth_error=denied and create
+// nothing.
+func TestGoogleCallbackProviderErrorRedirectsDenied(t *testing.T) {
+	store, router := newCallbackHarness(t, "rep@example.com")
+
+	rec := getCallback(router, "error=access_denied")
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "oauth_error=denied") {
+		t.Fatalf("Location = %q, want oauth_error=denied", loc)
+	}
+	if store.lastCreate.WorkspaceID != (uuid.UUID{}) {
+		t.Fatal("a denied consent must create no mailbox")
+	}
+}
+
+// TestGoogleCallbackDuplicateEmailRedirectsAlreadyConnected covers the branch
+// where the exchanged email is already connected in the (state-derived)
+// workspace: the callback maps ErrDuplicateMailbox to oauth_error=already_connected.
+func TestGoogleCallbackDuplicateEmailRedirectsAlreadyConnected(t *testing.T) {
+	store, router := newCallbackHarness(t, "dup@example.com")
+	wsA := uuid.New()
+	// Pre-seed the same email in the workspace the signed state points at.
+	if _, err := store.Create(context.Background(), gen.CreateMailboxParams{
+		WorkspaceID: wsA, Provider: "gmail", Email: "dup@example.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state := oauthstate.Sign(callbackTestSecret, wsA.String(), time.Now(), 10*time.Minute)
+
+	rec := getCallback(router, "code=abc&state="+url.QueryEscape(state))
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "oauth_error=already_connected") {
+		t.Fatalf("Location = %q, want oauth_error=already_connected", loc)
+	}
+}
+
+// TestGoogleCallbackEmptyEmailRedirectsNoEmail covers the branch where userinfo
+// yields no email (ErrValidation): the callback maps it to oauth_error=no_email
+// and creates nothing.
+func TestGoogleCallbackEmptyEmailRedirectsNoEmail(t *testing.T) {
+	store, router := newCallbackHarness(t, "")
+	wsA := uuid.New()
+	state := oauthstate.Sign(callbackTestSecret, wsA.String(), time.Now(), 10*time.Minute)
+
+	rec := getCallback(router, "code=abc&state="+url.QueryEscape(state))
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "oauth_error=no_email") {
+		t.Fatalf("Location = %q, want oauth_error=no_email", loc)
+	}
+	if store.lastCreate.WorkspaceID != (uuid.UUID{}) {
+		t.Fatal("an empty userinfo email must create no mailbox")
+	}
+}
+
 func TestGoogleCallbackGarbageStateNoMailbox(t *testing.T) {
 	store, router := newCallbackHarness(t, "rep@example.com")
 
