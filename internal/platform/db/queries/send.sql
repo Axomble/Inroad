@@ -5,7 +5,7 @@ FROM campaigns cam
 JOIN list_members lm ON lm.list_id = cam.list_id
 JOIN contacts ct ON ct.id = lm.contact_id
 WHERE cam.id = $1 AND cam.workspace_id = $2
-ON CONFLICT (campaign_id, contact_id) DO NOTHING
+ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL DO NOTHING
 RETURNING id;
 -- name: GetSendBundle :one
 -- Bundle is workspace-scoped: even though sendID is a UUID (unguessable in
