@@ -38,17 +38,20 @@ or SSRF. (Not a full threat model; that's future work.)
 
 ## OAuth (mailbox connect)
 8. **OAuth tokens are secrets, treated exactly like SMTP passwords.** The Gmail
-   `oauth2.Token` (access + refresh) is sealed at rest via `crypto.Sealer` into
-   `mailboxes.secret_ciphertext`, never logged, and never returned in an API
-   response (`mailboxResponse` omits it, same as SMTP creds). On a job, the
-   access token is a `[]byte` and is zeroized after the send/poll — like
-   `SMTPPassword`. The worker never receives the refresh token, only a
-   short-lived access token for one API call.
+   and M365 `oauth2.Token` (access + refresh) is sealed at rest via
+   `crypto.Sealer` into `mailboxes.secret_ciphertext`, never logged, and never
+   returned in an API response (`mailboxResponse` omits it, same as SMTP creds).
+   On a job, the access token is a `[]byte` and is zeroized after the send/poll —
+   like `SMTPPassword`. The worker never receives the refresh token, only a
+   short-lived access token for one API call. M365 joins under the identical
+   invariants: same sealed-token codec, same control-plane-only refresh
+   (invariant 9), same workspace-from-verified-state (invariant 10).
 9. **Token refresh + reseal + persist happen ONLY in the control plane**
-   (`coreapi` inprocess `gmailAccessToken`), which holds the pool and sealer.
-   The worker never refreshes, re-seals, or writes a token. A rotated refresh
-   token is re-sealed and persisted at job-build time so it is not silently
-   lost.
+   (`coreapi` inprocess `oauthAccessToken`, the provider-neutral refresh shared
+   by Gmail and M365 — resolved to the Google or Azure AD `oauth2.Config` by the
+   mailbox's `provider`), which holds the pool and sealer. The worker never
+   refreshes, re-seals, or writes a token. A rotated refresh token is re-sealed
+   and persisted at job-build time so it is not silently lost.
 10. **The callback derives `workspace_id` only from a verified signed `state`,
     never from a request param.** `state` is HMAC-signed (SHA-256, `JWTSecret`)
     with a 10-minute TTL (`internal/platform/oauthstate`). The HMAC proves the
@@ -61,8 +64,31 @@ or SSRF. (Not a full threat model; that's future work.)
     (low value, bounded, no data read). A single-use nonce store is the phase-2
     hardening.
 11. **No new SSRF surface.** Gmail API, Google token, and OpenID userinfo calls
-    all go to fixed Google hosts, not user-controlled input, so they do not go
-    through (and do not need) the `mail.vetAddr` guard.
+    all go to fixed Google hosts; the M365 code exchange, Graph `/me`,
+    `sendMail`/draft, and `/$value` calls all go to fixed Microsoft hosts
+    (`login.microsoftonline.com`, `graph.microsoft.com`). None are
+    user-controlled input, so they do not go through (and do not need) the
+    `mail.vetAddr` guard. The one M365 exception — the opaque, persisted Graph
+    delta cursor — is host-pinned before use (invariant 13).
+
+12. **M365 send stores Exchange's authoritative `internetMessageId`.** The Graph
+    send path is draft-then-send: it creates a draft (Graph parses the MIME and
+    may rewrite the `Message-Id` header we supplied), reads back the
+    `internetMessageId` Exchange actually assigned, then sends that draft. That
+    authoritative id — not our requested header — is stored as
+    `sends.message_id`, so inbound reply/bounce matching (`FindSendByMessageID`)
+    keys on the value Exchange used and stays robust. A draft created without an
+    `internetMessageId` fails the send rather than persisting an unmatchable value.
+
+13. **The incremental Graph delta cursor is host-pinned before the bearer is
+    attached.** The inbox delta cursor is an opaque URL persisted from a prior
+    Graph response and re-dialed with the mailbox's access token attached.
+    Before every incremental fetch it must parse to an absolute `https` URL whose
+    host is exactly `graph.microsoft.com` (`graphHostPinned`); a corrupted or
+    hostile stored value (wrong host, plain http, embedded userinfo, unparseable)
+    is treated as an expired cursor and re-baselined, so the access token can
+    never be exfiltrated off-host. Cursor values are never logged verbatim — only
+    their length.
 
 ## Deferred (documented, not yet built)
 - KMS-backed data-encryption keys (Cloud) — today a single local master key.
