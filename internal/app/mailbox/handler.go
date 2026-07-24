@@ -295,3 +295,69 @@ func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	redirect("connected=" + url.QueryEscape(m.Email))
 }
+
+// startMicrosoftOAuth (protected) begins the M365 connect flow. Mirrors
+// startGoogleOAuth: it reads the workspace from the JWT, signs a 10-minute state
+// binding the callback to that workspace, and returns the Microsoft consent URL
+// for the SPA to redirect to. offline_access is in the scopes so a refresh
+// token is issued; prompt=consent forces consent every time.
+func (h *Handler) startMicrosoftOAuth(w http.ResponseWriter, r *http.Request) {
+	wid, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	state := oauthstate.Sign(h.jwtSecret, wid.String(), time.Now(), 10*time.Minute)
+	authURL, err := h.svc.MicrosoftAuthCodeURL(state)
+	if err != nil {
+		if errors.Is(err, ErrOAuthDisabled) {
+			httpx.Error(w, http.StatusNotImplemented, "microsoft oauth not configured")
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"auth_url": authURL})
+}
+
+// microsoftCallback (public) is the top-level browser navigation Microsoft
+// redirects to. Mirrors googleCallback exactly: it authenticates from the signed
+// state and derives the workspace from it -- never from a request param -- and
+// never returns a 5xx. Every outcome 302s back to the SPA with connected=<email>
+// or oauth_error=<reason>; server-side detail is logged, never leaked to the URL.
+func (h *Handler) microsoftCallback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	redirect := func(query string) {
+		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query, http.StatusFound)
+	}
+	if q.Get("error") != "" || q.Get("code") == "" {
+		redirect("oauth_error=denied")
+		return
+	}
+	wid, err := oauthstate.Verify(h.jwtSecret, q.Get("state"), time.Now())
+	if err != nil {
+		redirect("oauth_error=bad_state")
+		return
+	}
+	wsID, err := uuid.Parse(wid)
+	if err != nil {
+		redirect("oauth_error=bad_state")
+		return
+	}
+	m, err := h.svc.CompleteMicrosoftOAuth(r.Context(), q.Get("code"), wsID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrDuplicateMailbox):
+			redirect("oauth_error=already_connected")
+		case errors.Is(err, ErrOAuthDisabled):
+			redirect("oauth_error=disabled")
+		case errors.Is(err, ErrValidation):
+			redirect("oauth_error=no_email")
+		default:
+			// Log the detail server-side; never surface internals to the browser.
+			slog.Error("mailbox: m365 oauth callback failed", "err", err)
+			redirect("oauth_error=exchange_failed")
+		}
+		return
+	}
+	redirect("connected=" + url.QueryEscape(m.Email))
+}

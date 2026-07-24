@@ -84,9 +84,16 @@ func main() {
 		ClientSecret: cfg.GoogleClientSecret,
 		RedirectURL:  cfg.GoogleRedirectURL,
 	}
+	msOAuth := mail.MicrosoftOAuth{
+		ClientID:     cfg.MSClientID,
+		ClientSecret: cfg.MSClientSecret,
+		RedirectURL:  cfg.MSRedirectURL,
+		Tenant:       cfg.MSTenant,
+	}
 	mbHandler := mailbox.NewHandler(
 		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer,
-			googleOAuth, mailbox.NewGoogleExchanger(googleOAuth)),
+			googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
+			msOAuth, mailbox.NewMicrosoftExchanger(msOAuth)),
 		cfg.JWTSecret, cfg.AppBaseURL,
 	)
 
@@ -128,9 +135,9 @@ func main() {
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
 		{pattern: "/t", handler: trackHandler.Routes()},
-		// Gmail OAuth callback is a top-level browser navigation from Google;
-		// it authenticates from the signed state, not the JWT cookie, so it
-		// mounts here rather than the protected group.
+		// OAuth callbacks (Gmail, M365) are top-level browser navigations from
+		// the provider; they authenticate from the signed state, not the JWT
+		// cookie, so they mount here rather than the protected group.
 		{pattern: "/oauth", handler: mbHandler.CallbackRoutes()},
 	}
 	protected := []mount{

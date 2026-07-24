@@ -160,7 +160,7 @@ func validConnectInput() ConnectInput {
 
 func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil)
+	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	in := validConnectInput()
@@ -196,7 +196,7 @@ func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 
 func TestConnectSMTP_ConnectionTestFailureDoesNotPersist(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{smtpErr: errors.New("dial tcp: connection refused")}, newTestSealer(t), mail.GoogleOAuth{}, nil)
+	svc := NewService(store, &fakeTester{smtpErr: errors.New("dial tcp: connection refused")}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	_, err := svc.ConnectSMTP(context.Background(), workspaceID, validConnectInput())
@@ -218,7 +218,7 @@ func TestConnectSMTP_ConnectionTestFailureDoesNotPersist(t *testing.T) {
 
 func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil)
+	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	in := validConnectInput()
@@ -234,7 +234,7 @@ func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 
 func TestPauseThenGetShowsPausedStatus(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil)
+	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	m, err := svc.ConnectSMTP(context.Background(), workspaceID, validConnectInput())
