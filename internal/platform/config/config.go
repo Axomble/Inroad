@@ -71,6 +71,14 @@ type Config struct {
 	GoogleClientSecret string
 	GoogleRedirectURL  string
 
+	// Microsoft OAuth (mailbox connect via M365 / Graph). Empty client id/secret
+	// disables M365 OAuth: the start endpoint returns 501 and m365 jobs fail
+	// cleanly. MSTenant selects the Azure AD authority (default "common").
+	MSClientID     string
+	MSClientSecret string
+	MSRedirectURL  string
+	MSTenant       string
+
 	EmailVerifyTTL   time.Duration
 	PasswordResetTTL time.Duration
 	InviteTTL        time.Duration
@@ -139,6 +147,10 @@ func Load() (*Config, error) {
 	cfg.GoogleClientID = getenv("INROAD_GOOGLE_CLIENT_ID", "")
 	cfg.GoogleClientSecret = getenv("INROAD_GOOGLE_CLIENT_SECRET", "")
 	cfg.GoogleRedirectURL = getenv("INROAD_GOOGLE_REDIRECT_URL", cfg.PublicURL+"/oauth/google/callback")
+	cfg.MSClientID = getenv("INROAD_MS_CLIENT_ID", "")
+	cfg.MSClientSecret = getenv("INROAD_MS_CLIENT_SECRET", "")
+	cfg.MSRedirectURL = getenv("INROAD_MS_REDIRECT_URL", cfg.PublicURL+"/oauth/microsoft/callback")
+	cfg.MSTenant = getenv("INROAD_MS_TENANT", "common")
 	cfg.EmailVerifyTTL = getenvDuration("INROAD_EMAIL_VERIFY_TTL", 24*time.Hour)
 	cfg.PasswordResetTTL = getenvDuration("INROAD_PASSWORD_RESET_TTL", time.Hour)
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
