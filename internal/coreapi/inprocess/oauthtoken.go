@@ -21,10 +21,12 @@ import (
 // cfg is the provider's oauth2 config (Google for gmail, Azure AD for m365),
 // resolved by the caller from the mailbox provider. A nil cfg means that
 // provider is not configured; the job fails cleanly with an error the caller
-// logs and does not retry into a hot loop.
-func (c client) oauthAccessToken(ctx context.Context, mailboxID, workspaceID uuid.UUID, sealed string, cfg *oauth2.Config) (string, error) {
+// logs and does not retry into a hot loop. provider (e.g. "gmail"/"m365") is
+// threaded into the error/log context so a refresh or persist failure is
+// triagable to the right transport; it is never a secret.
+func (c client) oauthAccessToken(ctx context.Context, provider string, mailboxID, workspaceID uuid.UUID, sealed string, cfg *oauth2.Config) (string, error) {
 	if cfg == nil {
-		return "", fmt.Errorf("oauth not configured")
+		return "", fmt.Errorf("%s oauth not configured", provider)
 	}
 	raw, err := c.sealer.Open(sealed)
 	if err != nil {
@@ -39,7 +41,7 @@ func (c client) oauthAccessToken(ctx context.Context, mailboxID, workspaceID uui
 	ts := cfg.TokenSource(ctx, tok)
 	fresh, err := ts.Token()
 	if err != nil {
-		return "", fmt.Errorf("oauth token refresh: %w", err)
+		return "", fmt.Errorf("%s oauth token refresh: %w", provider, err)
 	}
 	// Persist only on change (access token refreshed, or the provider rotated the
 	// refresh token) so a rotated refresh token isn't silently lost. A failed
@@ -53,7 +55,7 @@ func (c client) oauthAccessToken(ctx context.Context, mailboxID, workspaceID uui
 				if err := c.q.UpdateMailboxSecret(ctx, gen.UpdateMailboxSecretParams{
 					ID: mailboxID, WorkspaceID: workspaceID, SecretCiphertext: ct,
 				}); err != nil {
-					slog.Warn("oauth token reseal persist failed", "mailbox", mailboxID, "err", err)
+					slog.Warn("oauth token reseal persist failed", "provider", provider, "mailbox", mailboxID, "err", err)
 				}
 			}
 		}

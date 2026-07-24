@@ -41,7 +41,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 	// smtp (default): unseal the stored password exactly as before.
 	var accessToken, password []byte
 	if b.Provider == "gmail" || b.Provider == "m365" {
-		at, err := c.oauthAccessToken(ctx, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
+		at, err := c.oauthAccessToken(ctx, b.Provider, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
 		if err != nil {
 			return coreapi.SendJob{}, err
 		}

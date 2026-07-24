@@ -173,7 +173,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	// the stored password unchanged.
 	var accessToken, password []byte
 	if b.Provider == "gmail" || b.Provider == "m365" {
-		at, err := c.oauthAccessToken(ctx, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
+		at, err := c.oauthAccessToken(ctx, b.Provider, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
 		if err != nil {
 			return coreapi.StepSendJob{}, err
 		}

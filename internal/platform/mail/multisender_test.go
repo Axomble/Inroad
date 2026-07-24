@@ -30,10 +30,13 @@ func TestMultiSenderDispatch(t *testing.T) {
 func TestMultiSenderDispatchM365(t *testing.T) {
 	var gotGraph bool
 	var gotToken string
-	gr := &GraphSender{transmitFn: func(_ context.Context, at string, _ []byte) error {
-		gotGraph, gotToken = true, at
-		return nil
-	}}
+	gr := &GraphSender{
+		createDraftFn: func(_ context.Context, at string, _ []byte) (string, string, error) {
+			gotGraph, gotToken = true, at
+			return "draft-1", "<mid@outlook.com>", nil
+		},
+		sendDraftFn: func(context.Context, string, string) error { return nil },
+	}
 	ms := NewMultiSender(nil, nil, gr)
 	msg := Message{FromEmail: "rep@example.com", To: "lead@example.com", Subject: "Hi", BodyText: "hello"}
 	if _, err := ms.Send(context.Background(), OutboundJob{Provider: "m365", AccessToken: "at"}, msg); err != nil {

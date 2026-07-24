@@ -4,62 +4,149 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	netmail "net/mail"
 	"strings"
 	"testing"
 )
 
-// TestGraphSenderAssemblesMessageAndReturnsOurMessageID proves GraphSender
-// reuses buildMessage (headers/threading/Message-ID identical to the SMTP and
-// Gmail paths), forwards the access token, and returns OUR Message-ID header
-// (embedded in the MIME handed to Graph) — not a Graph resource id — so reply
-// matching stays transport-agnostic. Network-free via the transmit seam. The
-// captured body is STANDARD base64 (Graph sendMail), decoded back to the raw
-// RFC822 message before assertion.
-func TestGraphSenderAssemblesMessageAndReturnsOurMessageID(t *testing.T) {
-	var capturedB64 []byte
-	var gotToken string
-	g := &GraphSender{transmitFn: func(_ context.Context, at string, rawB64 []byte) error {
-		gotToken, capturedB64 = at, rawB64
-		return nil
-	}}
+// TestGraphSenderDraftThenSendReturnsInternetMessageID proves GraphSender runs
+// Graph's two-step MIME send: create a draft with the base64.StdEncoding MIME,
+// then send it by id. The returned id is the AUTHORITATIVE internetMessageId
+// Exchange assigned at draft creation — NOT our own MIME Message-Id (Exchange
+// may rewrite it). That is the regression guard: reply/bounce matching keys on
+// the value Exchange actually used. Network-free via the create/send seams.
+func TestGraphSenderDraftThenSendReturnsInternetMessageID(t *testing.T) {
+	const exchangeID = "<exchange-assigned@outlook.com>"
+	var createdB64 []byte
+	var createToken, sendToken, sentID string
+	g := &GraphSender{
+		createDraftFn: func(_ context.Context, at string, rawB64 []byte) (string, string, error) {
+			createToken, createdB64 = at, rawB64
+			return "draft-123", exchangeID, nil
+		},
+		sendDraftFn: func(_ context.Context, at, id string) error {
+			sendToken, sentID = at, id
+			return nil
+		},
+	}
 	msg := Message{
 		FromEmail: "rep@example.com", FromName: "Rep",
 		To: "lead@example.com", Subject: "Hello", BodyText: "hi there",
 		InReplyTo: "<parent@inroad>", References: "<root@inroad>",
 	}
-	msgID, err := g.Send(context.Background(), "tok", msg)
+	got, err := g.Send(context.Background(), "tok", msg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotToken != "tok" {
-		t.Fatalf("access token forwarded = %q, want tok", gotToken)
+	if createToken != "tok" || sendToken != "tok" {
+		t.Fatalf("access token forwarded = create %q / send %q, want tok", createToken, sendToken)
 	}
-	if msgID == "" {
-		t.Fatal("expected our Message-ID header, got empty")
+	// The returned id must be the internetMessageId from draft creation, NOT the
+	// MIME's own Message-Id — this is the Exchange-rewrite regression guard.
+	if got != exchangeID {
+		t.Fatalf("Send returned %q, want the internetMessageId %q", got, exchangeID)
 	}
-	// Graph's sendMail body is the base64 of the raw MIME (StdEncoding). Decode
-	// it and confirm it parses as the message we built.
-	raw, err := base64.StdEncoding.DecodeString(string(capturedB64))
+	// The send step must target the draft id create returned.
+	if sentID != "draft-123" {
+		t.Fatalf("send step called with id %q, want draft-123", sentID)
+	}
+	// Deterministic: the draft body is canonical base64.StdEncoding (NOT the
+	// URL-safe encoding Gmail uses). buildMessage is itself non-deterministic
+	// (random Message-Id, Date header), so we can't byte-match a fresh build;
+	// instead decode with StdEncoding and re-encode — the round-trip must be
+	// identical, which proves the body is exactly standard base64.
+	raw, err := base64.StdEncoding.DecodeString(string(createdB64))
 	if err != nil {
-		t.Fatalf("captured body was not standard base64: %v", err)
+		t.Fatalf("draft body was not standard base64: %v", err)
+	}
+	if base64.StdEncoding.EncodeToString(raw) != string(createdB64) {
+		t.Fatalf("draft body is not canonical base64.StdEncoding of the MIME")
 	}
 	parsed, err := netmail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("decoded MIME did not parse as a message: %v", err)
 	}
-	if got := parsed.Header.Get("Subject"); got != "Hello" {
-		t.Fatalf("Subject header = %q, want Hello", got)
+	if h := parsed.Header.Get("Subject"); h != "Hello" {
+		t.Fatalf("Subject header = %q, want Hello", h)
 	}
-	if got := parsed.Header.Get("To"); !strings.Contains(got, "lead@example.com") {
-		t.Fatalf("To header = %q, want it to contain lead@example.com", got)
+	if h := parsed.Header.Get("To"); !strings.Contains(h, "lead@example.com") {
+		t.Fatalf("To header = %q, want it to contain lead@example.com", h)
 	}
-	if got := parsed.Header.Get("In-Reply-To"); got != "<parent@inroad>" {
-		t.Fatalf("In-Reply-To header = %q, want <parent@inroad>", got)
+	if h := parsed.Header.Get("In-Reply-To"); h != "<parent@inroad>" {
+		t.Fatalf("In-Reply-To header = %q, want <parent@inroad>", h)
 	}
-	// The returned id is OUR built Message-ID (FindSendByMessageID keys on it), so
-	// it must be the one embedded in the decoded MIME we hand to Graph.
-	if !strings.Contains(string(raw), msgID) {
-		t.Fatalf("returned Message-ID %q absent from decoded MIME", msgID)
+	// Real Exchange-rewrite guard: the returned id must NOT be the Message-Id in
+	// the MIME we submitted (parsed from the captured body). Exchange may rewrite
+	// it, so we return the internetMessageId Graph reported instead.
+	if mimeID := parsed.Header.Get("Message-Id"); mimeID == "" || got == mimeID {
+		t.Fatalf("Send returned %q; must differ from the submitted MIME Message-Id %q", got, mimeID)
+	}
+}
+
+// TestGraphSenderSendFailureDeletesDraft proves that when the send step fails
+// after the draft was created, GraphSender best-effort deletes the orphaned
+// draft (by the created id) and returns the send error.
+func TestGraphSenderSendFailureDeletesDraft(t *testing.T) {
+	sendErr := errors.New("graph: send: unexpected status 500")
+	var deletedID string
+	deleteCalled := false
+	g := &GraphSender{
+		createDraftFn: func(context.Context, string, []byte) (string, string, error) {
+			return "draft-456", "<x@outlook.com>", nil
+		},
+		sendDraftFn: func(context.Context, string, string) error {
+			return sendErr
+		},
+		deleteDraftFn: func(_ context.Context, _, id string) error {
+			deleteCalled, deletedID = true, id
+			return nil
+		},
+	}
+	msg := Message{FromEmail: "rep@example.com", To: "lead@example.com", Subject: "Hi", BodyText: "hello"}
+	got, err := g.Send(context.Background(), "tok", msg)
+	if !errors.Is(err, sendErr) {
+		t.Fatalf("Send err = %v, want the send error", err)
+	}
+	if got != "" {
+		t.Fatalf("Send returned id %q on failure, want empty", got)
+	}
+	if !deleteCalled {
+		t.Fatal("expected best-effort delete after send failure")
+	}
+	if deletedID != "draft-456" {
+		t.Fatalf("delete called with id %q, want draft-456", deletedID)
+	}
+}
+
+// TestGraphSenderCreateFailureDoesNotDelete proves that when draft creation
+// fails, GraphSender returns that error with an empty id and NEVER attempts a
+// delete — there is no draft to clean up, so the cleanup path must not fire.
+func TestGraphSenderCreateFailureDoesNotDelete(t *testing.T) {
+	createErr := errors.New("graph: draft: unexpected status 400")
+	deleteCalled := false
+	g := &GraphSender{
+		createDraftFn: func(context.Context, string, []byte) (string, string, error) {
+			return "", "", createErr
+		},
+		sendDraftFn: func(context.Context, string, string) error {
+			t.Fatal("send step must not run when draft creation fails")
+			return nil
+		},
+		deleteDraftFn: func(context.Context, string, string) error {
+			deleteCalled = true
+			return nil
+		},
+	}
+	msg := Message{FromEmail: "rep@example.com", To: "lead@example.com", Subject: "Hi", BodyText: "hello"}
+	got, err := g.Send(context.Background(), "tok", msg)
+	if !errors.Is(err, createErr) {
+		t.Fatalf("Send err = %v, want the create error", err)
+	}
+	if got != "" {
+		t.Fatalf("Send returned id %q on create failure, want empty", got)
+	}
+	if deleteCalled {
+		t.Fatal("delete must not be called when no draft was created")
 	}
 }
