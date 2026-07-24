@@ -46,10 +46,17 @@ func main() {
 		ClientSecret: cfg.GoogleClientSecret,
 		RedirectURL:  cfg.GoogleRedirectURL,
 	}
-	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL, googleOAuth)
-	// MultiSender dispatches SMTP vs Gmail on the job's Provider; the SMTP leg
-	// keeps the SSRF-vetted NetSender, the Gmail leg uses the fixed Google host.
-	sndr := mail.NewMultiSender(mail.NewNetSender(cfg.MailAllowPrivateHosts), mail.NewGmailSender())
+	msOAuth := mail.MicrosoftOAuth{
+		ClientID:     cfg.MSClientID,
+		ClientSecret: cfg.MSClientSecret,
+		RedirectURL:  cfg.MSRedirectURL,
+		Tenant:       cfg.MSTenant,
+	}
+	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth)
+	// MultiSender dispatches SMTP vs Gmail vs Graph on the job's Provider; the
+	// SMTP leg keeps the SSRF-vetted NetSender, the Gmail leg uses the fixed
+	// Google host, and the m365 leg uses the fixed Microsoft Graph host.
+	sndr := mail.NewMultiSender(mail.NewNetSender(cfg.MailAllowPrivateHosts), mail.NewGmailSender(), mail.NewGraphSender())
 	reader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()

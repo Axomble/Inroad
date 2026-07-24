@@ -67,7 +67,7 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 	// opaque inbox_cursor (historyId), leaving the IMAP UID cursor columns zero;
 	// smtp unseals the stored IMAP password and resumes from the UID cursor.
 	if m.Provider == "gmail" {
-		at, err := c.gmailAccessToken(ctx, id, ws, m.SecretCiphertext)
+		at, err := c.oauthAccessToken(ctx, id, ws, m.SecretCiphertext, c.oauthConfigFor(m.Provider))
 		if err != nil {
 			return coreapi.InboxPollJob{}, err
 		}
