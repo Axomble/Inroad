@@ -11,6 +11,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/replyclassify"
 )
 
 // fakeReader is a test double for mail.InboxReader.
@@ -57,10 +58,17 @@ type stubCore struct {
 	cursorStringSet bool
 	cursorString    string
 
-	replied       []string
-	unsubscribed  []string
-	recordedClass []string
-	bounced       []bouncedCall
+	replied        []string  // enrollmentIDs passed to MarkReplied
+	repliedClass   []string  // class arg parallel to replied
+	repliedSource  []string  // source arg parallel to replied
+	repliedConf    []float64 // confidence arg parallel to replied
+	unsubscribed   []string  // enrollmentIDs passed to MarkUnsubscribed
+	unsubEmail     []string  // email arg parallel to unsubscribed
+	recorded       []string  // enrollmentIDs passed to RecordReplyClass
+	recordedClass  []string  // class arg parallel to recorded
+	recordedSource []string  // source arg parallel to recorded
+	recordedConf   []float64 // confidence arg parallel to recorded
+	bounced        []bouncedCall
 
 	mailboxes []coreapi.MailboxRef
 	listErr   error
@@ -115,18 +123,25 @@ func (s *stubCore) FindSendByMessageID(_ context.Context, _, messageID string) (
 	return coreapi.SendRef{}, coreapi.ErrNoMatch
 }
 
-func (s *stubCore) MarkReplied(_ context.Context, enrollmentID, _, _, _ string, _ float64) error {
+func (s *stubCore) MarkReplied(_ context.Context, enrollmentID, _, class, source string, confidence float64) error {
 	s.replied = append(s.replied, enrollmentID)
+	s.repliedClass = append(s.repliedClass, class)
+	s.repliedSource = append(s.repliedSource, source)
+	s.repliedConf = append(s.repliedConf, confidence)
 	return nil
 }
 
-func (s *stubCore) MarkUnsubscribed(_ context.Context, enrollmentID, _, _ string) error {
+func (s *stubCore) MarkUnsubscribed(_ context.Context, enrollmentID, _, email string) error {
 	s.unsubscribed = append(s.unsubscribed, enrollmentID)
+	s.unsubEmail = append(s.unsubEmail, email)
 	return nil
 }
 
-func (s *stubCore) RecordReplyClass(_ context.Context, enrollmentID, _, _, _ string, _ float64) error {
-	s.recordedClass = append(s.recordedClass, enrollmentID)
+func (s *stubCore) RecordReplyClass(_ context.Context, enrollmentID, _, class, source string, confidence float64) error {
+	s.recorded = append(s.recorded, enrollmentID)
+	s.recordedClass = append(s.recordedClass, class)
+	s.recordedSource = append(s.recordedSource, source)
+	s.recordedConf = append(s.recordedConf, confidence)
 	return nil
 }
 
@@ -160,27 +175,38 @@ func replyFixture(inReplyTo string) string {
 		inReplyTo + "\n\nSounds good.\n"
 }
 
+// replyWith builds a human reply fixture with a caller-chosen subject and body,
+// so a test can drive a specific classifier verdict (OOO subject, unsubscribe
+// body, sentiment body, …).
+func replyWith(subject, body, inReplyTo string) string {
+	return "From: alice@example.com\nTo: bob@example.com\nSubject: " + subject +
+		"\nIn-Reply-To: " + inReplyTo + "\n\n" + body + "\n"
+}
+
 func autoReplyFixture(inReplyTo string) string {
-	return "From: bot@example.com\nTo: bob@example.com\nSubject: Out of office\nIn-Reply-To: " +
-		inReplyTo + "\nAuto-Submitted: auto-replied\n\nI'm out of the office.\n"
+	// Auto-Submitted: auto-generated with a non-OOO subject → Layer 1 classifies
+	// this auto_reply (an "auto-replied" value or an OOO subject would instead
+	// resolve to out_of_office).
+	return "From: bot@example.com\nTo: bob@example.com\nSubject: Re: Hello\nIn-Reply-To: " +
+		inReplyTo + "\nAuto-Submitted: auto-generated\n\nThis is an automated response.\n"
 }
 
 func runPoll(t *testing.T, core coreapi.Client, reader mail.InboxReader) error {
 	t.Helper()
 	// nil API readers: every runPoll test drives the smtp/IMAP path (job.Provider
 	// defaults to "", so neither the gmail nor the m365 branch is taken and the
-	// readers are unused).
-	return PollHandler(core, reader, nil, nil)(context.Background(), pollTask(t))
+	// readers are unused). Layer-3 model unwired (New(nil)), like production.
+	return PollHandler(core, reader, nil, nil, replyclassify.New(nil))(context.Background(), pollTask(t))
 }
 
 func runGmailPoll(t *testing.T, core coreapi.Client, gmail GmailFetcher) error {
 	t.Helper()
-	return PollHandler(core, nil, gmail, nil)(context.Background(), pollTask(t))
+	return PollHandler(core, nil, gmail, nil, replyclassify.New(nil))(context.Background(), pollTask(t))
 }
 
 func runGraphPoll(t *testing.T, core coreapi.Client, graph GraphFetcher) error {
 	t.Helper()
-	return PollHandler(core, nil, nil, graph)(context.Background(), pollTask(t))
+	return PollHandler(core, nil, nil, graph, replyclassify.New(nil))(context.Background(), pollTask(t))
 }
 
 func TestPollFirstPollBaselinesWithoutFetching(t *testing.T) {
@@ -249,11 +275,187 @@ func TestPollAutoReplyDoesNotMarkReplied(t *testing.T) {
 	if err := runPoll(t, core, reader); err != nil {
 		t.Fatal(err)
 	}
-	if len(core.replied) != 0 {
-		t.Fatalf("an auto-reply must not be treated as an engaged reply, got %v", core.replied)
+	if len(core.replied) != 0 || len(core.unsubscribed) != 0 {
+		t.Fatalf("an auto-reply must not be treated as an engaged reply, got replied=%v unsub=%v", core.replied, core.unsubscribed)
+	}
+	if len(core.recorded) != 1 || core.recorded[0] != "e1" || core.recordedClass[0] != replyclassify.ClassAutoReply {
+		t.Fatalf("expected RecordReplyClass(e1, auto_reply), got ids=%v classes=%v", core.recorded, core.recordedClass)
 	}
 	if !core.cursorSet || core.cursorUID != 11 {
 		t.Fatal("cursor must still advance past a skipped message")
+	}
+}
+
+// TestPollOutOfOfficeRecordsClassWithoutStopping locks in the OOO-trap fix: an
+// out-of-office auto-reply (recognized by subject, with NO Auto-Submitted
+// header) that matches a send is TAGGED via RecordReplyClass but must NOT stop
+// the enrollment (no MarkReplied / MarkUnsubscribed) and is counted as skipped,
+// not an engaged reply.
+func TestPollOutOfOfficeRecordsClassWithoutStopping(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Out of Office", "I am away until Monday.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.recorded) != 1 || core.recorded[0] != "e1" || core.recordedClass[0] != replyclassify.ClassOutOfOffice {
+		t.Fatalf("expected RecordReplyClass(e1, out_of_office), got ids=%v classes=%v", core.recorded, core.recordedClass)
+	}
+	// An OOO subject is a Layer-1 verdict: source="header", non-zero confidence.
+	if core.recordedSource[0] != replyclassify.SourceHeader || core.recordedConf[0] <= 0 {
+		t.Fatalf("expected header source + non-zero confidence, got source=%q conf=%v", core.recordedSource[0], core.recordedConf[0])
+	}
+	if len(core.replied) != 0 || len(core.unsubscribed) != 0 {
+		t.Fatalf("an OOO reply must NOT stop the enrollment, got replied=%v unsub=%v", core.replied, core.unsubscribed)
+	}
+	if !core.cursorSet || core.cursorUID != 11 {
+		t.Fatal("cursor must still advance past an OOO reply")
+	}
+}
+
+// TestPollUnsubscribeReplySuppresses proves a reply-based opt-out is routed to
+// MarkUnsubscribed (address suppressed), not MarkReplied, and does not tag via
+// RecordReplyClass.
+func TestPollUnsubscribeReplySuppresses(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Please unsubscribe me from this list.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.unsubscribed) != 1 || core.unsubscribed[0] != "e1" || core.unsubEmail[0] != "a@b.io" {
+		t.Fatalf("expected MarkUnsubscribed(e1, a@b.io), got ids=%v emails=%v", core.unsubscribed, core.unsubEmail)
+	}
+	if len(core.replied) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("an unsubscribe reply must only suppress, got replied=%v recorded=%v", core.replied, core.recorded)
+	}
+}
+
+// TestPollNegativeReplyMarksRepliedNegative proves "not interested" (which
+// contains the positive token "interested") is tagged negative — the
+// negation/order fix — and stops the enrollment.
+func TestPollNegativeReplyMarksRepliedNegative(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Not interested, thanks.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.replied) != 1 || core.replied[0] != "e1" || core.repliedClass[0] != replyclassify.ClassNegative {
+		t.Fatalf("expected MarkReplied(e1, negative), got ids=%v classes=%v", core.replied, core.repliedClass)
+	}
+	// "not interested" is a Layer-2 verdict: source="lexicon", non-zero confidence.
+	if core.repliedSource[0] != replyclassify.SourceLexicon || core.repliedConf[0] <= 0 {
+		t.Fatalf("expected lexicon source + non-zero confidence, got source=%q conf=%v", core.repliedSource[0], core.repliedConf[0])
+	}
+	if len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("a negative reply must only MarkReplied, got unsub=%v recorded=%v", core.unsubscribed, core.recorded)
+	}
+}
+
+// TestPollPositiveReplyMarksRepliedPositive proves a clear interest reply is
+// tagged positive and stops the enrollment.
+func TestPollPositiveReplyMarksRepliedPositive(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Sounds great, let's chat this week.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.replied) != 1 || core.replied[0] != "e1" || core.repliedClass[0] != replyclassify.ClassPositive {
+		t.Fatalf("expected MarkReplied(e1, positive), got ids=%v classes=%v", core.replied, core.repliedClass)
+	}
+	if len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("a positive reply must only MarkReplied, got unsub=%v recorded=%v", core.unsubscribed, core.recorded)
+	}
+}
+
+// TestPollAmbiguousReplyMarksRepliedUnknown proves a plain human reply with no
+// keyword signal (Layer 3 unwired) still stops the enrollment, tagged unknown.
+func TestPollAmbiguousReplyMarksRepliedUnknown(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Thanks for reaching out.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.replied) != 1 || core.replied[0] != "e1" || core.repliedClass[0] != replyclassify.ClassUnknown {
+		t.Fatalf("expected MarkReplied(e1, unknown), got ids=%v classes=%v", core.replied, core.repliedClass)
+	}
+	if len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("an ambiguous reply must only MarkReplied, got unsub=%v recorded=%v", core.unsubscribed, core.recorded)
+	}
+}
+
+// TestPollOptOutInsideAutomatedMessageIsSuppressed is the compliance headline:
+// a message that Layer 1 would call automated (OOO subject) but whose body
+// carries an explicit opt-out MUST be routed to MarkUnsubscribed, not merely
+// RecordReplyClass — compliance wins over automation.
+func TestPollOptOutInsideAutomatedMessageIsSuppressed(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Out of Office", "I am away, but please remove me from your list.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.unsubscribed) != 1 || core.unsubscribed[0] != "e1" || core.unsubEmail[0] != "a@b.io" {
+		t.Fatalf("an opt-out inside an automated message must suppress, got unsub=%v emails=%v", core.unsubscribed, core.unsubEmail)
+	}
+	if len(core.recorded) != 0 || len(core.replied) != 0 {
+		t.Fatalf("compliance must win over automation (no RecordReplyClass/MarkReplied), got recorded=%v replied=%v", core.recorded, core.replied)
+	}
+}
+
+// TestPollUnsubscribeLegacyDirectSendStillSuppresses proves reply-based
+// suppression works for a legacy direct-send match (EnrollmentID == ""): there
+// is no enrollment to stop, but the contact address is still suppressed.
+func TestPollUnsubscribeLegacyDirectSendStillSuppresses(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "", ContactEmail: "direct@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Please unsubscribe me.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.unsubscribed) != 1 || core.unsubscribed[0] != "" || core.unsubEmail[0] != "direct@b.io" {
+		t.Fatalf("expected MarkUnsubscribed(\"\", direct@b.io), got ids=%v emails=%v", core.unsubscribed, core.unsubEmail)
+	}
+	if len(core.replied) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("a legacy-direct-send opt-out must only suppress, got replied=%v recorded=%v", core.replied, core.recorded)
 	}
 }
 
@@ -274,6 +476,73 @@ func TestPollHardBounceMarksBounced(t *testing.T) {
 	}
 	if len(core.replied) != 0 {
 		t.Fatal("a DSN must never also be treated as a reply")
+	}
+}
+
+// hardBounceDSNWithOptOutBody is a hard-bounce DSN whose human-readable part
+// ALSO contains opt-out / rejection language. The DSN branch must fire on the
+// multipart/report structure BEFORE the classifier ever sees the body, so those
+// words must not turn a bounce into an unsubscribe or a negative reply. Same
+// embedded original Message-ID (<orig@x>) as hardBounceDSN.
+const hardBounceDSNWithOptOutBody = `From: Mail Delivery System <MAILER-DAEMON@mail.example.com>
+To: sender@example.com
+Subject: Undelivered Mail Returned to Sender
+Content-Type: multipart/report; report-type=delivery-status;
+	boundary="BOUNDARY1"
+MIME-Version: 1.0
+
+--BOUNDARY1
+Content-Description: Notification
+Content-Type: text/plain; charset=us-ascii
+
+Please unsubscribe me. Not interested. (This text is bait for the classifier.)
+
+--BOUNDARY1
+Content-Description: Delivery report
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; mail.example.com
+Arrival-Date: Mon, 1 Jan 2026 10:00:00 -0500
+
+Final-Recipient: rfc822; nobody@recipient.example.com
+Action: failed
+Status: 5.1.1
+Diagnostic-Code: smtp; 550 5.1.1 <nobody@recipient.example.com>: Recipient address rejected: User unknown
+
+--BOUNDARY1
+Content-Description: Undelivered Message Headers
+Content-Type: message/rfc822-headers
+
+Message-ID: <orig@x>
+To: nobody@recipient.example.com
+From: sender@example.com
+Subject: Hello there
+
+--BOUNDARY1--
+`
+
+// TestPollDSNWinsOverOptOutBody is a routing-order regression: a hard-bounce DSN
+// whose body also contains "unsubscribe" / "not interested" must be handled by
+// the DSN-first branch (MarkBounced) and never reach the classifier, so no
+// reply/unsubscribe/record action fires.
+func TestPollDSNWinsOverOptOutBody(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<orig@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "nobody@recipient.example.com"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, hardBounceDSNWithOptOutBody)},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.bounced) != 1 || !core.bounced[0].hard || core.bounced[0].enrollmentID != "e1" {
+		t.Fatalf("expected a hard MarkBounced(e1), got %v", core.bounced)
+	}
+	if len(core.replied) != 0 || len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("the DSN branch must win — classifier never reached; got replied=%v unsub=%v recorded=%v",
+			core.replied, core.unsubscribed, core.recorded)
 	}
 }
 

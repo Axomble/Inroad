@@ -22,13 +22,13 @@ import (
 // boundaries so "nonstop" / "stopped by" do not false-positive; unambiguous
 // multi-word phrases use substring contains.
 func classifyLexicon(in Input) (Result, bool) {
-	text := strings.ToLower(strings.TrimSpace(in.Subject + "\n" + in.BodyText))
+	text := lexiconText(in)
 	if text == "" {
 		return Result{}, false
 	}
 
 	// 1. Compliance / opt-out (highest priority).
-	if containsAny(text, unsubscribePhrases) || matchesAny(text, unsubscribeBoundary) {
+	if isUnsubscribeText(text) {
 		return Result{Class: ClassUnsubscribe, Confidence: 0.9, Source: SourceLexicon}, true
 	}
 
@@ -43,6 +43,30 @@ func classifyLexicon(in Input) (Result, bool) {
 	}
 
 	return Result{}, false
+}
+
+// lexiconText is the normalized subject+body the lexicon layer scans: lower-cased
+// and trimmed, subject and body joined by a newline. Shared by classifyLexicon
+// and LooksLikeUnsubscribe so both scan identical text.
+func lexiconText(in Input) string {
+	return strings.ToLower(strings.TrimSpace(in.Subject + "\n" + in.BodyText))
+}
+
+// isUnsubscribeText is the boundary-aware compliance/opt-out scan Layer 2 uses,
+// factored out so LooksLikeUnsubscribe can reuse the exact same tokens and logic
+// (single source of truth — no duplicated keyword list).
+func isUnsubscribeText(text string) bool {
+	return containsAny(text, unsubscribePhrases) || matchesAny(text, unsubscribeBoundary)
+}
+
+// LooksLikeUnsubscribe reports whether the reply carries an explicit opt-out
+// signal, running ONLY the compliance-keyword scan (the same boundary-aware
+// tokens/logic Layer 2 uses — not a duplicate list). It lets a caller honor a
+// compliance request even when an earlier layer already classified the message
+// as automated (Precedence: bulk, an OOO subject, …), where the full pipeline
+// would otherwise short-circuit before Layer 2 ever ran. Pure and offline.
+func (c *Classifier) LooksLikeUnsubscribe(in Input) bool {
+	return isUnsubscribeText(lexiconText(in))
 }
 
 // unsubscribePhrases are explicit multi-word opt-out requests matched by

@@ -520,3 +520,31 @@ func BenchmarkClassifyFull(b *testing.B) {
 		_ = cls.Classify(context.Background(), in)
 	}
 }
+
+// TestLooksLikeUnsubscribe locks the compliance-only helper: it fires on the
+// same opt-out tokens Layer 2 uses (subject or body), stays boundary-aware
+// ("nonstop"/"stopped by" do not trip "stop"), and ignores non-opt-out text —
+// so a caller can honor an opt-out even inside an otherwise-automated message.
+func TestLooksLikeUnsubscribe(t *testing.T) {
+	cls := New(nil)
+	cases := []struct {
+		name string
+		in   Input
+		want bool
+	}{
+		{"body unsubscribe", Input{Subject: "Re: hi", BodyText: "please unsubscribe me"}, true},
+		{"remove me", Input{Subject: "Re: hi", BodyText: "remove me from your list"}, true},
+		{"stop boundary token", Input{Subject: "Re: hi", BodyText: "please stop"}, true},
+		{"opt-out inside OOO subject", Input{Subject: "Out of Office", BodyText: "away, but take me off your list"}, true},
+		{"nonstop is not stop (boundary)", Input{Subject: "Re: hi", BodyText: "we work nonstop and stopped by earlier"}, false},
+		{"plain positive is not opt-out", Input{Subject: "Re: hi", BodyText: "sounds great, let's chat"}, false},
+		{"empty", Input{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cls.LooksLikeUnsubscribe(tc.in); got != tc.want {
+				t.Fatalf("LooksLikeUnsubscribe(%q/%q) = %v, want %v", tc.in.Subject, tc.in.BodyText, got, tc.want)
+			}
+		})
+	}
+}
