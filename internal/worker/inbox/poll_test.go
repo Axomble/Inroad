@@ -57,8 +57,10 @@ type stubCore struct {
 	cursorStringSet bool
 	cursorString    string
 
-	replied []string
-	bounced []bouncedCall
+	replied       []string
+	unsubscribed  []string
+	recordedClass []string
+	bounced       []bouncedCall
 
 	mailboxes []coreapi.MailboxRef
 	listErr   error
@@ -113,8 +115,18 @@ func (s *stubCore) FindSendByMessageID(_ context.Context, _, messageID string) (
 	return coreapi.SendRef{}, coreapi.ErrNoMatch
 }
 
-func (s *stubCore) MarkReplied(_ context.Context, enrollmentID, _ string) error {
+func (s *stubCore) MarkReplied(_ context.Context, enrollmentID, _, _, _ string, _ float64) error {
 	s.replied = append(s.replied, enrollmentID)
+	return nil
+}
+
+func (s *stubCore) MarkUnsubscribed(_ context.Context, enrollmentID, _, _ string) error {
+	s.unsubscribed = append(s.unsubscribed, enrollmentID)
+	return nil
+}
+
+func (s *stubCore) RecordReplyClass(_ context.Context, enrollmentID, _, _, _ string, _ float64) error {
+	s.recordedClass = append(s.recordedClass, enrollmentID)
 	return nil
 }
 

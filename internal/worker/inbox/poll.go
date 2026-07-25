@@ -235,7 +235,9 @@ func processMessage(ctx context.Context, core coreapi.Client, workspaceID string
 			return false, err
 		}
 		if s.EnrollmentID != "" {
-			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID); err != nil {
+			// Task 4 replaces this with classification-driven routing (tagged
+			// MarkReplied / MarkUnsubscribed / RecordReplyClass). Untagged for now.
+			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID, "", "", 0); err != nil {
 				return false, err
 			}
 			*replies++

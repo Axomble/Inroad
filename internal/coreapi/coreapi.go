@@ -90,8 +90,22 @@ type Client interface {
 	// the send that caused it, workspace-scoped. Returns ErrNoMatch when
 	// nothing matches.
 	FindSendByMessageID(ctx context.Context, workspaceID, messageID string) (SendRef, error)
-	// MarkReplied halts the enrollment (if any) on an inbound reply.
-	MarkReplied(ctx context.Context, enrollmentID, workspaceID string) error
+	// MarkReplied halts the enrollment (if any) on an inbound reply and tags it
+	// with the classified reply (class/source/confidence + replied_at). When
+	// enrollmentID is "" (the matched send has no enrollment — the legacy
+	// direct-send path) there is nothing to stop or tag, so it is a no-op.
+	MarkReplied(ctx context.Context, enrollmentID, workspaceID, replyClass, replySource string, confidence float64) error
+	// MarkUnsubscribed suppresses the address (reusing the same workspace-scoped,
+	// idempotent suppression insert as MarkBounced) and, when enrollmentID is
+	// non-empty, halts the enrollment (reason unsubscribed) and tags it
+	// class=unsubscribe. The suppression happens EVEN WHEN enrollmentID is ""
+	// (a reply-unsubscribe to a legacy direct-send must still suppress the
+	// address — compliance).
+	MarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID, email string) error
+	// RecordReplyClass tags the enrollment with a classified reply WITHOUT
+	// stopping it — for automated replies (auto_reply/out_of_office) that must
+	// not halt the sequence. A no-op when enrollmentID is "" (nothing to tag).
+	RecordReplyClass(ctx context.Context, enrollmentID, workspaceID, class, source string, confidence float64) error
 	// MarkBounced records a hard bounce: halts the enrollment (if any) and
 	// suppresses the address. hard distinguishes hard from soft bounces; soft
 	// bounces are logged by the caller and never reach this method with
