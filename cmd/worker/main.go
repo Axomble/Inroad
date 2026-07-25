@@ -7,8 +7,9 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/config"
-	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
@@ -33,9 +34,13 @@ func main() {
 	}
 	defer pool.Close()
 
-	sealer, err := crypto.NewSealer(cfg.MasterKey)
+	// Build the per-workspace Keyring at the worker's composition root. The
+	// DEKStore is the sqlc-backed adapter over the pool; the worker engine
+	// packages never see it — they reach data only through coreapi, which holds
+	// the Keyring. keys.BuildKeyring owns the fail-closed provider guard.
+	keyring, err := keys.BuildKeyring(cfg, gen.New(pool))
 	if err != nil {
-		logger.Error("sealer init failed", "err", err)
+		logger.Error("keyring init failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -52,7 +57,7 @@ func main() {
 		RedirectURL:  cfg.MSRedirectURL,
 		Tenant:       cfg.MSTenant,
 	}
-	core := inprocess.New(pool, sealer, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth)
+	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth)
 	// MultiSender dispatches SMTP vs Gmail vs Graph on the job's Provider; the
 	// SMTP leg keeps the SSRF-vetted NetSender, the Gmail leg uses the fixed
 	// Google host, and the m365 leg uses the fixed Microsoft Graph host.

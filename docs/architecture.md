@@ -13,6 +13,32 @@ full layout rationale. This document tracks decisions as they evolve during buil
 - **CSRF protection:** Double-submit token (`csrf_token` cookie + `X-CSRF-Token` header) on cookie endpoints (/auth/refresh, /auth/logout).
 - **Authorization:** Deny-by-default — all non-public routes require a valid access token. Public endpoints: POST /register, /login, /refresh, /logout.
 
+## Credential encryption (two-level key hierarchy)
+Stored field secrets are protected by a two-level key hierarchy:
+**field ciphertext ← per-workspace DEK ← KEK (`KeyProvider`)**.
+
+- **DEK (data-encryption key):** a random 32-byte AES-256 key per workspace.
+  The `crypto.Sealer` seals each field (SMTP password, OAuth token) under the
+  workspace's DEK with the workspace id as AES-GCM AAD, in a versioned
+  self-describing envelope (v2 = `0x02 || nonce || ct`; legacy v1 = master-key
+  direct, no version byte). `crypto.Keyring.SealerFor(ctx, ws)` hands out a
+  workspace-bound `*Sealer`, generating the DEK on first use and caching the
+  plaintext DEK in a short-TTL in-memory cache (zeroized on eviction).
+- **KEK (key-encryption key):** the `crypto.KeyProvider` seam wraps/unwraps DEKs.
+  `LocalKeyProvider` wraps under an HKDF-derived subkey of `INROAD_MASTER_KEY`
+  (`inroad-kek-v1`); a cloud KMS is a future drop-in. Only the wrapped DEK is
+  persisted, in `workspace_deks` (fail-if-exists PK, `key_provider` recorded).
+- **Wiring seam:** `internal/platform/keys` holds the `PgDEKStore` (sqlc-backed
+  `crypto.DEKStore` adapter over `*gen.Queries`) and `BuildKeyring(cfg, q)`,
+  which selects the provider from `cfg.KeyProvider` (fail-closed on an unknown
+  value) and assembles the `Keyring`. It lives in `platform` so both composition
+  roots (`cmd/inroad`, `cmd/worker`) can wire it without `crypto` importing
+  `db/gen`; the worker still reaches decrypted data only via `coreapi`, which
+  holds the injected `Keyring`.
+- **Crypto-shredding:** `workspace_deks.workspace_id` is `ON DELETE CASCADE` on
+  `workspaces`, so deleting a workspace destroys its DEK and permanently renders
+  all of its sealed data unrecoverable (see `docs/security.md` invariants 14–19).
+
 ## Mail providers (SMTP + Gmail + M365)
 A mailbox's `provider` column (`smtp` | `gmail` | `m365`) is the transport discriminator; the abstraction keeps the worker's seams single-branched. M365 joins as a second OAuth provider behind the same seams, reusing the sealed-token codec, control-plane refresh, and opaque cursor unchanged — only the Graph-specific auth, send, and delta differ.
 - **Send:** the worker calls one seam, `mail.MultiSender.Send(ctx, OutboundJob, Message)`. `MultiSender` dispatches on `OutboundJob.Provider` — SMTP via `NetSender` (through the SSRF guard + TLS), Gmail via `GmailSender` (Gmail API, fixed Google host), M365 via `GraphSender` (Microsoft Graph `sendMail`, fixed Graph host). Both `sender.Handler` and `sequence.AdvanceHandler` build one `OutboundJob` from the coreapi job, so the transport branch lives in exactly one place. `GmailSender` reuses `buildMessage` and returns our own `Message-ID` header (Gmail preserves it); `GraphSender` also reuses `buildMessage` but uses a draft-then-send flow (Exchange may rewrite the `Message-Id`, so it reads back and returns the authoritative `internetMessageId`), so threading and reply matching are identical across transports.

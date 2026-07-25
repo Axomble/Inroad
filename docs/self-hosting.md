@@ -19,8 +19,28 @@
 The API (with the built web UI) serves on http://localhost:8080. Migrations run
 automatically on the api container's startup. The worker connects to Redis.
 
+## Encryption keys
+
+Field secrets (SMTP passwords, Gmail/M365 OAuth tokens) are sealed under a
+per-workspace data-encryption key (DEK); each DEK is wrapped by a
+key-encryption key (KEK) selected by `INROAD_KEY_PROVIDER`.
+
+- `INROAD_KEY_PROVIDER` — the KEK backend. Defaults to `local` (blank is
+  equivalent to `local`). `local` wraps DEKs under `INROAD_MASTER_KEY`. Any
+  other value is rejected at startup with a fatal error (fail-closed) — only
+  `local` is implemented today; a cloud KMS is a planned future provider behind
+  the same seam.
+- `INROAD_MASTER_KEY` is now the KEK that wraps the per-workspace DEKs.
+  Operationally nothing changes: it is still a base64 encoding of 32 raw bytes
+  (`openssl rand -base64 32`, must decode to 32 bytes). Losing it still loses
+  every sealed secret (it now unwraps the DEKs), so treat it as the single most
+  sensitive value in the deployment. Deleting a workspace destroys its DEK and
+  permanently shreds that workspace's sealed data.
+
 ## Production notes
 - Set strong INROAD_JWT_SECRET and INROAD_MASTER_KEY (see .env.example for generation).
+- Leave INROAD_KEY_PROVIDER at its `local` default unless/until a cloud-KMS
+  provider ships.
 - Put a TLS-terminating reverse proxy in front of :8080.
 - For worker fleets across multiple IPs, run the worker binary under systemd
   (templates in deploy/systemd/) rather than compose.

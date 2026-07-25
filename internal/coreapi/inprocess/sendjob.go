@@ -47,7 +47,11 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		}
 		accessToken = []byte(at)
 	} else {
-		password, err = c.sealer.Open(b.SecretCiphertext)
+		sealer, serr := c.keyring.SealerFor(ctx, ws)
+		if serr != nil {
+			return coreapi.SendJob{}, serr
+		}
+		password, err = sealer.Open(b.SecretCiphertext)
 		if err != nil {
 			return coreapi.SendJob{}, err
 		}

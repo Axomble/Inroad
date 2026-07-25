@@ -18,6 +18,11 @@ type Config struct {
 	JWTSecret   []byte
 	MasterKey   []byte
 
+	// KeyProvider selects the KEK backend that wraps per-workspace DEKs.
+	// "local" (default) wraps under INROAD_MASTER_KEY; a cloud KMS is a future
+	// drop-in. An unknown value fails closed at binary startup.
+	KeyProvider string
+
 	// TrackingSecret signs open/click tracking tokens (internal/platform/track).
 	// Dedicated so rotating tracking links doesn't invalidate sessions; falls
 	// back to JWTSecret when unset, so self-hosters aren't forced to mint a
@@ -120,6 +125,7 @@ func Load() (*Config, error) {
 	}
 	cfg.MasterKey = rawKey
 
+	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 

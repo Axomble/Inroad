@@ -19,8 +19,30 @@ import (
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
 )
+
+// itMasterKey is the fixed 32-byte master key for these integration tests. It
+// backs both the legacy Sealer that writes the seeded v1 credential and the
+// Keyring's legacy fallback that opens it, so the two never drift.
+var itMasterKey = bytes.Repeat([]byte{7}, 32)
+
+// itKeyring builds a Keyring over the real sqlc-backed DEKStore with itMasterKey
+// as the KEK/legacy key, so the seeded v1 credential opens via the legacy
+// fallback while fresh seals migrate to per-workspace v2 DEKs.
+func itKeyring(t *testing.T, q *gen.Queries) *crypto.Keyring {
+	t.Helper()
+	kp, err := crypto.NewLocalKeyProvider(itMasterKey)
+	if err != nil {
+		t.Fatalf("key provider: %v", err)
+	}
+	legacy, err := crypto.NewSealer(itMasterKey)
+	if err != nil {
+		t.Fatalf("legacy sealer: %v", err)
+	}
+	return crypto.NewKeyring(kp, keys.NewPgDEKStore(q), legacy)
+}
 
 func dsn() string {
 	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
@@ -121,7 +143,7 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 	}
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
 	return itFixture{
-		q: q, core: inprocess.New(pool, sealer, sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}),
+		q: q, core: inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}),
 		ws: ws.ID, campaignID: cam.ID, contactID: c.ID, email: email,
 	}
 }
@@ -137,7 +159,7 @@ func advance(t *testing.T, core coreapi.Client, s Sender, enq Enqueuer, enrollme
 
 func newSealer(t *testing.T) *crypto.Sealer {
 	t.Helper()
-	s, err := crypto.NewSealer(bytes.Repeat([]byte{7}, 32))
+	s, err := crypto.NewSealer(itMasterKey)
 	if err != nil {
 		t.Fatalf("sealer: %v", err)
 	}

@@ -17,9 +17,31 @@ import (
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
+
+// itMasterKey is the fixed 32-byte master key for these integration tests,
+// shared by the legacy Sealer that writes the seeded v1 credential and the
+// Keyring's legacy fallback that opens it.
+var itMasterKey = []byte("0123456789abcdef0123456789abcdef")
+
+// itKeyring builds a Keyring over the real sqlc-backed DEKStore with itMasterKey
+// as the KEK/legacy key, so the seeded v1 credential opens via the legacy
+// fallback while fresh seals migrate to per-workspace v2 DEKs.
+func itKeyring(t *testing.T, q *gen.Queries) *crypto.Keyring {
+	t.Helper()
+	kp, err := crypto.NewLocalKeyProvider(itMasterKey)
+	if err != nil {
+		t.Fatalf("key provider: %v", err)
+	}
+	legacy, err := crypto.NewSealer(itMasterKey)
+	if err != nil {
+		t.Fatalf("legacy sealer: %v", err)
+	}
+	return crypto.NewKeyring(kp, keys.NewPgDEKStore(q), legacy)
+}
 
 // This file mirrors internal/worker/sequence/sequence_integration_test.go's
 // harness (build tag, DB connect helper, seeding shape) but drives
@@ -49,7 +71,7 @@ func connect(t *testing.T) (*pgxpool.Pool, *gen.Queries, func()) {
 
 func newSealer(t *testing.T) *crypto.Sealer {
 	t.Helper()
-	s, err := crypto.NewSealer([]byte("0123456789abcdef0123456789abcdef"))
+	s, err := crypto.NewSealer(itMasterKey)
 	if err != nil {
 		t.Fatalf("sealer: %v", err)
 	}
@@ -135,7 +157,7 @@ func seedActiveEnrollment(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	eid := ids[0].ID
 
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
-	core := inprocess.New(pool, sealer, sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{})
+	core := inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{})
 
 	job, err := core.GetStepSendJob(ctx, eid.String(), ws.ID.String())
 	if err != nil {

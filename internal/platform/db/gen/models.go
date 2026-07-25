@@ -354,6 +354,13 @@ type Workspace struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type WorkspaceDek struct {
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	WrappedDek  []byte             `json:"wrapped_dek"`
+	KeyProvider string             `json:"key_provider"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type WorkspaceInvite struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`

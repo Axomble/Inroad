@@ -40,7 +40,7 @@ func validToken() *oauth2.Token {
 // ErrOAuthDisabled -- the handler turns that into a 501 -- and
 // CompleteGoogleOAuth refuses with ErrOAuthDisabled too.
 func TestStartGoogleOAuthDisabled(t *testing.T) {
-	svc := NewService(newFakeStore(), nil, newTestSealer(t), mail.GoogleOAuth{}, fakeExchanger{}, mail.MicrosoftOAuth{}, fakeExchanger{})
+	svc := NewService(newFakeStore(), nil, newTestKeyring(t), mail.GoogleOAuth{}, fakeExchanger{}, mail.MicrosoftOAuth{}, fakeExchanger{})
 	if _, err := svc.GoogleAuthCodeURL("state"); !errors.Is(err, ErrOAuthDisabled) {
 		t.Fatalf("GoogleAuthCodeURL: want ErrOAuthDisabled, got %v", err)
 	}
@@ -53,7 +53,7 @@ func TestCompleteGoogleOAuthCreatesGmailMailbox(t *testing.T) {
 	store := newFakeStore()
 	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b", RedirectURL: "http://x/cb"}
 	exch := fakeExchanger{tok: validToken(), email: "rep@example.com"}
-	svc := NewService(store, nil, newTestSealer(t), oauth, exch, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, nil, newTestKeyring(t), oauth, exch, mail.MicrosoftOAuth{}, nil)
 
 	workspaceID := uuid.New()
 	m, err := svc.CompleteGoogleOAuth(context.Background(), "code", workspaceID)
@@ -80,7 +80,7 @@ func TestCompleteGoogleOAuthCreatesGmailMailbox(t *testing.T) {
 func TestCompleteGoogleOAuthDuplicateEmailRejected(t *testing.T) {
 	store := newFakeStore()
 	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b"}
-	svc := NewService(store, nil, newTestSealer(t), oauth, fakeExchanger{tok: validToken(), email: "dup@example.com"}, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, nil, newTestKeyring(t), oauth, fakeExchanger{tok: validToken(), email: "dup@example.com"}, mail.MicrosoftOAuth{}, nil)
 
 	workspaceID := uuid.New()
 	// Seed an existing mailbox with the same email in the same workspace.
@@ -98,7 +98,7 @@ func TestCompleteGoogleOAuthDuplicateEmailRejected(t *testing.T) {
 func TestCompleteGoogleOAuthEmptyEmailRejected(t *testing.T) {
 	store := newFakeStore()
 	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b"}
-	svc := NewService(store, nil, newTestSealer(t), oauth, fakeExchanger{tok: validToken(), email: ""}, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, nil, newTestKeyring(t), oauth, fakeExchanger{tok: validToken(), email: ""}, mail.MicrosoftOAuth{}, nil)
 
 	if _, err := svc.CompleteGoogleOAuth(context.Background(), "code", uuid.New()); !errors.Is(err, ErrValidation) {
 		t.Fatalf("want ErrValidation, got %v", err)
@@ -111,7 +111,7 @@ func TestCompleteGoogleOAuthEmptyEmailRejected(t *testing.T) {
 func TestCompleteGoogleOAuthExchangeFailure(t *testing.T) {
 	store := newFakeStore()
 	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b"}
-	svc := NewService(store, nil, newTestSealer(t), oauth, fakeExchanger{err: errors.New("token endpoint 400")}, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, nil, newTestKeyring(t), oauth, fakeExchanger{err: errors.New("token endpoint 400")}, mail.MicrosoftOAuth{}, nil)
 
 	if _, err := svc.CompleteGoogleOAuth(context.Background(), "code", uuid.New()); err == nil {
 		t.Fatal("want error on exchange failure, got nil")
@@ -137,7 +137,7 @@ func newCallbackHarness(t *testing.T, email string) (*fakeStore, http.Handler) {
 	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b", RedirectURL: "http://x/cb"}
 	msOAuth := mail.MicrosoftOAuth{ClientID: "a", ClientSecret: "b", RedirectURL: "http://x/cb"}
 	exch := fakeExchanger{tok: validToken(), email: email}
-	svc := NewService(store, nil, newTestSealer(t), oauth, exch, msOAuth, exch)
+	svc := NewService(store, nil, newTestKeyring(t), oauth, exch, msOAuth, exch)
 	h := NewHandler(svc, callbackTestSecret, callbackTestAppBase)
 	return store, h.CallbackRoutes()
 }
@@ -291,7 +291,7 @@ func TestGoogleCallbackAbsentStateNoMailbox(t *testing.T) {
 // fails closed, mirroring the Gmail disabled case: both MicrosoftAuthCodeURL
 // and CompleteMicrosoftOAuth return ErrOAuthDisabled.
 func TestStartMicrosoftOAuthDisabled(t *testing.T) {
-	svc := NewService(newFakeStore(), nil, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, fakeExchanger{})
+	svc := NewService(newFakeStore(), nil, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, fakeExchanger{})
 	if _, err := svc.MicrosoftAuthCodeURL("state"); !errors.Is(err, ErrOAuthDisabled) {
 		t.Fatalf("MicrosoftAuthCodeURL: want ErrOAuthDisabled, got %v", err)
 	}
@@ -304,7 +304,7 @@ func TestCompleteMicrosoftOAuthCreatesM365Mailbox(t *testing.T) {
 	store := newFakeStore()
 	msOAuth := mail.MicrosoftOAuth{ClientID: "a", ClientSecret: "b", RedirectURL: "http://x/cb"}
 	exch := fakeExchanger{tok: validToken(), email: "rep@example.com"}
-	svc := NewService(store, nil, newTestSealer(t), mail.GoogleOAuth{}, nil, msOAuth, exch)
+	svc := NewService(store, nil, newTestKeyring(t), mail.GoogleOAuth{}, nil, msOAuth, exch)
 
 	workspaceID := uuid.New()
 	m, err := svc.CompleteMicrosoftOAuth(context.Background(), "code", workspaceID)
@@ -331,7 +331,7 @@ func TestCompleteMicrosoftOAuthCreatesM365Mailbox(t *testing.T) {
 func TestCompleteMicrosoftOAuthDuplicateEmailRejected(t *testing.T) {
 	store := newFakeStore()
 	msOAuth := mail.MicrosoftOAuth{ClientID: "a", ClientSecret: "b"}
-	svc := NewService(store, nil, newTestSealer(t), mail.GoogleOAuth{}, nil, msOAuth, fakeExchanger{tok: validToken(), email: "dup@example.com"})
+	svc := NewService(store, nil, newTestKeyring(t), mail.GoogleOAuth{}, nil, msOAuth, fakeExchanger{tok: validToken(), email: "dup@example.com"})
 
 	workspaceID := uuid.New()
 	// Seed an existing mailbox with the same email in the same workspace.
@@ -349,7 +349,7 @@ func TestCompleteMicrosoftOAuthDuplicateEmailRejected(t *testing.T) {
 func TestCompleteMicrosoftOAuthEmptyEmailRejected(t *testing.T) {
 	store := newFakeStore()
 	msOAuth := mail.MicrosoftOAuth{ClientID: "a", ClientSecret: "b"}
-	svc := NewService(store, nil, newTestSealer(t), mail.GoogleOAuth{}, nil, msOAuth, fakeExchanger{tok: validToken(), email: ""})
+	svc := NewService(store, nil, newTestKeyring(t), mail.GoogleOAuth{}, nil, msOAuth, fakeExchanger{tok: validToken(), email: ""})
 
 	if _, err := svc.CompleteMicrosoftOAuth(context.Background(), "code", uuid.New()); !errors.Is(err, ErrValidation) {
 		t.Fatalf("want ErrValidation, got %v", err)

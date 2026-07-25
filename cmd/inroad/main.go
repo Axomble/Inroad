@@ -24,10 +24,10 @@ import (
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/platform/config"
-	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
+	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/notify"
@@ -54,12 +54,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	sealer, err := crypto.NewSealer(cfg.MasterKey)
-	if err != nil {
-		logger.Error("sealer init failed", "err", err)
-		os.Exit(1)
-	}
-
 	sender, err := notify.New(notify.Config{
 		Driver: cfg.TransactionalDriver, SMTPHost: cfg.SystemSMTPHost, SMTPPort: cfg.SystemSMTPPort,
 		SMTPUsername: cfg.SystemSMTPUsername, SMTPPassword: cfg.SystemSMTPPassword, From: cfg.SystemEmailFrom,
@@ -71,6 +65,11 @@ func main() {
 	}
 
 	queries := gen.New(pool)
+	keyring, err := keys.BuildKeyring(cfg, queries)
+	if err != nil {
+		logger.Error("keyring init failed", "err", err)
+		os.Exit(1)
+	}
 	identStore := identity.NewStore(pool)
 	identHandler := identity.NewHandler(
 		identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
@@ -91,7 +90,7 @@ func main() {
 		Tenant:       cfg.MSTenant,
 	}
 	mbHandler := mailbox.NewHandler(
-		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), sealer,
+		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), keyring,
 			googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
 			msOAuth, mailbox.NewMicrosoftExchanger(msOAuth)),
 		cfg.JWTSecret, cfg.AppBaseURL,
