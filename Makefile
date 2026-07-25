@@ -1,4 +1,4 @@
-.PHONY: help db-up db-down migrate-up migrate-down sqlc run-api run-worker build test test-integration tidy
+.PHONY: help db-up db-down migrate-up migrate-down sqlc run-api run-worker build test test-integration tidy lint lint-go lint-web
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "%-18s %s\n", $$1, $$2}'
@@ -38,3 +38,11 @@ test-integration: ## Run integration tests (needs make db-up)
 
 tidy: ## Tidy go.mod
 	go mod tidy
+
+lint: lint-go lint-web ## Run all linters (Go + web)
+
+lint-go: ## Run golangci-lint on the Go backend
+	golangci-lint run ./...
+
+lint-web: ## Run oxlint + strict typecheck on the SPA
+	cd web && npm run lint && npm run typecheck

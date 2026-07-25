@@ -1,0 +1,86 @@
+# Strict-but-signal linting for the Inroad Go backend.
+# Run: make lint   (or: golangci-lint run)
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # `standard` = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - revive          # golint successor — style/naming/exported-doc
+    - gocritic        # opinionated smell detection
+    - errorlint       # correct error wrapping / errors.Is|As usage
+    - nilerr          # returning nil after a non-nil err (and vice-versa)
+    - bodyclose       # HTTP response bodies must be closed
+    - noctx           # no context on outbound HTTP requests
+    - sqlclosecheck   # sql.Rows/Stmt closed
+    - rowserrcheck    # rows.Err() checked
+    - unparam         # unused function params / always-same args
+    - unconvert       # redundant type conversions
+    - misspell        # typos in comments/strings
+    - whitespace      # leading/trailing whitespace
+    - dupl            # copy-paste duplication detection
+    - nolintlint      # keep //nolint directives honest (must be specific + explained)
+    - predeclared     # shadowing predeclared identifiers (len, error, ...)
+    - reassign        # reassigning package-level vars from other packages
+
+  settings:
+    dupl:
+      threshold: 120          # ~15+ duplicated lines before it flags
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment      # micro-optimization noise, not a quality signal
+        - shadow              # shadowing `err`/`ctx` is idiomatic Go; low signal
+    revive:
+      rules:
+        - name: exported
+          disabled: true      # not requiring doc comments on every export (too noisy for internal/)
+        - name: unused-parameter
+          disabled: true      # unparam covers the meaningful cases
+    gocritic:
+      # Drop the performance tag — hugeParam/rangeValCopy are pass-by-value
+      # micro-opts that hurt readability more than they help. Keep diagnostics.
+      enabled-tags: [diagnostic, style]
+      disabled-checks:
+        - ifElseChain
+        - commentFormatting
+        - unnamedResult
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+  exclusions:
+    generated: lax            # skip sqlc-generated + routeTree etc.
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Tests may duplicate table rows / skip some rigor.
+      - path: _test\.go
+        linters:
+          - dupl
+          - unparam
+          - errcheck
+      # Generated sqlc lives here; belt-and-braces beyond `generated: lax`.
+      - path: internal/platform/db/gen/
+        linters:
+          - dupl
+          - unparam
+          - revive
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/inroad/inroad
