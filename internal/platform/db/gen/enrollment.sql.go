@@ -192,7 +192,7 @@ func (q *Queries) EnrollListMembers(ctx context.Context, arg EnrollListMembersPa
 }
 
 const getEnrollment = `-- name: GetEnrollment :one
-SELECT id, workspace_id, campaign_id, contact_id, current_step, status, stop_reason, enrolled_at, last_sent_at, next_due_at, thread_root_id, completed_at, stopped_at, cap_deferrals FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, campaign_id, contact_id, current_step, status, stop_reason, enrolled_at, last_sent_at, next_due_at, thread_root_id, completed_at, stopped_at, cap_deferrals, reply_class, reply_source, reply_confidence, replied_at FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2
 `
 
 type GetEnrollmentParams struct {
@@ -218,6 +218,10 @@ func (q *Queries) GetEnrollment(ctx context.Context, arg GetEnrollmentParams) (S
 		&i.CompletedAt,
 		&i.StoppedAt,
 		&i.CapDeferrals,
+		&i.ReplyClass,
+		&i.ReplySource,
+		&i.ReplyConfidence,
+		&i.RepliedAt,
 	)
 	return i, err
 }
@@ -242,6 +246,69 @@ func (q *Queries) IncrementEnrollmentCapDeferrals(ctx context.Context, arg Incre
 	var cap_deferrals int32
 	err := row.Scan(&cap_deferrals)
 	return cap_deferrals, err
+}
+
+const listCampaignEnrollments = `-- name: ListCampaignEnrollments :many
+SELECT c.email, c.first_name, e.status, e.reply_class, e.reply_source, e.replied_at
+FROM sequence_enrollments e
+JOIN contacts c ON c.id = e.contact_id
+WHERE e.campaign_id = $1 AND e.workspace_id = $2
+ORDER BY e.replied_at DESC NULLS LAST, c.email ASC
+LIMIT $3 OFFSET $4
+`
+
+type ListCampaignEnrollmentsParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Limit       int32     `json:"limit"`
+	Offset      int32     `json:"offset"`
+}
+
+type ListCampaignEnrollmentsRow struct {
+	Email       string             `json:"email"`
+	FirstName   string             `json:"first_name"`
+	Status      string             `json:"status"`
+	ReplyClass  *string            `json:"reply_class"`
+	ReplySource *string            `json:"reply_source"`
+	RepliedAt   pgtype.Timestamptz `json:"replied_at"`
+}
+
+// Per-contact reply status for a campaign's enrollments, joined to the contact
+// for the display email/name. Workspace-pinned on the enrollment (defense in
+// depth alongside the service's ownership check) so a cross-tenant campaign id
+// yields no rows rather than leaking another tenant's contacts. Ordered by most
+// recently replied first (NULLS LAST keeps never-replied rows after replied
+// ones), then email for a stable page order. Paginated via LIMIT/OFFSET.
+func (q *Queries) ListCampaignEnrollments(ctx context.Context, arg ListCampaignEnrollmentsParams) ([]ListCampaignEnrollmentsRow, error) {
+	rows, err := q.db.Query(ctx, listCampaignEnrollments,
+		arg.CampaignID,
+		arg.WorkspaceID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCampaignEnrollmentsRow
+	for rows.Next() {
+		var i ListCampaignEnrollmentsRow
+		if err := rows.Scan(
+			&i.Email,
+			&i.FirstName,
+			&i.Status,
+			&i.ReplyClass,
+			&i.ReplySource,
+			&i.RepliedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listDueEnrollments = `-- name: ListDueEnrollments :many
@@ -296,6 +363,36 @@ type SetEnrollmentDueParams struct {
 // reconcile). No-op on non-active rows.
 func (q *Queries) SetEnrollmentDue(ctx context.Context, arg SetEnrollmentDueParams) error {
 	_, err := q.db.Exec(ctx, setEnrollmentDue, arg.ID, arg.WorkspaceID, arg.NextDueAt)
+	return err
+}
+
+const setEnrollmentReplyClass = `-- name: SetEnrollmentReplyClass :exec
+UPDATE sequence_enrollments
+SET reply_class = $3, reply_source = $4, reply_confidence = $5, replied_at = now()
+WHERE id = $1 AND workspace_id = $2
+`
+
+type SetEnrollmentReplyClassParams struct {
+	ID              uuid.UUID `json:"id"`
+	WorkspaceID     uuid.UUID `json:"workspace_id"`
+	ReplyClass      *string   `json:"reply_class"`
+	ReplySource     *string   `json:"reply_source"`
+	ReplyConfidence *float32  `json:"reply_confidence"`
+}
+
+// Store the classified reply (class/source/confidence + when) on the
+// enrollment WITHOUT touching status. Used on its own for automated replies
+// (auto_reply/out_of_office), and alongside StopEnrollment when a reply also
+// halts the sequence (replied/unsubscribed). Workspace-pinned so a caller
+// can't tag another tenant's enrollment.
+func (q *Queries) SetEnrollmentReplyClass(ctx context.Context, arg SetEnrollmentReplyClassParams) error {
+	_, err := q.db.Exec(ctx, setEnrollmentReplyClass,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.ReplyClass,
+		arg.ReplySource,
+		arg.ReplyConfidence,
+	)
 	return err
 }
 

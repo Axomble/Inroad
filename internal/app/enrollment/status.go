@@ -19,10 +19,11 @@ const (
 type StopReason string
 
 const (
-	StopReplied    StopReason = "replied"
-	StopBounced    StopReason = "bounced"
-	StopSuppressed StopReason = "suppressed"
-	StopManual     StopReason = "manual"
+	StopReplied      StopReason = "replied"
+	StopBounced      StopReason = "bounced"
+	StopSuppressed   StopReason = "suppressed"
+	StopManual       StopReason = "manual"
+	StopUnsubscribed StopReason = "unsubscribed"
 	// StopFailed halts an enrollment the sequence engine can no longer make
 	// progress on: a degenerate mailbox cap of 0, or a cap-defer loop that has
 	// exceeded its ceiling without ever clearing.

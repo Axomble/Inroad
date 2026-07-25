@@ -210,6 +210,18 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.updateCampaignTrackingRequest,
       }),
     }),
+    listCampaignEnrollments: build.query<
+      ListCampaignEnrollmentsApiResponse,
+      ListCampaignEnrollmentsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/enrollments`,
+        params: {
+          limit: queryArg.limit,
+          offset: queryArg.offset,
+        },
+      }),
+    }),
     listSteps: build.query<ListStepsApiResponse, ListStepsApiArg>({
       query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/steps` }),
     }),
@@ -389,6 +401,13 @@ export type UpdateCampaignTrackingApiResponse =
 export type UpdateCampaignTrackingApiArg = {
   id: string;
   updateCampaignTrackingRequest: UpdateCampaignTrackingRequest;
+};
+export type ListCampaignEnrollmentsApiResponse =
+  /** status 200 Per-contact reply status for the campaign's enrollments */ CampaignEnrollment[];
+export type ListCampaignEnrollmentsApiArg = {
+  id: string;
+  limit?: number;
+  offset?: number;
 };
 export type ListStepsApiResponse =
   /** status 200 Steps in order */ SequenceStep[];
@@ -610,6 +629,28 @@ export type CampaignDetail = {
 export type UpdateCampaignTrackingRequest = {
   enabled?: boolean;
 };
+export type CampaignEnrollment = {
+  email: string;
+  first_name: string;
+  /** enrollment lifecycle status (active/completed/stopped) */
+  status: string;
+  /** classified sentiment/intent bucket of the reply */
+  reply_class:
+    | (
+        | "positive"
+        | "negative"
+        | "neutral"
+        | "auto_reply"
+        | "out_of_office"
+        | "unsubscribe"
+        | "unknown"
+      )
+    | null;
+  /** layer that decided the class (header/lexicon/model) */
+  reply_source: string | null;
+  /** RFC3339 timestamp the reply was classified */
+  replied_at: string | null;
+};
 export type StepRequest = {
   delay_seconds?: number;
   subject?: string;
@@ -646,6 +687,7 @@ export const {
   useCreateCampaignMutation,
   useGetCampaignQuery,
   useUpdateCampaignTrackingMutation,
+  useListCampaignEnrollmentsQuery,
   useListStepsQuery,
   useCreateStepMutation,
   useUpdateStepMutation,

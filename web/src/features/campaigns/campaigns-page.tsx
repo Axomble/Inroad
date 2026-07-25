@@ -16,6 +16,7 @@ import { useListCampaignsQuery, useGetCampaignQuery, useLaunchCampaignMutation }
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
 import { MetricsPanel } from './metrics-panel'
+import { CampaignEnrollmentsList } from './campaign-enrollments-list'
 
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
@@ -179,6 +180,10 @@ function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
       {!isLoading && (
         <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
       )}
+
+      {/* Contacts + their classified replies. Owns its own loading/empty/error
+          states, so it mounts regardless of the campaign-detail query. */}
+      <CampaignEnrollmentsList campaignId={id} />
     </div>
   )
 }

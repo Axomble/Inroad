@@ -62,7 +62,15 @@ func (f fakeCore) FindSendByMessageID(context.Context, string, string) (coreapi.
 	return coreapi.SendRef{}, nil
 }
 
-func (f fakeCore) MarkReplied(context.Context, string, string) error { return nil }
+func (f fakeCore) MarkReplied(context.Context, string, string, string, string, float64) error {
+	return nil
+}
+
+func (f fakeCore) MarkUnsubscribed(context.Context, string, string, string) error { return nil }
+
+func (f fakeCore) RecordReplyClass(context.Context, string, string, string, string, float64) error {
+	return nil
+}
 
 func (f fakeCore) MarkBounced(context.Context, string, string, string, bool) error { return nil }
 

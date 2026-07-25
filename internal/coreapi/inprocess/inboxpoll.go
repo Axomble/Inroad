@@ -147,10 +147,10 @@ func (c client) FindSendByMessageID(ctx context.Context, workspaceID, messageID 
 	}, nil
 }
 
-// MarkReplied halts the enrollment on an inbound reply. A no-op when
-// enrollmentID is "" (the matched send has no enrollment — the legacy
-// direct-send path has nothing to stop).
-func (c client) MarkReplied(ctx context.Context, enrollmentID, workspaceID string) error {
+// MarkReplied halts the enrollment on an inbound reply and tags it with the
+// classified reply. A no-op when enrollmentID is "" (the matched send has no
+// enrollment — the legacy direct-send path has nothing to stop or tag).
+func (c client) MarkReplied(ctx context.Context, enrollmentID, workspaceID, replyClass, replySource string, confidence float64) error {
 	if enrollmentID == "" {
 		return nil
 	}
@@ -162,7 +162,87 @@ func (c client) MarkReplied(ctx context.Context, enrollmentID, workspaceID strin
 	if err != nil {
 		return err
 	}
-	return c.enroll.MarkStepStopped(ctx, ws, eid, enrollment.StopReplied)
+	if err := c.enroll.MarkStepStopped(ctx, ws, eid, enrollment.StopReplied); err != nil {
+		return err
+	}
+	return c.recordReplyClass(ctx, eid, ws, replyClass, replySource, confidence)
+}
+
+// RecordReplyClass tags the enrollment with a classified reply without touching
+// its status — for automated replies (auto_reply/out_of_office) that must not
+// halt the sequence. A no-op when enrollmentID is "" (nothing to tag).
+func (c client) RecordReplyClass(ctx context.Context, enrollmentID, workspaceID, class, source string, confidence float64) error {
+	if enrollmentID == "" {
+		return nil
+	}
+	eid, err := uuid.Parse(enrollmentID)
+	if err != nil {
+		return err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
+	return c.recordReplyClass(ctx, eid, ws, class, source, confidence)
+}
+
+// MarkUnsubscribed suppresses the address and, when the reply belongs to an
+// enrollment, halts it (reason unsubscribed) and tags it class=unsubscribe.
+// The suppression insert is the SAME workspace-scoped, idempotent
+// (ON CONFLICT DO NOTHING) one MarkBounced uses — only the reason literal
+// differs ("unsubscribe"). Suppression happens EVEN WHEN enrollmentID is ""
+// (a reply-unsubscribe to a legacy direct-send must still suppress the address
+// — compliance).
+func (c client) MarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID, email string) error {
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
+	// Compliance first: the opt-out suppression is the load-bearing write, so it
+	// runs BEFORE the enrollment stop/tag — a failure there can never skip it.
+	// The insert is idempotent (ON CONFLICT DO NOTHING), so ordering it first is
+	// safe even when the stop/tag below also runs.
+	if err := c.q.AddSuppression(ctx, gen.AddSuppressionParams{WorkspaceID: ws, Email: email, Reason: "unsubscribe"}); err != nil {
+		return err
+	}
+	if enrollmentID == "" {
+		return nil
+	}
+	eid, err := uuid.Parse(enrollmentID)
+	if err != nil {
+		return err
+	}
+	if err := c.enroll.MarkStepStopped(ctx, ws, eid, enrollment.StopUnsubscribed); err != nil {
+		return err
+	}
+	return c.recordReplyClass(ctx, eid, ws, "unsubscribe", "", 0)
+}
+
+// recordReplyClass persists the classified reply (class/source/confidence +
+// replied_at=now()) on the enrollment, workspace-pinned. Shared by MarkReplied,
+// RecordReplyClass and MarkUnsubscribed. Confidence narrows to the real column's
+// float32.
+//
+// An empty class/source is stored as SQL NULL (untagged), NOT "": the 000014
+// CHECK pins reply_class to NULL or one of the 7 classes, so writing "" would
+// be rejected — the interim untagged MarkReplied(...,"","",0) on the enrolled
+// path relies on this to stop-without-tag safely until Task 4 wires real classes.
+func (c client) recordReplyClass(ctx context.Context, eid, ws uuid.UUID, class, source string, confidence float64) error {
+	conf := float32(confidence)
+	return c.q.SetEnrollmentReplyClass(ctx, gen.SetEnrollmentReplyClassParams{
+		ID: eid, WorkspaceID: ws,
+		ReplyClass: nilIfEmpty(class), ReplySource: nilIfEmpty(source), ReplyConfidence: &conf,
+	})
+}
+
+// nilIfEmpty maps an empty string to a nil *string (SQL NULL) and any non-empty
+// string to a pointer to it. Used so an untagged reply writes NULL reply_class/
+// reply_source rather than "" (which the 000014 reply_class CHECK rejects).
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // MarkBounced records a hard bounce: halts the enrollment (if any) and

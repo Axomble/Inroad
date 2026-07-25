@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -108,6 +109,46 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toResponse(c, nil))
 	}
 	httpx.JSON(w, http.StatusOK, out)
+}
+
+// listEnrollments handles GET /campaigns/{id}/enrollments — per-contact reply
+// status for the campaign, paginated by ?limit (default 100, max 500) and
+// ?offset (default 0, clamped in the service). Workspace comes from the JWT; a
+// cross-tenant id 404s before any enrollment read.
+func (h *Handler) listEnrollments(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	rows, err := h.svc.ListEnrollments(r.Context(), ws, id,
+		queryInt32(r.URL.Query().Get("limit")), queryInt32(r.URL.Query().Get("offset")))
+	switch {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not list enrollments")
+	default:
+		out := make([]enrollmentResponse, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, toEnrollmentResponse(row))
+		}
+		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
+// queryInt32 parses a query-string integer, returning 0 for missing/invalid
+// input so the service applies its default/clamp (limit→100, offset→0).
+func queryInt32(v string) int32 {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0
+	}
+	return int32(n)
 }
 
 type trackingRequest struct {

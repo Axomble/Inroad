@@ -269,20 +269,24 @@ type Send struct {
 }
 
 type SequenceEnrollment struct {
-	ID           uuid.UUID          `json:"id"`
-	WorkspaceID  uuid.UUID          `json:"workspace_id"`
-	CampaignID   uuid.UUID          `json:"campaign_id"`
-	ContactID    uuid.UUID          `json:"contact_id"`
-	CurrentStep  int32              `json:"current_step"`
-	Status       string             `json:"status"`
-	StopReason   *string            `json:"stop_reason"`
-	EnrolledAt   pgtype.Timestamptz `json:"enrolled_at"`
-	LastSentAt   pgtype.Timestamptz `json:"last_sent_at"`
-	NextDueAt    pgtype.Timestamptz `json:"next_due_at"`
-	ThreadRootID string             `json:"thread_root_id"`
-	CompletedAt  pgtype.Timestamptz `json:"completed_at"`
-	StoppedAt    pgtype.Timestamptz `json:"stopped_at"`
-	CapDeferrals int32              `json:"cap_deferrals"`
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	CampaignID      uuid.UUID          `json:"campaign_id"`
+	ContactID       uuid.UUID          `json:"contact_id"`
+	CurrentStep     int32              `json:"current_step"`
+	Status          string             `json:"status"`
+	StopReason      *string            `json:"stop_reason"`
+	EnrolledAt      pgtype.Timestamptz `json:"enrolled_at"`
+	LastSentAt      pgtype.Timestamptz `json:"last_sent_at"`
+	NextDueAt       pgtype.Timestamptz `json:"next_due_at"`
+	ThreadRootID    string             `json:"thread_root_id"`
+	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+	StoppedAt       pgtype.Timestamptz `json:"stopped_at"`
+	CapDeferrals    int32              `json:"cap_deferrals"`
+	ReplyClass      *string            `json:"reply_class"`
+	ReplySource     *string            `json:"reply_source"`
+	ReplyConfidence *float32           `json:"reply_confidence"`
+	RepliedAt       pgtype.Timestamptz `json:"replied_at"`
 }
 
 type SequenceStep struct {

@@ -53,7 +53,13 @@ func (f *fakeCore) SetInboxCursorString(context.Context, string, string, string)
 func (f *fakeCore) FindSendByMessageID(context.Context, string, string) (coreapi.SendRef, error) {
 	return coreapi.SendRef{}, nil
 }
-func (f *fakeCore) MarkReplied(context.Context, string, string) error               { return nil }
+func (f *fakeCore) MarkReplied(context.Context, string, string, string, string, float64) error {
+	return nil
+}
+func (f *fakeCore) MarkUnsubscribed(context.Context, string, string, string) error { return nil }
+func (f *fakeCore) RecordReplyClass(context.Context, string, string, string, string, float64) error {
+	return nil
+}
 func (f *fakeCore) MarkBounced(context.Context, string, string, string, bool) error { return nil }
 
 type fakeSendEnqueuer struct {

@@ -3,6 +3,7 @@ package campaign
 import (
 	"math"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -25,6 +26,7 @@ func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r.Post("/", h.create)
 	r.Get("/", h.list)
 	r.Get("/{id}", h.get)
+	r.Get("/{id}/enrollments", h.listEnrollments)
 	r.With(auth.RequireVerified(checker)).Post("/{id}/launch", h.launch)
 	r.Put("/{id}/tracking", h.toggleTracking)
 	for _, s := range h.subs {
@@ -43,6 +45,31 @@ type campaignResponse struct {
 
 func toResponse(c gen.Campaign, stats map[string]int64) campaignResponse {
 	return campaignResponse{ID: c.ID.String(), Name: c.Name, Subject: c.Subject, Status: c.Status, Stats: stats}
+}
+
+// enrollmentResponse is one row of GET /campaigns/{id}/enrollments: a contact's
+// display email/name, the enrollment lifecycle status, and the classified reply
+// (class/source/replied_at). The three reply fields are null until a reply is
+// classified for that enrollment; replied_at is RFC3339 (UTC).
+type enrollmentResponse struct {
+	Email       string  `json:"email"`
+	FirstName   string  `json:"first_name"`
+	Status      string  `json:"status"`
+	ReplyClass  *string `json:"reply_class"`
+	ReplySource *string `json:"reply_source"`
+	RepliedAt   *string `json:"replied_at"`
+}
+
+func toEnrollmentResponse(e gen.ListCampaignEnrollmentsRow) enrollmentResponse {
+	var repliedAt *string
+	if e.RepliedAt.Valid {
+		s := e.RepliedAt.Time.UTC().Format(time.RFC3339)
+		repliedAt = &s
+	}
+	return enrollmentResponse{
+		Email: e.Email, FirstName: e.FirstName, Status: e.Status,
+		ReplyClass: e.ReplyClass, ReplySource: e.ReplySource, RepliedAt: repliedAt,
+	}
 }
 
 // stepView is a step in the campaign detail response.

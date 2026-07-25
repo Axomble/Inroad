@@ -140,6 +140,34 @@ or SSRF. (Not a full threat model; that's future work.)
     change remain v1 until they are rewritten; they stay workspace-isolated by the
     `workspace_id` SQL filter (invariant 4) in the meantime.
 
+## Reply classification & opt-out compliance
+20. **A reply-classified unsubscribe suppresses the address via the existing
+    workspace-scoped, idempotent suppression path.** When `processMessage`
+    (`internal/worker/inbox/poll.go`) classifies a matched reply as `unsubscribe`
+    — or detects an explicit opt-out inside an otherwise-automated reply
+    (`LooksLikeUnsubscribe`, where compliance wins over automation) — it calls
+    `coreapi.MarkUnsubscribed`, which inserts into the SAME workspace-scoped,
+    `ON CONFLICT DO NOTHING` suppression table `MarkBounced` uses (only the reason
+    literal differs: `unsubscribe`). The suppression is the load-bearing write and
+    runs BEFORE the enrollment stop/tag, so a downstream failure can never skip it,
+    and it fires EVEN WHEN there is no enrollment (a legacy direct-send opt-out
+    must still suppress the address). Opt-outs are honored in the fail-safe
+    direction: the accepted trade-off is occasionally suppressing an out-of-office
+    whose footer says "unsubscribe" — over-honoring an opt-out is compliant;
+    under-honoring one is not.
+21. **Classification is pure, offline, and side-effect-free.** Layers 1–2
+    (`internal/platform/replyclassify`) are deterministic header/lexicon scans with
+    no database access, no network/outbound dial, and no per-message global state;
+    the optional Layer-3 model seam is injected via `New` and is currently UNWIRED
+    (`New(nil)`), so the shipped path adds no AI dependency and no new SSRF surface.
+    The classifier reads only the reply's headers/subject/body projection and never
+    logs PII or secrets; it emits a class/source/confidence, not message content.
+    Automated replies (`auto_reply`/`out_of_office`) are tagged via
+    `RecordReplyClass` but keep the enrollment ACTIVE — they never over-suppress an
+    address nor wrongly stop a sequence (the OOO-trap fix). Every reply-driven write
+    (`MarkReplied` / `MarkUnsubscribed` / `RecordReplyClass`) is `workspace_id`-pinned
+    from the poll job, upholding invariant 4.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
@@ -148,6 +176,13 @@ or SSRF. (Not a full threat model; that's future work.)
 - Rate limiting / abuse controls on auth and connect endpoints.
 - Audit log for sensitive actions (mailbox connect/disconnect, settings changes).
 - Server-side single-use nonce store for the OAuth `state` (see invariant 10).
+- Rate limiting + an audit log on reply-driven suppression/stop. Reply-driven
+  actions (`MarkReplied`/`MarkUnsubscribed`) are workspace-bounded (invariant 21)
+  but are spoofable WITHIN a workspace: anyone who knows a target contact email
+  and a real `Message-ID` of a send could forge an inbound reply that suppresses
+  the contact or stops its enrollment. This is bounded (no cross-tenant effect, no
+  data read) but unthrottled and unlogged today; a rate limit + audit trail on
+  reply-driven state changes is the intended hardening.
 
 ## Checklist for a security-sensitive change
 - [ ] New stored credential? → sealed via a workspace Sealer from

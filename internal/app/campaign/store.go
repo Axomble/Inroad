@@ -60,6 +60,10 @@ type Store interface {
 	StopReasonCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error)
 	// SetTracking flips the campaign's tracking_enabled flag.
 	SetTracking(ctx context.Context, ws, campaignID uuid.UUID, enabled bool) error
+	// ListEnrollments returns per-contact reply status for the campaign's
+	// enrollments (contact email/name plus reply class/source/replied_at),
+	// workspace-pinned, most-recently-replied first, paginated by limit/offset.
+	ListEnrollments(ctx context.Context, ws, campaignID uuid.UUID, limit, offset int32) ([]gen.ListCampaignEnrollmentsRow, error)
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -183,6 +187,12 @@ func (s *PgStore) StopReasonCounts(ctx context.Context, ws, campaignID uuid.UUID
 func (s *PgStore) SetTracking(ctx context.Context, ws, campaignID uuid.UUID, enabled bool) error {
 	return s.q.SetCampaignTracking(ctx, gen.SetCampaignTrackingParams{
 		ID: campaignID, WorkspaceID: ws, TrackingEnabled: enabled,
+	})
+}
+
+func (s *PgStore) ListEnrollments(ctx context.Context, ws, campaignID uuid.UUID, limit, offset int32) ([]gen.ListCampaignEnrollmentsRow, error) {
+	return s.q.ListCampaignEnrollments(ctx, gen.ListCampaignEnrollmentsParams{
+		CampaignID: campaignID, WorkspaceID: ws, Limit: limit, Offset: offset,
 	})
 }
 

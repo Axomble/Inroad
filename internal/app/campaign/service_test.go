@@ -41,6 +41,13 @@ type fakeStore struct {
 	setTrackingEnabled           bool
 	setTrackingCalls             int
 	setTrackingErr               error
+
+	// enrollment-listing fixtures/spies: enrollmentRows is returned verbatim;
+	// the limit/offset the service passed (post-clamp) are recorded so tests can
+	// assert the default/clamp behaviour.
+	enrollmentRows                              []gen.ListCampaignEnrollmentsRow
+	listEnrollmentsCalls                        int
+	listEnrollmentsLimit, listEnrollmentsOffset int32
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
@@ -86,6 +93,11 @@ func (f *fakeStore) SetTracking(_ context.Context, ws, id uuid.UUID, enabled boo
 	f.setTrackingCalls++
 	f.setTrackingWS, f.setTrackingID, f.setTrackingEnabled = ws, id, enabled
 	return f.setTrackingErr
+}
+func (f *fakeStore) ListEnrollments(_ context.Context, _, _ uuid.UUID, limit, offset int32) ([]gen.ListCampaignEnrollmentsRow, error) {
+	f.listEnrollmentsCalls++
+	f.listEnrollmentsLimit, f.listEnrollmentsOffset = limit, offset
+	return f.enrollmentRows, nil
 }
 
 // errNotFound is what the sqlc-backed Get returns when the row isn't in the
@@ -486,5 +498,54 @@ func TestSetTrackingCrossTenantIsNotFound(t *testing.T) {
 	}
 	if store.setTrackingCalls != 0 {
 		t.Fatalf("expected store.SetTracking not called on cross-tenant id, got %d calls", store.setTrackingCalls)
+	}
+}
+
+// TestListEnrollmentsCrossTenantIsNotFound proves the ownership check runs
+// before any enrollment read: a campaign id from another workspace 404s and the
+// store's ListEnrollments is never called (no cross-tenant contact leak).
+func TestListEnrollmentsCrossTenantIsNotFound(t *testing.T) {
+	store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{
+		{uuid.New(), uuid.New()}: {Name: "foreign"},
+	}}
+	svc := NewService(store, okChecker{active: true})
+	if _, err := svc.ListEnrollments(context.Background(), uuid.New(), uuid.New(), 100, 0); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound for cross-tenant ListEnrollments, got %v", err)
+	}
+	if store.listEnrollmentsCalls != 0 {
+		t.Fatalf("expected store.ListEnrollments not called on cross-tenant id, got %d calls", store.listEnrollmentsCalls)
+	}
+}
+
+// TestListEnrollmentsClampsPagination proves limit is defaulted/clamped to
+// [1,500] and a negative offset floored to 0 before hitting the store.
+func TestListEnrollmentsClampsPagination(t *testing.T) {
+	ws, id := uuid.New(), uuid.New()
+	newSvc := func() (*Service, *fakeStore) {
+		store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws}}}
+		return NewService(store, okChecker{active: true}), store
+	}
+	cases := []struct {
+		name                  string
+		inLimit, inOffset     int32
+		wantLimit, wantOffset int32
+	}{
+		{"zero limit defaults to 100", 0, 0, defaultEnrollmentLimit, 0},
+		{"negative limit defaults to 100", -5, 0, defaultEnrollmentLimit, 0},
+		{"over-max limit clamps to 500", 10000, 0, maxEnrollmentLimit, 0},
+		{"in-range limit preserved", 250, 40, 250, 40},
+		{"negative offset floored to 0", 50, -3, 50, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store := newSvc()
+			if _, err := svc.ListEnrollments(context.Background(), ws, id, tc.inLimit, tc.inOffset); err != nil {
+				t.Fatalf("ListEnrollments: %v", err)
+			}
+			if store.listEnrollmentsLimit != tc.wantLimit || store.listEnrollmentsOffset != tc.wantOffset {
+				t.Fatalf("clamp wrong: got limit=%d offset=%d want limit=%d offset=%d",
+					store.listEnrollmentsLimit, store.listEnrollmentsOffset, tc.wantLimit, tc.wantOffset)
+			}
+		})
 	}
 }

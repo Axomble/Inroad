@@ -27,16 +27,3 @@ func messageIDTokens(v string) []string {
 	}
 	return out
 }
-
-// IsAutoReply reports whether the message is an auto-responder per RFC 3834
-// (Auto-Submitted present and not "no") and so should NOT be treated as an
-// engaged reply. Scoped to Auto-Submitted only, matching design spec A4 —
-// Precedence: bulk/list is a distinct (mailing-list) signal, not an
-// auto-reply one, and is intentionally not matched here.
-func IsAutoReply(hdr mail.Header) bool {
-	v := strings.TrimSpace(hdr.Get("Auto-Submitted"))
-	if v == "" {
-		return false
-	}
-	return !strings.EqualFold(v, "no")
-}

@@ -397,6 +397,21 @@ paths:
         '400': { description: Invalid JSON }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /campaigns/{id}/enrollments:
+    get:
+      operationId: listCampaignEnrollments
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, minimum: 1, maximum: 500 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, default: 0, minimum: 0 } }
+      responses:
+        '200': { description: Per-contact reply status for the campaign's enrollments, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/CampaignEnrollment' } } } } }
+        '400': { description: Invalid campaign id }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '500': { description: Could not list enrollments }
   /campaigns/{id}/steps:
     get:
       operationId: listSteps
@@ -719,6 +734,31 @@ components:
         reply_rate: { type: number }
         bounce_rate: { type: number }
         unsub_rate: { type: number }
+    CampaignEnrollment:
+      type: object
+      description: >-
+        One contact's enrollment reply status in a campaign. The reply fields
+        (reply_class/reply_source/replied_at) are null until an inbound reply is
+        classified for that enrollment.
+      required: [email, first_name, status, reply_class, reply_source, replied_at]
+      properties:
+        email: { type: string }
+        first_name: { type: string }
+        status: { type: string, description: enrollment lifecycle status (active/completed/stopped) }
+        reply_class:
+          type: string
+          nullable: true
+          enum: [positive, negative, neutral, auto_reply, out_of_office, unsubscribe, unknown]
+          description: classified sentiment/intent bucket of the reply
+        reply_source:
+          type: string
+          nullable: true
+          description: layer that decided the class (header/lexicon/model)
+        replied_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: RFC3339 timestamp the reply was classified
     SequenceStep:
       type: object
       properties:

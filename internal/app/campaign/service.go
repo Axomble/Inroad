@@ -270,6 +270,35 @@ func (s *Service) Detail(ctx context.Context, ws, id uuid.UUID) (CampaignDetail,
 	return CampaignDetail{Campaign: c, Steps: steps, SendStats: sends, Enrollments: enr, Metrics: metrics}, nil
 }
 
+// Enrollment-listing pagination bounds: default page size when the caller
+// supplies none (or a non-positive value) and the hard ceiling per page.
+const (
+	defaultEnrollmentLimit = 100
+	maxEnrollmentLimit     = 500
+)
+
+// ListEnrollments returns per-contact reply status for the campaign, paginated.
+// The campaign's workspace ownership is verified first (a cross-tenant id yields
+// ErrNotFound before any enrollment read), and the SQL is itself workspace-pinned
+// as defense in depth. limit is clamped to [1,maxEnrollmentLimit] with a default
+// of defaultEnrollmentLimit for non-positive input; a negative offset is floored
+// to 0.
+func (s *Service) ListEnrollments(ctx context.Context, ws, id uuid.UUID, limit, offset int32) ([]gen.ListCampaignEnrollmentsRow, error) {
+	if _, err := s.store.Get(ctx, ws, id); err != nil {
+		return nil, ErrNotFound
+	}
+	switch {
+	case limit <= 0:
+		limit = defaultEnrollmentLimit
+	case limit > maxEnrollmentLimit:
+		limit = maxEnrollmentLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return s.store.ListEnrollments(ctx, ws, id, limit, offset)
+}
+
 // SetTracking flips the campaign's tracking-enabled flag, workspace-scoped.
 // Editable regardless of campaign status: tracking only affects sends going
 // out after the flag changes, so there's no reason to restrict it to draft.

@@ -11,6 +11,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/replyclassify"
 )
 
 // fetchBatchSize bounds how many messages one inbox:poll pass pulls from a
@@ -41,9 +42,10 @@ type GraphFetcher interface {
 // m365 polls via the Microsoft Graph delta query (opaque delta-link cursor),
 // smtp opens the mailbox's IMAP connection, establishes/validates the poll
 // baseline via CurrentState, and fetches anything new since the stored UID
-// cursor. All paths run the SAME reply/bounce classification (processMessage)
-// and persist their respective cursor.
-func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher, graph GraphFetcher) func(context.Context, *asynq.Task) error {
+// cursor. All paths run the SAME reply/bounce classification (processMessage,
+// which routes a matched reply through the injected classifier) and persist
+// their respective cursor.
+func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher, graph GraphFetcher, classifier *replyclassify.Classifier) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPollPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -56,10 +58,10 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		}
 
 		if job.Provider == "gmail" {
-			return pollGmail(ctx, core, gmail, p, job)
+			return pollGmail(ctx, core, gmail, classifier, p, job)
 		}
 		if job.Provider == "m365" {
-			return pollGraph(ctx, core, graph, p, job)
+			return pollGraph(ctx, core, graph, classifier, p, job)
 		}
 		defer zeroize(job.Password)
 
@@ -93,7 +95,7 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 
 		var replies, bounces, skipped int
 		for _, msg := range msgs {
-			matched, err := processMessage(ctx, core, p.WorkspaceID, msg, &replies, &bounces)
+			matched, err := processMessage(ctx, core, classifier, p.WorkspaceID, msg, &replies, &bounces)
 			if err != nil {
 				return err
 			}
@@ -135,7 +137,7 @@ func scannedWindowTop(sinceUID, uidNext uint32) uint32 {
 // path as IMAP (ParseDSN + reply matcher), and persist the advanced cursor via
 // SetInboxCursorString (the IMAP UID cursor columns are untouched). The
 // short-lived access token is zeroized after the pass, like the IMAP password.
-func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
+func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, classifier *replyclassify.Classifier, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
 	defer zeroize(job.AccessToken)
 
 	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
@@ -145,7 +147,7 @@ func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, p 
 
 	var replies, bounces, skipped int
 	for _, msg := range msgs {
-		matched, err := processMessage(ctx, core, p.WorkspaceID, msg, &replies, &bounces)
+		matched, err := processMessage(ctx, core, classifier, p.WorkspaceID, msg, &replies, &bounces)
 		if err != nil {
 			return err
 		}
@@ -166,7 +168,7 @@ func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, p 
 // untouched). The short-lived access token is zeroized after the pass, like the
 // IMAP password and the Gmail token. Byte-for-byte parallel to pollGmail; only
 // the transport and the "provider" log value differ.
-func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
+func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, classifier *replyclassify.Classifier, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
 	defer zeroize(job.AccessToken)
 
 	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
@@ -176,7 +178,7 @@ func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, p 
 
 	var replies, bounces, skipped int
 	for _, msg := range msgs {
-		matched, err := processMessage(ctx, core, p.WorkspaceID, msg, &replies, &bounces)
+		matched, err := processMessage(ctx, core, classifier, p.WorkspaceID, msg, &replies, &bounces)
 		if err != nil {
 			return err
 		}
@@ -191,13 +193,29 @@ func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, p 
 }
 
 // processMessage classifies one fetched message and takes the corresponding
-// action. *bounces is bumped on a hard bounce that gets marked; *replies is
-// bumped only when a matched reply actually calls MarkReplied (i.e. the
-// matched send has an enrollment — a match against the legacy direct-send
-// path has nothing to stop, so it isn't counted as an engaged reply). The
-// returned bool reports whether the message matched anything (a bounce or a
-// reply) — used only for the skipped-count in the poll summary log.
-func processMessage(ctx context.Context, core coreapi.Client, workspaceID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
+// action. A DSN is handled first (hard bounce → MarkBounced) and never falls
+// through to the reply path. A non-DSN message that matches a send is routed
+// through the reply classifier:
+//
+//   - automated (auto_reply / out_of_office) → RecordReplyClass, enrollment
+//     kept ACTIVE (the OOO-trap fix) and counted as skipped, NOT a reply —
+//     UNLESS the automated message also carries an explicit opt-out, in which
+//     case compliance wins and it is routed to MarkUnsubscribed;
+//   - unsubscribe → MarkUnsubscribed (address suppressed + stop), counted as
+//     handled;
+//   - anything else (positive/negative/neutral/unknown) → MarkReplied tagged,
+//     counted as an engaged reply.
+//
+// *bounces is bumped on a marked hard bounce; *replies is bumped on a matched
+// reply routed to MarkReplied that actually has an enrollment to stop (so the
+// metric keeps its "engaged enrollment reply" meaning). enrollmentID may be ""
+// (legacy direct-send): classification and routing still run — MarkUnsubscribed
+// still suppresses the address, and the tagged RecordReplyClass/MarkReplied
+// writes no-op the enrollment update coreapi-side. The returned bool reports
+// whether the message matched (a bounce or a stopping/suppressing reply) — used
+// only for the skipped-count in the poll summary log; an automated tag reports
+// false so it counts as skipped rather than a reply.
+func processMessage(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, workspaceID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
 	d := ParseDSN(msg.Header, msg.ContentType, msg.Body)
 	if d.Kind != NotABounce {
 		// A DSN is never also a reply — always handled here, never falls
@@ -222,10 +240,10 @@ func processMessage(ctx context.Context, core coreapi.Client, workspaceID string
 		}
 	}
 
-	if IsAutoReply(msg.Header) {
-		return false, nil
-	}
-
+	// The standalone IsAutoReply early-skip is intentionally gone: the
+	// classifier's Layer 1 is a strict superset of it, so an automated reply is
+	// now routed through classification (tagged via RecordReplyClass) rather
+	// than silently dropped before it ever matches a send.
 	for _, id := range MessageIDs(msg.Header) {
 		s, err := core.FindSendByMessageID(ctx, workspaceID, id)
 		if err != nil {
@@ -234,13 +252,51 @@ func processMessage(ctx context.Context, core coreapi.Client, workspaceID string
 			}
 			return false, err
 		}
-		if s.EnrollmentID != "" {
-			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID); err != nil {
+
+		in := replyclassify.Input{
+			Headers:  map[string][]string(msg.Header), // net/mail.Header is already map[string][]string
+			Subject:  msg.Header.Get("Subject"),
+			BodyText: string(msg.Body),
+		}
+		r := classifier.Classify(ctx, in)
+		switch {
+		case replyclassify.IsAutomated(r.Class):
+			if classifier.LooksLikeUnsubscribe(in) {
+				// Compliance wins over automation: an explicit opt-out is
+				// honored even inside an automated message. The accepted
+				// trade-off is occasionally suppressing an OOO whose footer
+				// says "unsubscribe" — suppression is the fail-safe/compliant
+				// direction, so we err that way on purpose.
+				if err := core.MarkUnsubscribed(ctx, s.EnrollmentID, workspaceID, s.ContactEmail); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+			// auto_reply / out_of_office: tag but keep the enrollment ACTIVE
+			// (the OOO-trap fix). Not an engaged reply → reported as skipped.
+			if err := core.RecordReplyClass(ctx, s.EnrollmentID, workspaceID, r.Class, r.Source, r.Confidence); err != nil {
 				return false, err
 			}
-			*replies++
+			return false, nil
+		case r.Class == replyclassify.ClassUnsubscribe:
+			// Reply-based opt-out: suppress the address (compliance) + stop.
+			if err := core.MarkUnsubscribed(ctx, s.EnrollmentID, workspaceID, s.ContactEmail); err != nil {
+				return false, err
+			}
+			return true, nil
+		default:
+			// positive / negative / neutral / unknown: stop, tagged.
+			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID, r.Class, r.Source, r.Confidence); err != nil {
+				return false, err
+			}
+			// Only an enrollment reply is an "engaged reply": a legacy
+			// direct-send match (EnrollmentID == "") has nothing to stop, so
+			// MarkReplied no-ops coreapi-side and it isn't counted.
+			if s.EnrollmentID != "" {
+				*replies++
+			}
+			return true, nil
 		}
-		return true, nil
 	}
 	return false, nil
 }
