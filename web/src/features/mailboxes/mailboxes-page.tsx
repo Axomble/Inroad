@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, StatStrip, Stat, PageBody, EmptyBlock } from '@/components/layout/page'
+import { httpStatus } from '@/lib/rtk-error'
 import type { Mailbox } from '@/store/api'
 import type { StartOauthResponse } from './api'
 import {
@@ -257,6 +258,10 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
   const [resume, resumeState] = useResumeMailboxMutation()
   const [remove, removeState] = useDeleteMailboxMutation()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // A failed pause/resume/delete was previously silent — surface it inline on
+  // the row (the menu/dialog has already closed by the time this shows, so the
+  // error isn't hidden underneath either).
+  const [actionError, setActionError] = useState<string | null>(null)
   const id = mailbox.id ?? ''
   const busy = pauseState.isLoading || resumeState.isLoading || removeState.isLoading
   // Both OAuth providers send via a hosted API rather than SMTP; the row's
@@ -264,14 +269,20 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
   const oauthLabel = mailboxProviderLabel(mailbox.provider)
 
   async function onPause() {
-    await pause({ id })
+    setActionError(null)
+    const res = await pause({ id })
+    if ('error' in res) setActionError(mailboxActionErrorMessage('pause', httpStatus(res.error)))
   }
   async function onResume() {
-    await resume({ id })
+    setActionError(null)
+    const res = await resume({ id })
+    if ('error' in res) setActionError(mailboxActionErrorMessage('resume', httpStatus(res.error)))
   }
   async function onDelete() {
-    await remove({ id })
+    setActionError(null)
+    const res = await remove({ id })
     setConfirmDelete(false)
+    if ('error' in res) setActionError(mailboxActionErrorMessage('delete', httpStatus(res.error)))
   }
 
   return (
@@ -286,6 +297,11 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
           {oauthLabel ? `${oauthLabel} · API` : `${mailbox.smtp_host}:${mailbox.smtp_port}`}
           {mailbox.last_error ? <span className="text-danger"> · {mailbox.last_error}</span> : null}
         </div>
+        {actionError && (
+          <div role="alert" className="mt-0.5 text-[11px] text-danger">
+            {actionError}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2 tabular-nums">
@@ -350,6 +366,12 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
       </AlertDialog>
     </li>
   )
+}
+
+/** Human copy for a failed row-level mailbox mutation, narrowed via httpStatus. */
+function mailboxActionErrorMessage(action: 'pause' | 'resume' | 'delete', status?: number): string {
+  if (status === 404) return 'This mailbox no longer exists — refresh the page.'
+  return `Couldn't ${action} this mailbox. Please try again.`
 }
 
 function LoadingRows() {

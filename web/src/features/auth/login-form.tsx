@@ -71,9 +71,12 @@ export function LoginForm() {
         <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '240ms' }}>
           <div className="flex items-center justify-between">
             <Label htmlFor={passwordId}>Password</Label>
-            <a href="#" className="text-xs text-muted-foreground transition-colors hover:text-accent-ink">
+            <Link
+              to="/forgot-password"
+              className="text-xs text-muted-foreground transition-colors hover:text-accent-ink"
+            >
               Forgot password?
-            </a>
+            </Link>
           </div>
           <PasswordInput
             id={passwordId}

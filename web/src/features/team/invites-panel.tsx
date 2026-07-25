@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, PageBody, EmptyBlock } from '@/components/layout/page'
 import { useAppSelector } from '@/store/hooks'
+import { httpStatus } from '@/lib/rtk-error'
 import type { Invite } from '@/store/api'
 import { useCreateWorkspaceInviteMutation, useListWorkspaceInvitesQuery, useRevokeWorkspaceInviteMutation } from './api'
 
@@ -148,7 +149,7 @@ function InviteForm({
   }
 
   function errorMessage() {
-    const status = (error as { status?: number })?.status
+    const status = httpStatus(error)
     if (status === 409) return 'An invite is already pending for that email.'
     if (status === 400) return 'Please enter a valid email address.'
     return "Couldn't send the invite. Please try again."

@@ -6,6 +6,7 @@ import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { httpStatus } from '@/lib/rtk-error'
 import { useCreateListMutation } from './api'
 
 const schema = z.object({
@@ -14,7 +15,7 @@ const schema = z.object({
 type Values = z.infer<typeof schema>
 
 function createListErrorMessage(error: unknown): string {
-  const status = (error as { status?: number | string })?.status
+  const status = httpStatus(error)
   if (status === 409) return 'A list with this name already exists.'
   if (status === 400) return 'Please enter a list name.'
   return "Couldn't create the list. Please try again."

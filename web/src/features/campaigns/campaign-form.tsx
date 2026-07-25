@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
+import { httpStatus } from '@/lib/rtk-error'
 import { useCreateCampaignMutation } from './api'
 // Cross-feature query-hook imports are allowed for read-only reference data
 // (see features/campaigns/api.ts). Cross-feature UI imports remain forbidden.
@@ -23,7 +24,7 @@ const schema = z.object({
 type Values = z.infer<typeof schema>
 
 function createErrorMessage(error: unknown): string {
-  const status = (error as { status?: number })?.status
+  const status = httpStatus(error)
   if (status === 422) return 'That mailbox is not connected or active.'
   if (status === 404) return 'That list no longer exists.'
   if (status === 400) return 'Please fill in all required fields.'

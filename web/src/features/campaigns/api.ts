@@ -24,7 +24,7 @@ export type { CampaignEnrollment } from '@/store/api'
 export type { SequenceStep, StepRequest } from '@/store/api'
 
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign', 'Enrollment', 'Step'],
+  addTagTypes: ['Campaign', 'Step'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -52,9 +52,11 @@ const campaignApi = api.enhanceEndpoints({
         { type: 'Campaign', id: 'LIST' },
       ],
     },
-    listCampaignEnrollments: {
-      providesTags: (_result, _error, arg) => [{ type: 'Enrollment', id: arg.id }],
-    },
+    // No `providesTags` for enrollments: replies are classified server-side by
+    // the worker, so no client mutation can ever invalidate an `Enrollment`
+    // tag — it would be a dead tag that never refreshes. The component instead
+    // sets `refetchOnMountOrArgChange` so reopening the detail (or paging)
+    // pulls fresh reply classes without continuous polling.
     // Sequence steps: one `Step` tag keyed by campaign id. Every structural or
     // content mutation invalidates it so the ordered list refetches.
     listSteps: {

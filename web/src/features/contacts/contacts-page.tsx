@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Page, PageTopbar, SectionBar, StatStrip, Stat, PageBody, EmptyBlock } from '@/components/layout/page'
 import type { ImportResult } from '@/store/api'
+import { httpStatus } from '@/lib/rtk-error'
 import { useListListsQuery, useListContactsQuery } from './api'
 import { NewListForm } from './new-list-form'
 import { ImportCsvForm } from './import-csv-form'
@@ -13,7 +14,7 @@ export function ContactsPage() {
   const [showNewList, setShowNewList] = useState(false)
   const [selectedListId, setSelectedListId] = useState<string | null>(null)
   const [lastImport, setLastImport] = useState<ImportResult | null>(null)
-  const { data: listsData, isLoading: listsLoading } = useListListsQuery()
+  const { data: listsData, isLoading: listsLoading, error: listsError } = useListListsQuery()
   const lists = listsData ?? []
 
   // Land on the first list once lists have loaded, so the contacts pane isn't
@@ -61,6 +62,10 @@ export function ContactsPage() {
               <Skeleton className="h-6 w-full" />
               <Skeleton className="h-6 w-full" />
             </div>
+          ) : listsError ? (
+            <p role="alert" className="p-4 text-xs text-danger">
+              Couldn't load lists{httpStatus(listsError) ? ` (${httpStatus(listsError)})` : ''} — try again.
+            </p>
           ) : lists.length === 0 && !showNewList ? (
             <p className="p-4 text-xs text-muted-foreground">No lists yet.</p>
           ) : (
@@ -117,7 +122,7 @@ function ContactsPane({
   // Fetch one extra row so we can distinguish "exactly `limit` results" (no
   // next page) from "at least `limit`+1 results" (next page available). The
   // extra row is trimmed off before render.
-  const { data, isLoading } = useListContactsQuery({ list: listId, limit: limit + 1, offset })
+  const { data, isLoading, error } = useListContactsQuery({ list: listId, limit: limit + 1, offset })
   const fetched = data ?? []
   const hasMore = fetched.length > limit
   const contacts = hasMore ? fetched.slice(0, limit) : fetched
@@ -141,6 +146,10 @@ function ContactsPane({
               </li>
             ))}
           </ul>
+        ) : error ? (
+          <div role="alert" className="px-5 py-6 text-sm text-danger">
+            Couldn't load contacts{httpStatus(error) ? ` (${httpStatus(error)})` : ''} — try again.
+          </div>
         ) : contacts.length === 0 ? (
           <EmptyBlock
             title="No contacts in this list"

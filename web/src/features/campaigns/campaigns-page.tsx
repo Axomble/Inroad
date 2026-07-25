@@ -11,6 +11,7 @@ import {
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, StatStrip, Stat, SectionBar, PageBody, EmptyBlock } from '@/components/layout/page'
 import { cn } from '@/lib/utils'
+import { httpStatus } from '@/lib/rtk-error'
 import type { Campaign } from '@/store/api'
 import { useListCampaignsQuery, useGetCampaignQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
@@ -102,7 +103,7 @@ function CampaignRow({
     setError(null)
     const res = await launch({ id })
     if ('error' in res) {
-      const status = (res.error as { status?: number })?.status
+      const status = httpStatus(res.error)
       setError(status === 409 ? 'Already launched.' : status === 422 ? 'Target list is empty.' : 'Launch failed.')
     }
   }
@@ -155,7 +156,7 @@ function CampaignRow({
 }
 
 function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
-  const { data, isLoading } = useGetCampaignQuery({ id })
+  const { data, isLoading, error } = useGetCampaignQuery({ id })
   const stats = data?.stats ?? {}
   const n = (k: string) => stats[k] ?? 0
   return (
@@ -173,6 +174,12 @@ function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="px-5 py-4">
           <Skeleton className="h-6 w-64" />
         </div>
+      ) : error ? (
+        // A failed detail fetch must not masquerade as a real all-zero campaign
+        // (the grid below would be indistinguishable from an empty one).
+        <div role="alert" className="px-5 py-6 text-sm text-danger">
+          Couldn't load campaign stats{httpStatus(error) ? ` (${httpStatus(error)})` : ''} — try again.
+        </div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-4">
           <Stat label="Queued" value={n('queued')} dot={<Dot className="bg-faint" />} />
@@ -182,7 +189,7 @@ function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
         </div>
       )}
 
-      {!isLoading && (
+      {!isLoading && !error && (
         <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
       )}
 

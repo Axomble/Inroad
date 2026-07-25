@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Info } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -124,31 +125,49 @@ function IndicativeBadge() {
 
 function TrackingToggle({ campaignId, enabled }: { campaignId: string; enabled: boolean }) {
   const [updateTracking, { isLoading }] = useUpdateCampaignTrackingMutation()
+  // A failed toggle previously left the switch un-moved with no explanation.
+  // Track failure so we can surface it (and deliberately await the mutation
+  // rather than firing it as a floating promise).
+  const [failed, setFailed] = useState(false)
+
+  async function onToggle() {
+    setFailed(false)
+    const res = await updateTracking({
+      id: campaignId,
+      updateCampaignTrackingRequest: { enabled: !enabled },
+    })
+    if ('error' in res) setFailed(true)
+  }
 
   return (
-    <label className="flex items-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">
-      Tracking
-      <button
-        type="button"
-        role="switch"
-        aria-checked={enabled}
-        aria-label="Toggle open and click tracking"
-        disabled={isLoading}
-        onClick={() =>
-          updateTracking({ id: campaignId, updateCampaignTrackingRequest: { enabled: !enabled } })
-        }
-        className={cn(
-          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50',
-          enabled ? 'bg-ok' : 'bg-border-strong',
-        )}
-      >
-        <span
+    <div className="flex items-center gap-2">
+      {failed && (
+        <span role="alert" className="font-mono text-[10px] normal-case tracking-normal text-danger">
+          Couldn't update tracking — try again.
+        </span>
+      )}
+      <label className="flex items-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">
+        Tracking
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Toggle open and click tracking"
+          disabled={isLoading}
+          onClick={() => void onToggle()}
           className={cn(
-            'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
-            enabled ? 'translate-x-[18px]' : 'translate-x-1',
+            'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50',
+            enabled ? 'bg-ok' : 'bg-border-strong',
           )}
-        />
-      </button>
-    </label>
+        >
+          <span
+            className={cn(
+              'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
+              enabled ? 'translate-x-[18px]' : 'translate-x-1',
+            )}
+          />
+        </button>
+      </label>
+    </div>
   )
 }
