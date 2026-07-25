@@ -48,7 +48,7 @@ func bearerFor(t *testing.T) string {
 
 func do(t *testing.T, r http.Handler, method, path, authHeader string, headers map[string]string, cookies ...*http.Cookie) int {
 	t.Helper()
-	req := httptest.NewRequest(method, path, nil)
+	req := httptest.NewRequest(method, path, http.NoBody)
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}

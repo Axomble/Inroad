@@ -58,10 +58,10 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		}
 
 		if job.Provider == "gmail" {
-			return pollGmail(ctx, core, gmail, classifier, p, job)
+			return pollAPI(ctx, core, gmail, classifier, p, job, "gmail")
 		}
 		if job.Provider == "m365" {
-			return pollGraph(ctx, core, graph, classifier, p, job)
+			return pollAPI(ctx, core, graph, classifier, p, job, "m365")
 		}
 		defer zeroize(job.Password)
 
@@ -132,43 +132,21 @@ func scannedWindowTop(sinceUID, uidNext uint32) uint32 {
 	return top
 }
 
-// pollGmail runs one inbox poll pass for a gmail mailbox: fetch new messages
-// since the opaque historyId cursor, classify each with the SAME processMessage
-// path as IMAP (ParseDSN + reply matcher), and persist the advanced cursor via
-// SetInboxCursorString (the IMAP UID cursor columns are untouched). The
-// short-lived access token is zeroized after the pass, like the IMAP password.
-func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, classifier *replyclassify.Classifier, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
-	defer zeroize(job.AccessToken)
-
-	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
-	if err != nil {
-		return err
-	}
-
-	var replies, bounces, skipped int
-	for _, msg := range msgs {
-		matched, err := processMessage(ctx, core, classifier, p.WorkspaceID, msg, &replies, &bounces)
-		if err != nil {
-			return err
-		}
-		if !matched {
-			skipped++
-		}
-	}
-
-	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", "gmail",
-		"messages", len(msgs), "replies", replies, "bounces", bounces, "skipped", skipped)
-	return core.SetInboxCursorString(ctx, p.MailboxID, p.WorkspaceID, newCursor)
+// apiFetcher is the common shape of GmailFetcher and GraphFetcher: both resume
+// from an opaque provider cursor and return the advanced cursor. pollAPI runs
+// the shared per-pass logic for either transport.
+type apiFetcher interface {
+	Fetch(ctx context.Context, accessToken, sinceCursor string, maxN int) (msgs []mail.InboundMessage, newCursor string, err error)
 }
 
-// pollGraph runs one inbox poll pass for an m365 mailbox: fetch new messages
-// since the opaque Graph delta-link cursor, classify each with the SAME
-// processMessage path as IMAP/Gmail (ParseDSN + reply matcher), and persist the
+// pollAPI runs one inbox poll pass for an API-based mailbox (gmail or m365):
+// fetch new messages since the opaque provider cursor, classify each with the
+// SAME processMessage path as IMAP (ParseDSN + reply matcher), and persist the
 // advanced cursor via SetInboxCursorString (the IMAP UID cursor columns are
 // untouched). The short-lived access token is zeroized after the pass, like the
-// IMAP password and the Gmail token. Byte-for-byte parallel to pollGmail; only
-// the transport and the "provider" log value differ.
-func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, classifier *replyclassify.Classifier, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
+// IMAP password. Only the transport (reader) and the "provider" log value differ
+// between gmail and m365, so both providers share this body.
+func pollAPI(ctx context.Context, core coreapi.Client, reader apiFetcher, classifier *replyclassify.Classifier, p queue.InboxPollPayload, job coreapi.InboxPollJob, provider string) error {
 	defer zeroize(job.AccessToken)
 
 	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
@@ -187,7 +165,7 @@ func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, cl
 		}
 	}
 
-	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", "m365",
+	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", provider,
 		"messages", len(msgs), "replies", replies, "bounces", bounces, "skipped", skipped)
 	return core.SetInboxCursorString(ctx, p.MailboxID, p.WorkspaceID, newCursor)
 }

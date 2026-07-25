@@ -152,7 +152,7 @@ func TestRegisterDuplicateEmailReturns409(t *testing.T) {
 
 func TestRefreshFailureClearsCookiesAndReturns401(t *testing.T) {
 	h := newTestHandler(newFakeStore())
-	req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+	req := httptest.NewRequest(http.MethodPost, "/refresh", http.NoBody)
 	req.RemoteAddr = "203.0.113.10:54321"
 	req.AddCookie(&http.Cookie{Name: refreshCookieName, Value: "not-a-real-token"})
 	w := httptest.NewRecorder()
@@ -192,7 +192,7 @@ func TestMeIncludesEmailVerified(t *testing.T) {
 	}
 
 	callMe := func() map[string]any {
-		req := httptest.NewRequest(http.MethodGet, "/me", nil)
+		req := httptest.NewRequest(http.MethodGet, "/me", http.NoBody)
 		req.Header.Set("Authorization", "Bearer "+access)
 		w := httptest.NewRecorder()
 		auth.RequireAuth(h.jwtSecret)(http.HandlerFunc(h.me)).ServeHTTP(w, req)

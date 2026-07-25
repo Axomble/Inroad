@@ -107,7 +107,7 @@ type fakeGmailReader struct {
 	sinceCursor string
 }
 
-func (f *fakeGmailReader) Fetch(_ context.Context, _ string, sinceHistoryID string, _ int) ([]mail.InboundMessage, string, error) {
+func (f *fakeGmailReader) Fetch(_ context.Context, _, sinceHistoryID string, _ int) ([]mail.InboundMessage, string, error) {
 	f.fetchCalled = true
 	f.sinceCursor = sinceHistoryID
 	if f.fetchErr != nil {

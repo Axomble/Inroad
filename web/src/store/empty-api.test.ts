@@ -57,7 +57,7 @@ describe('baseQueryWithReauth', () => {
     const result = await store.dispatch(testApi.endpoints.ping.initiate())
 
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    const refreshRequest = fetchMock.mock.calls[1][0] as Request
+    const refreshRequest = fetchMock.mock.calls[1]![0] as Request
     expect(refreshRequest.url).toContain('/auth/refresh')
     expect(refreshRequest.method).toBe('POST')
 

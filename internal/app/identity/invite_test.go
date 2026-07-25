@@ -117,8 +117,6 @@ func (f *fakeStore) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams
 	f.invites[invite.ID] = invite
 
 	sp := arg.SessionParams
-	sp.UserID = userID
-	sp.WorkspaceID = invite.WorkspaceID
 	sessionID := uuid.New()
 	f.sessions[sessionID] = gen.Session{
 		ID: sessionID, UserID: userID, WorkspaceID: invite.WorkspaceID,

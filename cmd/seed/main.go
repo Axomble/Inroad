@@ -13,23 +13,29 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// run holds the seed logic so deferred cleanup (pool.Close) executes before the
+// process exits; main translates a returned error into a non-zero exit code.
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(1)
+		return fmt.Errorf("config: %w", err)
 	}
 	ctx := context.Background()
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "db:", err)
-		os.Exit(1)
+		return fmt.Errorf("db: %w", err)
 	}
 	defer pool.Close()
 
 	sender, err := notify.New(notify.Config{}) // console driver: seed doesn't need real delivery
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "notify:", err)
-		os.Exit(1)
+		return fmt.Errorf("notify: %w", err)
 	}
 	svc := identity.NewService(identity.NewStore(pool), time.Hour, sender, cfg.AppBaseURL,
 		cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL)
@@ -41,8 +47,8 @@ func main() {
 		IP:            "",
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "seed:", err)
-		os.Exit(1)
+		return fmt.Errorf("seed: %w", err)
 	}
 	fmt.Printf("seeded workspace=%s user=%s (login demo@inroad.test / demodemo)\n", sess.WorkspaceID, sess.UserID)
+	return nil
 }

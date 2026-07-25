@@ -240,9 +240,10 @@ function OauthMenuItem({
         // Keep the menu open during pending; on success the browser redirects
         // to the provider, on failure close it to reveal the banner.
         e.preventDefault()
-        void onConnect().then((redirecting) => {
+        void (async () => {
+          const redirecting = await onConnect()
           if (!redirecting) onFail()
-        })
+        })()
       }}
     >
       {starting ? <Loader2 className="size-4 animate-spin" /> : icon}

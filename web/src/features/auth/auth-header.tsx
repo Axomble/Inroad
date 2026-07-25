@@ -25,7 +25,7 @@ function initialsFromIdentity(name: string | null, email: string | null): string
   if (!source) return '?'
   const parts = source.split(/[\s@._-]+/).filter(Boolean)
   const first = parts[0]?.[0] ?? ''
-  const second = parts.length > 1 ? (parts[1][0] ?? '') : ''
+  const second = parts[1]?.[0] ?? ''
   const letters = (first + second).toUpperCase()
   return letters || source[0]!.toUpperCase()
 }

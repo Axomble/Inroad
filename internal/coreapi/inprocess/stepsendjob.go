@@ -197,7 +197,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{}, err
 	}
 	ageDays := int(time.Since(b.MailboxCreatedAt.Time).Hours() / 24)
-	cap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
+	dailyCap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
 	token := unsub.MakeToken(c.jwtSecret, ws.String(), b.ToEmail)
 
 	return coreapi.StepSendJob{
@@ -205,7 +205,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: b.MailboxID.String(),
 		SendID:      sendID.String(),
 		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
-		Suppressed: suppressed, EffectiveDailyCap: cap, SentToday: int(sentToday),
+		Suppressed: suppressed, EffectiveDailyCap: dailyCap, SentToday: int(sentToday),
 		ToEmail: b.ToEmail,
 		Vars: coreapi.ContactVars{
 			FirstName: b.FirstName, LastName: b.LastName, Email: b.ToEmail,
@@ -278,7 +278,7 @@ func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res c
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 	qtx := c.q.WithTx(tx)
 
 	// ON CONFLICT DO NOTHING → a duplicate advance (sweeper racing the lazy

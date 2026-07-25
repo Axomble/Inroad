@@ -97,12 +97,12 @@ func RequireVerified(c VerifiedChecker) func(http.Handler) http.Handler {
 
 var roleRank = map[string]int{"member": 1, "admin": 2, "owner": 3}
 
-// RequireRole rejects (403) callers whose workspace role ranks below min.
+// RequireRole rejects (403) callers whose workspace role ranks below minRole.
 // Must run after RequireAuth.
-func RequireRole(min string) func(http.Handler) http.Handler {
-	want, ok := roleRank[min]
+func RequireRole(minRole string) func(http.Handler) http.Handler {
+	want, ok := roleRank[minRole]
 	if !ok {
-		panic("auth.RequireRole: unknown role " + min)
+		panic("auth.RequireRole: unknown role " + minRole)
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

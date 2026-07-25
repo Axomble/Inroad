@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 
 	"github.com/hibiken/asynq"
+
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/queue"
 )

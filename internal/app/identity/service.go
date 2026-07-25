@@ -418,7 +418,10 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 func (s *Service) Logout(ctx context.Context, raw string) error {
 	row, err := s.store.GetSessionByHash(ctx, auth.HashRefreshToken(raw))
 	if err != nil {
-		return nil // already gone; idempotent
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // unknown token; already logged out (idempotent)
+		}
+		return err // genuine lookup failure surfaces
 	}
 	return s.store.RevokeFamily(ctx, row.FamilyID)
 }

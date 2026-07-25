@@ -15,13 +15,13 @@ interface State {
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null }
+  override state: State = { error: null }
 
   static getDerivedStateFromError(error: Error): State {
     return { error }
   }
 
-  componentDidCatch(error: Error, info: ErrorInfo): void {
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
     // Console log is intentional — this is a last-resort surface, and losing
     // the trace would make prod debugging harder. Wire to a real reporter later.
     // eslint-disable-next-line no-console
@@ -32,7 +32,7 @@ export class ErrorBoundary extends Component<Props, State> {
     this.setState({ error: null })
   }
 
-  render(): ReactNode {
+  override render(): ReactNode {
     if (this.state.error) {
       if (this.props.fallback) return this.props.fallback(this.state.error, this.reset)
       return (

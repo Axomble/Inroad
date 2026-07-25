@@ -12,7 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
 import { Route as AppRouteImport } from './routes/app'
-import { Route as DemoRouteImport } from './routes/demo'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
@@ -36,11 +35,6 @@ const AcceptInviteRoute = AcceptInviteRouteImport.update({
 const AppRoute = AppRouteImport.update({
   id: '/app',
   path: '/app',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const DemoRoute = DemoRouteImport.update({
-  id: '/demo',
-  path: '/demo',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
@@ -93,7 +87,6 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/app': typeof AppRouteWithChildren
-  '/demo': typeof DemoRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -107,7 +100,6 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
-  '/demo': typeof DemoRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -123,7 +115,6 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/app': typeof AppRouteWithChildren
-  '/demo': typeof DemoRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -140,7 +131,6 @@ export interface FileRouteTypes {
     | '/'
     | '/accept-invite'
     | '/app'
-    | '/demo'
     | '/forgot-password'
     | '/register'
     | '/reset-password'
@@ -154,7 +144,6 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/accept-invite'
-    | '/demo'
     | '/forgot-password'
     | '/register'
     | '/reset-password'
@@ -169,7 +158,6 @@ export interface FileRouteTypes {
     | '/'
     | '/accept-invite'
     | '/app'
-    | '/demo'
     | '/forgot-password'
     | '/register'
     | '/reset-password'
@@ -185,7 +173,6 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AcceptInviteRoute: typeof AcceptInviteRoute
   AppRoute: typeof AppRouteWithChildren
-  DemoRoute: typeof DemoRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   RegisterRoute: typeof RegisterRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
@@ -213,13 +200,6 @@ declare module '@tanstack/react-router' {
       path: '/app'
       fullPath: '/app'
       preLoaderRoute: typeof AppRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/demo': {
-      id: '/demo'
-      path: '/demo'
-      fullPath: '/demo'
-      preLoaderRoute: typeof DemoRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/forgot-password': {
@@ -310,7 +290,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AcceptInviteRoute: AcceptInviteRoute,
   AppRoute: AppRouteWithChildren,
-  DemoRoute: DemoRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,
   RegisterRoute: RegisterRoute,
   ResetPasswordRoute: ResetPasswordRoute,

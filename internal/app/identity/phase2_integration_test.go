@@ -394,7 +394,7 @@ func TestPhase2RequireVerifiedGatedRoute(t *testing.T) {
 	}
 
 	get := func() *http.Response {
-		req, err := http.NewRequest(http.MethodGet, srv.URL+"/protected", nil)
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/protected", http.NoBody)
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}

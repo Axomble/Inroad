@@ -34,6 +34,22 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
 - **Commits:** conventional (`feat:`, `chore:`, `test:`, `docs:`).
 - **Branches:** prefix by type — `feature/…`, `fix/…`, `chore/…`. Never commit feature work directly to `main`; branch, then merge.
 
+## Code quality
+
+Language-agnostic rules for writing code in this repo — apply to every language, not just Go/TS. Enforced by `make lint` (golangci-lint · oxlint · strict `tsc`); keep it green.
+
+- **Strict by default.** Type-check in strict mode (TS `strict` + `noUncheckedIndexedAccess`; Go `go vet` + golangci-lint). No new lint suppressions without a specific, explained directive (`//nolint:rule // why`, `// oxlint-disable-next-line rule -- why`) — never a blanket disable.
+- **Never swallow errors.** Handle a returned error / rejected promise or propagate it with context — never discard it. Inspect errors through the one shared seam per stack (Go `errors.Is/As` + `%w` wrapping; web `@/lib/rtk-error`), never ad-hoc casts or `catch {}`. Fail loud over failing silent.
+- **No duplication (DRY).** `dupl` flags copy-paste. Give shared logic one home once a pattern recurs — but prefer a little duplication over the *wrong* abstraction; don't abstract on the second occurrence.
+- **One source of truth for types.** Derive from the generated/owning definition; never hand-copy a shape that already exists (re-export a generated type, don't re-declare it). Make illegal states unrepresentable; no `any`/`interface{}` escape hatches.
+- **Small, single-purpose units.** One responsibility per function/file; guard-clause early returns over deep nesting; few parameters (pass an options struct/object past ~3). If a file is too big to hold in your head, split it by responsibility.
+- **Name for intent.** Intention-revealing, searchable names; one consistent term per concept; no throwaway abbreviations. (Identifier casing stays language-idiomatic — see Conventions.)
+- **Delete, don't comment out.** No dead code, unused exports/vars, or commented-out blocks — git remembers. YAGNI: don't build for imagined futures.
+- **Comments say why, not what.** Explain intent and tradeoffs the code can't; keep them true when the code changes.
+- **Isolate side effects.** Prefer pure functions; inject dependencies rather than reaching for hidden global mutable state (no package-level singletons/module globals holding state).
+- **Validate at boundaries.** Trust nothing crossing a boundary (HTTP, DB, env, user input); keep interfaces small and at the seam.
+- **Tests assert behavior, not implementation.** Cover the error / empty / edge branches, not just the happy path; a test that mocks everything asserts nothing.
+
 ## Dev
 
     cp .env.example .env
@@ -43,6 +59,7 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
     cd web && npm install && npm run dev
 
 Tests: `make test` (unit) · `make test-integration` (needs `make db-up`).
+Lint: `make lint` (Go + web) · `make lint-go` · `make lint-web`. Needs `golangci-lint` on PATH (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`).
 
 ## More docs
 - `docs/security.md` — security invariants that must never be broken (read before touching creds, outbound dials, or tenant queries).

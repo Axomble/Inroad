@@ -2,6 +2,7 @@ package oauthstate
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,7 @@ func TestVerifyRejectsMalformedAndTamperedPayload(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Verify(secret, tt.token, now); err != ErrInvalid {
+			if _, err := Verify(secret, tt.token, now); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("want ErrInvalid, got %v", err)
 			}
 		})
