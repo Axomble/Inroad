@@ -51,6 +51,16 @@ UPDATE sequence_enrollments
 SET status = 'stopped', stop_reason = $3::text, stopped_at = now(), next_due_at = NULL
 WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 
+-- name: SetEnrollmentReplyClass :exec
+-- Store the classified reply (class/source/confidence + when) on the
+-- enrollment WITHOUT touching status. Used on its own for automated replies
+-- (auto_reply/out_of_office), and alongside StopEnrollment when a reply also
+-- halts the sequence (replied/unsubscribed). Workspace-pinned so a caller
+-- can't tag another tenant's enrollment.
+UPDATE sequence_enrollments
+SET reply_class = $3, reply_source = $4, reply_confidence = $5, replied_at = now()
+WHERE id = $1 AND workspace_id = $2;
+
 -- name: SetEnrollmentDue :exec
 -- Re-stamp the next due time for an active enrollment (launch stagger + sweeper
 -- reconcile). No-op on non-active rows.
