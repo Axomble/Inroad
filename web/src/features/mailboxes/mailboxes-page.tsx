@@ -23,43 +23,66 @@ import {
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, StatStrip, Stat, PageBody, EmptyBlock } from '@/components/layout/page'
 import type { Mailbox } from '@/store/api'
+import type { StartOauthResponse } from './api'
 import {
   useListMailboxesQuery,
   usePauseMailboxMutation,
   useResumeMailboxMutation,
   useDeleteMailboxMutation,
   useStartGoogleOauthMutation,
+  useStartMicrosoftOauthMutation,
 } from './api'
 import { mailboxTone, mailboxStatusLabel } from './status'
 import { ConnectMailboxForm } from './connect-mailbox-form'
 import { GoogleIcon } from './google-icon'
+import { MicrosoftIcon } from './microsoft-icon'
+import { mailboxProviderLabel } from './provider'
 import { BannerShell, OauthCallbackBanner } from './oauth-callback-banner'
-import { startErrorCopy, startErrorKind, type StartErrorKind } from './oauth-start-error'
+import {
+  startErrorCopy,
+  startErrorKind,
+  type OauthProvider,
+  type StartErrorKind,
+} from './oauth-start-error'
+
+// The awaited result of an RTK Query OAuth-start mutation trigger: either the
+// consent-URL payload or a (typed) error. Both providers share this shape.
+type OauthStartResult = { data?: StartOauthResponse } | { error?: unknown }
 
 export function MailboxesPage() {
   const [showConnect, setShowConnect] = useState(false)
-  const [startError, setStartError] = useState<StartErrorKind | null>(null)
+  // Track which provider's start failed so the banner shows provider-correct
+  // copy from the single shared mapping.
+  const [startError, setStartError] = useState<{ provider: OauthProvider; kind: StartErrorKind } | null>(null)
   const { data, isLoading } = useListMailboxesQuery()
-  const [startGoogleOauth, { isLoading: starting }] = useStartGoogleOauthMutation()
+  const [startGoogleOauth, { isLoading: startingGmail }] = useStartGoogleOauthMutation()
+  const [startMicrosoftOauth, { isLoading: startingMicrosoft }] = useStartMicrosoftOauthMutation()
   const mailboxes = data ?? []
 
   const count = (s: string) => mailboxes.filter((m) => m.status === s).length
 
-  // Kick off the Gmail OAuth flow: the server hands back a Google consent URL
-  // and we full-page redirect the browser to it. Resolves `true` when a
-  // redirect is under way; on failure it records the error kind (501 = Gmail
-  // OAuth not configured; anything else transient) and resolves `false` so the
-  // caller can close the menu and reveal the banner.
-  async function onConnectGmail(): Promise<boolean> {
+  // Shared one-click OAuth kickoff for every provider: fire the given start
+  // mutation, and when the server hands back a consent URL, full-page redirect
+  // the browser to it. Resolves `true` when a redirect is under way; on failure
+  // it records the provider + error kind (501 = that provider's OAuth isn't
+  // configured; anything else transient) and resolves `false` so the caller can
+  // close the menu and reveal the banner.
+  async function onConnectOAuth(
+    provider: OauthProvider,
+    start: () => Promise<OauthStartResult>,
+  ): Promise<boolean> {
     setStartError(null)
-    const result = await startGoogleOauth()
+    const result = await start()
     if ('data' in result && result.data?.auth_url) {
       window.location.assign(result.data.auth_url)
       return true
     }
-    setStartError(startErrorKind('error' in result ? result.error : undefined))
+    setStartError({ provider, kind: startErrorKind('error' in result ? result.error : undefined) })
     return false
   }
+
+  const onConnectGmail = () => onConnectOAuth('gmail', () => startGoogleOauth())
+  const onConnectMicrosoft = () => onConnectOAuth('microsoft', () => startMicrosoftOauth())
 
   return (
     <Page>
@@ -67,8 +90,10 @@ export function MailboxesPage() {
         eyebrow="Mailboxes"
         actions={
           <ConnectMenu
-            starting={starting}
+            startingGmail={startingGmail}
+            startingMicrosoft={startingMicrosoft}
             onGmail={onConnectGmail}
+            onMicrosoft={onConnectMicrosoft}
             onSmtp={() => setShowConnect(true)}
           />
         }
@@ -79,7 +104,7 @@ export function MailboxesPage() {
       {startError && (
         <BannerShell tone="danger" onDismiss={() => setStartError(null)}>
           <AlertCircle className="size-4 shrink-0 text-danger" aria-hidden="true" />
-          <span className="min-w-0 flex-1">{startErrorCopy[startError]}</span>
+          <span className="min-w-0 flex-1">{startErrorCopy(startError.provider)[startError.kind]}</span>
         </BannerShell>
       )}
 
@@ -103,11 +128,13 @@ export function MailboxesPage() {
         ) : mailboxes.length === 0 && !showConnect ? (
           <EmptyBlock
             title="No mailboxes connected"
-            description="Connect a Gmail account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
+            description="Connect a Gmail or Microsoft 365 account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
             action={
               <ConnectMenu
-                starting={starting}
+                startingGmail={startingGmail}
+                startingMicrosoft={startingMicrosoft}
                 onGmail={onConnectGmail}
+                onMicrosoft={onConnectMicrosoft}
                 onSmtp={() => setShowConnect(true)}
                 triggerLabel="Connect your first mailbox"
               />
@@ -126,18 +153,22 @@ export function MailboxesPage() {
 }
 
 /**
- * The "Connect mailbox" primary action, split by provider: Gmail (one-click
- * OAuth) or SMTP/IMAP (the credentialled inline form). Same trigger button is
- * reused in the topbar and the empty state.
+ * The "Connect mailbox" primary action, split by provider: Gmail or Microsoft
+ * 365 (one-click OAuth) or SMTP/IMAP (the credentialled inline form). Same
+ * trigger button is reused in the topbar and the empty state.
  */
 function ConnectMenu({
-  starting,
+  startingGmail,
+  startingMicrosoft,
   onGmail,
+  onMicrosoft,
   onSmtp,
   triggerLabel,
 }: {
-  starting: boolean
+  startingGmail: boolean
+  startingMicrosoft: boolean
   onGmail: () => Promise<boolean>
+  onMicrosoft: () => Promise<boolean>
   onSmtp: () => void
   // Overrides the trigger's accessible name without changing the visible label.
   // The empty state renders a second identical trigger, so it passes a distinct
@@ -145,7 +176,7 @@ function ConnectMenu({
   // screen readers.
   triggerLabel?: string
 }) {
-  // Own the menu's open state so we can keep it open while the Gmail request is
+  // Own the menu's open state so we can keep it open while an OAuth request is
   // in flight but close it the moment that request fails — otherwise the Radix
   // menu stays open (onSelect is prevented) and covers the full-width error
   // banner that renders underneath it.
@@ -159,26 +190,64 @@ function ConnectMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem
-          disabled={starting}
-          onSelect={(e) => {
-            // Keep the menu open during pending; on success the browser
-            // redirects to Google, on failure close it to reveal the banner.
-            e.preventDefault()
-            void onGmail().then((redirecting) => {
-              if (!redirecting) setOpen(false)
-            })
-          }}
-        >
-          {starting ? <Loader2 className="size-4 animate-spin" /> : <GoogleIcon className="size-4" />}
-          Gmail
-        </DropdownMenuItem>
+        <OauthMenuItem
+          label="Gmail"
+          icon={<GoogleIcon className="size-4" />}
+          starting={startingGmail}
+          onConnect={onGmail}
+          onFail={() => setOpen(false)}
+        />
+        <OauthMenuItem
+          label="Microsoft 365"
+          icon={<MicrosoftIcon className="size-4" />}
+          starting={startingMicrosoft}
+          onConnect={onMicrosoft}
+          onFail={() => setOpen(false)}
+        />
         <DropdownMenuItem onSelect={() => onSmtp()}>
           <Mail className="size-4" />
           SMTP / IMAP
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+/**
+ * A single one-click-OAuth provider row in the ConnectMenu. Shared by every
+ * OAuth provider so the pending spinner, the keep-open-during-pending /
+ * close-on-failure dance, and the floating-promise guard live in exactly one
+ * place. `onConnect` resolves `true` while a redirect is under way (menu stays
+ * open) and `false` on failure (call `onFail` to close and reveal the banner).
+ */
+function OauthMenuItem({
+  label,
+  icon,
+  starting,
+  onConnect,
+  onFail,
+}: {
+  label: string
+  icon: React.ReactNode
+  starting: boolean
+  onConnect: () => Promise<boolean>
+  onFail: () => void
+}) {
+  return (
+    <DropdownMenuItem
+      disabled={starting}
+      onSelect={(e) => {
+        // Keep the menu open during pending; on success the browser redirects
+        // to the provider, on failure close it to reveal the banner.
+        e.preventDefault()
+        void onConnect().then((redirecting) => {
+          if (!redirecting) onFail()
+        })
+      }}
+    >
+      {starting ? <Loader2 className="size-4 animate-spin" /> : icon}
+      {label}
+    </DropdownMenuItem>
   )
 }
 
@@ -189,7 +258,9 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const id = mailbox.id ?? ''
   const busy = pauseState.isLoading || resumeState.isLoading || removeState.isLoading
-  const isGmail = mailbox.provider === 'gmail'
+  // Both OAuth providers send via a hosted API rather than SMTP; the row's
+  // secondary line reads "<Provider> · API" for them (SMTP has no label here).
+  const oauthLabel = mailboxProviderLabel(mailbox.provider)
 
   async function onPause() {
     await pause({ id })
@@ -208,10 +279,10 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
         <div className="flex items-center gap-2">
           <span className="truncate text-[13.5px] font-medium text-foreground">{mailbox.email}</span>
           {mailbox.display_name && <span className="truncate text-xs text-muted-foreground">{mailbox.display_name}</span>}
-          <ProviderTag gmail={isGmail} />
+          <ProviderTag provider={mailbox.provider} />
         </div>
         <div className="mt-0.5 font-mono text-[11px] text-faint">
-          {isGmail ? 'Gmail · API' : `${mailbox.smtp_host}:${mailbox.smtp_port}`}
+          {oauthLabel ? `${oauthLabel} · API` : `${mailbox.smtp_host}:${mailbox.smtp_port}`}
           {mailbox.last_error ? <span className="text-danger"> · {mailbox.last_error}</span> : null}
         </div>
       </div>
@@ -301,15 +372,24 @@ function Dot({ className }: { className?: string }) {
 }
 
 /**
- * Faint provider chip on a mailbox row. The text label ("Gmail"/"SMTP") is the
- * signal — the Google mark is only a reinforcing decoration, so color is never
- * the sole indicator.
+ * Faint provider chip on a mailbox row. The text label ("Gmail"/"Microsoft
+ * 365"/"SMTP") is the signal — the brand mark is only a reinforcing decoration,
+ * so color is never the sole indicator.
  */
-function ProviderTag({ gmail }: { gmail: boolean }) {
+function ProviderTag({ provider }: { provider?: string }) {
+  // Label comes from the single shared source; the icon is a reinforcing
+  // decoration only, so an absent/unknown provider falls back to plain "SMTP".
+  const label = mailboxProviderLabel(provider) ?? 'SMTP'
+  const icon =
+    provider === 'gmail' ? (
+      <GoogleIcon className="size-3" />
+    ) : provider === 'm365' ? (
+      <MicrosoftIcon className="size-3" />
+    ) : null
   return (
     <span className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-faint">
-      {gmail && <GoogleIcon className="size-3" />}
-      {gmail ? 'Gmail' : 'SMTP'}
+      {icon}
+      {label}
     </span>
   )
 }

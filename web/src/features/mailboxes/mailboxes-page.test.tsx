@@ -26,11 +26,13 @@ beforeAll(() => {
 
 const jsonHeaders = { 'content-type': 'application/json' }
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x'
+const MS_AUTH_URL = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=y'
 const ORIGINAL_LOCATION = window.location
 
-// Per-test responders for the two endpoints MailboxesPage hits.
+// Per-test responders for the endpoints MailboxesPage hits.
 let listResponder: () => Response
-let startResponder: () => Response
+let startGoogleResponder: () => Response
+let startMicrosoftResponder: () => Response
 let assignMock: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
@@ -39,13 +41,15 @@ beforeEach(() => {
       JSON.stringify([{ id: 'm-1', email: 'sender@gmail.com', provider: 'gmail', status: 'active', daily_cap: 50 }]),
       { status: 200, headers: jsonHeaders },
     )
-  startResponder = () => new Response('{}', { status: 200, headers: jsonHeaders })
+  startGoogleResponder = () => new Response('{}', { status: 200, headers: jsonHeaders })
+  startMicrosoftResponder = () => new Response('{}', { status: 200, headers: jsonHeaders })
 
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
-      if (url.includes('/mailboxes/oauth/google/start')) return startResponder()
+      if (url.includes('/mailboxes/oauth/google/start')) return startGoogleResponder()
+      if (url.includes('/mailboxes/oauth/microsoft/start')) return startMicrosoftResponder()
       return listResponder()
     }),
   )
@@ -65,17 +69,20 @@ afterEach(() => {
   Object.defineProperty(window, 'location', { configurable: true, value: ORIGINAL_LOCATION })
 })
 
-/** Opens the topbar Connect menu and selects the Gmail item. */
-async function selectGmail() {
+/** Opens the topbar Connect menu and selects a provider menu item by name. */
+async function selectProvider(name: RegExp) {
   const trigger = await screen.findByRole('button', { name: /^connect mailbox$/i })
   // Menus open on keydown (Enter), not a bare click, in Radix.
   fireEvent.keyDown(trigger, { key: 'Enter' })
-  const gmail = await screen.findByRole('menuitem', { name: /gmail/i })
-  fireEvent.click(gmail)
+  const item = await screen.findByRole('menuitem', { name })
+  fireEvent.click(item)
 }
 
-test('a 501 start error closes the menu and surfaces the disabled banner', async () => {
-  startResponder = () =>
+const selectGmail = () => selectProvider(/^gmail$/i)
+const selectMicrosoft = () => selectProvider(/microsoft 365/i)
+
+test('a 501 Gmail start error closes the menu and surfaces the disabled banner', async () => {
+  startGoogleResponder = () =>
     new Response(JSON.stringify({ error: 'gmail oauth not configured' }), { status: 501, headers: jsonHeaders })
 
   renderWithProviders(<MailboxesPage />)
@@ -85,12 +92,13 @@ test('a 501 start error closes the menu and surfaces the disabled banner', async
   // must have closed so it isn't hidden underneath the open dropdown.
   const alert = await screen.findByRole('alert')
   expect(alert).toHaveTextContent(/Gmail connect isn't configured on this server\./i)
-  await waitFor(() => expect(screen.queryByRole('menuitem', { name: /gmail/i })).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.queryByRole('menuitem', { name: /^gmail$/i })).not.toBeInTheDocument())
   expect(assignMock).not.toHaveBeenCalled()
 })
 
-test('a successful start redirects to the auth_url and leaves the menu open', async () => {
-  startResponder = () => new Response(JSON.stringify({ auth_url: AUTH_URL }), { status: 200, headers: jsonHeaders })
+test('a successful Gmail start redirects to the auth_url and leaves the menu open', async () => {
+  startGoogleResponder = () =>
+    new Response(JSON.stringify({ auth_url: AUTH_URL }), { status: 200, headers: jsonHeaders })
 
   renderWithProviders(<MailboxesPage />)
   await selectGmail()
@@ -98,7 +106,62 @@ test('a successful start redirects to the auth_url and leaves the menu open', as
   await waitFor(() => expect(assignMock).toHaveBeenCalledWith(AUTH_URL))
   // No error banner, and the menu stays open through the redirect.
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-  expect(screen.getByRole('menuitem', { name: /gmail/i })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: /^gmail$/i })).toBeInTheDocument()
+})
+
+test('a 501 Microsoft 365 start error closes the menu and surfaces the disabled banner', async () => {
+  startMicrosoftResponder = () =>
+    new Response(JSON.stringify({ error: 'microsoft oauth not configured' }), { status: 501, headers: jsonHeaders })
+
+  renderWithProviders(<MailboxesPage />)
+  await selectMicrosoft()
+
+  // Provider-correct disabled copy from the shared mapping, and the menu must
+  // close so the alert underneath it is visible.
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/Microsoft 365 connect isn't configured on this server\./i)
+  await waitFor(() => expect(screen.queryByRole('menuitem', { name: /microsoft 365/i })).not.toBeInTheDocument())
+  expect(assignMock).not.toHaveBeenCalled()
+})
+
+test('a non-501 Microsoft start error surfaces the generic transient banner', async () => {
+  startMicrosoftResponder = () =>
+    new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: jsonHeaders })
+
+  renderWithProviders(<MailboxesPage />)
+  await selectMicrosoft()
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/Couldn't start Microsoft sign-in — try again\./i)
+  await waitFor(() => expect(screen.queryByRole('menuitem', { name: /microsoft 365/i })).not.toBeInTheDocument())
+  expect(assignMock).not.toHaveBeenCalled()
+})
+
+test('a successful Microsoft 365 start redirects to the auth_url and leaves the menu open', async () => {
+  startMicrosoftResponder = () =>
+    new Response(JSON.stringify({ auth_url: MS_AUTH_URL }), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<MailboxesPage />)
+  await selectMicrosoft()
+
+  await waitFor(() => expect(assignMock).toHaveBeenCalledWith(MS_AUTH_URL))
+  // No error banner, and the menu stays open through the redirect.
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: /microsoft 365/i })).toBeInTheDocument()
+})
+
+test('an m365 mailbox row shows the Microsoft 365 provider tag and "· API" line', async () => {
+  listResponder = () =>
+    new Response(
+      JSON.stringify([{ id: 'm-2', email: 'sender@contoso.com', provider: 'm365', status: 'active', daily_cap: 50 }]),
+      { status: 200, headers: jsonHeaders },
+    )
+
+  renderWithProviders(<MailboxesPage />)
+
+  expect(await screen.findByText('sender@contoso.com')).toBeInTheDocument()
+  expect(screen.getByText('Microsoft 365')).toBeInTheDocument()
+  expect(screen.getByText('Microsoft 365 · API')).toBeInTheDocument()
 })
 
 test('the empty state trigger has a distinct accessible name from the topbar trigger', async () => {

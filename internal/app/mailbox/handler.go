@@ -20,8 +20,9 @@ import (
 // the protected router group (see cmd/inroad), not here.
 //
 // jwtSecret signs/verifies the OAuth `state` parameter; appBaseURL is the
-// frontend origin the public callback 302s back to. Both are only used by the
-// Gmail OAuth surface (startGoogleOAuth / googleCallback).
+// frontend origin the public callbacks 302 back to. Both are used by every
+// OAuth connect surface -- Gmail (startGoogleOAuth / googleCallback) and
+// Microsoft 365 (startMicrosoftOAuth / microsoftCallback).
 type Handler struct {
 	svc        *Service
 	jwtSecret  []byte
@@ -257,11 +258,15 @@ func (h *Handler) startGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 // it authenticates from the signed state and derives the workspace from it --
 // never from a request param. It is a browser navigation, so it never returns a
 // 5xx: every outcome 302s back to the SPA with connected=<email> or
-// oauth_error=<reason>; server-side detail is logged, never leaked to the URL.
+// oauth_error=<reason>, always tagged &provider=gmail so the SPA banner can use
+// provider-correct copy; server-side detail is logged, never leaked to the URL.
 func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	redirect := func(query string) {
-		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query, http.StatusFound)
+		// provider is a hardcoded literal (not user input), so the redirect stays
+		// injection-safe. gmail is the persisted mailbox provider value the SPA
+		// keys its banner + ProviderTag on -- not the "google" route segment.
+		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query+"&provider=gmail", http.StatusFound)
 	}
 	if q.Get("error") != "" || q.Get("code") == "" {
 		redirect("oauth_error=denied")
@@ -323,11 +328,15 @@ func (h *Handler) startMicrosoftOAuth(w http.ResponseWriter, r *http.Request) {
 // redirects to. Mirrors googleCallback exactly: it authenticates from the signed
 // state and derives the workspace from it -- never from a request param -- and
 // never returns a 5xx. Every outcome 302s back to the SPA with connected=<email>
-// or oauth_error=<reason>; server-side detail is logged, never leaked to the URL.
+// or oauth_error=<reason>, always tagged &provider=m365 so the SPA banner can
+// use provider-correct copy; server-side detail is logged, never leaked to the URL.
 func (h *Handler) microsoftCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	redirect := func(query string) {
-		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query, http.StatusFound)
+		// provider is a hardcoded literal (not user input), so the redirect stays
+		// injection-safe. m365 is the persisted mailbox provider value the SPA
+		// keys its banner + ProviderTag on -- not the "microsoft" route segment.
+		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query+"&provider=m365", http.StatusFound)
 	}
 	if q.Get("error") != "" || q.Get("code") == "" {
 		redirect("oauth_error=denied")

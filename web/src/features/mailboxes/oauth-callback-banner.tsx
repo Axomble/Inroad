@@ -5,21 +5,31 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { api } from '@/store/api'
 import { useAppDispatch } from '@/store/hooks'
+import { mailboxProviderLabel } from './provider'
 
 const routeApi = getRouteApi('/app/mailboxes')
 
 // Plain, actionable copy per backend reason code. Kept exhaustive so an
-// unmapped/unknown reason falls through to the generic message below.
+// unmapped/unknown reason falls through to the generic message below. `disabled`
+// is provider-specific and built at render time from the callback's provider
+// tag (see errorMessage), so it lives outside this static map.
 const errorCopy: Record<string, string> = {
-  denied: 'Google sign-in was cancelled.',
+  denied: 'Sign-in was cancelled.',
   bad_state: 'That connection link expired — start again.',
   already_connected: 'That mailbox is already connected.',
-  disabled: "Gmail connect isn't configured on this server.",
-  no_email: 'Could not read the mailbox address from Google.',
-  exchange_failed: 'Could not complete the Google connection — try again.',
+  no_email: "Couldn't read the mailbox address from your account.",
+  exchange_failed: "Couldn't complete the connection — try again.",
 }
 
-const GENERIC_ERROR = 'Could not complete the Google connection — try again.'
+const GENERIC_ERROR = "Couldn't complete the connection — try again."
+
+// Maps a backend reason code to banner copy. `disabled` is the one reason that
+// names the provider, so it uses the callback's provider label; every other
+// reason is looked up in the static map (falling back to the generic message).
+function errorMessage(reason: string | undefined, label: string): string {
+  if (reason === 'disabled') return `${label} connect isn't configured on this server.`
+  return (reason && errorCopy[reason]) || GENERIC_ERROR
+}
 
 /**
  * Renders the Gmail OAuth callback outcome once the public
@@ -36,16 +46,20 @@ export function OauthCallbackBanner() {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
   // Snapshot on mount: the effect below empties the live search a tick later,
-  // so the banner must read from this frozen copy to stay visible.
-  const [notice] = useState<{ connected?: string; error?: string }>(() => ({
+  // so the banner must read from this frozen copy to stay visible. `provider` is
+  // the callback's &provider tag ('gmail'|'m365') used to pick the copy label.
+  const [notice] = useState<{ connected?: string; error?: string; provider?: string }>(() => ({
     connected: search.connected,
     error: search.oauth_error,
+    provider: search.provider,
   }))
   const [dismissed, setDismissed] = useState(false)
+  // gmail→"Gmail", m365→"Microsoft 365"; an absent/unknown tag → "Mailbox".
+  const providerLabel = mailboxProviderLabel(notice.provider) ?? 'Mailbox'
 
   useEffect(() => {
     if (!notice.connected && !notice.error) return
-    // The new Gmail mailbox isn't in the cached list yet — refetch it.
+    // The new mailbox isn't in the cached list yet — refetch it.
     if (notice.connected) dispatch(api.util.invalidateTags([{ type: 'Mailbox', id: 'LIST' }]))
     // Strip ?connected / ?oauth_error so a refresh doesn't re-show this.
     void navigate({ to: '/app/mailboxes', search: {}, replace: true })
@@ -60,7 +74,7 @@ export function OauthCallbackBanner() {
       <BannerShell tone="ok" onDismiss={() => setDismissed(true)}>
         <CheckCircle2 className="size-4 shrink-0 text-ok" aria-hidden="true" />
         <span className="min-w-0 flex-1">
-          Gmail mailbox <span className="font-medium text-foreground">{notice.connected}</span> connected.
+          {providerLabel} mailbox <span className="font-medium text-foreground">{notice.connected}</span> connected.
         </span>
       </BannerShell>
     )
@@ -69,7 +83,7 @@ export function OauthCallbackBanner() {
   return (
     <BannerShell tone="danger" onDismiss={() => setDismissed(true)}>
       <AlertCircle className="size-4 shrink-0 text-danger" aria-hidden="true" />
-      <span className="min-w-0 flex-1">{(notice.error && errorCopy[notice.error]) || GENERIC_ERROR}</span>
+      <span className="min-w-0 flex-1">{errorMessage(notice.error, providerLabel)}</span>
     </BannerShell>
   )
 }

@@ -166,7 +166,9 @@ func TestGoogleCallbackValidStateCreatesMailbox(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	wantLoc := callbackTestAppBase + "/mailboxes?connected=" + url.QueryEscape("rep@example.com")
+	// The redirect carries connected=<email> plus &provider=gmail so the SPA
+	// banner can render provider-correct copy.
+	wantLoc := callbackTestAppBase + "/mailboxes?connected=" + url.QueryEscape("rep@example.com") + "&provider=gmail"
 	if got := rec.Header().Get("Location"); got != wantLoc {
 		t.Fatalf("Location = %q, want %q", got, wantLoc)
 	}
@@ -192,8 +194,14 @@ func TestGoogleCallbackProviderErrorRedirectsDenied(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "oauth_error=denied") {
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "oauth_error=denied") {
 		t.Fatalf("Location = %q, want oauth_error=denied", loc)
+	}
+	// Error redirects are tagged with the provider too, so the SPA banner can
+	// render provider-correct disabled/failure copy.
+	if !strings.Contains(loc, "provider=gmail") {
+		t.Fatalf("Location = %q, want provider=gmail", loc)
 	}
 	if store.lastCreate.WorkspaceID != (uuid.UUID{}) {
 		t.Fatal("a denied consent must create no mailbox")
@@ -361,7 +369,10 @@ func TestMicrosoftCallbackValidStateCreatesMailbox(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	wantLoc := callbackTestAppBase + "/mailboxes?connected=" + url.QueryEscape("rep@example.com")
+	// The redirect carries connected=<email> plus &provider=m365 (the persisted
+	// mailbox provider value, not the "microsoft" route segment) so the SPA
+	// banner renders Microsoft 365 copy.
+	wantLoc := callbackTestAppBase + "/mailboxes?connected=" + url.QueryEscape("rep@example.com") + "&provider=m365"
 	if got := rec.Header().Get("Location"); got != wantLoc {
 		t.Fatalf("Location = %q, want %q", got, wantLoc)
 	}
@@ -383,8 +394,14 @@ func TestMicrosoftCallbackGarbageStateNoMailbox(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "oauth_error=bad_state") {
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "oauth_error=bad_state") {
 		t.Fatalf("Location = %q, want oauth_error=bad_state", loc)
+	}
+	// Error redirects are tagged with the m365 provider too, so the SPA banner
+	// renders Microsoft 365 copy rather than the Gmail default.
+	if !strings.Contains(loc, "provider=m365") {
+		t.Fatalf("Location = %q, want provider=m365", loc)
 	}
 	if store.lastCreate.WorkspaceID != (uuid.UUID{}) {
 		t.Fatal("no mailbox should be created for a garbage state")
