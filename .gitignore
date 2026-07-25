@@ -19,6 +19,10 @@ web/dist/
 Thumbs.db
 *.exe
 
-# Session tooling
+# Session tooling — ignore .claude/ scratch (worktrees, local settings), but
+# keep the checked-in agent/command config under version control.
 .playwright-mcp/
-.claude/
+.claude/*
+!.claude/agents/
+!.claude/commands/
+!.claude/settings.json
