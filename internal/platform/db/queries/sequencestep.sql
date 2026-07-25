@@ -24,3 +24,16 @@ DELETE FROM sequence_steps WHERE id = $1 AND workspace_id = $2;
 SELECT count(*) FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2;
 -- name: MaxStepOrder :one
 SELECT COALESCE(max(step_order), 0)::int FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2;
+-- name: ShiftStepOrders :exec
+-- Reorder phase 1: bump every step_order by $3 (the current max) so all values
+-- land above the target 1..N range. The UNIQUE(campaign_id, step_order)
+-- constraint is checked per-row, so writing the final 1..N directly could
+-- transiently collide with a not-yet-updated row; shifting clear of the old
+-- range first guarantees no collision.
+UPDATE sequence_steps SET step_order = step_order + $3
+WHERE campaign_id = $1 AND workspace_id = $2;
+-- name: SetStepOrder :exec
+-- Reorder phase 2: stamp one step's final position. Pinned by campaign_id AND
+-- workspace_id so a foreign/other-tenant id updates zero rows.
+UPDATE sequence_steps SET step_order = $4, updated_at = now()
+WHERE id = $1 AND campaign_id = $2 AND workspace_id = $3;

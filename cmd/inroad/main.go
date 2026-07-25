@@ -119,7 +119,7 @@ func run() error {
 	// Sequence steps live under /campaigns/{id}/steps; the step service checks
 	// campaign status (draft-gating) via an adapter over the campaign store.
 	stepHandler := sequencestep.NewHandler(
-		sequencestep.NewService(sequencestep.NewPgStore(queries), campaignStatusChecker{campaigns: campaignStore}),
+		sequencestep.NewService(sequencestep.NewPgStore(pool), campaignStatusChecker{campaigns: campaignStore}),
 		cfg.JWTSecret,
 	)
 	suppStore := suppression.NewStore(queries)

@@ -245,6 +245,13 @@ const injectedRtkApi = api.injectEndpoints({
         method: "DELETE",
       }),
     }),
+    reorderSteps: build.mutation<ReorderStepsApiResponse, ReorderStepsApiArg>({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/reorder`,
+        method: "POST",
+        body: queryArg.reorderStepsRequest,
+      }),
+    }),
     launchCampaign: build.mutation<
       LaunchCampaignApiResponse,
       LaunchCampaignApiArg
@@ -431,6 +438,12 @@ export type DeleteStepApiResponse = unknown;
 export type DeleteStepApiArg = {
   id: string;
   stepId: string;
+};
+export type ReorderStepsApiResponse =
+  /** status 200 Steps in the new order */ SequenceStep[];
+export type ReorderStepsApiArg = {
+  id: string;
+  reorderStepsRequest: ReorderStepsRequest;
 };
 export type LaunchCampaignApiResponse =
   /** status 200 Enrollment + queue counts */ {
@@ -657,6 +670,10 @@ export type StepRequest = {
   body_text?: string;
   body_html?: string;
 };
+export type ReorderStepsRequest = {
+  /** the FULL ordered list of the campaign's step ids, in the desired order */
+  step_ids: string[];
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -692,6 +709,7 @@ export const {
   useCreateStepMutation,
   useUpdateStepMutation,
   useDeleteStepMutation,
+  useReorderStepsMutation,
   useLaunchCampaignMutation,
   useUnsubscribeConfirmPageQuery,
   useUnsubscribeMutation,

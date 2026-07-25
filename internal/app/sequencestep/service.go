@@ -13,10 +13,14 @@ import (
 var (
 	ErrNotFound         = errors.New("step not found")
 	ErrCampaignNotFound = errors.New("campaign not found")
-	// ErrCampaignNotDraft guards structural edits (create/delete): the spec
-	// permits them only while the campaign is draft; a running campaign returns
-	// 409. Content edits (Update) are exempt — they are live-reference.
+	// ErrCampaignNotDraft guards structural edits (create/delete/reorder): the
+	// spec permits them only while the campaign is draft; a running campaign
+	// returns 409. Content edits (Update) are exempt — they are live-reference.
 	ErrCampaignNotDraft = errors.New("campaign is not draft")
+	// ErrInvalidOrder is returned when a reorder request's step_ids is not
+	// exactly a permutation of the campaign's current step ids (wrong length,
+	// duplicates, extras, or a foreign/other-campaign id). Handler maps it to 400.
+	ErrInvalidOrder = errors.New("step_ids must be a permutation of the campaign's step ids")
 )
 
 // draftStatus is the campaign status that permits structural step edits. Kept
@@ -82,6 +86,51 @@ func (s *Service) Delete(ctx context.Context, ws, campaignID, stepID uuid.UUID) 
 		return err
 	}
 	return s.store.Delete(ctx, ws, stepID)
+}
+
+// Reorder rewrites the campaign's step_order to match stepIDs' order.
+// Structural change → draft-only (409 otherwise). stepIDs must be exactly a
+// permutation of the campaign's current step ids — any mismatch (including a
+// foreign/other-tenant id, which the workspace-pinned List simply won't
+// contain) yields ErrInvalidOrder (400) before any write. Returns the steps in
+// their new order.
+func (s *Service) Reorder(ctx context.Context, ws, campaignID uuid.UUID, stepIDs []uuid.UUID) ([]gen.SequenceStep, error) {
+	if err := s.requireDraft(ctx, ws, campaignID); err != nil {
+		return nil, err
+	}
+	current, err := s.store.List(ctx, ws, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePermutation(current, stepIDs); err != nil {
+		return nil, err
+	}
+	return s.store.Reorder(ctx, ws, campaignID, stepIDs)
+}
+
+// validatePermutation confirms stepIDs contains each of current's ids exactly
+// once (same set, no dupes, no extras, no missing). current comes from the
+// workspace-pinned List, so a cross-tenant/foreign id is absent from the set
+// and rejected here.
+func validatePermutation(current []gen.SequenceStep, stepIDs []uuid.UUID) error {
+	if len(stepIDs) != len(current) {
+		return ErrInvalidOrder
+	}
+	want := make(map[uuid.UUID]struct{}, len(current))
+	for _, st := range current {
+		want[st.ID] = struct{}{}
+	}
+	seen := make(map[uuid.UUID]struct{}, len(stepIDs))
+	for _, id := range stepIDs {
+		if _, ok := want[id]; !ok {
+			return ErrInvalidOrder
+		}
+		if _, dup := seen[id]; dup {
+			return ErrInvalidOrder
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 // requireDraft returns ErrCampaignNotFound if the campaign isn't in the
