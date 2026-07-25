@@ -15,14 +15,14 @@ let bootstrapPromise: Promise<void> | null = null
  * request instead of racing the refresh-token rotation.
  */
 export function runAuthBootstrap(dispatch: AppDispatch): Promise<void> {
-  bootstrapPromise ??= dispatch(api.endpoints.authRefresh.initiate())
-    .unwrap()
-    .then((session) => {
+  bootstrapPromise ??= (async () => {
+    try {
+      const session = await dispatch(api.endpoints.authRefresh.initiate()).unwrap()
       dispatch(setSession(session))
-    })
-    .catch(() => {
+    } catch {
       dispatch(clearSession())
-    })
+    }
+  })()
   return bootstrapPromise
 }
 

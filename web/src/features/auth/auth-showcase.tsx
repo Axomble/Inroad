@@ -133,8 +133,10 @@ export function AuthShowcase() {
       // connections + particles
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i]
+        if (!p) continue
         p.t += p.speed * (reduced ? 0 : 1)
         const n = nodes[p.from]
+        if (!n) continue
         const midX = (n.x + target.x) / 2
         const midY = (n.y + target.y) / 2 + p.cp
         const x = bezier(n.x, midX, target.x, p.t)
