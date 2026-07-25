@@ -1,14 +1,21 @@
 // Campaign feature endpoints. Tag wiring layered on top of the generated
 // store/api.ts shapes via `enhanceEndpoints` so list invalidations happen
-// automatically after any mutation.
+// automatically after any mutation. The enrollments listing lives in the
+// generated client too (from the OpenAPI path); we only attach its providesTags
+// here.
 //
 // Cross-feature query-hook imports (mailboxes, lists) are allowed HERE as a
 // deliberate loophole for read-only reference data that this feature's forms
 // need in dropdowns — cross-feature UI imports remain forbidden.
 import { api } from '@/store/api'
 
+// Re-export the generated enrollment type so feature components import it from
+// the feature barrel rather than reaching into store/api.ts directly. The
+// generated shape carries a strict `reply_class` union.
+export type { CampaignEnrollment } from '@/store/api'
+
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign'],
+  addTagTypes: ['Campaign', 'Enrollment'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -36,6 +43,9 @@ const campaignApi = api.enhanceEndpoints({
         { type: 'Campaign', id: 'LIST' },
       ],
     },
+    listCampaignEnrollments: {
+      providesTags: (_result, _error, arg) => [{ type: 'Enrollment', id: arg.id }],
+    },
   },
 })
 
@@ -45,4 +55,5 @@ export const {
   useCreateCampaignMutation,
   useLaunchCampaignMutation,
   useUpdateCampaignTrackingMutation,
+  useListCampaignEnrollmentsQuery,
 } = campaignApi

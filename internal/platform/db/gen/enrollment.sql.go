@@ -248,6 +248,69 @@ func (q *Queries) IncrementEnrollmentCapDeferrals(ctx context.Context, arg Incre
 	return cap_deferrals, err
 }
 
+const listCampaignEnrollments = `-- name: ListCampaignEnrollments :many
+SELECT c.email, c.first_name, e.status, e.reply_class, e.reply_source, e.replied_at
+FROM sequence_enrollments e
+JOIN contacts c ON c.id = e.contact_id
+WHERE e.campaign_id = $1 AND e.workspace_id = $2
+ORDER BY e.replied_at DESC NULLS LAST, c.email ASC
+LIMIT $3 OFFSET $4
+`
+
+type ListCampaignEnrollmentsParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Limit       int32     `json:"limit"`
+	Offset      int32     `json:"offset"`
+}
+
+type ListCampaignEnrollmentsRow struct {
+	Email       string             `json:"email"`
+	FirstName   string             `json:"first_name"`
+	Status      string             `json:"status"`
+	ReplyClass  *string            `json:"reply_class"`
+	ReplySource *string            `json:"reply_source"`
+	RepliedAt   pgtype.Timestamptz `json:"replied_at"`
+}
+
+// Per-contact reply status for a campaign's enrollments, joined to the contact
+// for the display email/name. Workspace-pinned on the enrollment (defense in
+// depth alongside the service's ownership check) so a cross-tenant campaign id
+// yields no rows rather than leaking another tenant's contacts. Ordered by most
+// recently replied first (NULLS LAST keeps never-replied rows after replied
+// ones), then email for a stable page order. Paginated via LIMIT/OFFSET.
+func (q *Queries) ListCampaignEnrollments(ctx context.Context, arg ListCampaignEnrollmentsParams) ([]ListCampaignEnrollmentsRow, error) {
+	rows, err := q.db.Query(ctx, listCampaignEnrollments,
+		arg.CampaignID,
+		arg.WorkspaceID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCampaignEnrollmentsRow
+	for rows.Next() {
+		var i ListCampaignEnrollmentsRow
+		if err := rows.Scan(
+			&i.Email,
+			&i.FirstName,
+			&i.Status,
+			&i.ReplyClass,
+			&i.ReplySource,
+			&i.RepliedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueEnrollments = `-- name: ListDueEnrollments :many
 SELECT id, workspace_id FROM sequence_enrollments
 WHERE status = 'active' AND next_due_at IS NOT NULL

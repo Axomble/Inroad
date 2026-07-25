@@ -97,6 +97,20 @@ SELECT stop_reason, count(*) AS n FROM sequence_enrollments
 WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'stopped'
 GROUP BY stop_reason;
 
+-- name: ListCampaignEnrollments :many
+-- Per-contact reply status for a campaign's enrollments, joined to the contact
+-- for the display email/name. Workspace-pinned on the enrollment (defense in
+-- depth alongside the service's ownership check) so a cross-tenant campaign id
+-- yields no rows rather than leaking another tenant's contacts. Ordered by most
+-- recently replied first (NULLS LAST keeps never-replied rows after replied
+-- ones), then email for a stable page order. Paginated via LIMIT/OFFSET.
+SELECT c.email, c.first_name, e.status, e.reply_class, e.reply_source, e.replied_at
+FROM sequence_enrollments e
+JOIN contacts c ON c.id = e.contact_id
+WHERE e.campaign_id = $1 AND e.workspace_id = $2
+ORDER BY e.replied_at DESC NULLS LAST, c.email ASC
+LIMIT $3 OFFSET $4;
+
 -- name: ListDueEnrollments :many
 -- Sweeper hot path: active enrollments whose next_due_at passed the reconcile
 -- window. Served by the partial idx_enrollments_due. Capped so one sweep tick
