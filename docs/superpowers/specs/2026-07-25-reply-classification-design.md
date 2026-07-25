@@ -10,10 +10,11 @@ Classify each inbound reply that matches one of our sends into a small, stable s
 of classes and act on it — fixing two real bugs in today's binary reply handling and
 unlocking sentiment-tagged replies for future reply-branching / CRM views.
 
-Inspired by Warmbly's `replyclassify` (Apache-2.0, same Go stack) but **reimplemented
-better**: it fixes a correctness bug in Warmbly's lexicon, removes global mutable
-state, adds boundary-aware matching, and ships with Inroad's higher test density.
-Attribution to Warmbly (Apache-2.0) is preserved in the package doc + a `NOTICE` entry.
+Informed by studying a same-category reference implementation (same Go stack) but
+**reimplemented from scratch** as our own design: it fixes a correctness bug that
+implementation's lexicon has, removes global mutable state, adds boundary-aware matching,
+and ships with Inroad's higher test density. No code is copied — ideas and architecture
+aren't copyrightable — so no attribution/`NOTICE` is required or added.
 
 Non-goals: the AI/LLM Layer-3 classifier is a **seam only, unwired** (Inroad has no AI
 provider) — the ambiguous middle resolves to `unknown` with zero network calls, exactly
@@ -58,13 +59,13 @@ func (c *Classifier) Classify(ctx context.Context, in Input) Result
   (`auto-replied`→OOO, else `auto_reply`), vendor headers (`X-Autoreply`,
   `X-Auto-Response-Suppress`), `Precedence: bulk/junk/list/auto_reply`,
   `multipart/report; …delivery-status` (DSN → `auto_reply`), null `Return-Path`,
-  mailer-daemon/no-reply senders. **Improvement over Warmbly:** also honor
+  mailer-daemon/no-reply senders. **Improvement over a same-category reference implementation:** also honor
   `List-Unsubscribe`/`Feedback-ID`/`X-Auto-Response-Suppress` as automated signals.
 - **Layer 2 — lexicon (deterministic, offline):** compliance words
   (`unsubscribe`/`remove me`/`stop emailing`…) win first (compliance-safe), then
   rejection → `negative`, then interest → `positive`.
-  **Improvements over Warmbly (correctness):**
-  - **Fix the "not interested" bug** — Warmbly checks positive *before* negative and
+  **Improvements over a same-category reference implementation (correctness):**
+  - **Fix the "not interested" bug** — a same-category reference implementation checks positive *before* negative and
     `"interested"` is a positive keyword, so **"not interested" mis-classifies as
     positive**. We check **negative before positive** AND make positive matches
     negation-aware (a positive keyword preceded by `not/isn't/won't/no` doesn't fire).
@@ -74,7 +75,7 @@ func (c *Classifier) Classify(ctx context.Context, in Input) Result
   `positive|negative|neutral`. `model == nil` → `unknown`, no I/O. Unwired in Inroad
   now; the seam + an injected (not global) classifier keep it ready.
 
-**Improvement — no global mutable state:** Warmbly wires Layer 3 via a package global
+**Improvement — no global mutable state:** a same-category reference implementation wires Layer 3 via a package global
 (`modelClassify` + `sync.RWMutex` + `SetModelClassifier`). We inject the (optional)
 model into a `Classifier` struct — pure DI, concurrent-safe by construction, trivially
 testable, no hidden global.
@@ -137,7 +138,7 @@ future phase; this ships the signal + display.
 ## 9. Testing (our edge)
 
 - **Unit (pure, table-driven):** each class from representative headers/subjects/bodies;
-  **the "not interested" → negative regression** (the Warmbly bug); boundary-matching
+  **the "not interested" → negative regression** (the a same-category reference implementation bug); boundary-matching
   (`nonstop` ∉ unsubscribe); compliance-first ordering; OOO-by-subject without
   Auto-Submitted; DSN content-type → auto_reply; Layer-3 nil → unknown (no I/O); a fake
   ModelClassifier resolves the middle.
@@ -150,7 +151,7 @@ future phase; this ships the signal + display.
 ## 10. Delivery order (independently testable)
 
 1. `internal/platform/replyclassify` — Layers 1–2 (+ Layer-3 seam), the improvements
-   above, full unit tests, Apache-2.0 attribution. (Pure; no DB.)
+   above, full unit tests. (Pure; no DB; no external-product name in shipped code.)
 2. Migration `000014` (`reply_class`/`reply_source`/`reply_confidence`/`replied_at` +
    CHECK) + `enrollment` store/state for the new columns + `unsubscribed` StopReason.
 3. coreapi: extend `MarkReplied`, add `MarkUnsubscribed` + `RecordReplyClass`; inprocess
@@ -158,11 +159,12 @@ future phase; this ships the signal + display.
 4. Integrate the classifier into `processMessage` (OOO-trap fix + unsubscribe suppression
    + tagged stop); wire the `Classifier` (Layer-3 nil) into the inbox worker; tests.
 5. Frontend: reply-class pill on the campaign/contact view.
-6. Docs (`architecture.md` reply pipeline, `security.md` compliance note) + `NOTICE` attribution.
+6. Docs (`architecture.md` reply pipeline, `security.md` compliance note).
 
 ## 11. References
 
-- Warmbly `internal/app/replyclassify/{classifier,headers,lexicon,model}.go` (Apache-2.0
-  — inspiration + attribution; improvements documented above).
+- A same-category reference implementation's reply-classify package (Apache-2.0) —
+  studied for design ideas only; no code copied, no attribution required. Improvements
+  over it documented above.
 - This repo: existing reply/bounce detection `internal/worker/inbox/{poll,reply,dsn}.go`;
   competitive analysis 03 (reply classification = P1 Do-better).
