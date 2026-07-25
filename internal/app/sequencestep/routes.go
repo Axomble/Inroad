@@ -14,6 +14,10 @@ import (
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/{id}/steps", h.List)
 	r.Post("/{id}/steps", h.Create)
+	// Static /reorder is registered alongside the /{stepId} wildcard; chi
+	// prefers the literal segment, so POST .../steps/reorder never resolves to
+	// the {stepId} routes (which are PUT/DELETE anyway).
+	r.Post("/{id}/steps/reorder", h.Reorder)
 	r.Put("/{id}/steps/{stepId}", h.Update)
 	r.Delete("/{id}/steps/{stepId}", h.Delete)
 }

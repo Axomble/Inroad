@@ -13,12 +13,14 @@ import (
 // fakeStore records the last create/update and can simulate a not-found Get
 // (for the cross-tenant / wrong-campaign guards).
 type fakeStore struct {
-	maxOrder  int32
-	created   CreateInput
-	updated   UpdateInput
-	deletedID uuid.UUID
-	getStep   gen.SequenceStep
-	getErr    error
+	maxOrder    int32
+	created     CreateInput
+	updated     UpdateInput
+	deletedID   uuid.UUID
+	getStep     gen.SequenceStep
+	getErr      error
+	listSteps   []gen.SequenceStep
+	reorderedTo []uuid.UUID
 }
 
 func (f *fakeStore) Create(_ context.Context, ws uuid.UUID, in CreateInput) (gen.SequenceStep, error) {
@@ -29,7 +31,15 @@ func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (gen.SequenceStep
 	return f.getStep, f.getErr
 }
 func (f *fakeStore) List(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
-	return nil, nil
+	return f.listSteps, nil
+}
+func (f *fakeStore) Reorder(_ context.Context, _, _ uuid.UUID, stepIDs []uuid.UUID) ([]gen.SequenceStep, error) {
+	f.reorderedTo = stepIDs
+	out := make([]gen.SequenceStep, len(stepIDs))
+	for i, id := range stepIDs {
+		out[i] = gen.SequenceStep{ID: id, StepOrder: int32(i + 1)}
+	}
+	return out, nil
 }
 func (f *fakeStore) Update(_ context.Context, _ uuid.UUID, in UpdateInput) (gen.SequenceStep, error) {
 	f.updated = in
@@ -105,6 +115,78 @@ func TestDeleteRejectsRunningCampaign(t *testing.T) {
 	err := svc.Delete(context.Background(), uuid.New(), campaignID, stepID)
 	if !errors.Is(err, ErrCampaignNotDraft) {
 		t.Fatalf("want ErrCampaignNotDraft, got %v", err)
+	}
+}
+
+// Reorder happy path: a valid permutation of the campaign's step ids is passed
+// through to the store, which rewrites step_order to 1..N.
+func TestReorderHappyPath(t *testing.T) {
+	campaignID := uuid.New()
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	store := &fakeStore{listSteps: []gen.SequenceStep{
+		{ID: a, StepOrder: 1}, {ID: b, StepOrder: 2}, {ID: c, StepOrder: 3},
+	}}
+	svc := NewService(store, fakeChecker{status: "draft"})
+	newOrder := []uuid.UUID{c, a, b}
+	got, err := svc.Reorder(context.Background(), uuid.New(), campaignID, newOrder)
+	if err != nil {
+		t.Fatalf("Reorder: %v", err)
+	}
+	if len(got) != 3 || got[0].ID != c || got[1].ID != a || got[2].ID != b {
+		t.Fatalf("wrong order returned: %+v", got)
+	}
+	for i := range store.reorderedTo {
+		if store.reorderedTo[i] != newOrder[i] {
+			t.Fatalf("store got %v, want %v", store.reorderedTo, newOrder)
+		}
+	}
+}
+
+// Reorder rejects a non-permutation (wrong length / dupes / extras / missing)
+// with ErrInvalidOrder (400) before any write.
+func TestReorderRejectsNonPermutation(t *testing.T) {
+	campaignID := uuid.New()
+	a, b := uuid.New(), uuid.New()
+	cases := map[string][]uuid.UUID{
+		"missing one":  {a},
+		"extra id":     {a, b, uuid.New()},
+		"duplicate":    {a, a},
+		"foreign only": {uuid.New(), uuid.New()},
+	}
+	for name, ids := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := &fakeStore{listSteps: []gen.SequenceStep{{ID: a, StepOrder: 1}, {ID: b, StepOrder: 2}}}
+			svc := NewService(store, fakeChecker{status: "draft"})
+			_, err := svc.Reorder(context.Background(), uuid.New(), campaignID, ids)
+			if !errors.Is(err, ErrInvalidOrder) {
+				t.Fatalf("want ErrInvalidOrder, got %v", err)
+			}
+			if store.reorderedTo != nil {
+				t.Fatalf("store.Reorder must not run on invalid input")
+			}
+		})
+	}
+}
+
+// Reorder is a structural edit → forbidden on a non-draft campaign (409).
+func TestReorderRejectsNonDraftCampaign(t *testing.T) {
+	store := &fakeStore{}
+	svc := NewService(store, fakeChecker{status: "running"})
+	_, err := svc.Reorder(context.Background(), uuid.New(), uuid.New(), []uuid.UUID{uuid.New()})
+	if !errors.Is(err, ErrCampaignNotDraft) {
+		t.Fatalf("want ErrCampaignNotDraft, got %v", err)
+	}
+	if store.reorderedTo != nil {
+		t.Fatalf("store.Reorder must not run on a non-draft campaign")
+	}
+}
+
+// Reorder on a missing campaign is 404, checked before any store read.
+func TestReorderRejectsMissingCampaign(t *testing.T) {
+	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")})
+	_, err := svc.Reorder(context.Background(), uuid.New(), uuid.New(), []uuid.UUID{uuid.New()})
+	if !errors.Is(err, ErrCampaignNotFound) {
+		t.Fatalf("want ErrCampaignNotFound, got %v", err)
 	}
 }
 

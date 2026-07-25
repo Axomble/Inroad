@@ -138,6 +138,54 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// reorderRequest is the reorder body: the FULL ordered list of the campaign's
+// step ids in the desired order. uuid.UUID unmarshals from the JSON string, so
+// a malformed id fails decode → 400.
+type reorderRequest struct {
+	StepIDs []uuid.UUID `json:"step_ids"`
+}
+
+// Reorder handles POST /campaigns/{id}/steps/reorder.
+func (h *Handler) Reorder(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	campaignID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad campaign id")
+		return
+	}
+	var req reorderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if len(req.StepIDs) == 0 {
+		httpx.Error(w, http.StatusBadRequest, "step_ids required")
+		return
+	}
+	steps, err := h.svc.Reorder(r.Context(), ws, campaignID, req.StepIDs)
+	switch {
+	case errors.Is(err, ErrCampaignNotFound):
+		httpx.Error(w, http.StatusNotFound, "campaign not found")
+	case errors.Is(err, ErrCampaignNotDraft):
+		httpx.Error(w, http.StatusConflict, "steps can only be reordered while the campaign is draft")
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "step not found")
+	case errors.Is(err, ErrInvalidOrder):
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not reorder steps")
+	default:
+		out := make([]stepResponse, 0, len(steps))
+		for _, st := range steps {
+			out = append(out, toResponse(st))
+		}
+		httpx.JSON(w, http.StatusOK, out)
+	}
+}
+
 func (h *Handler) decode(w http.ResponseWriter, r *http.Request) (stepRequest, bool) {
 	var req stepRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
