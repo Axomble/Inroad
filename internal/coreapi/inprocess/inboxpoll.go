@@ -76,7 +76,11 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 			Provider: m.Provider, AccessToken: []byte(at), Cursor: m.InboxCursor,
 		}, nil
 	}
-	password, err := c.sealer.Open(m.SecretCiphertext)
+	sealer, err := c.keyring.SealerFor(ctx, ws)
+	if err != nil {
+		return coreapi.InboxPollJob{}, err
+	}
+	password, err := sealer.Open(m.SecretCiphertext)
 	if err != nil {
 		return coreapi.InboxPollJob{}, err
 	}

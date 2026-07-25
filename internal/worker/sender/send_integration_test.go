@@ -16,9 +16,31 @@ import (
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
+
+// itMasterKey is the fixed 32-byte master key for these integration tests,
+// shared by the legacy Sealer that writes the seeded v1 credential and the
+// Keyring's legacy fallback that opens it.
+var itMasterKey = bytes.Repeat([]byte{7}, 32)
+
+// itKeyring builds a Keyring over the real sqlc-backed DEKStore with itMasterKey
+// as the KEK/legacy key, so the seeded v1 credential opens via the legacy
+// fallback while fresh seals migrate to per-workspace v2 DEKs.
+func itKeyring(t *testing.T, q *gen.Queries) *crypto.Keyring {
+	t.Helper()
+	kp, err := crypto.NewLocalKeyProvider(itMasterKey)
+	if err != nil {
+		t.Fatalf("key provider: %v", err)
+	}
+	legacy, err := crypto.NewSealer(itMasterKey)
+	if err != nil {
+		t.Fatalf("legacy sealer: %v", err)
+	}
+	return crypto.NewKeyring(kp, keys.NewPgDEKStore(q), legacy)
+}
 
 type fakeSender struct{ sent []mail.Message }
 
@@ -57,8 +79,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 	defer pool.Close()
 	q := gen.New(pool)
 
-	masterKey := bytes.Repeat([]byte{7}, 32)
-	sealer, err := crypto.NewSealer(masterKey)
+	sealer, err := crypto.NewSealer(itMasterKey)
 	if err != nil {
 		t.Fatalf("sealer: %v", err)
 	}
@@ -115,7 +136,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("expected 2 sends enqueued, got %d", len(sendIDs))
 	}
 
-	core := inprocess.New(pool, sealer, []byte("0123456789abcdef0123456789abcdef"), "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{})
+	core := inprocess.New(pool, itKeyring(t, q), []byte("0123456789abcdef0123456789abcdef"), "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{})
 	fs := &fakeSender{}
 	enq := queue.NewClient(redisAddr())
 	defer enq.Close()
@@ -187,8 +208,7 @@ func TestEnqueueSendsDedupOnRelaunch(t *testing.T) {
 	defer pool.Close()
 	q := gen.New(pool)
 
-	masterKey := bytes.Repeat([]byte{7}, 32)
-	sealer, err := crypto.NewSealer(masterKey)
+	sealer, err := crypto.NewSealer(itMasterKey)
 	if err != nil {
 		t.Fatalf("sealer: %v", err)
 	}

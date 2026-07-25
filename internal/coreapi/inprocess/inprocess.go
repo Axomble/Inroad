@@ -20,7 +20,7 @@ import (
 type client struct {
 	pool      *pgxpool.Pool
 	q         *gen.Queries
-	sealer    *crypto.Sealer
+	keyring   *crypto.Keyring
 	jwtSecret []byte
 	publicURL string
 	// googleOAuth is the app's Google OAuth client config. Used to refresh a
@@ -39,16 +39,17 @@ type client struct {
 
 // New returns the in-process coreapi client backed by the given connection
 // pool. The pool backs the pool-bound *gen.Queries for reads and lets
-// MarkStepSent run the record+advance writes in one transaction. The sealer
-// decrypts stored SMTP credentials (and sealed OAuth tokens); jwtSecret signs
-// stateless unsubscribe tokens; publicURL is the base URL used to build
-// unsubscribe links; googleOAuth refreshes gmail mailboxes' access tokens at
-// job-build time (zero value disables Gmail); msOAuth does the same for m365
-// mailboxes (zero value disables Microsoft 365).
-func New(pool *pgxpool.Pool, sealer *crypto.Sealer, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth) coreapi.Client {
+// MarkStepSent run the record+advance writes in one transaction. The keyring
+// resolves a per-workspace Sealer that decrypts stored SMTP credentials (and
+// sealed OAuth tokens) and re-seals rotated tokens; jwtSecret signs stateless
+// unsubscribe tokens; publicURL is the base URL used to build unsubscribe
+// links; googleOAuth refreshes gmail mailboxes' access tokens at job-build time
+// (zero value disables Gmail); msOAuth does the same for m365 mailboxes (zero
+// value disables Microsoft 365).
+func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth) coreapi.Client {
 	q := gen.New(pool)
 	return client{
-		pool: pool, q: q, sealer: sealer, jwtSecret: jwtSecret, publicURL: publicURL,
+		pool: pool, q: q, keyring: keyring, jwtSecret: jwtSecret, publicURL: publicURL,
 		googleOAuth: googleOAuth,
 		msOAuth:     msOAuth,
 		enroll:      enrollment.NewService(enrollment.NewPgStore(q)),

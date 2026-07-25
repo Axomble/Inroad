@@ -137,13 +137,52 @@ type fakeTester struct {
 func (t *fakeTester) TestSMTP(cfg mail.SMTPConfig) error { return t.smtpErr }
 func (t *fakeTester) TestIMAP(cfg mail.IMAPConfig) error { return t.imapErr }
 
-func newTestSealer(t *testing.T) *crypto.Sealer {
+// inMemDEKStore is a minimal in-memory crypto.DEKStore for unit tests: it
+// returns ErrDEKNotFound on a miss and fails a Put for an already-present
+// workspace, matching the fail-if-exists contract the sqlc-backed store
+// enforces via the workspace_deks primary key.
+type inMemDEKStore struct {
+	mu   sync.Mutex
+	rows map[uuid.UUID][]byte
+}
+
+func newInMemDEKStore() *inMemDEKStore { return &inMemDEKStore{rows: make(map[uuid.UUID][]byte)} }
+
+func (s *inMemDEKStore) GetWrappedDEK(_ context.Context, ws uuid.UUID) ([]byte, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.rows[ws]
+	if !ok {
+		return nil, "", crypto.ErrDEKNotFound
+	}
+	return w, "local", nil
+}
+
+func (s *inMemDEKStore) PutWrappedDEK(_ context.Context, ws uuid.UUID, wrapped []byte, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.rows[ws]; ok {
+		return errors.New("dek exists")
+	}
+	s.rows[ws] = wrapped
+	return nil
+}
+
+// newTestKeyring builds a Keyring over the in-memory DEKStore, a local
+// KeyProvider, and a legacy master-key Sealer — all under one fixed test key so
+// seals round-trip and legacy v1 blobs still open.
+func newTestKeyring(t *testing.T) *crypto.Keyring {
 	t.Helper()
-	sealer, err := crypto.NewSealer(bytes.Repeat([]byte{1}, 32))
+	key := bytes.Repeat([]byte{1}, 32)
+	kp, err := crypto.NewLocalKeyProvider(key)
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider() error = %v", err)
+	}
+	legacy, err := crypto.NewSealer(key)
 	if err != nil {
 		t.Fatalf("NewSealer() error = %v", err)
 	}
-	return sealer
+	return crypto.NewKeyring(kp, newInMemDEKStore(), legacy)
 }
 
 func validConnectInput() ConnectInput {
@@ -160,7 +199,7 @@ func validConnectInput() ConnectInput {
 
 func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	in := validConnectInput()
@@ -196,7 +235,7 @@ func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 
 func TestConnectSMTP_ConnectionTestFailureDoesNotPersist(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{smtpErr: errors.New("dial tcp: connection refused")}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, &fakeTester{smtpErr: errors.New("dial tcp: connection refused")}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	_, err := svc.ConnectSMTP(context.Background(), workspaceID, validConnectInput())
@@ -218,7 +257,7 @@ func TestConnectSMTP_ConnectionTestFailureDoesNotPersist(t *testing.T) {
 
 func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	in := validConnectInput()
@@ -234,7 +273,7 @@ func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 
 func TestPauseThenGetShowsPausedStatus(t *testing.T) {
 	store := newFakeStore()
-	svc := NewService(store, &fakeTester{}, newTestSealer(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+	svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
 	workspaceID := uuid.New()
 
 	m, err := svc.ConnectSMTP(context.Background(), workspaceID, validConnectInput())

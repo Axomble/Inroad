@@ -73,7 +73,11 @@ func (s *Service) CompleteGoogleOAuth(ctx context.Context, code string, workspac
 	if err != nil {
 		return MailboxSafe{}, err
 	}
-	ciphertext, err := s.sealer.Seal(raw)
+	sealer, err := s.keyring.SealerFor(ctx, workspaceID)
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	ciphertext, err := sealer.Seal(raw)
 	if err != nil {
 		return MailboxSafe{}, err
 	}
@@ -181,7 +185,11 @@ func (s *Service) CompleteMicrosoftOAuth(ctx context.Context, code string, works
 	if err != nil {
 		return MailboxSafe{}, err
 	}
-	ciphertext, err := s.sealer.Seal(raw)
+	sealer, err := s.keyring.SealerFor(ctx, workspaceID)
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	ciphertext, err := sealer.Seal(raw)
 	if err != nil {
 		return MailboxSafe{}, err
 	}

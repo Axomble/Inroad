@@ -28,7 +28,13 @@ func (c client) oauthAccessToken(ctx context.Context, provider string, mailboxID
 	if cfg == nil {
 		return "", fmt.Errorf("%s oauth not configured", provider)
 	}
-	raw, err := c.sealer.Open(sealed)
+	// One workspace-bound Sealer for both the initial Open and the reseal below,
+	// so a rotated token re-seals under the SAME per-workspace DEK it opened.
+	sealer, err := c.keyring.SealerFor(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	raw, err := sealer.Open(sealed)
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +57,7 @@ func (c client) oauthAccessToken(ctx context.Context, provider string, mailboxID
 	// token/ciphertext.
 	if fresh.AccessToken != tok.AccessToken || fresh.RefreshToken != tok.RefreshToken {
 		if b, err := mail.MarshalToken(fresh); err == nil {
-			if ct, err := c.sealer.Seal(b); err == nil {
+			if ct, err := sealer.Seal(b); err == nil {
 				if err := c.q.UpdateMailboxSecret(ctx, gen.UpdateMailboxSecretParams{
 					ID: mailboxID, WorkspaceID: workspaceID, SecretCiphertext: ct,
 				}); err != nil {

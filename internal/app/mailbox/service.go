@@ -27,12 +27,12 @@ var (
 
 // Service implements mailbox connection use cases. It depends on the Store
 // interface (not a concrete sqlc type), the mail.ConnectionTester interface,
-// and the crypto.Sealer for at-rest secret encryption -- dependency
-// inversion all the way down.
+// and the crypto.Keyring for at-rest secret encryption under a per-workspace
+// DEK -- dependency inversion all the way down.
 type Service struct {
-	store  Store
-	tester mail.ConnectionTester
-	sealer *crypto.Sealer
+	store   Store
+	tester  mail.ConnectionTester
+	keyring *crypto.Keyring
 	// oauth holds the app's Google OAuth client config (zero value = Gmail
 	// OAuth disabled); exchanger performs the authorization-code exchange (a
 	// seam so tests fake it without hitting Google). Both drive the Gmail
@@ -46,8 +46,8 @@ type Service struct {
 	msExchanger TokenExchanger
 }
 
-func NewService(store Store, tester mail.ConnectionTester, sealer *crypto.Sealer, oauth mail.GoogleOAuth, exchanger TokenExchanger, msOAuth mail.MicrosoftOAuth, msExchanger TokenExchanger) *Service {
-	return &Service{store: store, tester: tester, sealer: sealer, oauth: oauth, exchanger: exchanger, msOAuth: msOAuth, msExchanger: msExchanger}
+func NewService(store Store, tester mail.ConnectionTester, keyring *crypto.Keyring, oauth mail.GoogleOAuth, exchanger TokenExchanger, msOAuth mail.MicrosoftOAuth, msExchanger TokenExchanger) *Service {
+	return &Service{store: store, tester: tester, keyring: keyring, oauth: oauth, exchanger: exchanger, msOAuth: msOAuth, msExchanger: msExchanger}
 }
 
 // ConnectInput carries the fields needed to connect a new SMTP/IMAP mailbox.
@@ -134,7 +134,11 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		return MailboxSafe{}, fmt.Errorf("%w: imap: %v", ErrConnectionTestFailed, err)
 	}
 
-	ciphertext, err := s.sealer.Seal([]byte(in.Secret))
+	sealer, err := s.keyring.SealerFor(ctx, workspaceID)
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	ciphertext, err := sealer.Seal([]byte(in.Secret))
 	if err != nil {
 		return MailboxSafe{}, err
 	}
