@@ -90,14 +90,69 @@ or SSRF. (Not a full threat model; that's future work.)
     never be exfiltrated off-host. Cursor values are never logged verbatim — only
     their length.
 
+## Field encryption keys (per-workspace DEK)
+14. **Field secrets are sealed under a per-workspace data-encryption key (DEK),
+    not the master key directly.** SMTP passwords and Gmail/M365 OAuth tokens are
+    AES-256-GCM-sealed under a random 32-byte DEK unique to the workspace. Each
+    DEK is itself wrapped by the key-encryption key (KEK) via the `KeyProvider`
+    seam (`internal/platform/crypto/keyprovider.go`). `LocalKeyProvider` (the
+    default, `Name() == "local"`) wraps under an HKDF-SHA256-derived subkey of
+    `INROAD_MASTER_KEY` (info label `inroad-kek-v1`), so the KEK never shares a
+    key/nonce domain with the legacy raw master key; a cloud KMS is a future
+    drop-in behind the same interface. Plaintext DEKs live ONLY in a short-TTL
+    (5-minute) in-memory cache that zeroizes the bytes on eviction — never on
+    disk, never in a response. Only the wrapped DEK is persisted
+    (`workspace_deks.wrapped_dek`).
+15. **Every field ciphertext is AAD-bound to its `workspace_id`, and so is the
+    wrapped DEK.** The same additional-authenticated-data value (`ws:<uuid>`)
+    binds both layers: the DEK sealer's field ciphertext AND the KEK's wrap of
+    that DEK. A blob or wrapped DEK minted for workspace A therefore fails
+    authentication under workspace B's context — cross-tenant decrypt fails
+    closed, not silently returning garbage.
+16. **A DEK is never overwritten (fail-if-exists) and its wrapping provider is
+    recorded read-only.** `workspace_deks.workspace_id` is the primary key and
+    `CreateWorkspaceDEK` never upserts, so a second write (including a race) is
+    rejected rather than replacing a live DEK — overwriting would silently
+    invalidate every prior ciphertext. On a losing race the Keyring re-reads and
+    unwraps the winner. `key_provider` records which KeyProvider wrapped the DEK
+    for read-back; rotation is an explicit re-encrypt path, not an in-place
+    replace (a backfill/rotation CLI is a deferred follow-up).
+17. **`INROAD_MASTER_KEY` is now the KEK.** It wraps DEKs (via the HKDF-derived
+    subkey); the raw master key additionally remains the legacy-v1 field key,
+    decrypt-only, for pre-DEK blobs. Because the HKDF label domain-separates the
+    two roles they never collide. Blast radius is unchanged: losing
+    `INROAD_MASTER_KEY` loses every DEK and therefore every sealed secret, exactly
+    as before this change.
+18. **Crypto-shredding on workspace deletion.** `workspace_deks.workspace_id`
+    references `workspaces(id)` `ON DELETE CASCADE` (migration `000013`), so
+    deleting a workspace destroys its DEK and renders all of that workspace's
+    sealed data (mailbox creds, OAuth tokens) permanently unrecoverable — the
+    ciphertext survives only as undecryptable bytes. This is the GDPR-erasure
+    primitive.
+19. **Legacy v1 blobs stay decryptable and migrate lazily.** The `Sealer`
+    envelope is versioned and self-describing: v2 = `base64(0x02 || nonce ||
+    aes-gcm(dek, nonce, plaintext, aad))`; pre-DEK v1 = `base64(nonce || ct)`
+    under the master key with nil AAD, detected by the absence of the `0x02`
+    prefix. A workspace sealer opens either — falling back to the legacy
+    master-key sealer for v1 — and always writes v2, so a v1 secret re-seals to a
+    per-workspace DEK on its next write (OAuth mailboxes on token refresh). An
+    eager backfill CLI is deferred, so SMTP-only secrets sealed before this
+    change remain v1 until they are rewritten; they stay workspace-isolated by the
+    `workspace_id` SQL filter (invariant 4) in the meantime.
+
 ## Deferred (documented, not yet built)
-- KMS-backed data-encryption keys (Cloud) — today a single local master key.
+- Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
+  `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
+- Eager re-seal/rotation CLI: backfill pre-DEK v1 blobs to v2 and re-encrypt DEKs
+  under a rotated KEK (today v1→v2 migration is lazy, on next write).
 - Rate limiting / abuse controls on auth and connect endpoints.
 - Audit log for sensitive actions (mailbox connect/disconnect, settings changes).
 - Server-side single-use nonce store for the OAuth `state` (see invariant 10).
 
 ## Checklist for a security-sensitive change
-- [ ] New stored credential? → sealed via `crypto.Sealer`, absent from responses/logs.
+- [ ] New stored credential? → sealed via a workspace Sealer from
+      `Keyring.SealerFor(ctx, ws)` (per-workspace DEK, AAD-bound), absent from
+      responses/logs.
 - [ ] New outbound dial to a user-supplied host? → routed through the SSRF guard.
 - [ ] New tenant-scoped query? → filtered by `workspace_id` from the JWT.
 - [ ] New secret/config? → env-loaded, fail-closed in compose, in `.env.example`.
