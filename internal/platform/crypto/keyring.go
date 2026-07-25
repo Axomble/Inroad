@@ -120,7 +120,7 @@ func (k *Keyring) loadOrCreate(ctx context.Context, ws uuid.UUID, aad []byte) ([
 		// wrap both errors so a genuine double-failure is debuggable.
 		winner, _, gerr := k.store.GetWrappedDEK(ctx, ws)
 		if gerr != nil {
-			return nil, fmt.Errorf("put dek (and re-get failed: %v): %w", gerr, err)
+			return nil, fmt.Errorf("put dek (and re-get failed: %w): %w", gerr, err)
 		}
 		return k.unwrap(ctx, winner, aad)
 	}

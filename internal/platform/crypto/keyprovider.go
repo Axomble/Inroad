@@ -58,7 +58,7 @@ func NewLocalKeyProvider(masterKey []byte) (*LocalKeyProvider, error) {
 
 func (p *LocalKeyProvider) Name() string { return "local" }
 
-func (p *LocalKeyProvider) Wrap(_ context.Context, dek []byte, aad []byte) ([]byte, error) {
+func (p *LocalKeyProvider) Wrap(_ context.Context, dek, aad []byte) ([]byte, error) {
 	nonce := make([]byte, p.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
@@ -66,7 +66,7 @@ func (p *LocalKeyProvider) Wrap(_ context.Context, dek []byte, aad []byte) ([]by
 	return p.aead.Seal(nonce, nonce, dek, aad), nil
 }
 
-func (p *LocalKeyProvider) Unwrap(_ context.Context, wrapped []byte, aad []byte) ([]byte, error) {
+func (p *LocalKeyProvider) Unwrap(_ context.Context, wrapped, aad []byte) ([]byte, error) {
 	ns := p.aead.NonceSize()
 	if len(wrapped) < ns {
 		return nil, errors.New("wrapped dek too short")

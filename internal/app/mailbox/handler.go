@@ -1,6 +1,7 @@
 package mailbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -122,18 +123,7 @@ func (h *Handler) connect(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	m, err := h.svc.ConnectSMTP(r.Context(), wid, ConnectInput{
-		Email:        req.Email,
-		DisplayName:  req.DisplayName,
-		SMTPHost:     req.SMTPHost,
-		SMTPPort:     req.SMTPPort,
-		SMTPUsername: req.SMTPUsername,
-		IMAPHost:     req.IMAPHost,
-		IMAPPort:     req.IMAPPort,
-		IMAPUsername: req.IMAPUsername,
-		Secret:       req.Secret,
-		UseTLS:       req.UseTLS,
-	})
+	m, err := h.svc.ConnectSMTP(r.Context(), wid, ConnectInput(req))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -261,12 +251,26 @@ func (h *Handler) startGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 // oauth_error=<reason>, always tagged &provider=gmail so the SPA banner can use
 // provider-correct copy; server-side detail is logged, never leaked to the URL.
 func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
+	// provider=gmail: the persisted mailbox provider value the SPA keys its
+	// banner + ProviderTag on -- a hardcoded literal, not the "google" route
+	// segment and not user input, so the redirect stays injection-safe.
+	h.oauthCallback(w, r, "gmail", h.svc.CompleteGoogleOAuth)
+}
+
+// oauthCallback implements the shared provider-OAuth callback flow. The Gmail
+// and Microsoft callbacks differ only in the persisted provider tag and which
+// service method exchanges the code, so both delegate here. provider is a
+// hardcoded literal (never user input); it is echoed back as &provider=<tag> so
+// the SPA banner can use provider-correct copy. Every outcome 302s back to the
+// SPA (never a 5xx); server-side detail is logged, never leaked to the URL.
+func (h *Handler) oauthCallback(
+	w http.ResponseWriter, r *http.Request,
+	provider string,
+	complete func(context.Context, string, uuid.UUID) (MailboxSafe, error),
+) {
 	q := r.URL.Query()
 	redirect := func(query string) {
-		// provider is a hardcoded literal (not user input), so the redirect stays
-		// injection-safe. gmail is the persisted mailbox provider value the SPA
-		// keys its banner + ProviderTag on -- not the "google" route segment.
-		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query+"&provider=gmail", http.StatusFound)
+		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query+"&provider="+provider, http.StatusFound)
 	}
 	if q.Get("error") != "" || q.Get("code") == "" {
 		redirect("oauth_error=denied")
@@ -282,7 +286,7 @@ func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
 		redirect("oauth_error=bad_state")
 		return
 	}
-	m, err := h.svc.CompleteGoogleOAuth(r.Context(), q.Get("code"), wsID)
+	m, err := complete(r.Context(), q.Get("code"), wsID)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrDuplicateMailbox):
@@ -293,7 +297,7 @@ func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
 			redirect("oauth_error=no_email")
 		default:
 			// Log the detail server-side; never surface internals to the browser.
-			slog.Error("mailbox: gmail oauth callback failed", "err", err)
+			slog.Error("mailbox: oauth callback failed", "provider", provider, "err", err)
 			redirect("oauth_error=exchange_failed")
 		}
 		return
@@ -331,42 +335,8 @@ func (h *Handler) startMicrosoftOAuth(w http.ResponseWriter, r *http.Request) {
 // or oauth_error=<reason>, always tagged &provider=m365 so the SPA banner can
 // use provider-correct copy; server-side detail is logged, never leaked to the URL.
 func (h *Handler) microsoftCallback(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	redirect := func(query string) {
-		// provider is a hardcoded literal (not user input), so the redirect stays
-		// injection-safe. m365 is the persisted mailbox provider value the SPA
-		// keys its banner + ProviderTag on -- not the "microsoft" route segment.
-		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query+"&provider=m365", http.StatusFound)
-	}
-	if q.Get("error") != "" || q.Get("code") == "" {
-		redirect("oauth_error=denied")
-		return
-	}
-	wid, err := oauthstate.Verify(h.jwtSecret, q.Get("state"), time.Now())
-	if err != nil {
-		redirect("oauth_error=bad_state")
-		return
-	}
-	wsID, err := uuid.Parse(wid)
-	if err != nil {
-		redirect("oauth_error=bad_state")
-		return
-	}
-	m, err := h.svc.CompleteMicrosoftOAuth(r.Context(), q.Get("code"), wsID)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrDuplicateMailbox):
-			redirect("oauth_error=already_connected")
-		case errors.Is(err, ErrOAuthDisabled):
-			redirect("oauth_error=disabled")
-		case errors.Is(err, ErrValidation):
-			redirect("oauth_error=no_email")
-		default:
-			// Log the detail server-side; never surface internals to the browser.
-			slog.Error("mailbox: m365 oauth callback failed", "err", err)
-			redirect("oauth_error=exchange_failed")
-		}
-		return
-	}
-	redirect("connected=" + url.QueryEscape(m.Email))
+	// provider=m365: the persisted mailbox provider value the SPA keys its banner
+	// + ProviderTag on -- a hardcoded literal, not the "microsoft" route segment
+	// and not user input, so the redirect stays injection-safe.
+	h.oauthCallback(w, r, "m365", h.svc.CompleteMicrosoftOAuth)
 }

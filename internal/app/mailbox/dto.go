@@ -26,7 +26,7 @@ type MailboxSafe struct {
 	UseTls             bool
 	DailyCap           int32
 	MinIntervalSeconds int32
-	RampEnabled       bool
+	RampEnabled        bool
 	RampStartCap       int32
 	RampDays           int32
 	Status             string

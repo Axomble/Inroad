@@ -3,6 +3,7 @@ package worker
 
 import (
 	"github.com/hibiken/asynq"
+
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"

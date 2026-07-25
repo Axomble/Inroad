@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 

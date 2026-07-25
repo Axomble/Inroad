@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -149,7 +150,7 @@ func TestCreateRejectsInactiveMailbox(t *testing.T) {
 	_, err := svc.Create(context.Background(), uuid.New(), CreateInput{
 		Name: "Q3", Subject: "Hi", BodyText: "hello", MailboxID: uuid.New(), ListID: uuid.New(),
 	})
-	if err != ErrMailboxNotActive {
+	if !errors.Is(err, ErrMailboxNotActive) {
 		t.Fatalf("expected ErrMailboxNotActive, got %v", err)
 	}
 }
@@ -167,7 +168,7 @@ func TestCreateSucceeds(t *testing.T) {
 func TestLaunchRejectsAlreadyLaunched(t *testing.T) {
 	svc := NewService(&fakeStore{status: string(StatusRunning)}, okChecker{active: true})
 	_, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), &fakeEnqueuer{})
-	if err != ErrAlreadyLaunched {
+	if !errors.Is(err, ErrAlreadyLaunched) {
 		t.Fatalf("expected ErrAlreadyLaunched, got %v", err)
 	}
 }
@@ -176,7 +177,7 @@ func TestLaunchRejectsNoSteps(t *testing.T) {
 	// A draft campaign with a non-empty list but zero steps can't launch.
 	svc := NewService(&fakeStore{status: string(StatusDraft), steps: 0}, okChecker{active: true})
 	_, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), &fakeEnqueuer{})
-	if err != ErrNoSteps {
+	if !errors.Is(err, ErrNoSteps) {
 		t.Fatalf("expected ErrNoSteps, got %v", err)
 	}
 }
@@ -185,7 +186,7 @@ func TestLaunchRejectsEmptyList(t *testing.T) {
 	// Steps exist, but EnrollTx returns no enrollments (empty list).
 	svc := NewService(&fakeStore{status: string(StatusDraft), steps: 1}, okChecker{active: true})
 	_, err := svc.Launch(context.Background(), uuid.New(), uuid.New(), &fakeEnqueuer{})
-	if err != ErrEmptyList {
+	if !errors.Is(err, ErrEmptyList) {
 		t.Fatalf("expected ErrEmptyList, got %v", err)
 	}
 }
@@ -276,7 +277,7 @@ func TestDetailCrossTenantIsNotFound(t *testing.T) {
 		{uuid.New(), uuid.New()}: {Name: "foreign"},
 	}}
 	svc := NewService(store, okChecker{active: true})
-	if _, err := svc.Detail(context.Background(), uuid.New(), uuid.New()); err != ErrNotFound {
+	if _, err := svc.Detail(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound for cross-tenant detail, got %v", err)
 	}
 }
@@ -298,7 +299,7 @@ func TestCrossTenantGetReturnsNotFound(t *testing.T) {
 	}
 	svc := NewService(store, okChecker{active: true})
 
-	if _, err := svc.Get(context.Background(), callerWS, campaignID); err != errNotFound {
+	if _, err := svc.Get(context.Background(), callerWS, campaignID); !errors.Is(err, errNotFound) {
 		t.Fatalf("expected cross-tenant Get to fail with not-found, got %v", err)
 	}
 }
@@ -493,7 +494,7 @@ func TestSetTrackingCrossTenantIsNotFound(t *testing.T) {
 		{uuid.New(), uuid.New()}: {Name: "foreign"},
 	}}
 	svc := NewService(store, okChecker{active: true})
-	if err := svc.SetTracking(context.Background(), uuid.New(), uuid.New(), true); err != ErrNotFound {
+	if err := svc.SetTracking(context.Background(), uuid.New(), uuid.New(), true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound for cross-tenant SetTracking, got %v", err)
 	}
 	if store.setTrackingCalls != 0 {
@@ -509,7 +510,7 @@ func TestListEnrollmentsCrossTenantIsNotFound(t *testing.T) {
 		{uuid.New(), uuid.New()}: {Name: "foreign"},
 	}}
 	svc := NewService(store, okChecker{active: true})
-	if _, err := svc.ListEnrollments(context.Background(), uuid.New(), uuid.New(), 100, 0); err != ErrNotFound {
+	if _, err := svc.ListEnrollments(context.Background(), uuid.New(), uuid.New(), 100, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound for cross-tenant ListEnrollments, got %v", err)
 	}
 	if store.listEnrollmentsCalls != 0 {

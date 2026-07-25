@@ -13,22 +13,15 @@ import (
 // attacker who controls DNS could return [8.8.8.8, 127.0.0.1] and rely on
 // callers dialing whichever entry the resolver puts first.
 func TestVetAddrRejectsMixedAnswerSet(t *testing.T) {
-	fake := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return nil, errors.New("no dns")
-		},
-	}
-	// Use setResolver only through the injected fake wrapping our answer list
-	// via a resolverFake indirection would be over-engineered; instead, drive
-	// the check through the ip-level helper directly:
+	// Drive the check through the ip-level helper directly: a mixed answer set
+	// is rejected because each individual address is vetted, and loopback /
+	// link-local never pass even with allowPrivate=true.
 	if ipAllowed(net.ParseIP("127.0.0.1"), true) {
 		t.Fatal("loopback must not be allowed even with allowPrivate=true")
 	}
 	if ipAllowed(net.ParseIP("169.254.169.254"), true) {
 		t.Fatal("link-local metadata IP must never be allowed")
 	}
-	_ = fake // reserved for future integration-style rebind tests
 }
 
 // TestVetAddrDNSRebindWindow simulates a resolver whose second call returns a

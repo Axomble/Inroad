@@ -17,20 +17,30 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// run wires and serves the worker. Keeping the body here (rather than in main)
+// guarantees the deferred cleanups (pool.Close, enq.Close, sch.Shutdown) run
+// before the process exits; main only maps a returned error to a non-zero
+// status code. The error paths log/print their own diagnostics before returning.
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		// Exit before building the logger: config failure means we may not have
+		// Report before building the logger: config failure means we may not have
 		// the info the logger needs (env/level), and matching cmd/migrate keeps
 		// bad-config output uniform across binaries.
 		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(1)
+		return err
 	}
 	logger := log.New(cfg.Env)
 
 	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("db connect failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 	defer pool.Close()
 
@@ -41,7 +51,7 @@ func main() {
 	keyring, err := keys.BuildKeyring(cfg, gen.New(pool))
 	if err != nil {
 		logger.Error("keyring init failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 
 	// The worker package depends only on coreapi.Client; the DB-backed
@@ -72,15 +82,15 @@ func main() {
 	sch := queue.NewScheduler(cfg.RedisAddr, logger)
 	if err := queue.RegisterSweepStuck(sch); err != nil {
 		logger.Error("scheduler register failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 	if err := queue.RegisterSweepEnrollments(sch); err != nil {
 		logger.Error("scheduler register (enrollments) failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 	if err := queue.RegisterInboxSweep(sch); err != nil {
 		logger.Error("scheduler register (inbox sweep) failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 	go func() {
 		if err := sch.Run(); err != nil {
@@ -96,6 +106,7 @@ func main() {
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
 		logger.Error("worker error", "err", err)
-		os.Exit(1)
+		return err
 	}
+	return nil
 }

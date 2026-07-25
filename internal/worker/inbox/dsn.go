@@ -9,6 +9,7 @@ package inbox
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -106,7 +107,7 @@ func parseReport(boundary string, body []byte) DSNResult {
 	mr := multipart.NewReader(bytes.NewReader(body), boundary)
 	for {
 		part, err := mr.NextPart()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

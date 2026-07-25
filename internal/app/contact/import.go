@@ -52,7 +52,7 @@ func (s *Service) importRows(ctx context.Context, ws, listID uuid.UUID, r io.Rea
 	rows := 0
 	for {
 		rec, err := cr.Read()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

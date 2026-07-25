@@ -136,7 +136,7 @@ func TestOpenPixel_RecordsEvent(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -172,7 +172,7 @@ func TestClickRedirect_RecordsEventAndRedirects(t *testing.T) {
 
 	dest := "https://example.test/landing?utm_source=inroad"
 	tok := track.MakeClickToken(itSecret, fx.sendID.String(), dest)
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -209,7 +209,7 @@ func TestClickRedirect_DataURL_404NoRedirectNoEvent(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeClickToken(itSecret, fx.sendID.String(), "data:text/html,pwned")
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -236,7 +236,7 @@ func TestClickRedirect_ProtocolRelativeURL_404NoRedirectNoEvent(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeClickToken(itSecret, fx.sendID.String(), "//evil.com/x")
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -264,7 +264,7 @@ func TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens(t *testing
 	r := mountHandler(pool)
 
 	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; GoogleImageProxy)")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -299,12 +299,12 @@ func TestCampaignMetrics_FromSeededEvents(t *testing.T) {
 	r := mountHandler(pool)
 
 	openTok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	reqO := httptest.NewRequest(http.MethodGet, "/t/o/"+openTok+".gif", nil)
+	reqO := httptest.NewRequest(http.MethodGet, "/t/o/"+openTok+".gif", http.NoBody)
 	reqO.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	r.ServeHTTP(httptest.NewRecorder(), reqO)
 
 	clickTok := track.MakeClickToken(itSecret, fx.sendID.String(), "https://example.test/landing")
-	reqC := httptest.NewRequest(http.MethodGet, "/t/c/"+clickTok, nil)
+	reqC := httptest.NewRequest(http.MethodGet, "/t/c/"+clickTok, http.NoBody)
 	r.ServeHTTP(httptest.NewRecorder(), reqC)
 
 	campSvc := campaign.NewService(campaign.NewPgStore(pool), nil)

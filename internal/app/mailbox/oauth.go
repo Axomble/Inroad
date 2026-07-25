@@ -50,10 +50,23 @@ func (s *Service) GoogleAuthCodeURL(state string) (string, error) {
 // state, never a request body), so this write is workspace-pinned. Dedupes on
 // email like ConnectSMTP.
 func (s *Service) CompleteGoogleOAuth(ctx context.Context, code string, workspaceID uuid.UUID) (MailboxSafe, error) {
-	if !s.oauth.Enabled() {
+	return s.completeOAuth(ctx, code, workspaceID, s.oauth.Enabled(), s.exchanger, "gmail")
+}
+
+// completeOAuth is the provider-agnostic body shared by CompleteGoogleOAuth and
+// CompleteMicrosoftOAuth. It guards on the provider being configured (enabled),
+// exchanges the code for a token + connected address, dedupes on email, seals
+// the token under the per-workspace DEK, and persists a workspace-pinned mailbox
+// row tagged with provider. workspaceID is supplied by the caller (the callback
+// derives it from the verified signed state, never a request body).
+func (s *Service) completeOAuth(
+	ctx context.Context, code string, workspaceID uuid.UUID,
+	enabled bool, exchanger TokenExchanger, provider string,
+) (MailboxSafe, error) {
+	if !enabled {
 		return MailboxSafe{}, ErrOAuthDisabled
 	}
-	tok, email, err := s.exchanger.Exchange(ctx, code)
+	tok, email, err := exchanger.Exchange(ctx, code)
 	if err != nil {
 		return MailboxSafe{}, fmt.Errorf("oauth exchange: %w", err)
 	}
@@ -84,11 +97,11 @@ func (s *Service) CompleteGoogleOAuth(ctx context.Context, code string, workspac
 
 	return s.store.Create(ctx, gen.CreateMailboxParams{
 		WorkspaceID:      workspaceID,
-		Provider:         "gmail",
+		Provider:         provider,
 		Email:            email,
 		DisplayName:      email,
 		SecretCiphertext: ciphertext,
-		// SMTP/IMAP fields are unused for gmail; their zero values are fine.
+		// SMTP/IMAP fields are unused for OAuth mailboxes; their zero values are fine.
 		DailyCap:           defaultDailyCap,
 		MinIntervalSeconds: defaultMinIntervalSeconds,
 		RampEnabled:        true,
@@ -120,7 +133,7 @@ func (g *googleExchanger) Exchange(ctx context.Context, code string) (*oauth2.To
 	if err != nil {
 		return nil, "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://openidconnect.googleapis.com/v1/userinfo", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://openidconnect.googleapis.com/v1/userinfo", http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}
@@ -162,51 +175,7 @@ func (s *Service) MicrosoftAuthCodeURL(state string) (string, error) {
 // derives it from the verified signed state, never a request body), so this
 // write is workspace-pinned. Dedupes on email like ConnectSMTP.
 func (s *Service) CompleteMicrosoftOAuth(ctx context.Context, code string, workspaceID uuid.UUID) (MailboxSafe, error) {
-	if !s.msOAuth.Enabled() {
-		return MailboxSafe{}, ErrOAuthDisabled
-	}
-	tok, email, err := s.msExchanger.Exchange(ctx, code)
-	if err != nil {
-		return MailboxSafe{}, fmt.Errorf("oauth exchange: %w", err)
-	}
-	if email == "" {
-		return MailboxSafe{}, fmt.Errorf("%w: no email in userinfo", ErrValidation)
-	}
-
-	count, err := s.store.CountByEmail(ctx, workspaceID, email)
-	if err != nil {
-		return MailboxSafe{}, err
-	}
-	if count > 0 {
-		return MailboxSafe{}, ErrDuplicateMailbox
-	}
-
-	raw, err := mail.MarshalToken(tok)
-	if err != nil {
-		return MailboxSafe{}, err
-	}
-	sealer, err := s.keyring.SealerFor(ctx, workspaceID)
-	if err != nil {
-		return MailboxSafe{}, err
-	}
-	ciphertext, err := sealer.Seal(raw)
-	if err != nil {
-		return MailboxSafe{}, err
-	}
-
-	return s.store.Create(ctx, gen.CreateMailboxParams{
-		WorkspaceID:      workspaceID,
-		Provider:         "m365",
-		Email:            email,
-		DisplayName:      email,
-		SecretCiphertext: ciphertext,
-		// SMTP/IMAP fields are unused for m365; their zero values are fine.
-		DailyCap:           defaultDailyCap,
-		MinIntervalSeconds: defaultMinIntervalSeconds,
-		RampEnabled:        true,
-		RampStartCap:       defaultRampStartCap,
-		RampDays:           defaultRampDays,
-	})
+	return s.completeOAuth(ctx, code, workspaceID, s.msOAuth.Enabled(), s.msExchanger, "m365")
 }
 
 // microsoftExchanger is the production TokenExchanger for M365: it exchanges the
@@ -232,7 +201,7 @@ func (m *microsoftExchanger) Exchange(ctx context.Context, code string) (*oauth2
 	if err != nil {
 		return nil, "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://graph.microsoft.com/v1.0/me", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://graph.microsoft.com/v1.0/me", http.NoBody)
 	if err != nil {
 		return nil, "", err
 	}

@@ -51,8 +51,6 @@ type fakeStore struct {
 	workspaces     map[uuid.UUID]gen.Workspace
 
 	registerErr error
-	nextWS      uuid.UUID
-	nextUser    uuid.UUID
 
 	// preRevokeSession, when set, runs at the top of RevokeSession before it
 	// reads the session row. Tests use it to simulate a concurrent request
@@ -91,10 +89,10 @@ func (f *fakeStore) RegisterTx(ctx context.Context, arg RegisterTxParams) (Regis
 		ID: member.ID, WorkspaceID: wsID, UserID: userID, Role: gen.MemberRoleOwner, WorkspaceName: arg.WorkspaceName,
 	})
 	// The real store creates the session inside the same transaction; the fake
-	// mirrors that so tests exercise the same shape.
+	// mirrors that so tests exercise the same shape. The session row is built
+	// directly from the ids minted above, so SessionParams supplies only the
+	// token/expiry/agent fields.
 	sp := arg.SessionParams
-	sp.UserID = userID
-	sp.WorkspaceID = wsID
 	row := gen.Session{
 		ID: sessionID, UserID: userID, WorkspaceID: wsID,
 		TokenHash: sp.TokenHash, FamilyID: sp.FamilyID, ExpiresAt: sp.ExpiresAt,

@@ -45,7 +45,7 @@ func (s *Store) RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterT
 	if err != nil {
 		return RegisterTxResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
 	qtx := s.q.WithTx(tx)
 
@@ -81,7 +81,7 @@ func (s *Store) RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterT
 		return RegisterTxResult{}, err
 	}
 
-	if err = tx.Commit(ctx); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return RegisterTxResult{}, err
 	}
 
@@ -248,7 +248,7 @@ func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash str
 	if err != nil {
 		return uuid.Nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
 	qtx := s.q.WithTx(tx)
 
@@ -336,7 +336,7 @@ func (s *Store) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (A
 	if err != nil {
 		return AcceptInviteTxResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
 	qtx := s.q.WithTx(tx)
 

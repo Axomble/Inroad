@@ -76,6 +76,7 @@ func (c client) oauthConfigFor(provider string) *oauth2.Config {
 func (c client) MailboxExists(ctx context.Context, id string) (bool, error) {
 	uid, err := uuid.Parse(id)
 	if err != nil {
+		//nolint:nilerr // a malformed id can't identify any mailbox: absent, not a lookup failure
 		return false, nil
 	}
 	return c.q.MailboxExists(ctx, uid)

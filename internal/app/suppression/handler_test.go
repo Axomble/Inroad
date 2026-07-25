@@ -46,7 +46,7 @@ func TestUnsubscribeGETDoesNotMutate(t *testing.T) {
 	r, store, secret, ws := newTestHandler(t)
 	tok := unsub.MakeToken(secret, ws.String(), "alice@x.test")
 
-	req := httptest.NewRequest(http.MethodGet, "/u/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/u/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -68,7 +68,7 @@ func TestUnsubscribePOSTInserts(t *testing.T) {
 	r, store, secret, ws := newTestHandler(t)
 	tok := unsub.MakeToken(secret, ws.String(), "alice@x.test")
 
-	req := httptest.NewRequest(http.MethodPost, "/u/"+tok, nil)
+	req := httptest.NewRequest(http.MethodPost, "/u/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -96,7 +96,7 @@ func TestUnsubscribeMalformedToken400(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			r, store, _, _ := newTestHandler(t)
-			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 			if w.Code != http.StatusBadRequest {

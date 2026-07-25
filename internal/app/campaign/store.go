@@ -96,7 +96,7 @@ func (s *PgStore) Create(ctx context.Context, ws uuid.UUID, in CreateInput) (gen
 	if err != nil {
 		return gen.Campaign{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 	qtx := s.q.WithTx(tx)
 
 	c, err := qtx.CreateCampaign(ctx, gen.CreateCampaignParams{
@@ -223,7 +223,7 @@ func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]Enr
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
 	qtx := s.q.WithTx(tx)
 	rows, err := qtx.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: campaignID, WorkspaceID: ws})

@@ -68,7 +68,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		return coreapi.SendJob{}, err
 	}
 	ageDays := int(time.Since(b.MailboxCreatedAt.Time).Hours() / 24)
-	cap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
+	dailyCap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
 	token := unsub.MakeToken(c.jwtSecret, b.WorkspaceID.String(), b.ToEmail)
 
 	return coreapi.SendJob{
@@ -76,7 +76,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		WorkspaceID:       b.WorkspaceID.String(),
 		Attempts:          int(b.Attempts),
 		Suppressed:        suppressed,
-		EffectiveDailyCap: cap,
+		EffectiveDailyCap: dailyCap,
 		SentToday:         int(sentToday),
 		ToEmail:           b.ToEmail,
 		FirstName:         b.FirstName,

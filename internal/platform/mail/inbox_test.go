@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ import (
 func TestInboxReaderRejectsPrivateWhenDisallowed(t *testing.T) {
 	reader := &NetInboxReader{Timeout: time.Second} // AllowPrivate false
 	_, _, err := reader.Fetch(IMAPConfig{Host: "10.0.0.5", Port: 993}, 0, 50)
-	if err != ErrHostNotPermitted {
+	if !errors.Is(err, ErrHostNotPermitted) {
 		t.Fatalf("expected ErrHostNotPermitted for private IP, got %v", err)
 	}
 }

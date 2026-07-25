@@ -57,5 +57,5 @@ func sign(secret []byte, payload string) []byte {
 	return h.Sum(nil)
 }
 
-func b64(b []byte) string          { return base64.RawURLEncoding.EncodeToString(b) }
+func b64(b []byte) string            { return base64.RawURLEncoding.EncodeToString(b) }
 func unb64(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }

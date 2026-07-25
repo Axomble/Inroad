@@ -63,7 +63,7 @@ func TestOpenGIF_ValidToken_RecordsEventAndServesPixel(t *testing.T) {
 	r, store, sendID := newTestHandler(t)
 	tok := track.MakeOpenToken(testSecret, sendID.String())
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", testUA)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -92,7 +92,7 @@ func TestOpenGIF_ValidToken_RecordsEventAndServesPixel(t *testing.T) {
 func TestOpenGIF_InvalidToken_ServesPixelButRecordsNothing(t *testing.T) {
 	r, store, _ := newTestHandler(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/not-a-real-token.gif", nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/o/not-a-real-token.gif", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -111,7 +111,7 @@ func TestOpenGIF_UnknownSend_ServesPixelButRecordsNothing(t *testing.T) {
 	r, store, _ := newTestHandler(t)
 	tok := track.MakeOpenToken(testSecret, uuid.New().String()) // validly signed, no such send
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -128,7 +128,7 @@ func TestClickRedirect_ValidToken_RecordsEventAndRedirects(t *testing.T) {
 	dest := "https://example.test/landing?utm_source=inroad"
 	tok := track.MakeClickToken(testSecret, sendID.String(), dest)
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
 	req.Header.Set("User-Agent", testUA)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -156,7 +156,7 @@ func TestClickRedirect_TamperedToken_404NoRedirectNoEvent(t *testing.T) {
 		tampered = tok[:len(tok)-1] + "y"
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tampered, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tampered, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -179,7 +179,7 @@ func TestClickRedirect_UnsafeScheme_404NoRedirectNoEvent(t *testing.T) {
 	r, store, sendID := newTestHandler(t)
 	tok := track.MakeClickToken(testSecret, sendID.String(), "javascript:alert(1)")
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -198,7 +198,7 @@ func TestClickRedirect_UnknownSend_404NoRedirectNoEvent(t *testing.T) {
 	r, store, _ := newTestHandler(t)
 	tok := track.MakeClickToken(testSecret, uuid.New().String(), "https://example.test/landing")
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, nil)
+	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

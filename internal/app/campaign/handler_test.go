@@ -55,7 +55,7 @@ func newAuthedEnrollmentsRequest(t *testing.T, secret []byte, ws, campaignID uui
 	if rawQuery != "" {
 		url += "?" + rawQuery
 	}
-	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req := httptest.NewRequest(http.MethodGet, url, http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", campaignID.String())

@@ -34,31 +34,42 @@ func HashPassword(pw string) (string, error) {
 }
 
 func CheckPassword(encoded, pw string) bool {
-	salt, key, t, m, p, err := decodeArgon(encoded)
+	h, err := decodeArgon(encoded)
 	if err != nil {
 		return false
 	}
-	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(key)))
-	return subtle.ConstantTimeCompare(got, key) == 1
+	got := argon2.IDKey([]byte(pw), h.salt, h.t, h.m, h.p, uint32(len(h.key)))
+	return subtle.ConstantTimeCompare(got, h.key) == 1
 }
 
-func decodeArgon(encoded string) (salt, key []byte, t, m uint32, p uint8, err error) {
+// argonHash holds the parsed components of an encoded argon2id password hash.
+type argonHash struct {
+	salt, key []byte
+	t, m      uint32
+	p         uint8
+}
+
+func decodeArgon(encoded string) (argonHash, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
-		return nil, nil, 0, 0, 0, errors.New("bad argon2 hash")
+		return argonHash{}, errors.New("bad argon2 hash")
 	}
-	var version int
+	var (
+		h       argonHash
+		version int
+		err     error
+	)
 	if _, err = fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
-		return nil, nil, 0, 0, 0, err
+		return argonHash{}, err
 	}
-	if _, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil {
-		return nil, nil, 0, 0, 0, err
+	if _, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &h.m, &h.t, &h.p); err != nil {
+		return argonHash{}, err
 	}
-	if salt, err = base64.RawStdEncoding.DecodeString(parts[4]); err != nil {
-		return nil, nil, 0, 0, 0, err
+	if h.salt, err = base64.RawStdEncoding.DecodeString(parts[4]); err != nil {
+		return argonHash{}, err
 	}
-	if key, err = base64.RawStdEncoding.DecodeString(parts[5]); err != nil {
-		return nil, nil, 0, 0, 0, err
+	if h.key, err = base64.RawStdEncoding.DecodeString(parts[5]); err != nil {
+		return argonHash{}, err
 	}
-	return salt, key, t, m, p, nil
+	return h, nil
 }

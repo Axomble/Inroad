@@ -35,12 +35,22 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// run wires and serves the API. Keeping the body here (rather than in main)
+// guarantees the deferred cleanups (stop, pool.Close, enq.Close) run before the
+// process exits; main only maps a returned error to a non-zero status code. The
+// error paths log/print their own diagnostics before returning.
+func run() error {
 	cfg, err := config.Load()
 	if err != nil {
-		// Exit before building the logger: config failure could hide log
+		// Report before building the logger: config failure could hide log
 		// options; matching cmd/migrate keeps bad-config output uniform.
 		fmt.Fprintln(os.Stderr, "config:", err)
-		os.Exit(1)
+		return err
 	}
 	logger := log.New(cfg.Env)
 
@@ -50,7 +60,7 @@ func main() {
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Error("db connect failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 	defer pool.Close()
 
@@ -61,14 +71,14 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("transactional sender init failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 
 	queries := gen.New(pool)
 	keyring, err := keys.BuildKeyring(cfg, queries)
 	if err != nil {
 		logger.Error("keyring init failed", "err", err)
-		os.Exit(1)
+		return err
 	}
 	identStore := identity.NewStore(pool)
 	identHandler := identity.NewHandler(
@@ -159,8 +169,9 @@ func main() {
 	logger.Info("api listening", "addr", cfg.HTTPAddr)
 	if err := httpx.Run(ctx, srv); err != nil {
 		logger.Error("server error", "err", err)
-		os.Exit(1)
+		return err
 	}
+	return nil
 }
 
 // mount pairs a URL prefix with the handler served under it.

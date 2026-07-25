@@ -123,7 +123,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		Password: in.Secret,
 		UseTLS:   in.UseTLS,
 	}); err != nil {
-		return MailboxSafe{}, fmt.Errorf("%w: smtp: %v", ErrConnectionTestFailed, err)
+		return MailboxSafe{}, fmt.Errorf("%w: smtp: %w", ErrConnectionTestFailed, err)
 	}
 	if err := s.tester.TestIMAP(mail.IMAPConfig{
 		Host:     in.IMAPHost,
@@ -131,7 +131,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		Username: in.IMAPUsername,
 		Password: in.Secret,
 	}); err != nil {
-		return MailboxSafe{}, fmt.Errorf("%w: imap: %v", ErrConnectionTestFailed, err)
+		return MailboxSafe{}, fmt.Errorf("%w: imap: %w", ErrConnectionTestFailed, err)
 	}
 
 	sealer, err := s.keyring.SealerFor(ctx, workspaceID)
