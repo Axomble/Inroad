@@ -4,6 +4,12 @@
 // generated client too (from the OpenAPI path); we only attach its providesTags
 // here.
 //
+// The reorder endpoint (`POST /campaigns/{id}/steps/reorder`) was originally to
+// be injected here contract-first, but the backend's `gen:api` has since landed
+// it in the generated store/api.ts (`reorderSteps`, arg
+// `{ id, reorderStepsRequest: { step_ids } }` → `SequenceStep[]`). We now use
+// the generated endpoint directly and only attach its tag wiring below.
+//
 // Cross-feature query-hook imports (mailboxes, lists) are allowed HERE as a
 // deliberate loophole for read-only reference data that this feature's forms
 // need in dropdowns — cross-feature UI imports remain forbidden.
@@ -13,9 +19,12 @@ import { api } from '@/store/api'
 // the feature barrel rather than reaching into store/api.ts directly. The
 // generated shape carries a strict `reply_class` union.
 export type { CampaignEnrollment } from '@/store/api'
+// Step shapes are generated too; re-export so the sequence editor derives its
+// form/card types from the contract rather than hand-duplicating them.
+export type { SequenceStep, StepRequest } from '@/store/api'
 
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign', 'Enrollment'],
+  addTagTypes: ['Campaign', 'Enrollment', 'Step'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -46,6 +55,23 @@ const campaignApi = api.enhanceEndpoints({
     listCampaignEnrollments: {
       providesTags: (_result, _error, arg) => [{ type: 'Enrollment', id: arg.id }],
     },
+    // Sequence steps: one `Step` tag keyed by campaign id. Every structural or
+    // content mutation invalidates it so the ordered list refetches.
+    listSteps: {
+      providesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+    },
+    createStep: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+    },
+    updateStep: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+    },
+    deleteStep: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+    },
+    reorderSteps: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+    },
   },
 })
 
@@ -56,4 +82,9 @@ export const {
   useLaunchCampaignMutation,
   useUpdateCampaignTrackingMutation,
   useListCampaignEnrollmentsQuery,
+  useListStepsQuery,
+  useCreateStepMutation,
+  useUpdateStepMutation,
+  useDeleteStepMutation,
+  useReorderStepsMutation,
 } = campaignApi

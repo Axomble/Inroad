@@ -17,6 +17,7 @@ import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
 import { MetricsPanel } from './metrics-panel'
 import { CampaignEnrollmentsList } from './campaign-enrollments-list'
+import { SequenceEditor } from './sequence-editor'
 
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
@@ -159,6 +160,10 @@ function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const n = (k: string) => stats[k] ?? 0
   return (
     <div className="border-b border-border bg-surface/40">
+      {/* The sequence is the campaign's definition — surface it above the Sends
+          stats. Owns its own loading/empty/error states. */}
+      <SequenceEditor campaignId={id} status={data?.status} />
+
       <SectionBar label={`Sends · ${data?.name ?? ''}`}>
         <Button variant="ghost" size="xs" onClick={onClose}>
           Close
