@@ -167,12 +167,13 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	// step recomputes the same id — see stepSendIDNamespace.
 	sendID := deriveStepSendID(b.CampaignID, b.ContactID, nextOrder)
 
-	// Transport dispatch on the mailbox provider (see GetSendJob): gmail returns
-	// a refreshed short-lived access token and no password; smtp unseals the
-	// stored password unchanged.
+	// Transport dispatch on the mailbox provider (see GetSendJob): API providers
+	// (gmail, m365) return a refreshed short-lived access token and no password
+	// (the provider's oauth2 config selects the refresh endpoint); smtp unseals
+	// the stored password unchanged.
 	var accessToken, password []byte
-	if b.Provider == "gmail" {
-		at, err := c.gmailAccessToken(ctx, b.MailboxID, ws, b.SecretCiphertext)
+	if b.Provider == "gmail" || b.Provider == "m365" {
+		at, err := c.oauthAccessToken(ctx, b.Provider, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
 		if err != nil {
 			return coreapi.StepSendJob{}, err
 		}

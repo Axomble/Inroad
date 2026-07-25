@@ -121,7 +121,7 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 	}
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
 	return itFixture{
-		q: q, core: inprocess.New(pool, sealer, sealerKey, "https://app.test", mail.GoogleOAuth{}),
+		q: q, core: inprocess.New(pool, sealer, sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}),
 		ws: ws.ID, campaignID: cam.ID, contactID: c.ID, email: email,
 	}
 }

@@ -63,16 +63,17 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 		return coreapi.InboxPollJob{}, coreapi.ErrCrossTenant
 	}
 	// Transport dispatch on the mailbox provider (parallel to GetStepSendJob):
-	// gmail resolves a refreshed short-lived access token and resumes from the
-	// opaque inbox_cursor (historyId), leaving the IMAP UID cursor columns zero;
-	// smtp unseals the stored IMAP password and resumes from the UID cursor.
-	if m.Provider == "gmail" {
-		at, err := c.gmailAccessToken(ctx, id, ws, m.SecretCiphertext)
+	// the API providers (gmail, m365) resolve a refreshed short-lived access token
+	// and resume from the opaque inbox_cursor (Gmail historyId / Graph delta-link),
+	// leaving the IMAP UID cursor columns zero; smtp unseals the stored IMAP
+	// password and resumes from the UID cursor.
+	if m.Provider == "gmail" || m.Provider == "m365" {
+		at, err := c.oauthAccessToken(ctx, m.Provider, id, ws, m.SecretCiphertext, c.oauthConfigFor(m.Provider))
 		if err != nil {
 			return coreapi.InboxPollJob{}, err
 		}
 		return coreapi.InboxPollJob{
-			Provider: "gmail", AccessToken: []byte(at), Cursor: m.InboxCursor,
+			Provider: m.Provider, AccessToken: []byte(at), Cursor: m.InboxCursor,
 		}, nil
 	}
 	password, err := c.sealer.Open(m.SecretCiphertext)

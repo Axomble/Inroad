@@ -6,7 +6,7 @@ import { OauthCallbackBanner } from './oauth-callback-banner'
 
 // OauthCallbackBanner reads ?connected / ?oauth_error via getRouteApi and
 // strips them via useNavigate — stub both the same way the auth page tests do.
-let searchParams: { connected?: string; oauth_error?: string } = {}
+let searchParams: { connected?: string; oauth_error?: string; provider?: 'gmail' | 'm365' } = {}
 const navigateMock = vi.fn()
 
 vi.mock('@tanstack/react-router', () => ({
@@ -19,8 +19,10 @@ afterEach(() => {
   navigateMock.mockClear()
 })
 
-test('a successful connect shows the email, invalidates the list, and strips the query', () => {
-  searchParams = { connected: 'sender@gmail.com' }
+test('a successful Gmail connect shows the email, invalidates the list, and strips the query', () => {
+  // The backend now always tags the redirect with &provider so the banner can
+  // pick provider-correct copy.
+  searchParams = { connected: 'sender@gmail.com', provider: 'gmail' }
   const invalidateSpy = vi.spyOn(api.util, 'invalidateTags')
 
   renderWithProviders(<OauthCallbackBanner />)
@@ -34,12 +36,28 @@ test('a successful connect shows the email, invalidates the list, and strips the
   )
 })
 
-test('a known error reason maps to plain copy', () => {
+test('a successful Microsoft 365 connect shows the Microsoft 365 label', () => {
+  searchParams = { connected: 'rep@example.com', provider: 'm365' }
+
+  renderWithProviders(<OauthCallbackBanner />)
+
+  expect(screen.getByRole('status')).toHaveTextContent(/Microsoft 365 mailbox rep@example\.com connected\./i)
+})
+
+test('a Microsoft 365 disabled error names Microsoft 365', () => {
+  searchParams = { oauth_error: 'disabled', provider: 'm365' }
+
+  renderWithProviders(<OauthCallbackBanner />)
+
+  expect(screen.getByRole('alert')).toHaveTextContent(/Microsoft 365 connect isn't configured on this server\./i)
+})
+
+test('a known error reason maps to plain, provider-neutral copy', () => {
   searchParams = { oauth_error: 'denied' }
 
   renderWithProviders(<OauthCallbackBanner />)
 
-  expect(screen.getByRole('alert')).toHaveTextContent(/Google sign-in was cancelled\./i)
+  expect(screen.getByRole('alert')).toHaveTextContent(/Sign-in was cancelled\./i)
 })
 
 test('an unknown error reason falls back to the generic message', () => {
@@ -47,7 +65,7 @@ test('an unknown error reason falls back to the generic message', () => {
 
   renderWithProviders(<OauthCallbackBanner />)
 
-  expect(screen.getByRole('alert')).toHaveTextContent(/Could not complete the Google connection/i)
+  expect(screen.getByRole('alert')).toHaveTextContent(/Couldn't complete the connection — try again\./i)
 })
 
 test('the banner is dismissible', () => {

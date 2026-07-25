@@ -20,7 +20,14 @@ test('an absent error maps to "generic"', () => {
   expect(startErrorKind(undefined)).toBe('generic')
 })
 
-test('copy is defined for both kinds', () => {
-  expect(startErrorCopy.disabled).toMatch(/configured/i)
-  expect(startErrorCopy.generic).toMatch(/try again/i)
+test('copy is defined for both kinds, per provider', () => {
+  const gmail = startErrorCopy('gmail')
+  expect(gmail.disabled).toMatch(/gmail/i)
+  expect(gmail.disabled).toMatch(/configured/i)
+  expect(gmail.generic).toMatch(/try again/i)
+
+  const microsoft = startErrorCopy('microsoft')
+  expect(microsoft.disabled).toMatch(/microsoft 365/i)
+  expect(microsoft.disabled).toMatch(/configured/i)
+  expect(microsoft.generic).toMatch(/try again/i)
 })

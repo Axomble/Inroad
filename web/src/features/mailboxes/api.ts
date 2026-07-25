@@ -3,14 +3,16 @@
 // `enhanceEndpoints` so listing invalidations happen automatically after any
 // mutation — no more hand-rolled `refetch()` calls in components.
 //
-// The Gmail OAuth "start" endpoint isn't in the OpenAPI-generated client (it
-// returns an opaque auth_url and is a browser-redirect flow), so it's layered
+// The OAuth "start" endpoints aren't in the OpenAPI-generated client (they
+// return an opaque auth_url and are browser-redirect flows), so they're layered
 // on here with `injectEndpoints` rather than hand-editing the generated
 // store/api.ts.
 import { api } from '@/store/api'
 
-/** Response from POST /mailboxes/oauth/google/start. */
-export type StartGoogleOauthResponse = { auth_url: string }
+/** Response from the OAuth "start" endpoints — an opaque provider consent URL. */
+export type StartOauthResponse = { auth_url: string }
+/** @deprecated Alias kept for existing imports; use StartOauthResponse. */
+export type StartGoogleOauthResponse = StartOauthResponse
 
 const mailboxApi = api.enhanceEndpoints({
   addTagTypes: ['Mailbox'],
@@ -51,8 +53,11 @@ const mailboxApi = api.enhanceEndpoints({
   },
 }).injectEndpoints({
   endpoints: (build) => ({
-    startGoogleOauth: build.mutation<StartGoogleOauthResponse, void>({
+    startGoogleOauth: build.mutation<StartOauthResponse, void>({
       query: () => ({ url: '/mailboxes/oauth/google/start', method: 'POST' }),
+    }),
+    startMicrosoftOauth: build.mutation<StartOauthResponse, void>({
+      query: () => ({ url: '/mailboxes/oauth/microsoft/start', method: 'POST' }),
     }),
   }),
 })
@@ -65,4 +70,5 @@ export const {
   useResumeMailboxMutation,
   useDeleteMailboxMutation,
   useStartGoogleOauthMutation,
+  useStartMicrosoftOauthMutation,
 } = mailboxApi

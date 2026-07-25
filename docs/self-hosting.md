@@ -79,3 +79,72 @@ after 7 days**, so a connected Gmail mailbox will stop sending about a week
 after it is connected and must be reconnected. A real deployment must publish /
 verify the OAuth consent screen (Google's app-verification process) before
 relying on Gmail mailboxes.
+
+## Connecting a Microsoft 365 mailbox (OAuth)
+
+Inroad can connect Microsoft 365 / Exchange Online mailboxes via "Sign in with
+Microsoft" instead of an app password, and send / read replies through the
+Microsoft Graph API. This is optional: leave the `INROAD_MS_CLIENT_ID` /
+`INROAD_MS_CLIENT_SECRET` vars blank and M365 OAuth stays disabled — the
+connect-start endpoint returns `501 microsoft oauth not configured` and any
+pre-existing M365 job fails cleanly (SMTP and Gmail mailboxes are unaffected).
+
+### 1. Register an app in Microsoft Entra ID (Azure AD)
+1. In the [Azure portal](https://portal.azure.com/), go to **Microsoft Entra ID
+   → App registrations → New registration**.
+2. Give it a name. For **Supported account types**, pick the option that matches
+   your `INROAD_MS_TENANT` choice (see step 3): "Accounts in any organizational
+   directory and personal Microsoft accounts" for the default `common`, or
+   "Accounts in this organizational directory only" if you plan to pin a single
+   tenant id.
+3. Under **Redirect URI**, choose platform **Web** and add your redirect URI
+   *verbatim* — it must exactly match `INROAD_MS_REDIRECT_URL` (see below), which
+   defaults to `${INROAD_PUBLIC_URL}/oauth/microsoft/callback`. For a deployment
+   served at `https://inroad.example.com` that is:
+
+        https://inroad.example.com/oauth/microsoft/callback
+
+4. Click **Register**. Copy the **Application (client) ID** from the overview page.
+5. **Certificates & secrets → Client secrets → New client secret →** create one
+   and copy its **Value** (not the Secret ID) immediately — it is shown only once.
+
+### 2. API permissions requested
+Under **API permissions → Add a permission → Microsoft Graph → Delegated
+permissions**, add exactly these — no more:
+
+- `Mail.Send` — send outbound mail.
+- `Mail.Read` — poll replies and bounces.
+- `User.Read` — learn the connected mailbox's own address.
+- `offline_access` — issue a refresh token for control-plane token refresh.
+- `openid`
+- `email`
+
+These are **delegated** (act as the signed-in user), not application
+permissions, so no admin-consent-only application roles are involved. If your
+tenant requires admin consent for delegated Graph scopes, an administrator can
+grant it once from this same page.
+
+### 3. Set the environment variables
+Put these in `.env` (all four are documented in `.env.example`):
+
+        INROAD_MS_CLIENT_ID=<Application (client) ID from step 1.4>
+        INROAD_MS_CLIENT_SECRET=<client secret Value from step 1.5>
+        # Optional. Defaults to ${INROAD_PUBLIC_URL}/oauth/microsoft/callback.
+        # Set it only if you need a redirect URI different from that default,
+        # and it must match a registered Web redirect URI exactly.
+        INROAD_MS_REDIRECT_URL=
+        # Optional. Azure AD authority; defaults to "common".
+        INROAD_MS_TENANT=
+
+`INROAD_PUBLIC_URL` must be the externally-reachable base URL of the API (it is
+what the default redirect URI is built from), not `localhost`, in production.
+
+### 4. Tenant scoping (`INROAD_MS_TENANT`)
+`INROAD_MS_TENANT` defaults to `common`, meaning **any** Microsoft or Azure AD
+account can consent and connect a mailbox. A self-hoster who wants to restrict
+connections to their own organization should set `INROAD_MS_TENANT` to their
+tenant id (the directory GUID, or a verified domain such as
+`contoso.onmicrosoft.com`); Azure AD then rejects consent from outside that
+tenant. Either way, every mailbox a callback creates is pinned to the workspace
+of the signed state — tenant scoping only narrows *which Microsoft accounts* may
+consent, it does not change Inroad's per-workspace isolation.

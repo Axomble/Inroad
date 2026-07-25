@@ -155,14 +155,20 @@ func autoReplyFixture(inReplyTo string) string {
 
 func runPoll(t *testing.T, core coreapi.Client, reader mail.InboxReader) error {
 	t.Helper()
-	// nil Gmail reader: every runPoll test drives the smtp/IMAP path (job.Provider
-	// defaults to "", so the gmail branch is never taken and the reader is unused).
-	return PollHandler(core, reader, nil)(context.Background(), pollTask(t))
+	// nil API readers: every runPoll test drives the smtp/IMAP path (job.Provider
+	// defaults to "", so neither the gmail nor the m365 branch is taken and the
+	// readers are unused).
+	return PollHandler(core, reader, nil, nil)(context.Background(), pollTask(t))
 }
 
 func runGmailPoll(t *testing.T, core coreapi.Client, gmail GmailFetcher) error {
 	t.Helper()
-	return PollHandler(core, nil, gmail)(context.Background(), pollTask(t))
+	return PollHandler(core, nil, gmail, nil)(context.Background(), pollTask(t))
+}
+
+func runGraphPoll(t *testing.T, core coreapi.Client, graph GraphFetcher) error {
+	t.Helper()
+	return PollHandler(core, nil, nil, graph)(context.Background(), pollTask(t))
 }
 
 func TestPollFirstPollBaselinesWithoutFetching(t *testing.T) {
@@ -460,5 +466,73 @@ func TestPollGmailPropagatesFetchError(t *testing.T) {
 	}
 	if core.cursorStringSet {
 		t.Fatal("a failed gmail Fetch must not persist a cursor")
+	}
+}
+
+// TestPollM365ProviderUsesGraphReaderAndSharedClassification proves the m365
+// provider branch: a Graph job resumes the GraphReader from the opaque
+// delta-link cursor, runs the SAME reply/bounce classification (a reply here
+// marks the enrollment replied), and persists the advanced cursor via
+// SetInboxCursorString — never touching the IMAP UID cursor path. fakeGmailReader
+// satisfies GraphFetcher (identical shape), so it doubles as the Graph fake.
+func TestPollM365ProviderUsesGraphReaderAndSharedClassification(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{Provider: "m365", AccessToken: []byte("tok"), Cursor: "delta-old"},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	graph := &fakeGmailReader{
+		newCursor: "delta-new",
+		msgs:      []mail.InboundMessage{inboundMsg(t, 0, replyFixture("<root@x>"))},
+	}
+	if err := runGraphPoll(t, core, graph); err != nil {
+		t.Fatal(err)
+	}
+	if !graph.fetchCalled || graph.sinceCursor != "delta-old" {
+		t.Fatalf("expected GraphReader resumed from cursor delta-old, got called=%v since=%q", graph.fetchCalled, graph.sinceCursor)
+	}
+	if len(core.replied) != 1 || core.replied[0] != "e1" {
+		t.Fatalf("expected shared classification to MarkReplied(e1), got %v", core.replied)
+	}
+	if !core.cursorStringSet || core.cursorString != "delta-new" {
+		t.Fatalf("expected opaque cursor advanced to delta-new, got %q set=%v", core.cursorString, core.cursorStringSet)
+	}
+	if core.cursorSet {
+		t.Fatal("m365 path must not touch the IMAP UID cursor")
+	}
+}
+
+// TestPollM365BounceMarksBounced proves the m365 path shares the DSN parser:
+// a bounce DSN fetched by the GraphReader marks the enrollment bounced.
+func TestPollM365BounceMarksBounced(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{Provider: "m365", AccessToken: []byte("tok"), Cursor: "delta-old"},
+		sendRefs: map[string]coreapi.SendRef{"<orig@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "nobody@recipient.example.com"}},
+	}
+	graph := &fakeGmailReader{
+		newCursor: "delta-new",
+		msgs:      []mail.InboundMessage{inboundMsg(t, 0, hardBounceDSN)},
+	}
+	if err := runGraphPoll(t, core, graph); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.bounced) != 1 || !core.bounced[0].hard || core.bounced[0].enrollmentID != "e1" {
+		t.Fatalf("expected a hard MarkBounced(e1), got %v", core.bounced)
+	}
+	if !core.cursorStringSet || core.cursorString != "delta-new" {
+		t.Fatalf("expected opaque cursor advanced to delta-new, got %q", core.cursorString)
+	}
+}
+
+// TestPollM365PropagatesFetchError proves a Graph Fetch failure surfaces to
+// asynq and no cursor is persisted (the pass retries from the same cursor).
+func TestPollM365PropagatesFetchError(t *testing.T) {
+	want := errors.New("graph api down")
+	core := &stubCore{job: coreapi.InboxPollJob{Provider: "m365", AccessToken: []byte("tok"), Cursor: "delta-old"}}
+	graph := &fakeGmailReader{fetchErr: want}
+	if err := runGraphPoll(t, core, graph); !errors.Is(err, want) {
+		t.Fatalf("expected graph reader error to propagate, got %v", err)
+	}
+	if core.cursorStringSet {
+		t.Fatal("a failed graph Fetch must not persist a cursor")
 	}
 }

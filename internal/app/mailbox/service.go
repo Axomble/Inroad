@@ -39,10 +39,15 @@ type Service struct {
 	// connect flow in oauth.go.
 	oauth     mail.GoogleOAuth
 	exchanger TokenExchanger
+	// msOAuth / msExchanger are the Microsoft 365 counterparts of oauth /
+	// exchanger (zero value msOAuth = M365 OAuth disabled). They drive the
+	// M365 connect flow in oauth.go.
+	msOAuth     mail.MicrosoftOAuth
+	msExchanger TokenExchanger
 }
 
-func NewService(store Store, tester mail.ConnectionTester, sealer *crypto.Sealer, oauth mail.GoogleOAuth, exchanger TokenExchanger) *Service {
-	return &Service{store: store, tester: tester, sealer: sealer, oauth: oauth, exchanger: exchanger}
+func NewService(store Store, tester mail.ConnectionTester, sealer *crypto.Sealer, oauth mail.GoogleOAuth, exchanger TokenExchanger, msOAuth mail.MicrosoftOAuth, msExchanger TokenExchanger) *Service {
+	return &Service{store: store, tester: tester, sealer: sealer, oauth: oauth, exchanger: exchanger, msOAuth: msOAuth, msExchanger: msExchanger}
 }
 
 // ConnectInput carries the fields needed to connect a new SMTP/IMAP mailbox.

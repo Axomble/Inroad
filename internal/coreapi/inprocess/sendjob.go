@@ -35,12 +35,13 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 	if b.WorkspaceID != ws {
 		return coreapi.SendJob{}, coreapi.ErrCrossTenant
 	}
-	// Transport dispatch on the mailbox provider. gmail: refresh+return a
-	// short-lived access token (reseal handled in coreapi), no password unseal.
+	// Transport dispatch on the mailbox provider. API providers (gmail, m365):
+	// refresh+return a short-lived access token (reseal handled in coreapi), no
+	// password unseal — the provider's oauth2 config selects the refresh endpoint.
 	// smtp (default): unseal the stored password exactly as before.
 	var accessToken, password []byte
-	if b.Provider == "gmail" {
-		at, err := c.gmailAccessToken(ctx, b.MailboxID, ws, b.SecretCiphertext)
+	if b.Provider == "gmail" || b.Provider == "m365" {
+		at, err := c.oauthAccessToken(ctx, b.Provider, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
 		if err != nil {
 			return coreapi.SendJob{}, err
 		}

@@ -27,13 +27,23 @@ type GmailFetcher interface {
 	Fetch(ctx context.Context, accessToken, sinceHistoryID string, maxN int) (msgs []mail.InboundMessage, newCursor string, err error)
 }
 
+// GraphFetcher polls an M365 mailbox for new inbound messages via the Microsoft
+// Graph delta query, resuming from an opaque delta/next-link URL cursor.
+// *mail.GraphReader satisfies it; the worker depends on the interface so it can
+// be unit-tested with a fake (the concrete reader's wire seam is unexported). It
+// is the provider-parallel of GmailFetcher for the Graph API transport.
+type GraphFetcher interface {
+	Fetch(ctx context.Context, accessToken, sinceCursor string, maxN int) (msgs []mail.InboundMessage, newCursor string, err error)
+}
+
 // PollHandler returns an asynq handler for inbox:poll tasks. It dispatches on
 // the mailbox provider: gmail polls via the Gmail API (opaque historyId cursor),
+// m365 polls via the Microsoft Graph delta query (opaque delta-link cursor),
 // smtp opens the mailbox's IMAP connection, establishes/validates the poll
 // baseline via CurrentState, and fetches anything new since the stored UID
-// cursor. Both paths run the SAME reply/bounce classification (processMessage)
+// cursor. All paths run the SAME reply/bounce classification (processMessage)
 // and persist their respective cursor.
-func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher) func(context.Context, *asynq.Task) error {
+func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher, graph GraphFetcher) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPollPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -47,6 +57,9 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 
 		if job.Provider == "gmail" {
 			return pollGmail(ctx, core, gmail, p, job)
+		}
+		if job.Provider == "m365" {
+			return pollGraph(ctx, core, graph, p, job)
 		}
 		defer zeroize(job.Password)
 
@@ -142,6 +155,37 @@ func pollGmail(ctx context.Context, core coreapi.Client, reader GmailFetcher, p 
 	}
 
 	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", "gmail",
+		"messages", len(msgs), "replies", replies, "bounces", bounces, "skipped", skipped)
+	return core.SetInboxCursorString(ctx, p.MailboxID, p.WorkspaceID, newCursor)
+}
+
+// pollGraph runs one inbox poll pass for an m365 mailbox: fetch new messages
+// since the opaque Graph delta-link cursor, classify each with the SAME
+// processMessage path as IMAP/Gmail (ParseDSN + reply matcher), and persist the
+// advanced cursor via SetInboxCursorString (the IMAP UID cursor columns are
+// untouched). The short-lived access token is zeroized after the pass, like the
+// IMAP password and the Gmail token. Byte-for-byte parallel to pollGmail; only
+// the transport and the "provider" log value differ.
+func pollGraph(ctx context.Context, core coreapi.Client, reader GraphFetcher, p queue.InboxPollPayload, job coreapi.InboxPollJob) error {
+	defer zeroize(job.AccessToken)
+
+	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
+	if err != nil {
+		return err
+	}
+
+	var replies, bounces, skipped int
+	for _, msg := range msgs {
+		matched, err := processMessage(ctx, core, p.WorkspaceID, msg, &replies, &bounces)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			skipped++
+		}
+	}
+
+	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", "m365",
 		"messages", len(msgs), "replies", replies, "bounces", bounces, "skipped", skipped)
 	return core.SetInboxCursorString(ctx, p.MailboxID, p.WorkspaceID, newCursor)
 }
