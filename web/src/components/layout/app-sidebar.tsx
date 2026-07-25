@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Mail, Megaphone, Users, LayoutDashboard, Settings, type LucideIcon } from 'lucide-react'
+import { Mail, Megaphone, Users, Settings, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -15,7 +15,9 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
-  { label: 'Overview', to: '/app', icon: LayoutDashboard },
+  // No "Overview" row: `/app` only redirects to `/app/mailboxes`, so it would
+  // duplicate the Mailboxes item below. Add a real dashboard row here once an
+  // actual overview route exists.
   { label: 'Mailboxes', to: '/app/mailboxes', icon: Mail },
   { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
   { label: 'Contacts', to: '/app/contacts', icon: Users },

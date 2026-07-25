@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import type { ImportResult } from '@/store/api'
+import { httpStatus } from '@/lib/rtk-error'
 import { useImportContactsCsvMutation } from './api'
 
 /**
@@ -43,8 +44,7 @@ export function ImportCsvForm({
     setError(null)
     const result = await importCsv({ list: listId, file })
     if ('error' in result && result.error) {
-      const status = (result.error as { status?: number }).status
-      setError(importErrorMessage(status))
+      setError(importErrorMessage(httpStatus(result.error)))
       return
     }
     if ('data' in result && result.data) {

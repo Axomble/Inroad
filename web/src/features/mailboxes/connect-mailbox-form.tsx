@@ -6,6 +6,7 @@ import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { httpStatus } from '@/lib/rtk-error'
 import { useConnectMailboxMutation } from './api'
 
 const PORT_ERROR = 'Port must be between 1 and 65535'
@@ -25,7 +26,7 @@ const schema = z.object({
 type Values = z.infer<typeof schema>
 
 function connectErrorMessage(error: unknown): string {
-  const status = (error as { status?: number | string })?.status
+  const status = httpStatus(error)
   if (status === 409) return 'A mailbox with this email is already connected.'
   if (status === 422) return 'Connection test failed — check host, port, and credentials.'
   if (status === 400) return 'Please fill in all required fields.'

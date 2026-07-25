@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { PasswordInput } from '@/components/ui/password-input'
 import { useAppDispatch } from '@/store/hooks'
 import { setSession } from '@/store/slices/auth'
+import { httpStatus } from '@/lib/rtk-error'
 import { AuthLayout } from './auth-layout'
 import { useAuthAcceptInviteMutation } from './api'
 
@@ -44,7 +45,7 @@ export function AcceptInvitePage() {
   // create the account (a brand-new invitee submitted without one) — that's
   // recoverable, so send focus back to the password field instead of
   // treating it like a dead invite (see errorMessage below).
-  const errorStatus = (error as { status?: number } | undefined)?.status
+  const errorStatus = httpStatus(error)
   useEffect(() => {
     if (errorStatus === 422) setFocus('password')
   }, [errorStatus, setFocus])
