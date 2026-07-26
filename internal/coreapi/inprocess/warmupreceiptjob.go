@@ -245,15 +245,25 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 	// send; an exhausted / deleted thread means DoReply resolves to false.
 	doReply := warmup.ReplyDecision(seed, float64(b.ReplyRate))
 
-	var replySubject, replyBody, inReplyTo, references, token string
+	var reply coreapi.WarmupSendJob
 	if doReply {
-		built, berr := c.buildWarmupReply(ctx, rid, b.RecipientMailbox, ws)
+		built, ok, berr := c.buildWarmupReply(ctx, rid, b.RecipientMailbox, ws)
 		if berr != nil {
 			return coreapi.WarmupEngageJob{}, berr
 		}
-		if built.ok {
-			replySubject, replyBody = built.subject, built.body
-			inReplyTo, references, token = built.inReplyTo, built.references, built.token
+		if ok {
+			// The reply is a NEW warmup send FROM the recipient, over the RECIPIENT's
+			// own transport — the same credentials already decrypted above. Reusing the
+			// exact accessToken/password slices means the worker's single deferred
+			// zeroize wipes them here and on the engage job together.
+			built.Provider = b.Provider
+			built.AccessToken = accessToken
+			built.SMTPHost = b.SmtpHost
+			built.SMTPPort = int(b.SmtpPort)
+			built.SMTPUsername = b.SmtpUsername
+			built.SMTPPassword = password
+			built.AllowPlaintext = b.AllowPlaintext
+			reply = built
 		} else {
 			doReply = false
 		}
@@ -262,63 +272,55 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 	return coreapi.WarmupEngageJob{
 		Provider:       b.Provider,
 		AccessToken:    accessToken,
+		IMAPHost:       b.ImapHost,
+		IMAPPort:       int(b.ImapPort),
+		IMAPUsername:   b.ImapUsername,
 		SMTPHost:       b.SmtpHost,
 		SMTPPort:       int(b.SmtpPort),
 		SMTPUsername:   b.SmtpUsername,
 		SMTPPassword:   password,
 		AllowPlaintext: b.AllowPlaintext,
-		SourceFolder:   b.Placement,
+		SourceFolder:   b.SourceFolder,
+		MessageID:      b.MessageID,
 		DoRescue:       doRescue,
 		DoMarkRead:     true,
 		DoReply:        doReply,
-		ReplySubject:   replySubject,
-		ReplyBody:      replyBody,
-		InReplyTo:      inReplyTo,
-		References:     references,
-		Token:          token,
+		ReplySend:      reply,
 	}, nil
 }
 
-// warmupReply is the resolved reply turn for an engagement. ok is false when the
-// thread has no remaining turn (exhausted) or is gone (send SET NULL) — the caller
-// then builds no reply.
-type warmupReply struct {
-	ok         bool
-	subject    string
-	body       string
-	inReplyTo  string
-	references string
-	token      string
-}
-
-// buildWarmupReply resolves the next library turn for a receipt's thread and mints
-// a fresh signed receipt token for the reply send. The reply is a NEW warmup send
-// FROM the recipient, so its token embeds a deterministic reply send id derived from
-// (recipient, UTC day, recipient's send index) via deriveWarmupReplySendID — a
-// DISTINCT id namespace from the normal-send derivation, so a reply can never
-// collide with a normal due-send at the same (mailbox, day, index) tuple (which
-// would let one silently no-op the other at claim time). It stays deterministic, so
-// the reply's later claim reclaims the SAME row.
-func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID) (warmupReply, error) {
+// buildWarmupReply resolves the next library turn for a receipt's thread and builds
+// the reply as a NEW warmup send FROM the recipient BACK TO the original sender,
+// minting a fresh signed receipt token for it. ok is false when the thread has no
+// remaining turn (exhausted) or is gone (send SET NULL) — the caller then builds no
+// reply. The token embeds a deterministic reply send id derived from (recipient, UTC
+// day, recipient's send index) via deriveWarmupReplySendID — a DISTINCT id namespace
+// from the normal-send derivation, so a reply can never collide with a normal
+// due-send at the same (mailbox, day, index) tuple (which would let one silently
+// no-op the other at claim time). It stays deterministic, so the reply's later claim
+// reclaims the SAME row. The returned job carries everything the claim/send/finalize
+// path needs EXCEPT transport, which the caller fills from the recipient's already-
+// decrypted credentials.
+func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID) (coreapi.WarmupSendJob, bool, error) {
 	th, err := c.q.GetWarmupReplyThread(ctx, gen.GetWarmupReplyThreadParams{ID: receiptID, WorkspaceID: ws})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return warmupReply{}, nil // send/thread gone → no reply
+			return coreapi.WarmupSendJob{}, false, nil // send/thread gone → no reply
 		}
-		return warmupReply{}, err
+		return coreapi.WarmupSendJob{}, false, err
 	}
 	content, err := c.warmupContent.Thread(ctx, th.ContentKey)
 	if err != nil {
-		return warmupReply{}, err
+		return coreapi.WarmupSendJob{}, false, err
 	}
 	body, ok := warmup.Reply(content, int(th.Turn))
 	if !ok {
-		return warmupReply{}, nil // thread exhausted → no reply
+		return coreapi.WarmupSendJob{}, false, nil // thread exhausted → no reply
 	}
 
 	sentToday, err := c.q.GetWarmupSentToday(ctx, gen.GetWarmupSentTodayParams{MailboxID: recipient, WorkspaceID: ws})
 	if err != nil {
-		return warmupReply{}, err
+		return coreapi.WarmupSendJob{}, false, err
 	}
 	now := time.Now().UTC()
 	replySendID := deriveWarmupReplySendID(recipient, now.Format("2006-01-02"), int(sentToday))
@@ -326,14 +328,22 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 		WorkspaceID: ws.String(), WarmupSendID: replySendID.String(), FromMailbox: recipient.String(),
 	}, c.warmupSecret)
 
-	return warmupReply{
-		ok:         true,
-		subject:    "Re: " + content.Subject,
-		body:       body,
-		inReplyTo:  th.RootMessageID,
-		references: th.RootMessageID,
-		token:      token,
-	}, nil
+	return coreapi.WarmupSendJob{
+		WorkspaceID: ws.String(),
+		FromMailbox: recipient.String(),
+		ToMailbox:   th.SenderMailbox.String(),
+		ThreadID:    th.ThreadID.String(),
+		IsReply:     true,
+		SendID:      replySendID.String(),
+		ToEmail:     th.SenderEmail,
+		FromEmail:   th.RecipientEmail,
+		FromName:    th.RecipientName,
+		Subject:     "Re: " + content.Subject,
+		BodyText:    body,
+		InReplyTo:   th.RootMessageID,
+		References:  th.RootMessageID,
+		Token:       token,
+	}, true, nil
 }
 
 // MarkWarmupEngaged flips the receipt's engaged guard and, when the engagement

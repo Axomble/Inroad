@@ -94,6 +94,12 @@ func run() error {
 	sndr := mail.NewMultiSender(smtpSender, mail.NewGmailSender(), mail.NewGraphSender())
 	reader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
 	reader.LocalAddr = egressAddr
+	// Engager runs recipient-side warmup engagement (mark-read/rescue). The IMAP leg
+	// dials through the SAME SSRF-vetted, source-IP-bound path as the reader; the
+	// Gmail leg uses the fixed Google host; m365 is a documented clean skip.
+	imapEngager := mail.NewNetEngager(cfg.MailAllowPrivateHosts)
+	imapEngager.LocalAddr = egressAddr
+	engager := mail.NewMultiEngager(imapEngager, mail.NewGmailEngager())
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
 
@@ -133,7 +139,7 @@ func run() error {
 
 	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues)
 	mux := queue.NewMux()
-	worker.Register(mux, core, sndr, reader, enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
+	worker.Register(mux, core, sndr, engager, reader, enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {

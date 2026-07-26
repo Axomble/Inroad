@@ -17,10 +17,12 @@ import (
 // trackingSecret are threaded to the send handlers so they can build/sign
 // open and click tracking links (internal/worker/track) for campaigns with
 // tracking enabled.
-func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, reader mail.InboxReader, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte) {
-	// Warmup: send one warmup email per tick (lazy chain) + fan-out/health sweep.
+func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte) {
+	// Warmup: send one warmup email per tick (lazy chain) + fan-out/health sweep +
+	// recipient-side engagement (rescue/mark-read/reply) of received warmup mail.
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.SendHandler(core, sndr, enq))
 	mux.HandleFunc(queue.TaskWarmupSweep, warmup.SweepHandler(core, enq))
+	mux.HandleFunc(queue.TaskWarmupEngage, warmup.EngageHandler(core, engager, sndr))
 	mux.HandleFunc(queue.TaskSendEmail, sender.Handler(core, sndr, enq, publicURL, trackingSecret))
 	mux.HandleFunc(queue.TaskSweepStuck, sender.SweepStuckHandler(core, enq))
 	// Multi-step sequencing: advance one step per task (lazy chain) + reconcile.

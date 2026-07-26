@@ -307,14 +307,18 @@ ON CONFLICT (mailbox_id, day) DO UPDATE SET
 
 -- name: GetWarmupEngageBundle :one
 -- Everything GetWarmupEngageJob needs that is always present: the recipient's
--- transport (decrypted at the caller), its participant reply_rate (to recompute the
--- deterministic reply decision), the placement (rescue + source folder), and
--- received_at (seed anchor). INNER joins keep every column non-null; the two joins
--- are also workspace-pinned (belt-and-braces). warmup_send_id is carried through so
--- the caller can derive the reply's receipt token. A foreign / vanished receipt
--- yields pgx.ErrNoRows.
+-- send transport (SMTP, for the reply) AND its IMAP-MODIFY transport (for
+-- mark-read/rescue), both decrypted at the caller from the one secret_ciphertext;
+-- the receipt's source_folder + message_id (the engager locates/rescues the exact
+-- message by them); its participant reply_rate (to recompute the deterministic reply
+-- decision); the placement (rescue decision); and received_at (seed anchor). INNER
+-- joins keep every column non-null; the two joins are also workspace-pinned
+-- (belt-and-braces). warmup_send_id is carried through so the caller can derive the
+-- reply's receipt token. A foreign / vanished receipt yields pgx.ErrNoRows.
 SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
-       m.provider, m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
+       r.source_folder, r.message_id,
+       m.provider, m.imap_host, m.imap_port, m.imap_username,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
        m.allow_plaintext, p.reply_rate
 FROM warmup_receipts r
 JOIN mailboxes m ON m.id = r.recipient_mailbox AND m.workspace_id = r.workspace_id
@@ -322,14 +326,24 @@ JOIN warmup_participants p ON p.mailbox_id = r.recipient_mailbox AND p.workspace
 WHERE r.id = $1 AND r.workspace_id = $2;
 
 -- name: GetWarmupReplyThread :one
--- The thread behind a receipt, for building a reply turn. INNER joins through the
+-- The thread + addressing behind a receipt, for building a reply turn that is a NEW
+-- warmup send FROM the recipient BACK TO the original sender. INNER joins through the
 -- receipt's warmup_send_id → send → thread, so a receipt whose send was deleted
 -- (warmup_send_id SET NULL) or whose thread vanished yields pgx.ErrNoRows and the
--- caller simply builds no reply. workspace-pinned on the receipt.
-SELECT t.turn, t.content_key, t.root_message_id
+-- caller simply builds no reply. sender_mailbox/sender_email are the ORIGINAL sender
+-- (warmup_sends.from_mailbox — the reply's To); recipient_email/recipient_name are
+-- the replier's own envelope (the reply's From). Both mailbox joins are
+-- workspace-pinned (belt-and-braces), like the receipt WHERE.
+SELECT t.id AS thread_id, t.turn, t.content_key, t.root_message_id,
+       s.from_mailbox AS sender_mailbox,
+       sm.email AS sender_email,
+       rm.email AS recipient_email,
+       rm.display_name AS recipient_name
 FROM warmup_receipts r
 JOIN warmup_sends s ON s.id = r.warmup_send_id
 JOIN warmup_threads t ON t.id = s.thread_id
+JOIN mailboxes sm ON sm.id = s.from_mailbox AND sm.workspace_id = r.workspace_id
+JOIN mailboxes rm ON rm.id = r.recipient_mailbox AND rm.workspace_id = r.workspace_id
 WHERE r.id = $1 AND r.workspace_id = $2;
 
 -- name: SetWarmupReceiptEngaged :one

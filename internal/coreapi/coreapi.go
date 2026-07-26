@@ -549,39 +549,52 @@ type WarmupEngagePlan struct {
 }
 
 // WarmupEngageJob is everything the warmup:engage worker needs to act on one
-// received warmup message. The transport fields are the RECIPIENT's decrypted send
-// transport (the reply is a new warmup send FROM the recipient); AccessToken /
-// SMTPPassword are []byte so the worker can zeroize them after use, like
-// WarmupSendJob. SourceFolder is the placement the message landed in ("inbox" |
-// "spam" | "other"); the engager maps it to a provider folder. The Do* flags are
-// recomputed deterministically from the receipt. The Reply* fields and Token are
-// populated ONLY when DoReply is true and the thread still has a turn to send.
+// received warmup message. It carries the RECIPIENT's own decrypted transport
+// (engagement acts on the recipient's own mailbox): the IMAP fields drive the
+// smtp/imap engager's mark-read/rescue, AccessToken the Gmail engager, and the SMTP
+// fields the reply send. AccessToken / SMTPPassword are []byte so the worker
+// zeroizes them after use, like WarmupSendJob. The Do* flags are recomputed
+// deterministically from the receipt.
 type WarmupEngageJob struct {
-	// Provider selects the send transport ("smtp" | "gmail" | "m365"). AccessToken
-	// is the decrypted OAuth bearer for API providers (nil for smtp); zeroized after
-	// use like SMTPPassword. For API providers the SMTP* fields are empty.
-	Provider     string
-	AccessToken  []byte
+	// Provider selects both the engage transport (IMAP-modify for smtp, API-modify
+	// for gmail, unsupported for m365) and the reply-send transport ("smtp" |
+	// "gmail" | "m365"). AccessToken is the decrypted OAuth bearer for API providers
+	// (nil for smtp), used for BOTH the Gmail modify calls and the reply send;
+	// zeroized after use like SMTPPassword.
+	Provider    string
+	AccessToken []byte
+	// IMAPHost/Port/Username are the recipient's IMAP-MODIFY transport (mark-read /
+	// rescue) for smtp mailboxes; empty for API providers.
+	IMAPHost     string
+	IMAPPort     int
+	IMAPUsername string
+	// SMTPHost/Port/Username are the recipient's SMTP transport for the reply send;
+	// empty for API providers.
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
+	// SMTPPassword is the recipient's single decrypted mailbox secret. A mailbox uses
+	// ONE password for both IMAP and SMTP, so the engage worker feeds this same slice
+	// to the IMAP-modify dial and the reply send; zeroized once after use.
 	SMTPPassword []byte
 	// AllowPlaintext is the recipient mailbox's cleartext opt-out; threaded into the
 	// reply's outbound job so it applies the SAME TLS policy the connect-test validated.
 	AllowPlaintext bool
-	// SourceFolder is where the message was observed ("inbox" | "spam" | "other").
+	// SourceFolder is the ACTUAL provider folder the message was found in (INBOX / a
+	// junk folder name), stored on the C5a receipt; the engager locates + rescues the
+	// message by it. MessageID is the received message's RFC822 Message-ID, also from
+	// the receipt, used to locate the exact message. Both are attacker-influenceable
+	// inbound content — the engager passes them as literal protocol arguments.
 	SourceFolder string
+	MessageID    string
 	// DoRescue / DoMarkRead / DoReply mirror the plan, recomputed from the receipt.
 	DoRescue   bool
 	DoMarkRead bool
 	DoReply    bool
-	// ReplySubject / ReplyBody / InReplyTo / References build the threaded reply;
-	// empty unless DoReply is true.
-	ReplySubject string
-	ReplyBody    string
-	InReplyTo    string
-	References   string
-	// Token is the signed X-Inroad-Warmup receipt header for the reply send; empty
-	// unless DoReply is true.
-	Token string
+	// ReplySend is the fully-formed NEW warmup send FROM the recipient (its own
+	// deterministic SendID, threading headers, and signed X-Inroad-Warmup token),
+	// populated ONLY when DoReply is true AND the thread still has a turn to send. The
+	// engage worker claims → sends → finalizes it exactly like a tick send. Its
+	// transport fields reuse the same decrypted secret slices above (zeroized once).
+	ReplySend WarmupSendJob
 }

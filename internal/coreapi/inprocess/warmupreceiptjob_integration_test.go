@@ -247,6 +247,7 @@ func TestGetWarmupEngageJobAndMarkEngaged(t *testing.T) {
 	sendID, recipient := makeWarmupSend(t, ctx, f)
 	plan, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
 		WorkspaceID: f.ws1.String(), WarmupSendID: sendID, RecipientMailbox: recipient, Placement: placementSpam,
+		SourceFolder: "Junk", MessageID: "<orig@acme.test>",
 	})
 	if err != nil {
 		t.Fatalf("RecordWarmupReceipt: %v", err)
@@ -259,8 +260,16 @@ func TestGetWarmupEngageJobAndMarkEngaged(t *testing.T) {
 	if job.Provider != "smtp" || len(job.SMTPPassword) == 0 {
 		t.Fatalf("engage job transport = %q pw-len=%d, want smtp with a decrypted password", job.Provider, len(job.SMTPPassword))
 	}
-	if job.SourceFolder != placementSpam || !job.DoRescue || !job.DoMarkRead {
-		t.Fatalf("engage job = %+v, want spam source, rescue+markread", job)
+	// The engager locates the message by the receipt's ACTUAL folder + Message-ID, and
+	// dials the recipient's IMAP-MODIFY transport (loaded from the mailbox).
+	if job.SourceFolder != "Junk" || job.MessageID != "<orig@acme.test>" {
+		t.Fatalf("engage locator = %q/%q, want Junk/<orig@acme.test>", job.SourceFolder, job.MessageID)
+	}
+	if job.IMAPHost != "imap.acme.test" || job.IMAPPort != 993 {
+		t.Fatalf("engage IMAP transport = %q:%d, want imap.acme.test:993", job.IMAPHost, job.IMAPPort)
+	}
+	if !job.DoRescue || !job.DoMarkRead {
+		t.Fatalf("engage job = %+v, want rescue+markread on a spam placement", job)
 	}
 
 	// First mark engaged; when replied, the recipient's replies counter bumps once.

@@ -225,7 +225,9 @@ func (q *Queries) GetWarmupDailyStats(ctx context.Context, arg GetWarmupDailySta
 
 const getWarmupEngageBundle = `-- name: GetWarmupEngageBundle :one
 SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
-       m.provider, m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
+       r.source_folder, r.message_id,
+       m.provider, m.imap_host, m.imap_port, m.imap_username,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
        m.allow_plaintext, p.reply_rate
 FROM warmup_receipts r
 JOIN mailboxes m ON m.id = r.recipient_mailbox AND m.workspace_id = r.workspace_id
@@ -243,7 +245,12 @@ type GetWarmupEngageBundleRow struct {
 	WarmupSendID     pgtype.UUID        `json:"warmup_send_id"`
 	Placement        string             `json:"placement"`
 	ReceivedAt       pgtype.Timestamptz `json:"received_at"`
+	SourceFolder     string             `json:"source_folder"`
+	MessageID        string             `json:"message_id"`
 	Provider         string             `json:"provider"`
+	ImapHost         string             `json:"imap_host"`
+	ImapPort         int32              `json:"imap_port"`
+	ImapUsername     string             `json:"imap_username"`
 	SmtpHost         string             `json:"smtp_host"`
 	SmtpPort         int32              `json:"smtp_port"`
 	SmtpUsername     string             `json:"smtp_username"`
@@ -253,12 +260,14 @@ type GetWarmupEngageBundleRow struct {
 }
 
 // Everything GetWarmupEngageJob needs that is always present: the recipient's
-// transport (decrypted at the caller), its participant reply_rate (to recompute the
-// deterministic reply decision), the placement (rescue + source folder), and
-// received_at (seed anchor). INNER joins keep every column non-null; the two joins
-// are also workspace-pinned (belt-and-braces). warmup_send_id is carried through so
-// the caller can derive the reply's receipt token. A foreign / vanished receipt
-// yields pgx.ErrNoRows.
+// send transport (SMTP, for the reply) AND its IMAP-MODIFY transport (for
+// mark-read/rescue), both decrypted at the caller from the one secret_ciphertext;
+// the receipt's source_folder + message_id (the engager locates/rescues the exact
+// message by them); its participant reply_rate (to recompute the deterministic reply
+// decision); the placement (rescue decision); and received_at (seed anchor). INNER
+// joins keep every column non-null; the two joins are also workspace-pinned
+// (belt-and-braces). warmup_send_id is carried through so the caller can derive the
+// reply's receipt token. A foreign / vanished receipt yields pgx.ErrNoRows.
 func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngageBundleParams) (GetWarmupEngageBundleRow, error) {
 	row := q.db.QueryRow(ctx, getWarmupEngageBundle, arg.ID, arg.WorkspaceID)
 	var i GetWarmupEngageBundleRow
@@ -267,7 +276,12 @@ func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngage
 		&i.WarmupSendID,
 		&i.Placement,
 		&i.ReceivedAt,
+		&i.SourceFolder,
+		&i.MessageID,
 		&i.Provider,
+		&i.ImapHost,
+		&i.ImapPort,
+		&i.ImapUsername,
 		&i.SmtpHost,
 		&i.SmtpPort,
 		&i.SmtpUsername,
@@ -396,10 +410,16 @@ func (q *Queries) GetWarmupReceiptByPair(ctx context.Context, arg GetWarmupRecei
 }
 
 const getWarmupReplyThread = `-- name: GetWarmupReplyThread :one
-SELECT t.turn, t.content_key, t.root_message_id
+SELECT t.id AS thread_id, t.turn, t.content_key, t.root_message_id,
+       s.from_mailbox AS sender_mailbox,
+       sm.email AS sender_email,
+       rm.email AS recipient_email,
+       rm.display_name AS recipient_name
 FROM warmup_receipts r
 JOIN warmup_sends s ON s.id = r.warmup_send_id
 JOIN warmup_threads t ON t.id = s.thread_id
+JOIN mailboxes sm ON sm.id = s.from_mailbox AND sm.workspace_id = r.workspace_id
+JOIN mailboxes rm ON rm.id = r.recipient_mailbox AND rm.workspace_id = r.workspace_id
 WHERE r.id = $1 AND r.workspace_id = $2
 `
 
@@ -409,19 +429,37 @@ type GetWarmupReplyThreadParams struct {
 }
 
 type GetWarmupReplyThreadRow struct {
-	Turn          int32  `json:"turn"`
-	ContentKey    string `json:"content_key"`
-	RootMessageID string `json:"root_message_id"`
+	ThreadID       uuid.UUID `json:"thread_id"`
+	Turn           int32     `json:"turn"`
+	ContentKey     string    `json:"content_key"`
+	RootMessageID  string    `json:"root_message_id"`
+	SenderMailbox  uuid.UUID `json:"sender_mailbox"`
+	SenderEmail    string    `json:"sender_email"`
+	RecipientEmail string    `json:"recipient_email"`
+	RecipientName  string    `json:"recipient_name"`
 }
 
-// The thread behind a receipt, for building a reply turn. INNER joins through the
+// The thread + addressing behind a receipt, for building a reply turn that is a NEW
+// warmup send FROM the recipient BACK TO the original sender. INNER joins through the
 // receipt's warmup_send_id → send → thread, so a receipt whose send was deleted
 // (warmup_send_id SET NULL) or whose thread vanished yields pgx.ErrNoRows and the
-// caller simply builds no reply. workspace-pinned on the receipt.
+// caller simply builds no reply. sender_mailbox/sender_email are the ORIGINAL sender
+// (warmup_sends.from_mailbox — the reply's To); recipient_email/recipient_name are
+// the replier's own envelope (the reply's From). Both mailbox joins are
+// workspace-pinned (belt-and-braces), like the receipt WHERE.
 func (q *Queries) GetWarmupReplyThread(ctx context.Context, arg GetWarmupReplyThreadParams) (GetWarmupReplyThreadRow, error) {
 	row := q.db.QueryRow(ctx, getWarmupReplyThread, arg.ID, arg.WorkspaceID)
 	var i GetWarmupReplyThreadRow
-	err := row.Scan(&i.Turn, &i.ContentKey, &i.RootMessageID)
+	err := row.Scan(
+		&i.ThreadID,
+		&i.Turn,
+		&i.ContentKey,
+		&i.RootMessageID,
+		&i.SenderMailbox,
+		&i.SenderEmail,
+		&i.RecipientEmail,
+		&i.RecipientName,
+	)
 	return i, err
 }
 
