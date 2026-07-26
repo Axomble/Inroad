@@ -71,6 +71,19 @@ test('surfaces an error banner when the overview request fails', async () => {
   expect(alert).toHaveTextContent(/couldn't load the warmup overview/i)
 })
 
+test('does not present fabricated zero stats alongside the overview error', async () => {
+  overviewResponder = () => new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: jsonHeaders })
+
+  renderWithProviders(<WarmupPage />)
+
+  await screen.findByRole('alert')
+  // The "0 / Idle — needs 2+" fallbacks would be misleading next to "couldn't
+  // load"; the strip shows em-dashes for unknown values instead.
+  expect(screen.queryByText(/idle — needs 2\+/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/exchanging mail/i)).not.toBeInTheDocument()
+  expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+})
+
 test('shows the no-mailboxes empty state when there are none to warm', async () => {
   mailboxesResponder = () => new Response(JSON.stringify([]), { status: 200, headers: jsonHeaders })
 

@@ -31,17 +31,23 @@ export function WarmupPage() {
         </div>
       )}
 
-      <StatStrip>
+      {/*
+        On overview-fetch error the numbers below are unknown, not zero. Show
+        em-dashes instead of fabricated "0 / Idle" alongside the error banner,
+        dim the strip, and hide it from assistive tech (the banner conveys the
+        state) so we never present fake zeros as real data.
+      */}
+      <StatStrip className={cn(overviewError && 'opacity-40')} aria-hidden={overviewError || undefined}>
         <Stat
           label="Pool size"
-          value={overview?.pool_size ?? 0}
-          sub={active ? 'Exchanging mail' : 'Idle — needs 2+'}
+          value={overviewError ? '—' : (overview?.pool_size ?? 0)}
+          sub={overviewError ? undefined : active ? 'Exchanging mail' : 'Idle — needs 2+'}
         />
-        <Stat label="Healthy" value={countHealth('healthy')} dot={<Dot className="bg-ok" />} />
-        <Stat label="Watch" value={countHealth('watch')} dot={<Dot className="bg-warn" />} />
+        <Stat label="Healthy" value={overviewError ? '—' : countHealth('healthy')} dot={<Dot className="bg-ok" />} />
+        <Stat label="Watch" value={overviewError ? '—' : countHealth('watch')} dot={<Dot className="bg-warn" />} />
         <Stat
           label="At risk"
-          value={countHealth('throttled') + countHealth('paused')}
+          value={overviewError ? '—' : countHealth('throttled') + countHealth('paused')}
           dot={<Dot className="bg-danger" />}
         />
       </StatStrip>
@@ -67,7 +73,7 @@ export function WarmupPage() {
         ) : (
           <ul>
             {mailboxes.map((m) => (
-              <WarmupMailboxCard key={m.id} mailbox={m} entry={entryById.get(m.id ?? '')} />
+              <WarmupMailboxCard key={m.id ?? ''} mailbox={m} entry={entryById.get(m.id ?? '')} />
             ))}
           </ul>
         )}
