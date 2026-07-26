@@ -360,6 +360,72 @@ type UserToken struct {
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }
 
+type WarmupDailyStat struct {
+	MailboxID   uuid.UUID   `json:"mailbox_id"`
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	Day         pgtype.Date `json:"day"`
+	Sent        int32       `json:"sent"`
+	Received    int32       `json:"received"`
+	Inbox       int32       `json:"inbox"`
+	Spam        int32       `json:"spam"`
+	Replies     int32       `json:"replies"`
+}
+
+type WarmupParticipant struct {
+	MailboxID     uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	Enabled       bool               `json:"enabled"`
+	StartVolume   int32              `json:"start_volume"`
+	MaxVolume     int32              `json:"max_volume"`
+	RampIncrement int32              `json:"ramp_increment"`
+	ReplyRate     float32            `json:"reply_rate"`
+	StartedAt     pgtype.Timestamptz `json:"started_at"`
+	HealthState   string             `json:"health_state"`
+	HealthReason  string             `json:"health_reason"`
+	PausedUntil   pgtype.Timestamptz `json:"paused_until"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WarmupReceipt struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	WarmupSendID     pgtype.UUID        `json:"warmup_send_id"`
+	RecipientMailbox uuid.UUID          `json:"recipient_mailbox"`
+	Placement        string             `json:"placement"`
+	Engaged          bool               `json:"engaged"`
+	ReceivedAt       pgtype.Timestamptz `json:"received_at"`
+}
+
+type WarmupSend struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	FromMailbox uuid.UUID          `json:"from_mailbox"`
+	ToMailbox   uuid.UUID          `json:"to_mailbox"`
+	IsReply     bool               `json:"is_reply"`
+	Status      string             `json:"status"`
+	MessageID   string             `json:"message_id"`
+	Token       string             `json:"token"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	LastError   string             `json:"last_error"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WarmupThread struct {
+	ID             uuid.UUID          `json:"id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	SenderMailbox  uuid.UUID          `json:"sender_mailbox"`
+	PartnerMailbox uuid.UUID          `json:"partner_mailbox"`
+	Subject        string             `json:"subject"`
+	RootMessageID  string             `json:"root_message_id"`
+	Turn           int32              `json:"turn"`
+	ContentKey     string             `json:"content_key"`
+	LastActivityAt pgtype.Timestamptz `json:"last_activity_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
 type Worker struct {
 	WorkerID   string             `json:"worker_id"`
 	EgressIp   string             `json:"egress_ip"`
