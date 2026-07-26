@@ -88,6 +88,34 @@ func TestSweepStillEvaluatesHealthWhenAssignFails(t *testing.T) {
 	}
 }
 
+func TestSweepStillEvaluatesHealthWhenEnqueueFails(t *testing.T) {
+	core := &sweepCore{due: []coreapi.MailboxRef{
+		{ID: "mb-1", WorkspaceID: "ws-1"},
+		{ID: "mb-2", WorkspaceID: "ws-2"},
+	}}
+	// mb-1's tick enqueue fails; mb-2 must still be processed.
+	enq := &fakeEnq{failOn: "mb-1", err: context.DeadlineExceeded}
+
+	if err := SweepHandler(core, enq)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
+		t.Fatalf("a per-mailbox enqueue failure must not fail the sweep, got %v", err)
+	}
+	// Both mailboxes are attempted; the failure on mb-1 doesn't short-circuit mb-2.
+	if len(enq.calls) != 2 {
+		t.Fatalf("enqueue attempts = %d, want 2 (the failure must not skip the rest)", len(enq.calls))
+	}
+	seen := map[string]bool{}
+	for _, c := range enq.calls {
+		seen[c.mailboxID] = true
+	}
+	if !seen["mb-1"] || !seen["mb-2"] {
+		t.Fatalf("expected both mb-1 and mb-2 attempted, saw %v", seen)
+	}
+	// The health pass still runs for the pool despite the per-mailbox failure.
+	if !core.evaluated {
+		t.Fatalf("EvaluateWarmupHealth must still run after a per-mailbox enqueue failure")
+	}
+}
+
 func TestSweepEmptyPoolStillEvaluatesHealth(t *testing.T) {
 	core := &sweepCore{}
 	enq := &fakeEnq{}

@@ -111,10 +111,17 @@ type tickCall struct {
 type fakeEnq struct {
 	calls []tickCall
 	err   error
+	// failOn scopes err to a single mailbox: when set, only that mailbox's
+	// enqueue returns err and the rest succeed (proves per-mailbox isolation).
+	// When empty, err applies to every call (default nil = all succeed).
+	failOn string
 }
 
 func (f *fakeEnq) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
 	f.calls = append(f.calls, tickCall{mailboxID, workspaceID, dest, t})
+	if f.failOn != "" && mailboxID != f.failOn {
+		return nil
+	}
 	return f.err
 }
 

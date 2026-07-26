@@ -134,6 +134,13 @@ func buildMessage(msg Message) (*gomail.Msg, error) {
 			m.SetBodyString(gomail.TypeTextHTML, msg.BodyHTML)
 		}
 	}
+	// Custom generic headers (e.g. the warmup receipt token) set verbatim, and
+	// set FIRST so the dedicated threading/unsub headers below win last-write on
+	// any key collision — a caller-supplied ExtraHeader can never clobber them.
+	// nil ExtraHeaders is a no-op, keeping ordinary sends byte-for-byte unchanged.
+	for k, v := range msg.ExtraHeaders {
+		m.SetGenHeader(gomail.Header(k), v)
+	}
 	if msg.ListUnsubscribe != "" {
 		m.SetListUnsubscribe(msg.ListUnsubscribe)
 		m.SetListUnsubscribePost()
@@ -145,11 +152,6 @@ func buildMessage(msg Message) (*gomail.Msg, error) {
 	}
 	if msg.References != "" {
 		m.SetGenHeader(gomail.HeaderReferences, msg.References)
-	}
-	// Custom generic headers (e.g. the warmup receipt token) set verbatim. Set
-	// last so a caller cannot silently clobber the threading/unsub headers above.
-	for k, v := range msg.ExtraHeaders {
-		m.SetGenHeader(gomail.Header(k), v)
 	}
 	m.SetMessageID()
 	return m, nil
