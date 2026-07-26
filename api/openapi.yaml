@@ -910,7 +910,7 @@ components:
         health_reason: { type: string, description: human-readable explanation of a non-healthy state }
         started_at: { type: string, format: date-time }
         today_sent: { type: integer, description: warmup emails sent by this mailbox today }
-        today_target: { type: integer, description: today's ramp target (0 when paused) }
+        today_target: { type: integer, description: "today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this." }
     WarmupMailbox:
       type: object
       description: A participant enriched with rolling placement rates for the overview.
