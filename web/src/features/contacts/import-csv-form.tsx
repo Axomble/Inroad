@@ -1,14 +1,18 @@
-import { useId, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { Loader2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import type { ImportResult } from '@/store/api'
 import { httpStatus } from '@/lib/rtk-error'
 import { useImportContactsCsvMutation } from './api'
 
 /**
- * CSV import control.
+ * CSV import control — a compact, single-row picker sized to live inside a
+ * `SectionBar` (a fixed 40px `h-10` row). The native file input is visually
+ * hidden (`sr-only`, but still keyboard/screen-reader reachable via its
+ * `aria-label`) and driven by a small "Choose CSV" button; the selected
+ * filename shows inline (truncated) and the "Import" submit sits beside it.
+ * Any error surfaces just BELOW the bar (absolutely positioned) so it stays
+ * fully readable without ever growing the single-row bar.
  *
  * The generated `useImportContactsMutation` in store/api.ts types its body as
  * `{ file?: Blob }`, but RTK Query's fetchBaseQuery treats plain objects as
@@ -34,7 +38,6 @@ export function ImportCsvForm({
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const inputId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
   const [importCsv, { isLoading }] = useImportContactsCsvMutation()
 
@@ -57,24 +60,38 @@ export function ImportCsvForm({
   }
 
   return (
-    <form onSubmit={onSubmit} className="flex flex-wrap items-end gap-3">
-      <div>
-        <Label htmlFor={inputId}>Import CSV</Label>
-        <Input
-          id={inputId}
-          ref={inputRef}
-          type="file"
-          accept=".csv,text/csv"
-          className="mt-1.5"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        />
-      </div>
-      <Button type="submit" variant="primary" size="sm" disabled={!file || isLoading}>
-        {isLoading ? <Loader2 className="animate-spin" /> : <Upload className="size-4" />}
+    <form onSubmit={(e) => void onSubmit(e)} className="relative flex items-center gap-2">
+      {/* Visually hidden but reachable: the accessible name lives here so the
+          "Choose CSV" button can stay icon+label without a stacked <Label>. */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".csv,text/csv"
+        aria-label="Import CSV"
+        className="sr-only"
+        onChange={(e) => {
+          setError(null)
+          setFile(e.target.files?.[0] ?? null)
+        }}
+      />
+      <Button type="button" variant="secondary" size="xs" onClick={() => inputRef.current?.click()}>
+        <Upload className="size-3.5" />
+        Choose CSV
+      </Button>
+      {file && (
+        <span className="max-w-[9rem] truncate text-xs text-muted-foreground" title={file.name}>
+          {file.name}
+        </span>
+      )}
+      <Button type="submit" variant="primary" size="xs" disabled={!file || isLoading}>
+        {isLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
         {isLoading ? 'Importing…' : 'Import'}
       </Button>
       {error && (
-        <p role="alert" className="w-full text-xs text-danger">
+        <p
+          role="alert"
+          className="absolute right-0 top-full z-10 mt-1 whitespace-nowrap rounded-md border border-border bg-surface px-2 py-1 text-xs text-danger shadow-sm"
+        >
           {error}
         </p>
       )}
