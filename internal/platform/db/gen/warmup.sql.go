@@ -9,7 +9,81 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const advanceWarmupThread = `-- name: AdvanceWarmupThread :exec
+UPDATE warmup_threads
+SET turn = turn + 1,
+    root_message_id = CASE WHEN turn = 0 THEN $3 ELSE root_message_id END,
+    last_activity_at = now()
+WHERE id = $1 AND workspace_id = $2
+`
+
+type AdvanceWarmupThreadParams struct {
+	ID            uuid.UUID `json:"id"`
+	WorkspaceID   uuid.UUID `json:"workspace_id"`
+	RootMessageID string    `json:"root_message_id"`
+}
+
+// Advance a thread by one turn after a successful send, and record the first
+// message's Message-ID as the thread root on turn 0 (so later replies chain to it
+// via In-Reply-To/References). workspace-pinned.
+func (q *Queries) AdvanceWarmupThread(ctx context.Context, arg AdvanceWarmupThreadParams) error {
+	_, err := q.db.Exec(ctx, advanceWarmupThread, arg.ID, arg.WorkspaceID, arg.RootMessageID)
+	return err
+}
+
+const claimWarmupSend = `-- name: ClaimWarmupSend :one
+INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
+                          is_reply, token, status, claimed_at)
+SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now()
+FROM mailboxes WHERE id = $4 AND workspace_id = $2
+ON CONFLICT (id) DO UPDATE SET status = 'sending', claimed_at = now(), last_error = ''
+    WHERE warmup_sends.workspace_id = $2
+      AND (warmup_sends.status = 'queued'
+        OR (warmup_sends.status = 'sending'
+            AND warmup_sends.claimed_at < now() - make_interval(secs => $8::int)))
+RETURNING id
+`
+
+type ClaimWarmupSendParams struct {
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	ThreadID     uuid.UUID `json:"thread_id"`
+	FromMailbox  uuid.UUID `json:"from_mailbox"`
+	ToMailbox    uuid.UUID `json:"to_mailbox"`
+	IsReply      bool      `json:"is_reply"`
+	Token        string    `json:"token"`
+	LeaseSeconds int32     `json:"lease_seconds"`
+}
+
+// Claim one warmup send for delivery (claim-before-send), mirroring ClaimStepSend.
+// The warmup_sends row is the claim: a fresh INSERT wins it ('sending',
+// claimed_at=now()). SELF-ENFORCING tenancy — the INSERT ... SELECT emits a row
+// ONLY when from_mailbox belongs to the workspace, so a foreign pairing inserts
+// nothing and RETURNING yields pgx.ErrNoRows. On conflict (the row already exists)
+// the claim is re-won ONLY when the existing row is 'queued' (released after a
+// retryable failure) or a STALE 'sending' lease (a crashed worker) — never a
+// terminal 'sent'/'failed' nor a FRESH 'sending' another worker owns. RETURNING id
+// yields a row iff we won; zero rows means skip / recover-forward (caller then
+// reads status to distinguish already-'sent' from a fresh-'sending'/terminal skip).
+// workspace_id is pinned on both the insert value and the reclaim WHERE.
+func (q *Queries) ClaimWarmupSend(ctx context.Context, arg ClaimWarmupSendParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, claimWarmupSend,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.ThreadID,
+		arg.FromMailbox,
+		arg.ToMailbox,
+		arg.IsReply,
+		arg.Token,
+		arg.LeaseSeconds,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
 
 const countEnabledParticipants = `-- name: CountEnabledParticipants :one
 SELECT count(*) FROM warmup_participants
@@ -40,6 +114,64 @@ func (q *Queries) DisableWarmupParticipant(ctx context.Context, arg DisableWarmu
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const failWarmupSend = `-- name: FailWarmupSend :exec
+UPDATE warmup_sends
+SET status = 'failed', last_error = $3, claimed_at = NULL
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending'
+`
+
+type FailWarmupSendParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	LastError   string    `json:"last_error"`
+}
+
+// Finalize a claimed row to 'failed' after a PERMANENT failure (no thread advance,
+// no stat bump). Only touches a row still in 'sending'. workspace-pinned.
+func (q *Queries) FailWarmupSend(ctx context.Context, arg FailWarmupSendParams) error {
+	_, err := q.db.Exec(ctx, failWarmupSend, arg.ID, arg.WorkspaceID, arg.LastError)
+	return err
+}
+
+const getOpenWarmupThread = `-- name: GetOpenWarmupThread :one
+SELECT id, workspace_id, sender_mailbox, partner_mailbox, subject,
+       root_message_id, turn, content_key, last_activity_at, created_at
+FROM warmup_threads
+WHERE workspace_id = $1
+  AND ((sender_mailbox = $2 AND partner_mailbox = $3)
+    OR (sender_mailbox = $3 AND partner_mailbox = $2))
+ORDER BY last_activity_at DESC
+LIMIT 1
+`
+
+type GetOpenWarmupThreadParams struct {
+	WorkspaceID    uuid.UUID `json:"workspace_id"`
+	SenderMailbox  uuid.UUID `json:"sender_mailbox"`
+	PartnerMailbox uuid.UUID `json:"partner_mailbox"`
+}
+
+// The most recent thread between (sender, partner) in either direction, used to
+// decide whether the next send can reply into an existing conversation. The caller
+// checks turn against the resolved library content to know if a reply turn
+// remains. workspace-pinned.
+func (q *Queries) GetOpenWarmupThread(ctx context.Context, arg GetOpenWarmupThreadParams) (WarmupThread, error) {
+	row := q.db.QueryRow(ctx, getOpenWarmupThread, arg.WorkspaceID, arg.SenderMailbox, arg.PartnerMailbox)
+	var i WarmupThread
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SenderMailbox,
+		&i.PartnerMailbox,
+		&i.Subject,
+		&i.RootMessageID,
+		&i.Turn,
+		&i.ContentKey,
+		&i.LastActivityAt,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const getWarmupDailyStats = `-- name: GetWarmupDailyStats :many
@@ -167,6 +299,100 @@ func (q *Queries) GetWarmupPlacementRates7d(ctx context.Context, workspaceID uui
 	return items, nil
 }
 
+const getWarmupSendState = `-- name: GetWarmupSendState :one
+SELECT status, message_id FROM warmup_sends
+WHERE id = $1 AND workspace_id = $2
+`
+
+type GetWarmupSendStateParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetWarmupSendStateRow struct {
+	Status    string `json:"status"`
+	MessageID string `json:"message_id"`
+}
+
+// The claimed row's terminal state, for the lost-claim recover-forward decision
+// (a 'sent' row means this exact send already delivered). workspace-pinned.
+func (q *Queries) GetWarmupSendState(ctx context.Context, arg GetWarmupSendStateParams) (GetWarmupSendStateRow, error) {
+	row := q.db.QueryRow(ctx, getWarmupSendState, arg.ID, arg.WorkspaceID)
+	var i GetWarmupSendStateRow
+	err := row.Scan(&i.Status, &i.MessageID)
+	return i, err
+}
+
+const getWarmupSenderBundle = `-- name: GetWarmupSenderBundle :one
+
+SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
+       p.reply_rate, p.started_at, p.health_state, p.paused_until,
+       m.provider, m.email AS from_email, m.display_name AS from_name,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id
+WHERE p.mailbox_id = $1 AND p.workspace_id = $2
+`
+
+type GetWarmupSenderBundleParams struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetWarmupSenderBundleRow struct {
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	Enabled          bool               `json:"enabled"`
+	StartVolume      int32              `json:"start_volume"`
+	MaxVolume        int32              `json:"max_volume"`
+	RampIncrement    int32              `json:"ramp_increment"`
+	ReplyRate        float32            `json:"reply_rate"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	HealthState      string             `json:"health_state"`
+	PausedUntil      pgtype.Timestamptz `json:"paused_until"`
+	Provider         string             `json:"provider"`
+	FromEmail        string             `json:"from_email"`
+	FromName         string             `json:"from_name"`
+	SmtpHost         string             `json:"smtp_host"`
+	SmtpPort         int32              `json:"smtp_port"`
+	SmtpUsername     string             `json:"smtp_username"`
+	SecretCiphertext string             `json:"secret_ciphertext"`
+	AllowPlaintext   bool               `json:"allow_plaintext"`
+}
+
+// ============================================================================
+// Send path (spec §4/§6) — the control⇄execution seam's warmup read/claim
+// surface. Every statement is workspace_id-pinned; every INSERT of a
+// (mailbox/thread, workspace) row is SELF-ENFORCING (INSERT ... SELECT FROM
+// mailboxes WHERE id=$ AND workspace_id=$) so a foreign pairing writes zero rows.
+// ============================================================================
+// Everything GetWarmupSendJob needs about the FROM mailbox: its participant ramp
+// config + health, and its decrypted-at-caller transport columns. workspace-pinned
+// (belt-and-braces on the unguessable mailbox UUID); a foreign pair yields no row.
+func (q *Queries) GetWarmupSenderBundle(ctx context.Context, arg GetWarmupSenderBundleParams) (GetWarmupSenderBundleRow, error) {
+	row := q.db.QueryRow(ctx, getWarmupSenderBundle, arg.MailboxID, arg.WorkspaceID)
+	var i GetWarmupSenderBundleRow
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.Enabled,
+		&i.StartVolume,
+		&i.MaxVolume,
+		&i.RampIncrement,
+		&i.ReplyRate,
+		&i.StartedAt,
+		&i.HealthState,
+		&i.PausedUntil,
+		&i.Provider,
+		&i.FromEmail,
+		&i.FromName,
+		&i.SmtpHost,
+		&i.SmtpPort,
+		&i.SmtpUsername,
+		&i.SecretCiphertext,
+		&i.AllowPlaintext,
+	)
+	return i, err
+}
+
 const getWarmupSentToday = `-- name: GetWarmupSentToday :one
 SELECT COALESCE(SUM(sent), 0)::int AS sent
 FROM warmup_daily_stats
@@ -186,6 +412,69 @@ func (q *Queries) GetWarmupSentToday(ctx context.Context, arg GetWarmupSentToday
 	var sent int32
 	err := row.Scan(&sent)
 	return sent, err
+}
+
+const incrementWarmupSentStat = `-- name: IncrementWarmupSentStat :exec
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, sent)
+VALUES ($1, $2, CURRENT_DATE, 1)
+ON CONFLICT (mailbox_id, day) DO UPDATE SET sent = warmup_daily_stats.sent + 1
+`
+
+type IncrementWarmupSentStatParams struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Bump the sender's daily sent counter, creating today's row on first send.
+// workspace_id is stamped on insert; the PK is (mailbox_id, day).
+func (q *Queries) IncrementWarmupSentStat(ctx context.Context, arg IncrementWarmupSentStatParams) error {
+	_, err := q.db.Exec(ctx, incrementWarmupSentStat, arg.MailboxID, arg.WorkspaceID)
+	return err
+}
+
+const insertWarmupThread = `-- name: InsertWarmupThread :one
+INSERT INTO warmup_threads (workspace_id, sender_mailbox, partner_mailbox, subject, content_key)
+SELECT $1, $2, $3, $4, $5
+FROM mailboxes WHERE id = $2 AND workspace_id = $1
+RETURNING id, workspace_id, sender_mailbox, partner_mailbox, subject,
+          root_message_id, turn, content_key, last_activity_at, created_at
+`
+
+type InsertWarmupThreadParams struct {
+	WorkspaceID    uuid.UUID `json:"workspace_id"`
+	SenderMailbox  uuid.UUID `json:"sender_mailbox"`
+	PartnerMailbox uuid.UUID `json:"partner_mailbox"`
+	Subject        string    `json:"subject"`
+	ContentKey     string    `json:"content_key"`
+}
+
+// Open a new synthetic thread. SELF-ENFORCING tenancy: the INSERT ... SELECT emits
+// a row ONLY when the SENDER mailbox truly belongs to the workspace, so a foreign
+// (sender, workspace) pair inserts zero rows and RETURNING yields pgx.ErrNoRows —
+// never binding another tenant's mailbox into a thread. (The partner is validated
+// upstream by SelectWarmupPartner, which is itself workspace-pinned.)
+func (q *Queries) InsertWarmupThread(ctx context.Context, arg InsertWarmupThreadParams) (WarmupThread, error) {
+	row := q.db.QueryRow(ctx, insertWarmupThread,
+		arg.WorkspaceID,
+		arg.SenderMailbox,
+		arg.PartnerMailbox,
+		arg.Subject,
+		arg.ContentKey,
+	)
+	var i WarmupThread
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.SenderMailbox,
+		&i.PartnerMailbox,
+		&i.Subject,
+		&i.RootMessageID,
+		&i.Turn,
+		&i.ContentKey,
+		&i.LastActivityAt,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const listWarmupParticipants = `-- name: ListWarmupParticipants :many
@@ -226,6 +515,94 @@ func (q *Queries) ListWarmupParticipants(ctx context.Context, workspaceID uuid.U
 		return nil, err
 	}
 	return items, nil
+}
+
+const releaseWarmupSend = `-- name: ReleaseWarmupSend :exec
+UPDATE warmup_sends
+SET status = 'queued', claimed_at = NULL
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending'
+`
+
+type ReleaseWarmupSendParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Release a claimed-but-unsent row after a RETRYABLE failure: back to 'queued'
+// with the lease cleared, so the asynq retry's ClaimWarmupSend reclaims it
+// immediately (the 'queued' reclaim branch) without waiting out the lease window.
+// Only touches a row still in 'sending'. workspace-pinned.
+func (q *Queries) ReleaseWarmupSend(ctx context.Context, arg ReleaseWarmupSendParams) error {
+	_, err := q.db.Exec(ctx, releaseWarmupSend, arg.ID, arg.WorkspaceID)
+	return err
+}
+
+const selectWarmupPartner = `-- name: SelectWarmupPartner :one
+SELECT p.mailbox_id, m.email, m.display_name
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id
+WHERE p.workspace_id = $1
+  AND p.mailbox_id <> $2
+  AND p.enabled
+  AND p.health_state <> 'paused'
+  AND (p.paused_until IS NULL OR p.paused_until <= now())
+ORDER BY (
+    SELECT COALESCE(MAX(t.last_activity_at), 'epoch'::timestamptz)
+    FROM warmup_threads t
+    WHERE t.workspace_id = $1
+      AND ((t.sender_mailbox = $2 AND t.partner_mailbox = p.mailbox_id)
+        OR (t.sender_mailbox = p.mailbox_id AND t.partner_mailbox = $2))
+  ) ASC, p.mailbox_id ASC
+LIMIT 1
+`
+
+type SelectWarmupPartnerParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+}
+
+type SelectWarmupPartnerRow struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"display_name"`
+}
+
+// Pick ONE eligible warmup partner for a sender: a DIFFERENT, enabled, non-paused
+// participant in the SAME workspace, preferring one not recently paired with the
+// sender. Ordering: least-recently-active shared thread first (a never-paired
+// partner sorts on 'epoch', so it wins), tie-broken deterministically by
+// mailbox_id so partner spread is stable and reproducible. workspace-pinned; a
+// workspace with <2 eligible participants returns no row.
+func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartnerParams) (SelectWarmupPartnerRow, error) {
+	row := q.db.QueryRow(ctx, selectWarmupPartner, arg.WorkspaceID, arg.MailboxID)
+	var i SelectWarmupPartnerRow
+	err := row.Scan(&i.MailboxID, &i.Email, &i.DisplayName)
+	return i, err
+}
+
+const setWarmupSendSent = `-- name: SetWarmupSendSent :execrows
+UPDATE warmup_sends
+SET status = 'sent', message_id = $3, sent_at = now(), last_error = ''
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending'
+`
+
+type SetWarmupSendSentParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MessageID   string    `json:"message_id"`
+}
+
+// Finalize a claimed row to 'sent' + record its Message-ID. Guarded on
+// status='sending' and returns rows affected so the caller advances the thread and
+// bumps the daily counter ONLY when THIS call did the sending→sent transition
+// (idempotent: a re-run over an already-'sent' row affects 0 rows and skips the
+// side effects, never double-counting). workspace-pinned.
+func (q *Queries) SetWarmupSendSent(ctx context.Context, arg SetWarmupSendSentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setWarmupSendSent, arg.ID, arg.WorkspaceID, arg.MessageID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertWarmupParticipant = `-- name: UpsertWarmupParticipant :one

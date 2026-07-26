@@ -21,6 +21,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/replyclassify"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // itMasterKey is the fixed 32-byte master key for these integration tests,
@@ -158,7 +159,7 @@ func seedActiveEnrollment(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	eid := ids[0].ID
 
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
-	core := inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{})
+	core := inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, sealerKey, warmup.NewStaticLibrary())
 
 	job, err := core.GetStepSendJob(ctx, eid.String(), ws.ID.String())
 	if err != nil {

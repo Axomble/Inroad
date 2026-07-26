@@ -180,6 +180,45 @@ type Client interface {
 	// queueName is "w:<worker_id>" or "" for the default queue; it is derived
 	// server-side from the assignment, never from client input (invariant §17.8).
 	AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (queueName string, err error)
+
+	// --- Warmup send path (warmup:tick; spec §4/§6) ---
+
+	// GetWarmupSendJob picks the next warmup action for a warming mailbox: it
+	// selects a healthy same-workspace partner (recent-partner-avoidance), decides
+	// new-thread vs reply deterministically (participant.reply_rate + open threads),
+	// resolves content from the injected library, builds threading headers + a
+	// signed X-Inroad-Warmup receipt token, and loads the decrypted transport for
+	// the FROM mailbox. Read-only w.r.t. warmup_sends (no row yet); it MAY open a
+	// warmup_threads row when starting a new thread so the job can carry a valid
+	// thread id. workspaceID is pinned in every SQL WHERE. Returns Skip=true when
+	// the mailbox is paused, over today's target, no longer enabled, or has no
+	// eligible partner.
+	GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID string) (WarmupSendJob, error)
+	// ClaimWarmupSend inserts/reclaims the warmup_sends row 'sending' with a lease
+	// (claim-before-send), same ClaimOutcome semantics as ClaimStepSend:
+	// ClaimWon (fresh insert or reclaimed stale/queued lease → send now),
+	// ClaimAlreadySent (this exact send already 'sent' → do NOT re-send), or
+	// ClaimSkip (a fresh 'sending' another worker owns, or a terminal state). The
+	// row id is the deterministic SendID on the job; workspace_id is pinned.
+	ClaimWarmupSend(ctx context.Context, job WarmupSendJob) (ClaimOutcome, error)
+	// MarkWarmupSent finalizes the claimed row to 'sent' + records message_id,
+	// advances the thread turn (and sets root_message_id on turn 0), and increments
+	// warmup_daily_stats.sent — all in ONE transaction, exactly once (idempotent on
+	// re-run). workspace_id is pinned.
+	MarkWarmupSent(ctx context.Context, job WarmupSendJob, messageID string) error
+	// ReleaseWarmupSend releases a claimed-but-unsent row after a RETRYABLE failure
+	// (back to 'queued', lease cleared) so the asynq retry reclaims it promptly. No
+	// thread advance. workspace_id is pinned.
+	ReleaseWarmupSend(ctx context.Context, job WarmupSendJob) error
+	// FailWarmupSend finalizes the claimed row to 'failed' after a PERMANENT failure
+	// (no thread advance, no stat bump). workspace_id is pinned.
+	FailWarmupSend(ctx context.Context, job WarmupSendJob, errMsg string) error
+	// NextWarmupDue returns when this mailbox should send its next warmup email,
+	// applying the ramp target, per-day volume factor, inter-send spacing, health
+	// pause, and the waking-hours window. sendNow reports whether one is due right
+	// now (under target and inside the window). Pure policy over warmup_daily_stats
+	// + the participant; workspace_id is pinned.
+	NextWarmupDue(ctx context.Context, mailboxID, workspaceID string) (due time.Time, sendNow bool, err error)
 }
 
 // ClaimOutcome is the result of ClaimStepSend: what the advance handler should
@@ -373,4 +412,58 @@ type SendResult struct {
 	Status    string // "sent" | "failed"
 	MessageID string
 	Err       string
+}
+
+// WarmupSendJob is everything the warmup:tick worker needs to send one warmup
+// email (a new-thread opener or a reply), mirroring StepSendJob. Skip is true when
+// GetWarmupSendJob found nothing to do (mailbox paused/over-target/disabled, or no
+// eligible partner) — the worker no-ops. The worker passes the job back to
+// ClaimWarmupSend / MarkWarmupSent / Release / Fail unchanged, so it carries every
+// id those finalizers need without re-querying.
+//
+// Secrets are []byte (AccessToken, SMTPPassword) so the worker can zeroize them
+// after one send — a Go string would be immutable and linger in memory until GC.
+type WarmupSendJob struct {
+	Skip        bool
+	WorkspaceID string
+	// FromMailbox / ToMailbox identify the two participants; ThreadID is the thread
+	// this send belongs to (an existing open thread for a reply, or a freshly
+	// opened one for a new-thread send).
+	FromMailbox string
+	ToMailbox   string
+	ThreadID    string
+	IsReply     bool
+	// SendID is the deterministic warmup_sends row id, derived up front (before the
+	// send) so it can be embedded in the receipt token — ClaimWarmupSend writes it
+	// as the row id so a retried tick reclaims the SAME row. Derived from
+	// (from_mailbox, UTC day, today's send index), the stable tuple available
+	// read-side; see the inprocess deriveWarmupSendID doc for why this replaces the
+	// spec's dueUnix (GetWarmupSendJob's signature carries no tick time).
+	SendID string
+	// ToEmail / FromEmail / FromName address the message envelope.
+	ToEmail   string
+	FromEmail string
+	FromName  string
+	Subject   string
+	BodyText  string
+	BodyHTML  string
+	// InReplyTo / References thread a reply to the conversation root; empty for a
+	// new-thread opener.
+	InReplyTo  string
+	References string
+	// Token is the signed X-Inroad-Warmup receipt header value the poller verifies.
+	Token string
+	// Provider selects the send transport ("smtp" | "gmail" | "m365"). AccessToken
+	// is the decrypted OAuth bearer for API providers (nil for smtp); zeroized after
+	// use like SMTPPassword. For API providers the SMTP* fields are empty.
+	Provider     string
+	AccessToken  []byte
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword []byte
+	// AllowPlaintext is the persisted per-mailbox cleartext opt-out; threaded into
+	// the outbound job so the send applies the SAME TLS policy the connect-test
+	// validated. False keeps TLS enforced.
+	AllowPlaintext bool
 }

@@ -29,6 +29,12 @@ type Config struct {
 	// second secret on upgrade.
 	TrackingSecret []byte
 
+	// WarmupSecret signs the X-Inroad-Warmup receipt token (internal/platform/
+	// warmup) so the inbox poller can attribute a received warmup message back to
+	// its send. Dedicated so rotating warmup tokens doesn't invalidate sessions or
+	// tracking links; falls back to JWTSecret when unset, matching TrackingSecret.
+	WarmupSecret []byte
+
 	// MailAllowPrivateHosts permits mailbox SMTP/IMAP hosts on RFC1918/ULA
 	// private ranges. Default true for self-hosted operators reaching internal
 	// mail servers; set false for multi-tenant Cloud. Loopback, link-local
@@ -128,6 +134,18 @@ func Load() (*Config, error) {
 		cfg.TrackingSecret = []byte(trackingSecret)
 	} else {
 		cfg.TrackingSecret = cfg.JWTSecret
+	}
+
+	if warmupSecret := os.Getenv("INROAD_WARMUP_SECRET"); warmupSecret != "" {
+		// Same floor as INROAD_JWT_SECRET: an explicitly-set weak secret fails
+		// closed rather than signing warmup tokens with a guessable key. The
+		// fallback below inherits JWTSecret, which already met this bar.
+		if len(warmupSecret) < 16 {
+			return nil, fmt.Errorf("INROAD_WARMUP_SECRET must be at least 16 bytes")
+		}
+		cfg.WarmupSecret = []byte(warmupSecret)
+	} else {
+		cfg.WarmupSecret = cfg.JWTSecret
 	}
 
 	rawKey, err := base64.StdEncoding.DecodeString(os.Getenv("INROAD_MASTER_KEY"))

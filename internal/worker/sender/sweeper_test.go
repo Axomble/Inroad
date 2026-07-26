@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/hibiken/asynq"
 
@@ -74,6 +75,18 @@ func (f *fakeCore) MarkBounced(context.Context, string, string, string, bool) er
 func (f *fakeCore) UpsertWorkerHeartbeat(context.Context, string, string) error     { return nil }
 func (f *fakeCore) AssignMailboxWorker(context.Context, string, string) (string, error) {
 	return "", nil
+}
+func (f *fakeCore) GetWarmupSendJob(context.Context, string, string) (coreapi.WarmupSendJob, error) {
+	return coreapi.WarmupSendJob{}, nil
+}
+func (f *fakeCore) ClaimWarmupSend(context.Context, coreapi.WarmupSendJob) (coreapi.ClaimOutcome, error) {
+	return coreapi.ClaimWon, nil
+}
+func (f *fakeCore) MarkWarmupSent(context.Context, coreapi.WarmupSendJob, string) error { return nil }
+func (f *fakeCore) ReleaseWarmupSend(context.Context, coreapi.WarmupSendJob) error      { return nil }
+func (f *fakeCore) FailWarmupSend(context.Context, coreapi.WarmupSendJob, string) error { return nil }
+func (f *fakeCore) NextWarmupDue(context.Context, string, string) (time.Time, bool, error) {
+	return time.Time{}, false, nil
 }
 
 type fakeSendEnqueuer struct {

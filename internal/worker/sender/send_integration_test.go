@@ -19,6 +19,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // itMasterKey is the fixed 32-byte master key for these integration tests,
@@ -136,7 +137,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("expected 2 sends enqueued, got %d", len(sendIDs))
 	}
 
-	core := inprocess.New(pool, itKeyring(t, q), []byte("0123456789abcdef0123456789abcdef"), "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{})
+	core := inprocess.New(pool, itKeyring(t, q), []byte("0123456789abcdef0123456789abcdef"), "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, []byte("0123456789abcdef0123456789abcdef"), warmup.NewStaticLibrary())
 	fs := &fakeSender{}
 	enq := queue.NewClient(redisAddr())
 	defer enq.Close()
