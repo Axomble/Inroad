@@ -151,6 +151,37 @@ const injectedRtkApi = api.injectEndpoints({
         method: "POST",
       }),
     }),
+    getMailboxWarmup: build.query<
+      GetMailboxWarmupApiResponse,
+      GetMailboxWarmupApiArg
+    >({
+      query: (queryArg) => ({ url: `/mailboxes/${queryArg.id}/warmup` }),
+    }),
+    enableMailboxWarmup: build.mutation<
+      EnableMailboxWarmupApiResponse,
+      EnableMailboxWarmupApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/mailboxes/${queryArg.id}/warmup`,
+        method: "PUT",
+        body: queryArg.warmupSettings,
+      }),
+    }),
+    disableMailboxWarmup: build.mutation<
+      DisableMailboxWarmupApiResponse,
+      DisableMailboxWarmupApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/mailboxes/${queryArg.id}/warmup`,
+        method: "DELETE",
+      }),
+    }),
+    getWarmupOverview: build.query<
+      GetWarmupOverviewApiResponse,
+      GetWarmupOverviewApiArg
+    >({
+      query: () => ({ url: `/warmup/overview` }),
+    }),
     listLists: build.query<ListListsApiResponse, ListListsApiArg>({
       query: () => ({ url: `/lists` }),
     }),
@@ -367,6 +398,24 @@ export type ResumeMailboxApiResponse =
 export type ResumeMailboxApiArg = {
   id: string;
 };
+export type GetMailboxWarmupApiResponse =
+  /** status 200 Warmup detail for one mailbox, with a 30-day daily series */ WarmupDetail;
+export type GetMailboxWarmupApiArg = {
+  id: string;
+};
+export type EnableMailboxWarmupApiResponse =
+  /** status 200 Warmup enabled/updated */ WarmupParticipant;
+export type EnableMailboxWarmupApiArg = {
+  id: string;
+  warmupSettings: WarmupSettings;
+};
+export type DisableMailboxWarmupApiResponse = unknown;
+export type DisableMailboxWarmupApiArg = {
+  id: string;
+};
+export type GetWarmupOverviewApiResponse =
+  /** status 200 Warmup overview */ WarmupOverview;
+export type GetWarmupOverviewApiArg = void;
 export type ListListsApiResponse = /** status 200 Lists */ List[];
 export type ListListsApiArg = void;
 export type CreateListApiResponse = /** status 200 Created list */ List;
@@ -569,6 +618,67 @@ export type ConnectMailboxRequest = {
   /** Explicit opt-out from TLS, persisted on the mailbox so the connect test AND every subsequent send apply the SAME policy (rare cleartext-only internal relay). Omitted/false enforces TLS (STARTTLS on 25/587/2525, implicit TLS on 465); an absent value can never silently downgrade to cleartext auth. Replaces the removed use_tls flag. */
   allow_plaintext?: boolean;
 };
+export type WarmupParticipant = {
+  mailbox_id: string;
+  enabled: boolean;
+  start_volume: number;
+  max_volume: number;
+  ramp_increment: number;
+  reply_rate: number;
+  /** reputation state derived from inbox-placement and behavior signals */
+  health_state: "healthy" | "watch" | "throttled" | "paused";
+  /** human-readable explanation of a non-healthy state */
+  health_reason: string;
+  started_at: string;
+  /** warmup emails sent by this mailbox today */
+  today_sent: number;
+  /** today's ramp target (0 when paused) */
+  today_target: number;
+};
+export type WarmupDayStat = {
+  /** UTC day */
+  day: string;
+  sent: number;
+  received: number;
+  /** of received */
+  inbox: number;
+  /** of received */
+  spam: number;
+  replies: number;
+};
+export type WarmupDetail = {
+  participant: WarmupParticipant;
+  /** daily stats, oldest first, up to 30 days */
+  series: WarmupDayStat[];
+};
+export type WarmupSettings = {
+  /** warmup emails/day at day 0 */
+  start_volume?: number;
+  /** daily ceiling the ramp climbs to */
+  max_volume?: number;
+  /** emails/day added each day */
+  ramp_increment?: number;
+  /** probability a warmup send is an in-thread reply */
+  reply_rate?: number;
+};
+export type WarmupMailbox = {
+  mailbox_id: string;
+  email: string;
+  enabled: boolean;
+  health_state: "healthy" | "watch" | "throttled" | "paused";
+  health_reason: string;
+  today_sent: number;
+  today_target: number;
+  /** fraction of received warmup mail that landed in inbox over 7 days (0..1) */
+  inbox_rate_7d: number;
+  /** fraction that landed in spam over 7 days (0..1) */
+  spam_rate_7d: number;
+};
+export type WarmupOverview = {
+  pool_size: number;
+  active: boolean;
+  mailboxes: WarmupMailbox[];
+};
 export type List = {
   id?: string;
   name?: string;
@@ -697,6 +807,10 @@ export const {
   useDeleteMailboxMutation,
   usePauseMailboxMutation,
   useResumeMailboxMutation,
+  useGetMailboxWarmupQuery,
+  useEnableMailboxWarmupMutation,
+  useDisableMailboxWarmupMutation,
+  useGetWarmupOverviewQuery,
   useListListsQuery,
   useCreateListMutation,
   useImportContactsMutation,

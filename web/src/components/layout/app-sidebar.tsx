@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Mail, Megaphone, Users, Settings, type LucideIcon } from 'lucide-react'
+import { Mail, Megaphone, Users, Settings, Flame, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -19,6 +19,7 @@ const NAV: NavItem[] = [
   // duplicate the Mailboxes item below. Add a real dashboard row here once an
   // actual overview route exists.
   { label: 'Mailboxes', to: '/app/mailboxes', icon: Mail },
+  { label: 'Warmup', to: '/app/warmup', icon: Flame },
   { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
   { label: 'Contacts', to: '/app/contacts', icon: Users },
   { label: 'Team', to: '/app/settings/team', icon: Settings },
