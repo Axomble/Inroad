@@ -395,6 +395,8 @@ type WarmupReceipt struct {
 	Placement        string             `json:"placement"`
 	Engaged          bool               `json:"engaged"`
 	ReceivedAt       pgtype.Timestamptz `json:"received_at"`
+	SourceFolder     string             `json:"source_folder"`
+	MessageID        string             `json:"message_id"`
 }
 
 type WarmupSend struct {

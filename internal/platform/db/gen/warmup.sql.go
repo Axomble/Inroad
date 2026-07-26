@@ -1019,8 +1019,8 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 
 const upsertWarmupReceipt = `-- name: UpsertWarmupReceipt :one
 
-INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement)
-SELECT $1, $2, $3, $4
+INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement, source_folder, message_id)
+SELECT $1, $2, $3, $4, $5, $6
 FROM mailboxes WHERE id = $3 AND workspace_id = $1
 ON CONFLICT (warmup_send_id, recipient_mailbox) DO NOTHING
 RETURNING id, received_at
@@ -1031,6 +1031,8 @@ type UpsertWarmupReceiptParams struct {
 	WarmupSendID     pgtype.UUID `json:"warmup_send_id"`
 	RecipientMailbox uuid.UUID   `json:"recipient_mailbox"`
 	Placement        string      `json:"placement"`
+	SourceFolder     string      `json:"source_folder"`
+	MessageID        string      `json:"message_id"`
 }
 
 type UpsertWarmupReceiptRow struct {
@@ -1052,13 +1054,17 @@ type UpsertWarmupReceiptRow struct {
 // a foreign pair also inserts nothing (also pgx.ErrNoRows) — the caller
 // disambiguates duplicate-vs-cross-tenant with GetWarmupReceiptByPair. received_at
 // is returned so the caller seeds the deterministic engage plan on the SAME instant
-// a later GetWarmupEngageJob re-reads.
+// a later GetWarmupEngageJob re-reads. source_folder + message_id are the receipt
+// locator (000019): the provider folder the message was found in and its RFC822
+// Message-ID, so C5b's engager can relocate/rescue/mark-read the exact message.
 func (q *Queries) UpsertWarmupReceipt(ctx context.Context, arg UpsertWarmupReceiptParams) (UpsertWarmupReceiptRow, error) {
 	row := q.db.QueryRow(ctx, upsertWarmupReceipt,
 		arg.WorkspaceID,
 		arg.WarmupSendID,
 		arg.RecipientMailbox,
 		arg.Placement,
+		arg.SourceFolder,
+		arg.MessageID,
 	)
 	var i UpsertWarmupReceiptRow
 	err := row.Scan(&i.ID, &i.ReceivedAt)

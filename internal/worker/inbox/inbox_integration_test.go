@@ -232,7 +232,7 @@ func TestInboxIntegrationReplyStopsEnrollment(t *testing.T) {
 		msgID + "\n\nSounds good.\n"
 	reader := &fakeReader{uidValidity: 5, uidNext: 12, msgs: []mail.InboundMessage{inboundMsg(t, 11, raw)}}
 
-	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil))(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
+	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -262,7 +262,7 @@ func TestInboxIntegrationHardBounceStopsAndSuppresses(t *testing.T) {
 	}
 
 	reader := &fakeReader{uidValidity: 5, uidNext: 12, msgs: []mail.InboundMessage{inboundMsg(t, 11, hardBounceDSN)}}
-	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil))(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
+	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -295,7 +295,7 @@ func TestInboxIntegrationSoftBounceNoOp(t *testing.T) {
 	}
 
 	reader := &fakeReader{uidValidity: 5, uidNext: 12, msgs: []mail.InboundMessage{inboundMsg(t, 11, softBounceDSN)}}
-	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil))(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
+	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 
@@ -330,7 +330,7 @@ func TestInboxIntegrationFirstPollRebaselinesCursor(t *testing.T) {
 	// DB-default UIDVALIDITY of 0 — a never-polled mailbox.
 
 	reader := &fakeReader{uidValidity: 7, uidNext: 51}
-	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil))(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
+	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(ctx, pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
 	if reader.fetchCalled {
@@ -368,7 +368,7 @@ func TestInboxIntegrationRepollIsIdempotent(t *testing.T) {
 	reader := &fakeReader{uidValidity: 5, uidNext: 12, msgs: []mail.InboundMessage{inboundMsg(t, 11, raw)}}
 
 	task := pollTaskFor(t, fx.mailboxID.String(), fx.ws.String())
-	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil))(ctx, task); err != nil {
+	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(ctx, task); err != nil {
 		t.Fatalf("first poll: %v", err)
 	}
 	e := getEnrollment(t, ctx, q, fx.ws, fx.enrollmentID)
@@ -378,7 +378,7 @@ func TestInboxIntegrationRepollIsIdempotent(t *testing.T) {
 
 	// Re-poll with the same reader (simulating the message still being
 	// present) must not error and must not change anything further.
-	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil))(ctx, task); err != nil {
+	if err := PollHandler(fx.core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(ctx, task); err != nil {
 		t.Fatalf("second poll: %v", err)
 	}
 	e2 := getEnrollment(t, ctx, q, fx.ws, fx.enrollmentID)

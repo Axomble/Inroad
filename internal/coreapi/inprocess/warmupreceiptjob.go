@@ -104,6 +104,7 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 
 	row, err := qtx.UpsertWarmupReceipt(ctx, gen.UpsertWarmupReceiptParams{
 		WorkspaceID: ws, WarmupSendID: sendUUID, RecipientMailbox: recipient, Placement: in.Placement,
+		SourceFolder: in.SourceFolder, MessageID: in.MessageID,
 	})
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {

@@ -515,13 +515,18 @@ type WarmupSendJob struct {
 // WarmupReceiptInput is the poller's report of one detected warmup message: the
 // pinned workspace, the warmup_send_id decoded from the verified X-Inroad-Warmup
 // token, the recipient mailbox that observed it, and its Placement (one of
-// "inbox" | "spam" | "other"). All ids are strings at the seam; the impl parses
-// and pins them.
+// "inbox" | "spam" | "other"). SourceFolder + MessageID are the receipt locator:
+// the provider folder the message was found in (e.g. "INBOX" | "Junk" | "SPAM" |
+// "JunkEmail") and its RFC822 Message-ID, persisted so the engage worker (C5b)
+// can relocate/rescue/mark-read the exact message. All ids are strings at the
+// seam; the impl parses and pins them.
 type WarmupReceiptInput struct {
 	WorkspaceID      string
 	WarmupSendID     string
 	RecipientMailbox string
 	Placement        string
+	SourceFolder     string
+	MessageID        string
 }
 
 // WarmupEngagePlan is what a recipient should do about a newly received warmup

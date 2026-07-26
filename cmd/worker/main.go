@@ -133,7 +133,7 @@ func run() error {
 
 	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues)
 	mux := queue.NewMux()
-	worker.Register(mux, core, sndr, reader, enq, cfg.PublicURL, cfg.TrackingSecret)
+	worker.Register(mux, core, sndr, reader, enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {

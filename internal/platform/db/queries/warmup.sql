@@ -243,9 +243,11 @@ WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
 -- a foreign pair also inserts nothing (also pgx.ErrNoRows) — the caller
 -- disambiguates duplicate-vs-cross-tenant with GetWarmupReceiptByPair. received_at
 -- is returned so the caller seeds the deterministic engage plan on the SAME instant
--- a later GetWarmupEngageJob re-reads.
-INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement)
-SELECT $1, $2, $3, $4
+-- a later GetWarmupEngageJob re-reads. source_folder + message_id are the receipt
+-- locator (000019): the provider folder the message was found in and its RFC822
+-- Message-ID, so C5b's engager can relocate/rescue/mark-read the exact message.
+INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement, source_folder, message_id)
+SELECT $1, $2, $3, $4, $5, $6
 FROM mailboxes WHERE id = $3 AND workspace_id = $1
 ON CONFLICT (warmup_send_id, recipient_mailbox) DO NOTHING
 RETURNING id, received_at;

@@ -37,6 +37,22 @@ type WarmupTickPayload struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// TaskWarmupEngage drives the recipient-side engagement of one received warmup
+// message (rescue-from-spam / mark-read / threaded reply). It is enqueued,
+// delayed by a humanized dwell, by the inbox poller when it detects a warmup
+// message (spec §7); the handler (C5b) acts on the receipt behind the
+// warmup_receipts.engaged idempotency guard.
+const TaskWarmupEngage = "warmup:engage"
+
+// WarmupEngagePayload is the body of a warmup:engage task. WorkspaceID travels
+// alongside ReceiptID so the worker can pin workspace_id in its coreapi lookups
+// (defense in depth on the unguessable receipt UUID), matching every other task
+// payload.
+type WarmupEngagePayload struct {
+	ReceiptID   string `json:"receipt_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
 // TaskWarmupSweep is the periodic fan-out that enqueues a warmup:tick for every
 // due participant (routing each to its assigned worker queue) and recomputes
 // participant health. Scheduled every 5 minutes.
@@ -127,6 +143,35 @@ func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time,
 		Dest:    dest,
 	}, bus.Options{
 		At:       t,
+		MaxRetry: sendMaxRetry,
+	})
+}
+
+// warmupEngageTaskID keys a warmup:engage on the receipt id so a re-poll that
+// re-detects the SAME warmup message (junk scans are stateless and idempotent)
+// dedups to one engage task. The warmup_receipts.engaged guard — not this key —
+// is the real double-engage guarantee; a collapsed duplicate only saves wasted
+// work. Mirrors warmupTickTaskID's dedup discipline.
+func warmupEngageTaskID(receiptID string) string {
+	return "warmupengage:" + receiptID
+}
+
+// EnqueueWarmupEngageIn schedules a warmup:engage for one receipt after delay d
+// (the humanized engage dwell from the receipt's plan). It goes through the
+// transport seam (bus.Dispatcher): Key→TaskID dedup, In→ProcessIn delayed
+// delivery. Engagement acts on the RECIPIENT's own mailbox, so no cross-worker
+// egress routing applies — it uses the shared default queue (Dest "").
+func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error {
+	b, err := json.Marshal(WarmupEngagePayload{ReceiptID: receiptID, WorkspaceID: workspaceID})
+	if err != nil {
+		return err
+	}
+	return c.Publish(context.Background(), bus.Job{
+		Kind:    TaskWarmupEngage,
+		Payload: b,
+		Key:     warmupEngageTaskID(receiptID),
+	}, bus.Options{
+		In:       d,
 		MaxRetry: sendMaxRetry,
 	})
 }
