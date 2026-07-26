@@ -109,8 +109,8 @@ func TestWorkerQueueDefaults(t *testing.T) {
 	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
 	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("INROAD_WORKER_ID", "node-a")
-	os.Unsetenv("INROAD_WORKER_QUEUES")
-	os.Unsetenv("INROAD_WORKER_EGRESS_IP")
+	t.Setenv("INROAD_WORKER_QUEUES", "")
+	t.Setenv("INROAD_WORKER_EGRESS_IP", "")
 
 	cfg, err := Load()
 	if err != nil {

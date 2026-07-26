@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -76,12 +77,22 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", fmt.Errorf("coreapi: pick least-loaded worker: %w", err)
 	}
 
-	// 4. Persist the assignment. ON CONFLICT keeps the row that won a concurrent
+	// 4. Persist the assignment. The INSERT ... SELECT writes a row ONLY when the
+	//    mailbox belongs to wsID (self-enforcing tenancy, defense in depth on top of
+	//    the SendJob resolver's own pin), so a mismatched pair inserts zero rows and
+	//    RETURNING yields ErrNoRows here — distinct from step 3's no-live-worker
+	//    ErrNoRows, which was on PickLeastLoadedWorker and returned "" WITHOUT
+	//    reaching this insert. ON CONFLICT keeps the row that won a concurrent
 	//    first-send race and returns ITS worker_id, so both racers agree.
 	assigned, err := c.q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
 		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID,
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Zero rows inserted: the mailbox does not belong to wsID. Fail closed —
+		// never persist a foreign-workspace routing row.
+		return "", coreapi.ErrCrossTenant
+	case err != nil:
 		return "", fmt.Errorf("coreapi: persist assignment: %w", err)
 	}
 	return queueForWorker(assigned), nil

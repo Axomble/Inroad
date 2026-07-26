@@ -26,11 +26,14 @@ ORDER BY (
 LIMIT 1;
 
 -- name: InsertMailboxWorkerAssignment :one
--- Persist a first assignment. Idempotent under a concurrent first-send race: on
--- a mailbox_id conflict the existing row wins and its worker_id is returned, so
--- both racers resolve to the same queue.
+-- Persist a first assignment. Self-enforcing tenancy (defense in depth): the row
+-- is written ONLY when the mailbox truly belongs to the workspace, so a mismatched
+-- (mailbox, workspace) pair inserts zero rows and RETURNING yields pgx.ErrNoRows —
+-- the caller maps that to a cross-tenant rejection. Idempotent under a concurrent
+-- first-send race: on a mailbox_id conflict the existing row wins and its worker_id
+-- is returned, so both racers resolve to the same queue.
 INSERT INTO mailbox_worker_assignments (mailbox_id, workspace_id, worker_id)
-VALUES ($1, $2, $3)
+SELECT $1, $2, $3 FROM mailboxes WHERE id = $1 AND workspace_id = $2
 ON CONFLICT (mailbox_id)
 DO UPDATE SET worker_id = mailbox_worker_assignments.worker_id
 RETURNING worker_id;

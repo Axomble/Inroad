@@ -11,13 +11,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
 // These integration tests exercise the worker-routing assigner (migration
-// 000018) directly against Postgres: no-live-worker fallback, least-loaded pick,
-// idempotency, and workspace pinning. Docker must be up (same harness as
-// claim_integration_test.go).
+// 000017) directly against Postgres: no-live-worker fallback, least-loaded pick,
+// idempotency, workspace pinning, and self-enforcing write tenancy. Docker must be
+// up (same harness as claim_integration_test.go).
 
 // routingClient builds a minimal inprocess client — the routing methods use only
 // c.q / c.pool, so no keyring/oauth wiring is needed here.
@@ -159,5 +160,50 @@ func TestAssignMailboxWorkerWorkspacePinning(t *testing.T) {
 	got, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String())
 	if err != nil || got != "w:aaa" {
 		t.Fatalf("owner re-assign = %q err=%v, want w:aaa", got, err)
+	}
+}
+
+// TestAssignMailboxWorkerWriteTenancy: with a LIVE worker available (so the pick
+// succeeds and the assigner reaches the persist step), assigning a mailbox under a
+// NON-owning workspace_id inserts zero rows and returns ErrCrossTenant, persisting
+// nothing — distinct from the no-live-worker fallback (which never reaches the
+// insert). The owner then still assigns normally. This proves the write path is
+// self-enforcing, not just the read pin (spec §17.9, defense in depth).
+func TestAssignMailboxWorkerWriteTenancy(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	c := routingClient(pool, q)
+
+	owner, err := q.CreateWorkspace(ctx, "Routing owner "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("owner workspace: %v", err)
+	}
+	foreign, err := q.CreateWorkspace(ctx, "Routing foreign "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("foreign workspace: %v", err)
+	}
+	// A live worker so PickLeastLoadedWorker returns a row and control reaches the
+	// self-enforcing insert (otherwise the no-live-worker branch short-circuits).
+	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	mb := createRoutingMailbox(t, ctx, q, owner.ID)
+
+	// Foreign workspace claiming the owner's mailbox: the INSERT ... SELECT matches
+	// zero mailbox rows, RETURNING yields ErrNoRows, mapped to ErrCrossTenant.
+	if _, err := c.AssignMailboxWorker(ctx, mb.String(), foreign.ID.String()); !errors.Is(err, coreapi.ErrCrossTenant) {
+		t.Fatalf("foreign-workspace assign err = %v, want ErrCrossTenant", err)
+	}
+	// Nothing persisted: the mailbox has no assignment row under EITHER workspace.
+	if _, err := q.GetMailboxWorkerAssignment(ctx, gen.GetMailboxWorkerAssignmentParams{
+		MailboxID: mb, WorkspaceID: owner.ID,
+	}); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("rejected cross-tenant assign must persist nothing, got err=%v", err)
+	}
+
+	// The legitimate owner still assigns to the live worker.
+	got, err := c.AssignMailboxWorker(ctx, mb.String(), owner.ID.String())
+	if err != nil || got != "w:aaa" {
+		t.Fatalf("owner assign = %q err=%v, want w:aaa", got, err)
 	}
 }
