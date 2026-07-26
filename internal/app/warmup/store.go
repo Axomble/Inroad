@@ -10,11 +10,20 @@ package warmup
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
+
+// ErrMailboxNotInWorkspace is returned by UpsertParticipant when the target
+// mailbox does not belong to the caller's workspace. The self-enforcing
+// INSERT ... SELECT emits zero rows in that case (pgx.ErrNoRows), which this
+// domain surfaces as a distinct sentinel so a future handler can translate it to
+// 404 without importing pgx. The package stays self-contained (no coreapi import).
+var ErrMailboxNotInWorkspace = errors.New("warmup: mailbox not in workspace")
 
 // Store is the repository interface this domain depends on. It is defined here
 // (by the consumer), not by the persistence layer, so the service can be
@@ -41,8 +50,10 @@ type PgStore struct {
 func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
 
 // UpsertParticipant enables warmup for a mailbox or updates its ramp settings.
-// The underlying query's ON CONFLICT is workspace-pinned, so a cross-workspace
-// mailbox_id never updates another tenant's row.
+// The underlying INSERT ... SELECT and ON CONFLICT are both workspace-pinned, so
+// a foreign (mailbox, workspace) pair — whether a first insert or a collision on
+// an existing row — writes nothing and returns no row. That pgx.ErrNoRows is
+// mapped to ErrMailboxNotInWorkspace so the caller can fail closed with a 404.
 func (s *PgStore) UpsertParticipant(ctx context.Context, arg UpsertParams) (Participant, error) {
 	p, err := s.q.UpsertWarmupParticipant(ctx, gen.UpsertWarmupParticipantParams{
 		MailboxID:     arg.MailboxID,
@@ -52,7 +63,10 @@ func (s *PgStore) UpsertParticipant(ctx context.Context, arg UpsertParams) (Part
 		RampIncrement: arg.RampIncrement,
 		ReplyRate:     arg.ReplyRate,
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Participant{}, ErrMailboxNotInWorkspace
+	case err != nil:
 		return Participant{}, err
 	}
 	return participantFromGen(p), nil

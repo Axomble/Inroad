@@ -77,7 +77,7 @@ CREATE INDEX warmup_receipts_health ON warmup_receipts(recipient_mailbox, receiv
 CREATE TABLE warmup_daily_stats (
     mailbox_id        UUID NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
     workspace_id      UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    day               DATE NOT NULL,
+    day               DATE NOT NULL,              -- UTC day (DB session TZ = UTC); reads/writes anchor on CURRENT_DATE
     sent              INT NOT NULL DEFAULT 0,
     received          INT NOT NULL DEFAULT 0,
     inbox             INT NOT NULL DEFAULT 0,      -- of received, how many in inbox

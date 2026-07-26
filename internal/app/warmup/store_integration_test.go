@@ -134,12 +134,13 @@ func TestCrossWorkspaceIsInvisible(t *testing.T) {
 	}
 
 	// A collision upsert from the wrong workspace updates nothing and returns
-	// no row (the ON CONFLICT WHERE pin filters it out).
+	// no row (the ON CONFLICT WHERE pin filters it out), surfaced as the domain
+	// sentinel.
 	if _, err := store.UpsertParticipant(ctx, UpsertParams{
 		MailboxID: mb.ID, WorkspaceID: other.ID,
 		StartVolume: 9, MaxVolume: 9, RampIncrement: 9, ReplyRate: 0.9,
-	}); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("cross-workspace Upsert: got %v, want pgx.ErrNoRows", err)
+	}); !errors.Is(err, ErrMailboxNotInWorkspace) {
+		t.Fatalf("cross-workspace Upsert: got %v, want ErrMailboxNotInWorkspace", err)
 	}
 
 	// The original owner's settings are untouched.
@@ -149,6 +150,43 @@ func TestCrossWorkspaceIsInvisible(t *testing.T) {
 	}
 	if got.MaxVolume != 40 {
 		t.Errorf("owner row was mutated cross-tenant: max_volume=%d want 40", got.MaxVolume)
+	}
+}
+
+// TestFirstUpsertCrossWorkspaceInsertsNothing proves the self-enforcing INSERT:
+// a FIRST upsert (no pre-existing row) under a NON-owning workspace for another
+// tenant's mailbox matches zero mailbox rows, so nothing is written and the store
+// returns ErrMailboxNotInWorkspace — closing the gap the ON CONFLICT WHERE guard
+// alone left open (it only covers a collision on an already-present row).
+func TestFirstUpsertCrossWorkspaceInsertsNothing(t *testing.T) {
+	f := setup(t)
+	ctx, q, store, mb := f.ctx, f.q, f.store, f.mb // mb is owned by workspace A (f.ws)
+
+	other, err := q.CreateWorkspace(ctx, "Foreign "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("foreign workspace: %v", err)
+	}
+
+	// No participant row exists yet for mb; workspace B claiming A's mailbox must
+	// insert zero rows (INSERT ... SELECT ... WHERE workspace_id = B matches none).
+	if _, err := store.UpsertParticipant(ctx, UpsertParams{
+		MailboxID: mb.ID, WorkspaceID: other.ID,
+		StartVolume: 9, MaxVolume: 9, RampIncrement: 9, ReplyRate: 0.9,
+	}); !errors.Is(err, ErrMailboxNotInWorkspace) {
+		t.Fatalf("first cross-workspace upsert: got %v, want ErrMailboxNotInWorkspace", err)
+	}
+
+	// Nothing persisted under B...
+	listB, err := store.ListParticipants(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("list B: %v", err)
+	}
+	if len(listB) != 0 {
+		t.Fatalf("foreign upsert must persist nothing under B, got %d rows", len(listB))
+	}
+	// ...and nothing leaked under the true owner A either.
+	if _, err := store.GetParticipant(ctx, f.ws.ID, mb.ID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("owner Get after rejected foreign upsert: got %v, want pgx.ErrNoRows", err)
 	}
 }
 
@@ -190,11 +228,15 @@ func TestStatsReads(t *testing.T) {
 		t.Errorf("sent today with no rows: got %d want 0", sent)
 	}
 
-	// Seed today's counters directly (no daily-stats writer exists until a later
-	// step); the read surface under test is what C1 owns.
+	// Seed three UTC-day rows directly (no daily-stats writer exists until a later
+	// step): today (in both windows), an older 5-days-back row (in both windows,
+	// proves ORDER BY day ASC), and a 40-days-back row that must fall OUTSIDE both
+	// the 30-day series window and the 7-day placement window.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, sent, received, inbox, spam, replies)
-		 VALUES ($1, $2, CURRENT_DATE, 5, 4, 3, 1, 2)`,
+		 VALUES ($1, $2, CURRENT_DATE,      5, 4, 3, 1, 2),
+		        ($1, $2, CURRENT_DATE - 5,  1, 2, 1, 1, 0),
+		        ($1, $2, CURRENT_DATE - 40, 100, 100, 100, 100, 100)`,
 		mb.ID, w.ID,
 	); err != nil {
 		t.Fatalf("seed stats: %v", err)
@@ -208,19 +250,29 @@ func TestStatsReads(t *testing.T) {
 		t.Errorf("sent today: got %d want 5", sent)
 	}
 
+	// 30-day series: today + 5-days-back only; the 40-days-back row is excluded,
+	// and rows come back oldest-first (ORDER BY day ASC).
 	series, err := store.DailyStats(ctx, w.ID, mb.ID)
 	if err != nil {
 		t.Fatalf("daily stats: %v", err)
 	}
-	if len(series) != 1 || series[0].Inbox != 3 || series[0].Spam != 1 {
+	if len(series) != 2 {
+		t.Fatalf("daily series len: got %d want 2 (40-days-back row must be out of window): %+v", len(series), series)
+	}
+	if !series[0].Day.Time.Before(series[1].Day.Time) {
+		t.Errorf("daily series not ordered day ASC: %v then %v", series[0].Day.Time, series[1].Day.Time)
+	}
+	if series[0].Inbox != 1 || series[1].Inbox != 3 || series[1].Spam != 1 {
 		t.Errorf("daily series unexpected: %+v", series)
 	}
 
+	// 7-day placement: sums today (3/1/4) + 5-days-back (1/1/2); the 40-days-back
+	// row is excluded from the trailing-7-day window.
 	rates, err := store.PlacementRates7d(ctx, w.ID)
 	if err != nil {
 		t.Fatalf("placement rates: %v", err)
 	}
-	if len(rates) != 1 || rates[0].Inbox != 3 || rates[0].Spam != 1 || rates[0].Received != 4 {
-		t.Errorf("placement rates unexpected: %+v", rates)
+	if len(rates) != 1 || rates[0].Inbox != 4 || rates[0].Spam != 2 || rates[0].Received != 6 {
+		t.Errorf("placement rates unexpected (want inbox=4 spam=2 received=6): %+v", rates)
 	}
 }
