@@ -41,16 +41,24 @@ func deriveWarmupSendID(mailboxID uuid.UUID, day string, index int) uuid.UUID {
 	return uuid.NewSHA1(warmupSendIDNamespace, []byte(key))
 }
 
-// deriveWarmupReplySendID derives the deterministic warmup_sends id for an
-// engagement REPLY. It shares the same (mailbox, UTC day, index) tuple as
-// deriveWarmupSendID but salts a distinct "reply" discriminator into the key, so a
-// reply and a NORMAL due-send at the same (mailbox, day, index) can never collapse
-// to the same warmup_sends row (which would let one silently no-op the other at
-// claim time). It stays deterministic — the reply's own later claim re-derives and
-// reclaims the SAME row. Normal-send derivation is unchanged.
-func deriveWarmupReplySendID(mailboxID uuid.UUID, day string, index int) uuid.UUID {
-	key := "reply|" + mailboxID.String() + "|" + day + "|" + strconv.Itoa(index)
-	return uuid.NewSHA1(warmupSendIDNamespace, []byte(key))
+// warmupReplySendIDNamespace is a fixed namespace DISTINCT from warmupSendIDNamespace,
+// used to derive an engagement reply's warmup_sends id from the IMMUTABLE receipt id.
+// The separate namespace guarantees a reply's id can NEVER collide with a normal
+// due-send's id (deriveWarmupSendID) — even for the same underlying uuid bytes — so one
+// can never silently no-op the other at claim time.
+var warmupReplySendIDNamespace = uuid.MustParse("c3d5e7f9-2b4d-6f8a-0c1e-3d5f7b9a1c2e")
+
+// deriveWarmupReplySendID derives the deterministic warmup_sends id for an engagement
+// REPLY from the receipt id — an IMMUTABLE key (one receipt maps to exactly one reply).
+// Anchoring on the receipt, NOT the recipient's mutable sent-today index, is the
+// idempotency fix: a post-send engage retry (e.g. MarkWarmupEngaged failed → asynq
+// retries GetWarmupEngageJob) re-derives the SAME id — even though the reply's own
+// MarkWarmupSent already bumped the sent counter — so ClaimWarmupSend sees the existing
+// 'sent' row (ClaimAlreadySent → recover-forward) instead of INSERTing a fresh row,
+// winning the claim, and SENDING THE REPLY TWICE. It uses a namespace distinct from
+// deriveWarmupSendID so a reply can never collide with a normal due-send.
+func deriveWarmupReplySendID(receiptID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(warmupReplySendIDNamespace, receiptID[:])
 }
 
 // GetWarmupSendJob resolves the next warmup action for a warming mailbox. It is

@@ -116,6 +116,34 @@ func TestSelectFolderInjectionSafe(t *testing.T) {
 	}
 }
 
+// TestMarkReadFolderFollowsPlacement proves mark-read targets the folder the message
+// actually sits in: an unset MarkReadFolder (a rescued or inbox-placed message) resolves
+// to INBOX, while a non-inbox, non-spam ("other") placement is read in its OWN folder —
+// so \Seen lands where the message is, not a folder it was never in.
+func TestMarkReadFolderFollowsPlacement(t *testing.T) {
+	cases := []struct {
+		name   string
+		target EngageTarget
+		want   string
+	}{
+		{"rescued or inbox placement defaults to inbox", EngageTarget{MarkReadFolder: ""}, inboxFolder},
+		{"other placement keeps its own folder", EngageTarget{MarkReadFolder: "Archive"}, "Archive"},
+		{"custom junk-adjacent folder preserved", EngageTarget{MarkReadFolder: "[Gmail]/All Mail"}, "[Gmail]/All Mail"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := markReadFolder(tc.target); got != tc.want {
+				t.Fatalf("markReadFolder = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// The resolved folder still flows through the injection-safe SELECT: an 'other'
+	// placement folder crosses the wire as a single quoted mailbox token (proven
+	// end-to-end by TestSelectFolderInjectionSafe for arbitrary folder names).
+	wire := serializeCommand(t, (&commands.Select{Mailbox: markReadFolder(EngageTarget{MarkReadFolder: "Archive"})}).Command())
+	assertCarriedAsToken(t, wire, "Archive")
+}
+
 // TestRescueSkipsInboxPlacement proves Rescue is a no-op (no dial) when the message
 // already sits in the inbox — SourceFolder empty or INBOX (any case).
 func TestRescueSkipsInboxPlacement(t *testing.T) {

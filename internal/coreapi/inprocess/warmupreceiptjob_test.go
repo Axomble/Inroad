@@ -4,8 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -102,29 +100,6 @@ func TestPausedUntilPerState(t *testing.T) {
 		}
 		if tc.wantValid && !got.Time.Equal(now.Add(tc.wantDelay)) {
 			t.Errorf("state %q: PausedUntil = %v, want %v", tc.state, got.Time, now.Add(tc.wantDelay))
-		}
-	}
-}
-
-// TestWarmupReplySendIDDistinctFromNormal proves an engagement reply and a normal
-// due-send at the SAME (mailbox, day, index) tuple derive DIFFERENT warmup_sends
-// ids, so a reply can never collide with (and silently no-op) a normal send at claim
-// time — while each derivation stays deterministic (reclaimable on retry).
-func TestWarmupReplySendIDDistinctFromNormal(t *testing.T) {
-	mb := uuid.MustParse("33333333-3333-3333-3333-333333333333")
-	const day = "2026-07-27"
-	for _, idx := range []int{0, 1, 7, 42} {
-		normal := deriveWarmupSendID(mb, day, idx)
-		reply := deriveWarmupReplySendID(mb, day, idx)
-		if normal == reply {
-			t.Errorf("index %d: reply id collided with normal send id %s", idx, normal)
-		}
-		// Deterministic: same inputs → same id (the retry-reclaims-same-row guarantee).
-		if reply != deriveWarmupReplySendID(mb, day, idx) {
-			t.Errorf("index %d: reply id not deterministic", idx)
-		}
-		if normal != deriveWarmupSendID(mb, day, idx) {
-			t.Errorf("index %d: normal id not deterministic", idx)
 		}
 	}
 }

@@ -1,10 +1,13 @@
 package warmup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -186,7 +189,13 @@ func TestEngageSkipsReplyWhenDoReplyFalse(t *testing.T) {
 
 func TestEngageUnsupportedProviderSkipsGracefully(t *testing.T) {
 	// Graph/M365: both engage steps return ErrEngageUnsupported; the handler logs a
-	// skip and still completes (no error, receipt marked engaged).
+	// skip and still completes (no error, receipt marked engaged). The skip must be
+	// OBSERVABLE, not silently swallowed, so we capture slog and assert a log line.
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	job := engageJob()
 	job.Provider = "m365"
 	job.DoReply = false
@@ -202,21 +211,68 @@ func TestEngageUnsupportedProviderSkipsGracefully(t *testing.T) {
 	if !core.engagedCalled || core.engagedReplied {
 		t.Fatalf("MarkWarmupEngaged: called=%v replied=%v, want called with replied=false", core.engagedCalled, core.engagedReplied)
 	}
+	// The skip is observable: a log line per skipped step names the provider (not a
+	// silent swallow).
+	if out := logs.String(); !strings.Contains(out, "step unsupported for provider") || !strings.Contains(out, "provider=m365") {
+		t.Fatalf("unsupported skip not logged observably; slog output:\n%s", out)
+	}
 }
+
+// errBoom is a non-unsupported engager failure the handler must surface verbatim
+// (wrapped with %w) so a caller can match it via errors.Is.
+var errBoom = errors.New("imap timeout")
 
 func TestEngageEngagerErrorPropagates(t *testing.T) {
 	// A non-unsupported engager error is surfaced so asynq retries, and the receipt
 	// is NOT marked engaged (so the retry re-engages).
 	core := &engageCore{job: engageJob(), claim: coreapi.ClaimWon}
-	eng := &fakeEngager{rescueErr: errors.New("imap timeout")}
+	eng := &fakeEngager{rescueErr: errBoom}
 
 	err := EngageHandler(core, eng, &fakeSender{})(context.Background(), engageTask(t, "rcpt-1", "ws-1"))
-	if err == nil {
-		t.Fatalf("engager error should propagate for retry")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("engager error = %v, want the specific errBoom wrapped for retry", err)
 	}
 	if core.engagedCalled {
 		t.Fatalf("receipt marked engaged despite an engage failure (retry would skip it)")
 	}
+}
+
+// TestEngageMarkReadFolderFollowsPlacement proves the handler tells the engager WHICH
+// folder to mark-read in: a rescued spam message is read in INBOX (empty sentinel), while
+// a non-inbox, non-spam ("other") placement is read in its OWN SourceFolder.
+func TestEngageMarkReadFolderFollowsPlacement(t *testing.T) {
+	t.Run("other placement reads in its own folder", func(t *testing.T) {
+		job := engageJob()
+		job.DoRescue = false // 'other' placement: no rescue
+		job.SourceFolder = "Archive"
+		job.DoReply = false
+		core := &engageCore{job: job, claim: coreapi.ClaimWon}
+		eng := &fakeEngager{}
+
+		if err := EngageHandler(core, eng, &fakeSender{})(context.Background(), engageTask(t, "rcpt-1", "ws-1")); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+		if eng.markReadCalls != 1 {
+			t.Fatalf("MarkRead calls = %d, want 1", eng.markReadCalls)
+		}
+		if eng.lastTarget.MarkReadFolder != "Archive" {
+			t.Fatalf("mark-read folder = %q, want the message's own folder \"Archive\"", eng.lastTarget.MarkReadFolder)
+		}
+	})
+	t.Run("rescued spam placement reads in inbox", func(t *testing.T) {
+		job := engageJob() // DoRescue=true, SourceFolder="Junk"
+		job.DoReply = false
+		core := &engageCore{job: job, claim: coreapi.ClaimWon}
+		eng := &fakeEngager{}
+
+		if err := EngageHandler(core, eng, &fakeSender{})(context.Background(), engageTask(t, "rcpt-1", "ws-1")); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+		// Empty MarkReadFolder ⇒ INBOX in the engager: the message moved there on rescue.
+		if eng.lastTarget.MarkReadFolder != "" {
+			t.Fatalf("rescued mark-read folder = %q, want empty (INBOX) after rescue", eng.lastTarget.MarkReadFolder)
+		}
+	})
 }
 
 func TestEngageReplyAlreadySentRecoversForward(t *testing.T) {

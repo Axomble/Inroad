@@ -293,14 +293,14 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 // the reply as a NEW warmup send FROM the recipient BACK TO the original sender,
 // minting a fresh signed receipt token for it. ok is false when the thread has no
 // remaining turn (exhausted) or is gone (send SET NULL) — the caller then builds no
-// reply. The token embeds a deterministic reply send id derived from (recipient, UTC
-// day, recipient's send index) via deriveWarmupReplySendID — a DISTINCT id namespace
-// from the normal-send derivation, so a reply can never collide with a normal
-// due-send at the same (mailbox, day, index) tuple (which would let one silently
-// no-op the other at claim time). It stays deterministic, so the reply's later claim
-// reclaims the SAME row. The returned job carries everything the claim/send/finalize
-// path needs EXCEPT transport, which the caller fills from the recipient's already-
-// decrypted credentials.
+// reply. The token embeds a deterministic reply send id derived from the IMMUTABLE
+// receipt id via deriveWarmupReplySendID — a DISTINCT id namespace from the normal-send
+// derivation, so a reply can never collide with a normal due-send (which would let one
+// silently no-op the other at claim time). Anchoring on the receipt (not the recipient's
+// mutable sent-today index) makes a post-send engage retry re-derive the SAME id and
+// reclaim the existing 'sent' row (recover-forward) rather than re-send. The returned job
+// carries everything the claim/send/finalize path needs EXCEPT transport, which the caller
+// fills from the recipient's already-decrypted credentials.
 func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID) (coreapi.WarmupSendJob, bool, error) {
 	th, err := c.q.GetWarmupReplyThread(ctx, gen.GetWarmupReplyThreadParams{ID: receiptID, WorkspaceID: ws})
 	if err != nil {
@@ -318,12 +318,11 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 		return coreapi.WarmupSendJob{}, false, nil // thread exhausted → no reply
 	}
 
-	sentToday, err := c.q.GetWarmupSentToday(ctx, gen.GetWarmupSentTodayParams{MailboxID: recipient, WorkspaceID: ws})
-	if err != nil {
-		return coreapi.WarmupSendJob{}, false, err
-	}
-	now := time.Now().UTC()
-	replySendID := deriveWarmupReplySendID(recipient, now.Format("2006-01-02"), int(sentToday))
+	// Anchor the reply's warmup_sends id to the IMMUTABLE receipt id (one receipt maps to
+	// one reply), NOT the recipient's mutable sent-today index. A post-send engage retry
+	// then re-derives the SAME id and reclaims the existing 'sent' row (ClaimAlreadySent →
+	// recover-forward), instead of a drifting id that would INSERT a fresh row and re-send.
+	replySendID := deriveWarmupReplySendID(receiptID)
 	token := warmup.Sign(warmup.Payload{
 		WorkspaceID: ws.String(), WarmupSendID: replySendID.String(), FromMailbox: recipient.String(),
 	}, c.warmupSecret)

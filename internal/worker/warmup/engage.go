@@ -54,16 +54,23 @@ func EngageHandler(core coreapi.Client, engager mail.Engager, sender Sender) fun
 			SourceFolder:   job.SourceFolder,
 			MessageID:      job.MessageID,
 		}
+		// Mark-read must target the folder the message ACTUALLY sits in: after a rescue it
+		// has moved to INBOX (left empty ⇒ INBOX), otherwise it is still in the receipt's
+		// SourceFolder — so an 'other' (non-inbox, non-spam) placement is read in its own
+		// folder, not a folder it was never in.
+		if !job.DoRescue {
+			target.MarkReadFolder = job.SourceFolder
+		}
 
 		// Rescue first (only when it landed in spam) so mark-read then finds it in the
 		// inbox where a real recipient reads it.
 		if job.DoRescue {
-			if err := engageStep(ctx, "rescue", job.Provider, func() error { return engager.Rescue(ctx, target) }); err != nil {
+			if err := engageStep("rescue", job.Provider, func() error { return engager.Rescue(ctx, target) }); err != nil {
 				return err
 			}
 		}
 		if job.DoMarkRead {
-			if err := engageStep(ctx, "mark-read", job.Provider, func() error { return engager.MarkRead(ctx, target) }); err != nil {
+			if err := engageStep("mark-read", job.Provider, func() error { return engager.MarkRead(ctx, target) }); err != nil {
 				return err
 			}
 		}
@@ -88,10 +95,12 @@ func EngageHandler(core coreapi.Client, engager mail.Engager, sender Sender) fun
 }
 
 // engageStep runs one engagement action, treating mail.ErrEngageUnsupported (the
-// Graph/M365 provider in v1) as a documented clean skip — logged, not failed — and
-// surfacing any other error so asynq retries. The reply send is unaffected: it uses
-// the ordinary send transport, which every provider supports.
-func engageStep(_ context.Context, action, provider string, fn func() error) error {
+// Graph/M365 provider in v1) as a documented clean skip — logged at Info so the skip
+// is OBSERVABLE, never silently swallowed — and surfacing any other error so asynq
+// retries. The action's fn closes over the handler's context; engageStep only inspects
+// the returned error, so it takes no context of its own. The reply send is unaffected:
+// it uses the ordinary send transport, which every provider supports.
+func engageStep(action, provider string, fn func() error) error {
 	switch err := fn(); {
 	case err == nil:
 		return nil

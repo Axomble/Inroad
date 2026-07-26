@@ -289,6 +289,66 @@ func TestGetWarmupEngageJobAndMarkEngaged(t *testing.T) {
 	}
 }
 
+// TestWarmupReplySendIDStableAcrossRetry is the MAJOR reply-idempotency guard: the
+// engagement reply's warmup_sends SendID is anchored to the IMMUTABLE receipt id, so a
+// post-send engage retry of GetWarmupEngageJob re-derives the IDENTICAL reply SendID —
+// even after the recipient's sent-today counter has advanced (the reply's own
+// MarkWarmupSent bump, plus later tick sends). Under the OLD (recipient, day, sentToday)
+// derivation the id would DRIFT on retry, ClaimWarmupSend would INSERT a fresh row, win
+// the claim, and the reply would be SENT TWICE (corrupting content + the replies/sent
+// counters). With the receipt anchor the retry reclaims the same row (ClaimAlreadySent).
+func TestWarmupReplySendIDStableAcrossRetry(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	// Force recipient B to ALWAYS reply (reply_rate=1.0 ⇒ ReplyDecision true) so
+	// GetWarmupEngageJob deterministically builds the reply send under test.
+	if _, err := f.q.UpsertWarmupParticipant(ctx, gen.UpsertWarmupParticipantParams{
+		MailboxID: f.b, WorkspaceID: f.ws1, StartVolume: 8, MaxVolume: 40, RampIncrement: 2, ReplyRate: 1.0,
+	}); err != nil {
+		t.Fatalf("force reply_rate=1: %v", err)
+	}
+	sendID, recipient := makeWarmupSend(t, ctx, f) // recipient == B
+	plan, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID, RecipientMailbox: recipient,
+		Placement: placementInbox, SourceFolder: "INBOX", MessageID: "<orig@acme.test>",
+	})
+	if err != nil {
+		t.Fatalf("RecordWarmupReceipt: %v", err)
+	}
+
+	job1, err := f.core.GetWarmupEngageJob(ctx, plan.ReceiptID, f.ws1.String())
+	if err != nil {
+		t.Fatalf("GetWarmupEngageJob #1: %v", err)
+	}
+	if !job1.DoReply || job1.ReplySend.SendID == "" {
+		t.Fatalf("engage job #1 = %+v, want a built reply carrying a SendID", job1)
+	}
+	id1 := job1.ReplySend.SendID
+
+	// Simulate the exact post-send state the double-send bug hinged on: the reply's own
+	// MarkWarmupSent → IncrementWarmupSentStat (and any later tick send) advances the
+	// recipient's sent-today counter that the OLD derivation summed.
+	rb, err := uuid.Parse(recipient)
+	if err != nil {
+		t.Fatalf("parse recipient: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := f.q.IncrementWarmupSentStat(ctx, gen.IncrementWarmupSentStatParams{MailboxID: rb, WorkspaceID: f.ws1}); err != nil {
+			t.Fatalf("advance sent-today: %v", err)
+		}
+	}
+
+	job2, err := f.core.GetWarmupEngageJob(ctx, plan.ReceiptID, f.ws1.String())
+	if err != nil {
+		t.Fatalf("GetWarmupEngageJob #2 (retry): %v", err)
+	}
+	if !job2.DoReply || job2.ReplySend.SendID == "" {
+		t.Fatalf("engage job #2 = %+v, want the reply still built on retry", job2)
+	}
+	if job2.ReplySend.SendID != id1 {
+		t.Fatalf("reply SendID DRIFTED across retry: #1=%s #2=%s — ClaimWarmupSend would insert a fresh row and re-send", id1, job2.ReplySend.SendID)
+	}
+}
+
 // TestListDueWarmupMailboxes proves enabled non-paused participants are listed and a
 // paused one is excluded (membership check — the fan-out is global across the shared DB).
 func TestListDueWarmupMailboxes(t *testing.T) {

@@ -101,12 +101,26 @@ func findUIDs(c *client.Client, messageID string) (*imap.SeqSet, bool, error) {
 	return set, true, nil
 }
 
-// MarkRead sets the \Seen flag on the message in the INBOX. A real recipient reads
-// mail in their inbox, and a rescued message has already been moved there, so
-// mark-read always targets INBOX; a message that is not there (e.g. a rare 'other'
-// placement) yields no search hit and is a clean no-op.
+// markReadFolder resolves the folder the mark-read STORE operates in: the folder the
+// message CURRENTLY sits in (t.MarkReadFolder), defaulting to INBOX when unset — the
+// case of a rescued message (moved to INBOX) or an inbox placement. A non-inbox,
+// non-spam ("other") placement is marked read in its own folder, not INBOX, so the
+// \Seen flag lands on the message where it actually is.
+func markReadFolder(t EngageTarget) string {
+	if t.MarkReadFolder == "" {
+		return inboxFolder
+	}
+	return t.MarkReadFolder
+}
+
+// MarkRead sets the \Seen flag on the message in the folder it currently occupies
+// (markReadFolder): INBOX for a rescued or inbox-placed message, else the receipt's
+// SourceFolder for an 'other' placement. The folder name crosses the wire as a
+// quoted/literal SELECT argument (see withFolder), so an attacker-influenceable folder
+// can never break out. A message not found in that folder yields no search hit and is a
+// clean no-op.
 func (e *NetEngager) MarkRead(_ context.Context, t EngageTarget) error {
-	return e.withFolder(imapCfg(t), inboxFolder, func(c *client.Client) error {
+	return e.withFolder(imapCfg(t), markReadFolder(t), func(c *client.Client) error {
 		set, ok, err := findUIDs(c, t.MessageID)
 		if err != nil || !ok {
 			return err

@@ -35,6 +35,12 @@ type EngageTarget struct {
 	AllowPlaintext bool
 	SourceFolder   string // actual provider folder the message was found in (INBOX / a junk folder)
 	MessageID      string // RFC822 Message-ID of the received message
+	// MarkReadFolder is the folder the message CURRENTLY sits in for the mark-read
+	// STORE: after a rescue it has moved to INBOX, otherwise it is still in the
+	// receipt's SourceFolder. Empty means INBOX (a rescued or inbox-placed message).
+	// Like SourceFolder it is attacker-influenceable and MUST cross the wire as a
+	// quoted/literal mailbox name (the IMAP engager's SELECT encodes it as such).
+	MarkReadFolder string
 }
 
 // Engager performs the recipient-side actions on a received warmup message. The
