@@ -41,6 +41,18 @@ func deriveWarmupSendID(mailboxID uuid.UUID, day string, index int) uuid.UUID {
 	return uuid.NewSHA1(warmupSendIDNamespace, []byte(key))
 }
 
+// deriveWarmupReplySendID derives the deterministic warmup_sends id for an
+// engagement REPLY. It shares the same (mailbox, UTC day, index) tuple as
+// deriveWarmupSendID but salts a distinct "reply" discriminator into the key, so a
+// reply and a NORMAL due-send at the same (mailbox, day, index) can never collapse
+// to the same warmup_sends row (which would let one silently no-op the other at
+// claim time). It stays deterministic — the reply's own later claim re-derives and
+// reclaims the SAME row. Normal-send derivation is unchanged.
+func deriveWarmupReplySendID(mailboxID uuid.UUID, day string, index int) uuid.UUID {
+	key := "reply|" + mailboxID.String() + "|" + day + "|" + strconv.Itoa(index)
+	return uuid.NewSHA1(warmupSendIDNamespace, []byte(key))
+}
+
 // GetWarmupSendJob resolves the next warmup action for a warming mailbox. It is
 // read-only w.r.t. warmup_sends (the claim inserts that row) but MAY open a
 // warmup_threads row when starting a new thread, so the returned job carries a

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
@@ -82,12 +83,15 @@ func TestRecordWarmupReceiptIdempotent(t *testing.T) {
 	}
 }
 
-// TestRecordWarmupReceiptPlacementStats proves inbox vs spam route to the right
-// counter (each also bumps received) and spam sets DoRescue.
-func TestRecordWarmupReceiptPlacementStats(t *testing.T) {
+// TestRecordWarmupReceiptSenderAttribution proves placement is attributed to the
+// SENDER, not the recipient (spec §4): when recipient B records A's mail as inbox
+// then spam, A's (sender) inbox/spam counters increment and B's (recipient) received
+// counter increments — B's spam/inbox stay ZERO (the innocent inbox owner is never
+// punished for what it received). spam still sets DoRescue on the recipient's plan.
+func TestRecordWarmupReceiptSenderAttribution(t *testing.T) {
 	ctx, f := setupWarmup(t)
-	inboxSend, recipient := makeWarmupSend(t, ctx, f)
-	spamSend, _ := makeWarmupSend(t, ctx, f)
+	inboxSend, recipient := makeWarmupSend(t, ctx, f) // A -> B, from_mailbox = A
+	spamSend, _ := makeWarmupSend(t, ctx, f)          // A -> B
 
 	if _, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
 		WorkspaceID: f.ws1.String(), WarmupSendID: inboxSend, RecipientMailbox: recipient, Placement: placementInbox,
@@ -104,10 +108,18 @@ func TestRecordWarmupReceiptPlacementStats(t *testing.T) {
 		t.Fatalf("spam plan DoRescue = false, want true")
 	}
 
+	// Recipient B: observes the mail (received bumps) but placement is NEVER attributed
+	// to it — inbox/spam must stay 0.
 	rb, _ := uuid.Parse(recipient)
-	received, inbox, spam, _ := todayStats(t, ctx, f, rb)
-	if received != 2 || inbox != 1 || spam != 1 {
-		t.Fatalf("stats received=%d inbox=%d spam=%d, want 2/1/1", received, inbox, spam)
+	received, rInbox, rSpam, _ := todayStats(t, ctx, f, rb)
+	if received != 2 || rInbox != 0 || rSpam != 0 {
+		t.Fatalf("recipient B stats received=%d inbox=%d spam=%d, want 2/0/0 (recipient observes, never attributed placement)", received, rInbox, rSpam)
+	}
+
+	// Sender A: the deliverability signal lands here — one inbox, one spam.
+	_, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a)
+	if aInbox != 1 || aSpam != 1 {
+		t.Fatalf("sender A placement inbox=%d spam=%d, want 1/1 (placement attributed to sender)", aInbox, aSpam)
 	}
 }
 
@@ -208,28 +220,46 @@ func dueContains(refs []coreapi.MailboxRef, id uuid.UUID) bool {
 }
 
 // TestEvaluateWarmupHealthTransitionsAndRecovers proves EvaluateWarmupHealth
-// escalates a spammy participant to paused and steps a clean paused participant one
-// level back down (recovery), persisting both transitions.
+// escalates a spammy SENDER to paused (placement is sender-attributed), steps a
+// clean paused participant whose timed block has ELAPSED one level back down
+// (recovery), and — the timed-block floor — does NOT recover a clean participant
+// whose paused_until is still in the future.
 func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 	ctx, f := setupWarmup(t)
 
-	// A: seed a spammy trailing window (6 spam / 4 inbox = 60% > 50% → paused).
+	// A: seed a spammy trailing window attributed to A as the SENDER via a real A->B
+	// send (6 spam / 4 inbox = 60% > 50% → paused). RecordWarmupSenderPlacementStat
+	// resolves the sender from warmup_sends.from_mailbox = A.
+	sendID, _ := makeWarmupSend(t, ctx, f)
+	sid, err := uuid.Parse(sendID)
+	if err != nil {
+		t.Fatalf("parse sendID: %v", err)
+	}
 	for i := 0; i < 6; i++ {
-		if err := f.q.RecordWarmupReceiptStat(ctx, gen.RecordWarmupReceiptStatParams{MailboxID: f.a, WorkspaceID: f.ws1, Placement: placementSpam}); err != nil {
+		if err := f.q.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{WorkspaceID: f.ws1, WarmupSendID: sid, Placement: placementSpam}); err != nil {
 			t.Fatalf("seed A spam: %v", err)
 		}
 	}
 	for i := 0; i < 4; i++ {
-		if err := f.q.RecordWarmupReceiptStat(ctx, gen.RecordWarmupReceiptStatParams{MailboxID: f.a, WorkspaceID: f.ws1, Placement: placementInbox}); err != nil {
+		if err := f.q.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{WorkspaceID: f.ws1, WarmupSendID: sid, Placement: placementInbox}); err != nil {
 			t.Fatalf("seed A inbox: %v", err)
 		}
 	}
-	// B: currently paused but with a CLEAN window (no stats) → should recover one step.
+	// B: paused with a CLEAN window whose block has ELAPSED (paused_until in the past)
+	// → should recover one step (paused → throttled).
 	if err := f.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
 		MailboxID: f.b, WorkspaceID: f.ws1, HealthState: warmup.StatePaused, HealthReason: "seed",
-		PausedUntil: pgtype.Timestamptz{Time: time.Now().Add(72 * time.Hour), Valid: true},
+		PausedUntil: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	}); err != nil {
 		t.Fatalf("seed B paused: %v", err)
+	}
+	// C (ws2): paused with a CLEAN window but the block is STILL LIVE (paused_until in
+	// the future) → the timed-block floor must hold it paused (no recovery yet).
+	if err := f.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
+		MailboxID: f.c, WorkspaceID: f.ws2, HealthState: warmup.StatePaused, HealthReason: "seed",
+		PausedUntil: pgtype.Timestamptz{Time: time.Now().Add(72 * time.Hour), Valid: true},
+	}); err != nil {
+		t.Fatalf("seed C paused: %v", err)
 	}
 
 	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
@@ -241,7 +271,7 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 		t.Fatalf("read A: %v", err)
 	}
 	if pa.HealthState != warmup.StatePaused {
-		t.Fatalf("A health = %q, want paused (60%% spam)", pa.HealthState)
+		t.Fatalf("A health = %q, want paused (60%% sender-attributed spam)", pa.HealthState)
 	}
 	if !pa.PausedUntil.Valid {
 		t.Fatalf("A paused_until not set on escalation")
@@ -252,6 +282,63 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 		t.Fatalf("read B: %v", err)
 	}
 	if pb.HealthState != warmup.StateThrottled {
-		t.Fatalf("B health = %q, want throttled (one-level recovery from paused)", pb.HealthState)
+		t.Fatalf("B health = %q, want throttled (one-level recovery after block elapsed)", pb.HealthState)
 	}
+
+	pc, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: f.c, WorkspaceID: f.ws2})
+	if err != nil {
+		t.Fatalf("read C: %v", err)
+	}
+	if pc.HealthState != warmup.StatePaused {
+		t.Fatalf("C health = %q, want paused (timed-block floor: no recovery while paused_until is live)", pc.HealthState)
+	}
+}
+
+// TestRecordWarmupReceiptNonParticipantSkip proves a receipt for a recipient that is
+// NOT a warmup participant is a clean no-op skip (spec §4): an empty plan, nil error,
+// and NO receipt or stat persisted (the tx rolls back).
+func TestRecordWarmupReceiptNonParticipantSkip(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f) // A -> B
+	rb, err := uuid.Parse(recipient)
+	if err != nil {
+		t.Fatalf("parse recipient: %v", err)
+	}
+
+	// Drop B's participant row so the recipient is a real workspace mailbox but no
+	// longer a warmup participant.
+	if _, err := f.q.DisableWarmupParticipant(ctx, gen.DisableWarmupParticipantParams{MailboxID: rb, WorkspaceID: f.ws1}); err != nil {
+		t.Fatalf("disable B participant: %v", err)
+	}
+
+	plan, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID, RecipientMailbox: recipient, Placement: placementSpam,
+	})
+	if err != nil {
+		t.Fatalf("non-participant RecordWarmupReceipt err = %v, want nil (clean skip)", err)
+	}
+	if plan != (coreapi.WarmupEngagePlan{}) {
+		t.Fatalf("non-participant plan = %+v, want zero value", plan)
+	}
+
+	// No stat persisted for the non-participant recipient, and no receipt row (so a
+	// later re-poll after re-enabling would still record it fresh).
+	if received, _, _, _ := todayStats(t, ctx, f, rb); received != 0 {
+		t.Fatalf("recipient received = %d after non-participant skip, want 0 (nothing persisted)", received)
+	}
+	if _, err := f.q.GetWarmupReceiptByPair(ctx, gen.GetWarmupReceiptByPairParams{
+		WarmupSendID: pgtype.UUID{Bytes: sid16(t, sendID), Valid: true}, RecipientMailbox: rb, WorkspaceID: f.ws1,
+	}); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("GetWarmupReceiptByPair err = %v, want ErrNoRows (no receipt persisted)", err)
+	}
+}
+
+// sid16 parses a send-id string to the raw 16 bytes for a pgtype.UUID.
+func sid16(t *testing.T, s string) [16]byte {
+	t.Helper()
+	u, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("parse send id: %v", err)
+	}
+	return u
 }

@@ -259,24 +259,43 @@ RETURNING id, received_at;
 SELECT id FROM warmup_receipts
 WHERE warmup_send_id = $1 AND recipient_mailbox = $2 AND workspace_id = $3;
 
--- name: RecordWarmupReceiptStat :exec
--- On a NEWLY inserted receipt, bump the RECIPIENT's daily received/inbox/spam
--- counters for the UTC day (CURRENT_DATE, matching the C1 UTC-day convention),
--- creating today's row on first receipt. placement drives which of inbox/spam also
--- increments.
+-- name: RecordWarmupReceivedStat :exec
+-- On a NEWLY inserted receipt, bump the RECIPIENT's daily received counter for the
+-- UTC day (CURRENT_DATE, matching the C1 UTC-day convention), creating today's row
+-- on first receipt. This is a recipient-side VOLUME counter only ("how much warmup
+-- mail did I receive") — it is NOT a reputation signal. inbox/spam PLACEMENT is a
+-- sender-deliverability signal and is attributed to the SENDER separately
+-- (RecordWarmupSenderPlacementStat), because deliverability belongs to whoever SENT
+-- the mail, not whoever observed where it landed. Attributing spam to the recipient
+-- would invert the signal (punish the innocent inbox owner, never flag the sender).
 -- SAFETY: a bare-VALUES insert (like IncrementWarmupSentStat), SAFE ONLY because it
 -- runs inside RecordWarmupReceipt's transaction AFTER the workspace-pinned,
 -- self-enforcing UpsertWarmupReceipt has already proven the (recipient, workspace)
 -- pairing. A future caller OUTSIDE that gate MUST add INSERT ... SELECT
 -- self-enforcement.
-INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received, inbox, spam)
-VALUES ($1, $2, CURRENT_DATE, 1,
-        CASE WHEN sqlc.arg(placement)::text = 'inbox' THEN 1 ELSE 0 END,
-        CASE WHEN sqlc.arg(placement)::text = 'spam'  THEN 1 ELSE 0 END)
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received)
+VALUES ($1, $2, CURRENT_DATE, 1)
 ON CONFLICT (mailbox_id, day) DO UPDATE SET
-    received = warmup_daily_stats.received + EXCLUDED.received,
-    inbox    = warmup_daily_stats.inbox + EXCLUDED.inbox,
-    spam     = warmup_daily_stats.spam + EXCLUDED.spam;
+    received = warmup_daily_stats.received + 1;
+
+-- name: RecordWarmupSenderPlacementStat :exec
+-- On a NEWLY inserted receipt, bump the SENDER's daily inbox|spam placement counter
+-- for the UTC day. The sender is resolved from warmup_sends.from_mailbox for this
+-- warmup_send_id, because inbox-vs-spam placement is a SENDER-deliverability signal
+-- ("did MY outbound warmup mail land in the inbox or spam at partners?"). The
+-- recipient merely OBSERVES the placement. 'other' placement increments neither
+-- counter. SELF-ENFORCING tenancy: the INSERT ... SELECT emits a row ONLY when the
+-- send truly belongs to the workspace, so a foreign (send, workspace) pair inserts
+-- zero rows; the resolved (sender, workspace) pairing is proven by the same join.
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, inbox, spam)
+SELECT s.from_mailbox, s.workspace_id, CURRENT_DATE,
+       CASE WHEN sqlc.arg(placement)::text = 'inbox' THEN 1 ELSE 0 END,
+       CASE WHEN sqlc.arg(placement)::text = 'spam'  THEN 1 ELSE 0 END
+FROM warmup_sends s
+WHERE s.id = sqlc.arg(warmup_send_id) AND s.workspace_id = sqlc.arg(workspace_id)
+ON CONFLICT (mailbox_id, day) DO UPDATE SET
+    inbox = warmup_daily_stats.inbox + EXCLUDED.inbox,
+    spam  = warmup_daily_stats.spam + EXCLUDED.spam;
 
 -- name: GetWarmupEngageBundle :one
 -- Everything GetWarmupEngageJob needs that is always present: the recipient's
@@ -341,20 +360,23 @@ WHERE enabled
 ORDER BY mailbox_id;
 
 -- name: ListWarmupHealthSignals :many
--- Per-participant trailing-window signals for EvaluateWarmupHealth: the spam and
--- received sums over the last 7 UTC days plus the current health_state. The LEFT
--- JOIN keeps a participant with no recent stats (received=0 → spamRate 0 → healthy).
--- Global fan-out (health is recomputed for every enabled participant). Bounce and
--- invalid-token signals have no persistence in the v1 schema, so the caller passes
--- them as zero (documented gap, not a silent drop).
-SELECT p.mailbox_id, p.workspace_id, p.health_state,
-       COALESCE(SUM(s.spam), 0)::bigint    AS spam,
-       COALESCE(SUM(s.received), 0)::bigint AS received
+-- Per-participant trailing-window signals for EvaluateWarmupHealth: the participant's
+-- OWN sender-attributed inbox and spam placement sums over the last 7 UTC days, its
+-- current health_state, and its paused_until (the timed-block floor gate). The spam
+-- placement rate the caller derives is "of MY sent warmup mail, the fraction that
+-- landed in spam" = spam / (inbox + spam) — a sender-deliverability signal, NOT the
+-- recipient-side received volume. The LEFT JOIN keeps a participant with no recent
+-- placement (inbox+spam=0 → spamRate 0 → healthy). Global fan-out (health is
+-- recomputed for every enabled participant). Bounce and invalid-token signals have no
+-- persistence in the v1 schema, so the caller passes them as zero (documented gap).
+SELECT p.mailbox_id, p.workspace_id, p.health_state, p.paused_until,
+       COALESCE(SUM(s.inbox), 0)::bigint AS inbox,
+       COALESCE(SUM(s.spam), 0)::bigint  AS spam
 FROM warmup_participants p
 LEFT JOIN warmup_daily_stats s
   ON s.mailbox_id = p.mailbox_id AND s.day >= CURRENT_DATE - 6
 WHERE p.enabled
-GROUP BY p.mailbox_id, p.workspace_id, p.health_state;
+GROUP BY p.mailbox_id, p.workspace_id, p.health_state, p.paused_until;
 
 -- name: UpdateWarmupHealth :exec
 -- Persist a health transition for one participant: new state, human-readable

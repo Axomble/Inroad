@@ -653,30 +653,34 @@ func (q *Queries) ListDueWarmupMailboxes(ctx context.Context) ([]ListDueWarmupMa
 }
 
 const listWarmupHealthSignals = `-- name: ListWarmupHealthSignals :many
-SELECT p.mailbox_id, p.workspace_id, p.health_state,
-       COALESCE(SUM(s.spam), 0)::bigint    AS spam,
-       COALESCE(SUM(s.received), 0)::bigint AS received
+SELECT p.mailbox_id, p.workspace_id, p.health_state, p.paused_until,
+       COALESCE(SUM(s.inbox), 0)::bigint AS inbox,
+       COALESCE(SUM(s.spam), 0)::bigint  AS spam
 FROM warmup_participants p
 LEFT JOIN warmup_daily_stats s
   ON s.mailbox_id = p.mailbox_id AND s.day >= CURRENT_DATE - 6
 WHERE p.enabled
-GROUP BY p.mailbox_id, p.workspace_id, p.health_state
+GROUP BY p.mailbox_id, p.workspace_id, p.health_state, p.paused_until
 `
 
 type ListWarmupHealthSignalsRow struct {
-	MailboxID   uuid.UUID `json:"mailbox_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	HealthState string    `json:"health_state"`
-	Spam        int64     `json:"spam"`
-	Received    int64     `json:"received"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	HealthState string             `json:"health_state"`
+	PausedUntil pgtype.Timestamptz `json:"paused_until"`
+	Inbox       int64              `json:"inbox"`
+	Spam        int64              `json:"spam"`
 }
 
-// Per-participant trailing-window signals for EvaluateWarmupHealth: the spam and
-// received sums over the last 7 UTC days plus the current health_state. The LEFT
-// JOIN keeps a participant with no recent stats (received=0 → spamRate 0 → healthy).
-// Global fan-out (health is recomputed for every enabled participant). Bounce and
-// invalid-token signals have no persistence in the v1 schema, so the caller passes
-// them as zero (documented gap, not a silent drop).
+// Per-participant trailing-window signals for EvaluateWarmupHealth: the participant's
+// OWN sender-attributed inbox and spam placement sums over the last 7 UTC days, its
+// current health_state, and its paused_until (the timed-block floor gate). The spam
+// placement rate the caller derives is "of MY sent warmup mail, the fraction that
+// landed in spam" = spam / (inbox + spam) — a sender-deliverability signal, NOT the
+// recipient-side received volume. The LEFT JOIN keeps a participant with no recent
+// placement (inbox+spam=0 → spamRate 0 → healthy). Global fan-out (health is
+// recomputed for every enabled participant). Bounce and invalid-token signals have no
+// persistence in the v1 schema, so the caller passes them as zero (documented gap).
 func (q *Queries) ListWarmupHealthSignals(ctx context.Context) ([]ListWarmupHealthSignalsRow, error) {
 	rows, err := q.db.Query(ctx, listWarmupHealthSignals)
 	if err != nil {
@@ -690,8 +694,9 @@ func (q *Queries) ListWarmupHealthSignals(ctx context.Context) ([]ListWarmupHeal
 			&i.MailboxID,
 			&i.WorkspaceID,
 			&i.HealthState,
+			&i.PausedUntil,
+			&i.Inbox,
 			&i.Spam,
-			&i.Received,
 		); err != nil {
 			return nil, err
 		}
@@ -743,34 +748,64 @@ func (q *Queries) ListWarmupParticipants(ctx context.Context, workspaceID uuid.U
 	return items, nil
 }
 
-const recordWarmupReceiptStat = `-- name: RecordWarmupReceiptStat :exec
-INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received, inbox, spam)
-VALUES ($1, $2, CURRENT_DATE, 1,
-        CASE WHEN $3::text = 'inbox' THEN 1 ELSE 0 END,
-        CASE WHEN $3::text = 'spam'  THEN 1 ELSE 0 END)
+const recordWarmupReceivedStat = `-- name: RecordWarmupReceivedStat :exec
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received)
+VALUES ($1, $2, CURRENT_DATE, 1)
 ON CONFLICT (mailbox_id, day) DO UPDATE SET
-    received = warmup_daily_stats.received + EXCLUDED.received,
-    inbox    = warmup_daily_stats.inbox + EXCLUDED.inbox,
-    spam     = warmup_daily_stats.spam + EXCLUDED.spam
+    received = warmup_daily_stats.received + 1
 `
 
-type RecordWarmupReceiptStatParams struct {
+type RecordWarmupReceivedStatParams struct {
 	MailboxID   uuid.UUID `json:"mailbox_id"`
 	WorkspaceID uuid.UUID `json:"workspace_id"`
-	Placement   string    `json:"placement"`
 }
 
-// On a NEWLY inserted receipt, bump the RECIPIENT's daily received/inbox/spam
-// counters for the UTC day (CURRENT_DATE, matching the C1 UTC-day convention),
-// creating today's row on first receipt. placement drives which of inbox/spam also
-// increments.
+// On a NEWLY inserted receipt, bump the RECIPIENT's daily received counter for the
+// UTC day (CURRENT_DATE, matching the C1 UTC-day convention), creating today's row
+// on first receipt. This is a recipient-side VOLUME counter only ("how much warmup
+// mail did I receive") — it is NOT a reputation signal. inbox/spam PLACEMENT is a
+// sender-deliverability signal and is attributed to the SENDER separately
+// (RecordWarmupSenderPlacementStat), because deliverability belongs to whoever SENT
+// the mail, not whoever observed where it landed. Attributing spam to the recipient
+// would invert the signal (punish the innocent inbox owner, never flag the sender).
 // SAFETY: a bare-VALUES insert (like IncrementWarmupSentStat), SAFE ONLY because it
 // runs inside RecordWarmupReceipt's transaction AFTER the workspace-pinned,
 // self-enforcing UpsertWarmupReceipt has already proven the (recipient, workspace)
 // pairing. A future caller OUTSIDE that gate MUST add INSERT ... SELECT
 // self-enforcement.
-func (q *Queries) RecordWarmupReceiptStat(ctx context.Context, arg RecordWarmupReceiptStatParams) error {
-	_, err := q.db.Exec(ctx, recordWarmupReceiptStat, arg.MailboxID, arg.WorkspaceID, arg.Placement)
+func (q *Queries) RecordWarmupReceivedStat(ctx context.Context, arg RecordWarmupReceivedStatParams) error {
+	_, err := q.db.Exec(ctx, recordWarmupReceivedStat, arg.MailboxID, arg.WorkspaceID)
+	return err
+}
+
+const recordWarmupSenderPlacementStat = `-- name: RecordWarmupSenderPlacementStat :exec
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, inbox, spam)
+SELECT s.from_mailbox, s.workspace_id, CURRENT_DATE,
+       CASE WHEN $1::text = 'inbox' THEN 1 ELSE 0 END,
+       CASE WHEN $1::text = 'spam'  THEN 1 ELSE 0 END
+FROM warmup_sends s
+WHERE s.id = $2 AND s.workspace_id = $3
+ON CONFLICT (mailbox_id, day) DO UPDATE SET
+    inbox = warmup_daily_stats.inbox + EXCLUDED.inbox,
+    spam  = warmup_daily_stats.spam + EXCLUDED.spam
+`
+
+type RecordWarmupSenderPlacementStatParams struct {
+	Placement    string    `json:"placement"`
+	WarmupSendID uuid.UUID `json:"warmup_send_id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+}
+
+// On a NEWLY inserted receipt, bump the SENDER's daily inbox|spam placement counter
+// for the UTC day. The sender is resolved from warmup_sends.from_mailbox for this
+// warmup_send_id, because inbox-vs-spam placement is a SENDER-deliverability signal
+// ("did MY outbound warmup mail land in the inbox or spam at partners?"). The
+// recipient merely OBSERVES the placement. 'other' placement increments neither
+// counter. SELF-ENFORCING tenancy: the INSERT ... SELECT emits a row ONLY when the
+// send truly belongs to the workspace, so a foreign (send, workspace) pair inserts
+// zero rows; the resolved (sender, workspace) pairing is proven by the same join.
+func (q *Queries) RecordWarmupSenderPlacementStat(ctx context.Context, arg RecordWarmupSenderPlacementStatParams) error {
+	_, err := q.db.Exec(ctx, recordWarmupSenderPlacementStat, arg.Placement, arg.WarmupSendID, arg.WorkspaceID)
 	return err
 }
 

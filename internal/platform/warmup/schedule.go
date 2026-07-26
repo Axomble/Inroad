@@ -139,6 +139,29 @@ func HealthState(spamRate, bounceRate float64, invalidTokens int, current string
 	}
 }
 
+// IsRecovery reports whether a health transition from->to is a recovery (a step
+// toward a healthier state) rather than an escalation to a worse one. from == to is
+// not a recovery.
+func IsRecovery(from, to string) bool {
+	return stateRank(to) < stateRank(from)
+}
+
+// ShouldApplyTransition reports whether a computed health transition should be
+// persisted now. A no-op (from == to) is never applied. An ESCALATION to a worse
+// state always applies immediately. A RECOVERY (step down to a healthier state) is
+// held back while the timed block is still in force (pausedUntil in the future),
+// enforcing the 24h/72h dwell so a mailbox can't walk paused→throttled→watch→healthy
+// on back-to-back 5-minute sweeps. A zero/elapsed pausedUntil never blocks recovery.
+func ShouldApplyTransition(from, to string, pausedUntil, now time.Time) bool {
+	if from == to {
+		return false
+	}
+	if IsRecovery(from, to) && pausedUntil.After(now) {
+		return false
+	}
+	return true
+}
+
 // worstSignalState maps the raw signals to the worst state they warrant, checked
 // most-severe first.
 func worstSignalState(spamRate, bounceRate float64, invalidTokens int) (state, reason string) {

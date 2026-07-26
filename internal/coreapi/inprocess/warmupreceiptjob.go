@@ -71,8 +71,12 @@ func warmupPausedUntil(state string, now time.Time) pgtype.Timestamptz {
 
 // RecordWarmupReceipt idempotently records a received warmup message and returns
 // the recipient's engagement plan. See the coreapi.Client interface doc. The
-// upsert + placement-stat write run in ONE transaction so a NEW receipt and its
-// stat land atomically; the plan is built (pure) after commit.
+// upsert + participant read + both stat writes run in ONE transaction so a NEW
+// receipt, its sender-attributed placement, and the plan it derives land atomically:
+// a transient participant-read error rolls the whole receipt back and the poller's
+// retry re-inserts + re-plans (no silently-dropped engagement). A recipient that is
+// NOT a warmup participant is a clean no-op skip — the tx rolls back so NO receipt or
+// stat persists, and an empty plan is returned. The plan is built (pure) after commit.
 func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error) {
 	ws, err := uuid.Parse(in.WorkspaceID)
 	if err != nil {
@@ -122,9 +126,30 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		return coreapi.WarmupEngagePlan{}, nil
 	}
 
-	// New receipt: record the placement observation, then commit.
-	if err := qtx.RecordWarmupReceiptStat(ctx, gen.RecordWarmupReceiptStatParams{
-		MailboxID: recipient, WorkspaceID: ws, Placement: in.Placement,
+	// New receipt. Read the recipient's participant config INSIDE the tx so plan
+	// derivation is atomic with the receipt. A recipient that is NOT a warmup
+	// participant is a clean no-op skip: the deferred rollback discards the just-
+	// inserted receipt (NO stat is written) and we return an empty plan. A transient
+	// read error rolls back too, so the poller's retry re-inserts + re-plans.
+	p, err := qtx.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: recipient, WorkspaceID: ws})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return coreapi.WarmupEngagePlan{}, nil
+		}
+		return coreapi.WarmupEngagePlan{}, err
+	}
+
+	// Record placement with the CORRECT attribution (spec §4): the recipient's row
+	// gets a received-volume bump; the SENDER's row (resolved via
+	// warmup_sends.from_mailbox for this send) gets the inbox|spam deliverability
+	// signal. Placement belongs to whoever SENT the mail, not who observed it.
+	if err := qtx.RecordWarmupReceivedStat(ctx, gen.RecordWarmupReceivedStatParams{
+		MailboxID: recipient, WorkspaceID: ws,
+	}); err != nil {
+		return coreapi.WarmupEngagePlan{}, err
+	}
+	if err := qtx.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{
+		WorkspaceID: ws, WarmupSendID: sendID, Placement: in.Placement,
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}
@@ -132,13 +157,9 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		return coreapi.WarmupEngagePlan{}, err
 	}
 
-	// Build the deterministic plan (pure). The recipient's reply_rate drives the
-	// reply decision; the seed is anchored on the just-committed received_at so a
-	// later GetWarmupEngageJob reproduces the same decision.
-	p, err := c.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: recipient, WorkspaceID: ws})
-	if err != nil {
-		return coreapi.WarmupEngagePlan{}, err
-	}
+	// Build the deterministic plan (pure). The recipient's reply_rate (read in-tx
+	// above) drives the reply decision; the seed is anchored on the just-committed
+	// received_at so a later GetWarmupEngageJob reproduces the same decision.
 	dayKey := row.ReceivedAt.Time.UTC().Format("2006-01-02")
 	return warmupEngagePlan(row.ID.String(), recipient.String(), dayKey, float64(p.ReplyRate), in.Placement), nil
 }
@@ -185,7 +206,10 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 	}
 
 	dayKey := b.ReceivedAt.Time.UTC().Format("2006-01-02")
-	seed := warmupReceiptSeed(receiptID, b.RecipientMailbox.String(), dayKey)
+	// Seed on the CANONICAL uuid (rid.String()), not the raw receiptID argument, so a
+	// non-canonical-but-valid UUID string can't flip the reply decision away from the
+	// plan RecordWarmupReceipt recorded (which seeded on row.ID.String()).
+	seed := warmupReceiptSeed(rid.String(), b.RecipientMailbox.String(), dayKey)
 	doRescue := b.Placement == placementSpam
 	// Reply only when the seeded decision says so AND the thread still has a turn to
 	// send; an exhausted / deleted thread means DoReply resolves to false.
@@ -239,9 +263,12 @@ type warmupReply struct {
 
 // buildWarmupReply resolves the next library turn for a receipt's thread and mints
 // a fresh signed receipt token for the reply send. The reply is a NEW warmup send
-// FROM the recipient, so its token embeds a deterministic reply send id derived
-// from (recipient, UTC day, recipient's send index) — the same deriveWarmupSendID
-// the send path uses, so the reply's later claim reclaims the SAME row.
+// FROM the recipient, so its token embeds a deterministic reply send id derived from
+// (recipient, UTC day, recipient's send index) via deriveWarmupReplySendID — a
+// DISTINCT id namespace from the normal-send derivation, so a reply can never
+// collide with a normal due-send at the same (mailbox, day, index) tuple (which
+// would let one silently no-op the other at claim time). It stays deterministic, so
+// the reply's later claim reclaims the SAME row.
 func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID) (warmupReply, error) {
 	th, err := c.q.GetWarmupReplyThread(ctx, gen.GetWarmupReplyThreadParams{ID: receiptID, WorkspaceID: ws})
 	if err != nil {
@@ -264,7 +291,7 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 		return warmupReply{}, err
 	}
 	now := time.Now().UTC()
-	replySendID := deriveWarmupSendID(recipient, now.Format("2006-01-02"), int(sentToday))
+	replySendID := deriveWarmupReplySendID(recipient, now.Format("2006-01-02"), int(sentToday))
 	token := warmup.Sign(warmup.Payload{
 		WorkspaceID: ws.String(), WarmupSendID: replySendID.String(), FromMailbox: recipient.String(),
 	}, c.warmupSecret)
@@ -333,25 +360,36 @@ func (c client) ListDueWarmupMailboxes(ctx context.Context) ([]coreapi.MailboxRe
 
 // EvaluateWarmupHealth recomputes and persists health transitions across all
 // enabled participants. See the coreapi.Client interface doc. Only actual state
-// changes are written, so a steady-state sweep touches nothing.
+// changes are written, so a steady-state sweep touches nothing. A per-participant
+// update error is accumulated (errors.Join) and evaluation CONTINUES for the rest,
+// so one bad row never stalls health eval for every mailbox.
 func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 	rows, err := c.q.ListWarmupHealthSignals(ctx)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
+	var errs []error
 	for _, r := range rows {
+		// spamRate is "of MY sent warmup mail, the fraction that landed in spam" —
+		// spam / (inbox + spam), both SENDER-attributed (spec §4/§8). inbox+spam == 0
+		// (no recent sends observed) yields rate 0 → healthy.
+		sent := r.Inbox + r.Spam
 		var spamRate float64
-		if r.Received > 0 {
-			spamRate = float64(r.Spam) / float64(r.Received)
+		if sent > 0 {
+			spamRate = float64(r.Spam) / float64(sent)
 		}
 		// Bounce rate and invalid-token count have no persistence in the v1 schema,
 		// so they are 0 here (documented gap); spam-placement rate is the only live
 		// signal. HealthState escalates immediately and recovers one level per clean
 		// window.
 		state, reason := warmup.HealthState(spamRate, 0, 0, r.HealthState)
-		if state == r.HealthState {
-			continue // no transition to persist
+		// Timed-block floor (spec §8): an escalation to a worse state applies
+		// immediately, but a recovery (step down) is held back while paused_until is
+		// still in the future — so recovery can't bypass the 72h/24h dwell by walking
+		// paused→throttled→watch→healthy on consecutive 5-minute sweeps.
+		if !warmup.ShouldApplyTransition(r.HealthState, state, r.PausedUntil.Time, now) {
+			continue
 		}
 		if err := c.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
 			MailboxID:    r.MailboxID,
@@ -360,8 +398,9 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 			HealthReason: reason,
 			PausedUntil:  warmupPausedUntil(state, now),
 		}); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("warmup: update health for mailbox %s: %w", r.MailboxID.String(), err))
+			continue
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
