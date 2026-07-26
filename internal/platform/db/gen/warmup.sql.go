@@ -223,6 +223,61 @@ func (q *Queries) GetWarmupDailyStats(ctx context.Context, arg GetWarmupDailySta
 	return items, nil
 }
 
+const getWarmupEngageBundle = `-- name: GetWarmupEngageBundle :one
+SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
+       m.provider, m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
+       m.allow_plaintext, p.reply_rate
+FROM warmup_receipts r
+JOIN mailboxes m ON m.id = r.recipient_mailbox AND m.workspace_id = r.workspace_id
+JOIN warmup_participants p ON p.mailbox_id = r.recipient_mailbox AND p.workspace_id = r.workspace_id
+WHERE r.id = $1 AND r.workspace_id = $2
+`
+
+type GetWarmupEngageBundleParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetWarmupEngageBundleRow struct {
+	RecipientMailbox uuid.UUID          `json:"recipient_mailbox"`
+	WarmupSendID     pgtype.UUID        `json:"warmup_send_id"`
+	Placement        string             `json:"placement"`
+	ReceivedAt       pgtype.Timestamptz `json:"received_at"`
+	Provider         string             `json:"provider"`
+	SmtpHost         string             `json:"smtp_host"`
+	SmtpPort         int32              `json:"smtp_port"`
+	SmtpUsername     string             `json:"smtp_username"`
+	SecretCiphertext string             `json:"secret_ciphertext"`
+	AllowPlaintext   bool               `json:"allow_plaintext"`
+	ReplyRate        float32            `json:"reply_rate"`
+}
+
+// Everything GetWarmupEngageJob needs that is always present: the recipient's
+// transport (decrypted at the caller), its participant reply_rate (to recompute the
+// deterministic reply decision), the placement (rescue + source folder), and
+// received_at (seed anchor). INNER joins keep every column non-null; the two joins
+// are also workspace-pinned (belt-and-braces). warmup_send_id is carried through so
+// the caller can derive the reply's receipt token. A foreign / vanished receipt
+// yields pgx.ErrNoRows.
+func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngageBundleParams) (GetWarmupEngageBundleRow, error) {
+	row := q.db.QueryRow(ctx, getWarmupEngageBundle, arg.ID, arg.WorkspaceID)
+	var i GetWarmupEngageBundleRow
+	err := row.Scan(
+		&i.RecipientMailbox,
+		&i.WarmupSendID,
+		&i.Placement,
+		&i.ReceivedAt,
+		&i.Provider,
+		&i.SmtpHost,
+		&i.SmtpPort,
+		&i.SmtpUsername,
+		&i.SecretCiphertext,
+		&i.AllowPlaintext,
+		&i.ReplyRate,
+	)
+	return i, err
+}
+
 const getWarmupParticipant = `-- name: GetWarmupParticipant :one
 SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2
@@ -297,6 +352,59 @@ func (q *Queries) GetWarmupPlacementRates7d(ctx context.Context, workspaceID uui
 		return nil, err
 	}
 	return items, nil
+}
+
+const getWarmupReceiptByPair = `-- name: GetWarmupReceiptByPair :one
+SELECT id FROM warmup_receipts
+WHERE warmup_send_id = $1 AND recipient_mailbox = $2 AND workspace_id = $3
+`
+
+type GetWarmupReceiptByPairParams struct {
+	WarmupSendID     pgtype.UUID `json:"warmup_send_id"`
+	RecipientMailbox uuid.UUID   `json:"recipient_mailbox"`
+	WorkspaceID      uuid.UUID   `json:"workspace_id"`
+}
+
+// Disambiguates an UpsertWarmupReceipt that inserted zero rows: a workspace-pinned
+// lookup on the same (send, recipient) pair. A hit means a genuine DUPLICATE (same
+// workspace, already recorded → idempotent no-op); a miss means the recipient does
+// not belong to the workspace (the self-enforcing INSERT's SELECT was empty →
+// cross-tenant). workspace-pinned.
+func (q *Queries) GetWarmupReceiptByPair(ctx context.Context, arg GetWarmupReceiptByPairParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getWarmupReceiptByPair, arg.WarmupSendID, arg.RecipientMailbox, arg.WorkspaceID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const getWarmupReplyThread = `-- name: GetWarmupReplyThread :one
+SELECT t.turn, t.content_key, t.root_message_id
+FROM warmup_receipts r
+JOIN warmup_sends s ON s.id = r.warmup_send_id
+JOIN warmup_threads t ON t.id = s.thread_id
+WHERE r.id = $1 AND r.workspace_id = $2
+`
+
+type GetWarmupReplyThreadParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetWarmupReplyThreadRow struct {
+	Turn          int32  `json:"turn"`
+	ContentKey    string `json:"content_key"`
+	RootMessageID string `json:"root_message_id"`
+}
+
+// The thread behind a receipt, for building a reply turn. INNER joins through the
+// receipt's warmup_send_id → send → thread, so a receipt whose send was deleted
+// (warmup_send_id SET NULL) or whose thread vanished yields pgx.ErrNoRows and the
+// caller simply builds no reply. workspace-pinned on the receipt.
+func (q *Queries) GetWarmupReplyThread(ctx context.Context, arg GetWarmupReplyThreadParams) (GetWarmupReplyThreadRow, error) {
+	row := q.db.QueryRow(ctx, getWarmupReplyThread, arg.ID, arg.WorkspaceID)
+	var i GetWarmupReplyThreadRow
+	err := row.Scan(&i.Turn, &i.ContentKey, &i.RootMessageID)
+	return i, err
 }
 
 const getWarmupSendState = `-- name: GetWarmupSendState :one
@@ -414,6 +522,28 @@ func (q *Queries) GetWarmupSentToday(ctx context.Context, arg GetWarmupSentToday
 	return sent, err
 }
 
+const incrementWarmupReplyStat = `-- name: IncrementWarmupReplyStat :exec
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, replies)
+VALUES ($1, $2, CURRENT_DATE, 1)
+ON CONFLICT (mailbox_id, day) DO UPDATE SET replies = warmup_daily_stats.replies + 1
+`
+
+type IncrementWarmupReplyStatParams struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Bump the RECIPIENT's daily replies counter when an engagement replied, creating
+// today's row on first reply. workspace_id is stamped on insert; PK is
+// (mailbox_id, day).
+// SAFETY: bare-VALUES insert, SAFE ONLY inside MarkWarmupEngaged's transaction
+// AFTER the workspace-pinned SetWarmupReceiptEngaged has returned the recipient it
+// proved belongs to the workspace-pinned receipt (same gate as IncrementWarmupSentStat).
+func (q *Queries) IncrementWarmupReplyStat(ctx context.Context, arg IncrementWarmupReplyStatParams) error {
+	_, err := q.db.Exec(ctx, incrementWarmupReplyStat, arg.MailboxID, arg.WorkspaceID)
+	return err
+}
+
 const incrementWarmupSentStat = `-- name: IncrementWarmupSentStat :exec
 INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, sent)
 VALUES ($1, $2, CURRENT_DATE, 1)
@@ -483,6 +613,96 @@ func (q *Queries) InsertWarmupThread(ctx context.Context, arg InsertWarmupThread
 	return i, err
 }
 
+const listDueWarmupMailboxes = `-- name: ListDueWarmupMailboxes :many
+SELECT mailbox_id, workspace_id FROM warmup_participants
+WHERE enabled
+  AND health_state <> 'paused'
+  AND (paused_until IS NULL OR paused_until <= now())
+ORDER BY mailbox_id
+`
+
+type ListDueWarmupMailboxesRow struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// (mailbox, workspace) for every enabled, non-paused participant — the sweep
+// fan-out. Deliberately coarse: precise ramp/window due-gating is delegated to
+// NextWarmupDue in the send handler (C4), so this only filters out the two states
+// that can never send now (disabled, or paused with a live pause window). A lone
+// participant is returned too; its GetWarmupSendJob then Skips for want of a
+// partner. Global fan-out (no workspace pin), like ListActiveMailboxes.
+func (q *Queries) ListDueWarmupMailboxes(ctx context.Context) ([]ListDueWarmupMailboxesRow, error) {
+	rows, err := q.db.Query(ctx, listDueWarmupMailboxes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDueWarmupMailboxesRow
+	for rows.Next() {
+		var i ListDueWarmupMailboxesRow
+		if err := rows.Scan(&i.MailboxID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWarmupHealthSignals = `-- name: ListWarmupHealthSignals :many
+SELECT p.mailbox_id, p.workspace_id, p.health_state,
+       COALESCE(SUM(s.spam), 0)::bigint    AS spam,
+       COALESCE(SUM(s.received), 0)::bigint AS received
+FROM warmup_participants p
+LEFT JOIN warmup_daily_stats s
+  ON s.mailbox_id = p.mailbox_id AND s.day >= CURRENT_DATE - 6
+WHERE p.enabled
+GROUP BY p.mailbox_id, p.workspace_id, p.health_state
+`
+
+type ListWarmupHealthSignalsRow struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	HealthState string    `json:"health_state"`
+	Spam        int64     `json:"spam"`
+	Received    int64     `json:"received"`
+}
+
+// Per-participant trailing-window signals for EvaluateWarmupHealth: the spam and
+// received sums over the last 7 UTC days plus the current health_state. The LEFT
+// JOIN keeps a participant with no recent stats (received=0 → spamRate 0 → healthy).
+// Global fan-out (health is recomputed for every enabled participant). Bounce and
+// invalid-token signals have no persistence in the v1 schema, so the caller passes
+// them as zero (documented gap, not a silent drop).
+func (q *Queries) ListWarmupHealthSignals(ctx context.Context) ([]ListWarmupHealthSignalsRow, error) {
+	rows, err := q.db.Query(ctx, listWarmupHealthSignals)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWarmupHealthSignalsRow
+	for rows.Next() {
+		var i ListWarmupHealthSignalsRow
+		if err := rows.Scan(
+			&i.MailboxID,
+			&i.WorkspaceID,
+			&i.HealthState,
+			&i.Spam,
+			&i.Received,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWarmupParticipants = `-- name: ListWarmupParticipants :many
 SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at FROM warmup_participants
 WHERE workspace_id = $1
@@ -521,6 +741,37 @@ func (q *Queries) ListWarmupParticipants(ctx context.Context, workspaceID uuid.U
 		return nil, err
 	}
 	return items, nil
+}
+
+const recordWarmupReceiptStat = `-- name: RecordWarmupReceiptStat :exec
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received, inbox, spam)
+VALUES ($1, $2, CURRENT_DATE, 1,
+        CASE WHEN $3::text = 'inbox' THEN 1 ELSE 0 END,
+        CASE WHEN $3::text = 'spam'  THEN 1 ELSE 0 END)
+ON CONFLICT (mailbox_id, day) DO UPDATE SET
+    received = warmup_daily_stats.received + EXCLUDED.received,
+    inbox    = warmup_daily_stats.inbox + EXCLUDED.inbox,
+    spam     = warmup_daily_stats.spam + EXCLUDED.spam
+`
+
+type RecordWarmupReceiptStatParams struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Placement   string    `json:"placement"`
+}
+
+// On a NEWLY inserted receipt, bump the RECIPIENT's daily received/inbox/spam
+// counters for the UTC day (CURRENT_DATE, matching the C1 UTC-day convention),
+// creating today's row on first receipt. placement drives which of inbox/spam also
+// increments.
+// SAFETY: a bare-VALUES insert (like IncrementWarmupSentStat), SAFE ONLY because it
+// runs inside RecordWarmupReceipt's transaction AFTER the workspace-pinned,
+// self-enforcing UpsertWarmupReceipt has already proven the (recipient, workspace)
+// pairing. A future caller OUTSIDE that gate MUST add INSERT ... SELECT
+// self-enforcement.
+func (q *Queries) RecordWarmupReceiptStat(ctx context.Context, arg RecordWarmupReceiptStatParams) error {
+	_, err := q.db.Exec(ctx, recordWarmupReceiptStat, arg.MailboxID, arg.WorkspaceID, arg.Placement)
+	return err
 }
 
 const releaseWarmupSend = `-- name: ReleaseWarmupSend :exec
@@ -586,6 +837,30 @@ func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartn
 	return i, err
 }
 
+const setWarmupReceiptEngaged = `-- name: SetWarmupReceiptEngaged :one
+UPDATE warmup_receipts
+SET engaged = true
+WHERE id = $1 AND workspace_id = $2 AND NOT engaged
+RETURNING recipient_mailbox
+`
+
+type SetWarmupReceiptEngagedParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Mark a receipt engaged so a retried engage is a no-op. Guarded on NOT engaged and
+// RETURNING recipient_mailbox: this call flips the flag (and RETURNS the recipient
+// so the caller can bump its reply counter) ONLY the first time; a re-run over an
+// already-engaged row affects zero rows and RETURNS pgx.ErrNoRows (idempotent).
+// workspace-pinned.
+func (q *Queries) SetWarmupReceiptEngaged(ctx context.Context, arg SetWarmupReceiptEngagedParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, setWarmupReceiptEngaged, arg.ID, arg.WorkspaceID)
+	var recipient_mailbox uuid.UUID
+	err := row.Scan(&recipient_mailbox)
+	return recipient_mailbox, err
+}
+
 const setWarmupSendSent = `-- name: SetWarmupSendSent :execrows
 UPDATE warmup_sends
 SET status = 'sent', message_id = $3, sent_at = now(), last_error = ''
@@ -609,6 +884,34 @@ func (q *Queries) SetWarmupSendSent(ctx context.Context, arg SetWarmupSendSentPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const updateWarmupHealth = `-- name: UpdateWarmupHealth :exec
+UPDATE warmup_participants
+SET health_state = $3, health_reason = $4, paused_until = $5, updated_at = now()
+WHERE mailbox_id = $1 AND workspace_id = $2
+`
+
+type UpdateWarmupHealthParams struct {
+	MailboxID    uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	HealthState  string             `json:"health_state"`
+	HealthReason string             `json:"health_reason"`
+	PausedUntil  pgtype.Timestamptz `json:"paused_until"`
+}
+
+// Persist a health transition for one participant: new state, human-readable
+// reason, and the pause window (NULL clears it on recovery to watch/healthy).
+// workspace-pinned.
+func (q *Queries) UpdateWarmupHealth(ctx context.Context, arg UpdateWarmupHealthParams) error {
+	_, err := q.db.Exec(ctx, updateWarmupHealth,
+		arg.MailboxID,
+		arg.WorkspaceID,
+		arg.HealthState,
+		arg.HealthReason,
+		arg.PausedUntil,
+	)
+	return err
 }
 
 const upsertWarmupParticipant = `-- name: UpsertWarmupParticipant :one
@@ -676,5 +979,53 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
+	return i, err
+}
+
+const upsertWarmupReceipt = `-- name: UpsertWarmupReceipt :one
+
+INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement)
+SELECT $1, $2, $3, $4
+FROM mailboxes WHERE id = $3 AND workspace_id = $1
+ON CONFLICT (warmup_send_id, recipient_mailbox) DO NOTHING
+RETURNING id, received_at
+`
+
+type UpsertWarmupReceiptParams struct {
+	WorkspaceID      uuid.UUID   `json:"workspace_id"`
+	WarmupSendID     pgtype.UUID `json:"warmup_send_id"`
+	RecipientMailbox uuid.UUID   `json:"recipient_mailbox"`
+	Placement        string      `json:"placement"`
+}
+
+type UpsertWarmupReceiptRow struct {
+	ID         uuid.UUID          `json:"id"`
+	ReceivedAt pgtype.Timestamptz `json:"received_at"`
+}
+
+// ============================================================================
+// Receipt + engagement + health path (spec §4/§8) — the recipient-side seam.
+// Every statement is workspace_id-pinned; the receipt INSERT is SELF-ENFORCING
+// (INSERT ... SELECT FROM mailboxes WHERE id=<recipient> AND workspace_id=<ws>)
+// so a foreign (recipient, workspace) pair writes zero rows.
+// ============================================================================
+// Idempotently record a received warmup message's placement. UNIQUE
+// (warmup_send_id, recipient_mailbox) makes a re-poll a no-op: ON CONFLICT DO
+// NOTHING, and RETURNING yields a row ONLY on a genuinely NEW insert (a duplicate
+// returns pgx.ErrNoRows). SELF-ENFORCING tenancy: the INSERT ... SELECT emits a
+// candidate row ONLY when the recipient mailbox truly belongs to the workspace, so
+// a foreign pair also inserts nothing (also pgx.ErrNoRows) — the caller
+// disambiguates duplicate-vs-cross-tenant with GetWarmupReceiptByPair. received_at
+// is returned so the caller seeds the deterministic engage plan on the SAME instant
+// a later GetWarmupEngageJob re-reads.
+func (q *Queries) UpsertWarmupReceipt(ctx context.Context, arg UpsertWarmupReceiptParams) (UpsertWarmupReceiptRow, error) {
+	row := q.db.QueryRow(ctx, upsertWarmupReceipt,
+		arg.WorkspaceID,
+		arg.WarmupSendID,
+		arg.RecipientMailbox,
+		arg.Placement,
+	)
+	var i UpsertWarmupReceiptRow
+	err := row.Scan(&i.ID, &i.ReceivedAt)
 	return i, err
 }

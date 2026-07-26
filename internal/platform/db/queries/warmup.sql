@@ -226,3 +226,140 @@ WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
 UPDATE warmup_sends
 SET status = 'failed', last_error = $3, claimed_at = NULL
 WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
+
+-- ============================================================================
+-- Receipt + engagement + health path (spec §4/§8) — the recipient-side seam.
+-- Every statement is workspace_id-pinned; the receipt INSERT is SELF-ENFORCING
+-- (INSERT ... SELECT FROM mailboxes WHERE id=<recipient> AND workspace_id=<ws>)
+-- so a foreign (recipient, workspace) pair writes zero rows.
+-- ============================================================================
+
+-- name: UpsertWarmupReceipt :one
+-- Idempotently record a received warmup message's placement. UNIQUE
+-- (warmup_send_id, recipient_mailbox) makes a re-poll a no-op: ON CONFLICT DO
+-- NOTHING, and RETURNING yields a row ONLY on a genuinely NEW insert (a duplicate
+-- returns pgx.ErrNoRows). SELF-ENFORCING tenancy: the INSERT ... SELECT emits a
+-- candidate row ONLY when the recipient mailbox truly belongs to the workspace, so
+-- a foreign pair also inserts nothing (also pgx.ErrNoRows) — the caller
+-- disambiguates duplicate-vs-cross-tenant with GetWarmupReceiptByPair. received_at
+-- is returned so the caller seeds the deterministic engage plan on the SAME instant
+-- a later GetWarmupEngageJob re-reads.
+INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement)
+SELECT $1, $2, $3, $4
+FROM mailboxes WHERE id = $3 AND workspace_id = $1
+ON CONFLICT (warmup_send_id, recipient_mailbox) DO NOTHING
+RETURNING id, received_at;
+
+-- name: GetWarmupReceiptByPair :one
+-- Disambiguates an UpsertWarmupReceipt that inserted zero rows: a workspace-pinned
+-- lookup on the same (send, recipient) pair. A hit means a genuine DUPLICATE (same
+-- workspace, already recorded → idempotent no-op); a miss means the recipient does
+-- not belong to the workspace (the self-enforcing INSERT's SELECT was empty →
+-- cross-tenant). workspace-pinned.
+SELECT id FROM warmup_receipts
+WHERE warmup_send_id = $1 AND recipient_mailbox = $2 AND workspace_id = $3;
+
+-- name: RecordWarmupReceiptStat :exec
+-- On a NEWLY inserted receipt, bump the RECIPIENT's daily received/inbox/spam
+-- counters for the UTC day (CURRENT_DATE, matching the C1 UTC-day convention),
+-- creating today's row on first receipt. placement drives which of inbox/spam also
+-- increments.
+-- SAFETY: a bare-VALUES insert (like IncrementWarmupSentStat), SAFE ONLY because it
+-- runs inside RecordWarmupReceipt's transaction AFTER the workspace-pinned,
+-- self-enforcing UpsertWarmupReceipt has already proven the (recipient, workspace)
+-- pairing. A future caller OUTSIDE that gate MUST add INSERT ... SELECT
+-- self-enforcement.
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received, inbox, spam)
+VALUES ($1, $2, CURRENT_DATE, 1,
+        CASE WHEN sqlc.arg(placement)::text = 'inbox' THEN 1 ELSE 0 END,
+        CASE WHEN sqlc.arg(placement)::text = 'spam'  THEN 1 ELSE 0 END)
+ON CONFLICT (mailbox_id, day) DO UPDATE SET
+    received = warmup_daily_stats.received + EXCLUDED.received,
+    inbox    = warmup_daily_stats.inbox + EXCLUDED.inbox,
+    spam     = warmup_daily_stats.spam + EXCLUDED.spam;
+
+-- name: GetWarmupEngageBundle :one
+-- Everything GetWarmupEngageJob needs that is always present: the recipient's
+-- transport (decrypted at the caller), its participant reply_rate (to recompute the
+-- deterministic reply decision), the placement (rescue + source folder), and
+-- received_at (seed anchor). INNER joins keep every column non-null; the two joins
+-- are also workspace-pinned (belt-and-braces). warmup_send_id is carried through so
+-- the caller can derive the reply's receipt token. A foreign / vanished receipt
+-- yields pgx.ErrNoRows.
+SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
+       m.provider, m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
+       m.allow_plaintext, p.reply_rate
+FROM warmup_receipts r
+JOIN mailboxes m ON m.id = r.recipient_mailbox AND m.workspace_id = r.workspace_id
+JOIN warmup_participants p ON p.mailbox_id = r.recipient_mailbox AND p.workspace_id = r.workspace_id
+WHERE r.id = $1 AND r.workspace_id = $2;
+
+-- name: GetWarmupReplyThread :one
+-- The thread behind a receipt, for building a reply turn. INNER joins through the
+-- receipt's warmup_send_id → send → thread, so a receipt whose send was deleted
+-- (warmup_send_id SET NULL) or whose thread vanished yields pgx.ErrNoRows and the
+-- caller simply builds no reply. workspace-pinned on the receipt.
+SELECT t.turn, t.content_key, t.root_message_id
+FROM warmup_receipts r
+JOIN warmup_sends s ON s.id = r.warmup_send_id
+JOIN warmup_threads t ON t.id = s.thread_id
+WHERE r.id = $1 AND r.workspace_id = $2;
+
+-- name: SetWarmupReceiptEngaged :one
+-- Mark a receipt engaged so a retried engage is a no-op. Guarded on NOT engaged and
+-- RETURNING recipient_mailbox: this call flips the flag (and RETURNS the recipient
+-- so the caller can bump its reply counter) ONLY the first time; a re-run over an
+-- already-engaged row affects zero rows and RETURNS pgx.ErrNoRows (idempotent).
+-- workspace-pinned.
+UPDATE warmup_receipts
+SET engaged = true
+WHERE id = $1 AND workspace_id = $2 AND NOT engaged
+RETURNING recipient_mailbox;
+
+-- name: IncrementWarmupReplyStat :exec
+-- Bump the RECIPIENT's daily replies counter when an engagement replied, creating
+-- today's row on first reply. workspace_id is stamped on insert; PK is
+-- (mailbox_id, day).
+-- SAFETY: bare-VALUES insert, SAFE ONLY inside MarkWarmupEngaged's transaction
+-- AFTER the workspace-pinned SetWarmupReceiptEngaged has returned the recipient it
+-- proved belongs to the workspace-pinned receipt (same gate as IncrementWarmupSentStat).
+INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, replies)
+VALUES ($1, $2, CURRENT_DATE, 1)
+ON CONFLICT (mailbox_id, day) DO UPDATE SET replies = warmup_daily_stats.replies + 1;
+
+-- name: ListDueWarmupMailboxes :many
+-- (mailbox, workspace) for every enabled, non-paused participant — the sweep
+-- fan-out. Deliberately coarse: precise ramp/window due-gating is delegated to
+-- NextWarmupDue in the send handler (C4), so this only filters out the two states
+-- that can never send now (disabled, or paused with a live pause window). A lone
+-- participant is returned too; its GetWarmupSendJob then Skips for want of a
+-- partner. Global fan-out (no workspace pin), like ListActiveMailboxes.
+SELECT mailbox_id, workspace_id FROM warmup_participants
+WHERE enabled
+  AND health_state <> 'paused'
+  AND (paused_until IS NULL OR paused_until <= now())
+ORDER BY mailbox_id;
+
+-- name: ListWarmupHealthSignals :many
+-- Per-participant trailing-window signals for EvaluateWarmupHealth: the spam and
+-- received sums over the last 7 UTC days plus the current health_state. The LEFT
+-- JOIN keeps a participant with no recent stats (received=0 → spamRate 0 → healthy).
+-- Global fan-out (health is recomputed for every enabled participant). Bounce and
+-- invalid-token signals have no persistence in the v1 schema, so the caller passes
+-- them as zero (documented gap, not a silent drop).
+SELECT p.mailbox_id, p.workspace_id, p.health_state,
+       COALESCE(SUM(s.spam), 0)::bigint    AS spam,
+       COALESCE(SUM(s.received), 0)::bigint AS received
+FROM warmup_participants p
+LEFT JOIN warmup_daily_stats s
+  ON s.mailbox_id = p.mailbox_id AND s.day >= CURRENT_DATE - 6
+WHERE p.enabled
+GROUP BY p.mailbox_id, p.workspace_id, p.health_state;
+
+-- name: UpdateWarmupHealth :exec
+-- Persist a health transition for one participant: new state, human-readable
+-- reason, and the pause window (NULL clears it on recovery to watch/healthy).
+-- workspace-pinned.
+UPDATE warmup_participants
+SET health_state = $3, health_reason = $4, paused_until = $5, updated_at = now()
+WHERE mailbox_id = $1 AND workspace_id = $2;

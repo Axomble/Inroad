@@ -105,6 +105,17 @@ func (f fakeCore) FailWarmupSend(context.Context, coreapi.WarmupSendJob, string)
 func (f fakeCore) NextWarmupDue(context.Context, string, string) (time.Time, bool, error) {
 	return time.Time{}, false, nil
 }
+func (f fakeCore) RecordWarmupReceipt(context.Context, coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error) {
+	return coreapi.WarmupEngagePlan{}, nil
+}
+func (f fakeCore) GetWarmupEngageJob(context.Context, string, string) (coreapi.WarmupEngageJob, error) {
+	return coreapi.WarmupEngageJob{}, nil
+}
+func (f fakeCore) MarkWarmupEngaged(context.Context, string, string, bool) error { return nil }
+func (f fakeCore) ListDueWarmupMailboxes(context.Context) ([]coreapi.MailboxRef, error) {
+	return nil, nil
+}
+func (f fakeCore) EvaluateWarmupHealth(context.Context) error { return nil }
 
 var _ coreapi.Client = fakeCore{}
 
