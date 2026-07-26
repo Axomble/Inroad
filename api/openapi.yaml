@@ -923,8 +923,8 @@ components:
         health_reason: { type: string }
         today_sent: { type: integer }
         today_target: { type: integer }
-        inbox_rate_7d: { type: number, description: fraction of received warmup mail that landed in inbox over 7 days (0..1) }
-        spam_rate_7d: { type: number, description: fraction that landed in spam over 7 days (0..1) }
+        inbox_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal" }
+        spam_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1)" }
     WarmupOverview:
       type: object
       description: >-
@@ -942,10 +942,10 @@ components:
       required: [day, sent, received, inbox, spam, replies]
       properties:
         day: { type: string, format: date, description: UTC day }
-        sent: { type: integer }
-        received: { type: integer }
-        inbox: { type: integer, description: of received, how many landed in inbox }
-        spam: { type: integer, description: of received, how many landed in spam }
+        sent: { type: integer, description: warmup mail this mailbox sent }
+        received: { type: integer, description: warmup mail this mailbox received }
+        inbox: { type: integer, description: "of this mailbox's SENT mail, how many landed in partners' inboxes (sender placement)" }
+        spam: { type: integer, description: "of this mailbox's SENT mail, how many landed in partners' spam (sender placement)" }
         replies: { type: integer }
     WarmupDetail:
       type: object

@@ -191,10 +191,21 @@ NextWarmupDue(ctx, mailboxID, workspaceID string) (due time.Time, sendNow bool, 
 
 // RecordWarmupReceipt is called by the inbox poller when it detects a warmup
 // message (verified token, §7). Upserts warmup_receipts (idempotent on
-// (send,recipient)), updates warmup_daily_stats.received/inbox/spam for the
-// RECIPIENT's placement observation, and returns an engagement plan describing
-// what the recipient should do. A duplicate receipt returns Plan{}, so a
-// re-poll never double-engages.
+// (send,recipient)) and, on a genuinely new receipt, writes stats with the
+// correct ATTRIBUTION (this is the health signal — get it right):
+//   - warmup_daily_stats.received += 1 on the RECIPIENT's row (how much mail it
+//     received; a recipient-side counter, not a reputation signal).
+//   - warmup_daily_stats.inbox|spam += 1 on the SENDER's row — resolved via
+//     warmup_sends.from_mailbox for this warmup_send_id — because placement is a
+//     SENDER-deliverability signal: "did MY outbound warmup mail land in the
+//     inbox or spam at partners?" (§3 note, §8). The recipient merely OBSERVES
+//     the placement; the reputation belongs to the sender. Attributing spam to
+//     the recipient would invert the signal (punish the innocent inbox owner and
+//     never flag the bad sender).
+// It reads the RECIPIENT's reply_rate inside the same tx (atomic plan
+// derivation) and returns the engagement plan for the recipient. A recipient
+// that is not a warmup participant is a clean no-op skip (empty plan, nil err,
+// no stat). A duplicate receipt returns Plan{}, so a re-poll never double-engages.
 RecordWarmupReceipt(ctx, in WarmupReceiptInput) (WarmupEngagePlan, error)
 
 // GetWarmupEngageJob loads what the engage worker needs to act on one received
