@@ -138,30 +138,23 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		}
 	}
 
+	// newThreadContentKey is set (== seed) only on the new-thread path, deferring
+	// the actual InsertWarmupThread until after the fallible credential decrypt
+	// below (see the ordering note there).
+	var newThreadContentKey string
 	if !isReply {
 		// New thread: content_key seeds the library selection and is persisted so a
-		// later reply regenerates the identical conversation.
-		contentKey := seed
-		content, cerr := c.warmupContent.Thread(ctx, contentKey)
+		// later reply regenerates the identical conversation. Resolving the content
+		// here is fallible but creates NO row — the row-creating insert is deferred.
+		newThreadContentKey = seed
+		content, cerr := c.warmupContent.Thread(ctx, newThreadContentKey)
 		if cerr != nil {
 			return coreapi.WarmupSendJob{}, cerr
 		}
 		opener, ok := warmup.Reply(content, 0)
 		if !ok {
-			return coreapi.WarmupSendJob{}, fmt.Errorf("warmup: content thread %q has no opening turn", contentKey)
+			return coreapi.WarmupSendJob{}, fmt.Errorf("warmup: content thread %q has no opening turn", newThreadContentKey)
 		}
-		th, ierr := c.q.InsertWarmupThread(ctx, gen.InsertWarmupThreadParams{
-			WorkspaceID: ws, SenderMailbox: mbID, PartnerMailbox: partner.MailboxID,
-			Subject: content.Subject, ContentKey: contentKey,
-		})
-		if ierr != nil {
-			if errors.Is(ierr, pgx.ErrNoRows) {
-				// Self-enforcing insert wrote nothing → sender not in workspace.
-				return coreapi.WarmupSendJob{}, coreapi.ErrCrossTenant
-			}
-			return coreapi.WarmupSendJob{}, ierr
-		}
-		threadID = th.ID
 		subject = content.Subject
 		body = opener
 	}
@@ -173,7 +166,10 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 
 	// Decrypt the FROM mailbox transport via the SAME keyring/sealer path
 	// GetStepSendJob uses: API providers refresh a short-lived access token; smtp
-	// unseals the stored password. Both are []byte, zeroized by the worker.
+	// unseals the stored password. Both are []byte, zeroized by the worker. This
+	// block creates NO rows — it must run BEFORE InsertWarmupThread so a transient
+	// decrypt failure leaves zero rows behind (no orphan thread that a retried tick
+	// would re-insert on top of), matching GetStepSendJob's zero-rows-on-failure.
 	var accessToken, password []byte
 	if b.Provider == "gmail" || b.Provider == "m365" {
 		at, aerr := c.oauthAccessToken(ctx, b.Provider, mbID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
@@ -192,17 +188,37 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		}
 	}
 
+	// Thread insert LAST: the final fallible, row-creating step before the job is
+	// returned. All credential decryption above has already succeeded, so opening
+	// this thread is the only side effect left — a failure earlier created nothing.
+	if !isReply {
+		th, ierr := c.q.InsertWarmupThread(ctx, gen.InsertWarmupThreadParams{
+			WorkspaceID: ws, SenderMailbox: mbID, PartnerMailbox: partner.MailboxID,
+			Subject: subject, ContentKey: newThreadContentKey,
+		})
+		if ierr != nil {
+			if errors.Is(ierr, pgx.ErrNoRows) {
+				// Self-enforcing insert wrote nothing → sender not in workspace.
+				return coreapi.WarmupSendJob{}, coreapi.ErrCrossTenant
+			}
+			return coreapi.WarmupSendJob{}, ierr
+		}
+		threadID = th.ID
+	}
+
 	return coreapi.WarmupSendJob{
-		WorkspaceID:    ws.String(),
-		FromMailbox:    mbID.String(),
-		ToMailbox:      partner.MailboxID.String(),
-		ThreadID:       threadID.String(),
-		IsReply:        isReply,
-		SendID:         sendID.String(),
-		ToEmail:        partner.Email,
-		FromEmail:      b.FromEmail,
-		FromName:       b.FromName,
-		Subject:        subject,
+		WorkspaceID: ws.String(),
+		FromMailbox: mbID.String(),
+		ToMailbox:   partner.MailboxID.String(),
+		ThreadID:    threadID.String(),
+		IsReply:     isReply,
+		SendID:      sendID.String(),
+		ToEmail:     partner.Email,
+		FromEmail:   b.FromEmail,
+		FromName:    b.FromName,
+		Subject:     subject,
+		// Warmup mail is intentionally plaintext for v1 (the library content is
+		// text-only), so BodyHTML is deliberately left empty here — not a TODO.
 		BodyText:       body,
 		InReplyTo:      inReplyTo,
 		References:     references,

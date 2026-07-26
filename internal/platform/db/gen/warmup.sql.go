@@ -427,6 +427,12 @@ type IncrementWarmupSentStatParams struct {
 
 // Bump the sender's daily sent counter, creating today's row on first send.
 // workspace_id is stamped on insert; the PK is (mailbox_id, day).
+// SAFETY: this is the one bare-VALUES insert in the send path (not the
+// self-enforcing INSERT ... SELECT FROM mailbox pattern the others use). It is
+// SAFE ONLY because it runs inside MarkWarmupSent's transaction AFTER the
+// workspace-pinned, self-enforcing SetWarmupSendSent claim has already proven the
+// (mailbox, workspace) pairing. A future refactor that calls this OUTSIDE that
+// gate MUST add the INSERT ... SELECT self-enforcement (like InsertWarmupThread).
 func (q *Queries) IncrementWarmupSentStat(ctx context.Context, arg IncrementWarmupSentStatParams) error {
 	_, err := q.db.Exec(ctx, incrementWarmupSentStat, arg.MailboxID, arg.WorkspaceID)
 	return err

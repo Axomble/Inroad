@@ -201,6 +201,12 @@ WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
 -- name: IncrementWarmupSentStat :exec
 -- Bump the sender's daily sent counter, creating today's row on first send.
 -- workspace_id is stamped on insert; the PK is (mailbox_id, day).
+-- SAFETY: this is the one bare-VALUES insert in the send path (not the
+-- self-enforcing INSERT ... SELECT FROM mailbox pattern the others use). It is
+-- SAFE ONLY because it runs inside MarkWarmupSent's transaction AFTER the
+-- workspace-pinned, self-enforcing SetWarmupSendSent claim has already proven the
+-- (mailbox, workspace) pairing. A future refactor that calls this OUTSIDE that
+-- gate MUST add the INSERT ... SELECT self-enforcement (like InsertWarmupThread).
 INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, sent)
 VALUES ($1, $2, CURRENT_DATE, 1)
 ON CONFLICT (mailbox_id, day) DO UPDATE SET sent = warmup_daily_stats.sent + 1;
