@@ -48,6 +48,20 @@ type Config struct {
 	// simultaneously. Default 10; tune per SMTP throughput.
 	WorkerConcurrency int
 
+	// --- Worker identity + per-IP routing (spec §15) ---
+
+	// WorkerID is this worker's stable id (default: OS hostname). It keys the
+	// `workers` heartbeat row and names the worker's dedicated queue ("w:<id>").
+	WorkerID string
+	// WorkerEgressIP is the optional source IP outbound SMTP/IMAP dials bind to
+	// (net.Dialer.LocalAddr). Empty = OS default route (single-node dev). It sets
+	// the SOURCE address only and never relaxes the SSRF destination vet.
+	WorkerEgressIP string
+	// WorkerQueues is the ordered set of asynq queues this worker consumes;
+	// default {"w:<WorkerID>", "default"} so it serves its own per-IP queue plus
+	// the shared default.
+	WorkerQueues []string
+
 	// LogLevel is one of debug/info/warn/error. When empty, the logger
 	// falls back to env-based defaults (debug in development, info elsewhere).
 	LogLevel string
@@ -134,6 +148,20 @@ func Load() (*Config, error) {
 	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
 	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
+
+	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
+	cfg.WorkerID = getenv("INROAD_WORKER_ID", hostname)
+	cfg.WorkerEgressIP = getenv("INROAD_WORKER_EGRESS_IP", "")
+	if raw := os.Getenv("INROAD_WORKER_QUEUES"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				cfg.WorkerQueues = append(cfg.WorkerQueues, s)
+			}
+		}
+	}
+	if len(cfg.WorkerQueues) == 0 {
+		cfg.WorkerQueues = defaultWorkerQueues(cfg.WorkerID)
+	}
 	cfg.LogLevel = strings.ToLower(getenv("INROAD_LOG_LEVEL", ""))
 	if raw := os.Getenv("INROAD_TRUSTED_PROXIES"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
@@ -162,6 +190,17 @@ func Load() (*Config, error) {
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
 
 	return cfg, nil
+}
+
+// defaultWorkerQueues is the queue set a worker consumes when INROAD_WORKER_QUEUES
+// is unset: its own dedicated per-IP queue plus the shared default. An empty
+// workerID (hostname lookup failed AND no override) collapses to just the shared
+// default, so the worker still processes unrouted traffic.
+func defaultWorkerQueues(workerID string) []string {
+	if workerID == "" {
+		return []string{"default"}
+	}
+	return []string{"w:" + workerID, "default"}
 }
 
 func getenvInt(key string, fallback int) int {

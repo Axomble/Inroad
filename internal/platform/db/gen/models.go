@@ -251,6 +251,13 @@ type Mailbox struct {
 	AllowPlaintext     bool               `json:"allow_plaintext"`
 }
 
+type MailboxWorkerAssignment struct {
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	WorkerID    string             `json:"worker_id"`
+	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+}
+
 type Send struct {
 	ID               uuid.UUID          `json:"id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
@@ -351,6 +358,12 @@ type UserToken struct {
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type Worker struct {
+	WorkerID   string             `json:"worker_id"`
+	EgressIp   string             `json:"egress_ip"`
+	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
 }
 
 type Workspace struct {

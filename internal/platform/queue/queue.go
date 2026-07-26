@@ -214,20 +214,44 @@ var _ bus.Dispatcher = (*Client)(nil)
 func (c *Client) Close() error { return c.inner.Close() }
 
 // NewServer builds an asynq processing server. Concurrency defaults to 10
-// when concurrency <= 0. The provided *slog.Logger is adapted to asynq's
-// Logger interface so worker log lines flow through the same structured
-// sink as the rest of the app.
-func NewServer(redisAddr string, logger *slog.Logger, concurrency int) *asynq.Server {
+// when concurrency <= 0. queues is the ordered set of queues to consume (spec
+// §15: a worker serves its own per-IP "w:<id>" queue plus "default"); an empty
+// list leaves asynq on its built-in {"default":1}. The provided *slog.Logger is
+// adapted to asynq's Logger interface so worker log lines flow through the same
+// structured sink as the rest of the app.
+func NewServer(redisAddr string, logger *slog.Logger, concurrency int, queues []string) *asynq.Server {
 	if concurrency <= 0 {
 		concurrency = 10
 	}
-	return asynq.NewServer(
-		asynq.RedisClientOpt{Addr: redisAddr},
-		asynq.Config{
-			Concurrency: concurrency,
-			Logger:      newAsynqLogger(logger),
-		},
-	)
+	cfg := asynq.Config{
+		Concurrency: concurrency,
+		Logger:      newAsynqLogger(logger),
+	}
+	if qmap := queuePriorities(queues); len(qmap) > 0 {
+		cfg.Queues = qmap
+	}
+	return asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr}, cfg)
+}
+
+// queuePriorities maps an ordered queue list to asynq's weighted-priority map.
+// Earlier queues get proportionally higher weight so a worker prefers its own
+// per-IP queue over the shared default without starving it (asynq is weighted,
+// not strict). Duplicates and empty names are ignored. An empty result leaves
+// the caller on asynq's default {"default":1}.
+func queuePriorities(queues []string) map[string]int {
+	m := make(map[string]int, len(queues))
+	weight := len(queues)
+	for _, q := range queues {
+		if q == "" {
+			continue
+		}
+		if _, ok := m[q]; ok {
+			continue
+		}
+		m[q] = weight
+		weight--
+	}
+	return m
 }
 
 // NewMux returns an empty task router for worker handlers to register on.

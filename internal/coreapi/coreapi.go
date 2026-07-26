@@ -160,6 +160,26 @@ type Client interface {
 	// bounces are logged by the caller and never reach this method with
 	// hard=true.
 	MarkBounced(ctx context.Context, enrollmentID, workspaceID, email string, hard bool) error
+
+	// --- Worker routing (per-IP egress; spec §15) ---
+
+	// UpsertWorkerHeartbeat refreshes this worker's row in the GLOBAL `workers`
+	// registry (worker_id, egress_ip, last_seen_at=now()) on each heartbeat tick,
+	// so AssignMailboxWorker can tell which workers are live. `workers` is global
+	// infrastructure state, NOT tenant data — no workspace pin (security
+	// invariant §17.9).
+	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error
+	// AssignMailboxWorker resolves the destination queue for a mailbox's outbound
+	// traffic, pinning it to ONE worker's egress IP (the deliverability win). It
+	// is idempotent: an existing assignment is returned unchanged. A first
+	// assignment picks the least-loaded worker with a live heartbeat and persists
+	// it. When NO worker has a live heartbeat (single-node dev), it returns ""
+	// (the shared default queue) WITHOUT persisting, so everything still runs on
+	// one process and a real worker can claim the mailbox once it comes online.
+	// workspace-pinned — mailbox_worker_assignments is tenant data. The returned
+	// queueName is "w:<worker_id>" or "" for the default queue; it is derived
+	// server-side from the assignment, never from client input (invariant §17.8).
+	AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (queueName string, err error)
 }
 
 // ClaimOutcome is the result of ClaimStepSend: what the advance handler should

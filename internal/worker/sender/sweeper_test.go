@@ -71,6 +71,10 @@ func (f *fakeCore) RecordReplyClass(context.Context, string, string, string, str
 	return nil
 }
 func (f *fakeCore) MarkBounced(context.Context, string, string, string, bool) error { return nil }
+func (f *fakeCore) UpsertWorkerHeartbeat(context.Context, string, string) error     { return nil }
+func (f *fakeCore) AssignMailboxWorker(context.Context, string, string) (string, error) {
+	return "", nil
+}
 
 type fakeSendEnqueuer struct {
 	fail     map[string]bool

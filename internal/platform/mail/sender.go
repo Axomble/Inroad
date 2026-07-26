@@ -29,6 +29,11 @@ type Message struct {
 type NetSender struct {
 	Timeout      time.Duration
 	AllowPrivate bool
+	// LocalAddr optionally binds the SOURCE address of every SMTP dial to the
+	// worker's egress IP (spec §15). nil = OS default route. Source-only: it is
+	// applied to the net.Dialer AFTER vetAddr has vetted the destination, so it
+	// never relaxes the SSRF destination check (spec §17.7).
+	LocalAddr *net.TCPAddr
 }
 
 // NewNetSender returns a NetSender with a sane default send timeout.
@@ -61,6 +66,11 @@ func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
 	}
 
 	dialer := &net.Dialer{Timeout: s.Timeout}
+	if s.LocalAddr != nil {
+		// Bind the source address only; addr (below) is the already-vetted
+		// DESTINATION, so this narrows egress without touching the SSRF vet.
+		dialer.LocalAddr = s.LocalAddr
+	}
 	dialFn := func(ctx context.Context, _, _ string) (net.Conn, error) {
 		// Ignore gomail's address argument (built from cfg.Host); always dial the
 		// pre-vetted ip:port instead so hostname re-resolution can't slip in.
