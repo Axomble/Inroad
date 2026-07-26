@@ -51,9 +51,12 @@ func todayStats(t *testing.T, ctx context.Context, f warmupFixture, mb uuid.UUID
 	return
 }
 
-// TestRecordWarmupReceiptIdempotent proves a re-poll of the SAME receipt returns a
-// zero-value plan and never double-counts the placement stat.
-func TestRecordWarmupReceiptIdempotent(t *testing.T) {
+// TestRecordWarmupReceiptUnengagedDuplicateSelfHeals proves the self-heal: a re-poll of
+// the SAME still-UNENGAGED receipt re-returns the EXACT same deterministic plan (so a
+// poller that lost the warmup:engage enqueue after the first commit re-enqueues it) and
+// still never double-counts the placement/received stat (the tx rolled back, no stat
+// re-written).
+func TestRecordWarmupReceiptUnengagedDuplicateSelfHeals(t *testing.T) {
 	ctx, f := setupWarmup(t)
 	sendID, recipient := makeWarmupSend(t, ctx, f)
 
@@ -69,17 +72,116 @@ func TestRecordWarmupReceiptIdempotent(t *testing.T) {
 		t.Fatalf("first plan = %+v, want a real plan (ReceiptID set, DoMarkRead)", plan1)
 	}
 
+	// The duplicate is still unengaged (C5b never ran), so the engage may have been
+	// lost — the plan is re-returned IDENTICALLY so the poller re-enqueues.
+	plan2, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("second RecordWarmupReceipt: %v", err)
+	}
+	if plan2 != plan1 {
+		t.Fatalf("unengaged duplicate plan = %+v, want the SAME plan as the first (%+v)", plan2, plan1)
+	}
+
+	rb, _ := uuid.Parse(recipient)
+	if received, _, _, _ := todayStats(t, ctx, f, rb); received != 1 {
+		t.Fatalf("recipient received = %d, want 1 (self-heal must not re-write stats)", received)
+	}
+}
+
+// TestRecordWarmupReceiptSpamDuplicateSelfHeals proves the junk-path counterpart: a
+// re-scan of a still-unengaged SPAM receipt re-returns the same rescue plan (ReceiptID
+// set, DoRescue true) so the poller re-enqueues the lost engage — with no stat
+// double-count.
+func TestRecordWarmupReceiptSpamDuplicateSelfHeals(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementSpam,
+	}
+	plan1, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("first RecordWarmupReceipt: %v", err)
+	}
+	if plan1.ReceiptID == "" || !plan1.DoRescue {
+		t.Fatalf("first spam plan = %+v, want ReceiptID set + DoRescue", plan1)
+	}
+
+	plan2, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("second RecordWarmupReceipt: %v", err)
+	}
+	if plan2 != plan1 {
+		t.Fatalf("unengaged spam duplicate plan = %+v, want the SAME plan (%+v)", plan2, plan1)
+	}
+}
+
+// TestRecordWarmupReceiptEngagedDuplicateReturnsEmpty proves the guard that keeps the
+// self-heal from double-engaging: once the receipt is marked engaged (C5b ran), a
+// re-poll returns the ZERO-value plan (nothing to re-enqueue) and never re-writes stats.
+func TestRecordWarmupReceiptEngagedDuplicateReturnsEmpty(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	plan1, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("first RecordWarmupReceipt: %v", err)
+	}
+	// Engage it (C5b): flips engaged=true.
+	if err := f.core.MarkWarmupEngaged(ctx, plan1.ReceiptID, f.ws1.String(), false); err != nil {
+		t.Fatalf("MarkWarmupEngaged: %v", err)
+	}
+
 	plan2, err := f.core.RecordWarmupReceipt(ctx, in)
 	if err != nil {
 		t.Fatalf("second RecordWarmupReceipt: %v", err)
 	}
 	if plan2 != (coreapi.WarmupEngagePlan{}) {
-		t.Fatalf("duplicate plan = %+v, want zero value", plan2)
+		t.Fatalf("engaged duplicate plan = %+v, want zero value (no re-enqueue)", plan2)
 	}
 
 	rb, _ := uuid.Parse(recipient)
 	if received, _, _, _ := todayStats(t, ctx, f, rb); received != 1 {
-		t.Fatalf("recipient received = %d, want 1 (no double count on re-poll)", received)
+		t.Fatalf("recipient received = %d, want 1 (no double count)", received)
+	}
+}
+
+// TestRecordWarmupReceiptDuplicateNonParticipantReturnsEmpty proves the self-heal takes
+// the same clean skip the fresh path does when the recipient is no longer a warmup
+// participant: an unengaged duplicate whose participant row is gone returns the empty
+// plan (no re-enqueue), rather than failing.
+func TestRecordWarmupReceiptDuplicateNonParticipantReturnsEmpty(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+	rb, err := uuid.Parse(recipient)
+	if err != nil {
+		t.Fatalf("parse recipient: %v", err)
+	}
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("first RecordWarmupReceipt: %v", err)
+	}
+	// Drop the recipient's participant row: still a real workspace mailbox, no longer a
+	// warmup participant.
+	if _, err := f.q.DisableWarmupParticipant(ctx, gen.DisableWarmupParticipantParams{MailboxID: rb, WorkspaceID: f.ws1}); err != nil {
+		t.Fatalf("disable participant: %v", err)
+	}
+
+	plan2, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("duplicate non-participant RecordWarmupReceipt err = %v, want nil (clean skip)", err)
+	}
+	if plan2 != (coreapi.WarmupEngagePlan{}) {
+		t.Fatalf("duplicate non-participant plan = %+v, want zero value", plan2)
 	}
 }
 

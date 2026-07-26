@@ -77,6 +77,15 @@ func warmupPausedUntil(state string, now time.Time) pgtype.Timestamptz {
 // retry re-inserts + re-plans (no silently-dropped engagement). A recipient that is
 // NOT a warmup participant is a clean no-op skip — the tx rolls back so NO receipt or
 // stat persists, and an empty plan is returned. The plan is built (pure) after commit.
+//
+// SELF-HEALING: the caller (inbox poller) commits the receipt here, then enqueues
+// warmup:engage separately, so an enqueue failure AFTER this commit would strand the
+// engagement forever (the retry re-enters here, hits the duplicate, and previously got
+// an empty plan). To close that gap, a duplicate that is still UNENGAGED re-returns the
+// SAME deterministic plan (rebuilt from the stored row) so the poller re-enqueues; a
+// duplicate that is already ENGAGED (C5b ran) returns the empty plan. Re-enqueue is
+// safe: the asynq TaskID warmupengage:<receiptID> dedups a still-pending task, and once
+// engaged=true this returns empty again, so it can never double-engage.
 func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error) {
 	ws, err := uuid.Parse(in.WorkspaceID)
 	if err != nil {
@@ -116,15 +125,35 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		// is found (idempotent no-op → empty plan); a miss means the recipient does
 		// not belong to the workspace (fail closed).
 		_ = tx.Rollback(ctx)
-		if _, gerr := c.q.GetWarmupReceiptByPair(ctx, gen.GetWarmupReceiptByPairParams{
+		dup, gerr := c.q.GetWarmupReceiptByPair(ctx, gen.GetWarmupReceiptByPairParams{
 			WarmupSendID: sendUUID, RecipientMailbox: recipient, WorkspaceID: ws,
-		}); gerr != nil {
+		})
+		if gerr != nil {
 			if errors.Is(gerr, pgx.ErrNoRows) {
 				return coreapi.WarmupEngagePlan{}, coreapi.ErrCrossTenant
 			}
 			return coreapi.WarmupEngagePlan{}, gerr
 		}
-		return coreapi.WarmupEngagePlan{}, nil
+		// Duplicate receipt. Already engaged (C5b ran) → nothing to do, empty plan.
+		if dup.Engaged {
+			return coreapi.WarmupEngagePlan{}, nil
+		}
+		// Still unengaged: the original engage task may have been lost to a post-commit
+		// enqueue failure. Rebuild the SAME deterministic plan from the stored row so the
+		// poller re-enqueues it. The recipient's reply_rate is read with a second
+		// workspace-pinned lookup; a recipient that is no longer a participant is the same
+		// clean no-op skip the fresh-insert path takes (empty plan → no re-enqueue).
+		p, perr := c.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: recipient, WorkspaceID: ws})
+		if perr != nil {
+			if errors.Is(perr, pgx.ErrNoRows) {
+				return coreapi.WarmupEngagePlan{}, nil
+			}
+			return coreapi.WarmupEngagePlan{}, perr
+		}
+		// Rebuild against the STORED placement + received_at so DoRescue/DoReply/EngageAfter
+		// match what the fresh insert returned and what GetWarmupEngageJob will recompute.
+		dayKey := dup.ReceivedAt.Time.UTC().Format("2006-01-02")
+		return warmupEngagePlan(dup.ID.String(), recipient.String(), dayKey, float64(p.ReplyRate), dup.Placement), nil
 	}
 
 	// New receipt. Read the recipient's participant config INSIDE the tx so plan

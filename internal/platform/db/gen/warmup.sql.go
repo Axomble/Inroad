@@ -355,7 +355,7 @@ func (q *Queries) GetWarmupPlacementRates7d(ctx context.Context, workspaceID uui
 }
 
 const getWarmupReceiptByPair = `-- name: GetWarmupReceiptByPair :one
-SELECT id FROM warmup_receipts
+SELECT id, engaged, received_at, placement FROM warmup_receipts
 WHERE warmup_send_id = $1 AND recipient_mailbox = $2 AND workspace_id = $3
 `
 
@@ -365,16 +365,34 @@ type GetWarmupReceiptByPairParams struct {
 	WorkspaceID      uuid.UUID   `json:"workspace_id"`
 }
 
+type GetWarmupReceiptByPairRow struct {
+	ID         uuid.UUID          `json:"id"`
+	Engaged    bool               `json:"engaged"`
+	ReceivedAt pgtype.Timestamptz `json:"received_at"`
+	Placement  string             `json:"placement"`
+}
+
 // Disambiguates an UpsertWarmupReceipt that inserted zero rows: a workspace-pinned
 // lookup on the same (send, recipient) pair. A hit means a genuine DUPLICATE (same
 // workspace, already recorded → idempotent no-op); a miss means the recipient does
 // not belong to the workspace (the self-enforcing INSERT's SELECT was empty →
-// cross-tenant). workspace-pinned.
-func (q *Queries) GetWarmupReceiptByPair(ctx context.Context, arg GetWarmupReceiptByPairParams) (uuid.UUID, error) {
+// cross-tenant). workspace-pinned. Deliberately a PURE receipt read (no participant
+// join) so the hit/miss semantics stay exactly duplicate-vs-cross-tenant. engaged,
+// received_at and placement are returned so the caller can, on an UNENGAGED
+// duplicate, rebuild the SAME deterministic engage plan the fresh insert produced and
+// re-enqueue it — self-healing an engagement lost to a post-commit enqueue failure.
+// The recipient's reply_rate is read separately (GetWarmupParticipant) to keep this a
+// single-table read.
+func (q *Queries) GetWarmupReceiptByPair(ctx context.Context, arg GetWarmupReceiptByPairParams) (GetWarmupReceiptByPairRow, error) {
 	row := q.db.QueryRow(ctx, getWarmupReceiptByPair, arg.WarmupSendID, arg.RecipientMailbox, arg.WorkspaceID)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i GetWarmupReceiptByPairRow
+	err := row.Scan(
+		&i.ID,
+		&i.Engaged,
+		&i.ReceivedAt,
+		&i.Placement,
+	)
+	return i, err
 }
 
 const getWarmupReplyThread = `-- name: GetWarmupReplyThread :one

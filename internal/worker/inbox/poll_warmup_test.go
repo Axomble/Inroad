@@ -341,3 +341,140 @@ func TestPollGmailSpamWarmupRecordedAsSpam(t *testing.T) {
 		t.Errorf("expected engage enqueue for the gmail spam receipt, got %+v", enq.calls)
 	}
 }
+
+// fakeJunkGraph is a GraphFetcher that also implements graphJunkScanner, so the
+// m365 branch exercises the JunkEmail-folder placement scan (the Graph parallel of
+// fakeSpamGmail).
+type fakeJunkGraph struct {
+	inboxMsgs []mail.InboundMessage
+	junkMsgs  []mail.InboundMessage
+	junkErr   error
+}
+
+func (f *fakeJunkGraph) Fetch(_ context.Context, _, _ string, _ int) ([]mail.InboundMessage, string, error) {
+	return f.inboxMsgs, "delta-next", nil
+}
+
+func (f *fakeJunkGraph) FetchJunk(_ context.Context, _ string, _ int) ([]mail.InboundMessage, error) {
+	return f.junkMsgs, f.junkErr
+}
+
+// TestPollM365JunkWarmupRecordedAsSpam proves the m365 branch also detects
+// spam-placed warmup mail: a warmup message in the JunkEmail folder is recorded
+// placement "spam" with source folder "JunkEmail" (the Graph parallel of the Gmail
+// SPAM-label test).
+func TestPollM365JunkWarmupRecordedAsSpam(t *testing.T) {
+	core := &warmupStubCore{
+		stubCore: &stubCore{job: coreapi.InboxPollJob{Provider: "m365", AccessToken: []byte("tok"), Cursor: "delta-old"}},
+		plan:     coreapi.WarmupEngagePlan{ReceiptID: "rcpt-m", EngageAfter: time.Minute},
+	}
+	enq := &spyEngageEnqueuer{}
+	token := warmupToken(t, warmupSecret, pollWS, "send-m")
+	graph := &fakeJunkGraph{junkMsgs: []mail.InboundMessage{warmupMsg(t, 0, token, "<wm-m@warm>", "<none@x>")}}
+
+	if err := PollHandler(core, nil, nil, graph, replyclassify.New(nil), warmupSecret, enq)(context.Background(), pollTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.receipts) != 1 {
+		t.Fatalf("expected 1 m365 junk receipt, got %d", len(core.receipts))
+	}
+	got := core.receipts[0]
+	if got.Placement != placementSpam || got.SourceFolder != "JunkEmail" {
+		t.Errorf("m365 junk receipt placement/folder = %q/%q, want spam/JunkEmail", got.Placement, got.SourceFolder)
+	}
+	if got.WarmupSendID != "send-m" {
+		t.Errorf("receipt WarmupSendID = %q, want send-m", got.WarmupSendID)
+	}
+	if len(enq.calls) != 1 || enq.calls[0].receiptID != "rcpt-m" {
+		t.Errorf("expected engage enqueue for the m365 junk receipt, got %+v", enq.calls)
+	}
+}
+
+// TestPollInboxWarmupEnqueueFailureThenRetryReEnqueues exercises the self-heal at the
+// poll seam: an INBOX warmup enqueue that FAILS (spyEngageEnqueuer.err) fails the poll
+// and does NOT advance the cursor, so asynq retries. On the retry, RecordWarmupReceipt
+// re-returns the SAME plan for the still-unengaged receipt (the coreapi self-heal,
+// modeled here by the stub returning the plan again) and, with the enqueue now
+// succeeding, engagement is re-enqueued and the poll completes. Without the self-heal,
+// the retry's duplicate receipt would yield an empty plan and the engage would be lost.
+func TestPollInboxWarmupEnqueueFailureThenRetryReEnqueues(t *testing.T) {
+	core := newWarmupCore(t) // plan.ReceiptID == "rcpt-1"
+	enq := &spyEngageEnqueuer{err: errors.New("redis down")}
+	token := warmupToken(t, warmupSecret, pollWS, "send-5")
+	msg := warmupMsg(t, 11, token, "<wm-5@warm>", "<none@x>")
+
+	// Poll 1: the enqueue fails, so the whole poll fails and the cursor is untouched.
+	reader := &fakeReader{uidValidity: 5, uidNext: 12, msgs: []mail.InboundMessage{msg}}
+	if err := runWarmupPoll(t, core, reader, enq); !errors.Is(err, enq.err) {
+		t.Fatalf("expected the enqueue error to fail the poll, got %v", err)
+	}
+	if core.cursorSet {
+		t.Fatal("a failed engage enqueue must not advance the INBOX cursor")
+	}
+
+	// Retry: enqueue now succeeds. The receipt is still unengaged, so the plan is
+	// re-returned and re-enqueued; the poll completes and advances the cursor.
+	enq.err = nil
+	reader2 := &fakeReader{uidValidity: 5, uidNext: 12, msgs: []mail.InboundMessage{msg}}
+	if err := runWarmupPoll(t, core, reader2, enq); err != nil {
+		t.Fatalf("retry poll: %v", err)
+	}
+	if len(enq.calls) != 2 || enq.calls[1].receiptID != "rcpt-1" {
+		t.Fatalf("expected the engage to be re-enqueued on retry, got %+v", enq.calls)
+	}
+	if !core.cursorSet {
+		t.Fatal("the retry poll must advance the INBOX cursor once engagement is enqueued")
+	}
+}
+
+// TestPollJunkWarmupEnqueueFailureDoesNotFailPoll exercises spyEngageEnqueuer.err on
+// the junk path: unlike the INBOX path, a junk-scan enqueue failure is best-effort —
+// it is logged, NOT propagated — so the poll still succeeds and the INBOX cursor
+// advances. The stateless rescan re-observes the (still unengaged) receipt next poll
+// and the coreapi self-heal re-returns the plan, so the engage is retried, not lost.
+func TestPollJunkWarmupEnqueueFailureDoesNotFailPoll(t *testing.T) {
+	core := newWarmupCore(t)
+	enq := &spyEngageEnqueuer{err: errors.New("redis down")}
+	token := warmupToken(t, warmupSecret, pollWS, "send-6")
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		junkFolder: "Junk",
+		junkMsgs:   []mail.InboundMessage{warmupMsg(t, 0, token, "<wm-6@warm>", "<none@x>")},
+	}
+
+	if err := runWarmupPoll(t, core, reader, enq); err != nil {
+		t.Fatalf("a junk-path enqueue failure must not fail the poll, got %v", err)
+	}
+	if !core.cursorSet {
+		t.Fatal("the INBOX cursor must still advance despite a junk enqueue failure")
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("expected one (failed) junk enqueue attempt, got %+v", enq.calls)
+	}
+}
+
+// TestPollJunkWarmupRecordErrorDoesNotFailPoll proves a junk-path RecordWarmupReceipt
+// error is swallowed (logged) and the poll still succeeds and advances the cursor —
+// the best-effort junk scan never holds back the INBOX cursor. No engage is enqueued
+// because the record failed before a plan was produced.
+func TestPollJunkWarmupRecordErrorDoesNotFailPoll(t *testing.T) {
+	core := newWarmupCore(t)
+	core.recordErr = errors.New("db down")
+	enq := &spyEngageEnqueuer{}
+	token := warmupToken(t, warmupSecret, pollWS, "send-7")
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		junkFolder: "Junk",
+		junkMsgs:   []mail.InboundMessage{warmupMsg(t, 0, token, "<wm-7@warm>", "<none@x>")},
+	}
+
+	if err := runWarmupPoll(t, core, reader, enq); err != nil {
+		t.Fatalf("a junk-path record error must be swallowed, got %v", err)
+	}
+	if !core.cursorSet {
+		t.Fatal("the INBOX cursor must still advance when a junk record errors")
+	}
+	if len(enq.calls) != 0 {
+		t.Fatalf("a failed junk record must not enqueue engagement, got %+v", enq.calls)
+	}
+}

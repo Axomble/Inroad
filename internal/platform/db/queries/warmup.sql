@@ -257,8 +257,14 @@ RETURNING id, received_at;
 -- lookup on the same (send, recipient) pair. A hit means a genuine DUPLICATE (same
 -- workspace, already recorded → idempotent no-op); a miss means the recipient does
 -- not belong to the workspace (the self-enforcing INSERT's SELECT was empty →
--- cross-tenant). workspace-pinned.
-SELECT id FROM warmup_receipts
+-- cross-tenant). workspace-pinned. Deliberately a PURE receipt read (no participant
+-- join) so the hit/miss semantics stay exactly duplicate-vs-cross-tenant. engaged,
+-- received_at and placement are returned so the caller can, on an UNENGAGED
+-- duplicate, rebuild the SAME deterministic engage plan the fresh insert produced and
+-- re-enqueue it — self-healing an engagement lost to a post-commit enqueue failure.
+-- The recipient's reply_rate is read separately (GetWarmupParticipant) to keep this a
+-- single-table read.
+SELECT id, engaged, received_at, placement FROM warmup_receipts
 WHERE warmup_send_id = $1 AND recipient_mailbox = $2 AND workspace_id = $3;
 
 -- name: RecordWarmupReceivedStat :exec
