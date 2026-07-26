@@ -53,10 +53,14 @@ internal/app/warmup/                   internal/worker/warmup/
 coreapi.Client (new methods) ◀──────────┘   reaches warmup data only here
 internal/platform/mail/  (+ Engager seam: IMAP/Gmail modify)
 internal/platform/warmup/ (content library + ContentGenerator seam, token)
-internal/platform/db/migrations/000017_warmup.up.sql
+internal/platform/db/migrations/000018_warmup.up.sql
 ```
 
-## 3. Data model — migration `000017_warmup`
+## 3. Data model — migration `000018_warmup`
+
+> Migration numbering: worker-routing (§15) is `000017` and lands first (Track B);
+> warmup is `000018` and lands second (Track C), so migration order matches build
+> order and `migrate up` never skips a lower number on the incremental path.
 
 All tables workspace-pinned; all FKs `ON DELETE CASCADE` from `workspaces` and
 `mailboxes` so deleting either crypto-shreds/cleans warmup state.
@@ -403,7 +407,7 @@ Validation at the boundary: reject `start_volume>max_volume`, `max_volume>200`,
 
 1. **I** land this spec + the `api/openapi.yaml` additions + the security-invariant
    append (the shared contract).
-2. **backend-developer**: migration `000017`, sqlc queries, `warmup` domain
+2. **backend-developer**: migration `000018`, sqlc queries, `warmup` domain
    (store/service/handler/routes/dto), coreapi methods + inprocess impl, queue
    tasks + scheduler, `platform/warmup` (content/token/schedule), `mail.Engager`
    impls, worker `send/engage/sweep` + the inbox-poll receipt hook, wiring in
@@ -480,7 +484,7 @@ mailboxes spread across workers — the deliverability win. No broker change.
   to; empty = OS default route (single-node dev).
 - `INROAD_WORKER_QUEUES` — queues this worker consumes; default `w:<id>,default`.
 
-**Registry + assignment (migration `000018_worker_routing`):**
+**Registry + assignment (migration `000017_worker_routing`):**
 ```sql
 CREATE TABLE workers (                     -- global infra, not tenant data
     worker_id     TEXT PRIMARY KEY,
@@ -522,12 +526,12 @@ only the enqueue destination is resolved through the assigner.
 2. **backend-developer — Track A (transport seam):** `internal/platform/bus`
    interface + `redisbus` (asynq) impl; make `*queue.Client` satisfy it; warmup +
    routing enqueues go through it. TDD.
-3. **backend-developer — Track B (routing):** migration `000018`, `workers` +
+3. **backend-developer — Track B (routing):** migration `000017`, `workers` +
    `mailbox_worker_assignments` queries, worker identity config, heartbeat upsert,
    `AssignMailboxWorker` assigner, `Dest` resolution at enqueue, source-IP bind on
    the `mail` dialer (destination SSRF vet unchanged). TDD.
 4. **backend-developer — Track C (warmup engine):** everything in §3–§9 — migration
-   `000017`, warmup domain, coreapi methods + inprocess impl, `platform/warmup`
+   `000018`, warmup domain, coreapi methods + inprocess impl, `platform/warmup`
    (content/token/schedule), `mail.Engager`, worker `send/engage/sweep` + inbox
    receipt hook, wiring. Enqueues route via Track A + B. TDD.
 5. **frontend-developer (parallel with A–C):** regenerate types; warmup feature,
