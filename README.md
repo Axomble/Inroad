@@ -1,13 +1,13 @@
 <div align="center">
 
-```
-██╗ ███╗   ██╗ ██████╗   ██████╗   █████╗  ██████╗
+<pre>
+██╗ ███╗   ██╗ ██████╗   ██████╗   █████╗  ██████╗ 
 ██║ ████╗  ██║ ██╔══██╗ ██╔═══██╗ ██╔══██╗ ██╔══██╗
 ██║ ██╔██╗ ██║ ██████╔╝ ██║   ██║ ███████║ ██║  ██║
 ██║ ██║╚██╗██║ ██╔══██╗ ██║   ██║ ██╔══██║ ██║  ██║
 ██║ ██║ ╚████║ ██║  ██║ ╚██████╔╝ ██║  ██║ ██████╔╝
-╚═╝ ╚═╝  ╚═══╝ ╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝ ╚═════╝
-```
+╚═╝ ╚═╝  ╚═══╝ ╚═╝  ╚═╝  ╚═════╝  ╚═╝  ╚═╝ ╚═════╝ 
+</pre>
 
 **The self-hostable cold email sequencing and mailbox warm-up platform.**
 
@@ -24,8 +24,6 @@
 </div>
 
 ---
-
-## Inroad
 
 Inroad sends cold email sequences from the mailboxes you already own — Gmail, Microsoft 365, or plain
 SMTP — and paces them on a warm-up ramp so they keep landing in the inbox. Replies, bounces, and
@@ -60,7 +58,14 @@ infrastructure than rent it.
 
 ---
 
-## Screenshots
+## A look inside
+
+### Run campaigns
+
+Draft until you launch it, then running until it's done — with the launch button only where launching
+is actually legal.
+
+![Campaign list](docs/images/campaigns.png)
 
 ### Build the sequence
 
