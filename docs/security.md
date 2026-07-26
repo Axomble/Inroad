@@ -192,6 +192,29 @@ or SSRF. (Not a full threat model; that's future work.)
     (`MarkReplied` / `MarkUnsubscribed` / `RecordReplyClass`) is `workspace_id`-pinned
     from the poll job, upholding invariant 4.
 
+## Worker routing (per-IP send distribution)
+22. **Binding a worker's outbound source IP never bypasses the SSRF guard.** The
+    optional `LocalAddr` on the mail dialer (from `INROAD_WORKER_EGRESS_IP`) sets
+    only the *source* address. `mail.vetAddr` still runs FIRST on every send/poll
+    dial — resolving the destination and rejecting loopback/link-local/metadata
+    (`169.254.169.254`)/private/multicast — and the dial still targets the vetted
+    destination IP. Source-bind can only choose the egress interface; it can never
+    reach a destination the guard blocked (`internal/platform/mail/{sender,inbox,
+    net_tester}.go`, proven by `TestSendSourceBindDoesNotBypassSSRF` /
+    `TestInboxSourceBindDoesNotBypassSSRF`).
+23. **A job's routing destination is derived server-side, never from the client.**
+    The target queue (`w:<worker_id>` or the shared default `""`) comes from the
+    persisted `mailbox_worker_assignments` row via `AssignMailboxWorker`
+    (`internal/coreapi/inprocess/workerrouting.go`), computed from the worker
+    registry — no request field influences which worker/IP a mailbox's mail
+    egresses through, so a caller can't pin or divert traffic.
+24. **Assignment is tenant-scoped; the worker registry is not tenant data.**
+    `mailbox_worker_assignments` is `workspace_id`-pinned (invariant 4): a mailbox
+    is assigned/read only within its own workspace, and the assignment is
+    idempotent (`ON CONFLICT` keeps a single race winner). The `workers` heartbeat
+    registry is global infrastructure state — it holds no tenant rows and is never
+    returned on a tenant-facing API.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
