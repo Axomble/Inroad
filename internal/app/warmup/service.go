@@ -98,7 +98,10 @@ func (r resolvedSettings) validate() error {
 // row (ErrMailboxNotInWorkspace), which is surfaced as ErrNotFound so the handler
 // 404s. The returned DTO carries the computed today_sent / today_target.
 func (s *Service) EnableWarmup(ctx context.Context, ws, mailboxID uuid.UUID, settings WarmupSettings) (WarmupParticipantDTO, error) {
-	base := s.currentOrDefault(ctx, ws, mailboxID)
+	base, err := s.currentOrDefault(ctx, ws, mailboxID)
+	if err != nil {
+		return WarmupParticipantDTO{}, err
+	}
 	resolved := merge(base, settings)
 	if err := resolved.validate(); err != nil {
 		return WarmupParticipantDTO{}, err
@@ -127,27 +130,32 @@ func (s *Service) EnableWarmup(ctx context.Context, ws, mailboxID uuid.UUID, set
 }
 
 // currentOrDefault reads the participant's existing settings as the merge base,
-// falling back to the package defaults when the mailbox is not yet a participant
-// (or is not this workspace's — a foreign mailbox also reads as absent here and
-// is caught by the self-enforcing upsert). A genuine read error is swallowed to
-// the default base on purpose ONLY for the not-found case; any other error would
-// surface downstream on the upsert.
-func (s *Service) currentOrDefault(ctx context.Context, ws, mailboxID uuid.UUID) resolvedSettings {
+// falling back to the package defaults ONLY when the mailbox is not yet a
+// participant (pgx.ErrNoRows — also the case for a foreign mailbox, which reads
+// as absent here and is caught downstream by the self-enforcing upsert). Any
+// OTHER read error is propagated, never swallowed: on a partial update of an
+// EXISTING participant a transient read failure must NOT silently collapse the
+// merge base to defaults, or the ON CONFLICT DO UPDATE would overwrite the live
+// start/max/increment/reply settings back to defaults (silent data corruption).
+func (s *Service) currentOrDefault(ctx context.Context, ws, mailboxID uuid.UUID) (resolvedSettings, error) {
 	cur, err := s.store.GetParticipant(ctx, ws, mailboxID)
-	if err != nil {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		return resolvedSettings{
 			startVolume:   defaultStartVolume,
 			maxVolume:     defaultMaxVolume,
 			rampIncrement: defaultRampIncrement,
 			replyRate:     defaultReplyRate,
-		}
+		}, nil
+	case err != nil:
+		return resolvedSettings{}, fmt.Errorf("warmup: read current settings: %w", err)
 	}
 	return resolvedSettings{
 		startVolume:   cur.StartVolume,
 		maxVolume:     cur.MaxVolume,
 		rampIncrement: cur.RampIncrement,
 		replyRate:     cur.ReplyRate,
-	}
+	}, nil
 }
 
 // merge overlays the non-nil request fields onto the base settings.
@@ -256,6 +264,13 @@ func (s *Service) participantDTO(p Participant, todaySent int32) WarmupParticipa
 
 // targetFor computes today's ramp target: 0 while paused (spec §8), otherwise the
 // pure ramp target for the number of whole UTC days the mailbox has been warming.
+//
+// This is the INTENDED daily ramp target — the clean, UN-JITTERED number we
+// surface as today_target. The worker's per-day send cap is NOT identical: its
+// NextDue applies DailyVolumeFactor (±~20% jitter) on top of this same ramp
+// target, so the actual cap varies day to day. As a result today_sent can
+// occasionally exceed today_target on a high-jitter day. Surfacing the clean
+// ramp target (not a re-jittered value) keeps today_target stable and meaningful.
 func targetFor(healthState string, start, maxVol, increment int32, startedAt pgtype.Timestamptz, now time.Time) int32 {
 	if healthState == healthPaused {
 		return 0

@@ -32,11 +32,6 @@ RETURNING *;
 SELECT * FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2;
 
--- name: ListWarmupParticipants :many
-SELECT * FROM warmup_participants
-WHERE workspace_id = $1
-ORDER BY created_at DESC;
-
 -- name: DisableWarmupParticipant :execrows
 -- Disabling deletes the row (spec §10: DELETE /mailboxes/{id}/warmup -> 204).
 DELETE FROM warmup_participants
@@ -59,18 +54,6 @@ SELECT * FROM warmup_daily_stats
 WHERE mailbox_id = $1 AND workspace_id = $2
   AND day >= CURRENT_DATE - 29
 ORDER BY day ASC;
-
--- name: GetWarmupPlacementRates7d :many
--- Per-mailbox inbox/spam/received sums over the trailing 7 UTC days for the
--- overview placement rates. Grouped by mailbox, scoped to one workspace.
-SELECT
-    mailbox_id,
-    COALESCE(SUM(inbox), 0)::bigint    AS inbox,
-    COALESCE(SUM(spam), 0)::bigint     AS spam,
-    COALESCE(SUM(received), 0)::bigint AS received
-FROM warmup_daily_stats
-WHERE workspace_id = $1 AND day >= CURRENT_DATE - 6
-GROUP BY mailbox_id;
 
 -- name: GetWarmupSentToday :one
 -- Today's (UTC) sent count for one mailbox. Aggregated so a missing day row

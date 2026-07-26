@@ -66,24 +66,6 @@ func dayStatFromGen(s gen.WarmupDailyStat) DayStat {
 	}
 }
 
-// PlacementRate is one mailbox's trailing-7-day inbox/spam/received counts,
-// from which the overview derives inbox_rate_7d / spam_rate_7d.
-type PlacementRate struct {
-	MailboxID uuid.UUID
-	Inbox     int64
-	Spam      int64
-	Received  int64
-}
-
-func placementRateFromGen(r gen.GetWarmupPlacementRates7dRow) PlacementRate {
-	return PlacementRate{
-		MailboxID: r.MailboxID,
-		Inbox:     r.Inbox,
-		Spam:      r.Spam,
-		Received:  r.Received,
-	}
-}
-
 // UpsertParams carries the ramp settings for enabling or updating a
 // participant. It is a domain-owned struct (not the generated params type) so
 // the Store interface stays free of gen references, keeping the seam minimal.

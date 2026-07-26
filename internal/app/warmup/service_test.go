@@ -25,6 +25,10 @@ type fakeStore struct {
 	overviewRows   []OverviewRow
 	enabledCount   int64
 
+	// getParticipantErr, when non-nil, is returned by GetParticipant to model a
+	// transient read failure (a NON-ErrNoRows error) on the merge-base read.
+	getParticipantErr error
+
 	upsertCalls int
 }
 
@@ -66,21 +70,14 @@ func (s *fakeStore) UpsertParticipant(_ context.Context, arg UpsertParams) (Part
 }
 
 func (s *fakeStore) GetParticipant(_ context.Context, workspaceID, mailboxID uuid.UUID) (Participant, error) {
+	if s.getParticipantErr != nil {
+		return Participant{}, s.getParticipantErr
+	}
 	p, ok := s.participants[mailboxID]
 	if !ok || p.WorkspaceID != workspaceID {
 		return Participant{}, pgx.ErrNoRows
 	}
 	return p, nil
-}
-
-func (s *fakeStore) ListParticipants(_ context.Context, workspaceID uuid.UUID) ([]Participant, error) {
-	var out []Participant
-	for _, p := range s.participants {
-		if p.WorkspaceID == workspaceID {
-			out = append(out, p)
-		}
-	}
-	return out, nil
 }
 
 func (s *fakeStore) DisableParticipant(_ context.Context, workspaceID, mailboxID uuid.UUID) (int64, error) {
@@ -98,10 +95,6 @@ func (s *fakeStore) CountEnabledParticipants(_ context.Context, _ uuid.UUID) (in
 
 func (s *fakeStore) DailyStats(_ context.Context, workspaceID, mailboxID uuid.UUID) ([]DayStat, error) {
 	return s.dailyStats[mailboxID], nil
-}
-
-func (s *fakeStore) PlacementRates7d(_ context.Context, _ uuid.UUID) ([]PlacementRate, error) {
-	return nil, nil
 }
 
 func (s *fakeStore) SentToday(_ context.Context, _, mailboxID uuid.UUID) (int32, error) {
@@ -206,6 +199,34 @@ func TestEnablePartialUpdateKeepsExisting(t *testing.T) {
 	}
 	if got.MaxVolume != 120 {
 		t.Fatalf("partial update did not apply max_volume: got %d", got.MaxVolume)
+	}
+}
+
+// TestEnablePartialUpdatePropagatesReadError proves a transient (NON-ErrNoRows)
+// read failure on the merge-base read of an EXISTING participant is propagated,
+// not swallowed to defaults. If it were swallowed, the partial update would merge
+// over defaults and the upsert would overwrite the live start/max/increment/reply
+// settings back to defaults (silent data corruption). The upsert must NOT run.
+func TestEnablePartialUpdatePropagatesReadError(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	// Model an existing participant whose current settings the merge would keep.
+	store.participants[mb] = Participant{
+		MailboxID: mb, WorkspaceID: ws, Enabled: true,
+		StartVolume: 10, MaxVolume: 80, RampIncrement: 5, ReplyRate: 0.5, HealthState: "healthy",
+	}
+	readErr := errors.New("transient read failure")
+	store.getParticipantErr = readErr
+	svc := NewService(store)
+
+	// Partial update (only max_volume) — the merge base MUST come from a good read.
+	_, err := svc.EnableWarmup(context.Background(), ws, mb, WarmupSettings{MaxVolume: ptrI32(120)})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("partial update read failure: want wrapped %v, got %v", readErr, err)
+	}
+	if store.upsertCalls != 0 {
+		t.Fatalf("a failed merge-base read must not reach the upsert: upsertCalls=%d", store.upsertCalls)
 	}
 }
 

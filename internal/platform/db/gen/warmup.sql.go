@@ -323,51 +323,6 @@ func (q *Queries) GetWarmupParticipant(ctx context.Context, arg GetWarmupPartici
 	return i, err
 }
 
-const getWarmupPlacementRates7d = `-- name: GetWarmupPlacementRates7d :many
-SELECT
-    mailbox_id,
-    COALESCE(SUM(inbox), 0)::bigint    AS inbox,
-    COALESCE(SUM(spam), 0)::bigint     AS spam,
-    COALESCE(SUM(received), 0)::bigint AS received
-FROM warmup_daily_stats
-WHERE workspace_id = $1 AND day >= CURRENT_DATE - 6
-GROUP BY mailbox_id
-`
-
-type GetWarmupPlacementRates7dRow struct {
-	MailboxID uuid.UUID `json:"mailbox_id"`
-	Inbox     int64     `json:"inbox"`
-	Spam      int64     `json:"spam"`
-	Received  int64     `json:"received"`
-}
-
-// Per-mailbox inbox/spam/received sums over the trailing 7 UTC days for the
-// overview placement rates. Grouped by mailbox, scoped to one workspace.
-func (q *Queries) GetWarmupPlacementRates7d(ctx context.Context, workspaceID uuid.UUID) ([]GetWarmupPlacementRates7dRow, error) {
-	rows, err := q.db.Query(ctx, getWarmupPlacementRates7d, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []GetWarmupPlacementRates7dRow
-	for rows.Next() {
-		var i GetWarmupPlacementRates7dRow
-		if err := rows.Scan(
-			&i.MailboxID,
-			&i.Inbox,
-			&i.Spam,
-			&i.Received,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getWarmupReceiptByPair = `-- name: GetWarmupReceiptByPair :one
 SELECT id, engaged, received_at, placement FROM warmup_receipts
 WHERE warmup_send_id = $1 AND recipient_mailbox = $2 AND workspace_id = $3
@@ -835,46 +790,6 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 			&i.Inbox7d,
 			&i.Spam7d,
 			&i.TodaySent,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listWarmupParticipants = `-- name: ListWarmupParticipants :many
-SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at FROM warmup_participants
-WHERE workspace_id = $1
-ORDER BY created_at DESC
-`
-
-func (q *Queries) ListWarmupParticipants(ctx context.Context, workspaceID uuid.UUID) ([]WarmupParticipant, error) {
-	rows, err := q.db.Query(ctx, listWarmupParticipants, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []WarmupParticipant
-	for rows.Next() {
-		var i WarmupParticipant
-		if err := rows.Scan(
-			&i.MailboxID,
-			&i.WorkspaceID,
-			&i.Enabled,
-			&i.StartVolume,
-			&i.MaxVolume,
-			&i.RampIncrement,
-			&i.ReplyRate,
-			&i.StartedAt,
-			&i.HealthState,
-			&i.HealthReason,
-			&i.PausedUntil,
-			&i.CreatedAt,
-			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -94,14 +94,8 @@ func TestUpsertIsIdempotentAndUpdates(t *testing.T) {
 		t.Errorf("update not applied: %+v", second)
 	}
 
-	list, err := store.ListParticipants(ctx, w.ID)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(list) != 1 {
-		t.Fatalf("want exactly 1 participant after re-upsert, got %d", len(list))
-	}
-
+	// The re-upsert updated in place rather than inserting a duplicate: exactly one
+	// enabled participant remains for the workspace.
 	n, err := store.CountEnabledParticipants(ctx, w.ID)
 	if err != nil {
 		t.Fatalf("count: %v", err)
@@ -176,13 +170,9 @@ func TestFirstUpsertCrossWorkspaceInsertsNothing(t *testing.T) {
 		t.Fatalf("first cross-workspace upsert: got %v, want ErrMailboxNotInWorkspace", err)
 	}
 
-	// Nothing persisted under B...
-	listB, err := store.ListParticipants(ctx, other.ID)
-	if err != nil {
-		t.Fatalf("list B: %v", err)
-	}
-	if len(listB) != 0 {
-		t.Fatalf("foreign upsert must persist nothing under B, got %d rows", len(listB))
+	// Nothing persisted under B: B cannot see the mailbox as a participant...
+	if _, err := store.GetParticipant(ctx, other.ID, mb.ID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("foreign upsert must persist nothing under B: Get got %v, want pgx.ErrNoRows", err)
 	}
 	// ...and nothing leaked under the true owner A either.
 	if _, err := store.GetParticipant(ctx, f.ws.ID, mb.ID); !errors.Is(err, pgx.ErrNoRows) {
@@ -215,7 +205,7 @@ func TestDisableDeletesRow(t *testing.T) {
 }
 
 // TestStatsReads proves the stats read queries: SentToday defaults to 0 with no
-// row, and the daily-series / 7-day placement reads reflect seeded counters.
+// row, and the daily-series read reflects seeded counters within its UTC window.
 func TestStatsReads(t *testing.T) {
 	f := setup(t)
 	ctx, pool, store, w, mb := f.ctx, f.pool, f.store, f.ws, f.mb
@@ -229,9 +219,8 @@ func TestStatsReads(t *testing.T) {
 	}
 
 	// Seed three UTC-day rows directly (no daily-stats writer exists until a later
-	// step): today (in both windows), an older 5-days-back row (in both windows,
-	// proves ORDER BY day ASC), and a 40-days-back row that must fall OUTSIDE both
-	// the 30-day series window and the 7-day placement window.
+	// step): today, an older 5-days-back row (proves ORDER BY day ASC), and a
+	// 40-days-back row that must fall OUTSIDE the 30-day series window.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, sent, received, inbox, spam, replies)
 		 VALUES ($1, $2, CURRENT_DATE,      5, 4, 3, 1, 2),
@@ -264,15 +253,5 @@ func TestStatsReads(t *testing.T) {
 	}
 	if series[0].Inbox != 1 || series[1].Inbox != 3 || series[1].Spam != 1 {
 		t.Errorf("daily series unexpected: %+v", series)
-	}
-
-	// 7-day placement: sums today (3/1/4) + 5-days-back (1/1/2); the 40-days-back
-	// row is excluded from the trailing-7-day window.
-	rates, err := store.PlacementRates7d(ctx, w.ID)
-	if err != nil {
-		t.Fatalf("placement rates: %v", err)
-	}
-	if len(rates) != 1 || rates[0].Inbox != 4 || rates[0].Spam != 2 || rates[0].Received != 6 {
-		t.Errorf("placement rates unexpected (want inbox=4 spam=2 received=6): %+v", rates)
 	}
 }

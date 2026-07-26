@@ -33,11 +33,9 @@ var ErrMailboxNotInWorkspace = errors.New("warmup: mailbox not in workspace")
 type Store interface {
 	UpsertParticipant(ctx context.Context, arg UpsertParams) (Participant, error)
 	GetParticipant(ctx context.Context, workspaceID, mailboxID uuid.UUID) (Participant, error)
-	ListParticipants(ctx context.Context, workspaceID uuid.UUID) ([]Participant, error)
 	DisableParticipant(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int64, error)
 	CountEnabledParticipants(ctx context.Context, workspaceID uuid.UUID) (int64, error)
 	DailyStats(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]DayStat, error)
-	PlacementRates7d(ctx context.Context, workspaceID uuid.UUID) ([]PlacementRate, error)
 	SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int32, error)
 	ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error)
 }
@@ -84,18 +82,6 @@ func (s *PgStore) GetParticipant(ctx context.Context, workspaceID, mailboxID uui
 	return participantFromGen(p), nil
 }
 
-func (s *PgStore) ListParticipants(ctx context.Context, workspaceID uuid.UUID) ([]Participant, error) {
-	rows, err := s.q.ListWarmupParticipants(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Participant, len(rows))
-	for i, p := range rows {
-		out[i] = participantFromGen(p)
-	}
-	return out, nil
-}
-
 func (s *PgStore) DisableParticipant(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int64, error) {
 	return s.q.DisableWarmupParticipant(ctx, gen.DisableWarmupParticipantParams{
 		MailboxID:   mailboxID,
@@ -118,18 +104,6 @@ func (s *PgStore) DailyStats(ctx context.Context, workspaceID, mailboxID uuid.UU
 	out := make([]DayStat, len(rows))
 	for i, r := range rows {
 		out[i] = dayStatFromGen(r)
-	}
-	return out, nil
-}
-
-func (s *PgStore) PlacementRates7d(ctx context.Context, workspaceID uuid.UUID) ([]PlacementRate, error) {
-	rows, err := s.q.GetWarmupPlacementRates7d(ctx, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]PlacementRate, len(rows))
-	for i, r := range rows {
-		out[i] = placementRateFromGen(r)
 	}
 	return out, nil
 }
