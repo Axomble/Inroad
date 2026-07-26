@@ -22,6 +22,12 @@ type Message struct {
 	// now so replies thread correctly in the recipient's client.
 	InReplyTo  string
 	References string
+	// ExtraHeaders are additional generic headers set verbatim on the outgoing
+	// message. Every transport (SMTP/Gmail/Graph) assembles through buildMessage,
+	// so a header set here reaches the wire regardless of provider — used for the
+	// warmup receipt header (X-Inroad-Warmup) the inbox poller verifies. nil for
+	// ordinary sends, which keeps their serialized output byte-for-byte unchanged.
+	ExtraHeaders map[string]string
 }
 
 // NetSender sends mail over SMTP, applying the same SSRF host vetting as the
@@ -139,6 +145,11 @@ func buildMessage(msg Message) (*gomail.Msg, error) {
 	}
 	if msg.References != "" {
 		m.SetGenHeader(gomail.HeaderReferences, msg.References)
+	}
+	// Custom generic headers (e.g. the warmup receipt token) set verbatim. Set
+	// last so a caller cannot silently clobber the threading/unsub headers above.
+	for k, v := range msg.ExtraHeaders {
+		m.SetGenHeader(gomail.Header(k), v)
 	}
 	m.SetMessageID()
 	return m, nil

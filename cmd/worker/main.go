@@ -120,6 +120,10 @@ func run() error {
 		logger.Error("scheduler register (inbox sweep) failed", "err", err)
 		return err
 	}
+	if err := queue.RegisterWarmupSweep(sch); err != nil {
+		logger.Error("scheduler register (warmup sweep) failed", "err", err)
+		return err
+	}
 	go func() {
 		if err := sch.Run(); err != nil {
 			logger.Error("scheduler exited", "err", err)

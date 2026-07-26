@@ -18,7 +18,9 @@ import (
 // open and click tracking links (internal/worker/track) for campaigns with
 // tracking enabled.
 func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, reader mail.InboxReader, enq *queue.Client, publicURL string, trackingSecret []byte) {
-	mux.HandleFunc(queue.TaskWarmupTick, warmup.Handler(core))
+	// Warmup: send one warmup email per tick (lazy chain) + fan-out/health sweep.
+	mux.HandleFunc(queue.TaskWarmupTick, warmup.SendHandler(core, sndr, enq))
+	mux.HandleFunc(queue.TaskWarmupSweep, warmup.SweepHandler(core, enq))
 	mux.HandleFunc(queue.TaskSendEmail, sender.Handler(core, sndr, enq, publicURL, trackingSecret))
 	mux.HandleFunc(queue.TaskSweepStuck, sender.SweepStuckHandler(core, enq))
 	// Multi-step sequencing: advance one step per task (lazy chain) + reconcile.

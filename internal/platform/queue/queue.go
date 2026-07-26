@@ -28,10 +28,19 @@ const (
 
 const TaskWarmupTick = "warmup:tick"
 
-// WarmupTickPayload is the body of a warmup:tick task.
+// WarmupTickPayload is the body of a warmup:tick task. WorkspaceID travels
+// alongside MailboxID so the worker can pin workspace_id in its coreapi lookups
+// (defense in depth on the unguessable mailbox UUID), matching every other task
+// payload.
 type WarmupTickPayload struct {
-	MailboxID string `json:"mailbox_id"`
+	MailboxID   string `json:"mailbox_id"`
+	WorkspaceID string `json:"workspace_id"`
 }
+
+// TaskWarmupSweep is the periodic fan-out that enqueues a warmup:tick for every
+// due participant (routing each to its assigned worker queue) and recomputes
+// participant health. Scheduled every 5 minutes.
+const TaskWarmupSweep = "warmup:sweep"
 
 const TaskSendEmail = "send:email"
 
@@ -89,13 +98,37 @@ func NewClient(redisAddr string) *Client {
 	return &Client{inner: asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})}
 }
 
-func (c *Client) EnqueueWarmupTick(mailboxID string) error {
-	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID})
+// warmupTickTaskID keys a warmup:tick on (mailbox, due-second) so duplicate
+// enqueues for the SAME due instant — a sweep fan-out racing the send handler's
+// lazy chain — dedup to one task, while a genuinely later tick still enqueues.
+// Whole-second granularity is safe because ClaimWarmupSend (the row claim), not
+// this key, is the delivery-idempotency guarantee; a collapsed duplicate only
+// saves wasted work. Mirrors enqueueAdvance's advance:<id>:<sec> key.
+func warmupTickTaskID(mailboxID string, due time.Time) string {
+	return fmt.Sprintf("warmup:%s:%d", mailboxID, due.Unix())
+}
+
+// EnqueueWarmupTickAt schedules a warmup:tick for one mailbox at time t, routed
+// to dest (the from-mailbox's assigned worker queue, spec §15 — so a mailbox's
+// warmup and campaign mail egress from one IP; "" = shared default queue). It
+// goes through the transport seam (bus.Dispatcher): Key→TaskID dedup,
+// Dest→Queue routing, At→ProcessAt delayed delivery. dest is always derived
+// server-side from the mailbox→worker assignment, never from client input
+// (§17.8).
+func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
+	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	_, err = c.inner.Enqueue(asynq.NewTask(TaskWarmupTick, b))
-	return err
+	return c.Publish(context.Background(), bus.Job{
+		Kind:    TaskWarmupTick,
+		Payload: b,
+		Key:     warmupTickTaskID(mailboxID, t),
+		Dest:    dest,
+	}, bus.Options{
+		At:       t,
+		MaxRetry: sendMaxRetry,
+	})
 }
 
 // enqueue submits a task and treats an asynq TaskID conflict as success: a
@@ -285,6 +318,13 @@ func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
 // minutes to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 3m", asynq.NewTask(TaskInboxSweep, nil))
+	return err
+}
+
+// RegisterWarmupSweep registers the periodic warmup:sweep. Runs every 5 minutes
+// to fan out a warmup:tick for every due participant and recompute health.
+func RegisterWarmupSweep(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil))
 	return err
 }
 
