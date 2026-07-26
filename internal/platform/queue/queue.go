@@ -3,6 +3,7 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/inroad/inroad/internal/platform/bus"
+	"github.com/inroad/inroad/internal/platform/bus/redisbus"
 )
 
 // Delivery-idempotency defense in depth (the claim in the send/advance handlers
@@ -191,6 +195,21 @@ func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 	_, err = c.inner.Enqueue(asynq.NewTask(TaskInboxPoll, b))
 	return err
 }
+
+// Publish makes *Client satisfy bus.Dispatcher, so the new warmup and routing
+// enqueue paths can depend on the transport seam while sharing this Client's
+// live asynq connection. It is a thin adapter over redisbus — the same
+// Job/Options -> asynq translation and TaskID-conflict-as-success dedup rule.
+//
+// The existing typed helpers (EnqueueSend/EnqueueAdvance/…) are intentionally
+// left untouched; migrating those call sites onto the seam is a documented
+// follow-up, not part of this change.
+func (c *Client) Publish(ctx context.Context, j bus.Job, o bus.Options) error {
+	return redisbus.NewDispatcher(c.inner).Publish(ctx, j, o)
+}
+
+// Compile-time proof the adapter is complete.
+var _ bus.Dispatcher = (*Client)(nil)
 
 func (c *Client) Close() error { return c.inner.Close() }
 
