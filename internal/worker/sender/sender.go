@@ -4,6 +4,7 @@ package sender
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -72,6 +73,26 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL st
 			return enq.EnqueueSendIn(p.SendID, p.WorkspaceID, 6*time.Hour)
 		}
 
+		// Claim-before-send: move the pre-existing 'queued' row to 'sending' (or
+		// reclaim a stale lease). If we don't win the claim, another worker owns
+		// it or it is already terminal — skip the send so a retried/raced job can
+		// never double-deliver. Unlike the step path, this path has no enrollment
+		// cursor, so "recover-forward" reduces to a plain skip: a 'sent' row is
+		// never reclaimed (the ClaimSend WHERE matches only 'queued' OR a stale
+		// 'sending', so 'sent' is excluded), so a lost claim means the send is
+		// already done — nothing left to advance. The one residual double-send
+		// window (a hard crash between Send returning success and the single
+		// MarkSend commit) is inherent to non-transactional SMTP, same as the step
+		// path's MarkStepDelivered window; this path is dormant (EnqueueSends is
+		// test-only) so no deeper rework is warranted.
+		claimed, err := core.ClaimSend(ctx, p.SendID, p.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			return nil
+		}
+
 		// Subject is a header, treated as text: no HTML escape.
 		vars := personalize.Vars{FirstName: job.FirstName, Email: job.ToEmail}
 		subject := personalize.Text(job.Subject, vars)
@@ -90,18 +111,28 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL st
 		msgID, sendErr := sender.Send(ctx,
 			mail.OutboundJob{
 				Provider: job.Provider, Host: job.SMTPHost, Port: job.SMTPPort,
-				Username: job.SMTPUsername, Password: string(job.SMTPPassword), UseTLS: job.UseTLS,
-				AccessToken: string(job.AccessToken),
+				Username: job.SMTPUsername, Password: string(job.SMTPPassword),
+				AllowPlaintext: job.AllowPlaintext, AccessToken: string(job.AccessToken),
 			},
 			mail.Message{
 				FromEmail: job.FromEmail, FromName: job.FromName, To: job.ToEmail,
 				Subject: subject, BodyText: bodyText, BodyHTML: bodyHTML, ListUnsubscribe: job.UnsubURL,
 			},
 		)
-		if sendErr != nil {
+		switch {
+		case sendErr == nil:
+			return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "sent", MessageID: msgID})
+		case mail.Retryable(sendErr):
+			// Transient failure (nothing delivered): release the claim and return
+			// the error so asynq retries.
+			if rerr := core.ReleaseSend(ctx, p.SendID, p.WorkspaceID); rerr != nil {
+				return fmt.Errorf("release send after transient failure: %w", rerr)
+			}
+			return sendErr
+		default:
+			// Permanent failure: finalize 'failed' (fail-forward).
 			return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "failed", Err: sendErr.Error()})
 		}
-		return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "sent", MessageID: msgID})
 	}
 }
 

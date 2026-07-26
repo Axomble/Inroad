@@ -12,6 +12,34 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimSend = `-- name: ClaimSend :one
+UPDATE sends SET status = 'sending', claimed_at = now()
+WHERE id = $1 AND workspace_id = $2
+  AND (status = 'queued'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => $3::int)))
+RETURNING id
+`
+
+type ClaimSendParams struct {
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	LeaseSeconds int32     `json:"lease_seconds"`
+}
+
+// Claim one direct-send ('send:email' path) for delivery. Unlike the step path,
+// the row pre-exists as 'queued' (EnqueueSends), so the claim is an UPDATE: win
+// it from 'queued', or reclaim a STALE 'sending' lease (a crashed worker).
+// RETURNING id yields a row iff we won the claim; zero rows (pgx.ErrNoRows) mean
+// another worker owns it or it is already terminal — skip the send. Staleness is
+// claimed_at older than lease_seconds. workspace_id pinned so a foreign id claims
+// zero rows.
+func (q *Queries) ClaimSend(ctx context.Context, arg ClaimSendParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, claimSend, arg.ID, arg.WorkspaceID, arg.LeaseSeconds)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const countQueuedByCampaign = `-- name: CountQueuedByCampaign :one
 SELECT count(*) FROM sends WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'queued'
 `
@@ -107,7 +135,7 @@ const getSendBundle = `-- name: GetSendBundle :one
 SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html, cam.tracking_enabled,
        m.provider, m.email AS from_email, m.display_name AS from_name,
-       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days, m.created_at AS mailbox_created_at
 FROM sends s
 JOIN campaigns cam ON cam.id = s.campaign_id
@@ -139,7 +167,7 @@ type GetSendBundleRow struct {
 	SmtpPort         int32              `json:"smtp_port"`
 	SmtpUsername     string             `json:"smtp_username"`
 	SecretCiphertext string             `json:"secret_ciphertext"`
-	UseTls           bool               `json:"use_tls"`
+	AllowPlaintext   bool               `json:"allow_plaintext"`
 	DailyCap         int32              `json:"daily_cap"`
 	RampEnabled      bool               `json:"ramp_enabled"`
 	RampStartCap     int32              `json:"ramp_start_cap"`
@@ -172,7 +200,7 @@ func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (G
 		&i.SmtpPort,
 		&i.SmtpUsername,
 		&i.SecretCiphertext,
-		&i.UseTls,
+		&i.AllowPlaintext,
 		&i.DailyCap,
 		&i.RampEnabled,
 		&i.RampStartCap,
@@ -221,6 +249,32 @@ func (q *Queries) GetSendByMessageID(ctx context.Context, arg GetSendByMessageID
 		&i.ToEmail,
 		&i.EnrollmentID,
 	)
+	return i, err
+}
+
+const getSendState = `-- name: GetSendState :one
+SELECT status, message_id FROM sends WHERE id = $1 AND workspace_id = $2
+`
+
+type GetSendStateParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetSendStateRow struct {
+	Status    string `json:"status"`
+	MessageID string `json:"message_id"`
+}
+
+// Read a claimed send's current terminal-relevant state, workspace-pinned. Used
+// on the step path AFTER a lost claim: the recover-forward decision keys on
+// status ('sent' ⇒ this step already delivered, advance the cursor without
+// re-sending), and the step-1 thread-root advance reads message_id from the
+// already-'sent' row rather than a fresh send result.
+func (q *Queries) GetSendState(ctx context.Context, arg GetSendStateParams) (GetSendStateRow, error) {
+	row := q.db.QueryRow(ctx, getSendState, arg.ID, arg.WorkspaceID)
+	var i GetSendStateRow
+	err := row.Scan(&i.Status, &i.MessageID)
 	return i, err
 }
 
@@ -282,6 +336,25 @@ func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]ListStuckQueuedSe
 	return items, nil
 }
 
+const releaseSend = `-- name: ReleaseSend :exec
+UPDATE sends SET claimed_at = 'epoch'
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending'
+`
+
+type ReleaseSendParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Release a claimed-but-not-finalized send after a RETRYABLE failure: expire the
+// lease (claimed_at='epoch') so the asynq retry reclaims promptly. Guarded on
+// status='sending' so it never touches a row already finalized by this or
+// another worker. Shared by the step and direct paths. workspace_id pinned.
+func (q *Queries) ReleaseSend(ctx context.Context, arg ReleaseSendParams) error {
+	_, err := q.db.Exec(ctx, releaseSend, arg.ID, arg.WorkspaceID)
+	return err
+}
+
 const setSendResult = `-- name: SetSendResult :exec
 UPDATE sends SET status = $2, message_id = $3, error = $4,
        sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
@@ -296,6 +369,9 @@ type SetSendResultParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
+// Finalize a send to its terminal state ('sent'|'failed'|'skipped'); sent_at is
+// stamped only on success. Doubles as FinalizeStepSend: the step path calls it
+// inside the same tx as the enrollment cursor advance. workspace_id pinned.
 func (q *Queries) SetSendResult(ctx context.Context, arg SetSendResultParams) error {
 	_, err := q.db.Exec(ctx, setSendResult,
 		arg.ID,

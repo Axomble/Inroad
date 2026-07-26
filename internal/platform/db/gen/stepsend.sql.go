@@ -12,13 +12,64 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimStepSend = `-- name: ClaimStepSend :one
+INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
+                   step_order, references_header, status, claimed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now())
+ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
+DO UPDATE SET status = 'sending', claimed_at = now(), error = ''
+    WHERE sends.status = 'sending'
+      AND sends.workspace_id = $2
+      AND sends.claimed_at < now() - make_interval(secs => $9::int)
+RETURNING id
+`
+
+type ClaimStepSendParams struct {
+	ID               uuid.UUID `json:"id"`
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
+	CampaignID       uuid.UUID `json:"campaign_id"`
+	ContactID        uuid.UUID `json:"contact_id"`
+	MailboxID        uuid.UUID `json:"mailbox_id"`
+	ToEmail          string    `json:"to_email"`
+	StepOrder        int32     `json:"step_order"`
+	ReferencesHeader string    `json:"references_header"`
+	LeaseSeconds     int32     `json:"lease_seconds"`
+}
+
+// Claim one step-send for delivery (claim-before-send). The sends row is the
+// claim: a fresh INSERT wins it ('sending', claimed_at=now()). On conflict the
+// row already exists, and the claim is re-won ONLY when the existing row is a
+// STALE 'sending' lease (a crashed worker) — never a terminal 'sent'/'failed'
+// (already delivered / permanently done) nor a FRESH 'sending' (another worker
+// owns it). RETURNING id yields a row iff we won the claim; zero rows
+// (pgx.ErrNoRows) means "skip the send — someone else owns or already delivered
+// it". Staleness is claimed_at older than the lease window (lease_seconds).
+// workspace_id is pinned on both the insert value and the reclaim WHERE, so a
+// foreign/cross-tenant id claims zero rows (belt-and-braces on the campaign FK).
+func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, claimStepSend,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.CampaignID,
+		arg.ContactID,
+		arg.MailboxID,
+		arg.ToEmail,
+		arg.StepOrder,
+		arg.ReferencesHeader,
+		arg.LeaseSeconds,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getStepEnrollmentBundle = `-- name: GetStepEnrollmentBundle :one
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        e.status, e.thread_root_id,
        cam.id AS campaign_id, cam.mailbox_id, cam.tracking_enabled,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
        m.provider, m.email AS from_email, m.display_name AS from_name,
-       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at
 FROM sequence_enrollments e
@@ -55,7 +106,7 @@ type GetStepEnrollmentBundleRow struct {
 	SmtpPort         int32              `json:"smtp_port"`
 	SmtpUsername     string             `json:"smtp_username"`
 	SecretCiphertext string             `json:"secret_ciphertext"`
-	UseTls           bool               `json:"use_tls"`
+	AllowPlaintext   bool               `json:"allow_plaintext"`
 	DailyCap         int32              `json:"daily_cap"`
 	RampEnabled      bool               `json:"ramp_enabled"`
 	RampStartCap     int32              `json:"ramp_start_cap"`
@@ -91,7 +142,7 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 		&i.SmtpPort,
 		&i.SmtpUsername,
 		&i.SecretCiphertext,
-		&i.UseTls,
+		&i.AllowPlaintext,
 		&i.DailyCap,
 		&i.RampEnabled,
 		&i.RampStartCap,
@@ -125,56 +176,4 @@ func (q *Queries) LatestSentForContact(ctx context.Context, arg LatestSentForCon
 	var i LatestSentForContactRow
 	err := row.Scan(&i.MessageID, &i.ReferencesHeader)
 	return i, err
-}
-
-const recordStepSend = `-- name: RecordStepSend :one
-INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-                   step_order, references_header, status, message_id, error, sent_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, CASE WHEN $9 = 'sent' THEN now() ELSE NULL END)
-ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL DO NOTHING
-RETURNING id
-`
-
-type RecordStepSendParams struct {
-	ID               uuid.UUID `json:"id"`
-	WorkspaceID      uuid.UUID `json:"workspace_id"`
-	CampaignID       uuid.UUID `json:"campaign_id"`
-	ContactID        uuid.UUID `json:"contact_id"`
-	MailboxID        uuid.UUID `json:"mailbox_id"`
-	ToEmail          string    `json:"to_email"`
-	StepOrder        int32     `json:"step_order"`
-	ReferencesHeader string    `json:"references_header"`
-	Status           string    `json:"status"`
-	MessageID        string    `json:"message_id"`
-	Error            string    `json:"error"`
-}
-
-// Insert the send row for one step WITH its result in a single write (the
-// advance handler sends first, then records). Keeps GetStepSendJob read-only so
-// a suppressed/capped step never leaves an orphan queued row. sent_at is set
-// only on success. ON CONFLICT makes a duplicate advance a no-op against the
-// (campaign, contact, step_order) idempotency index (migration 000008): the
-// duplicate inserts no row and returns none (sql.ErrNoRows), which the caller
-// treats as already-recorded.
-// id is supplied by the caller (generated in GetStepSendJob, before the step is
-// sent) rather than left to the column default: the worker embeds this same id
-// in the tracking pixel/click tokens at MIME-build time, so the eventual send
-// row's id must be known ahead of the insert for tracking_events to line up.
-func (q *Queries) RecordStepSend(ctx context.Context, arg RecordStepSendParams) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, recordStepSend,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.CampaignID,
-		arg.ContactID,
-		arg.MailboxID,
-		arg.ToEmail,
-		arg.StepOrder,
-		arg.ReferencesHeader,
-		arg.Status,
-		arg.MessageID,
-		arg.Error,
-	)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
 }

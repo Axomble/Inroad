@@ -2,9 +2,11 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -93,7 +95,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		SMTPPort:          int(b.SmtpPort),
 		SMTPUsername:      b.SmtpUsername,
 		SMTPPassword:      password,
-		UseTLS:            b.UseTls,
+		AllowPlaintext:    b.AllowPlaintext,
 	}, nil
 }
 
@@ -116,9 +118,47 @@ func (c client) IncrementSendAttempts(ctx context.Context, sendID, workspaceID s
 	return int(n), nil
 }
 
-// MarkSend records the outcome of a send attempt. workspaceID is pinned
-// alongside sendID so a stray/spoofed task can't clobber a row in another
-// tenant.
+// ClaimSend claims a direct-send for delivery (claim-before-send): the
+// pre-existing 'queued' row is moved to 'sending' with a fresh lease, or a STALE
+// 'sending' lease is reclaimed after a crash. Reports whether the claim was won;
+// false means another worker owns it or it is already terminal, so the caller
+// must NOT send. workspaceID is pinned so a foreign id claims zero rows.
+func (c client) ClaimSend(ctx context.Context, sendID, workspaceID string) (bool, error) {
+	id, err := uuid.Parse(sendID)
+	if err != nil {
+		return false, err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := c.q.ClaimSend(ctx, gen.ClaimSendParams{ID: id, WorkspaceID: ws, LeaseSeconds: claimLeaseSeconds}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// ReleaseSend expires the claim's lease after a RETRYABLE send failure so the
+// asynq retry reclaims it promptly. Guarded on status='sending' (in SQL),
+// workspace-pinned.
+func (c client) ReleaseSend(ctx context.Context, sendID, workspaceID string) error {
+	id, err := uuid.Parse(sendID)
+	if err != nil {
+		return err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
+	return c.q.ReleaseSend(ctx, gen.ReleaseSendParams{ID: id, WorkspaceID: ws})
+}
+
+// MarkSend finalizes a send to its terminal state (sent/failed/skipped).
+// workspaceID is pinned alongside sendID so a stray/spoofed task can't clobber a
+// row in another tenant.
 func (c client) MarkSend(ctx context.Context, sendID, workspaceID string, res coreapi.SendResult) error {
 	id, err := uuid.Parse(sendID)
 	if err != nil {

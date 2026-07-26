@@ -33,7 +33,7 @@ func seedThreeSteps(t *testing.T, ctx context.Context, q *gen.Queries, label str
 		WorkspaceID: w.ID, Provider: "smtp", Email: "from@x.test", DisplayName: "X",
 		SmtpHost: "smtp.x", SmtpPort: 587, SmtpUsername: "from@x.test",
 		ImapHost: "imap.x", ImapPort: 993, ImapUsername: "from@x.test",
-		SecretCiphertext: "ct", UseTls: true, DailyCap: 50,
+		SecretCiphertext: "ct", DailyCap: 50,
 		MinIntervalSeconds: 0, RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {

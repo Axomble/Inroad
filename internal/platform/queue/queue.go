@@ -4,10 +4,22 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/hibiken/asynq"
+)
+
+// Delivery-idempotency defense in depth (the claim in the send/advance handlers
+// is the real correctness guarantee; these just cut wasted retries/concurrency):
+//   - sendMaxRetry bounds how many times a permanently-failing task cycles
+//     (asynq's default is 25).
+//   - taskRetention keeps a finished task briefly for post-run inspection.
+const (
+	sendMaxRetry  = 5
+	taskRetention = 24 * time.Hour
 )
 
 const TaskWarmupTick = "warmup:tick"
@@ -82,16 +94,29 @@ func (c *Client) EnqueueWarmupTick(mailboxID string) error {
 	return err
 }
 
+// enqueue submits a task and treats an asynq TaskID conflict as success: a
+// duplicate enqueue of an already-pending task (sweeper re-enqueue racing a live
+// task) is a deliberate no-op, not an error.
+func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
+	if _, err := c.inner.Enqueue(t, opts...); err != nil {
+		if errors.Is(err, asynq.ErrTaskIDConflict) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // EnqueueSend enqueues a send:email task for immediate processing. Both
 // ids travel in the payload so the worker can pin workspace_id in its
-// DB lookups (defense in depth on top of the UUID sendID).
+// DB lookups (defense in depth on top of the UUID sendID). The TaskID keys on
+// the send id so a sweeper re-enqueue of an already-pending send dedups.
 func (c *Client) EnqueueSend(sendID, workspaceID string) error {
 	b, err := json.Marshal(SendEmailPayload{SendID: sendID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	_, err = c.inner.Enqueue(asynq.NewTask(TaskSendEmail, b))
-	return err
+	return c.enqueue(asynq.NewTask(TaskSendEmail, b), sendOpts(sendID)...)
 }
 
 // EnqueueSendIn enqueues a send:email task to be processed after delay d.
@@ -100,34 +125,61 @@ func (c *Client) EnqueueSendIn(sendID, workspaceID string, d time.Duration) erro
 	if err != nil {
 		return err
 	}
-	_, err = c.inner.Enqueue(asynq.NewTask(TaskSendEmail, b), asynq.ProcessIn(d))
-	return err
+	return c.enqueue(asynq.NewTask(TaskSendEmail, b), append(sendOpts(sendID), asynq.ProcessIn(d))...)
+}
+
+// sendOpts are the shared idempotency options for a send:email task.
+func sendOpts(sendID string) []asynq.Option {
+	return []asynq.Option{
+		asynq.TaskID("send:" + sendID),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Retention(taskRetention),
+	}
 }
 
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.
 func (c *Client) EnqueueAdvance(enrollmentID, workspaceID string) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID)
+	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now())
 }
 
 // EnqueueAdvanceAt enqueues a sequence:advance task to run at time t (used by
 // launch stagger and the lazy chain's next-step scheduling).
 func (c *Client) EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, asynq.ProcessAt(t))
+	return c.enqueueAdvance(enrollmentID, workspaceID, t, asynq.ProcessAt(t))
 }
 
 // EnqueueAdvanceIn enqueues a sequence:advance task after delay d (used by the
 // cap-exceeded backoff).
 func (c *Client) EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, asynq.ProcessIn(d))
+	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
 }
 
-func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, opts ...asynq.Option) error {
+// enqueueAdvance submits a sequence:advance keyed on (enrollment, due-second) so
+// duplicate enqueues for the SAME due instant (a sweeper re-enqueue racing the
+// lazy chain) dedup, while a genuinely new advance (a later due time) still
+// enqueues.
+//
+// Invariant: the TaskID uses whole-second granularity (due.Unix()), so two
+// advances whose due times land in the same second COLLAPSE to one task. That is
+// safe because (a) the ClaimStepSend row-claim — not this key — is the
+// delivery-idempotency guarantee, so a collapsed duplicate only saves wasted
+// work, never correctness; and (b) all advance due times are second-granular
+// (step delays are whole seconds), so a legitimately-distinct next advance never
+// shares a second with the one that scheduled it. The claim in AdvanceHandler
+// remains the correctness guarantee; this only cuts wasted concurrent advances.
+// due is the scheduled processing time.
+func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time, opts ...asynq.Option) error {
 	b, err := json.Marshal(AdvancePayload{EnrollmentID: enrollmentID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	_, err = c.inner.Enqueue(asynq.NewTask(TaskSequenceAdvance, b), opts...)
-	return err
+	taskID := fmt.Sprintf("advance:%s:%d", enrollmentID, due.Unix())
+	opts = append(opts,
+		asynq.TaskID(taskID),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Retention(taskRetention),
+	)
+	return c.enqueue(asynq.NewTask(TaskSequenceAdvance, b), opts...)
 }
 
 // EnqueueInboxPoll enqueues an inbox:poll task for immediate processing.

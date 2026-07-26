@@ -546,7 +546,7 @@ export type Mailbox = {
   imap_host?: string;
   imap_port?: number;
   imap_username?: string;
-  use_tls?: boolean;
+  allow_plaintext?: boolean;
   daily_cap?: number;
   min_interval_seconds?: number;
   ramp_enabled?: boolean;
@@ -566,7 +566,8 @@ export type ConnectMailboxRequest = {
   imap_port: number;
   imap_username?: string;
   secret: string;
-  use_tls?: boolean;
+  /** Explicit opt-out from TLS, persisted on the mailbox so the connect test AND every subsequent send apply the SAME policy (rare cleartext-only internal relay). Omitted/false enforces TLS (STARTTLS on 25/587/2525, implicit TLS on 465); an absent value can never silently downgrade to cleartext auth. Replaces the removed use_tls flag. */
+  allow_plaintext?: boolean;
 };
 export type List = {
   id?: string;

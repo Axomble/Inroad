@@ -16,10 +16,15 @@ type Store interface {
 	Enroll(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.UUID, error)
 	Get(ctx context.Context, ws, id uuid.UUID) (gen.SequenceEnrollment, error)
 	// AdvanceStep records a successful non-final step: bumps current_step,
-	// stamps last_sent_at=now(), schedules nextDueAt, stays active.
+	// stamps last_sent_at=now(), schedules nextDueAt, stays active. Guarded on
+	// status='active' in SQL, so a concurrently-stopped enrollment matches 0
+	// rows and this is a safe no-op (the stop is terminal and wins) — no error.
 	AdvanceStep(ctx context.Context, ws, id uuid.UUID, currentStep int32, nextDueAt time.Time) error
 	// Complete records the final step: bumps current_step, stamps
-	// last_sent_at, marks completed, clears next_due_at.
+	// last_sent_at, marks completed, clears next_due_at. Guarded on
+	// status='active' (like AdvanceStep): a stop that raced the final advance
+	// wins, so a stopped enrollment is not overwritten to completed (0 rows,
+	// no-op, no error).
 	Complete(ctx context.Context, ws, id uuid.UUID, currentStep int32) error
 	// Stop halts an active enrollment with a reason (no-op if not active).
 	Stop(ctx context.Context, ws, id uuid.UUID, reason StopReason) error

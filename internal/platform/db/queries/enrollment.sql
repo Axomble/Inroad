@@ -31,18 +31,27 @@ SELECT * FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2;
 -- run of cap-defers, so the counter tracks CONSECUTIVE defers since the last
 -- send (bounded by maxCapDeferrals), not a lifetime total that would wrongly
 -- fail a long, healthy campaign that occasionally brushes the daily cap.
+-- Guarded on status='active' (like StopEnrollment): the send path splits
+-- delivery (MarkStepDelivered) from this cursor advance into separate
+-- transactions, so a concurrent reply/bounce/unsubscribe stop can land between
+-- them. A stop is terminal and wins — this UPDATE then matches 0 rows and is a
+-- safe no-op (:exec surfaces no error), leaving the enrollment 'stopped' rather
+-- than clobbering it back to active.
 UPDATE sequence_enrollments
 SET current_step = $3, last_sent_at = now(), next_due_at = $4, cap_deferrals = 0
-WHERE id = $1 AND workspace_id = $2;
+WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 
 -- name: CompleteEnrollment :exec
 -- Final step sent: bump current_step, stamp last_sent_at, mark completed and
 -- clear next_due_at (drops the row out of the partial due index). Reset
 -- cap_deferrals to 0 on success for the same reason as AdvanceEnrollmentStep.
+-- Guarded on status='active' for the same reason: a stop that lands between the
+-- last step's MarkStepDelivered and this complete is terminal and must win, so
+-- a stopped enrollment is NOT overwritten to 'completed' (0 rows, no-op).
 UPDATE sequence_enrollments
 SET current_step = $3, last_sent_at = now(), status = 'completed',
     completed_at = now(), next_due_at = NULL, cap_deferrals = 0
-WHERE id = $1 AND workspace_id = $2;
+WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 
 -- name: StopEnrollment :exec
 -- The single stop entry point (unsubscribe now; reply/bounce deferred). Only

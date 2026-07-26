@@ -96,7 +96,7 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 		WorkspaceID: ws.ID, Provider: "smtp", Email: "from@acme.test", DisplayName: "Acme",
 		SmtpHost: "smtp.acme.test", SmtpPort: 587, SmtpUsername: "from@acme.test",
 		ImapHost: "imap.acme.test", ImapPort: 993, ImapUsername: "from@acme.test",
-		SecretCiphertext: ct, UseTls: true, DailyCap: 50, MinIntervalSeconds: 120,
+		SecretCiphertext: ct, DailyCap: 50, MinIntervalSeconds: 120,
 		RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {
@@ -225,7 +225,7 @@ func TestEnqueueSendsDedupOnRelaunch(t *testing.T) {
 		WorkspaceID: ws.ID, Provider: "smtp", Email: "from@dedup.test", DisplayName: "Dedup",
 		SmtpHost: "smtp.dedup.test", SmtpPort: 587, SmtpUsername: "from@dedup.test",
 		ImapHost: "imap.dedup.test", ImapPort: 993, ImapUsername: "from@dedup.test",
-		SecretCiphertext: ct, UseTls: true, DailyCap: 50, MinIntervalSeconds: 120,
+		SecretCiphertext: ct, DailyCap: 50, MinIntervalSeconds: 120,
 		RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {

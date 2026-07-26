@@ -61,7 +61,11 @@ type ConnectInput struct {
 	IMAPPort     int
 	IMAPUsername string
 	Secret       string
-	UseTLS       bool
+	// AllowPlaintext explicitly opts the SMTP connection test AND every subsequent
+	// send out of TLS (rare cleartext-only internal relay). It is persisted on the
+	// mailbox so connect and send apply the SAME policy. Omitted/false keeps TLS
+	// enforced (security Invariant 6).
+	AllowPlaintext bool
 }
 
 func (in ConnectInput) validate() error {
@@ -117,11 +121,11 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 	}
 
 	if err := s.tester.TestSMTP(mail.SMTPConfig{
-		Host:     in.SMTPHost,
-		Port:     in.SMTPPort,
-		Username: in.SMTPUsername,
-		Password: in.Secret,
-		UseTLS:   in.UseTLS,
+		Host:           in.SMTPHost,
+		Port:           in.SMTPPort,
+		Username:       in.SMTPUsername,
+		Password:       in.Secret,
+		AllowPlaintext: in.AllowPlaintext,
 	}); err != nil {
 		return MailboxSafe{}, fmt.Errorf("%w: smtp: %w", ErrConnectionTestFailed, err)
 	}
@@ -155,7 +159,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		ImapPort:           int32(in.IMAPPort),
 		ImapUsername:       in.IMAPUsername,
 		SecretCiphertext:   ciphertext,
-		UseTls:             in.UseTLS,
+		AllowPlaintext:     in.AllowPlaintext,
 		DailyCap:           defaultDailyCap,
 		MinIntervalSeconds: defaultMinIntervalSeconds,
 		RampEnabled:        true,

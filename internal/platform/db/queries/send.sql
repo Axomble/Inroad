@@ -15,7 +15,7 @@ RETURNING id;
 SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
        ct.first_name, cam.subject, cam.body_text, cam.body_html, cam.tracking_enabled,
        m.provider, m.email AS from_email, m.display_name AS from_name,
-       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days, m.created_at AS mailbox_created_at
 FROM sends s
 JOIN campaigns cam ON cam.id = s.campaign_id
@@ -23,9 +23,42 @@ JOIN contacts ct ON ct.id = s.contact_id
 JOIN mailboxes m ON m.id = s.mailbox_id
 WHERE s.id = $1 AND s.workspace_id = $2;
 -- name: SetSendResult :exec
+-- Finalize a send to its terminal state ('sent'|'failed'|'skipped'); sent_at is
+-- stamped only on success. Doubles as FinalizeStepSend: the step path calls it
+-- inside the same tx as the enrollment cursor advance. workspace_id pinned.
 UPDATE sends SET status = $2, message_id = $3, error = $4,
        sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
 WHERE id = $1 AND workspace_id = $5;
+
+-- name: GetSendState :one
+-- Read a claimed send's current terminal-relevant state, workspace-pinned. Used
+-- on the step path AFTER a lost claim: the recover-forward decision keys on
+-- status ('sent' ⇒ this step already delivered, advance the cursor without
+-- re-sending), and the step-1 thread-root advance reads message_id from the
+-- already-'sent' row rather than a fresh send result.
+SELECT status, message_id FROM sends WHERE id = $1 AND workspace_id = $2;
+
+-- name: ClaimSend :one
+-- Claim one direct-send ('send:email' path) for delivery. Unlike the step path,
+-- the row pre-exists as 'queued' (EnqueueSends), so the claim is an UPDATE: win
+-- it from 'queued', or reclaim a STALE 'sending' lease (a crashed worker).
+-- RETURNING id yields a row iff we won the claim; zero rows (pgx.ErrNoRows) mean
+-- another worker owns it or it is already terminal — skip the send. Staleness is
+-- claimed_at older than lease_seconds. workspace_id pinned so a foreign id claims
+-- zero rows.
+UPDATE sends SET status = 'sending', claimed_at = now()
+WHERE id = $1 AND workspace_id = $2
+  AND (status = 'queued'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => sqlc.arg(lease_seconds)::int)))
+RETURNING id;
+
+-- name: ReleaseSend :exec
+-- Release a claimed-but-not-finalized send after a RETRYABLE failure: expire the
+-- lease (claimed_at='epoch') so the asynq retry reclaims promptly. Guarded on
+-- status='sending' so it never touches a row already finalized by this or
+-- another worker. Shared by the step and direct paths. workspace_id pinned.
+UPDATE sends SET claimed_at = 'epoch'
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
 -- name: CountSentToday :one
 -- Sends today for a mailbox, counted over the UTC calendar day. The half-open
 -- range is explicitly UTC (date_trunc on now() AT TIME ZONE 'utc'), so it counts

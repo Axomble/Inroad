@@ -19,6 +19,21 @@ or SSRF. (Not a full threat model; that's future work.)
 4. **Every tenant-scoped query is filtered by `workspace_id`.** The id comes from
    the authenticated JWT (`auth.UserFromContext`), never from the request body or
    a path param the caller controls. Store methods take `workspaceID` explicitly.
+   This includes the send-delivery claim/finalize/release
+   (`ClaimStepSend`/`ClaimSend`/`SetSendResult`/`ReleaseSend`): each is
+   `workspace_id`-pinned, so a foreign/cross-tenant id claims, finalizes, or
+   releases zero rows, and the step finalize + enrollment cursor advance commit
+   in one transaction.
+
+4a. **Email delivery is idempotent (claim-before-send).** Both send handlers
+   claim the `sends` row (`queued`/fresh → `sending`, with a `claimed_at` lease)
+   BEFORE the real SMTP call, and only finalize (`sent`/`failed`) after. A retried
+   asynq job or a raced sweeper-vs-lazy-chain advance that finds the row already
+   `sending`/`sent` loses the claim and skips the send, so the same email is never
+   delivered twice. A crashed worker's `sending` row is reclaimed only once its
+   lease expires. A transient send error releases the claim (retry); an ambiguous
+   or permanent one fails forward — "never double, occasionally drop a rare
+   ambiguous send".
 
 ## Outbound network (SSRF)
 5. **User-supplied hosts are dialed only through the SSRF guard** (`mail.vetAddr`):
@@ -29,8 +44,17 @@ or SSRF. (Not a full threat model; that's future work.)
    - Port allowlist: SMTP {25,465,587,2525}, IMAP {143,993}.
    - Dial the resolved IP (hostname kept only as TLS ServerName) — closes the
      DNS-rebinding window.
-6. **TLS is enforced for SMTP/IMAP by default.** Plaintext auth requires an
-   explicit opt-out (future: per-mailbox flag), never a silent fallback.
+6. **TLS is enforced for SMTP/IMAP by default.** The SMTP send and connection
+   test dial STARTTLS-mandatory on 25/587/2525 and implicit TLS on 465 — an
+   omitted/false request field can no longer silently downgrade to cleartext
+   auth (the pre-Phase-A bug). Cleartext requires an explicit `allow_plaintext`
+   opt-out, which is now **persisted** on the mailbox (`mailboxes.allow_plaintext
+   BOOLEAN NOT NULL DEFAULT false`) and read back into the send job, so the
+   connect-test and every send apply the SAME policy (a plaintext relay that
+   passed the test no longer fails on every send). The dead `use_tls` column and
+   its request/job plumbing were removed (it was never consulted by the send
+   path and contradicted `allow_plaintext`). IMAP is unchanged (already
+   TLS-by-default).
 
 ## Auth
 7. **JWT is HS256 and the signing method is verified on parse** (`auth.ParseToken`

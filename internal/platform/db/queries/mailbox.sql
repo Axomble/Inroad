@@ -3,7 +3,7 @@ INSERT INTO mailboxes (
     workspace_id, provider, email, display_name,
     smtp_host, smtp_port, smtp_username,
     imap_host, imap_port, imap_username,
-    secret_ciphertext, use_tls,
+    secret_ciphertext, allow_plaintext,
     daily_cap, min_interval_seconds,
     ramp_enabled, ramp_start_cap, ramp_days
 ) VALUES (

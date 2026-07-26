@@ -45,7 +45,12 @@ type connectRequest struct {
 	IMAPPort     int    `json:"imap_port"`
 	IMAPUsername string `json:"imap_username"`
 	Secret       string `json:"secret"`
-	UseTLS       bool   `json:"use_tls"`
+	// AllowPlaintext is the explicit cleartext opt-out, persisted on the mailbox so
+	// the connect-test AND every send apply the same policy. Omitted/false keeps
+	// TLS enforced (security Invariant 6): unlike the removed use_tls, an absent
+	// value can never silently downgrade to cleartext auth. Field order must mirror
+	// ConnectInput for the ConnectInput(req) conversion in connect().
+	AllowPlaintext bool `json:"allow_plaintext"`
 }
 
 // mailboxResponse is the wire shape returned for a mailbox. It deliberately
@@ -62,7 +67,7 @@ type mailboxResponse struct {
 	IMAPHost           string `json:"imap_host"`
 	IMAPPort           int32  `json:"imap_port"`
 	IMAPUsername       string `json:"imap_username"`
-	UseTLS             bool   `json:"use_tls"`
+	AllowPlaintext     bool   `json:"allow_plaintext"`
 	DailyCap           int32  `json:"daily_cap"`
 	MinIntervalSeconds int32  `json:"min_interval_seconds"`
 	RampEnabled        bool   `json:"ramp_enabled"`
@@ -85,7 +90,7 @@ func toResponse(m MailboxSafe) mailboxResponse {
 		IMAPHost:           m.ImapHost,
 		IMAPPort:           m.ImapPort,
 		IMAPUsername:       m.ImapUsername,
-		UseTLS:             m.UseTls,
+		AllowPlaintext:     m.AllowPlaintext,
 		DailyCap:           m.DailyCap,
 		MinIntervalSeconds: m.MinIntervalSeconds,
 		RampEnabled:        m.RampEnabled,

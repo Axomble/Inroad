@@ -3,6 +3,7 @@ package sender
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 
@@ -17,33 +18,54 @@ const testBaseURL = "https://app.test"
 
 var testTrackingSecret = []byte("0123456789abcdef0123456789abcdef")
 
-// stubCore embeds coreapi.Client so it satisfies the interface; only the two
+// stubCore embeds coreapi.Client so it satisfies the interface; only the
 // methods Handler calls are implemented.
 type stubCore struct {
 	coreapi.Client
 	job    coreapi.SendJob
 	marked *coreapi.SendResult
+	// claimOK is the result of the FIRST ClaimSend; subsequent claims lose,
+	// modelling the DB claim (a retried/raced job finds the row already
+	// 'sending'/terminal and skips).
+	claimOK    bool
+	claimErr   error
+	claimCalls int
+	released   bool
 }
 
 func (s *stubCore) GetSendJob(context.Context, string, string) (coreapi.SendJob, error) {
 	return s.job, nil
+}
+func (s *stubCore) ClaimSend(context.Context, string, string) (bool, error) {
+	s.claimCalls++
+	if s.claimErr != nil {
+		return false, s.claimErr
+	}
+	return s.claimOK && s.claimCalls == 1, nil
+}
+func (s *stubCore) ReleaseSend(context.Context, string, string) error {
+	s.released = true
+	return nil
 }
 func (s *stubCore) MarkSend(_ context.Context, _, _ string, res coreapi.SendResult) error {
 	s.marked = &res
 	return nil
 }
 
-// stubSender records the single message passed to Send. Named distinctly
-// from send_integration_test.go's fakeSender (same package, integration
-// build tag) to avoid a redeclaration when both compile together.
+// stubSender records the message passed to Send and counts calls. Named
+// distinctly from send_integration_test.go's fakeSender (same package,
+// integration build tag) to avoid a redeclaration when both compile together.
 type stubSender struct {
-	sent mail.Message
-	tj   mail.OutboundJob
+	calls int
+	sent  mail.Message
+	tj    mail.OutboundJob
+	err   error
 }
 
 func (f *stubSender) Send(_ context.Context, tj mail.OutboundJob, m mail.Message) (string, error) {
+	f.calls++
 	f.tj, f.sent = tj, m
-	return "<mid@x>", nil
+	return "<mid@x>", f.err
 }
 
 func sendTask(t *testing.T) *asynq.Task {
@@ -60,7 +82,7 @@ func sendTask(t *testing.T) *asynq.Task {
 // an open pixel, the unsubscribe link is left untouched, and the plain-text
 // body is never rewritten.
 func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
-	core := &stubCore{job: coreapi.SendJob{
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
 		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
 		Provider: "smtp", Subject: "Hi", BodyText: "hello",
 		BodyHTML:        `<html><body><p>hello <a href="https://example.com/x">click</a></p></body></html>`,
@@ -96,7 +118,7 @@ func TestHandlerInjectsTrackingWhenEnabled(t *testing.T) {
 // the dispatched OutboundJob, so MultiSender routes to the Gmail transport with
 // the right bearer (rather than the SMTP leg).
 func TestHandlerGmailProviderDispatchesAccessToken(t *testing.T) {
-	core := &stubCore{job: coreapi.SendJob{
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
 		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
 		Provider: "gmail", AccessToken: []byte("ya29.access-token"),
 		Subject: "Hi", BodyText: "hello",
@@ -119,7 +141,7 @@ func TestHandlerGmailProviderDispatchesAccessToken(t *testing.T) {
 // rewritten links.
 func TestHandlerSkipsTrackingWhenDisabled(t *testing.T) {
 	html := `<html><body><a href="https://example.com/x">click</a></body></html>`
-	core := &stubCore{job: coreapi.SendJob{
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
 		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
 		Subject: "Hi", BodyText: "hello", BodyHTML: html, TrackingEnabled: false,
 	}}
@@ -140,7 +162,7 @@ func TestHandlerSkipsTrackingWhenDisabled(t *testing.T) {
 // tracking rewrite even when TrackingEnabled is true — RewriteHTML is never
 // called on an empty body.
 func TestHandlerNoHTMLBodyNoInjection(t *testing.T) {
-	core := &stubCore{job: coreapi.SendJob{
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
 		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
 		Subject: "Hi", BodyText: "text only", TrackingEnabled: true,
 	}}
@@ -153,3 +175,59 @@ func TestHandlerNoHTMLBodyNoInjection(t *testing.T) {
 		t.Errorf("no HTML body in the job must yield no HTML in the sent message, got %q", snd.sent.BodyHTML)
 	}
 }
+
+// TestHandlerDoubleSendDeliversOnce is the direct-path headline regression:
+// invoking the send handler twice for the SAME send delivers exactly once. The
+// second ClaimSend loses (the row is already owned/terminal), so Send is never
+// called a second time.
+func TestHandlerDoubleSendDeliversOnce(t *testing.T) {
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
+		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
+		Provider: "smtp", Subject: "Hi", BodyText: "hello",
+	}}
+	snd := &stubSender{}
+	h := Handler(core, snd, nil, testBaseURL, testTrackingSecret)
+
+	if err := h(context.Background(), sendTask(t)); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if err := h(context.Background(), sendTask(t)); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	if core.claimCalls != 2 {
+		t.Fatalf("expected two claim attempts, got %d", core.claimCalls)
+	}
+	if snd.calls != 1 {
+		t.Fatalf("double-send bug: Send must be called EXACTLY once, got %d", snd.calls)
+	}
+}
+
+// TestHandlerTransientSendReleasesAndReturnsError proves a transient failure
+// releases the claim and returns the error (asynq retries) rather than
+// finalizing the send as failed.
+func TestHandlerTransientSendReleasesAndReturnsError(t *testing.T) {
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
+		SendID: "11111111-1111-4111-8111-111111111111", EffectiveDailyCap: 10, ToEmail: "a@b.io",
+		Provider: "smtp", Subject: "Hi", BodyText: "hello",
+	}}
+	snd := &stubSender{err: &net.OpError{Op: "dial", Err: timeoutStub{}}}
+	h := Handler(core, snd, nil, testBaseURL, testTrackingSecret)
+	err := h(context.Background(), sendTask(t))
+	if err == nil {
+		t.Fatal("transient failure must return an error so asynq retries")
+	}
+	if !core.released {
+		t.Fatal("transient failure must release the claim")
+	}
+	if core.marked != nil {
+		t.Fatalf("transient failure must NOT finalize the send, got %+v", core.marked)
+	}
+}
+
+// timeoutStub is a net.Error reporting a timeout (forces mail.Retryable=true).
+type timeoutStub struct{}
+
+func (timeoutStub) Error() string   { return "i/o timeout" }
+func (timeoutStub) Timeout() bool   { return true }
+func (timeoutStub) Temporary() bool { return true }

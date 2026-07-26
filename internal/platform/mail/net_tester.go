@@ -31,8 +31,9 @@ func NewNetTester(allowPrivate bool) *NetTester {
 const defaultIMAPTimeout = 30 * time.Second
 
 // TestSMTP dials the SMTP server, negotiates TLS, and authenticates — without
-// sending any mail. Port 465 uses implicit TLS; other ports use STARTTLS when
-// UseTLS is set.
+// sending any mail. TLS is enforced by default (security Invariant 6): port 465
+// uses implicit TLS, every other port requires STARTTLS — cleartext auth is
+// permitted ONLY when cfg.AllowPlaintext is explicitly set.
 func (t *NetTester) TestSMTP(cfg SMTPConfig) error {
 	addr, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, t.AllowPrivate)
 	if err != nil {
@@ -58,13 +59,13 @@ func (t *NetTester) TestSMTP(cfg SMTPConfig) error {
 	}
 	defer c.Close()
 
-	if cfg.Port != 465 && cfg.UseTLS {
+	if cfg.Port != 465 && !cfg.AllowPlaintext {
 		if ok, _ := c.Extension("STARTTLS"); ok {
 			if err := c.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
 				return fmt.Errorf("smtp starttls: %w", err)
 			}
 		} else {
-			return fmt.Errorf("smtp server does not advertise STARTTLS but TLS was required")
+			return fmt.Errorf("smtp server does not advertise STARTTLS but TLS is required (set allow_plaintext to override)")
 		}
 	}
 
