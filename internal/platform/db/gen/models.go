@@ -235,7 +235,6 @@ type Mailbox struct {
 	ImapPort           int32              `json:"imap_port"`
 	ImapUsername       string             `json:"imap_username"`
 	SecretCiphertext   string             `json:"secret_ciphertext"`
-	UseTls             bool               `json:"use_tls"`
 	DailyCap           int32              `json:"daily_cap"`
 	MinIntervalSeconds int32              `json:"min_interval_seconds"`
 	RampEnabled        bool               `json:"ramp_enabled"`
@@ -249,6 +248,7 @@ type Mailbox struct {
 	InboxLastSeenUid   int64              `json:"inbox_last_seen_uid"`
 	InboxUidValidity   int64              `json:"inbox_uid_validity"`
 	InboxCursor        string             `json:"inbox_cursor"`
+	AllowPlaintext     bool               `json:"allow_plaintext"`
 }
 
 type Send struct {
@@ -266,6 +266,7 @@ type Send struct {
 	Attempts         int32              `json:"attempts"`
 	StepOrder        int32              `json:"step_order"`
 	ReferencesHeader string             `json:"references_header"`
+	ClaimedAt        pgtype.Timestamptz `json:"claimed_at"`
 }
 
 type SequenceEnrollment struct {

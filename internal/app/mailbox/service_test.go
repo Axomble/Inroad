@@ -56,7 +56,7 @@ func (s *fakeStore) Create(ctx context.Context, arg gen.CreateMailboxParams) (Ma
 		ImapHost:           arg.ImapHost,
 		ImapPort:           arg.ImapPort,
 		ImapUsername:       arg.ImapUsername,
-		UseTls:             arg.UseTls,
+		AllowPlaintext:     arg.AllowPlaintext,
 		DailyCap:           arg.DailyCap,
 		MinIntervalSeconds: arg.MinIntervalSeconds,
 		RampEnabled:        arg.RampEnabled,
@@ -193,7 +193,6 @@ func validConnectInput() ConnectInput {
 		IMAPHost: "imap.example.com",
 		IMAPPort: 993,
 		Secret:   "super-secret-password",
-		UseTLS:   true,
 	}
 }
 
@@ -230,6 +229,40 @@ func TestConnectSMTP_SuccessPersistsSealedSecret(t *testing.T) {
 	}
 	if len(all) != 1 {
 		t.Fatalf("len(all) = %d, want 1", len(all))
+	}
+}
+
+func TestConnectSMTP_PersistsAllowPlaintext(t *testing.T) {
+	// A self-hoster who connect-tests a cleartext relay with allow_plaintext=true
+	// must have that policy PERSISTED, so every later send applies the same rule
+	// the test validated (MAJOR 2). Default input keeps it false (TLS enforced).
+	cases := []struct {
+		name  string
+		allow bool
+	}{
+		{"plaintext opt-out persisted", true},
+		{"default enforces tls", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+			in := validConnectInput()
+			in.AllowPlaintext = tc.allow
+			m, err := svc.ConnectSMTP(context.Background(), uuid.New(), in)
+			if err != nil {
+				t.Fatalf("ConnectSMTP() error = %v", err)
+			}
+			store.mu.Lock()
+			got := store.lastCreate.AllowPlaintext
+			store.mu.Unlock()
+			if got != tc.allow {
+				t.Fatalf("persisted allow_plaintext = %v, want %v", got, tc.allow)
+			}
+			if m.AllowPlaintext != tc.allow {
+				t.Fatalf("returned mailbox allow_plaintext = %v, want %v", m.AllowPlaintext, tc.allow)
+			}
+		})
 	}
 }
 

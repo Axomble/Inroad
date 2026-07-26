@@ -71,8 +71,22 @@ test('a valid submit posts the entered fields and calls onDone on success', asyn
     imap_host: 'imap.company.com',
     imap_port: 993,
     secret: 'app-password-123',
-    use_tls: true,
+    allow_plaintext: false,
   })
+})
+
+test('checking "Allow plaintext" submits allow_plaintext: true', async () => {
+  const onDone = vi.fn()
+  renderWithProviders(<ConnectMailboxForm onDone={onDone} onCancel={() => {}} />)
+
+  fillRequiredFields()
+  fireEvent.click(screen.getByLabelText(/Allow plaintext/))
+  submit()
+
+  await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1))
+
+  const posted = requests.find((r) => r.method === 'POST' && r.url.endsWith('/mailboxes'))
+  expect(posted?.body).toMatchObject({ allow_plaintext: true })
 })
 
 test('a 422 surfaces the "connection test failed" copy and does not call onDone', async () => {

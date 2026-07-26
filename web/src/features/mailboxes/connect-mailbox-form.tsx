@@ -21,7 +21,7 @@ const schema = z.object({
   imap_port: z.number({ message: PORT_ERROR }).int().min(1, PORT_ERROR).max(65535, PORT_ERROR),
   imap_username: z.string().optional(),
   secret: z.string().min(1, 'Required'),
-  use_tls: z.boolean(),
+  allow_plaintext: z.boolean(),
 })
 type Values = z.infer<typeof schema>
 
@@ -40,10 +40,10 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
     formState: { errors },
   } = useForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: { smtp_port: 587, imap_port: 993, use_tls: true },
+    defaultValues: { smtp_port: 587, imap_port: 993, allow_plaintext: false },
   })
   const [connect, { isLoading, error }] = useConnectMailboxMutation()
-  const tlsId = useId()
+  const plaintextId = useId()
 
   async function onSubmit(values: Values) {
     const result = await connect({ connectMailboxRequest: values })
@@ -146,10 +146,21 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
           )}
         </Field>
 
-        <label htmlFor={tlsId} className="flex items-center gap-2 text-[13px] text-muted-foreground">
-          <input id={tlsId} type="checkbox" className="size-4 accent-primary" {...register('use_tls')} />
-          Require TLS (recommended)
-        </label>
+        <div>
+          <label htmlFor={plaintextId} className="flex items-center gap-2 text-[13px] text-muted-foreground">
+            <input
+              id={plaintextId}
+              type="checkbox"
+              className="size-4 accent-primary"
+              {...register('allow_plaintext')}
+            />
+            Allow plaintext (no TLS)
+          </label>
+          <p className="mt-1 pl-6 text-xs text-faint">
+            TLS is used by default. Only check this for a local or self-hosted relay with no TLS — credentials will
+            be sent without encryption.
+          </p>
+        </div>
 
         {error && (
           <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">

@@ -66,7 +66,7 @@ func seedSend(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.Quer
 		WorkspaceID: ws.ID, Provider: "smtp", Email: "from@acme.test", DisplayName: "Acme",
 		SmtpHost: "smtp.acme.test", SmtpPort: 587, SmtpUsername: "from@acme.test",
 		ImapHost: "imap.acme.test", ImapPort: 993, ImapUsername: "from@acme.test",
-		SecretCiphertext: "ct", UseTls: true, DailyCap: 500, MinIntervalSeconds: 0,
+		SecretCiphertext: "ct", DailyCap: 500, MinIntervalSeconds: 0,
 		RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {

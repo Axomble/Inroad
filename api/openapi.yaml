@@ -671,7 +671,16 @@ components:
         imap_port: { type: integer }
         imap_username: { type: string }
         secret: { type: string }
-        use_tls: { type: boolean, default: true }
+        allow_plaintext:
+          type: boolean
+          default: false
+          description: >-
+            Explicit opt-out from TLS, persisted on the mailbox so the connect
+            test AND every subsequent send apply the SAME policy (rare
+            cleartext-only internal relay). Omitted/false enforces TLS
+            (STARTTLS on 25/587/2525, implicit TLS on 465); an absent value can
+            never silently downgrade to cleartext auth. Replaces the removed
+            use_tls flag.
     Mailbox:
       type: object
       properties:
@@ -685,7 +694,7 @@ components:
         imap_host: { type: string }
         imap_port: { type: integer }
         imap_username: { type: string }
-        use_tls: { type: boolean }
+        allow_plaintext: { type: boolean }
         daily_cap: { type: integer }
         min_interval_seconds: { type: integer }
         ramp_enabled: { type: boolean }

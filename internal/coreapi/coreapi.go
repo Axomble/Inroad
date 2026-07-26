@@ -27,8 +27,18 @@ type Client interface {
 	// WorkspaceID is pinned in the SQL WHERE clause (defense in depth on top
 	// of the unguessable send UUID); mismatch yields a not-found error.
 	GetSendJob(ctx context.Context, sendID, workspaceID string) (SendJob, error)
-	// MarkSend records the outcome of a send attempt. Same workspace
-	// pinning as GetSendJob.
+	// ClaimSend claims a direct-send for delivery (claim-before-send): the
+	// pre-existing 'queued' sends row is moved to 'sending' with a fresh lease,
+	// or a STALE 'sending' lease is reclaimed after a crash. Reports whether the
+	// claim was won; a false result means another worker owns it or it is already
+	// terminal, so the caller must NOT send. Same workspace pinning as GetSendJob.
+	ClaimSend(ctx context.Context, sendID, workspaceID string) (claimed bool, err error)
+	// ReleaseSend releases a claimed-but-unfinalized send after a RETRYABLE
+	// failure, expiring the lease so the asynq retry reclaims it promptly. Only
+	// touches a row still in 'sending'. Same workspace pinning.
+	ReleaseSend(ctx context.Context, sendID, workspaceID string) error
+	// MarkSend finalizes a send to its terminal state (sent/failed/skipped).
+	// Same workspace pinning as GetSendJob.
 	MarkSend(ctx context.Context, sendID, workspaceID string, res SendResult) error
 	// ListStuckQueuedSends returns send ids (with their workspace) that are
 	// still 'queued' more than the reconcile window (currently 2 minutes)
@@ -49,14 +59,53 @@ type Client interface {
 	// creates no rows, so a suppressed/capped step leaves no orphan. workspaceID
 	// is pinned in the SQL WHERE (defense in depth on the enrollment UUID).
 	GetStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (StepSendJob, error)
-	// MarkStepSent records the step's send (one sends row, with result) and
-	// advances the enrollment cursor via the enrollment state machine — the
-	// single insertion point for the current_step transition and cadence, run in
-	// one transaction. It takes the StepSendJob returned by GetStepSendJob so the
-	// immutable values (campaign/contact/mailbox ids, resolved step, references,
-	// next-step delay) are reused rather than re-queried. Returns whether the
-	// enrollment completed and, if not, when the next step is due.
-	MarkStepSent(ctx context.Context, job StepSendJob, res StepResult) (Advance, error)
+	// ClaimStepSend claims one step-send for delivery (claim-before-send): the
+	// sends row is inserted 'sending' (fresh claim), or a STALE 'sending' lease is
+	// reclaimed after a crash. The returned ClaimOutcome tells the caller what to
+	// do WITHOUT it having to distinguish "crashed before delivery" from
+	// "delivered, finalize failed":
+	//   - ClaimWon: we own the claim; build + send now.
+	//   - ClaimAlreadySent: this exact step already delivered (a prior run's
+	//     status='sent' UPDATE committed but its cursor advance didn't). The
+	//     caller must NOT re-send — it runs ONLY the cursor advance
+	//     (recover-forward) via AdvanceStepCursor.
+	//   - ClaimSkip: a fresh 'sending' (another worker owns it) or a terminal
+	//     'failed'/'skipped' — do nothing.
+	// It reuses the immutable values GetStepSendJob resolved (carried on the job)
+	// — including the deterministic SendID the tracking tokens embed — so the
+	// claimed row's id matches those tokens. workspace_id is pinned on the claim.
+	ClaimStepSend(ctx context.Context, job StepSendJob) (ClaimOutcome, error)
+	// MarkStepDelivered records a successful delivery in its OWN committed
+	// statement — UPDATE sends SET status='sent', message_id, sent_at=now() — so
+	// the delivery is durable independently of the cursor advance. Called
+	// immediately after Send succeeds and BEFORE AdvanceStepCursor, so if the
+	// cursor advance then fails, the asynq retry's claim sees the 'sent' row
+	// (ClaimAlreadySent) and recover-forwards instead of re-delivering.
+	// workspace_id pinned.
+	MarkStepDelivered(ctx context.Context, job StepSendJob, messageID string) error
+	// AdvanceStepCursor advances the enrollment cursor via the enrollment state
+	// machine (the single current_step transition + cadence point), in its own
+	// committed step. Idempotent: current_step is set absolutely, so a retried
+	// recover-forward re-advances to the same value. On step 1 it reads the
+	// already-'sent' row's message_id to record the thread root. Returns whether
+	// the enrollment completed and, if not, when the next step is due. Used by
+	// BOTH the normal success path (after MarkStepDelivered) and recover-forward.
+	// workspace_id pinned.
+	AdvanceStepCursor(ctx context.Context, job StepSendJob) (Advance, error)
+	// FinalizeStepSend finalizes the claimed step-send to a NON-'sent' terminal
+	// state (permanent 'failed') AND advances the enrollment cursor in ONE
+	// transaction (fail-forward). The success path does NOT use this — it splits
+	// into MarkStepDelivered + AdvanceStepCursor so a delivered row can never be
+	// left unrecorded by a failed combined-tx (the residual double-send this
+	// replaced). A failed finalize is atomic with its advance, so a 'failed' row
+	// always has an advanced cursor (nothing to recover-forward). Reuses the
+	// immutable job values rather than re-querying.
+	FinalizeStepSend(ctx context.Context, job StepSendJob, res StepResult) (Advance, error)
+	// ReleaseStepSend releases a claimed-but-unfinalized step-send after a
+	// RETRYABLE failure, expiring the lease so the asynq retry reclaims it
+	// promptly without advancing the cursor. Only touches a row still in
+	// 'sending'. workspace_id pinned.
+	ReleaseStepSend(ctx context.Context, job StepSendJob) error
 	// MarkStepStopped halts an enrollment (the single stop entry point). reason
 	// is one of the enrollment stop reasons (e.g. "suppressed").
 	MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error
@@ -112,6 +161,23 @@ type Client interface {
 	// hard=true.
 	MarkBounced(ctx context.Context, enrollmentID, workspaceID, email string, hard bool) error
 }
+
+// ClaimOutcome is the result of ClaimStepSend: what the advance handler should
+// do about the send row it tried to claim. It lets the handler recover-forward
+// (advance the cursor without re-sending) when a prior run delivered but never
+// advanced — closing the residual double-send window.
+type ClaimOutcome int
+
+const (
+	// ClaimSkip: another worker owns a fresh 'sending' lease, or the row is a
+	// terminal 'failed'/'skipped'. Do nothing.
+	ClaimSkip ClaimOutcome = iota
+	// ClaimWon: we own the claim (fresh insert or reclaimed stale lease). Send.
+	ClaimWon
+	// ClaimAlreadySent: this exact step already delivered ('sent'); advance the
+	// cursor only (recover-forward), never re-send.
+	ClaimAlreadySent
+)
 
 // ContactVars are the personalization values for a contact, applied worker-side
 // to the raw step templates ({{first_name}}, {{custom.<key>}}, …).
@@ -176,7 +242,10 @@ type StepSendJob struct {
 	SMTPPort     int
 	SMTPUsername string
 	SMTPPassword []byte
-	UseTLS       bool
+	// AllowPlaintext is the persisted per-mailbox cleartext opt-out (mailboxes.
+	// allow_plaintext). Threaded into OutboundJob so the send applies the SAME
+	// TLS policy the connect-test validated; false keeps TLS enforced.
+	AllowPlaintext bool
 }
 
 // StepResult is the outcome of one step send.
@@ -229,7 +298,6 @@ type InboxPollJob struct {
 	Port        int
 	Username    string
 	Password    []byte
-	UseTLS      bool
 	LastSeenUID uint32
 	UIDValidity uint32
 }
@@ -266,7 +334,10 @@ type SendJob struct {
 	SMTPPort          int
 	SMTPUsername      string
 	SMTPPassword      []byte
-	UseTLS            bool
+	// AllowPlaintext is the persisted per-mailbox cleartext opt-out (mailboxes.
+	// allow_plaintext), threaded into OutboundJob so the send applies the SAME
+	// TLS policy the connect-test validated; false keeps TLS enforced.
+	AllowPlaintext bool
 	// TrackingEnabled mirrors the campaign's tracking_enabled column; see
 	// StepSendJob.TrackingEnabled for the injection contract.
 	TrackingEnabled bool

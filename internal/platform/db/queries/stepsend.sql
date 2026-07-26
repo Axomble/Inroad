@@ -7,7 +7,7 @@ SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        cam.id AS campaign_id, cam.mailbox_id, cam.tracking_enabled,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
        m.provider, m.email AS from_email, m.display_name AS from_name,
-       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.use_tls,
+       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at
 FROM sequence_enrollments e
@@ -16,22 +16,25 @@ JOIN contacts ct ON ct.id = e.contact_id
 JOIN mailboxes m ON m.id = cam.mailbox_id
 WHERE e.id = $1 AND e.workspace_id = $2;
 
--- name: RecordStepSend :one
--- Insert the send row for one step WITH its result in a single write (the
--- advance handler sends first, then records). Keeps GetStepSendJob read-only so
--- a suppressed/capped step never leaves an orphan queued row. sent_at is set
--- only on success. ON CONFLICT makes a duplicate advance a no-op against the
--- (campaign, contact, step_order) idempotency index (migration 000008): the
--- duplicate inserts no row and returns none (sql.ErrNoRows), which the caller
--- treats as already-recorded.
--- id is supplied by the caller (generated in GetStepSendJob, before the step is
--- sent) rather than left to the column default: the worker embeds this same id
--- in the tracking pixel/click tokens at MIME-build time, so the eventual send
--- row's id must be known ahead of the insert for tracking_events to line up.
+-- name: ClaimStepSend :one
+-- Claim one step-send for delivery (claim-before-send). The sends row is the
+-- claim: a fresh INSERT wins it ('sending', claimed_at=now()). On conflict the
+-- row already exists, and the claim is re-won ONLY when the existing row is a
+-- STALE 'sending' lease (a crashed worker) — never a terminal 'sent'/'failed'
+-- (already delivered / permanently done) nor a FRESH 'sending' (another worker
+-- owns it). RETURNING id yields a row iff we won the claim; zero rows
+-- (pgx.ErrNoRows) means "skip the send — someone else owns or already delivered
+-- it". Staleness is claimed_at older than the lease window (lease_seconds).
+-- workspace_id is pinned on both the insert value and the reclaim WHERE, so a
+-- foreign/cross-tenant id claims zero rows (belt-and-braces on the campaign FK).
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-                   step_order, references_header, status, message_id, error, sent_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, CASE WHEN $9 = 'sent' THEN now() ELSE NULL END)
-ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL DO NOTHING
+                   step_order, references_header, status, claimed_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now())
+ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
+DO UPDATE SET status = 'sending', claimed_at = now(), error = ''
+    WHERE sends.status = 'sending'
+      AND sends.workspace_id = $2
+      AND sends.claimed_at < now() - make_interval(secs => sqlc.arg(lease_seconds)::int)
 RETURNING id;
 
 -- name: LatestSentForContact :one

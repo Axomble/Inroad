@@ -87,7 +87,7 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 	return coreapi.InboxPollJob{
 		Provider: "smtp",
 		Host:     m.ImapHost, Port: int(m.ImapPort), Username: m.ImapUsername, Password: password,
-		UseTLS: m.UseTls, LastSeenUID: uint32(m.InboxLastSeenUid), UIDValidity: uint32(m.InboxUidValidity),
+		LastSeenUID: uint32(m.InboxLastSeenUid), UIDValidity: uint32(m.InboxUidValidity),
 	}, nil
 }
 

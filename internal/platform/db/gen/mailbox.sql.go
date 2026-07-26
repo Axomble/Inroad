@@ -32,7 +32,7 @@ INSERT INTO mailboxes (
     workspace_id, provider, email, display_name,
     smtp_host, smtp_port, smtp_username,
     imap_host, imap_port, imap_username,
-    secret_ciphertext, use_tls,
+    secret_ciphertext, allow_plaintext,
     daily_cap, min_interval_seconds,
     ramp_enabled, ramp_start_cap, ramp_days
 ) VALUES (
@@ -43,7 +43,7 @@ INSERT INTO mailboxes (
     $13, $14,
     $15, $16, $17
 )
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext
 `
 
 type CreateMailboxParams struct {
@@ -58,7 +58,7 @@ type CreateMailboxParams struct {
 	ImapPort           int32     `json:"imap_port"`
 	ImapUsername       string    `json:"imap_username"`
 	SecretCiphertext   string    `json:"secret_ciphertext"`
-	UseTls             bool      `json:"use_tls"`
+	AllowPlaintext     bool      `json:"allow_plaintext"`
 	DailyCap           int32     `json:"daily_cap"`
 	MinIntervalSeconds int32     `json:"min_interval_seconds"`
 	RampEnabled        bool      `json:"ramp_enabled"`
@@ -79,7 +79,7 @@ func (q *Queries) CreateMailbox(ctx context.Context, arg CreateMailboxParams) (M
 		arg.ImapPort,
 		arg.ImapUsername,
 		arg.SecretCiphertext,
-		arg.UseTls,
+		arg.AllowPlaintext,
 		arg.DailyCap,
 		arg.MinIntervalSeconds,
 		arg.RampEnabled,
@@ -100,7 +100,6 @@ func (q *Queries) CreateMailbox(ctx context.Context, arg CreateMailboxParams) (M
 		&i.ImapPort,
 		&i.ImapUsername,
 		&i.SecretCiphertext,
-		&i.UseTls,
 		&i.DailyCap,
 		&i.MinIntervalSeconds,
 		&i.RampEnabled,
@@ -114,6 +113,7 @@ func (q *Queries) CreateMailbox(ctx context.Context, arg CreateMailboxParams) (M
 		&i.InboxLastSeenUid,
 		&i.InboxUidValidity,
 		&i.InboxCursor,
+		&i.AllowPlaintext,
 	)
 	return i, err
 }
@@ -136,7 +136,7 @@ func (q *Queries) DeleteMailbox(ctx context.Context, arg DeleteMailboxParams) (i
 }
 
 const getMailbox = `-- name: GetMailbox :one
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor FROM mailboxes WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext FROM mailboxes WHERE id = $1 AND workspace_id = $2
 `
 
 type GetMailboxParams struct {
@@ -160,7 +160,6 @@ func (q *Queries) GetMailbox(ctx context.Context, arg GetMailboxParams) (Mailbox
 		&i.ImapPort,
 		&i.ImapUsername,
 		&i.SecretCiphertext,
-		&i.UseTls,
 		&i.DailyCap,
 		&i.MinIntervalSeconds,
 		&i.RampEnabled,
@@ -174,6 +173,7 @@ func (q *Queries) GetMailbox(ctx context.Context, arg GetMailboxParams) (Mailbox
 		&i.InboxLastSeenUid,
 		&i.InboxUidValidity,
 		&i.InboxCursor,
+		&i.AllowPlaintext,
 	)
 	return i, err
 }
@@ -210,7 +210,7 @@ func (q *Queries) ListActiveMailboxes(ctx context.Context) ([]ListActiveMailboxe
 }
 
 const listMailboxes = `-- name: ListMailboxes :many
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]Mailbox, error) {
@@ -235,7 +235,6 @@ func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]M
 			&i.ImapPort,
 			&i.ImapUsername,
 			&i.SecretCiphertext,
-			&i.UseTls,
 			&i.DailyCap,
 			&i.MinIntervalSeconds,
 			&i.RampEnabled,
@@ -249,6 +248,7 @@ func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]M
 			&i.InboxLastSeenUid,
 			&i.InboxUidValidity,
 			&i.InboxCursor,
+			&i.AllowPlaintext,
 		); err != nil {
 			return nil, err
 		}
@@ -335,7 +335,7 @@ const updateMailboxStatus = `-- name: UpdateMailboxStatus :one
 UPDATE mailboxes
 SET status = $3, last_error = $4
 WHERE id = $1 AND workspace_id = $2
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, use_tls, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext
 `
 
 type UpdateMailboxStatusParams struct {
@@ -366,7 +366,6 @@ func (q *Queries) UpdateMailboxStatus(ctx context.Context, arg UpdateMailboxStat
 		&i.ImapPort,
 		&i.ImapUsername,
 		&i.SecretCiphertext,
-		&i.UseTls,
 		&i.DailyCap,
 		&i.MinIntervalSeconds,
 		&i.RampEnabled,
@@ -380,6 +379,7 @@ func (q *Queries) UpdateMailboxStatus(ctx context.Context, arg UpdateMailboxStat
 		&i.InboxLastSeenUid,
 		&i.InboxUidValidity,
 		&i.InboxCursor,
+		&i.AllowPlaintext,
 	)
 	return i, err
 }

@@ -26,6 +26,12 @@ func (s *Service) Enroll(ctx context.Context, ws, campaignID uuid.UUID) ([]uuid.
 // following step should fire (last_sent_at + next step's delay, computed by the
 // caller); lastStep true ⇒ the enrollment completes. On step 1, threadRootID
 // (that step's Message-ID) is recorded once so later steps thread onto it.
+//
+// Tolerates a concurrently-stopped enrollment as a success no-op: the underlying
+// AdvanceStep/Complete are guarded on status='active', so a stop that raced the
+// cursor advance (delivery and advance are separate transactions) matches 0 rows
+// and returns no error — the stop is terminal and wins, and the row is not
+// resurrected. Re-sending can't follow: GetStepSendJob re-checks status.
 func (s *Service) MarkStepSent(ctx context.Context, ws, id uuid.UUID, sentStep int32, nextDueAt time.Time, lastStep bool, threadRootID string) error {
 	if sentStep == 1 && threadRootID != "" {
 		if err := s.store.SetThreadRoot(ctx, ws, id, threadRootID); err != nil {

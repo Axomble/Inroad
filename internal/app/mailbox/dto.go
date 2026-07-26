@@ -23,7 +23,7 @@ type MailboxSafe struct {
 	ImapHost           string
 	ImapPort           int32
 	ImapUsername       string
-	UseTls             bool
+	AllowPlaintext     bool
 	DailyCap           int32
 	MinIntervalSeconds int32
 	RampEnabled        bool
@@ -51,7 +51,7 @@ func safeFromGen(m gen.Mailbox) MailboxSafe {
 		ImapHost:           m.ImapHost,
 		ImapPort:           m.ImapPort,
 		ImapUsername:       m.ImapUsername,
-		UseTls:             m.UseTls,
+		AllowPlaintext:     m.AllowPlaintext,
 		DailyCap:           m.DailyCap,
 		MinIntervalSeconds: m.MinIntervalSeconds,
 		RampEnabled:        m.RampEnabled,

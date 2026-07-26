@@ -39,9 +39,11 @@ func NewNetSender(allowPrivate bool) *NetSender {
 }
 
 // Send delivers msg over SMTP using cfg. It applies the same SSRF vetting
-// used for connection testing before ever dialing out. Port 465 uses
-// implicit TLS; other ports use STARTTLS when UseTLS is set, or no
-// encryption otherwise. On success it returns the generated Message-ID.
+// used for connection testing before ever dialing out. TLS is enforced by
+// default (security Invariant 6): port 465 uses implicit TLS, every other port
+// requires STARTTLS (TLSMandatory) — cleartext is used ONLY when the caller
+// explicitly opts out via cfg.AllowPlaintext. On success it returns the
+// generated Message-ID.
 //
 // The vetted ip:port is dialed directly via WithDialContextFunc; cfg.Host is
 // preserved only as the TLS SNI / AUTH server name. This closes the
@@ -76,10 +78,12 @@ func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
 	switch {
 	case cfg.Port == 465:
 		opts = append(opts, gomail.WithSSLPort(false))
-	case cfg.UseTLS:
-		opts = append(opts, gomail.WithTLSPolicy(gomail.TLSMandatory))
-	default:
+	case cfg.AllowPlaintext:
+		// Explicit, deliberate cleartext opt-out (rare internal relay).
 		opts = append(opts, gomail.WithTLSPolicy(gomail.NoTLS))
+	default:
+		// Secure default: STARTTLS required on 25/587/2525.
+		opts = append(opts, gomail.WithTLSPolicy(gomail.TLSMandatory))
 	}
 
 	client, err := gomail.NewClient(cfg.Host, opts...)

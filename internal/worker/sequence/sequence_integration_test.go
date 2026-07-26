@@ -104,7 +104,7 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 		WorkspaceID: ws.ID, Provider: "smtp", Email: "from@acme.test", DisplayName: "Acme",
 		SmtpHost: "smtp.acme.test", SmtpPort: 587, SmtpUsername: "from@acme.test",
 		ImapHost: "imap.acme.test", ImapPort: 993, ImapUsername: "from@acme.test",
-		SecretCiphertext: ct, UseTls: true, DailyCap: 500, MinIntervalSeconds: 0,
+		SecretCiphertext: ct, DailyCap: 500, MinIntervalSeconds: 0,
 		RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {
@@ -315,6 +315,71 @@ func TestSequenceCapDeferralsResetOnSend(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("post-reset counter must be consecutive (want 1), got %d", n)
+	}
+}
+
+// TestSequenceStopPrecedenceOverFinalAdvance proves the send-path two-phase
+// split (MarkStepDelivered then AdvanceStepCursor in separate transactions)
+// cannot mis-report a concurrently-stopped enrollment as completed. A reply/
+// bounce/unsubscribe stop that lands in the window between the LAST step's
+// delivery and its cursor advance is terminal and must win: the guarded
+// CompleteEnrollment matches 0 rows, so AdvanceStepCursor is a safe no-op (no
+// error) and the enrollment ends 'stopped', NOT 'completed'.
+func TestSequenceStopPrecedenceOverFinalAdvance(t *testing.T) {
+	ctx := context.Background()
+	pool, q, closeFn := connect(t)
+	defer closeFn()
+	sealer := newSealer(t)
+
+	// Single-step campaign so the advance is the final one (CompleteEnrollment).
+	fx := seedCampaign(t, ctx, pool, q, sealer, [][3]string{{"Hi {{first_name}}", "Hello", "0"}})
+	ids, err := q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: fx.campaignID, WorkspaceID: fx.ws})
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("enroll: %v", err)
+	}
+	eid := ids[0].ID
+
+	// Resolve + claim + deliver the step while still active — exactly the order the
+	// advance handler runs (GetStepSendJob → ClaimStepSend → Send → MarkStepDelivered),
+	// leaving a durable 'sent' row before the cursor advance.
+	job, err := fx.core.GetStepSendJob(ctx, eid.String(), fx.ws.String())
+	if err != nil {
+		t.Fatalf("get step send job: %v", err)
+	}
+	if job.Skip || !job.LastStep {
+		t.Fatalf("expected an active final-step job, got skip=%v last=%v", job.Skip, job.LastStep)
+	}
+	if outcome, err := fx.core.ClaimStepSend(ctx, job); err != nil || outcome != coreapi.ClaimWon {
+		t.Fatalf("claim: outcome=%v err=%v", outcome, err)
+	}
+	if err := fx.core.MarkStepDelivered(ctx, job, "<delivered@inroad>"); err != nil {
+		t.Fatalf("mark delivered: %v", err)
+	}
+
+	// A concurrent reply stop lands in the split window (after delivery, before the
+	// cursor advance). It is terminal.
+	if err := q.StopEnrollment(ctx, gen.StopEnrollmentParams{ID: eid, WorkspaceID: fx.ws, Column3: "replied"}); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// The final-step cursor advance must tolerate the now-stopped enrollment: no
+	// error, and it must NOT resurrect the row to 'completed'.
+	if _, err := fx.core.AdvanceStepCursor(ctx, job); err != nil {
+		t.Fatalf("advance over a stopped enrollment must be a safe no-op, got %v", err)
+	}
+
+	e, err := q.GetEnrollment(ctx, gen.GetEnrollmentParams{ID: eid, WorkspaceID: fx.ws})
+	if err != nil {
+		t.Fatalf("get enrollment: %v", err)
+	}
+	if e.Status != "stopped" {
+		t.Fatalf("stop must win over the final advance, got status=%q (want stopped)", e.Status)
+	}
+	if e.StopReason == nil || *e.StopReason != "replied" {
+		t.Fatalf("stop reason clobbered, got %v (want replied)", e.StopReason)
+	}
+	if e.CompletedAt.Valid {
+		t.Fatalf("stopped enrollment must not be stamped completed_at, got %v", e.CompletedAt.Time)
 	}
 }
 

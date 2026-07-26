@@ -7,6 +7,7 @@ package sequence
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -98,6 +99,42 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, capBackoff)
 		}
 
+		// schedule enqueues the next step (lazy chain) unless the enrollment
+		// completed. advanceCursor advances the enrollment cursor in its own
+		// committed step, then schedules — shared by the normal success path and
+		// recover-forward.
+		schedule := func(adv coreapi.Advance) error {
+			if !adv.Completed {
+				return enq.EnqueueAdvanceAt(p.EnrollmentID, p.WorkspaceID, adv.NextDueAt)
+			}
+			return nil
+		}
+		advanceCursor := func() error {
+			adv, err := core.AdvanceStepCursor(ctx, job)
+			if err != nil {
+				return err
+			}
+			return schedule(adv)
+		}
+
+		// Claim-before-send: the sends row is the delivery claim.
+		//   - ClaimSkip: another worker owns a fresh 'sending' lease, or the row is
+		//     terminal — nothing to do.
+		//   - ClaimAlreadySent: a prior run delivered THIS exact step but its cursor
+		//     advance didn't commit. Recover-forward: advance the cursor only, never
+		//     re-send. This is what closes the residual double-send window.
+		//   - ClaimWon: we own the claim; build + send below.
+		outcome, err := core.ClaimStepSend(ctx, job)
+		if err != nil {
+			return err
+		}
+		switch outcome {
+		case coreapi.ClaimSkip:
+			return nil
+		case coreapi.ClaimAlreadySent:
+			return advanceCursor()
+		}
+
 		vars := personalize.Vars{
 			FirstName: job.Vars.FirstName, LastName: job.Vars.LastName,
 			Email: job.Vars.Email, Company: job.Vars.Company, Custom: job.Vars.Custom,
@@ -109,7 +146,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			bodyHTML = withUnsubHTML(personalize.HTML(job.BodyHTML, vars), job.UnsubURL)
 			// Tracking rewrite runs AFTER the unsub footer so the unsubscribe
 			// link is present in the body when RewriteHTML skips it (never
-			// click-tracked).
+			// click-tracked). Uses the pre-derived SendID (== the claimed row id).
 			if job.TrackingEnabled {
 				bodyHTML = track.RewriteHTML(bodyHTML, publicURL, job.SendID, trackingSecret)
 			}
@@ -118,8 +155,8 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		msgID, sendErr := sender.Send(ctx,
 			mail.OutboundJob{
 				Provider: job.Provider, Host: job.SMTPHost, Port: job.SMTPPort,
-				Username: job.SMTPUsername, Password: string(job.SMTPPassword), UseTLS: job.UseTLS,
-				AccessToken: string(job.AccessToken),
+				Username: job.SMTPUsername, Password: string(job.SMTPPassword),
+				AllowPlaintext: job.AllowPlaintext, AccessToken: string(job.AccessToken),
 			},
 			mail.Message{
 				FromEmail: job.FromEmail, FromName: job.FromName, To: job.ToEmail,
@@ -127,22 +164,36 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				ListUnsubscribe: job.UnsubURL, InReplyTo: job.InReplyTo, References: job.References,
 			},
 		)
-		res := coreapi.StepResult{Status: "sent", MessageID: msgID}
-		if sendErr != nil {
-			// Record the failure and advance the cursor so a single failing step
-			// doesn't wedge the enrollment forever. NOTE: this "fail-forward"
-			// choice is inferred (spec §4.2 not available) — a retry-on-transient
-			// policy may be preferred; revisit.
-			res = coreapi.StepResult{Status: "failed", Err: sendErr.Error()}
+
+		switch {
+		case sendErr == nil:
+			// Durable-delivered + recover-forward: commit status='sent' FIRST so the
+			// delivery is durable on its own, THEN advance the cursor as a separate
+			// committed step. If the cursor advance fails, the asynq retry's claim
+			// sees the 'sent' row (ClaimAlreadySent) and advances without re-sending.
+			if err := core.MarkStepDelivered(ctx, job, msgID); err != nil {
+				// The status='sent' UPDATE failed: the row is still 'sending', so
+				// returning the error lets asynq retry. This is the irreducible
+				// one-UPDATE + hard-crash window documented on MarkStepDelivered.
+				return fmt.Errorf("mark step delivered: %w", err)
+			}
+			return advanceCursor()
+		case mail.Retryable(sendErr):
+			// Transient failure (nothing delivered): release the claim so the
+			// asynq retry reclaims it, and return the error so asynq retries.
+			if rerr := core.ReleaseStepSend(ctx, job); rerr != nil {
+				return fmt.Errorf("release step send after transient failure: %w", rerr)
+			}
+			return sendErr
+		default:
+			// Permanent failure: fail-forward — finalize 'failed' and advance the
+			// cursor in one tx so a single bad step doesn't wedge the enrollment.
+			adv, ferr := core.FinalizeStepSend(ctx, job, coreapi.StepResult{Status: "failed", Err: sendErr.Error()})
+			if ferr != nil {
+				return ferr
+			}
+			return schedule(adv)
 		}
-		adv, err := core.MarkStepSent(ctx, job, res)
-		if err != nil {
-			return err
-		}
-		if !adv.Completed {
-			return enq.EnqueueAdvanceAt(p.EnrollmentID, p.WorkspaceID, adv.NextDueAt)
-		}
-		return nil
 	}
 }
 

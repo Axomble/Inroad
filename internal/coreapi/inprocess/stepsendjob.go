@@ -20,14 +20,22 @@ import (
 
 // stepSendIDNamespace is a fixed namespace for deriving each step-send's id
 // deterministically (uuid.NewSHA1) from (campaign, contact, step_order) —
-// the same tuple RecordStepSend's idempotency index is keyed on. A retried or
+// the same tuple ClaimStepSend's idempotency index is keyed on. A retried or
 // raced advance (sweeper vs. the lazy chain) then recomputes the identical
 // id, so every copy of a step's tracking tokens (embedded in the email body
-// before the send row exists) resolve to the one canonical sends row instead
-// of orphaning a dead id when only the first delivery's row survives the
-// ON CONFLICT DO NOTHING. The value itself is arbitrary — it only needs to be
-// fixed across process restarts.
+// before the send row exists) resolve to the one canonical sends row, and the
+// claim's ON CONFLICT lets exactly one of them win delivery. The value itself
+// is arbitrary — it only needs to be fixed across process restarts.
 var stepSendIDNamespace = uuid.MustParse("6f1b1a1e-6b7a-4c9e-9c1e-9b8e2a7d5f3a")
+
+// claimLeaseSeconds is the delivery-claim lease: how long a 'sending' row is
+// considered owned before a crashed worker's claim may be reclaimed. 5 minutes
+// — longer than any single send timeout (30s) so a live send is never
+// double-claimed, shorter than the 5-min enrollment sweeper so a genuinely
+// crashed send is re-driven promptly. Both the step and direct claim paths use
+// it. A package const (not config) keeps the correctness-critical value pinned;
+// the asynq claim is defense in depth over it.
+const claimLeaseSeconds int32 = 300
 
 // deriveStepSendID computes the deterministic send id for one (campaign,
 // contact, step_order) — see stepSendIDNamespace.
@@ -160,11 +168,11 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	inReplyTo, references := c.threading(ctx, nextOrder, b.CampaignID, b.ContactID, b.ThreadRootID)
 
 	// Derived now, before the step is sent, so the worker can embed it in
-	// tracking tokens at MIME-build time; MarkStepSent writes it back as the
-	// send row's id (RecordStepSend takes an explicit id rather than the
-	// column default) so events recorded against it line up with that row.
-	// Deterministic (not uuid.New()) so a retried/raced advance for the same
-	// step recomputes the same id — see stepSendIDNamespace.
+	// tracking tokens at MIME-build time; ClaimStepSend inserts it as the send
+	// row's id (an explicit id rather than the column default) so events recorded
+	// against it line up with that row. Deterministic (not uuid.New()) so a
+	// retried/raced advance for the same step recomputes the same id — see
+	// stepSendIDNamespace.
 	sendID := deriveStepSendID(b.CampaignID, b.ContactID, nextOrder)
 
 	// Transport dispatch on the mailbox provider (see GetSendJob): API providers
@@ -217,21 +225,109 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		FromEmail: b.FromEmail, FromName: b.FromName,
 		Provider: b.Provider, AccessToken: accessToken,
 		SMTPHost: b.SmtpHost, SMTPPort: int(b.SmtpPort),
-		SMTPUsername: b.SmtpUsername, SMTPPassword: password, UseTLS: b.UseTls,
+		SMTPUsername: b.SmtpUsername, SMTPPassword: password, AllowPlaintext: b.AllowPlaintext,
 	}, nil
 }
 
-// MarkStepSent records the step send (one sends row, with result) and advances
-// the enrollment cursor via the enrollment state machine, in one transaction.
-// It reuses the immutable values GetStepSendJob already resolved (carried on the
-// job) rather than re-fetching the bundle, next step and references. Returns
-// whether the enrollment completed and the next due time.
+// ClaimStepSend claims one step-send for delivery (claim-before-send). The
+// deterministic SendID (derived in GetStepSendJob, embedded in the tracking
+// tokens) is the sends row id: a fresh INSERT wins the claim, and only a STALE
+// 'sending' lease is reclaimed on conflict. workspace_id is pinned on the insert
+// value and the reclaim WHERE, so a cross-tenant id claims zero rows.
 //
-// Tenant safety: cross-tenant reads are rejected in GetStepSendJob (which built
-// the job); here workspace_id is pinned on every write (the send row's
-// workspace_id value and each enrollment UPDATE's WHERE), so a mismatch cannot
-// touch another tenant's rows.
-func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error) {
+// On a LOST claim (ON CONFLICT matched a non-stale row → the underlying query
+// returns pgx.ErrNoRows) it does a workspace-pinned status lookup so the caller
+// can RECOVER FORWARD: a 'sent' row means this exact step already delivered (a
+// prior run's MarkStepDelivered committed but its cursor advance did not), so we
+// must advance the cursor WITHOUT re-sending — returned as ClaimAlreadySent. Any
+// other lost-claim state (a fresh 'sending' owned by another worker, or a
+// terminal 'failed'/'skipped') returns ClaimSkip. The lookup happening a moment
+// after the claim is benign: worst case we return ClaimSkip on a row that just
+// became 'sent' (the sweeper/retry re-drives it) or ClaimAlreadySent on one that
+// just became 'sent' by another worker (the cursor advance is idempotent).
+func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
+	ws, err := uuid.Parse(job.WorkspaceID)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	campaignID, err := uuid.Parse(job.CampaignID)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	contactID, err := uuid.Parse(job.ContactID)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	mailboxID, err := uuid.Parse(job.MailboxID)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	sendID, err := uuid.Parse(job.SendID)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	if _, err := c.q.ClaimStepSend(ctx, gen.ClaimStepSendParams{
+		ID:          sendID,
+		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
+		ToEmail: job.ToEmail, StepOrder: int32(job.StepOrder), ReferencesHeader: job.References,
+		LeaseSeconds: claimLeaseSeconds,
+	}); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return coreapi.ClaimSkip, err
+		}
+		// Lost the claim: learn the row's state to decide skip vs recover-forward.
+		st, serr := c.q.GetSendState(ctx, gen.GetSendStateParams{ID: sendID, WorkspaceID: ws})
+		if serr != nil {
+			if errors.Is(serr, pgx.ErrNoRows) {
+				// Not visible to this workspace (cross-tenant / vanished): skip.
+				return coreapi.ClaimSkip, nil
+			}
+			return coreapi.ClaimSkip, serr
+		}
+		if st.Status == "sent" {
+			return coreapi.ClaimAlreadySent, nil
+		}
+		return coreapi.ClaimSkip, nil
+	}
+	return coreapi.ClaimWon, nil
+}
+
+// MarkStepDelivered commits the step-send's successful delivery in its OWN
+// statement — UPDATE sends SET status='sent', message_id, sent_at=now() — so the
+// delivery becomes durable independently of the cursor advance. It reuses
+// SetSendResult (the identical UPDATE), workspace-pinned. Called right after Send
+// succeeds and BEFORE AdvanceStepCursor.
+//
+// Residual double-send window (documented; irreducible for non-transactional
+// SMTP): if this single UPDATE does not commit after Send returned success —
+// whether from a hard crash OR a returned error from the deliver-UPDATE itself
+// (a lost connection, statement timeout, etc.) — the row is left 'sending'; after
+// the lease expires the sweeper reclaims it and re-sends. This is the ONLY
+// remaining window — we shrank it from the pre-fix "whole finalize tx + an
+// ordinary asynq retry" down to "one UPDATE failing to commit". Any failure AFTER
+// this commit recovers forward via ClaimAlreadySent instead of re-delivering.
+func (c client) MarkStepDelivered(ctx context.Context, job coreapi.StepSendJob, messageID string) error {
+	ws, err := uuid.Parse(job.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	sendID, err := uuid.Parse(job.SendID)
+	if err != nil {
+		return err
+	}
+	return c.q.SetSendResult(ctx, gen.SetSendResultParams{
+		ID: sendID, Status: "sent", MessageID: messageID, Error: "", WorkspaceID: ws,
+	})
+}
+
+// AdvanceStepCursor advances the enrollment cursor for the just-delivered step in
+// its own committed transaction (SetThreadRoot on step 1 + AdvanceStep/Complete).
+// Idempotent: current_step is set absolutely, so a retried recover-forward
+// re-advances to the same value. On step 1 it reads the message_id from the
+// already-'sent' row (persisted by MarkStepDelivered) to record the thread root,
+// so it behaves identically on the normal success path and on recover-forward
+// (where there is no fresh send result). workspace_id is pinned on every write.
+func (c client) AdvanceStepCursor(ctx context.Context, job coreapi.StepSendJob) (coreapi.Advance, error) {
 	eid, err := uuid.Parse(job.EnrollmentID)
 	if err != nil {
 		return coreapi.Advance{}, err
@@ -240,15 +336,82 @@ func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res c
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	campaignID, err := uuid.Parse(job.CampaignID)
+	sendID, err := uuid.Parse(job.SendID)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	contactID, err := uuid.Parse(job.ContactID)
+	sentStep := job.StepOrder
+	lastStep := job.LastStep
+
+	threadRoot := ""
+	if sentStep == 1 {
+		st, err := c.q.GetSendState(ctx, gen.GetSendStateParams{ID: sendID, WorkspaceID: ws})
+		if err != nil {
+			return coreapi.Advance{}, err
+		}
+		if st.Status == "sent" {
+			threadRoot = st.MessageID
+		}
+	}
+	var nextDueAt time.Time
+	if !lastStep {
+		// Cadence reference point is now; the enrollment stamps last_sent_at=now()
+		// in the same transition.
+		nextDueAt = time.Now().Add(time.Duration(job.NextDelaySeconds) * time.Second)
+	}
+
+	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
-	mailboxID, err := uuid.Parse(job.MailboxID)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := c.q.WithTx(tx)
+	enrollTx := enrollment.NewService(enrollment.NewPgStore(qtx))
+	if err := enrollTx.MarkStepSent(ctx, ws, eid, int32(sentStep), nextDueAt, lastStep, threadRoot); err != nil {
+		return coreapi.Advance{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return coreapi.Advance{}, err
+	}
+	return coreapi.Advance{Completed: lastStep, NextDueAt: nextDueAt}, nil
+}
+
+// ReleaseStepSend expires the claim's lease after a RETRYABLE send failure so
+// the asynq retry reclaims it promptly, without advancing the cursor. Guarded on
+// status='sending' (in SQL), workspace-pinned.
+func (c client) ReleaseStepSend(ctx context.Context, job coreapi.StepSendJob) error {
+	ws, err := uuid.Parse(job.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	sendID, err := uuid.Parse(job.SendID)
+	if err != nil {
+		return err
+	}
+	return c.q.ReleaseSend(ctx, gen.ReleaseSendParams{ID: sendID, WorkspaceID: ws})
+}
+
+// FinalizeStepSend finalizes the already-claimed step-send row to a NON-'sent'
+// terminal state (permanent 'failed') and advances the enrollment cursor via the
+// enrollment state machine, in ONE transaction (fail-forward). The SUCCESS path
+// deliberately does NOT use this — it splits into MarkStepDelivered (durable
+// delivery) + AdvanceStepCursor so a delivered row can never be left unrecorded
+// by a failed combined tx. Because a 'failed' finalize is atomic with its cursor
+// advance, a 'failed' row always has an advanced cursor (nothing to
+// recover-forward). It reuses the immutable values GetStepSendJob resolved
+// (carried on the job) rather than re-fetching the bundle, next step and
+// references. Returns whether the enrollment completed and the next due time.
+//
+// Tenant safety: cross-tenant reads are rejected in GetStepSendJob (which built
+// the job); here workspace_id is pinned on every write (the send UPDATE's WHERE
+// and each enrollment UPDATE's WHERE), so a mismatch cannot touch another
+// tenant's rows.
+func (c client) FinalizeStepSend(ctx context.Context, job coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error) {
+	eid, err := uuid.Parse(job.EnrollmentID)
+	if err != nil {
+		return coreapi.Advance{}, err
+	}
+	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return coreapi.Advance{}, err
 	}
@@ -271,9 +434,9 @@ func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res c
 		nextDueAt = time.Now().Add(time.Duration(job.NextDelaySeconds) * time.Second)
 	}
 
-	// One transaction (spec §6): the send row and the cursor advance commit
-	// together so a crash between them can't leave a recorded send with a stale
-	// cursor, or an advanced cursor with no send row.
+	// One transaction (spec §6): the send-row finalize and the cursor advance
+	// commit together so a crash between them can't leave a finalized send with a
+	// stale cursor, or an advanced cursor with an unfinalized send row.
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return coreapi.Advance{}, err
@@ -281,16 +444,15 @@ func (c client) MarkStepSent(ctx context.Context, job coreapi.StepSendJob, res c
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 	qtx := c.q.WithTx(tx)
 
-	// ON CONFLICT DO NOTHING → a duplicate advance (sweeper racing the lazy
-	// chain) inserts no second row and returns ErrNoRows; treat that as
-	// already-recorded and still advance (current_step is set absolutely, so a
-	// repeat is idempotent).
-	if _, err := qtx.RecordStepSend(ctx, gen.RecordStepSendParams{
+	// The row already exists (this worker claimed it 'sending'); finalize it to
+	// its terminal state. workspace_id pinned in the UPDATE WHERE.
+	if err := qtx.SetSendResult(ctx, gen.SetSendResultParams{
 		ID:          sendID,
-		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
-		ToEmail: job.ToEmail, StepOrder: int32(sentStep), ReferencesHeader: job.References,
-		Status: res.Status, MessageID: res.MessageID, Error: res.Err,
-	}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		Status:      res.Status,
+		MessageID:   res.MessageID,
+		Error:       res.Err,
+		WorkspaceID: ws,
+	}); err != nil {
 		return coreapi.Advance{}, err
 	}
 

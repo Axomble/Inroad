@@ -32,9 +32,19 @@ func (f *fakeCore) IncrementSendAttempts(context.Context, string, string) (int, 
 func (f *fakeCore) GetStepSendJob(context.Context, string, string) (coreapi.StepSendJob, error) {
 	return coreapi.StepSendJob{}, nil
 }
-func (f *fakeCore) MarkStepSent(context.Context, coreapi.StepSendJob, coreapi.StepResult) (coreapi.Advance, error) {
+func (f *fakeCore) ClaimSend(context.Context, string, string) (bool, error) { return true, nil }
+func (f *fakeCore) ReleaseSend(context.Context, string, string) error       { return nil }
+func (f *fakeCore) ClaimStepSend(context.Context, coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
+	return coreapi.ClaimWon, nil
+}
+func (f *fakeCore) MarkStepDelivered(context.Context, coreapi.StepSendJob, string) error { return nil }
+func (f *fakeCore) AdvanceStepCursor(context.Context, coreapi.StepSendJob) (coreapi.Advance, error) {
 	return coreapi.Advance{}, nil
 }
+func (f *fakeCore) FinalizeStepSend(context.Context, coreapi.StepSendJob, coreapi.StepResult) (coreapi.Advance, error) {
+	return coreapi.Advance{}, nil
+}
+func (f *fakeCore) ReleaseStepSend(context.Context, coreapi.StepSendJob) error    { return nil }
 func (f *fakeCore) MarkStepStopped(context.Context, string, string, string) error { return nil }
 func (f *fakeCore) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
 	return 0, nil

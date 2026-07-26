@@ -10,12 +10,18 @@ import (
 )
 
 // SMTPConfig holds the outbound settings for a mailbox.
+//
+// TLS is enforced by default (security Invariant 6): port 465 uses implicit TLS,
+// every other port requires STARTTLS. AllowPlaintext is the explicit, deliberate
+// opt-out for the rare cleartext-only internal relay — its zero value keeps the
+// secure default, so an omitted field can never silently downgrade to cleartext
+// auth (the pre-Phase-A bug).
 type SMTPConfig struct {
-	Host     string
-	Port     int
-	Username string
-	Password string
-	UseTLS   bool
+	Host           string
+	Port           int
+	Username       string
+	Password       string
+	AllowPlaintext bool
 }
 
 // IMAPConfig holds the inbound (reply/bounce polling) settings for a mailbox.

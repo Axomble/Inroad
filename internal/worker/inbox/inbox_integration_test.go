@@ -113,7 +113,7 @@ func seedActiveEnrollment(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 		WorkspaceID: ws.ID, Provider: "smtp", Email: "from@acme.test", DisplayName: "Acme",
 		SmtpHost: "smtp.acme.test", SmtpPort: 587, SmtpUsername: "from@acme.test",
 		ImapHost: "imap.acme.test", ImapPort: 993, ImapUsername: "from@acme.test",
-		SecretCiphertext: ct, UseTls: true, DailyCap: 500, MinIntervalSeconds: 0,
+		SecretCiphertext: ct, DailyCap: 500, MinIntervalSeconds: 0,
 		RampEnabled: false, RampStartCap: 5, RampDays: 30,
 	})
 	if err != nil {
@@ -167,8 +167,16 @@ func seedActiveEnrollment(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	if job.Skip {
 		t.Fatal("step 1 send job unexpectedly skipped")
 	}
-	if _, err := core.MarkStepSent(ctx, job, coreapi.StepResult{Status: "sent", MessageID: firstStepMessageID}); err != nil {
-		t.Fatalf("mark step sent: %v", err)
+	// Drive the production success flow (claim → record delivery → advance cursor),
+	// seeding a 'sent' row with a known Message-ID for the reply matcher.
+	if outcome, err := core.ClaimStepSend(ctx, job); err != nil || outcome != coreapi.ClaimWon {
+		t.Fatalf("claim step send: outcome=%v err=%v", outcome, err)
+	}
+	if err := core.MarkStepDelivered(ctx, job, firstStepMessageID); err != nil {
+		t.Fatalf("mark step delivered: %v", err)
+	}
+	if _, err := core.AdvanceStepCursor(ctx, job); err != nil {
+		t.Fatalf("advance step cursor: %v", err)
 	}
 
 	return itFixture{
