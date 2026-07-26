@@ -39,6 +39,7 @@ type Store interface {
 	DailyStats(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]DayStat, error)
 	PlacementRates7d(ctx context.Context, workspaceID uuid.UUID) ([]PlacementRate, error)
 	SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int32, error)
+	ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error)
 }
 
 // PgStore implements Store by wrapping sqlc-generated queries. It is the only
@@ -138,4 +139,19 @@ func (s *PgStore) SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUI
 		MailboxID:   mailboxID,
 		WorkspaceID: workspaceID,
 	})
+}
+
+// ListOverviewRows returns one row per participant enriched with the mailbox
+// email and the trailing-7-day placement + today's sent counters — the single
+// workspace-pinned read behind GET /warmup/overview (no N+1 over the pool).
+func (s *PgStore) ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error) {
+	rows, err := s.q.ListWarmupOverviewRows(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OverviewRow, len(rows))
+	for i, r := range rows {
+		out[i] = overviewRowFromGen(r)
+	}
+	return out, nil
 }

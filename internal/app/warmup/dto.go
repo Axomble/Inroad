@@ -95,3 +95,105 @@ type UpsertParams struct {
 	RampIncrement int32
 	ReplyRate     float32
 }
+
+// OverviewRow is one participant enriched for the workspace overview: its ramp
+// and health fields, the mailbox email, the trailing-7-day SENDER placement sums
+// (inbox/spam), and today's sent count — all resolved in one workspace-pinned
+// read. Inbox7d/Spam7d are the numerator/denominator inputs the service turns
+// into inbox_rate_7d / spam_rate_7d; the denominator is Inbox7d+Spam7d (observed
+// placements of this mailbox's SENT warmup mail), not received volume.
+type OverviewRow struct {
+	MailboxID     uuid.UUID
+	Enabled       bool
+	StartVolume   int32
+	MaxVolume     int32
+	RampIncrement int32
+	ReplyRate     float32
+	StartedAt     pgtype.Timestamptz
+	HealthState   string
+	HealthReason  string
+	Email         string
+	Inbox7d       int64
+	Spam7d        int64
+	TodaySent     int32
+}
+
+func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
+	return OverviewRow{
+		MailboxID:     r.MailboxID,
+		Enabled:       r.Enabled,
+		StartVolume:   r.StartVolume,
+		MaxVolume:     r.MaxVolume,
+		RampIncrement: r.RampIncrement,
+		ReplyRate:     r.ReplyRate,
+		StartedAt:     r.StartedAt,
+		HealthState:   r.HealthState,
+		HealthReason:  r.HealthReason,
+		Email:         r.Email,
+		Inbox7d:       r.Inbox7d,
+		Spam7d:        r.Spam7d,
+		TodaySent:     r.TodaySent,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// API response DTOs (spec §10 / api/openapi.yaml). These carry the snake_case
+// JSON contract the frontend consumes. They are DISTINCT from the persistence
+// view types above (Participant/DayStat/OverviewRow): the service maps domain
+// types into these so the wire shape and the storage shape stay decoupled.
+// ---------------------------------------------------------------------------
+
+// WarmupParticipantDTO is the WarmupParticipant schema: a mailbox's enrollment
+// state plus its computed today_sent / today_target.
+type WarmupParticipantDTO struct {
+	MailboxID     string  `json:"mailbox_id"`
+	Enabled       bool    `json:"enabled"`
+	StartVolume   int32   `json:"start_volume"`
+	MaxVolume     int32   `json:"max_volume"`
+	RampIncrement int32   `json:"ramp_increment"`
+	ReplyRate     float32 `json:"reply_rate"`
+	HealthState   string  `json:"health_state"`
+	HealthReason  string  `json:"health_reason"`
+	StartedAt     string  `json:"started_at"`
+	TodaySent     int32   `json:"today_sent"`
+	TodayTarget   int32   `json:"today_target"`
+}
+
+// WarmupMailboxDTO is the WarmupMailbox schema: a participant enriched with the
+// mailbox email and rolling 7-day placement rates for the overview.
+type WarmupMailboxDTO struct {
+	MailboxID    string  `json:"mailbox_id"`
+	Email        string  `json:"email"`
+	Enabled      bool    `json:"enabled"`
+	HealthState  string  `json:"health_state"`
+	HealthReason string  `json:"health_reason"`
+	TodaySent    int32   `json:"today_sent"`
+	TodayTarget  int32   `json:"today_target"`
+	InboxRate7d  float64 `json:"inbox_rate_7d"`
+	SpamRate7d   float64 `json:"spam_rate_7d"`
+}
+
+// WarmupOverviewDTO is the WarmupOverview schema: the pool summary plus per
+// mailbox health/placement. active is true when pool_size >= 2.
+type WarmupOverviewDTO struct {
+	PoolSize  int                `json:"pool_size"`
+	Active    bool               `json:"active"`
+	Mailboxes []WarmupMailboxDTO `json:"mailboxes"`
+}
+
+// WarmupDayStatDTO is the WarmupDayStat schema: one UTC day of counters.
+type WarmupDayStatDTO struct {
+	Day      string `json:"day"`
+	Sent     int32  `json:"sent"`
+	Received int32  `json:"received"`
+	Inbox    int32  `json:"inbox"`
+	Spam     int32  `json:"spam"`
+	Replies  int32  `json:"replies"`
+}
+
+// WarmupDetailDTO is the WarmupDetail schema: one participant plus its daily
+// series (oldest first, up to 30 days).
+type WarmupDetailDTO struct {
+	Participant WarmupParticipantDTO `json:"participant"`
+	Series      []WarmupDayStatDTO   `json:"series"`
+}

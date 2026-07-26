@@ -80,6 +80,37 @@ FROM warmup_daily_stats
 WHERE mailbox_id = $1 AND workspace_id = $2
   AND day = CURRENT_DATE;
 
+-- name: ListWarmupOverviewRows :many
+-- One workspace-pinned row per participant for GET /warmup/overview: the
+-- participant's ramp/health fields, the mailbox email (INNER join — a participant
+-- always maps to a live mailbox), the trailing-7-UTC-day SENDER placement sums
+-- (inbox/spam — the deliverability signal, §4/§8), and today's (UTC) sent count.
+-- The two stat rollups are LEFT-joined subqueries so a participant with no stats
+-- yet yields zeros, and everything resolves in ONE query (no N+1 over the pool).
+-- The two subqueries and the outer WHERE are all workspace-pinned on $1.
+SELECT
+    p.mailbox_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
+    p.reply_rate, p.started_at, p.health_state, p.health_reason,
+    m.email,
+    COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
+    COALESCE(wk.spam, 0)::bigint  AS spam_7d,
+    COALESCE(td.sent, 0)::int     AS today_sent
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
+LEFT JOIN (
+    SELECT s.mailbox_id, SUM(s.inbox) AS inbox, SUM(s.spam) AS spam
+    FROM warmup_daily_stats s
+    WHERE s.workspace_id = $1 AND s.day >= CURRENT_DATE - 6
+    GROUP BY s.mailbox_id
+) wk ON wk.mailbox_id = p.mailbox_id
+LEFT JOIN (
+    SELECT s.mailbox_id, s.sent
+    FROM warmup_daily_stats s
+    WHERE s.workspace_id = $1 AND s.day = CURRENT_DATE
+) td ON td.mailbox_id = p.mailbox_id
+WHERE p.workspace_id = $1
+ORDER BY p.created_at DESC;
+
 -- ============================================================================
 -- Send path (spec §4/§6) — the control⇄execution seam's warmup read/claim
 -- surface. Every statement is workspace_id-pinned; every INSERT of a
