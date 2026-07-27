@@ -41,6 +41,18 @@ func createRoutingMailbox(t *testing.T, ctx context.Context, q *gen.Queries, ws 
 	return mb.ID
 }
 
+// resetRouting clears the two GLOBAL-infra routing tables. Unlike tenant data
+// (isolated per test by unique workspace/mailbox UUIDs), `workers` and
+// `mailbox_worker_assignments` use fixed worker ids that otherwise leak across
+// tests sharing this Postgres — a stale live worker would be picked by the
+// fleet-wide least-loaded query and make assignment order non-deterministic.
+func resetRouting(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, "TRUNCATE mailbox_worker_assignments, workers"); err != nil {
+		t.Fatalf("reset routing tables: %v", err)
+	}
+}
+
 // TestAssignMailboxWorkerNoLiveWorkerFallback: with no live heartbeat the
 // assigner returns "" (shared default queue) and persists nothing, so a real
 // worker can claim the mailbox once it comes online (single-node dev).
@@ -48,6 +60,7 @@ func TestAssignMailboxWorkerNoLiveWorkerFallback(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
 	c := routingClient(pool, q)
+	resetRouting(t, ctx, pool)
 
 	ws, err := q.CreateWorkspace(ctx, "Routing "+uuid.NewString())
 	if err != nil {
@@ -77,6 +90,7 @@ func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
 	c := routingClient(pool, q)
+	resetRouting(t, ctx, pool)
 
 	ws, err := q.CreateWorkspace(ctx, "Routing "+uuid.NewString())
 	if err != nil {
@@ -131,6 +145,7 @@ func TestAssignMailboxWorkerWorkspacePinning(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
 	c := routingClient(pool, q)
+	resetRouting(t, ctx, pool)
 
 	ws, err := q.CreateWorkspace(ctx, "Routing owner "+uuid.NewString())
 	if err != nil {
@@ -173,6 +188,7 @@ func TestAssignMailboxWorkerWriteTenancy(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
 	c := routingClient(pool, q)
+	resetRouting(t, ctx, pool)
 
 	owner, err := q.CreateWorkspace(ctx, "Routing owner "+uuid.NewString())
 	if err != nil {
