@@ -393,8 +393,10 @@ func TestPhase2RequireVerifiedGatedRoute(t *testing.T) {
 		t.Fatalf("IssueToken: %v", err)
 	}
 
-	get := func() *http.Response {
-		req, err := http.NewRequest(http.MethodGet, srv.URL+"/protected", http.NoBody)
+	// getStatus issues the gated request and returns only its status code, so
+	// the response body is closed here rather than leaked to the caller.
+	getStatus := func() int {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/protected", http.NoBody)
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
@@ -403,19 +405,19 @@ func TestPhase2RequireVerifiedGatedRoute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("do request: %v", err)
 		}
-		t.Cleanup(func() { resp.Body.Close() })
-		return resp
+		defer resp.Body.Close()
+		return resp.StatusCode
 	}
 
-	if resp := get(); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 for an unverified user, got %d", resp.StatusCode)
+	if code := getStatus(); code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an unverified user, got %d", code)
 	}
 
 	if err := svc.VerifyEmail(ctx, token); err != nil {
 		t.Fatalf("VerifyEmail: %v", err)
 	}
 
-	if resp := get(); resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 after verifying, got %d", resp.StatusCode)
+	if code := getStatus(); code != http.StatusOK {
+		t.Fatalf("expected 200 after verifying, got %d", code)
 	}
 }
