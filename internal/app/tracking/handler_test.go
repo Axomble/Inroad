@@ -2,8 +2,10 @@ package tracking
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -151,10 +153,23 @@ func TestClickRedirect_ValidToken_RecordsEventAndRedirects(t *testing.T) {
 func TestClickRedirect_TamperedToken_404NoRedirectNoEvent(t *testing.T) {
 	r, store, sendID := newTestHandler(t)
 	tok := track.MakeClickToken(testSecret, sendID.String(), "https://example.test/landing")
-	tampered := tok[:len(tok)-1] + "x"
-	if tampered == tok {
-		tampered = tok[:len(tok)-1] + "y"
+
+	// Tamper deterministically: a token is base64url(payload)."."base64url(sig),
+	// so flipping the final base64 char can leave the DECODED signature bytes
+	// unchanged (non-canonical low bits) and still verify. Decode the signature
+	// segment, flip a byte in the middle of the raw bytes, and re-encode — this
+	// always changes the signature the HMAC is compared against, so a tampered
+	// token can NEVER verify.
+	dot := strings.LastIndexByte(tok, '.')
+	if dot < 0 {
+		t.Fatalf("token %q has no signature separator", tok)
 	}
+	sig, err := base64.RawURLEncoding.DecodeString(tok[dot+1:])
+	if err != nil {
+		t.Fatalf("decode signature segment: %v", err)
+	}
+	sig[len(sig)/2] ^= 0xFF
+	tampered := tok[:dot+1] + base64.RawURLEncoding.EncodeToString(sig)
 
 	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tampered, http.NoBody)
 	w := httptest.NewRecorder()

@@ -103,7 +103,7 @@ func jsonRequest(t *testing.T, srv *httptest.Server, method, path string, body a
 	} else {
 		reader = bytes.NewReader(nil)
 	}
-	req, err := http.NewRequest(method, srv.URL+path, reader)
+	req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+path, reader)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -118,7 +118,6 @@ func jsonRequest(t *testing.T, srv *httptest.Server, method, path string, body a
 	if err != nil {
 		t.Fatalf("do request %s %s: %v", method, path, err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
 
@@ -151,6 +150,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 			"email":          email,
 			"password":       password,
 		}, nil, "")
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
@@ -213,6 +213,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 			"email":          email,
 			"password":       "another-longenough-pw",
 		}, nil, "")
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusConflict {
 			t.Fatalf("expected 409, got %d", resp.StatusCode)
 		}
@@ -223,6 +224,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 			"email":    email,
 			"password": password,
 		}, nil, "")
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
@@ -246,6 +248,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 			{Name: auth.CSRFCookieName, Value: registerCSRFCookie},
 		}
 		resp := jsonRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh", nil, cookies, registerCSRFCookie)
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
@@ -270,6 +273,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 			{Name: auth.CSRFCookieName, Value: registerCSRFCookie},
 		}
 		resp := jsonRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh", nil, cookies, registerCSRFCookie)
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("expected 401 on reused refresh token, got %d", resp.StatusCode)
 		}
@@ -281,6 +285,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 			{Name: auth.CSRFCookieName, Value: registerCSRFCookie},
 		}
 		resp2 := jsonRequest(t, srv, http.MethodPost, "/api/v1/auth/refresh", nil, cookies2, registerCSRFCookie)
+		defer resp2.Body.Close()
 		if resp2.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("expected 401, entire family should be revoked after reuse, got %d", resp2.StatusCode)
 		}
@@ -298,6 +303,7 @@ func TestIdentityAuthFlows(t *testing.T) {
 
 	t.Run("deny by default: /me with no Authorization header", func(t *testing.T) {
 		resp := jsonRequest(t, srv, http.MethodGet, "/api/v1/auth/me", nil, nil, "")
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("expected 401, got %d", resp.StatusCode)
 		}
@@ -312,12 +318,13 @@ func TestIdentityAuthFlows(t *testing.T) {
 			"email":          otherEmail,
 			"password":       "another-longenough-pw",
 		}, nil, "")
+		defer regResp.Body.Close()
 		if regResp.StatusCode != http.StatusOK {
 			t.Fatalf("expected 200 registering second workspace, got %d", regResp.StatusCode)
 		}
 		otherOut := decodeSession(t, regResp)
 
-		req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/auth/switch-workspace",
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/v1/auth/switch-workspace",
 			bytes.NewReader(mustJSON(t, map[string]string{"workspace_id": otherOut.ActiveWorkspaceID})))
 		if err != nil {
 			t.Fatalf("new request: %v", err)
