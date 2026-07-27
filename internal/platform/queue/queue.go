@@ -3,6 +3,7 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+
+	"github.com/inroad/inroad/internal/platform/bus"
+	"github.com/inroad/inroad/internal/platform/bus/redisbus"
 )
 
 // Delivery-idempotency defense in depth (the claim in the send/advance handlers
@@ -24,10 +28,35 @@ const (
 
 const TaskWarmupTick = "warmup:tick"
 
-// WarmupTickPayload is the body of a warmup:tick task.
+// WarmupTickPayload is the body of a warmup:tick task. WorkspaceID travels
+// alongside MailboxID so the worker can pin workspace_id in its coreapi lookups
+// (defense in depth on the unguessable mailbox UUID), matching every other task
+// payload.
 type WarmupTickPayload struct {
-	MailboxID string `json:"mailbox_id"`
+	MailboxID   string `json:"mailbox_id"`
+	WorkspaceID string `json:"workspace_id"`
 }
+
+// TaskWarmupEngage drives the recipient-side engagement of one received warmup
+// message (rescue-from-spam / mark-read / threaded reply). It is enqueued,
+// delayed by a humanized dwell, by the inbox poller when it detects a warmup
+// message (spec §7); the handler (C5b) acts on the receipt behind the
+// warmup_receipts.engaged idempotency guard.
+const TaskWarmupEngage = "warmup:engage"
+
+// WarmupEngagePayload is the body of a warmup:engage task. WorkspaceID travels
+// alongside ReceiptID so the worker can pin workspace_id in its coreapi lookups
+// (defense in depth on the unguessable receipt UUID), matching every other task
+// payload.
+type WarmupEngagePayload struct {
+	ReceiptID   string `json:"receipt_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// TaskWarmupSweep is the periodic fan-out that enqueues a warmup:tick for every
+// due participant (routing each to its assigned worker queue) and recomputes
+// participant health. Scheduled every 5 minutes.
+const TaskWarmupSweep = "warmup:sweep"
 
 const TaskSendEmail = "send:email"
 
@@ -85,13 +114,66 @@ func NewClient(redisAddr string) *Client {
 	return &Client{inner: asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})}
 }
 
-func (c *Client) EnqueueWarmupTick(mailboxID string) error {
-	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID})
+// warmupTickTaskID keys a warmup:tick on (mailbox, due-second) so duplicate
+// enqueues for the SAME due instant — a sweep fan-out racing the send handler's
+// lazy chain — dedup to one task, while a genuinely later tick still enqueues.
+// Whole-second granularity is safe because ClaimWarmupSend (the row claim), not
+// this key, is the delivery-idempotency guarantee; a collapsed duplicate only
+// saves wasted work. Mirrors enqueueAdvance's advance:<id>:<sec> key.
+func warmupTickTaskID(mailboxID string, due time.Time) string {
+	return fmt.Sprintf("warmup:%s:%d", mailboxID, due.Unix())
+}
+
+// EnqueueWarmupTickAt schedules a warmup:tick for one mailbox at time t, routed
+// to dest (the from-mailbox's assigned worker queue, spec §15 — so a mailbox's
+// warmup and campaign mail egress from one IP; "" = shared default queue). It
+// goes through the transport seam (bus.Dispatcher): Key→TaskID dedup,
+// Dest→Queue routing, At→ProcessAt delayed delivery. dest is always derived
+// server-side from the mailbox→worker assignment, never from client input
+// (§17.8).
+func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
+	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	_, err = c.inner.Enqueue(asynq.NewTask(TaskWarmupTick, b))
-	return err
+	return c.Publish(context.Background(), bus.Job{
+		Kind:    TaskWarmupTick,
+		Payload: b,
+		Key:     warmupTickTaskID(mailboxID, t),
+		Dest:    dest,
+	}, bus.Options{
+		At:       t,
+		MaxRetry: sendMaxRetry,
+	})
+}
+
+// warmupEngageTaskID keys a warmup:engage on the receipt id so a re-poll that
+// re-detects the SAME warmup message (junk scans are stateless and idempotent)
+// dedups to one engage task. The warmup_receipts.engaged guard — not this key —
+// is the real double-engage guarantee; a collapsed duplicate only saves wasted
+// work. Mirrors warmupTickTaskID's dedup discipline.
+func warmupEngageTaskID(receiptID string) string {
+	return "warmupengage:" + receiptID
+}
+
+// EnqueueWarmupEngageIn schedules a warmup:engage for one receipt after delay d
+// (the humanized engage dwell from the receipt's plan). It goes through the
+// transport seam (bus.Dispatcher): Key→TaskID dedup, In→ProcessIn delayed
+// delivery. Engagement acts on the RECIPIENT's own mailbox, so no cross-worker
+// egress routing applies — it uses the shared default queue (Dest "").
+func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error {
+	b, err := json.Marshal(WarmupEngagePayload{ReceiptID: receiptID, WorkspaceID: workspaceID})
+	if err != nil {
+		return err
+	}
+	return c.Publish(context.Background(), bus.Job{
+		Kind:    TaskWarmupEngage,
+		Payload: b,
+		Key:     warmupEngageTaskID(receiptID),
+	}, bus.Options{
+		In:       d,
+		MaxRetry: sendMaxRetry,
+	})
 }
 
 // enqueue submits a task and treats an asynq TaskID conflict as success: a
@@ -192,23 +274,62 @@ func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 	return err
 }
 
+// Publish makes *Client satisfy bus.Dispatcher, so the new warmup and routing
+// enqueue paths can depend on the transport seam while sharing this Client's
+// live asynq connection. It is a thin adapter over redisbus — the same
+// Job/Options -> asynq translation and TaskID-conflict-as-success dedup rule.
+//
+// The existing typed helpers (EnqueueSend/EnqueueAdvance/…) are intentionally
+// left untouched; migrating those call sites onto the seam is a documented
+// follow-up, not part of this change.
+func (c *Client) Publish(ctx context.Context, j bus.Job, o bus.Options) error {
+	return redisbus.NewDispatcher(c.inner).Publish(ctx, j, o)
+}
+
+// Compile-time proof the adapter is complete.
+var _ bus.Dispatcher = (*Client)(nil)
+
 func (c *Client) Close() error { return c.inner.Close() }
 
 // NewServer builds an asynq processing server. Concurrency defaults to 10
-// when concurrency <= 0. The provided *slog.Logger is adapted to asynq's
-// Logger interface so worker log lines flow through the same structured
-// sink as the rest of the app.
-func NewServer(redisAddr string, logger *slog.Logger, concurrency int) *asynq.Server {
+// when concurrency <= 0. queues is the ordered set of queues to consume (spec
+// §15: a worker serves its own per-IP "w:<id>" queue plus "default"); an empty
+// list leaves asynq on its built-in {"default":1}. The provided *slog.Logger is
+// adapted to asynq's Logger interface so worker log lines flow through the same
+// structured sink as the rest of the app.
+func NewServer(redisAddr string, logger *slog.Logger, concurrency int, queues []string) *asynq.Server {
 	if concurrency <= 0 {
 		concurrency = 10
 	}
-	return asynq.NewServer(
-		asynq.RedisClientOpt{Addr: redisAddr},
-		asynq.Config{
-			Concurrency: concurrency,
-			Logger:      newAsynqLogger(logger),
-		},
-	)
+	cfg := asynq.Config{
+		Concurrency: concurrency,
+		Logger:      newAsynqLogger(logger),
+	}
+	if qmap := queuePriorities(queues); len(qmap) > 0 {
+		cfg.Queues = qmap
+	}
+	return asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr}, cfg)
+}
+
+// queuePriorities maps an ordered queue list to asynq's weighted-priority map.
+// Earlier queues get proportionally higher weight so a worker prefers its own
+// per-IP queue over the shared default without starving it (asynq is weighted,
+// not strict). Duplicates and empty names are ignored. An empty result leaves
+// the caller on asynq's default {"default":1}.
+func queuePriorities(queues []string) map[string]int {
+	m := make(map[string]int, len(queues))
+	weight := len(queues)
+	for _, q := range queues {
+		if q == "" {
+			continue
+		}
+		if _, ok := m[q]; ok {
+			continue
+		}
+		m[q] = weight
+		weight--
+	}
+	return m
 }
 
 // NewMux returns an empty task router for worker handlers to register on.
@@ -242,6 +363,13 @@ func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
 // minutes to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 3m", asynq.NewTask(TaskInboxSweep, nil))
+	return err
+}
+
+// RegisterWarmupSweep registers the periodic warmup:sweep. Runs every 5 minutes
+// to fan out a warmup:tick for every due participant and recompute health.
+func RegisterWarmupSweep(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil))
 	return err
 }
 

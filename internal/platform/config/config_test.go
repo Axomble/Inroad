@@ -101,3 +101,62 @@ func TestLoadTokenDefaults(t *testing.T) {
 		t.Fatal("cookie secure should default true")
 	}
 }
+
+// TestWorkerQueueDefaults proves the worker's queue set defaults to its own
+// per-IP queue plus the shared default when INROAD_WORKER_QUEUES is unset, and
+// that an explicit id override is honored.
+func TestWorkerQueueDefaults(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("INROAD_WORKER_ID", "node-a")
+	t.Setenv("INROAD_WORKER_QUEUES", "")
+	t.Setenv("INROAD_WORKER_EGRESS_IP", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.WorkerID != "node-a" {
+		t.Fatalf("WorkerID = %q, want node-a", cfg.WorkerID)
+	}
+	want := []string{"w:node-a", "default"}
+	if len(cfg.WorkerQueues) != len(want) {
+		t.Fatalf("WorkerQueues = %v, want %v", cfg.WorkerQueues, want)
+	}
+	for i := range want {
+		if cfg.WorkerQueues[i] != want[i] {
+			t.Fatalf("WorkerQueues[%d] = %q, want %q", i, cfg.WorkerQueues[i], want[i])
+		}
+	}
+}
+
+// TestWorkerQueuesOverride proves INROAD_WORKER_QUEUES is parsed as a trimmed,
+// ordered CSV that fully replaces the default set.
+func TestWorkerQueuesOverride(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("INROAD_WORKER_QUEUES", " w:node-a , default , critical ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"w:node-a", "default", "critical"}
+	if len(cfg.WorkerQueues) != len(want) {
+		t.Fatalf("WorkerQueues = %v, want %v", cfg.WorkerQueues, want)
+	}
+	for i := range want {
+		if cfg.WorkerQueues[i] != want[i] {
+			t.Fatalf("WorkerQueues[%d] = %q, want %q", i, cfg.WorkerQueues[i], want[i])
+		}
+	}
+}
+
+// TestDefaultWorkerQueuesEmptyID proves a worker with no resolvable id falls
+// back to the shared default queue only (it can't own a stable per-IP queue).
+func TestDefaultWorkerQueuesEmptyID(t *testing.T) {
+	got := defaultWorkerQueues("")
+	if len(got) != 1 || got[0] != "default" {
+		t.Fatalf("defaultWorkerQueues(\"\") = %v, want [default]", got)
+	}
+}

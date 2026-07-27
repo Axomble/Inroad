@@ -52,6 +52,10 @@ type GmailReader struct {
 	// getFn fetches one message and returns its decoded RFC822 bytes
 	// (users.messages.get, format=RAW, base64url-decoded).
 	getFn func(ctx context.Context, srv *gmail.Service, msgID string) (raw []byte, err error)
+	// spamListFn lists the ids of the most-recent messages carrying the SPAM
+	// label (users.messages.list, labelIds=SPAM), for warmup spam-placement
+	// detection. nil = the real call (gmailSpamList).
+	spamListFn func(ctx context.Context, srv *gmail.Service, maxN int) (msgIDs []string, err error)
 }
 
 // NewGmailReader returns a GmailReader that talks to the real Gmail API.
@@ -181,6 +185,71 @@ func parseInbound(raw []byte) InboundMessage {
 		ContentType: header.Get("Content-Type"),
 		Body:        postHeaderBody,
 	}
+}
+
+// FetchSpam best-effort returns the most-recent (bounded) messages Gmail routed
+// to SPAM, for warmup spam-placement detection. A message Gmail marks as spam
+// carries the SPAM label and NOT INBOX, so the incremental INBOX history poll
+// (Fetch) never sees it — this separate scan is how spam-placed warmup mail is
+// observed. Stateless by design (no cursor): the warmup receipt write is
+// idempotent, so re-listing SPAM every poll never double-records. maxN must be
+// positive; it bounds the messages.list page and the per-message fetch fan-out.
+func (g *GmailReader) FetchSpam(ctx context.Context, accessToken string, maxN int) ([]InboundMessage, error) {
+	if maxN <= 0 {
+		return nil, fmt.Errorf("mail: GmailReader.FetchSpam requires maxN > 0, got %d", maxN)
+	}
+	srv, err := g.newService(ctx, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	msgIDs, err := g.spamList(ctx, srv, maxN)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]InboundMessage, len(msgIDs))
+	grp, gctx := errgroup.WithContext(ctx)
+	grp.SetLimit(gmailGetConcurrency)
+	for i, id := range msgIDs {
+		grp.Go(func() error {
+			raw, err := g.get(gctx, srv, id)
+			if err != nil {
+				return err
+			}
+			out[i] = parseInbound(raw)
+			return nil
+		})
+	}
+	if err := grp.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (g *GmailReader) spamList(ctx context.Context, srv *gmail.Service, maxN int) ([]string, error) {
+	if g.spamListFn != nil {
+		return g.spamListFn(ctx, srv, maxN)
+	}
+	return gmailSpamList(ctx, srv, maxN)
+}
+
+// gmailSpamList lists the ids of up to maxN most-recent SPAM-labelled messages.
+// messages.list returns newest-first, so a small MaxResults cap naturally yields
+// the recent window a warmup message would be in without paging the whole folder.
+func gmailSpamList(ctx context.Context, srv *gmail.Service, maxN int) ([]string, error) {
+	resp, err := srv.Users.Messages.List("me").
+		LabelIds("SPAM").
+		MaxResults(int64(maxN)).
+		Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("gmail: messages.list(SPAM): %w", err)
+	}
+	ids := make([]string, 0, len(resp.Messages))
+	for _, m := range resp.Messages {
+		if m != nil && m.Id != "" {
+			ids = append(ids, m.Id)
+		}
+	}
+	return ids, nil
 }
 
 func (g *GmailReader) newService(ctx context.Context, accessToken string) (*gmail.Service, error) {

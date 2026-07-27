@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"time"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/db"
@@ -13,8 +16,14 @@ import (
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
 )
+
+// workerHeartbeatInterval is how often a worker refreshes its `workers` row. It
+// matches the assigner's live-worker window (coreapi workerLiveWindow, 15m) with
+// comfortable headroom so a couple of missed ticks don't drop it from routing.
+const workerHeartbeatInterval = 5 * time.Minute
 
 func main() {
 	if err := run(); err != nil {
@@ -67,14 +76,39 @@ func run() error {
 		RedirectURL:  cfg.MSRedirectURL,
 		Tenant:       cfg.MSTenant,
 	}
-	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth)
+	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary())
+
+	// Resolve the optional worker egress IP once. When set, outbound SMTP/IMAP
+	// dials bind their SOURCE address to it (spec §15) so a mailbox's mail
+	// egresses from one IP; it never relaxes the SSRF destination vet (§17.7).
+	egressAddr, err := mail.ParseEgressIP(cfg.WorkerEgressIP)
+	if err != nil {
+		logger.Error("invalid worker egress ip", "err", err)
+		return err
+	}
 	// MultiSender dispatches SMTP vs Gmail vs Graph on the job's Provider; the
 	// SMTP leg keeps the SSRF-vetted NetSender, the Gmail leg uses the fixed
 	// Google host, and the m365 leg uses the fixed Microsoft Graph host.
-	sndr := mail.NewMultiSender(mail.NewNetSender(cfg.MailAllowPrivateHosts), mail.NewGmailSender(), mail.NewGraphSender())
+	smtpSender := mail.NewNetSender(cfg.MailAllowPrivateHosts)
+	smtpSender.LocalAddr = egressAddr
+	sndr := mail.NewMultiSender(smtpSender, mail.NewGmailSender(), mail.NewGraphSender())
 	reader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
+	reader.LocalAddr = egressAddr
+	// Engager runs recipient-side warmup engagement (mark-read/rescue). The IMAP leg
+	// dials through the SAME SSRF-vetted, source-IP-bound path as the reader; the
+	// Gmail leg uses the fixed Google host; m365 is a documented clean skip.
+	imapEngager := mail.NewNetEngager(cfg.MailAllowPrivateHosts)
+	imapEngager.LocalAddr = egressAddr
+	engager := mail.NewMultiEngager(imapEngager, mail.NewGmailEngager())
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
+
+	// Heartbeat this worker into the global registry so the control-plane
+	// assigner can route mailboxes to it. The ticker is bound to hbCtx, cancelled
+	// when run() returns (the server stopped), so the goroutine exits cleanly.
+	hbCtx, cancelHeartbeat := context.WithCancel(context.Background())
+	defer cancelHeartbeat()
+	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, logger)
 
 	// Start the periodic scheduler alongside the worker. It enqueues
 	// send:sweep_stuck every 2 minutes so orphaned sends (launch committed
@@ -92,6 +126,10 @@ func run() error {
 		logger.Error("scheduler register (inbox sweep) failed", "err", err)
 		return err
 	}
+	if err := queue.RegisterWarmupSweep(sch); err != nil {
+		logger.Error("scheduler register (warmup sweep) failed", "err", err)
+		return err
+	}
 	go func() {
 		if err := sch.Run(); err != nil {
 			logger.Error("scheduler exited", "err", err)
@@ -99,9 +137,9 @@ func run() error {
 	}()
 	defer sch.Shutdown()
 
-	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency)
+	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues)
 	mux := queue.NewMux()
-	worker.Register(mux, core, sndr, reader, enq, cfg.PublicURL, cfg.TrackingSecret)
+	worker.Register(mux, core, sndr, engager, reader, enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
@@ -109,4 +147,36 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// startHeartbeat registers this worker immediately, then refreshes its `workers`
+// row every workerHeartbeatInterval until ctx is cancelled. The initial beat is
+// synchronous so the assigner sees the worker as live before it processes its
+// first task. A worker with an empty id (hostname lookup failed AND no
+// INROAD_WORKER_ID) can't own a stable queue, so it skips registration and runs
+// off the shared default queue only. Heartbeat failures are logged, not fatal:
+// a transient DB blip must not take the worker down.
+func startHeartbeat(ctx context.Context, core coreapi.Client, workerID, egressIP string, logger *slog.Logger) {
+	if workerID == "" {
+		logger.Warn("worker id empty; skipping registration (serves default queue only)")
+		return
+	}
+	beat := func() {
+		if err := core.UpsertWorkerHeartbeat(ctx, workerID, egressIP); err != nil {
+			logger.Error("worker heartbeat failed", "worker_id", workerID, "err", err)
+		}
+	}
+	beat() // register now so the assigner routes to us on the first send
+	go func() {
+		t := time.NewTicker(workerHeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				beat()
+			}
+		}
+	}()
 }

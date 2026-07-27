@@ -21,6 +21,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // itMasterKey is the fixed 32-byte master key for these integration tests. It
@@ -143,7 +144,7 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 	}
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
 	return itFixture{
-		q: q, core: inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}),
+		q: q, core: inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, sealerKey, warmup.NewStaticLibrary()),
 		ws: ws.ID, campaignID: cam.ID, contactID: c.ID, email: email,
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -68,7 +69,16 @@ type GraphReader struct {
 	// getRawFn fetches one message's RAW RFC822 bytes (/$value returns raw MIME
 	// directly — NOT base64, so unlike Gmail there is no decode step).
 	getRawFn func(ctx context.Context, accessToken, id string) (raw []byte, err error)
+	// junkListFn lists the ids of the most-recent messages in the JunkEmail
+	// well-known folder, for warmup spam-placement detection. nil = the real call
+	// (graphJunkList).
+	junkListFn func(ctx context.Context, accessToken string, maxN int) (ids []string, err error)
 }
+
+// graphJunkURL lists the well-known JunkEmail folder's messages, newest-first,
+// selecting only the id (the /$value fetch pulls the body). The host is Graph's
+// fixed API endpoint, not user input, so no SSRF vetting is needed.
+const graphJunkURL = "https://graph.microsoft.com/v1.0/me/mailFolders('junkemail')/messages?$select=id&$orderby=receivedDateTime%20desc"
 
 // NewGraphReader returns a GraphReader that talks to the real Graph API.
 func NewGraphReader() *GraphReader { return &GraphReader{} }
@@ -201,6 +211,82 @@ func graphHostPinned(cursor string) bool {
 		return false
 	}
 	return u.Scheme == "https" && u.Host == "graph.microsoft.com"
+}
+
+// FetchJunk best-effort returns the most-recent (bounded) messages in the M365
+// JunkEmail folder, for warmup spam-placement detection. A message M365 routes
+// to junk lives in JunkEmail, not Inbox, so the incremental Inbox delta poll
+// (Fetch) never sees it — this separate scan is how spam-placed warmup mail is
+// observed. Stateless by design (no cursor): the warmup receipt write is
+// idempotent, so re-listing JunkEmail every poll never double-records. maxN must
+// be positive; it bounds the list page and the per-message fetch fan-out.
+func (g *GraphReader) FetchJunk(ctx context.Context, accessToken string, maxN int) ([]InboundMessage, error) {
+	if maxN <= 0 {
+		return nil, fmt.Errorf("mail: GraphReader.FetchJunk requires maxN > 0, got %d", maxN)
+	}
+	ids, err := g.junkList(ctx, accessToken, maxN)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]InboundMessage, len(ids))
+	grp, gctx := errgroup.WithContext(ctx)
+	grp.SetLimit(graphGetConcurrency)
+	for i, id := range ids {
+		grp.Go(func() error {
+			raw, err := g.getRaw(gctx, accessToken, id)
+			if err != nil {
+				return err
+			}
+			out[i] = parseInbound(raw)
+			return nil
+		})
+	}
+	if err := grp.Wait(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (g *GraphReader) junkList(ctx context.Context, accessToken string, maxN int) ([]string, error) {
+	if g.junkListFn != nil {
+		return g.junkListFn(ctx, accessToken, maxN)
+	}
+	return graphJunkList(ctx, accessToken, maxN)
+}
+
+// graphJunkList GETs up to maxN ids from the JunkEmail folder (newest-first). It
+// reports the status only on a non-2xx, never the body, so a bearer token echoed
+// by Graph never lands in logs or errors — matching graphDelta/graphGetRaw.
+func graphJunkList(ctx context.Context, accessToken string, maxN int) ([]string, error) {
+	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+	u := graphJunkURL + "&$top=" + strconv.Itoa(maxN)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("graph: junk list request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("graph: junk list: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("graph: junk list: unexpected status %d", resp.StatusCode)
+	}
+	var body struct {
+		Value []struct {
+			ID string `json:"id"`
+		} `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("graph: junk list decode: %w", err)
+	}
+	ids := make([]string, 0, len(body.Value))
+	for _, m := range body.Value {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids, nil
 }
 
 func (g *GraphReader) delta(ctx context.Context, accessToken, u string) ([]deltaMsg, string, string, error) {

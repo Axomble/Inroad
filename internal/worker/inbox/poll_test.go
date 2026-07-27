@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/hibiken/asynq"
 
@@ -14,7 +15,10 @@ import (
 	"github.com/inroad/inroad/internal/platform/replyclassify"
 )
 
-// fakeReader is a test double for mail.InboxReader.
+// fakeReader is a test double for mail.InboxReader (and, via FetchJunk, the
+// optional imapJunkScanner). The junk* fields drive the best-effort spam-folder
+// scan; their zero values (no messages, nil error) make FetchJunk a clean no-op,
+// so the many non-warmup poll tests are unaffected by the junk-scan step.
 type fakeReader struct {
 	uidValidity uint32
 	uidNext     uint32
@@ -25,6 +29,11 @@ type fakeReader struct {
 
 	fetchCalled bool
 	sinceUID    uint32
+
+	junkMsgs        []mail.InboundMessage
+	junkFolder      string
+	junkErr         error
+	junkFetchCalled bool
 }
 
 func (f *fakeReader) CurrentState(mail.IMAPConfig) (uint32, uint32, error) {
@@ -38,6 +47,14 @@ func (f *fakeReader) Fetch(_ mail.IMAPConfig, sinceUID uint32, _ int) ([]mail.In
 		return nil, 0, f.fetchErr
 	}
 	return f.msgs, f.uidValidity, nil
+}
+
+func (f *fakeReader) FetchJunk(_ mail.IMAPConfig, _ int) ([]mail.InboundMessage, string, error) {
+	f.junkFetchCalled = true
+	if f.junkErr != nil {
+		return nil, "", f.junkErr
+	}
+	return f.junkMsgs, f.junkFolder, nil
 }
 
 // stubCore embeds coreapi.Client so it satisfies the interface; only the
@@ -195,19 +212,28 @@ func runPoll(t *testing.T, core coreapi.Client, reader mail.InboxReader) error {
 	t.Helper()
 	// nil API readers: every runPoll test drives the smtp/IMAP path (job.Provider
 	// defaults to "", so neither the gmail nor the m365 branch is taken and the
-	// readers are unused). Layer-3 model unwired (New(nil)), like production.
-	return PollHandler(core, reader, nil, nil, replyclassify.New(nil))(context.Background(), pollTask(t))
+	// readers are unused). Layer-3 model unwired (New(nil)), like production. A nil
+	// warmup secret + no-op enqueuer: these tests carry no X-Inroad-Warmup header,
+	// so the warmup hook never fires and the classification path is unchanged.
+	return PollHandler(core, reader, nil, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(context.Background(), pollTask(t))
 }
 
 func runGmailPoll(t *testing.T, core coreapi.Client, gmail GmailFetcher) error {
 	t.Helper()
-	return PollHandler(core, nil, gmail, nil, replyclassify.New(nil))(context.Background(), pollTask(t))
+	return PollHandler(core, nil, gmail, nil, replyclassify.New(nil), nil, noopEngageEnqueuer{})(context.Background(), pollTask(t))
 }
 
 func runGraphPoll(t *testing.T, core coreapi.Client, graph GraphFetcher) error {
 	t.Helper()
-	return PollHandler(core, nil, nil, graph, replyclassify.New(nil))(context.Background(), pollTask(t))
+	return PollHandler(core, nil, nil, graph, replyclassify.New(nil), nil, noopEngageEnqueuer{})(context.Background(), pollTask(t))
 }
+
+// noopEngageEnqueuer satisfies WarmupEngageEnqueuer for tests that drive
+// non-warmup mail (the hook never enqueues). A warmup-detection test uses a
+// recording spy instead (see poll_warmup_test.go).
+type noopEngageEnqueuer struct{}
+
+func (noopEngageEnqueuer) EnqueueWarmupEngageIn(string, string, time.Duration) error { return nil }
 
 func TestPollFirstPollBaselinesWithoutFetching(t *testing.T) {
 	// job.UIDValidity == 0 means this mailbox has never been polled: baseline

@@ -23,6 +23,7 @@ import (
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/app/tracking"
+	"github.com/inroad/inroad/internal/app/warmup"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -99,11 +100,16 @@ func run() error {
 		RedirectURL:  cfg.MSRedirectURL,
 		Tenant:       cfg.MSTenant,
 	}
+	// Warmup control-plane. Its per-mailbox routes (/mailboxes/{id}/warmup)
+	// register as a sub-router under the mailbox mount; its workspace-level
+	// overview mounts at /api/v1/warmup below.
+	warmupHandler := warmup.NewHandler(warmup.NewService(warmup.NewPgStore(queries)))
 	mbHandler := mailbox.NewHandler(
 		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), keyring,
 			googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
 			msOAuth, mailbox.NewMicrosoftExchanger(msOAuth)),
 		cfg.JWTSecret, cfg.AppBaseURL,
+		warmupHandler,
 	)
 
 	enq := queue.NewClient(cfg.RedisAddr)
@@ -162,6 +168,10 @@ func run() error {
 		// /launch (email-gated sending).
 		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes(identStore)},
 		{pattern: "/api/v1/workspaces", handler: identHandler.InviteRoutes()},
+		// Workspace-level warmup overview. The per-mailbox warmup routes
+		// (/mailboxes/{id}/warmup) are registered as a sub-router of the mailbox
+		// mount above, not here.
+		{pattern: "/api/v1/warmup", handler: warmupHandler.Routes()},
 	}
 	router := buildRouter(logger, cfg.JWTSecret, public, protected)
 

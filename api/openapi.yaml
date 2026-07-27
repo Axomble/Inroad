@@ -297,6 +297,65 @@ paths:
               schema: { $ref: '#/components/schemas/Mailbox' }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /mailboxes/{id}/warmup:
+    get:
+      operationId: getMailboxWarmup
+      tags: [warmup]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Warmup detail for one mailbox, with a 30-day daily series
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WarmupDetail' }
+        '401': { description: Unauthorized }
+        '404': { description: Mailbox not found or not a warmup participant }
+    put:
+      operationId: enableMailboxWarmup
+      tags: [warmup]
+      security: [{ bearerAuth: [] }]
+      description: Enable warmup on a mailbox or update its settings. Idempotent.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WarmupSettings' }
+      responses:
+        '200':
+          description: Warmup enabled/updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WarmupParticipant' }
+        '400': { description: Validation error (e.g. start_volume > max_volume) }
+        '401': { description: Unauthorized }
+        '404': { description: Mailbox not found }
+    delete:
+      operationId: disableMailboxWarmup
+      tags: [warmup]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Warmup disabled }
+        '401': { description: Unauthorized }
+        '404': { description: Mailbox not found }
+  /warmup/overview:
+    get:
+      operationId: getWarmupOverview
+      tags: [warmup]
+      security: [{ bearerAuth: [] }]
+      description: Pool summary plus per-mailbox health and 7-day placement rates for the workspace.
+      responses:
+        '200':
+          description: Warmup overview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WarmupOverview' }
+        '401': { description: Unauthorized }
   /lists:
     get:
       operationId: listLists
@@ -821,3 +880,80 @@ components:
       type: object
       properties:
         enabled: { type: boolean }
+    WarmupSettings:
+      type: object
+      description: >-
+        Warmup ramp settings for a mailbox. All fields optional on update; omitted
+        fields keep their current (or default) value. Validated at the boundary:
+        1 <= start_volume <= max_volume <= 200, ramp_increment >= 1,
+        0 <= reply_rate <= 1.
+      properties:
+        start_volume: { type: integer, minimum: 1, maximum: 200, description: warmup emails/day at day 0 }
+        max_volume: { type: integer, minimum: 1, maximum: 200, description: daily ceiling the ramp climbs to }
+        ramp_increment: { type: integer, minimum: 1, description: emails/day added each day }
+        reply_rate: { type: number, minimum: 0, maximum: 1, description: probability a warmup send is an in-thread reply }
+    WarmupParticipant:
+      type: object
+      description: One mailbox's warmup enrollment state.
+      required: [mailbox_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, health_state, health_reason, started_at, today_sent, today_target]
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        enabled: { type: boolean }
+        start_volume: { type: integer }
+        max_volume: { type: integer }
+        ramp_increment: { type: integer }
+        reply_rate: { type: number }
+        health_state:
+          type: string
+          enum: [healthy, watch, throttled, paused]
+          description: reputation state derived from inbox-placement and behavior signals
+        health_reason: { type: string, description: human-readable explanation of a non-healthy state }
+        started_at: { type: string, format: date-time }
+        today_sent: { type: integer, description: warmup emails sent by this mailbox today }
+        today_target: { type: integer, description: "today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this." }
+    WarmupMailbox:
+      type: object
+      description: A participant enriched with rolling placement rates for the overview.
+      required: [mailbox_id, email, enabled, health_state, health_reason, today_sent, today_target, inbox_rate_7d, spam_rate_7d]
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        email: { type: string }
+        enabled: { type: boolean }
+        health_state: { type: string, enum: [healthy, watch, throttled, paused] }
+        health_reason: { type: string }
+        today_sent: { type: integer }
+        today_target: { type: integer }
+        inbox_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal" }
+        spam_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1)" }
+    WarmupOverview:
+      type: object
+      description: >-
+        Workspace warmup summary. pool_size is the number of enabled participants;
+        warmup needs at least 2 to exchange mail (active is true when pool_size>=2).
+      required: [pool_size, active, mailboxes]
+      properties:
+        pool_size: { type: integer }
+        active: { type: boolean }
+        mailboxes:
+          type: array
+          items: { $ref: '#/components/schemas/WarmupMailbox' }
+    WarmupDayStat:
+      type: object
+      required: [day, sent, received, inbox, spam, replies]
+      properties:
+        day: { type: string, format: date, description: UTC day }
+        sent: { type: integer, description: warmup mail this mailbox sent }
+        received: { type: integer, description: warmup mail this mailbox received }
+        inbox: { type: integer, description: "of this mailbox's SENT mail, how many landed in partners' inboxes (sender placement)" }
+        spam: { type: integer, description: "of this mailbox's SENT mail, how many landed in partners' spam (sender placement)" }
+        replies: { type: integer }
+    WarmupDetail:
+      type: object
+      description: One mailbox's participant state plus its daily series.
+      required: [participant, series]
+      properties:
+        participant: { $ref: '#/components/schemas/WarmupParticipant' }
+        series:
+          type: array
+          description: daily stats, oldest first, up to 30 days
+          items: { $ref: '#/components/schemas/WarmupDayStat' }

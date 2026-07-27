@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	netmail "net/mail"
 	"sort"
 	"time"
@@ -19,6 +20,11 @@ import (
 type NetInboxReader struct {
 	Timeout      time.Duration
 	AllowPrivate bool
+	// LocalAddr optionally binds the SOURCE address of every IMAP dial to the
+	// worker's egress IP (spec §15), so a mailbox's inbox polling egresses from
+	// the same IP as its sends. nil = OS default route. Source-only: applied to
+	// the net.Dialer after vetAddr vets the destination (spec §17.7).
+	LocalAddr *net.TCPAddr
 }
 
 // NewNetInboxReader returns a NetInboxReader with a sane default dial
@@ -37,7 +43,7 @@ func (r *NetInboxReader) selectInboxReadOnly(cfg IMAPConfig) (*client.Client, *i
 		return nil, nil, err
 	}
 
-	c, err := dialIMAP(addr, cfg, r.Timeout)
+	c, err := dialIMAP(addr, cfg, r.Timeout, r.LocalAddr)
 	if err != nil {
 		return nil, nil, err
 	}

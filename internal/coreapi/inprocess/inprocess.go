@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 type client struct {
@@ -35,6 +36,14 @@ type client struct {
 	// control plane composes the domain service here so the MarkStep* coreapi
 	// methods delegate the transition to a single, unit-tested place.
 	enroll *enrollment.Service
+	// warmupSecret signs the X-Inroad-Warmup receipt token on every warmup send,
+	// mirroring the tracking-secret discipline. Injected (never a package global) so
+	// the signing key is a composition-root decision.
+	warmupSecret []byte
+	// warmupContent is the injected content library (ContentGenerator seam) that
+	// produces the synthetic conversations warmup sends carry. The static library is
+	// the v1 impl; an AI generator drops in behind the same interface.
+	warmupContent warmup.ContentGenerator
 }
 
 // New returns the in-process coreapi client backed by the given connection
@@ -45,14 +54,18 @@ type client struct {
 // unsubscribe tokens; publicURL is the base URL used to build unsubscribe
 // links; googleOAuth refreshes gmail mailboxes' access tokens at job-build time
 // (zero value disables Gmail); msOAuth does the same for m365 mailboxes (zero
-// value disables Microsoft 365).
-func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth) coreapi.Client {
+// value disables Microsoft 365); warmupSecret signs the warmup receipt token and
+// warmupContent is the injected warmup content library (both used only by the
+// warmup send path).
+func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth, warmupSecret []byte, warmupContent warmup.ContentGenerator) coreapi.Client {
 	q := gen.New(pool)
 	return client{
 		pool: pool, q: q, keyring: keyring, jwtSecret: jwtSecret, publicURL: publicURL,
-		googleOAuth: googleOAuth,
-		msOAuth:     msOAuth,
-		enroll:      enrollment.NewService(enrollment.NewPgStore(q)),
+		googleOAuth:   googleOAuth,
+		msOAuth:       msOAuth,
+		enroll:        enrollment.NewService(enrollment.NewPgStore(q)),
+		warmupSecret:  warmupSecret,
+		warmupContent: warmupContent,
 	}
 }
 

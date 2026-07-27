@@ -1,0 +1,152 @@
+// Package warmup is the execution-plane warmup engine. The warmup:tick handler
+// sends one warmup email (a new-thread opener or a threaded reply) and schedules
+// the mailbox's next tick (lazy chain), mirroring sequence/advance.go's
+// claim→send→finalize→schedule shape; the warmup:sweep handler fans out a tick
+// per due participant and recomputes health. Both reach data ONLY through
+// coreapi and send ONLY through the shared SSRF-guarded transport — no new DB or
+// dial path.
+package warmup
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/hibiken/asynq"
+
+	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/queue"
+)
+
+// warmupHeader is the custom MIME header carrying the signed receipt token
+// (spec §7). The recipient's inbox poller verifies it to recognize warmup mail;
+// it MUST be emitted on the wire, so it is set through mail.Message.ExtraHeaders,
+// which every transport serializes.
+const warmupHeader = "X-Inroad-Warmup"
+
+// Sender sends one email through the transport the job's Provider selects (same
+// contract as the campaign send path). Defined here so tests inject a fake and
+// exercise the pipeline without a live server.
+type Sender interface {
+	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
+}
+
+// Enqueuer schedules a warmup:tick at a time, routed to a worker queue.
+// Satisfied by *queue.Client.
+type Enqueuer interface {
+	EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error
+}
+
+// SendHandler returns an asynq handler for warmup:tick tasks. It owns one warmup
+// send's lifecycle: fetch the next action, claim it (claim-before-send
+// idempotency), build the threaded MIME message with the signed X-Inroad-Warmup
+// receipt header, send over the shared SSRF-guarded transport, finalize, and
+// (lazy chain) schedule the mailbox's next tick — exactly one live tick per
+// mailbox. Mirrors sequence.AdvanceHandler.
+func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.Context, *asynq.Task) error {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var p queue.WarmupTickPayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return err
+		}
+		job, err := core.GetWarmupSendJob(ctx, p.MailboxID, p.WorkspaceID)
+		if err != nil {
+			return err
+		}
+		// Decrypted secrets: wipe both after use, like every other worker secret.
+		defer zeroize(job.SMTPPassword)
+		defer zeroize(job.AccessToken)
+
+		// Nothing to do: mailbox paused / over today's target / disabled / no
+		// eligible partner. The lazy chain is intentionally NOT continued here —
+		// the sweep re-seeds this mailbox once it is due again.
+		if job.Skip {
+			return nil
+		}
+
+		// scheduleNext resolves the from-mailbox's assigned worker (per-IP routing,
+		// §15: a mailbox's warmup and campaign mail share one egress identity) and
+		// enqueues its next tick. Shared by the already-sent, success, and
+		// permanent-failure paths.
+		scheduleNext := func() error {
+			due, sendNow, err := core.NextWarmupDue(ctx, p.MailboxID, p.WorkspaceID)
+			if err != nil {
+				return err
+			}
+			if sendNow {
+				due = time.Now()
+			}
+			dest, err := core.AssignMailboxWorker(ctx, p.MailboxID, p.WorkspaceID)
+			if err != nil {
+				return err
+			}
+			return enq.EnqueueWarmupTickAt(p.MailboxID, p.WorkspaceID, due, dest)
+		}
+
+		// Claim-before-send: the warmup_sends row is the delivery claim.
+		//   - ClaimSkip: another worker owns a fresh 'sending' lease, or the row is
+		//     terminal — nothing to do.
+		//   - ClaimAlreadySent: a prior run delivered THIS exact send but its next
+		//     tick didn't schedule. Recover-forward: schedule only, never re-send.
+		//   - ClaimWon: we own the claim; build + send below.
+		outcome, err := core.ClaimWarmupSend(ctx, job)
+		if err != nil {
+			return err
+		}
+		switch outcome {
+		case coreapi.ClaimSkip:
+			return nil
+		case coreapi.ClaimAlreadySent:
+			return scheduleNext()
+		}
+
+		msgID, sendErr := sender.Send(ctx,
+			mail.OutboundJob{
+				Provider: job.Provider, Host: job.SMTPHost, Port: job.SMTPPort,
+				Username: job.SMTPUsername, Password: string(job.SMTPPassword),
+				AllowPlaintext: job.AllowPlaintext, AccessToken: string(job.AccessToken),
+			},
+			mail.Message{
+				FromEmail: job.FromEmail, FromName: job.FromName, To: job.ToEmail,
+				Subject: job.Subject, BodyText: job.BodyText, BodyHTML: job.BodyHTML,
+				InReplyTo: job.InReplyTo, References: job.References,
+				ExtraHeaders: map[string]string{warmupHeader: job.Token},
+			},
+		)
+
+		switch {
+		case sendErr == nil:
+			// Durable-delivered + recover-forward: finalize 'sent' FIRST so the
+			// delivery is durable on its own, THEN schedule the next tick. If the
+			// schedule fails, the asynq retry's claim sees the 'sent' row
+			// (ClaimAlreadySent) and schedules without re-sending.
+			if err := core.MarkWarmupSent(ctx, job, msgID); err != nil {
+				return fmt.Errorf("mark warmup sent: %w", err)
+			}
+			return scheduleNext()
+		case mail.Retryable(sendErr):
+			// Transient failure (nothing delivered): release the claim so the asynq
+			// retry reclaims it, and return the error so asynq retries.
+			if rerr := core.ReleaseWarmupSend(ctx, job); rerr != nil {
+				return fmt.Errorf("release warmup send after transient failure: %w", rerr)
+			}
+			return sendErr
+		default:
+			// Permanent failure: finalize 'failed' (no thread advance) then keep the
+			// mailbox's chain alive so one bad send doesn't wedge its warmup.
+			if ferr := core.FailWarmupSend(ctx, job, sendErr.Error()); ferr != nil {
+				return ferr
+			}
+			return scheduleNext()
+		}
+	}
+}
+
+// zeroize overwrites a decrypted secret in place after use.
+func zeroize(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}

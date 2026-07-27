@@ -8,10 +8,17 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 )
 
+// SubRouter registers additional routes onto the mailbox router. Sub-resources
+// (warmup) implement it so they live under /mailboxes/{id} and inherit the auth
+// middleware — chi disallows two routers mounted at the same prefix.
+type SubRouter interface{ Register(r chi.Router) }
+
 // Routes returns this domain's HTTP surface, mounted by the server under
 // e.g. /api/v1/mailboxes. Every route requires an authenticated caller;
 // auth is enforced by the protected router group, not here. connect
-// additionally requires a verified email, checked via checker.
+// additionally requires a verified email, checked via checker. Sub-resources
+// (warmup) registered here inherit the group's auth by being mounted under
+// /mailboxes.
 func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r := chi.NewRouter()
 
@@ -23,6 +30,9 @@ func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r.Post("/{id}/pause", h.pause)
 	r.Post("/{id}/resume", h.resume)
 	r.Delete("/{id}", h.delete)
+	for _, s := range h.subs {
+		s.Register(r)
+	}
 
 	return r
 }

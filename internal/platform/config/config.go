@@ -29,6 +29,12 @@ type Config struct {
 	// second secret on upgrade.
 	TrackingSecret []byte
 
+	// WarmupSecret signs the X-Inroad-Warmup receipt token (internal/platform/
+	// warmup) so the inbox poller can attribute a received warmup message back to
+	// its send. Dedicated so rotating warmup tokens doesn't invalidate sessions or
+	// tracking links; falls back to JWTSecret when unset, matching TrackingSecret.
+	WarmupSecret []byte
+
 	// MailAllowPrivateHosts permits mailbox SMTP/IMAP hosts on RFC1918/ULA
 	// private ranges. Default true for self-hosted operators reaching internal
 	// mail servers; set false for multi-tenant Cloud. Loopback, link-local
@@ -47,6 +53,20 @@ type Config struct {
 	// WorkerConcurrency caps how many asynq tasks the worker processes
 	// simultaneously. Default 10; tune per SMTP throughput.
 	WorkerConcurrency int
+
+	// --- Worker identity + per-IP routing (spec §15) ---
+
+	// WorkerID is this worker's stable id (default: OS hostname). It keys the
+	// `workers` heartbeat row and names the worker's dedicated queue ("w:<id>").
+	WorkerID string
+	// WorkerEgressIP is the optional source IP outbound SMTP/IMAP dials bind to
+	// (net.Dialer.LocalAddr). Empty = OS default route (single-node dev). It sets
+	// the SOURCE address only and never relaxes the SSRF destination vet.
+	WorkerEgressIP string
+	// WorkerQueues is the ordered set of asynq queues this worker consumes;
+	// default {"w:<WorkerID>", "default"} so it serves its own per-IP queue plus
+	// the shared default.
+	WorkerQueues []string
 
 	// LogLevel is one of debug/info/warn/error. When empty, the logger
 	// falls back to env-based defaults (debug in development, info elsewhere).
@@ -116,6 +136,18 @@ func Load() (*Config, error) {
 		cfg.TrackingSecret = cfg.JWTSecret
 	}
 
+	if warmupSecret := os.Getenv("INROAD_WARMUP_SECRET"); warmupSecret != "" {
+		// Same floor as INROAD_JWT_SECRET: an explicitly-set weak secret fails
+		// closed rather than signing warmup tokens with a guessable key. The
+		// fallback below inherits JWTSecret, which already met this bar.
+		if len(warmupSecret) < 16 {
+			return nil, fmt.Errorf("INROAD_WARMUP_SECRET must be at least 16 bytes")
+		}
+		cfg.WarmupSecret = []byte(warmupSecret)
+	} else {
+		cfg.WarmupSecret = cfg.JWTSecret
+	}
+
 	rawKey, err := base64.StdEncoding.DecodeString(os.Getenv("INROAD_MASTER_KEY"))
 	if err != nil {
 		return nil, fmt.Errorf("INROAD_MASTER_KEY must be valid base64: %w", err)
@@ -134,6 +166,20 @@ func Load() (*Config, error) {
 	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
 	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
+
+	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
+	cfg.WorkerID = getenv("INROAD_WORKER_ID", hostname)
+	cfg.WorkerEgressIP = getenv("INROAD_WORKER_EGRESS_IP", "")
+	if raw := os.Getenv("INROAD_WORKER_QUEUES"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				cfg.WorkerQueues = append(cfg.WorkerQueues, s)
+			}
+		}
+	}
+	if len(cfg.WorkerQueues) == 0 {
+		cfg.WorkerQueues = defaultWorkerQueues(cfg.WorkerID)
+	}
 	cfg.LogLevel = strings.ToLower(getenv("INROAD_LOG_LEVEL", ""))
 	if raw := os.Getenv("INROAD_TRUSTED_PROXIES"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
@@ -162,6 +208,17 @@ func Load() (*Config, error) {
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
 
 	return cfg, nil
+}
+
+// defaultWorkerQueues is the queue set a worker consumes when INROAD_WORKER_QUEUES
+// is unset: its own dedicated per-IP queue plus the shared default. An empty
+// workerID (hostname lookup failed AND no override) collapses to just the shared
+// default, so the worker still processes unrouted traffic.
+func defaultWorkerQueues(workerID string) []string {
+	if workerID == "" {
+		return []string{"default"}
+	}
+	return []string{"w:" + workerID, "default"}
 }
 
 func getenvInt(key string, fallback int) int {

@@ -28,10 +28,16 @@ type Handler struct {
 	svc        *Service
 	jwtSecret  []byte
 	appBaseURL string
+	// subs are sub-resource routers (e.g. warmup) mounted under /mailboxes/{id}
+	// so they share the {id} scope and inherit this router's auth — chi disallows
+	// two routers on the same prefix (see SubRouter).
+	subs []SubRouter
 }
 
-func NewHandler(svc *Service, jwtSecret []byte, appBaseURL string) *Handler {
-	return &Handler{svc: svc, jwtSecret: jwtSecret, appBaseURL: appBaseURL}
+// NewHandler builds the mailbox handler. Optional subs register additional routes
+// under the mailbox router (e.g. warmup's /mailboxes/{id}/warmup).
+func NewHandler(svc *Service, jwtSecret []byte, appBaseURL string, subs ...SubRouter) *Handler {
+	return &Handler{svc: svc, jwtSecret: jwtSecret, appBaseURL: appBaseURL, subs: subs}
 }
 
 // connectRequest is the wire shape for POST /. It maps 1:1 onto ConnectInput.

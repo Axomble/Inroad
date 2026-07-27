@@ -85,7 +85,9 @@ func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
 		return err
 	}
 
-	c, err := dialIMAP(addr, cfg, t.Timeout)
+	// The connect-test is a control-plane dial (cmd/inroad), not a worker egress
+	// dial, so it binds no source address.
+	c, err := dialIMAP(addr, cfg, t.Timeout, nil)
 	if err != nil {
 		return err
 	}
@@ -109,11 +111,18 @@ func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
 // via go-imap's per-command deadline (Client.Timeout), so a hung server can
 // never block the caller indefinitely. A timeout <= 0 falls back to
 // defaultIMAPTimeout.
-func dialIMAP(addr string, cfg IMAPConfig, timeout time.Duration) (*client.Client, error) {
+//
+// localAddr optionally binds the SOURCE address of the dial (the worker egress
+// IP, spec §15); nil uses the OS default route. addr is the already-vetted
+// DESTINATION, so a source bind never affects the SSRF vet (spec §17.7).
+func dialIMAP(addr string, cfg IMAPConfig, timeout time.Duration, localAddr *net.TCPAddr) (*client.Client, error) {
 	if timeout <= 0 {
 		timeout = defaultIMAPTimeout
 	}
 	dialer := &net.Dialer{Timeout: timeout}
+	if localAddr != nil {
+		dialer.LocalAddr = localAddr
+	}
 
 	var c *client.Client
 	var err error
