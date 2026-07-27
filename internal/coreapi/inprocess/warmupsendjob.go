@@ -105,8 +105,12 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		return coreapi.WarmupSendJob{Skip: true}, nil
 	}
 
-	// Select a partner (different, enabled, non-paused, same workspace).
-	partner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{WorkspaceID: ws, MailboxID: mbID})
+	// Recency-spread partner (different, enabled, non-paused, same workspace): the
+	// seed anchor AND the new-thread recipient. Selected FIRST so the reply
+	// decision's seed is unchanged from before this tuning (partner spread for new
+	// threads is preserved); when a reply is wanted we may instead target a
+	// repliable partner below, but the new-thread fallback stays on this one.
+	spreadPartner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{WorkspaceID: ws, MailboxID: mbID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No eligible partner (workspace has <2 usable participants) → skip.
@@ -118,8 +122,9 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	dayKey := now.Format("2006-01-02")
 	sendIndex := int(sentToday)
 	// Deterministic (seeded, not math/rand) reply-vs-new decision, stable across a
-	// retried tick because it seeds on (mailbox, partner, day, index).
-	seed := mailboxID + ":" + partner.MailboxID.String() + ":" + dayKey + ":" + strconv.Itoa(sendIndex)
+	// retried tick because it seeds on (mailbox, spread partner, day, index). Rolled
+	// BEFORE partner-for-reply selection; the seed is unchanged from before the fix.
+	seed := mailboxID + ":" + spreadPartner.MailboxID.String() + ":" + dayKey + ":" + strconv.Itoa(sendIndex)
 	wantReply := warmup.ReplyDecision(seed, float64(b.ReplyRate))
 
 	var (
@@ -131,30 +136,45 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		references string
 	)
 
+	// New-thread recipient defaults to the recency-spread partner; the reply branch
+	// below overrides it with a repliable partner ONLY on a confirmed reply.
+	toMailbox := spreadPartner.MailboxID
+	toEmail := spreadPartner.Email
+
 	if wantReply {
-		th, terr := c.q.GetOpenWarmupThread(ctx, gen.GetOpenWarmupThreadParams{
-			WorkspaceID: ws, SenderMailbox: mbID, PartnerMailbox: partner.MailboxID,
+		// Prefer a partner that ACTUALLY has an open, non-exhausted thread to reply
+		// into, rather than replying only into the recency-spread partner (which, as
+		// the least-recently-active pick, is the least likely to have one — the cause
+		// of the under-realized reply_rate). No repliable partner → fall through to
+		// the new-thread path on the spread partner, unchanged.
+		rp, rerr := c.q.SelectWarmupReplyPartner(ctx, gen.SelectWarmupReplyPartnerParams{
+			WorkspaceID: ws, SenderMailbox: mbID, MaxTurn: int32(warmup.MaxContentTurns()),
 		})
 		switch {
-		case terr == nil:
-			content, cerr := c.warmupContent.Thread(ctx, th.ContentKey)
+		case rerr == nil:
+			content, cerr := c.warmupContent.Thread(ctx, rp.ContentKey)
 			if cerr != nil {
 				return coreapi.WarmupSendJob{}, cerr
 			}
-			// Reply only if the library thread still has a turn at this position;
-			// an exhausted thread falls through to open a fresh one.
-			if turnBody, ok := warmup.Reply(content, int(th.Turn)); ok {
-				threadID = th.ID
+			// @max_turn is a coarse bound; confirm this specific thread still has a
+			// turn here (a shorter library thread can be exhausted below it). An
+			// exhausted thread falls through to open a fresh one with spreadPartner.
+			if turnBody, ok := warmup.Reply(content, int(rp.Turn)); ok {
+				toMailbox = rp.MailboxID
+				toEmail = rp.Email
+				threadID = rp.ThreadID
 				isReply = true
 				subject = "Re: " + content.Subject
 				body = turnBody
-				inReplyTo = th.RootMessageID
-				references = th.RootMessageID
+				inReplyTo = rp.RootMessageID
+				// TODO(warmup): enrich References with the full ancestor chain once
+				// per-message ids are persisted (a schema change, out of scope here).
+				references = rp.RootMessageID
 			}
-		case errors.Is(terr, pgx.ErrNoRows):
-			// no open thread for the pair — fall through to a new thread
+		case errors.Is(rerr, pgx.ErrNoRows):
+			// no repliable partner for this sender — fall through to a new thread
 		default:
-			return coreapi.WarmupSendJob{}, terr
+			return coreapi.WarmupSendJob{}, rerr
 		}
 	}
 
@@ -213,7 +233,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	// this thread is the only side effect left — a failure earlier created nothing.
 	if !isReply {
 		th, ierr := c.q.InsertWarmupThread(ctx, gen.InsertWarmupThreadParams{
-			WorkspaceID: ws, SenderMailbox: mbID, PartnerMailbox: partner.MailboxID,
+			WorkspaceID: ws, SenderMailbox: mbID, PartnerMailbox: toMailbox,
 			Subject: subject, ContentKey: newThreadContentKey,
 		})
 		if ierr != nil {
@@ -229,11 +249,11 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	return coreapi.WarmupSendJob{
 		WorkspaceID: ws.String(),
 		FromMailbox: mbID.String(),
-		ToMailbox:   partner.MailboxID.String(),
+		ToMailbox:   toMailbox.String(),
 		ThreadID:    threadID.String(),
 		IsReply:     isReply,
 		SendID:      sendID.String(),
-		ToEmail:     partner.Email,
+		ToEmail:     toEmail,
 		FromEmail:   b.FromEmail,
 		FromName:    b.FromName,
 		Subject:     subject,

@@ -925,6 +925,78 @@ func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartn
 	return i, err
 }
 
+const selectWarmupReplyPartner = `-- name: SelectWarmupReplyPartner :one
+SELECT p.mailbox_id, m.email, m.display_name,
+       t.id AS thread_id, t.content_key, t.turn, t.root_message_id
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id
+JOIN LATERAL (
+    SELECT th.id, th.content_key, th.turn, th.root_message_id, th.last_activity_at
+    FROM warmup_threads th
+    WHERE th.workspace_id = $1
+      AND ((th.sender_mailbox = $2 AND th.partner_mailbox = p.mailbox_id)
+        OR (th.sender_mailbox = p.mailbox_id AND th.partner_mailbox = $2))
+    ORDER BY th.last_activity_at DESC
+    LIMIT 1
+) t ON true
+WHERE p.workspace_id = $1
+  AND p.mailbox_id <> $2
+  AND p.enabled
+  AND p.health_state <> 'paused'
+  AND (p.paused_until IS NULL OR p.paused_until <= now())
+  AND t.turn >= 1
+  AND t.turn < $3::int
+ORDER BY t.last_activity_at ASC, p.mailbox_id ASC
+LIMIT 1
+`
+
+type SelectWarmupReplyPartnerParams struct {
+	WorkspaceID   uuid.UUID `json:"workspace_id"`
+	SenderMailbox uuid.UUID `json:"sender_mailbox"`
+	MaxTurn       int32     `json:"max_turn"`
+}
+
+type SelectWarmupReplyPartnerRow struct {
+	MailboxID     uuid.UUID `json:"mailbox_id"`
+	Email         string    `json:"email"`
+	DisplayName   string    `json:"display_name"`
+	ThreadID      uuid.UUID `json:"thread_id"`
+	ContentKey    string    `json:"content_key"`
+	Turn          int32     `json:"turn"`
+	RootMessageID string    `json:"root_message_id"`
+}
+
+// Pick ONE eligible warmup partner for a sender that ALSO has an OPEN,
+// NON-EXHAUSTED shared thread the sender can reply INTO — so a wanted reply
+// actually lands on a repliable partner instead of falling through to a new
+// thread (the reply_rate under-realization the recency-spread SelectWarmupPartner
+// causes: its least-recently-active pick is the LEAST likely to have an open
+// thread). Same eligibility as SelectWarmupPartner (DIFFERENT, enabled,
+// non-paused, SAME workspace). "Open + repliable" is judged on the pair's LATEST
+// thread (the one GetOpenWarmupThread would reply into): its turn must be
+// >= 1 (its opener already sent, so root_message_id is set for In-Reply-To) and
+// < @max_turn (the library's MaxContentTurns — a thread at/over it is exhausted
+// for EVERY library thread). @max_turn is a COARSE bound: a shorter thread can be
+// exhausted below it, so the caller still confirms with warmup.Reply and, on a
+// miss, falls back to the new-thread path. Ordered by that thread's
+// last_activity_at ASC so replies still spread across repliable partners
+// (least-recently-active first, matching SelectWarmupPartner's spread), tie-broken
+// by mailbox_id for determinism. workspace-pinned; no repliable partner → no row.
+func (q *Queries) SelectWarmupReplyPartner(ctx context.Context, arg SelectWarmupReplyPartnerParams) (SelectWarmupReplyPartnerRow, error) {
+	row := q.db.QueryRow(ctx, selectWarmupReplyPartner, arg.WorkspaceID, arg.SenderMailbox, arg.MaxTurn)
+	var i SelectWarmupReplyPartnerRow
+	err := row.Scan(
+		&i.MailboxID,
+		&i.Email,
+		&i.DisplayName,
+		&i.ThreadID,
+		&i.ContentKey,
+		&i.Turn,
+		&i.RootMessageID,
+	)
+	return i, err
+}
+
 const setWarmupReceiptEngaged = `-- name: SetWarmupReceiptEngaged :one
 UPDATE warmup_receipts
 SET engaged = true

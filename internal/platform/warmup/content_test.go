@@ -80,6 +80,25 @@ func TestEmptyLibraryReturnsError(t *testing.T) {
 	}
 }
 
+// TestMaxContentTurns proves the coarse repliable-thread bound equals the real
+// maximum turn count across the library (so SelectWarmupReplyPartner never
+// excludes a thread that could still yield a reply), and is derived, not guessed:
+// it recomputes the max independently and compares.
+func TestMaxContentTurns(t *testing.T) {
+	want := 0
+	for _, th := range curatedThreads() {
+		if len(th.Turns) > want {
+			want = len(th.Turns)
+		}
+	}
+	if want < 2 {
+		t.Fatalf("library max turns = %d, want >= 2 (a thread needs an opener + at least one reply)", want)
+	}
+	if got := MaxContentTurns(); got != want {
+		t.Fatalf("MaxContentTurns() = %d, want %d (the actual library maximum)", got, want)
+	}
+}
+
 func startsWithGreeting(s string) bool {
 	for _, g := range greetings {
 		if strings.HasPrefix(s, g) {

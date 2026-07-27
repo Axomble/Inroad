@@ -82,6 +82,24 @@ func Reply(thread Thread, turn int) (string, bool) {
 	return thread.Turns[turn], true
 }
 
+// MaxContentTurns is the greatest turn count any library thread has. The send
+// path passes it to SelectWarmupReplyPartner as a COARSE upper bound: a thread
+// whose turn has reached this value is exhausted for EVERY library thread, so it
+// can never yield another reply and is excluded from the repliable-partner search.
+// The authoritative, per-thread exhaustion check stays warmup.Reply against the
+// resolved content (a shorter thread can be exhausted below this bound). Deriving
+// it from the static library keeps the bound's single source of truth here rather
+// than as a magic number embedded in SQL.
+func MaxContentTurns() int {
+	longest := 0
+	for _, t := range curatedThreads() {
+		if len(t.Turns) > longest {
+			longest = len(t.Turns)
+		}
+	}
+	return longest
+}
+
 func substitute(s, greeting string) string {
 	return strings.ReplaceAll(s, greetingToken, greeting)
 }

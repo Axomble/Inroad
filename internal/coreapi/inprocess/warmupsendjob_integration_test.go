@@ -148,6 +148,147 @@ func TestPartnerSelectionSkipsWhenAlone(t *testing.T) {
 	}
 }
 
+// mustSealer builds the legacy sealer used to seal seeded mailbox credentials.
+func mustSealer(t *testing.T) *crypto.Sealer {
+	t.Helper()
+	s, err := crypto.NewSealer(itMasterKey)
+	if err != nil {
+		t.Fatalf("sealer: %v", err)
+	}
+	return s
+}
+
+// forceReplyRate re-upserts a participant with a fixed reply_rate (1.0 → always
+// reply, 0.0 → never), so a test can drive the reply-vs-new decision deterministically
+// without depending on the seeded hash.
+func forceReplyRate(t *testing.T, ctx context.Context, q *gen.Queries, mb, ws uuid.UUID, rate float32) {
+	t.Helper()
+	if _, err := q.UpsertWarmupParticipant(ctx, gen.UpsertWarmupParticipantParams{
+		MailboxID: mb, WorkspaceID: ws, StartVolume: 8, MaxVolume: 40, RampIncrement: 2, ReplyRate: rate,
+	}); err != nil {
+		t.Fatalf("force reply_rate: %v", err)
+	}
+}
+
+// seedRepliableThread opens a thread (sender→partner) and advances it to turn 1 so
+// its opener is "sent" (root_message_id set) and a reply turn remains — the state
+// SelectWarmupReplyPartner treats as repliable. Returns the recorded root Message-ID.
+func seedRepliableThread(t *testing.T, ctx context.Context, q *gen.Queries, ws, sender, partner uuid.UUID) string {
+	t.Helper()
+	th, err := q.InsertWarmupThread(ctx, gen.InsertWarmupThreadParams{
+		WorkspaceID: ws, SenderMailbox: sender, PartnerMailbox: partner,
+		Subject: "seed", ContentKey: "seed-reply-thread",
+	})
+	if err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	const root = "<seed-root@acme.test>"
+	if err := q.AdvanceWarmupThread(ctx, gen.AdvanceWarmupThreadParams{
+		ID: th.ID, WorkspaceID: ws, RootMessageID: root,
+	}); err != nil {
+		t.Fatalf("advance seed thread: %v", err)
+	}
+	return root
+}
+
+// TestReplyPrefersRepliablePartner proves the fix: when a reply is wanted and the
+// sender has an OPEN, non-exhausted thread with partner B, GetWarmupSendJob replies
+// to B — even though the recency-spread partner is the never-paired D (which sorts
+// FIRST as the least-recently-active pick). Before the fix the reply would target D,
+// find no open thread, and fall through to a new thread (under-realizing reply_rate).
+func TestReplyPrefersRepliablePartner(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	d := itMailbox(t, ctx, f.q, mustSealer(t), f.ws1, "d@acme.test")
+	forceReplyRate(t, ctx, f.q, f.a, f.ws1, 1) // always reply
+	root := seedRepliableThread(t, ctx, f.q, f.ws1, f.a, f.b)
+
+	// The recency-spread partner is D (never paired → 'epoch'); B has a just-active
+	// thread. Confirm that assumption so the test proves preference, not coincidence.
+	sp, err := f.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{WorkspaceID: f.ws1, MailboxID: f.a})
+	if err != nil {
+		t.Fatalf("spread partner: %v", err)
+	}
+	if sp.MailboxID != d {
+		t.Fatalf("recency-spread partner = %s, want D=%s (test needs B != spread partner)", sp.MailboxID, d)
+	}
+
+	job, err := f.core.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
+	if err != nil || job.Skip {
+		t.Fatalf("GetWarmupSendJob: job=%+v err=%v", job, err)
+	}
+	if !job.IsReply {
+		t.Fatalf("IsReply = false, want true (a reply was wanted and B is repliable)")
+	}
+	if job.ToMailbox != f.b.String() {
+		t.Fatalf("reply partner = %s, want repliable B=%s (not spread partner D=%s)", job.ToMailbox, f.b, d)
+	}
+	if job.InReplyTo != root {
+		t.Fatalf("InReplyTo = %q, want thread root %q", job.InReplyTo, root)
+	}
+	if job.References != root {
+		t.Fatalf("References = %q, want thread root %q", job.References, root)
+	}
+}
+
+// TestReplyFallsBackToNewThreadWhenNoRepliablePartner proves that when a reply is
+// wanted but NO partner has an open repliable thread, GetWarmupSendJob falls back to
+// the unchanged new-thread path on the recency-spread partner (a fresh thread, not a
+// reply) rather than erroring or skipping.
+func TestReplyFallsBackToNewThreadWhenNoRepliablePartner(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	forceReplyRate(t, ctx, f.q, f.a, f.ws1, 1) // always want a reply
+
+	job, err := f.core.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
+	if err != nil || job.Skip {
+		t.Fatalf("GetWarmupSendJob: job=%+v err=%v", job, err)
+	}
+	if job.IsReply {
+		t.Fatalf("IsReply = true, want false (no repliable thread exists → new thread)")
+	}
+	if job.ToMailbox != f.b.String() {
+		t.Fatalf("new-thread partner = %s, want B=%s", job.ToMailbox, f.b)
+	}
+	if job.InReplyTo != "" {
+		t.Fatalf("InReplyTo = %q, want empty on a new thread", job.InReplyTo)
+	}
+}
+
+// TestReplyFallsBackWhenLatestThreadExhausted proves an EXHAUSTED thread (its turn
+// reached the library maximum) is not treated as repliable: SelectWarmupReplyPartner
+// excludes it, so a wanted reply falls back to a new thread with the same partner.
+func TestReplyFallsBackWhenLatestThreadExhausted(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	forceReplyRate(t, ctx, f.q, f.a, f.ws1, 1)
+
+	th, err := f.q.InsertWarmupThread(ctx, gen.InsertWarmupThreadParams{
+		WorkspaceID: f.ws1, SenderMailbox: f.a, PartnerMailbox: f.b,
+		Subject: "seed", ContentKey: "seed-reply-thread",
+	})
+	if err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	// Advance to the library max turn → exhausted for EVERY library thread, so the
+	// coarse SQL bound (turn < max_turn) excludes it.
+	for i := 0; i < warmup.MaxContentTurns(); i++ {
+		if err := f.q.AdvanceWarmupThread(ctx, gen.AdvanceWarmupThreadParams{
+			ID: th.ID, WorkspaceID: f.ws1, RootMessageID: "<exhausted@acme.test>",
+		}); err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+	}
+
+	job, err := f.core.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
+	if err != nil || job.Skip {
+		t.Fatalf("GetWarmupSendJob: job=%+v err=%v", job, err)
+	}
+	if job.IsReply {
+		t.Fatalf("IsReply = true, want false (latest thread exhausted → new thread)")
+	}
+	if job.ToMailbox != f.b.String() {
+		t.Fatalf("partner = %s, want B=%s", job.ToMailbox, f.b)
+	}
+}
+
 // TestClaimIdempotencyAndThreadAdvance drives the claim lifecycle: a first claim
 // wins, a re-claim of a fresh 'sending' skips, MarkWarmupSent advances the thread
 // and bumps stats, and a post-sent claim recover-forwards (AlreadySent).
