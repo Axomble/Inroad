@@ -632,17 +632,19 @@ export type WarmupParticipant = {
   started_at: string;
   /** warmup emails sent by this mailbox today */
   today_sent: number;
-  /** today's ramp target (0 when paused) */
+  /** today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this. */
   today_target: number;
 };
 export type WarmupDayStat = {
   /** UTC day */
   day: string;
+  /** warmup mail this mailbox sent */
   sent: number;
+  /** warmup mail this mailbox received */
   received: number;
-  /** of received */
+  /** of this mailbox's SENT mail, how many landed in partners' inboxes (sender placement) */
   inbox: number;
-  /** of received */
+  /** of this mailbox's SENT mail, how many landed in partners' spam (sender placement) */
   spam: number;
   replies: number;
 };
@@ -669,9 +671,9 @@ export type WarmupMailbox = {
   health_reason: string;
   today_sent: number;
   today_target: number;
-  /** fraction of received warmup mail that landed in inbox over 7 days (0..1) */
+  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal */
   inbox_rate_7d: number;
-  /** fraction that landed in spam over 7 days (0..1) */
+  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1) */
   spam_rate_7d: number;
 };
 export type WarmupOverview = {
