@@ -67,6 +67,18 @@ func TestTokenRejectsMalformed(t *testing.T) {
 	}
 }
 
+// TestTokenRejectsSignedNonJSON pins that a validly-signed but corrupt payload is
+// still rejected: the HMAC passes (we sign the raw bytes with the real secret), so
+// Verify reaches the JSON decode, which must fail closed. A good signature over
+// garbage is not a valid token.
+func TestTokenRejectsSignedNonJSON(t *testing.T) {
+	raw := []byte("this is validly signed but is not JSON at all")
+	tok := b64(raw) + "." + b64(sign(raw, testSecret))
+	if _, ok := Verify(tok, testSecret); ok {
+		t.Fatal("expected a validly-signed but non-JSON payload to be rejected")
+	}
+}
+
 // TestTokenVerifiedPayloadNotTrusted documents that a valid signature over a
 // mismatched workspace is still returned to the caller — Verify only proves the
 // token is authentic; the poller must additionally check the workspace matches.

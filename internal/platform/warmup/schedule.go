@@ -130,7 +130,13 @@ func HealthState(spamRate, bounceRate float64, invalidTokens int, current string
 		if lower == StateHealthy {
 			return StateHealthy, ""
 		}
-		return lower, "clean window: recovering, stepping down from " + normalizeState(current)
+		if want == StateHealthy {
+			return lower, "clean window: recovering, stepping down from " + normalizeState(current)
+		}
+		// Signals improved but aren't fully clean: still step down exactly one
+		// level, but report the persisting signal rather than falsely claiming a
+		// clean window.
+		return lower, "improving, stepping down from " + normalizeState(current) + " to " + lower + " (" + wantReason + ")"
 	default:
 		if want == StateHealthy {
 			return StateHealthy, ""

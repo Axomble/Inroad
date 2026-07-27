@@ -98,6 +98,11 @@ func NewScheduler(registrar Registrar) *Scheduler { return &Scheduler{registrar:
 
 // RegisterPeriodic registers a recurring job of the given kind on the cron spec.
 func (s *Scheduler) RegisterPeriodic(spec, kind string) error {
+	// asynq's Register returns an entry ID for later Unregister; we discard it
+	// deliberately. The bus seam's RegisterPeriodic(spec, kind) error signature
+	// can't surface that id, so an entry registered through the bus can't later be
+	// Unregister'd — fine for boot-time sweep registration (register once at boot,
+	// never dynamically torn down).
 	if _, err := s.registrar.Register(spec, asynq.NewTask(kind, nil)); err != nil {
 		return fmt.Errorf("register periodic %q: %w", kind, err)
 	}

@@ -1,6 +1,7 @@
 package warmup
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,6 +132,7 @@ func TestHealthStateTransitions(t *testing.T) {
 		{"recover paused -> throttled on clean", 0.0, 0.0, 0, StatePaused, StateThrottled},
 		{"recover throttled -> watch on clean", 0.0, 0.0, 0, StateThrottled, StateWatch},
 		{"recover watch -> healthy on clean", 0.0, 0.0, 0, StateWatch, StateHealthy},
+		{"partial recovery steps one level toward health", 0.20, 0.0, 0, StatePaused, StateThrottled},
 		{"holds level when signals match state", 0.20, 0.0, 0, StateWatch, StateWatch},
 		{"unknown current treated as healthy", 0.20, 0.0, 0, "bogus", StateWatch},
 	}
@@ -147,5 +149,22 @@ func TestHealthStateTransitions(t *testing.T) {
 				t.Fatalf("expected empty reason for healthy, got %q", reason)
 			}
 		})
+	}
+}
+
+// TestHealthStatePartialRecoveryReason pins that a step-down whose window is NOT
+// clean — signals still warrant a non-healthy level, just a milder one — reports
+// the persisting signal and never falsely claims a clean window. State is still a
+// single step toward health (paused -> throttled); only the reason is at issue.
+func TestHealthStatePartialRecoveryReason(t *testing.T) {
+	got, reason := HealthState(0.20, 0.0, 0, StatePaused) // spam 0.20 warrants watch
+	if got != StateThrottled {
+		t.Fatalf("state = %q, want %q (reason %q)", got, StateThrottled, reason)
+	}
+	if strings.Contains(reason, "clean window") {
+		t.Fatalf("reason must not claim a clean window while signals persist: %q", reason)
+	}
+	if !strings.Contains(reason, "15%") {
+		t.Fatalf("reason should surface the still-present signal, got %q", reason)
 	}
 }
