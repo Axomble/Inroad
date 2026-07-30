@@ -32,8 +32,20 @@ test('a successful Gmail connect shows the email, invalidates the list, and stri
   expect(invalidateSpy.mock.calls.some((args) => JSON.stringify(args).includes('Mailbox'))).toBe(true)
   // The query params are stripped so a refresh can't re-show the banner.
   expect(navigateMock).toHaveBeenCalledWith(
-    expect.objectContaining({ to: '/app/mailboxes', search: {}, replace: true }),
+    expect.objectContaining({ to: '/app/mailboxes', replace: true, search: expect.any(Function) }),
   )
+  // ...and stripped *selectively*: the same route carries the list's ?q=/?sort=,
+  // so clearing the callback params must not reset the user's filter.
+  const [{ search }] = navigateMock.mock.calls.at(-1) as [
+    { search: (prev: Record<string, unknown>) => Record<string, unknown> },
+  ]
+  expect(search({ connected: 'x', provider: 'gmail', oauth_error: 'y', q: 'alex', sort: 'email' })).toEqual({
+    connected: undefined,
+    oauth_error: undefined,
+    provider: undefined,
+    q: 'alex',
+    sort: 'email',
+  })
 })
 
 test('a successful Microsoft 365 connect shows the Microsoft 365 label', () => {

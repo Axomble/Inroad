@@ -5,7 +5,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { httpStatus } from '@/lib/rtk-error'
 import type { Mailbox, WarmupMailbox } from '@/store/api'
-import { HealthBadge } from './health-badge'
+import { HealthBadge } from '@/components/shared/health-badge'
 import { WarmupSettingsForm } from './warmup-settings-form'
 import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api'
 

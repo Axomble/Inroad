@@ -1,5 +1,5 @@
 import { cn } from '@/lib/utils'
-import { healthMeta, toWarmupHealth } from './health'
+import { healthMeta, toWarmupHealth } from '@/lib/warmup-health'
 
 /**
  * A mailbox's warmup reputation state as a small pill. Color is reinforcement

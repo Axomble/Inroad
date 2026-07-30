@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertCircle, Loader2, Mail, MoreVertical, Plus } from 'lucide-react'
+import { AlertCircle, Flame, Loader2, Mail, MoreVertical, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -20,10 +20,30 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { StatusPill } from '@/components/shared/status-pill'
-import { Page, PageTopbar, StatStrip, Stat, PageBody, EmptyBlock } from '@/components/layout/page'
+import { StatusPill, StatusDot } from '@/components/shared/status-pill'
+import { HealthBadge } from '@/components/shared/health-badge'
+import { ListSearchInput } from '@/components/shared/list-search-input'
+import { SortMenu } from '@/components/shared/sort-menu'
+import {
+  Page,
+  PageTopbar,
+  StatStrip,
+  Stat,
+  SectionBar,
+  PageBody,
+  EmptyBlock,
+  ListHeader,
+  ListHeaderCell,
+  HintBar,
+} from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
-import type { Mailbox } from '@/store/api'
+import { useListControls, byText, byRank, type SortOption } from '@/hooks/use-list-controls'
+import { useListKeyboardNav, LIST_NAV_HINTS_NO_OPEN } from '@/hooks/use-list-keyboard-nav'
+// Read-only cross-feature query-hook reuse is the established pattern here (see
+// features/warmup/warmup-page.tsx pulling the mailbox list); cross-feature *UI*
+// imports are not, which is why the warmup badge now lives in components/shared.
+import { useGetWarmupOverviewQuery } from '@/features/warmup/api'
+import type { Mailbox, WarmupMailbox } from '@/store/api'
 import type { StartOauthResponse } from './api'
 import {
   useListMailboxesQuery,
@@ -50,17 +70,52 @@ import {
 // consent-URL payload or a (typed) error. Both providers share this shape.
 type OauthStartResult = { data?: StartOauthResponse } | { error?: unknown }
 
+/**
+ * Module scope so `useListControls` can memoise on comparator identity.
+ *
+ * "Needs attention" leads because this page answers one question — can I send
+ * from these today? — so errored and paused mailboxes belong at the top.
+ */
+const SORTS: readonly SortOption<Mailbox>[] = [
+  {
+    id: 'attention',
+    label: 'Needs attention',
+    compare: byRank((m) => m.status, ['error', 'paused', 'active']),
+  },
+  { id: 'email', label: 'Email', compare: byText((m) => m.email) },
+  { id: 'provider', label: 'Provider', compare: byText((m) => m.provider) },
+]
+
 export function MailboxesPage() {
   const [showConnect, setShowConnect] = useState(false)
   // Track which provider's start failed so the banner shows provider-correct
   // copy from the single shared mapping.
   const [startError, setStartError] = useState<{ provider: OauthProvider; kind: StartErrorKind } | null>(null)
   const { data, isLoading } = useListMailboxesQuery()
+  // Warmup state belongs on the mailbox row: the mailbox is the unit of trust,
+  // so its identity, sending status, and reputation must be answerable on one
+  // screen instead of forcing a page switch to /app/warmup. Read-only, and the
+  // warmup page shares the same cache entry.
+  const { data: warmup } = useGetWarmupOverviewQuery()
   const [startGoogleOauth, { isLoading: startingGmail }] = useStartGoogleOauthMutation()
   const [startMicrosoftOauth, { isLoading: startingMicrosoft }] = useStartMicrosoftOauthMutation()
   const mailboxes = data ?? []
 
+  // Plain construction, no `useMemo`: nothing downstream depends on this Map's
+  // identity (rows read through `.get()`), and building it is one pass over a
+  // few dozen entries. Memoizing would buy nothing but a dependency array.
+  const warmupByMailbox = new Map((warmup?.mailboxes ?? []).map((entry) => [entry.mailbox_id, entry]))
+
+  const controls = useListControls({
+    items: mailboxes,
+    searchFields: (m) => [m.email, m.display_name, m.provider, m.smtp_host],
+    sorts: SORTS,
+  })
+
+  const nav = useListKeyboardNav({ count: controls.items.length })
+
   const count = (s: string) => mailboxes.filter((m) => m.status === s).length
+  const isEmpty = mailboxes.length === 0
 
   // Shared one-click OAuth kickoff for every provider: fire the given start
   // mutation, and when the server hands back a consent URL, full-page redirect
@@ -110,45 +165,94 @@ export function MailboxesPage() {
       )}
 
       <StatStrip>
-        <Stat label="Total" value={mailboxes.length} />
-        <Stat label="Active" value={count('active')} dot={<Dot className="bg-ok" />} />
-        <Stat label="Paused" value={count('paused')} dot={<Dot className="bg-warn" />} />
-        <Stat label="Error" value={count('error')} dot={<Dot className="bg-danger" />} />
+        <Stat label="Total" value={mailboxes.length} sub="connected" />
+        <Stat label="Active" value={count('active')} dot={<StatusDot tone="running" />} sub="able to send" />
+        <Stat label="Paused" value={count('paused')} dot={<StatusDot tone="paused" />} sub="resumable" />
+        <Stat label="Error" value={count('error')} dot={<StatusDot tone="failing" />} sub="needs attention" />
       </StatStrip>
 
-      <PageBody>
-        {showConnect && (
-          <ConnectMailboxForm
-            onDone={() => setShowConnect(false)}
-            onCancel={() => setShowConnect(false)}
-          />
-        )}
+      {showConnect && (
+        <ConnectMailboxForm onDone={() => setShowConnect(false)} onCancel={() => setShowConnect(false)} />
+      )}
 
-        {isLoading ? (
-          <LoadingRows />
-        ) : mailboxes.length === 0 && !showConnect ? (
-          <EmptyBlock
-            title="No mailboxes connected"
-            description="Connect a Gmail or Microsoft 365 account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
-            action={
-              <ConnectMenu
-                startingGmail={startingGmail}
-                startingMicrosoft={startingMicrosoft}
-                onGmail={onConnectGmail}
-                onMicrosoft={onConnectMicrosoft}
-                onSmtp={() => setShowConnect(true)}
-                triggerLabel="Connect your first mailbox"
-              />
-            }
+      {!isEmpty && (
+        <SectionBar
+          label="Mailboxes"
+          count={controls.isFiltered ? `${controls.items.length}/${controls.totalCount}` : controls.totalCount}
+        >
+          <ListSearchInput
+            value={controls.query}
+            onChange={controls.setQuery}
+            placeholder="Search by email…"
           />
-        ) : (
-          <ul>
-            {mailboxes.map((m) => (
-              <MailboxRow key={m.id} mailbox={m} />
-            ))}
-          </ul>
-        )}
-      </PageBody>
+          <SortMenu options={SORTS} value={controls.sortId} onChange={controls.setSortId} />
+        </SectionBar>
+      )}
+
+      {isLoading ? (
+        <PageBody>
+          <LoadingRows />
+        </PageBody>
+      ) : isEmpty ? (
+        <PageBody>
+          {!showConnect && (
+            <EmptyBlock
+              title="No mailboxes connected"
+              description="Connect a Gmail or Microsoft 365 account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
+              action={
+                <ConnectMenu
+                  startingGmail={startingGmail}
+                  startingMicrosoft={startingMicrosoft}
+                  onGmail={onConnectGmail}
+                  onMicrosoft={onConnectMicrosoft}
+                  onSmtp={() => setShowConnect(true)}
+                  triggerLabel="Connect your first mailbox"
+                />
+              }
+            />
+          )}
+        </PageBody>
+      ) : (
+        <>
+          <ListHeader>
+            <ListHeaderCell className="min-w-0 flex-1">Mailbox</ListHeaderCell>
+            <ListHeaderCell className="w-40">Warmup</ListHeaderCell>
+            <ListHeaderCell className="w-16 text-right">Cap</ListHeaderCell>
+            <ListHeaderCell className="w-20 text-right">Status</ListHeaderCell>
+            <ListHeaderCell className="w-8" aria-label="Actions" />
+          </ListHeader>
+
+          <PageBody ref={nav.containerRef}>
+            {controls.items.length === 0 ? (
+              <EmptyBlock
+                title="No mailboxes match this search"
+                description={`Nothing matches "${controls.query}". Clear the search to see all ${controls.totalCount} mailboxes.`}
+                action={
+                  <Button variant="secondary" size="sm" onClick={controls.clear}>
+                    Clear search
+                  </Button>
+                }
+              />
+            ) : (
+              <ul>
+                {controls.items.map((m, index) => (
+                  <MailboxRow
+                    key={m.id}
+                    mailbox={m}
+                    warmup={warmupByMailbox.get(m.id ?? '')}
+                    index={index}
+                    active={nav.isActive(index)}
+                    onHover={nav.onRowHover}
+                  />
+                ))}
+              </ul>
+            )}
+          </PageBody>
+
+          {/* No `↵ open` — mailbox rows have no detail view to open. */}
+          <HintBar hints={LIST_NAV_HINTS_NO_OPEN} />
+        </>
+      )}
     </Page>
   )
 }
@@ -253,7 +357,20 @@ function OauthMenuItem({
   )
 }
 
-function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
+function MailboxRow({
+  mailbox,
+  warmup,
+  index,
+  active,
+  onHover,
+}: {
+  mailbox: Mailbox
+  /** This mailbox's warmup row, present only when it's enrolled in the pool. */
+  warmup?: WarmupMailbox
+  index: number
+  active: boolean
+  onHover: (index: number) => void
+}) {
   const [pause, pauseState] = usePauseMailboxMutation()
   const [resume, resumeState] = useResumeMailboxMutation()
   const [remove, removeState] = useDeleteMailboxMutation()
@@ -286,7 +403,14 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
   }
 
   return (
-    <li className="flex items-center gap-4 border-b border-border px-5 py-3">
+    <li
+      data-row-index={index}
+      onMouseEnter={() => onHover(index)}
+      className={cn(
+        'flex items-center gap-4 border-b border-border px-5 py-3 transition-colors',
+        active && 'bg-surface-2/60',
+      )}
+    >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-[13.5px] font-medium text-foreground">{mailbox.email}</span>
@@ -304,11 +428,17 @@ function MailboxRow({ mailbox }: { mailbox: Mailbox }) {
         )}
       </div>
 
-      <div className="flex items-center gap-2 tabular-nums">
-        <span className="font-mono text-[11px] text-muted-foreground">{mailbox.daily_cap}/day</span>
+      <div className="w-40 shrink-0">
+        <WarmupCell entry={warmup} />
       </div>
 
-      <StatusPill tone={mailboxTone(mailbox.status)}>{mailboxStatusLabel(mailbox.status)}</StatusPill>
+      <div className="w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+        {mailbox.daily_cap}/day
+      </div>
+
+      <div className="flex w-20 shrink-0 justify-end">
+        <StatusPill tone={mailboxTone(mailbox.status)}>{mailboxStatusLabel(mailbox.status)}</StatusPill>
+      </div>
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -390,8 +520,28 @@ function LoadingRows() {
   )
 }
 
-function Dot({ className }: { className?: string }) {
-  return <span className={cn('size-1.5 rounded-full', className)} aria-hidden="true" />
+/**
+ * A mailbox's warmup state, inline on its own row: reputation health plus today's
+ * ramp progress, or an explicit "off" when it isn't in the pool.
+ *
+ * Read-only by design. Enabling, disabling, and tuning warmup stay on
+ * `/app/warmup`, which owns those mutations — this cell exists so the question
+ * "can I trust this mailbox to send today?" is answerable without leaving the
+ * page, not to duplicate the warmup feature's controls here.
+ */
+function WarmupCell({ entry }: { entry?: WarmupMailbox }) {
+  if (!entry?.enabled) {
+    return <span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">Off</span>
+  }
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <HealthBadge state={entry.health_state} reason={entry.health_reason} />
+      <span className="flex items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+        <Flame className="size-3 text-warm" aria-hidden="true" />
+        {entry.today_sent}/{entry.today_target}
+      </span>
+    </div>
+  )
 }
 
 /**

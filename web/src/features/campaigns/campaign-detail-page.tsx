@@ -1,0 +1,87 @@
+import { Link, getRouteApi } from '@tanstack/react-router'
+import { ArrowLeft } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { StatusPill, StatusDot } from '@/components/shared/status-pill'
+import { Page, PageTopbar, StatStrip, Stat, SectionBar, PageBody } from '@/components/layout/page'
+import { httpStatus } from '@/lib/rtk-error'
+import { useGetCampaignQuery } from './api'
+import { campaignTone, campaignLabel } from './status'
+import { MetricsPanel } from './metrics-panel'
+import { CampaignEnrollmentsList } from './campaign-enrollments-list'
+import { SequenceEditor } from './sequence-editor'
+
+const routeApi = getRouteApi('/app/campaigns/$id')
+
+/**
+ * One campaign, at its own address.
+ *
+ * This used to render inline above the campaign list from `useState`, which meant
+ * a campaign had no URL (nothing to link or bookmark), Back didn't close it, and
+ * opening one pushed the row you clicked off the bottom of the screen. Being a
+ * route fixes all three, and the router code-splits this chunk so the sequence
+ * editor and metrics panel aren't in the list route's bundle.
+ */
+export function CampaignDetailPage() {
+  const { id } = routeApi.useParams()
+  const { data, isLoading, error } = useGetCampaignQuery({ id })
+  const stats = data?.stats ?? {}
+  const n = (key: string) => stats[key] ?? 0
+
+  return (
+    <Page>
+      <PageTopbar
+        eyebrow="Campaign"
+        title={isLoading ? undefined : data?.name}
+        subtitle={data?.subject}
+        actions={
+          data?.status ? (
+            <StatusPill tone={campaignTone(data.status)}>{campaignLabel(data.status)}</StatusPill>
+          ) : undefined
+        }
+      />
+
+      <SectionBar label="Sends">
+        <Button variant="ghost" size="xs" asChild>
+          <Link to="/app/campaigns">
+            <ArrowLeft className="size-3.5" />
+            All campaigns
+          </Link>
+        </Button>
+      </SectionBar>
+
+      {isLoading ? (
+        <div className="px-5 py-4">
+          <Skeleton className="h-6 w-64" />
+        </div>
+      ) : error ? (
+        // A failed detail fetch must not masquerade as a real all-zero campaign
+        // (the grid below would be indistinguishable from an empty one).
+        <div role="alert" className="px-5 py-6 text-sm text-danger">
+          Couldn't load campaign stats{httpStatus(error) ? ` (${httpStatus(error)})` : ''} — try again.
+        </div>
+      ) : (
+        <StatStrip>
+          <Stat label="Queued" value={n('queued')} dot={<StatusDot tone="draft" />} />
+          <Stat label="Sent" value={n('sent')} dot={<StatusDot tone="running" />} sub="delivered to the provider" />
+          <Stat label="Failed" value={n('failed')} dot={<StatusDot tone="failing" />} sub="permanent errors" />
+          <Stat label="Skipped" value={n('skipped')} dot={<StatusDot tone="paused" />} sub="suppressed or capped" />
+        </StatStrip>
+      )}
+
+      <PageBody>
+        {/* The sequence is the campaign's definition — surface it first. Owns its
+            own loading/empty/error states. */}
+        <SequenceEditor campaignId={id} status={data?.status} />
+
+        {!isLoading && !error && (
+          <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
+        )}
+
+        {/* Contacts + their classified replies. Owns its own loading/empty/error
+            states, so it mounts regardless of the campaign-detail query. */}
+        <CampaignEnrollmentsList campaignId={id} />
+      </PageBody>
+    </Page>
+  )
+}

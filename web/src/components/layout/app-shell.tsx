@@ -1,9 +1,19 @@
+import { Suspense, lazy, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { toggleSidebar } from '@/store/slices/ui'
 import { cn } from '@/lib/utils'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useHotkey } from '@/hooks/use-hotkey'
 import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
+
+// Only needed once someone presses ⌘K, so it stays out of the initial bundle —
+// same pattern the warmup sparkline uses. No Suspense fallback: a spinner that
+// appears for one frame before the palette is worse than the palette simply
+// appearing, and the chunk is a few KB.
+const CommandPalette = lazy(() =>
+  import('@/components/shared/command-palette').then((m) => ({ default: m.CommandPalette })),
+)
 
 /**
  * Authenticated app frame: header + sidebar over the chrome, with the
@@ -28,6 +38,11 @@ export function AppShell({
   const close = () => {
     if (open) dispatch(toggleSidebar())
   }
+
+  // Local state, not redux: nothing outside this subtree needs to know the
+  // palette is open, and it must not be persisted across reloads.
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  useHotkey({ key: 'k', mod: true, whileTyping: true }, () => setPaletteOpen(true))
 
   return (
     <TooltipProvider>
@@ -62,6 +77,12 @@ export function AppShell({
             {children}
           </main>
         </div>
+
+        {paletteOpen && (
+          <Suspense fallback={null}>
+            <CommandPalette onClose={() => setPaletteOpen(false)} />
+          </Suspense>
+        )}
       </div>
     </TooltipProvider>
   )

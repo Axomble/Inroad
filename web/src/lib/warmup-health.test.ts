@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { healthMeta, toWarmupHealth } from './health'
+import { healthMeta, toWarmupHealth } from './warmup-health'
 
 describe('warmup health mapping', () => {
   // Each state maps to a distinct label AND a distinct color token, so the four

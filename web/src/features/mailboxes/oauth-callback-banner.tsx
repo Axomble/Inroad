@@ -61,8 +61,15 @@ export function OauthCallbackBanner() {
     if (!notice.connected && !notice.error) return
     // The new mailbox isn't in the cached list yet — refetch it.
     if (notice.connected) dispatch(api.util.invalidateTags([{ type: 'Mailbox', id: 'LIST' }]))
-    // Strip ?connected / ?oauth_error so a refresh doesn't re-show this.
-    void navigate({ to: '/app/mailboxes', search: {}, replace: true })
+    // Strip ?connected / ?oauth_error / ?provider so a refresh doesn't re-show
+    // this. Clear those three keys specifically rather than replacing search
+    // with `{}` — the same route also carries the list's `?q=` / `?sort=`, and
+    // blanking the whole object would silently reset the user's filter.
+    void navigate({
+      to: '/app/mailboxes',
+      search: (prev) => ({ ...prev, connected: undefined, oauth_error: undefined, provider: undefined }),
+      replace: true,
+    })
     // Runs once: `notice` is a first-render snapshot and never changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

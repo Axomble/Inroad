@@ -8,6 +8,14 @@ import { CampaignsPage } from './campaigns-page'
 // swallowed). These tests lock the exact copy the refactored component renders
 // via `httpStatus`, plus the success path (mutation fired, no error shown).
 
+// The page's filter/sort live in the URL (`useUrlState`) and a row click
+// navigates to the campaign's own route, so stub the router: empty search means
+// no filter and the default sort.
+vi.mock('@tanstack/react-router', () => ({
+  useSearch: () => ({}),
+  useNavigate: () => () => {},
+}))
+
 const jsonHeaders = { 'content-type': 'application/json' }
 
 type CapturedRequest = { method: string; url: string }

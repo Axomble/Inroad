@@ -4,10 +4,12 @@ import { renderWithProviders } from '@/test/render-with-providers'
 import { MailboxesPage } from './mailboxes-page'
 
 // MailboxesPage embeds OauthCallbackBanner, which reads the route search via
-// getRouteApi and navigates via useNavigate — stub both (empty search => the
-// callback banner renders nothing), same as the other feature-page tests.
+// getRouteApi, and the page's own list filter/sort lives in the URL via
+// `useUrlState` (useSearch + useNavigate). Stub all three — an empty search means
+// no callback banner, no filter, and the default sort.
 vi.mock('@tanstack/react-router', () => ({
   getRouteApi: () => ({ useSearch: () => ({}) }),
+  useSearch: () => ({}),
   useNavigate: () => () => {},
 }))
 
