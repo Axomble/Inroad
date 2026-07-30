@@ -18,6 +18,7 @@ deliberately omitted from every document here) and maps its capabilities against
 | [01-feature-inventory.md](01-feature-inventory.md) | Every feature the Reference platform ships, grouped by area, each tagged with Inroad's current status (✅ have / ⚠️ partial / ❌ missing). |
 | [02-architecture.md](02-architecture.md) | The architectural patterns where Reference is genuinely stronger, each with an honest "replicate as-is / do better / not worth it for us" call. |
 | [03-replicate-vs-improve.md](03-replicate-vs-improve.md) | The decision table: per capability, a verdict (**Replicate / Do-better / Skip / Defer**), rough effort, and priority, mapped onto Inroad's single-Go-stack architecture. |
+| [04-ui-ux-audit.md](04-ui-ux-audit.md) | Interface-level audit of the Reference console (Inbox / Campaigns / Accounts) against Inroad's real screens: information architecture, finding affordances, interaction quality, plus where our UI is genuinely better. Ends in a tiered plan. |
 
 ## Executive summary
 

@@ -77,17 +77,22 @@ product). "Inroad:" notes map to our codebase.
 
 ## 4. Warmup
 
+> **Updated:** most of this section shipped in the warm-up engine (migrations
+> `000018`/`000019`; `internal/{app,worker,platform}/warmup`, `internal/coreapi`).
+> See `docs/architecture.md` → *Warm-up engine* and the design spec. The remaining
+> ❌ rows are conscious follow-ups.
+
 | Feature | Status | Notes |
 |---|---|---|
-| Ramp-based warmup (linear cap increase over N days) | ✅ have | Inroad's ramp math is live (`inprocess/ramp.go`); the `warmup:tick` handler itself is a no-op. |
-| **Pooled warmup** (mailboxes exchange natural mail to build reputation) | ❌ missing | The big one. Reference segregates **free vs premium pools**; recipient-only participation; avoids reciprocal-pair loops. |
-| **Warmup content generation** (offline AI bank of conversation plans) | ❌ missing | Batch-generated, lint-gated, auto-retire risky threads; send path draws least-used thread atomically; falls back to a static library. |
-| Warmup reply behavior & threading (configurable reply rate, resumes exact plan) | ❌ missing | |
-| **Verification token + inbound processing** (hidden token, rescue-from-spam, file to a dedicated folder) | ❌ missing | Rescuing warmup mail from spam is itself a positive placement signal. |
-| Warmup routing rules (provider/domain/tld preferences) | ❌ missing | |
-| **Warmup health states** (healthy/watch/throttled/quarantined/blocked) + spam score + auto-block | ❌ missing | Score model with sample floors; expired block → probation, not snap-to-healthy. |
-| Warmup ban status & appeals | ❌ missing | |
-| Warmup placement-by-domain signal | ❌ missing | Every verified delivery reports inbox vs spam, rolled up per recipient domain — a free continuous placement signal. |
+| Ramp-based warmup (linear cap increase over N days) | ✅ have | Ramp math (`platform/warmup`) drives the real `warmup:tick` send handler — it is no longer a no-op. |
+| **Pooled warmup** (mailboxes exchange natural mail to build reputation) | ✅ have | Workspace-local pool: a mailbox warms only opted-in peers in the same workspace (no cross-tenant flow). No free/premium tiers — deliberately simpler for self-hosting. |
+| **Warmup content generation** (conversation plans) | ⚠️ partial | A curated static thread library behind an injected `ContentGenerator` seam; an AI generator is a drop-in (no batch/lint/auto-retire bank yet). |
+| Warmup reply behavior & threading (configurable reply rate, resumes the plan) | ✅ have | Per-participant `reply_rate`; replies advance a stored `warmup_thread`; partner selection prefers a mailbox with an open thread so the configured rate is realized. |
+| **Verification token + inbound processing** (hidden token, rescue-from-spam) | ✅ have | Signed `X-Inroad-Warmup` token; recipient scans INBOX + spam, records placement, rescues from spam, marks read. Rescue is itself a positive placement signal. |
+| Warmup routing rules (provider/domain/tld preferences) | ❌ missing | Not built. |
+| **Warmup health states** + auto-throttle | ✅ have | `healthy → watch → throttled → paused` from a trailing spam-placement rate; timed pause windows with clean-window recovery (not snap-to-healthy). No separate quarantine/blocked tier. |
+| Warmup ban status & appeals | ❌ missing | Not built. |
+| Warmup placement signal | ⚠️ partial | Every detected delivery reports inbox vs spam, attributed to the **sender** for health — but not yet rolled up per recipient *domain*. |
 
 ---
 

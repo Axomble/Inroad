@@ -26,8 +26,9 @@ not reinvent them.
   crosses workspaces. A workspace needs ≥2 participants for warmup to do anything;
   with <2 the engine idles (surfaced in the UI).
 - **Warmup thread** — a synthetic conversation between two participants. Rooted at
-  a first message; replies advance it. Stored in `warmup_threads` +
-  `warmup_messages` so reply simulation is stateful and looks natural.
+  a first message; replies advance it. State lives on `warmup_threads` itself
+  (`turn`, `root_message_id`, `content_key`) — enough to resume the conversation;
+  a per-message table was considered but not built (see §14 follow-ups).
 - **Warmup send** — one outbound warmup email (new thread or a reply). Has its own
   claim-before-send lifecycle in `warmup_sends`, exactly like campaign `sends`.
 - **Engagement** — the recipient-side actions on a received warmup message:

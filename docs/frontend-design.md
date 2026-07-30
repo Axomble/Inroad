@@ -98,14 +98,24 @@ stay distinguishable for the most common colorblindness types.
 
 ## 3. Typography
 
-The Artifact/Tailwind CSP and self-hosting posture mean we don't depend on a webfont CDN at runtime. The
-identity is carried by a **system UI stack for prose and a monospace for data** — which is also honest to
-the developer/deliverability audience.
+The typeface is **Geist Sans for prose and Geist Mono for data** — a matched pair designed for developer
+tooling, which is honest to the developer/deliverability audience and gives the console a consistent
+identity instead of one that changes with the operator's OS.
+
+Both are **self-hosted**, installed as `@fontsource-variable/geist` / `-geist-mono` and `@import`ed at the
+top of `globals.css`, so Vite bundles the woff2 from `node_modules`. There is **no runtime webfont CDN**
+and nothing to allow in the CSP — the original constraint is satisfied by bundling, not by giving up on a
+typeface. The faces are variable (100–900), so the whole scale below comes from one file per subset, and
+`unicode-range` subsetting means a latin reader downloads ~51 KB total (29 KB sans + 23 KB mono). Only the
+upright faces are imported; nothing in the app sets `italic`.
 
 | Role | Stack | Used for |
 |---|---|---|
-| `font-sans` | `system-ui, -apple-system, "Segoe UI", Roboto, …` | UI text, headings, body |
-| `font-mono` | `ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, …` | Numbers, IDs, labels, eyebrows |
+| `font-sans` | `"Geist Variable", system-ui, -apple-system, "Segoe UI", …` | UI text, headings, body |
+| `font-mono` | `"Geist Mono Variable", ui-monospace, "Cascadia Code", …` | Numbers, IDs, labels, eyebrows |
+
+The system stack is retained behind each as the fallback, so a failed font load degrades to the OS UI face
+rather than to Times.
 
 Type scale (dense by design):
 

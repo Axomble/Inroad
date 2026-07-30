@@ -1,6 +1,15 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Typeface — Geist Sans + Geist Mono (SIL OFL 1.1), self-hosted.
+   Bundled from node_modules by Vite, so there is no runtime webfont CDN and
+   nothing to allow in the CSP; the `unicode-range` subsets mean a latin
+   reader downloads only the latin woff2. Variable (100–900), so the whole
+   type scale — font-light stat values through font-semibold buttons — comes
+   from one file per subset. */
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
 /* Light is the default theme; add `.dark` on <html> to switch. */
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -180,8 +189,10 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  /* The system stack stays as the fallback so a failed font load degrades to
+     the OS UI face rather than to Times. */
+  --font-sans: "Geist Variable", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 
 body {

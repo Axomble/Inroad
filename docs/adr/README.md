@@ -14,3 +14,4 @@ Accepted / Superseded / Deprecated.
 | [0003](0003-control-execution-plane-seam.md) | control/execution plane seam (`coreapi`) | Accepted |
 | [0004](0004-ssrf-guard-default-allow-private.md) | SSRF guard, private allowed by default | Accepted |
 | [0005](0005-apache-2.0-license.md) | Apache 2.0 license | Accepted |
+| [0006](0006-warmup-engine-design.md) | Warm-up: workspace-local pool, static content behind an AI seam | Accepted |

@@ -45,6 +45,33 @@ key-encryption key (KEK) selected by `INROAD_KEY_PROVIDER`.
 - For worker fleets across multiple IPs, run the worker binary under systemd
   (templates in deploy/systemd/) rather than compose.
 
+## Warm-up and the worker fleet
+Warm-up is on once a workspace enables ≥2 mailboxes for it (via the app, or
+`PUT /api/v1/mailboxes/{id}/warmup`); no server flag is required. A `warmup:sweep`
+scheduler tick paces sends automatically. Recipient-side engagement (rescue-from-spam,
+mark-read, reply) needs the connected mailbox to allow write access — IMAP `MOVE`/`STORE`
+for SMTP mailboxes, the `gmail.modify` scope for Gmail; Microsoft 365 sends warm-up mail
+but its recipient-side engagement is a documented follow-up.
+
+- `INROAD_WARMUP_SECRET` — HMAC key for the `X-Inroad-Warmup` receipt token that lets a
+  recipient mailbox recognize warm-up mail and isolate it from campaign handling. Optional:
+  if unset it falls back to `INROAD_JWT_SECRET`. If you set it explicitly, use ≥16 bytes
+  (`openssl rand -base64 32`) and keep it as stable as `INROAD_JWT_SECRET` — rotating it
+  makes warm-up mail already in flight fall through to normal reply handling (harmless, but
+  it skips that engagement).
+
+Per-IP worker routing (optional — single-node deployments can ignore all of these and the
+worker serves the shared default queue):
+
+- `INROAD_WORKER_ID` — stable identity for this worker in the fleet registry. Defaults to
+  the hostname. Give each worker a distinct id when running more than one.
+- `INROAD_WORKER_EGRESS_IP` — the source IP this worker binds its outbound SMTP/IMAP dials
+  to, so a mailbox's mail consistently leaves from one IP. Leave blank to use the OS default
+  route. (It only sets the *source* address; the destination is still SSRF-vetted.)
+- `INROAD_WORKER_QUEUES` — the asynq queues this worker consumes. Defaults to
+  `w:<worker_id>,default`; a mailbox assigned to a worker routes to that worker's `w:<id>`
+  queue, and everything unrouted falls to `default`.
+
 ## Connecting a Gmail mailbox (OAuth)
 
 Inroad can connect Gmail / Google Workspace mailboxes via "Sign in with Google"
