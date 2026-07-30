@@ -344,32 +344,59 @@ func (s *Service) ResetPassword(ctx context.Context, raw, newPassword string) ([
 
 // Login verifies credentials, activates the user's most-recently-seen
 // workspace (per ListMembersByUser ordering), and starts a new refresh-token
-// family.
+// family. It is Authenticate followed by StartSessionForUser; the 2FA login gate
+// (identity.Handler.login) calls those two steps separately so it can interpose a
+// challenge between them for a user with a confirmed second factor.
 func (s *Service) Login(ctx context.Context, email, pw, ua, ip string) (Session, error) {
+	uid, err := s.Authenticate(ctx, email, pw)
+	if err != nil {
+		return Session{}, err
+	}
+	return s.StartSessionForUser(ctx, uid, ua, ip)
+}
+
+// Authenticate verifies an email + password and that the user belongs to at
+// least one workspace, returning the user id — but issues NO session. The 2FA
+// login gate authenticates here, then either issues a challenge (confirmed
+// second factor) or proceeds to StartSessionForUser. Timing is constant across
+// the unknown-email and wrong-password paths (a dummy argon2 comparison on a
+// miss), so response time never leaks whether an email is registered; the 2FA
+// check happens only AFTER the password is verified, so a wrong password can
+// never reveal whether an account has a second factor.
+func (s *Service) Authenticate(ctx context.Context, email, pw string) (uuid.UUID, error) {
 	user, err := s.store.GetUserByEmail(ctx, email)
 	if err != nil {
-		// No such user: still run an argon2 comparison (against a fixed
-		// dummy hash) so this path costs the same as a wrong-password
-		// rejection below. Without this, response timing would leak whether
-		// an email is registered.
 		auth.CheckPassword(dummyHash, pw)
-		return Session{}, ErrInvalidCredentials
+		return uuid.Nil, ErrInvalidCredentials
 	}
 	if !auth.CheckPassword(user.PasswordHash, pw) {
-		return Session{}, ErrInvalidCredentials
+		return uuid.Nil, ErrInvalidCredentials
 	}
 	mems, err := s.memberships(ctx, user.ID)
+	if err != nil || len(mems) == 0 {
+		return uuid.Nil, ErrNoWorkspace
+	}
+	return user.ID, nil
+}
+
+// StartSessionForUser activates the user's most-recently-seen workspace and
+// starts a new refresh-token family, returning the Session. It is the
+// session-issuing half of login, shared by the password path (via Login) and the
+// 2FA-verify path (via identity.Handler.CompleteLogin) so both mint a session
+// identically — same family/workspace-activation semantics.
+func (s *Service) StartSessionForUser(ctx context.Context, userID uuid.UUID, ua, ip string) (Session, error) {
+	mems, err := s.memberships(ctx, userID)
 	if err != nil || len(mems) == 0 {
 		return Session{}, ErrNoWorkspace
 	}
 	active := mems[0] // ListMembersByUser orders by last_seen desc, created asc
-	_ = s.store.TouchMemberLastSeen(ctx, active.WorkspaceID, user.ID)
+	_ = s.store.TouchMemberLastSeen(ctx, active.WorkspaceID, userID)
 	fam := uuid.New()
-	sid, raw, err := s.newSessionRow(ctx, user.ID, active.WorkspaceID, fam, ua, ip)
+	sid, raw, err := s.newSessionRow(ctx, userID, active.WorkspaceID, fam, ua, ip)
 	if err != nil {
 		return Session{}, err
 	}
-	return Session{UserID: user.ID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid, RawRefresh: raw, Memberships: mems}, nil
+	return Session{UserID: userID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid, RawRefresh: raw, Memberships: mems}, nil
 }
 
 // Refresh rotates a refresh token: the presented token is looked up by

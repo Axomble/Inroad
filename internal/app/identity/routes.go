@@ -12,10 +12,20 @@ import (
 // refresh/logout, and an access-token-protected group for session
 // introspection/management and workspace switching. verifier authenticates the
 // access token for the protected group.
-func (h *Handler) Routes(verifier auth.Verifier) http.Handler {
+//
+// twofa (may be nil) is the twofa domain's router, mounted at "/2fa" so its
+// paths land under /api/v1/auth/2fa. It is mounted here rather than at the top
+// router because chi cannot mount a deeper prefix alongside the /api/v1/auth
+// mount that already owns this subtree. Passed as a bare http.Handler so identity
+// never imports the twofa package (the app-packages-don't-import-each-other
+// invariant); the composition root supplies the concrete router.
+func (h *Handler) Routes(verifier auth.Verifier, twofa http.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Post("/register", h.register)
 	r.Post("/login", h.login)
+	if twofa != nil {
+		r.Mount("/2fa", twofa)
+	}
 	r.With(auth.RequireCSRF).Post("/refresh", h.refresh)
 	r.With(auth.RequireCSRF).Post("/logout", h.logout)
 	r.Post("/verify-email", h.verifyEmail)

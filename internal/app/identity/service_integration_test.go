@@ -84,11 +84,11 @@ func newIdentityTestServerTTL(t *testing.T, cacheTTL time.Duration) (*httptest.S
 	verifier := NewSessionVerifier(testJWTSecret, store, cacheTTL)
 	h := NewHandler(
 		NewService(store, testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
-		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil, verifier,
+		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil, verifier, nil,
 	)
 
 	r := chi.NewRouter()
-	r.Mount("/api/v1/auth", h.Routes(verifier))
+	r.Mount("/api/v1/auth", h.Routes(verifier, nil))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 

@@ -169,7 +169,7 @@ func TestBuildRouterIdentityMeStaysGuarded(t *testing.T) {
 	h := &identity.Handler{}
 
 	r := buildRouter(discardLogger(), auth.NewJWTVerifier(testSecret),
-		[]mount{{pattern: "/api/v1/auth", handler: h.Routes(auth.NewJWTVerifier(testSecret))}},
+		[]mount{{pattern: "/api/v1/auth", handler: h.Routes(auth.NewJWTVerifier(testSecret), nil)}},
 		nil,
 	)
 

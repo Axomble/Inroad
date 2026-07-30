@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -27,6 +28,19 @@ type sessionCacheBuster interface {
 	Bust(sid uuid.UUID)
 }
 
+// TwoFactorGate is the login-gate seam: after a correct password, login consults
+// it to decide whether the user must clear a second factor. A confirmed-2FA user
+// gets a single-use challenge (and NO session) instead of tokens; everyone else
+// logs in unchanged. Kept as a consumer-defined interface (satisfied by
+// twofa.Service and wired at the composition root) so identity never imports the
+// twofa domain — the app-packages-don't-import-each-other invariant holds.
+type TwoFactorGate interface {
+	// ChallengeIfRequired returns (rawChallenge, true, nil) when userID has a
+	// confirmed second factor, or ("", false, nil) when login should proceed to
+	// issue a session.
+	ChallengeIfRequired(ctx context.Context, userID uuid.UUID, ip string) (string, bool, error)
+}
+
 // Handler exposes the identity domain (register/login/refresh/logout,
 // session introspection + management, and workspace switching) over HTTP.
 type Handler struct {
@@ -38,6 +52,10 @@ type Handler struct {
 	cookieDomain   string
 	trustedProxies []*net.IPNet
 	buster         sessionCacheBuster
+	// gate (may be nil) is consulted on login to interpose the 2FA challenge for
+	// users with a confirmed second factor. Nil disables the gate entirely (every
+	// user logs in with password alone) — the shape before P2 and in unit tests.
+	gate TwoFactorGate
 }
 
 // NewHandler constructs a Handler backed by svc. accessTTL/refreshTTL size
@@ -47,7 +65,7 @@ type Handler struct {
 // handler will honor; unparsable entries are silently dropped (loudness
 // belongs in cmd startup, not per-request). buster (may be nil) invalidates
 // the verifier's session-auth cache when a session is revoked in-process.
-func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string, trustedProxies []string, buster sessionCacheBuster) *Handler {
+func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string, trustedProxies []string, buster sessionCacheBuster, gate TwoFactorGate) *Handler {
 	nets := make([]*net.IPNet, 0, len(trustedProxies))
 	for _, c := range trustedProxies {
 		if _, n, err := net.ParseCIDR(c); err == nil {
@@ -56,7 +74,7 @@ func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Durat
 	}
 	return &Handler{
 		svc: svc, jwtSecret: jwtSecret, accessTTL: accessTTL, refreshTTL: refreshTTL,
-		cookieSecure: cookieSecure, cookieDomain: cookieDomain, trustedProxies: nets, buster: buster,
+		cookieSecure: cookieSecure, cookieDomain: cookieDomain, trustedProxies: nets, buster: buster, gate: gate,
 	}
 }
 
@@ -230,6 +248,15 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	h.issueSession(w, sess)
 }
 
+// twoFactorRequiredResponse is login's 200 body when the user has a confirmed
+// second factor: no tokens are issued, only an opaque single-use challenge the
+// client completes at POST /auth/2fa/verify. The absence of a session here is the
+// fail-closed gate — a confirmed second factor cannot be skipped.
+type twoFactorRequiredResponse struct {
+	TwoFactorRequired bool   `json:"two_factor_required"`
+	Challenge         string `json:"challenge"`
+}
+
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Email    string `json:"email"`
@@ -240,9 +267,44 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ua, ip := h.clientMeta(r)
-	sess, err := h.svc.Login(r.Context(), body.Email, body.Password, ua, ip)
+	// Password (and workspace-membership) check FIRST — a wrong password returns
+	// the same 401 whether or not the account has a second factor, so login never
+	// leaks 2FA status to someone without the password.
+	uid, err := h.svc.Authenticate(r.Context(), body.Email, body.Password)
 	if err != nil {
 		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	// Fail-closed gate: a confirmed second factor gets a challenge and NO session.
+	if h.gate != nil {
+		challenge, required, gerr := h.gate.ChallengeIfRequired(r.Context(), uid, ip)
+		if gerr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "could not start two-factor challenge")
+			return
+		}
+		if required {
+			httpx.JSON(w, http.StatusOK, twoFactorRequiredResponse{TwoFactorRequired: true, Challenge: challenge})
+			return
+		}
+	}
+	sess, err := h.svc.StartSessionForUser(r.Context(), uid, ua, ip)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+	h.issueSession(w, sess)
+}
+
+// CompleteLogin issues a first-party session for an already-authenticated user
+// and writes the standard login response (access token + refresh/CSRF cookies),
+// exactly as a password login would. It is called by the twofa verify handler
+// after a challenge is satisfied (satisfying twofa.LoginCompleter), so a 2FA
+// login and a password login mint an identical session.
+func (h *Handler) CompleteLogin(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+	ua, ip := h.clientMeta(r)
+	sess, err := h.svc.StartSessionForUser(r.Context(), userID, ua, ip)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not issue session")
 		return
 	}
 	h.issueSession(w, sess)

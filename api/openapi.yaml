@@ -35,10 +35,17 @@ paths:
             schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
         '200':
-          description: Session
+          description: >-
+            A session (SessionResponse) for a user without a confirmed second
+            factor, OR a single-use 2FA challenge (TwoFactorRequiredResponse,
+            no tokens) for a user with 2FA enabled — the caller must then POST
+            /auth/2fa/verify to obtain a session.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/SessionResponse' }
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SessionResponse'
+                  - $ref: '#/components/schemas/TwoFactorRequiredResponse'
         '401': { description: Invalid credentials }
   /auth/refresh:
     post:
@@ -207,6 +214,96 @@ paths:
         '400': { description: Validation error }
         '404': { description: Invalid or expired invite }
         '422': { description: Password required to create an account }
+  /auth/2fa:
+    get:
+      operationId: authTwoFactorStatus
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: 2FA status for the caller
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorStatusResponse' }
+        '401': { description: Unauthorized }
+  /auth/2fa/totp:
+    post:
+      operationId: authTwoFactorEnroll
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Begin TOTP enrollment. Returns the base32 secret and an otpauth:// URI
+        (render as a QR code). The secret is stored sealed but UNCONFIRMED and is
+        never returned again — confirm with a code at /auth/2fa/totp/confirm.
+      responses:
+        '200':
+          description: Pending enrollment secret
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorEnrollResponse' }
+        '401': { description: Unauthorized }
+        '409': { description: Two-factor is already enabled }
+    delete:
+      operationId: authTwoFactorDisable
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Disable 2FA. Requires a fresh TOTP code OR a recovery code as proof of
+        possession. Also revokes the caller's OTHER sessions (a second-factor
+        removal is a security downgrade).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+      responses:
+        '204': { description: Two-factor disabled, other sessions revoked }
+        '400': { description: Validation error, or two-factor is not enabled }
+        '401': { description: Unauthorized, or invalid code }
+  /auth/2fa/totp/confirm:
+    post:
+      operationId: authTwoFactorConfirm
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Activate a pending TOTP enrollment by proving possession with a code.
+        Returns the one-time recovery codes exactly once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+      responses:
+        '200':
+          description: Two-factor enabled; recovery codes returned once
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorConfirmResponse' }
+        '400': { description: Enrollment not started, or invalid code }
+        '401': { description: Unauthorized }
+        '409': { description: Two-factor is already enabled }
+  /auth/2fa/verify:
+    post:
+      operationId: authTwoFactorVerify
+      tags: [auth]
+      security: []
+      description: >-
+        Complete the login gate: exchange a 2FA challenge (from /auth/login) plus
+        a TOTP or recovery code for a session. The challenge is single-use,
+        TTL'd, and try-capped; any failure is a flat 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorVerifyRequest' }
+      responses:
+        '200':
+          description: Session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '400': { description: Validation error }
+        '401': { description: Invalid or expired challenge / code }
   /workspaces/{id}/invites:
     post:
       operationId: createWorkspaceInvite
@@ -738,6 +835,43 @@ components:
         expires_in: { type: integer }
         active_workspace_id: { type: string }
         role: { type: string }
+    TwoFactorRequiredResponse:
+      type: object
+      required: [two_factor_required, challenge]
+      properties:
+        two_factor_required: { type: boolean, description: Always true; distinguishes this from a SessionResponse. }
+        challenge: { type: string, description: Single-use, short-lived challenge token to submit to /auth/2fa/verify. }
+    TwoFactorStatusResponse:
+      type: object
+      required: [totp_enabled, recovery_codes_remaining]
+      properties:
+        totp_enabled: { type: boolean }
+        recovery_codes_remaining: { type: integer, description: Number of unused single-use recovery codes. }
+    TwoFactorEnrollResponse:
+      type: object
+      required: [secret, otpauth_uri]
+      properties:
+        secret: { type: string, description: Base32 TOTP secret for manual entry. Returned only at enrollment. }
+        otpauth_uri: { type: string, description: otpauth:// provisioning URI to render as a QR code. }
+    TwoFactorConfirmResponse:
+      type: object
+      required: [recovery_codes]
+      properties:
+        recovery_codes:
+          type: array
+          description: Single-use recovery codes, shown exactly once.
+          items: { type: string }
+    TwoFactorCodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: A TOTP code or a recovery code. }
+    TwoFactorVerifyRequest:
+      type: object
+      required: [challenge, code]
+      properties:
+        challenge: { type: string, description: The challenge token returned by /auth/login. }
+        code: { type: string, description: A TOTP code or a recovery code. }
     VerifyEmailRequest:
       type: object
       required: [token]

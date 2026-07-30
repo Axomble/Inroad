@@ -343,12 +343,31 @@ type TrackingEvent struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type TwoFactorChallenge struct {
+	ID            uuid.UUID          `json:"id"`
+	UserID        uuid.UUID          `json:"user_id"`
+	ChallengeHash []byte             `json:"challenge_hash"`
+	Attempts      int32              `json:"attempts"`
+	Ip            *netip.Addr        `json:"ip"`
+	ConsumedAt    pgtype.Timestamptz `json:"consumed_at"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
 type User struct {
 	ID              uuid.UUID          `json:"id"`
 	Email           string             `json:"email"`
 	PasswordHash    string             `json:"password_hash"`
 	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type UserRecoveryCode struct {
+	ID        uuid.UUID          `json:"id"`
+	UserID    uuid.UUID          `json:"user_id"`
+	CodeHash  string             `json:"code_hash"`
+	UsedAt    pgtype.Timestamptz `json:"used_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type UserToken struct {
@@ -359,6 +378,13 @@ type UserToken struct {
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type UserTotp struct {
+	UserID           uuid.UUID          `json:"user_id"`
+	SecretCiphertext string             `json:"secret_ciphertext"`
+	ConfirmedAt      pgtype.Timestamptz `json:"confirmed_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
 type WarmupDailyStat struct {

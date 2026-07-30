@@ -18,7 +18,7 @@ import (
 
 func newTestHandler(store *fakeStore) *Handler {
 	svc := newTestService(store)
-	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil, nil)
+	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil, nil, nil)
 }
 
 func doRequest(h http.HandlerFunc, method, path string, body any) *httptest.ResponseRecorder {

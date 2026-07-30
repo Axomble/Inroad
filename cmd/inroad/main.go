@@ -23,8 +23,10 @@ import (
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/app/tracking"
+	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
@@ -87,12 +89,28 @@ func run() error {
 	// is both the auth.Verifier for the protected group AND the cache-buster the
 	// identity handler calls when it revokes a session.
 	sessionVerifier := identity.NewSessionVerifier(cfg.JWTSecret, identStore, cfg.SessionCacheTTL)
+	identSvc := identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
+		cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL)
+	// TOTP 2FA. The secret is USER-level, sealed under a server-level HKDF subkey
+	// of the master key (crypto.ServerKeyring) — NOT a per-workspace DEK, since a
+	// user's second factor spans every workspace they belong to. The twofa service
+	// depends on identity only through narrow seams wired below (gate + completer +
+	// revoker), never an import.
+	serverKeyring, err := crypto.NewServerKeyring(cfg.MasterKey)
+	if err != nil {
+		logger.Error("server keyring init failed", "err", err)
+		return err
+	}
+	twofaSvc := twofa.NewService(twofa.NewPgStore(pool), serverKeyring)
+	// gate = twofaSvc: login interposes the 2FA challenge for confirmed-2FA users.
 	identHandler := identity.NewHandler(
-		identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
-			cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL),
+		identSvc,
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
-		cfg.TrustedProxies, sessionVerifier,
+		cfg.TrustedProxies, sessionVerifier, twofaSvc,
 	)
+	// completer = identHandler (issues the session on a passed 2FA verify);
+	// revoker = identSvc + buster = sessionVerifier (disable revokes other sessions).
+	twofaHandler := twofa.NewHandler(twofaSvc, identHandler, identSvc, sessionVerifier)
 	mailboxStore := mailbox.NewPgStore(queries)
 	googleOAuth := mail.GoogleOAuth{
 		ClientID:     cfg.GoogleClientID,
@@ -150,7 +168,7 @@ func run() error {
 	//               route mounted here is authenticated by default, so a new
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
-		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier)},
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier, twofaHandler.Routes(sessionVerifier))},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
