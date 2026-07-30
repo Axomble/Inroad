@@ -7,10 +7,31 @@
 import { api } from '@/store/api'
 
 const authApi = api.enhanceEndpoints({
-  addTagTypes: ['Session'],
+  addTagTypes: ['Session', 'Sessions'],
   endpoints: {
     authMe: {
       providesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
+    // The revocable-session list (P1 auth hardening). Tagged so revoking one
+    // session or signing out everywhere else refetches the list automatically —
+    // no hand-rolled refetch() in the screen.
+    authListSessions: {
+      providesTags: (result) =>
+        result
+          ? [
+              ...result.sessions.map((s) => ({ type: 'Sessions' as const, id: s.id })),
+              { type: 'Sessions' as const, id: 'LIST' },
+            ]
+          : [{ type: 'Sessions' as const, id: 'LIST' }],
+    },
+    authRevokeSession: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Sessions', id: arg.id },
+        { type: 'Sessions', id: 'LIST' },
+      ],
+    },
+    authRevokeOtherSessions: {
+      invalidatesTags: [{ type: 'Sessions', id: 'LIST' }],
     },
     authLogin: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
@@ -55,4 +76,7 @@ export const {
   useAuthForgotPasswordMutation,
   useAuthResetPasswordMutation,
   useAuthAcceptInviteMutation,
+  useAuthListSessionsQuery,
+  useAuthRevokeSessionMutation,
+  useAuthRevokeOtherSessionsMutation,
 } = authApi

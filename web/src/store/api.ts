@@ -40,6 +40,27 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.switchWorkspaceRequest,
       }),
     }),
+    authListSessions: build.query<
+      AuthListSessionsApiResponse,
+      AuthListSessionsApiArg
+    >({
+      query: () => ({ url: `/auth/sessions` }),
+    }),
+    authRevokeOtherSessions: build.mutation<
+      AuthRevokeOtherSessionsApiResponse,
+      AuthRevokeOtherSessionsApiArg
+    >({
+      query: () => ({ url: `/auth/sessions/revoke-others`, method: "POST" }),
+    }),
+    authRevokeSession: build.mutation<
+      AuthRevokeSessionApiResponse,
+      AuthRevokeSessionApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/sessions/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
     authVerifyEmail: build.mutation<
       AuthVerifyEmailApiResponse,
       AuthVerifyEmailApiArg
@@ -338,6 +359,16 @@ export type AuthSwitchWorkspaceApiResponse =
 export type AuthSwitchWorkspaceApiArg = {
   switchWorkspaceRequest: SwitchWorkspaceRequest;
 };
+export type AuthListSessionsApiResponse =
+  /** status 200 The caller's active sessions (current one flagged) */ SessionListResponse;
+export type AuthListSessionsApiArg = void;
+export type AuthRevokeOtherSessionsApiResponse =
+  /** status 200 Revoked every session except the current one */ RevokeOthersResponse;
+export type AuthRevokeOtherSessionsApiArg = void;
+export type AuthRevokeSessionApiResponse = unknown;
+export type AuthRevokeSessionApiArg = {
+  id: string;
+};
 export type AuthVerifyEmailApiResponse = unknown;
 export type AuthVerifyEmailApiArg = {
   verifyEmailRequest: VerifyEmailRequest;
@@ -557,6 +588,23 @@ export type SwitchWorkspaceResponse = {
 };
 export type SwitchWorkspaceRequest = {
   workspace_id: string;
+};
+export type SessionInfo = {
+  id: string;
+  workspace_id: string;
+  user_agent?: string | null;
+  ip?: string | null;
+  created_at: string;
+  expires_at: string;
+  /** Whether this is the session tied to the caller's current access token. */
+  current: boolean;
+};
+export type SessionListResponse = {
+  sessions: SessionInfo[];
+};
+export type RevokeOthersResponse = {
+  /** Number of other sessions revoked. */
+  revoked: number;
 };
 export type VerifyEmailRequest = {
   token: string;
@@ -795,6 +843,9 @@ export const {
   useAuthMeQuery,
   useAuthLogoutAllMutation,
   useAuthSwitchWorkspaceMutation,
+  useAuthListSessionsQuery,
+  useAuthRevokeOtherSessionsMutation,
+  useAuthRevokeSessionMutation,
   useAuthVerifyEmailMutation,
   useAuthResendVerificationMutation,
   useAuthForgotPasswordMutation,

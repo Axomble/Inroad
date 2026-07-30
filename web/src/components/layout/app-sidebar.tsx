@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Mail, Megaphone, Users, Settings, Flame, type LucideIcon } from 'lucide-react'
+import { Mail, Megaphone, Users, Settings, Flame, ShieldCheck, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavCounts } from './use-nav-counts'
 
@@ -49,7 +49,10 @@ const NAV: NavGroup[] = [
   },
   {
     label: 'Workspace',
-    items: [{ label: 'Team', to: '/app/settings/team', icon: Settings }],
+    items: [
+      { label: 'Team', to: '/app/settings/team', icon: Settings },
+      { label: 'Security', to: '/app/settings/security', icon: ShieldCheck },
+    ],
   },
 ]
 

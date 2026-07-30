@@ -22,6 +22,7 @@ import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
 import { Route as AppCampaignsIdRouteImport } from './routes/app.campaigns.$id'
+import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
 
 const IndexRoute = IndexRouteImport.update({
@@ -89,6 +90,11 @@ const AppCampaignsIdRoute = AppCampaignsIdRouteImport.update({
   path: '/campaigns/$id',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsSecurityRoute = AppSettingsSecurityRouteImport.update({
+  id: '/settings/security',
+  path: '/settings/security',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsTeamRoute = AppSettingsTeamRouteImport.update({
   id: '/settings/team',
   path: '/settings/team',
@@ -108,6 +114,7 @@ export interface FileRoutesByFullPath {
   '/app/warmup': typeof AppWarmupRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
 }
@@ -123,6 +130,7 @@ export interface FileRoutesByTo {
   '/app/warmup': typeof AppWarmupRoute
   '/app': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
 }
@@ -140,6 +148,7 @@ export interface FileRoutesById {
   '/app/warmup': typeof AppWarmupRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
 }
@@ -158,6 +167,7 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
   fileRoutesByTo: FileRoutesByTo
@@ -173,6 +183,7 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/app'
     | '/app/campaigns/$id'
+    | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns'
   id:
@@ -189,6 +200,7 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
   fileRoutesById: FileRoutesById
@@ -296,6 +308,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCampaignsIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/security': {
+      id: '/app/settings/security'
+      path: '/settings/security'
+      fullPath: '/app/settings/security'
+      preLoaderRoute: typeof AppSettingsSecurityRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/team': {
       id: '/app/settings/team'
       path: '/settings/team'
@@ -312,6 +331,7 @@ interface AppRouteChildren {
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
   AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
 }
@@ -322,6 +342,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
   AppCampaignsIdRoute: AppCampaignsIdRoute,
+  AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppCampaignsIndexRoute: AppCampaignsIndexRoute,
 }
