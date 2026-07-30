@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -152,20 +153,34 @@ func toMembershipDTOs(mems []Membership) []membershipDTO {
 	return dto
 }
 
+// mintAccessToken issues an access token for a session. The RULE for every
+// caller: tokenVersion MUST be the session's LIVE token_version — 0 for a
+// freshly-created session (register/login/refresh, whose rows default to 0), or
+// the value read back from the session row for a SAME-SESSION re-issue against a
+// still-live session (switchWorkspace, via RepointSessionWorkspace's RETURNING).
+// A same-session re-issue that hardcoded 0 would be instantly rejected by the
+// verifier once any later phase bumps that live session's token_version. Session
+// TERMINATION is a different operation entirely — a full revoke
+// (RevokeAllForUser / RevokeSessionOwned / RevokeFamily), never a bare re-mint.
+func (h *Handler) mintAccessToken(userID, workspaceID, role, sessionID string, tokenVersion int) (string, error) {
+	return auth.IssueToken(h.jwtSecret, auth.Claims{
+		UserID: userID, WorkspaceID: workspaceID, Role: role,
+		SessionID: sessionID, TokenVersion: tokenVersion,
+	}, h.accessTTL)
+}
+
 // issueSession mints an access token for sess, sets the refresh + CSRF
 // cookies, and writes the session JSON body. Shared by register/login/refresh.
 //
-// The token's `tv` claim is left at 0: every session this issues (register,
-// login, and refresh all create a fresh session row) starts at token_version 0
-// — the DB default — so a 0 claim always matches the session's live value. Only
-// a security event that BUMPS a still-live session (a later phase: 2FA/passkey
-// change) advances it, and that flow is responsible for re-issuing the caller's
-// access token with the new tv.
+// tv is 0 here: every session this issues (register, login, and refresh all
+// create a fresh session row) starts at token_version 0 — the DB default — so a
+// 0 claim always matches the session's live value. The OTHER re-issue site,
+// switchWorkspace, re-mints for an EXISTING live session and therefore sources
+// tv from the session row (never 0). Only a security event that BUMPS a
+// still-live session (a later phase: 2FA/passkey change) advances token_version,
+// and that flow re-issues the caller's access token with the new tv.
 func (h *Handler) issueSession(w http.ResponseWriter, sess Session) {
-	access, err := auth.IssueToken(h.jwtSecret, auth.Claims{
-		UserID: sess.UserID.String(), WorkspaceID: sess.WorkspaceID.String(),
-		Role: sess.Role, SessionID: sess.SessionID.String(),
-	}, h.accessTTL)
+	access, err := h.mintAccessToken(sess.UserID.String(), sess.WorkspaceID.String(), sess.Role, sess.SessionID.String(), 0)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not issue token")
 		return
@@ -251,7 +266,20 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(refreshCookieName); err == nil {
-		_ = h.svc.Logout(r.Context(), c.Value)
+		revoked, err := h.svc.Logout(r.Context(), c.Value)
+		if err != nil {
+			// Logout stays best-effort (the response is still 200 and cookies
+			// are cleared below), but a genuine revoke failure must not be
+			// swallowed silently — surface it so a session that failed to revoke
+			// server-side is at least observable.
+			slog.Error("identity: logout revoke failed", "err", err)
+		}
+		// Bust the verifier's cached auth-state for every revoked session so a
+		// just-logged-out access token is rejected on its next request rather
+		// than after the cache TTL (matches revoke-session/revoke-others).
+		for _, sid := range revoked {
+			h.bustSession(sid)
+		}
 	}
 	h.clearCookies(w)
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -287,9 +315,15 @@ func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	if err := h.svc.LogoutAll(r.Context(), uid); err != nil {
+	revoked, err := h.svc.LogoutAll(r.Context(), uid)
+	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not revoke sessions")
 		return
+	}
+	// Bust every revoked session's cached auth-state so a logout-everywhere kills
+	// each still-live access token promptly in-process, not after the cache TTL.
+	for _, sid := range revoked {
+		h.bustSession(sid)
 	}
 	h.clearCookies(w)
 	httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -324,14 +358,16 @@ func (h *Handler) switchWorkspace(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	activeWS, role, err := h.svc.SwitchWorkspace(r.Context(), sid, uid, target)
+	activeWS, role, tokenVersion, err := h.svc.SwitchWorkspace(r.Context(), sid, uid, target)
 	if err != nil {
 		httpx.Error(w, http.StatusForbidden, "not a member of that workspace")
 		return
 	}
-	access, err := auth.IssueToken(h.jwtSecret, auth.Claims{
-		UserID: claims.UserID, WorkspaceID: activeWS.String(), Role: role, SessionID: claims.SessionID,
-	}, h.accessTTL)
+	// Same-session re-issue: the session row stays live (only its workspace/role
+	// changed), so the new token's `tv` MUST come from that row's current
+	// token_version — never a hardcoded 0, which a later tv-bump would turn into
+	// an instant self-inflicted 401. See mintAccessToken's rule.
+	access, err := h.mintAccessToken(claims.UserID, activeWS.String(), role, claims.SessionID, tokenVersion)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not issue token")
 		return
@@ -406,13 +442,20 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.svc.ResetPassword(r.Context(), body.Token, body.NewPassword); err != nil {
+	revoked, err := h.svc.ResetPassword(r.Context(), body.Token, body.NewPassword)
+	if err != nil {
 		if errors.Is(err, ErrTokenInvalid) {
 			httpx.Error(w, http.StatusBadRequest, "invalid or expired token")
 			return
 		}
 		httpx.Error(w, http.StatusInternalServerError, "could not reset password")
 		return
+	}
+	// Bust every revoked session's cached auth-state so a password reset kills
+	// each pre-reset access token promptly in-process (the reset already bumped
+	// token_version for cross-replica correctness within the cache TTL).
+	for _, sid := range revoked {
+		h.bustSession(sid)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

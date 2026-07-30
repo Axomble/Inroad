@@ -159,7 +159,7 @@ func TestPhase2ForgotResetFlow(t *testing.T) {
 	}
 	token := extractToken(t, sender.last.TextBody)
 
-	if err := svc.ResetPassword(ctx, token, newPassword); err != nil {
+	if _, err := svc.ResetPassword(ctx, token, newPassword); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 

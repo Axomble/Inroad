@@ -77,18 +77,18 @@ type storeIface interface {
 	CreateSession(ctx context.Context, arg gen.CreateSessionParams) (gen.Session, error)
 	GetSessionByHash(ctx context.Context, hash []byte) (gen.Session, error)
 	RevokeSession(ctx context.Context, id uuid.UUID) (int64, error)
-	RevokeFamily(ctx context.Context, familyID uuid.UUID) error
-	RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
+	RevokeFamily(ctx context.Context, familyID uuid.UUID) ([]uuid.UUID, error)
+	RevokeAllForUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error)
 	ListActiveSessionsForUser(ctx context.Context, userID uuid.UUID) ([]gen.ListActiveSessionsForUserRow, error)
 	RevokeSessionOwned(ctx context.Context, sid, userID uuid.UUID) (int64, error)
 	RevokeOtherSessionsForUser(ctx context.Context, userID, keepSID uuid.UUID) ([]uuid.UUID, error)
-	RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error
+	RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) (int, error)
 	IssueUserToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration) (string, error)
 	ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error)
 	CountRecentUserTokens(ctx context.Context, userID uuid.UUID, kind string, since time.Time) (int64, error)
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 	IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error)
-	ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error)
+	ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) ([]uuid.UUID, error)
 	CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error)
 	ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]gen.WorkspaceInvite, error)
 	RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) error
@@ -331,13 +331,15 @@ func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 // resetting the password - the legitimate owner recovering a compromised
 // account, or an attacker who just took it over - the other party's existing
 // sessions must not survive the reset.
-func (s *Service) ResetPassword(ctx context.Context, raw, newPassword string) error {
+// It returns the revoked session ids so the caller can bust their cached
+// auth-state in-process — a just-reset access token is then rejected on its
+// next request rather than after the verifier cache TTL.
+func (s *Service) ResetPassword(ctx context.Context, raw, newPassword string) ([]uuid.UUID, error) {
 	hash, err := auth.HashPassword(newPassword)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = s.store.ResetPasswordTx(ctx, raw, "password_reset", hash)
-	return err // ErrTokenInvalid on a bad/expired/already-consumed token
+	return s.store.ResetPasswordTx(ctx, raw, "password_reset", hash) // ErrTokenInvalid on a bad/expired/already-consumed token
 }
 
 // Login verifies credentials, activates the user's most-recently-seen
@@ -391,7 +393,7 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 	}
 	// Reuse detection: a revoked or expired token kills the whole family.
 	if row.RevokedAt.Valid || time.Now().After(pgxTime(row.ExpiresAt)) {
-		_ = s.store.RevokeFamily(ctx, row.FamilyID)
+		_, _ = s.store.RevokeFamily(ctx, row.FamilyID)
 		return Session{}, ErrRefreshInvalid
 	}
 	n, err := s.store.RevokeSession(ctx, row.ID)
@@ -401,7 +403,7 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 	if n == 0 {
 		// Lost the race: someone else already revoked/rotated this session
 		// between our read and our write. Treat as reuse.
-		_ = s.store.RevokeFamily(ctx, row.FamilyID)
+		_, _ = s.store.RevokeFamily(ctx, row.FamilyID)
 		return Session{}, ErrRefreshInvalid
 	}
 	member, err := s.store.GetMember(ctx, row.WorkspaceID, row.UserID)
@@ -416,22 +418,25 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 	return Session{UserID: row.UserID, WorkspaceID: row.WorkspaceID, Role: string(member.Role), SessionID: sid, RawRefresh: newRaw, Memberships: mems}, nil
 }
 
-// Logout revokes the entire refresh-token family for the presented token.
-// An unknown token is treated as already logged out (idempotent).
-func (s *Service) Logout(ctx context.Context, raw string) error {
+// Logout revokes the entire refresh-token family for the presented token,
+// returning the revoked session ids so the caller can bust their cached
+// auth-state in-process. An unknown token is treated as already logged out
+// (idempotent) and revokes nothing.
+func (s *Service) Logout(ctx context.Context, raw string) ([]uuid.UUID, error) {
 	row, err := s.store.GetSessionByHash(ctx, auth.HashRefreshToken(raw))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil // unknown token; already logged out (idempotent)
+			return nil, nil // unknown token; already logged out (idempotent)
 		}
-		return err // genuine lookup failure surfaces
+		return nil, err // genuine lookup failure surfaces
 	}
 	return s.store.RevokeFamily(ctx, row.FamilyID)
 }
 
 // LogoutAll revokes every active session belonging to a user, across all
-// families and devices.
-func (s *Service) LogoutAll(ctx context.Context, userID uuid.UUID) error {
+// families and devices, returning the revoked session ids so the caller can
+// bust their cached auth-state in-process.
+func (s *Service) LogoutAll(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
 	return s.store.RevokeAllForUser(ctx, userID)
 }
 
@@ -468,21 +473,24 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, keepSID uuid.
 }
 
 // SwitchWorkspace repoints an existing session at a different workspace the
-// user is a member of, returning the new active workspace and the user's
-// role there. Returns ErrNotMember if the user does not belong to target,
-// or if the session id isn't owned by the caller (the SQL WHERE clause
-// binds session id + user id together — a mismatched pair yields 0 rows
-// affected, surfaced here as ErrNotMember).
-func (s *Service) SwitchWorkspace(ctx context.Context, sessionID, userID, target uuid.UUID) (uuid.UUID, string, error) {
+// user is a member of, returning the new active workspace, the user's role
+// there, and the session's LIVE token_version so the caller re-mints an access
+// token whose `tv` matches the still-live session (a same-session re-issue must
+// source tv from the row, never hardcode 0). Returns ErrNotMember if the user
+// does not belong to target, or if the session id isn't owned by the caller
+// (the SQL WHERE clause binds session id + user id together — a mismatched pair
+// yields 0 rows affected, surfaced here as ErrNotMember).
+func (s *Service) SwitchWorkspace(ctx context.Context, sessionID, userID, target uuid.UUID) (uuid.UUID, string, int, error) {
 	m, err := s.store.GetMember(ctx, target, userID)
 	if err != nil {
-		return uuid.Nil, "", ErrNotMember
+		return uuid.Nil, "", 0, ErrNotMember
 	}
-	if err := s.store.RepointSessionWorkspace(ctx, sessionID, userID, target); err != nil {
-		return uuid.Nil, "", err
+	tokenVersion, err := s.store.RepointSessionWorkspace(ctx, sessionID, userID, target)
+	if err != nil {
+		return uuid.Nil, "", 0, err
 	}
 	_ = s.store.TouchMemberLastSeen(ctx, target, userID)
-	return target, string(m.Role), nil
+	return target, string(m.Role), tokenVersion, nil
 }
 
 // Memberships returns every workspace the user belongs to.

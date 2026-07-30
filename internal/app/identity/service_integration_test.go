@@ -54,7 +54,21 @@ type sessionOut struct {
 // newIdentityTestServer wires the identity handler exactly as cmd/inroad/main.go
 // does (NewStore -> NewService -> NewHandler -> Routes(secret)), mounted at
 // /api/v1/auth on a real httptest.Server backed by a real Postgres pool.
+//
+// TTL 0 disables the verifier cache so every request re-reads the session's
+// live auth-state from Postgres — revocation/token_version assertions are then
+// deterministic without waiting out a cache window. Tests that specifically
+// prove the in-process cache BUST (logout/reset/switch) use newIdentityTestServerTTL
+// with a long TTL so the cache would otherwise serve stale "live" state.
 func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
+	return newIdentityTestServerTTL(t, 0)
+}
+
+// newIdentityTestServerTTL is newIdentityTestServer with an explicit verifier
+// cache TTL. A long TTL makes the cache the ONLY thing that could keep a
+// just-revoked access token alive, so a test that sees a prompt 401 proves the
+// handler busted the cache (not merely that the cache happened to miss).
+func newIdentityTestServerTTL(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Queries) {
 	t.Helper()
 	ctx := context.Background()
 	if err := db.Migrate(dsn()); err != nil {
@@ -67,10 +81,7 @@ func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
 	t.Cleanup(pool.Close)
 
 	store := NewStore(pool)
-	// TTL 0 disables the verifier cache so every request re-reads the session's
-	// live auth-state from Postgres — revocation/token_version assertions below
-	// are then deterministic without waiting out a cache window.
-	verifier := NewSessionVerifier(testJWTSecret, store, 0)
+	verifier := NewSessionVerifier(testJWTSecret, store, cacheTTL)
 	h := NewHandler(
 		NewService(store, testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
 		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil, verifier,

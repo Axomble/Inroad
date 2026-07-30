@@ -166,13 +166,17 @@ func (s *Store) RevokeSession(ctx context.Context, id uuid.UUID) (int64, error) 
 	return s.q.RevokeSession(ctx, id)
 }
 
-// RevokeFamily marks every session in a refresh-token family as revoked.
-func (s *Store) RevokeFamily(ctx context.Context, familyID uuid.UUID) error {
+// RevokeFamily marks every still-live session in a refresh-token family as
+// revoked, returning the ids actually flipped so an in-process caller can bust
+// the verifier's cached auth-state for each (mirrors RevokeOtherSessionsForUser).
+func (s *Store) RevokeFamily(ctx context.Context, familyID uuid.UUID) ([]uuid.UUID, error) {
 	return s.q.RevokeFamily(ctx, familyID)
 }
 
-// RevokeAllForUser marks every active session belonging to a user as revoked.
-func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
+// RevokeAllForUser marks every active session belonging to a user as revoked,
+// returning the ids actually flipped so an in-process caller (logout-all) can
+// bust the verifier's cached auth-state for each.
+func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
 	return s.q.RevokeAllForUser(ctx, userID)
 }
 
@@ -243,10 +247,10 @@ func (s *Store) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash strin
 // in a single transaction, so a crash between steps can never leave the hash
 // updated with old sessions still live (or the reverse). Mirrors RegisterTx's
 // pattern of running several statements as one qtx-scoped unit.
-func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error) {
+func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) ([]uuid.UUID, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
 
@@ -257,30 +261,34 @@ func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash str
 		Kind:      gen.UserTokenKind(kind),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, ErrTokenInvalid
+		return nil, ErrTokenInvalid
 	}
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 
 	if err := qtx.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: uid, PasswordHash: newHash}); err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
-	if err := qtx.RevokeAllForUser(ctx, uid); err != nil {
-		return uuid.Nil, err
+	// The ids RevokeAllForUser flips are returned so the caller can bust each
+	// revoked session's cached auth-state in-process — a just-reset access token
+	// is then rejected on its next request rather than after the cache TTL.
+	revoked, err := qtx.RevokeAllForUser(ctx, uid)
+	if err != nil {
+		return nil, err
 	}
 	// Belt-and-braces with RevokeAllForUser: advance every session's
 	// token_version so any access token already minted for this user is
 	// rejected by the verifier even in the (impossible-by-construction) case a
 	// session escaped revocation. A password reset is a full security event.
 	if err := qtx.BumpTokenVersionForUser(ctx, uid); err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
-	return uid, nil
+	return revoked, nil
 }
 
 // GetSessionAuthState returns the minimal per-request validation state for a
@@ -470,18 +478,21 @@ func (s *Store) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (A
 }
 
 // RepointSessionWorkspace switches a session's active workspace (used when a
-// user swaps workspace context without re-authenticating). The userID is
-// checked in the WHERE clause so callers can only ever repoint their own
-// sessions; a 0-row result means the (session, user) pair didn't match.
-func (s *Store) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error {
-	n, err := s.q.RepointSessionWorkspace(ctx, gen.RepointSessionWorkspaceParams{
+// user swaps workspace context without re-authenticating) and returns the
+// session's live token_version so the caller can re-mint an access token whose
+// `tv` matches the row (a same-session re-issue must never hardcode 0). The
+// userID is checked in the WHERE clause so callers can only ever repoint their
+// own sessions; a non-matching (session, user) pair updates 0 rows, surfacing
+// as pgx.ErrNoRows, mapped here to ErrNotMember.
+func (s *Store) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) (int, error) {
+	tv, err := s.q.RepointSessionWorkspace(ctx, gen.RepointSessionWorkspaceParams{
 		ID: id, WorkspaceID: wsID, UserID: userID,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotMember
+	}
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if n == 0 {
-		return ErrNotMember
-	}
-	return nil
+	return int(tv), nil
 }
