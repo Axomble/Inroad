@@ -79,6 +79,9 @@ type storeIface interface {
 	RevokeSession(ctx context.Context, id uuid.UUID) (int64, error)
 	RevokeFamily(ctx context.Context, familyID uuid.UUID) error
 	RevokeAllForUser(ctx context.Context, userID uuid.UUID) error
+	ListActiveSessionsForUser(ctx context.Context, userID uuid.UUID) ([]gen.ListActiveSessionsForUserRow, error)
+	RevokeSessionOwned(ctx context.Context, sid, userID uuid.UUID) (int64, error)
+	RevokeOtherSessionsForUser(ctx context.Context, userID, keepSID uuid.UUID) ([]uuid.UUID, error)
 	RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error
 	IssueUserToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration) (string, error)
 	ConsumeUserToken(ctx context.Context, raw, kind string) (uuid.UUID, error)
@@ -430,6 +433,38 @@ func (s *Service) Logout(ctx context.Context, raw string) error {
 // families and devices.
 func (s *Service) LogoutAll(ctx context.Context, userID uuid.UUID) error {
 	return s.store.RevokeAllForUser(ctx, userID)
+}
+
+// ErrSessionNotFound is returned by RevokeSession when the (session, user) pair
+// matches no active session — a foreign id, an unknown id, or one already
+// revoked. The handler maps it to 404.
+var ErrSessionNotFound = errors.New("session not found")
+
+// ListSessions returns the caller's live sessions for the session-management
+// UI. Never carries a token hash (the query doesn't select it).
+func (s *Service) ListSessions(ctx context.Context, userID uuid.UUID) ([]gen.ListActiveSessionsForUserRow, error) {
+	return s.store.ListActiveSessionsForUser(ctx, userID)
+}
+
+// RevokeSession revokes one of the caller's own sessions. The session id is
+// pinned to userID in SQL, so a caller can never revoke another user's session;
+// a non-match (foreign/unknown/already-revoked) surfaces as ErrSessionNotFound.
+func (s *Service) RevokeSession(ctx context.Context, userID, sid uuid.UUID) error {
+	n, err := s.store.RevokeSessionOwned(ctx, sid, userID)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+
+// RevokeOtherSessions revokes every one of the caller's sessions except
+// keepSID (their current one), returning the revoked session ids so the caller
+// can invalidate any cached auth-state for them.
+func (s *Service) RevokeOtherSessions(ctx context.Context, userID, keepSID uuid.UUID) ([]uuid.UUID, error) {
+	return s.store.RevokeOtherSessionsForUser(ctx, userID, keepSID)
 }
 
 // SwitchWorkspace repoints an existing session at a different workspace the

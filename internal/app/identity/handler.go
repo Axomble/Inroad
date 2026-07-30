@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -16,8 +18,16 @@ import (
 	"github.com/inroad/inroad/internal/platform/validate"
 )
 
+// sessionCacheBuster drops a session's cached auth-state so a revoke takes
+// effect on the next request even while the verifier's short-TTL cache is warm.
+// Satisfied by *SessionVerifier; kept as a tiny interface so the handler can be
+// unit-tested (and constructed) without one.
+type sessionCacheBuster interface {
+	Bust(sid uuid.UUID)
+}
+
 // Handler exposes the identity domain (register/login/refresh/logout,
-// session introspection, and workspace switching) over HTTP.
+// session introspection + management, and workspace switching) over HTTP.
 type Handler struct {
 	svc            *Service
 	jwtSecret      []byte
@@ -26,6 +36,7 @@ type Handler struct {
 	cookieSecure   bool
 	cookieDomain   string
 	trustedProxies []*net.IPNet
+	buster         sessionCacheBuster
 }
 
 // NewHandler constructs a Handler backed by svc. accessTTL/refreshTTL size
@@ -33,8 +44,9 @@ type Handler struct {
 // control the cookie attributes (Secure should be true outside local dev).
 // trustedProxies is the CIDR list whose X-Forwarded-For / X-Real-IP the
 // handler will honor; unparsable entries are silently dropped (loudness
-// belongs in cmd startup, not per-request).
-func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string, trustedProxies []string) *Handler {
+// belongs in cmd startup, not per-request). buster (may be nil) invalidates
+// the verifier's session-auth cache when a session is revoked in-process.
+func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string, trustedProxies []string, buster sessionCacheBuster) *Handler {
 	nets := make([]*net.IPNet, 0, len(trustedProxies))
 	for _, c := range trustedProxies {
 		if _, n, err := net.ParseCIDR(c); err == nil {
@@ -43,7 +55,15 @@ func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Durat
 	}
 	return &Handler{
 		svc: svc, jwtSecret: jwtSecret, accessTTL: accessTTL, refreshTTL: refreshTTL,
-		cookieSecure: cookieSecure, cookieDomain: cookieDomain, trustedProxies: nets,
+		cookieSecure: cookieSecure, cookieDomain: cookieDomain, trustedProxies: nets, buster: buster,
+	}
+}
+
+// bustSession invalidates the verifier's cached auth-state for sid, if a buster
+// was wired (nil in unit tests / zero-value handlers).
+func (h *Handler) bustSession(sid uuid.UUID) {
+	if h.buster != nil {
+		h.buster.Bust(sid)
 	}
 }
 
@@ -134,6 +154,13 @@ func toMembershipDTOs(mems []Membership) []membershipDTO {
 
 // issueSession mints an access token for sess, sets the refresh + CSRF
 // cookies, and writes the session JSON body. Shared by register/login/refresh.
+//
+// The token's `tv` claim is left at 0: every session this issues (register,
+// login, and refresh all create a fresh session row) starts at token_version 0
+// — the DB default — so a 0 claim always matches the session's live value. Only
+// a security event that BUMPS a still-live session (a later phase: 2FA/passkey
+// change) advances it, and that flow is responsible for re-issuing the caller's
+// access token with the new tv.
 func (h *Handler) issueSession(w http.ResponseWriter, sess Session) {
 	access, err := auth.IssueToken(h.jwtSecret, auth.Claims{
 		UserID: sess.UserID.String(), WorkspaceID: sess.WorkspaceID.String(),
@@ -408,6 +435,115 @@ func (h *Handler) resendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// sessionInfoDTO is one active session in the management list. It never
+// carries the token hash (the query doesn't select it); `current` flags the
+// session tied to the caller's own access token.
+type sessionInfoDTO struct {
+	ID          string  `json:"id"`
+	WorkspaceID string  `json:"workspace_id"`
+	UserAgent   *string `json:"user_agent"`
+	IP          *string `json:"ip"`
+	CreatedAt   string  `json:"created_at"`
+	ExpiresAt   string  `json:"expires_at"`
+	Current     bool    `json:"current"`
+}
+
+type sessionsListResponse struct {
+	Sessions []sessionInfoDTO `json:"sessions"`
+}
+
+// listSessions returns the caller's live sessions, flagging the current one.
+// Scoped to the authenticated user id from the JWT (sessions are user-owned,
+// not workspace tenant data), never a request param.
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.UserFromContext(r.Context())
+	uid, err := uuid.Parse(p.UserID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	rows, err := h.svc.ListSessions(r.Context(), uid)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not list sessions")
+		return
+	}
+	out := make([]sessionInfoDTO, len(rows))
+	for i, s := range rows {
+		out[i] = sessionInfoDTO{
+			ID:          s.ID.String(),
+			WorkspaceID: s.WorkspaceID.String(),
+			UserAgent:   s.UserAgent,
+			IP:          ipToString(s.Ip),
+			CreatedAt:   pgxTime(s.CreatedAt).UTC().Format(time.RFC3339),
+			ExpiresAt:   pgxTime(s.ExpiresAt).UTC().Format(time.RFC3339),
+			Current:     s.ID.String() == p.SessionID,
+		}
+	}
+	httpx.JSON(w, http.StatusOK, sessionsListResponse{Sessions: out})
+}
+
+// revokeSession revokes one of the caller's OWN sessions (pinned to the JWT
+// user id in SQL). The session id comes from the path; a foreign or unknown id
+// matches nothing and returns 404 rather than revealing another user's session.
+func (h *Handler) revokeSession(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.UserFromContext(r.Context())
+	uid, err := uuid.Parse(p.UserID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	sid, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	if err := h.svc.RevokeSession(r.Context(), uid, sid); err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			httpx.Error(w, http.StatusNotFound, "session not found")
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, "could not revoke session")
+		return
+	}
+	h.bustSession(sid)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeOtherSessions revokes every session EXCEPT the caller's current one
+// (the session named in the JWT), keeping the current device logged in. The
+// kept session id comes only from the verified token, never the request body.
+func (h *Handler) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.UserFromContext(r.Context())
+	uid, err := uuid.Parse(p.UserID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	keep, err := uuid.Parse(p.SessionID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	revoked, err := h.svc.RevokeOtherSessions(r.Context(), uid, keep)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "could not revoke sessions")
+		return
+	}
+	for _, sid := range revoked {
+		h.bustSession(sid)
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"revoked": len(revoked)})
+}
+
+// ipToString renders an optional stored IP as a nullable JSON string.
+func ipToString(ip *netip.Addr) *string {
+	if ip == nil {
+		return nil
+	}
+	s := ip.String()
+	return &s
 }
 
 // isUniqueViolation reports whether err represents a Postgres unique-key

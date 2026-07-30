@@ -82,11 +82,16 @@ func run() error {
 		return err
 	}
 	identStore := identity.NewStore(pool)
+	// The store-backed verifier makes access tokens revocable: every request is
+	// validated against the session's live revocation/expiry/token_version. It
+	// is both the auth.Verifier for the protected group AND the cache-buster the
+	// identity handler calls when it revokes a session.
+	sessionVerifier := identity.NewSessionVerifier(cfg.JWTSecret, identStore, cfg.SessionCacheTTL)
 	identHandler := identity.NewHandler(
 		identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
 			cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL),
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
-		cfg.TrustedProxies,
+		cfg.TrustedProxies, sessionVerifier,
 	)
 	mailboxStore := mailbox.NewPgStore(queries)
 	googleOAuth := mail.GoogleOAuth{
@@ -145,7 +150,7 @@ func run() error {
 	//               route mounted here is authenticated by default, so a new
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
-		{pattern: "/api/v1/auth", handler: identHandler.Routes(cfg.JWTSecret)},
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier)},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
@@ -173,7 +178,7 @@ func run() error {
 		// mount above, not here.
 		{pattern: "/api/v1/warmup", handler: warmupHandler.Routes()},
 	}
-	router := buildRouter(logger, cfg.JWTSecret, public, protected)
+	router := buildRouter(logger, sessionVerifier, public, protected)
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
 	logger.Info("api listening", "addr", cfg.HTTPAddr)
@@ -192,16 +197,16 @@ type mount struct {
 
 // buildRouter assembles the API router with a deny-by-default posture. Public
 // mounts are served as-is; every protected mount is wrapped once, at the group
-// root, by auth.RequireAuth(secret). A route added under the protected group is
-// therefore authenticated whether or not it wires up any middleware of its own
-// -- forgetting a per-domain guard can no longer expose a route.
-func buildRouter(logger *slog.Logger, secret []byte, public, protected []mount) *chi.Mux {
+// root, by auth.RequireAuth(verifier). A route added under the protected group
+// is therefore authenticated whether or not it wires up any middleware of its
+// own -- forgetting a per-domain guard can no longer expose a route.
+func buildRouter(logger *slog.Logger, verifier auth.Verifier, public, protected []mount) *chi.Mux {
 	r := httpx.NewRouter(logger)
 	for _, m := range public {
 		r.Mount(m.pattern, m.handler)
 	}
 	r.Group(func(pr chi.Router) {
-		pr.Use(auth.RequireAuth(secret))
+		pr.Use(auth.RequireAuth(verifier))
 		for _, m := range protected {
 			pr.Mount(m.pattern, m.handler)
 		}

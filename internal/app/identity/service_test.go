@@ -204,6 +204,41 @@ func (f *fakeStore) RevokeAllForUser(ctx context.Context, userID uuid.UUID) erro
 	return nil
 }
 
+func (f *fakeStore) ListActiveSessionsForUser(ctx context.Context, userID uuid.UUID) ([]gen.ListActiveSessionsForUserRow, error) {
+	var out []gen.ListActiveSessionsForUserRow
+	for _, row := range f.sessions {
+		if row.UserID == userID && !row.RevokedAt.Valid {
+			out = append(out, gen.ListActiveSessionsForUserRow{
+				ID: row.ID, WorkspaceID: row.WorkspaceID, UserAgent: row.UserAgent,
+				Ip: row.Ip, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) RevokeSessionOwned(ctx context.Context, sid, userID uuid.UUID) (int64, error) {
+	row, ok := f.sessions[sid]
+	if !ok || row.UserID != userID || row.RevokedAt.Valid {
+		return 0, nil
+	}
+	row.RevokedAt = pgxTimestamp(time.Now())
+	f.sessions[sid] = row
+	return 1, nil
+}
+
+func (f *fakeStore) RevokeOtherSessionsForUser(ctx context.Context, userID, keepSID uuid.UUID) ([]uuid.UUID, error) {
+	var revoked []uuid.UUID
+	for id, row := range f.sessions {
+		if row.UserID == userID && id != keepSID && !row.RevokedAt.Valid {
+			row.RevokedAt = pgxTimestamp(time.Now())
+			f.sessions[id] = row
+			revoked = append(revoked, id)
+		}
+	}
+	return revoked, nil
+}
+
 func (f *fakeStore) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	u, ok := f.usersByID[id]
 	if !ok {

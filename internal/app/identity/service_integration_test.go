@@ -66,13 +66,18 @@ func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
 	}
 	t.Cleanup(pool.Close)
 
+	store := NewStore(pool)
+	// TTL 0 disables the verifier cache so every request re-reads the session's
+	// live auth-state from Postgres — revocation/token_version assertions below
+	// are then deterministic without waiting out a cache window.
+	verifier := NewSessionVerifier(testJWTSecret, store, 0)
 	h := NewHandler(
-		NewService(NewStore(pool), testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
-		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil,
+		NewService(store, testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
+		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil, verifier,
 	)
 
 	r := chi.NewRouter()
-	r.Mount("/api/v1/auth", h.Routes(testJWTSecret))
+	r.Mount("/api/v1/auth", h.Routes(verifier))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
@@ -324,13 +329,26 @@ func TestIdentityAuthFlows(t *testing.T) {
 		}
 		otherOut := decodeSession(t, regResp)
 
+		// User A's register-session family was revoked by the reuse-detection
+		// subtest above; with revocable sessions that access token is now
+		// (correctly) rejected. Log A in fresh to get a live session before
+		// exercising the switch-authorization path.
+		loginResp := jsonRequest(t, srv, http.MethodPost, "/api/v1/auth/login", map[string]string{
+			"email": email, "password": password,
+		}, nil, "")
+		defer loginResp.Body.Close()
+		if loginResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 logging user A back in, got %d", loginResp.StatusCode)
+		}
+		freshAccess := decodeSession(t, loginResp).AccessToken
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/v1/auth/switch-workspace",
 			bytes.NewReader(mustJSON(t, map[string]string{"workspace_id": otherOut.ActiveWorkspaceID})))
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+registerAccess)
+		req.Header.Set("Authorization", "Bearer "+freshAccess)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("do request: %v", err)

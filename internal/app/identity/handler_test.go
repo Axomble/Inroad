@@ -18,7 +18,7 @@ import (
 
 func newTestHandler(store *fakeStore) *Handler {
 	svc := newTestService(store)
-	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil)
+	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil, nil)
 }
 
 func doRequest(h http.HandlerFunc, method, path string, body any) *httptest.ResponseRecorder {
@@ -195,7 +195,7 @@ func TestMeIncludesEmailVerified(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/me", http.NoBody)
 		req.Header.Set("Authorization", "Bearer "+access)
 		w := httptest.NewRecorder()
-		auth.RequireAuth(h.jwtSecret)(http.HandlerFunc(h.me)).ServeHTTP(w, req)
+		auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.me)).ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 		}
@@ -258,7 +258,7 @@ func TestSwitchWorkspaceUsesSessionIDFromJWTNotBody(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 
-	protected := auth.RequireAuth(h.jwtSecret)(http.HandlerFunc(h.switchWorkspace))
+	protected := auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.switchWorkspace))
 	protected.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {

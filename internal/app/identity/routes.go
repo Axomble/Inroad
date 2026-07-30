@@ -10,9 +10,9 @@ import (
 
 // Routes mounts the full identity surface: public register/login, CSRF-guarded
 // refresh/logout, and an access-token-protected group for session
-// introspection and workspace switching. secret verifies the access token for
-// the protected group.
-func (h *Handler) Routes(secret []byte) http.Handler {
+// introspection/management and workspace switching. verifier authenticates the
+// access token for the protected group.
+func (h *Handler) Routes(verifier auth.Verifier) http.Handler {
 	r := chi.NewRouter()
 	r.Post("/register", h.register)
 	r.Post("/login", h.login)
@@ -33,11 +33,15 @@ func (h *Handler) Routes(secret []byte) http.Handler {
 	// double-submit).
 	r.Post("/invites/accept", h.acceptInvite)
 	r.Group(func(pr chi.Router) {
-		pr.Use(auth.RequireAuth(secret))
+		pr.Use(auth.RequireAuth(verifier))
 		pr.Get("/me", h.me)
 		pr.Post("/logout-all", h.logoutAll)
 		pr.Post("/switch-workspace", h.switchWorkspace)
 		pr.Post("/verify-email/resend", h.resendVerification)
+		// Session management (this user's own sessions only; user-pinned).
+		pr.Get("/sessions", h.listSessions)
+		pr.Post("/sessions/revoke-others", h.revokeOtherSessions)
+		pr.Delete("/sessions/{id}", h.revokeSession)
 	})
 	return r
 }

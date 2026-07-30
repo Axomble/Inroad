@@ -105,6 +105,41 @@ paths:
               schema: { $ref: '#/components/schemas/SwitchWorkspaceResponse' }
         '401': { description: Unauthorized }
         '403': { description: Not a member of the target workspace }
+  /auth/sessions:
+    get:
+      operationId: authListSessions
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The caller's active sessions (current one flagged)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionListResponse' }
+        '401': { description: Unauthorized }
+  /auth/sessions/revoke-others:
+    post:
+      operationId: authRevokeOtherSessions
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Revoked every session except the current one
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevokeOthersResponse' }
+        '401': { description: Unauthorized }
+  /auth/sessions/{id}:
+    delete:
+      operationId: authRevokeSession
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Session revoked }
+        '400': { description: Invalid session id }
+        '401': { description: Unauthorized }
+        '404': { description: No such session belonging to the caller }
   /auth/verify-email:
     post:
       operationId: authVerifyEmail
@@ -672,6 +707,29 @@ components:
       required: [workspace_id]
       properties:
         workspace_id: { type: string }
+    SessionInfo:
+      type: object
+      required: [id, workspace_id, created_at, expires_at, current]
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        user_agent: { type: string, nullable: true }
+        ip: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        current: { type: boolean, description: Whether this is the session tied to the caller's current access token. }
+    SessionListResponse:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items: { $ref: '#/components/schemas/SessionInfo' }
+    RevokeOthersResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { type: integer, description: Number of other sessions revoked. }
     SwitchWorkspaceResponse:
       type: object
       required: [access_token, expires_in, active_workspace_id, role]

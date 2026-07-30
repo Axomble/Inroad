@@ -269,11 +269,62 @@ func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash str
 	if err := qtx.RevokeAllForUser(ctx, uid); err != nil {
 		return uuid.Nil, err
 	}
+	// Belt-and-braces with RevokeAllForUser: advance every session's
+	// token_version so any access token already minted for this user is
+	// rejected by the verifier even in the (impossible-by-construction) case a
+	// session escaped revocation. A password reset is a full security event.
+	if err := qtx.BumpTokenVersionForUser(ctx, uid); err != nil {
+		return uuid.Nil, err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, err
 	}
 	return uid, nil
+}
+
+// GetSessionAuthState returns the minimal per-request validation state for a
+// session (owning user, revocation, expiry, token_version), mapped off the
+// pgx row into plain Go types so the verifier stays free of persistence types.
+// A missing session surfaces as pgx.ErrNoRows for the caller to treat as an
+// unknown (rejected) session.
+func (s *Store) GetSessionAuthState(ctx context.Context, sid uuid.UUID) (SessionAuthState, error) {
+	row, err := s.q.GetSessionAuthState(ctx, sid)
+	if err != nil {
+		return SessionAuthState{}, err
+	}
+	return SessionAuthState{
+		UserID:       row.UserID,
+		Revoked:      row.RevokedAt.Valid,
+		ExpiresAt:    pgxTime(row.ExpiresAt),
+		TokenVersion: int(row.TokenVersion),
+	}, nil
+}
+
+// BumpSessionTokenVersion advances a single session's token_version, rejecting
+// every access token previously minted for it. The primitive later phases hook
+// for 2FA/passkey changes on a session that stays otherwise live.
+func (s *Store) BumpSessionTokenVersion(ctx context.Context, sid uuid.UUID) error {
+	return s.q.BumpSessionTokenVersion(ctx, sid)
+}
+
+// ListActiveSessionsForUser returns a user's live sessions (never any token
+// hash) for the session-management surface.
+func (s *Store) ListActiveSessionsForUser(ctx context.Context, userID uuid.UUID) ([]gen.ListActiveSessionsForUserRow, error) {
+	return s.q.ListActiveSessionsForUser(ctx, userID)
+}
+
+// RevokeSessionOwned revokes one session, pinned to its owning user so a
+// caller can never revoke another user's session. Returns rows affected (0 if
+// the id is foreign, unknown, or already revoked).
+func (s *Store) RevokeSessionOwned(ctx context.Context, sid, userID uuid.UUID) (int64, error) {
+	return s.q.RevokeSessionOwned(ctx, gen.RevokeSessionOwnedParams{ID: sid, UserID: userID})
+}
+
+// RevokeOtherSessionsForUser revokes all of a user's active sessions except
+// keepSID, returning the ids actually revoked (for cache invalidation).
+func (s *Store) RevokeOtherSessionsForUser(ctx context.Context, userID, keepSID uuid.UUID) ([]uuid.UUID, error) {
+	return s.q.RevokeOtherSessionsForUser(ctx, gen.RevokeOtherSessionsForUserParams{UserID: userID, ID: keepSID})
 }
 
 // CreateInvite persists a new pending workspace invite. A second pending

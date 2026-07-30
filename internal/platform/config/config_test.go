@@ -91,11 +91,14 @@ func TestLoadTokenDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.AccessTokenTTL != 15*time.Minute {
+	if cfg.AccessTokenTTL != 5*time.Minute {
 		t.Fatalf("access ttl = %v", cfg.AccessTokenTTL)
 	}
 	if cfg.RefreshTokenTTL != 720*time.Hour {
 		t.Fatalf("refresh ttl = %v", cfg.RefreshTokenTTL)
+	}
+	if cfg.SessionCacheTTL != 5*time.Second {
+		t.Fatalf("session cache ttl = %v", cfg.SessionCacheTTL)
 	}
 	if !cfg.CookieSecure {
 		t.Fatal("cookie secure should default true")

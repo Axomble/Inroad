@@ -23,7 +23,7 @@ const testSecret = "0123456789abcdef0123456789abcdef"
 // claim extraction, and URL-param binding.
 func authedRouter(h *Handler) http.Handler {
 	r := chi.NewRouter()
-	r.Use(auth.RequireAuth([]byte(testSecret)))
+	r.Use(auth.RequireAuth(auth.NewJWTVerifier([]byte(testSecret))))
 	h.Register(r)
 	r.Mount("/warmup", h.Routes())
 	return r

@@ -311,16 +311,17 @@ type SequenceStep struct {
 }
 
 type Session struct {
-	ID          uuid.UUID          `json:"id"`
-	UserID      uuid.UUID          `json:"user_id"`
-	WorkspaceID uuid.UUID          `json:"workspace_id"`
-	TokenHash   []byte             `json:"token_hash"`
-	FamilyID    uuid.UUID          `json:"family_id"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
-	UserAgent   *string            `json:"user_agent"`
-	Ip          *netip.Addr        `json:"ip"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID           uuid.UUID          `json:"id"`
+	UserID       uuid.UUID          `json:"user_id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	TokenHash    []byte             `json:"token_hash"`
+	FamilyID     uuid.UUID          `json:"family_id"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt    pgtype.Timestamptz `json:"revoked_at"`
+	UserAgent    *string            `json:"user_agent"`
+	Ip           *netip.Addr        `json:"ip"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	TokenVersion int32              `json:"token_version"`
 }
 
 type Suppression struct {

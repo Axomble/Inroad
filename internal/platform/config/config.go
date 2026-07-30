@@ -50,6 +50,14 @@ type Config struct {
 	CookieSecure    bool
 	CookieDomain    string
 
+	// SessionCacheTTL is how long the store-backed access-token verifier caches
+	// a session's auth-state (revocation/expiry/token_version) in-process before
+	// re-reading it from Postgres. A revoke performed by THIS process busts the
+	// entry immediately; an out-of-band change propagates within at most this
+	// TTL. Set <= 0 to disable the cache (every request hits the DB). Kept short
+	// because it bounds revocation-propagation latency across replicas.
+	SessionCacheTTL time.Duration
+
 	// WorkerConcurrency caps how many asynq tasks the worker processes
 	// simultaneously. Default 10; tune per SMTP throughput.
 	WorkerConcurrency int
@@ -161,8 +169,13 @@ func Load() (*Config, error) {
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 
-	cfg.AccessTokenTTL = getenvDuration("INROAD_ACCESS_TOKEN_TTL", 15*time.Minute)
+	// Short by default: the access token is re-validated against the session
+	// store every request, so a ~5-minute TTL plus per-request revocation check
+	// is the revocation guarantee (a revoked session is rejected within the
+	// session-cache TTL, not the token TTL).
+	cfg.AccessTokenTTL = getenvDuration("INROAD_ACCESS_TOKEN_TTL", 5*time.Minute)
 	cfg.RefreshTokenTTL = getenvDuration("INROAD_REFRESH_TOKEN_TTL", 720*time.Hour)
+	cfg.SessionCacheTTL = getenvDuration("INROAD_SESSION_CACHE_TTL", 5*time.Second)
 	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
 	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
