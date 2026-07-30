@@ -46,7 +46,8 @@ infrastructure than rent it.
 |---|---|
 | **Multi-step sequences** | Ordered steps with per-step delays, drag-to-reorder, and `{{first_name}}` / `{{company}}` merge fields. Structural edits are draft-only; copy edits stay live on a running campaign. |
 | **Three transports, one seam** | Gmail API, Microsoft Graph, and SMTP/IMAP behind a single `MultiSender`. The worker doesn't know or care which one it's using. |
-| **Warm-up ramp + daily caps** | Every mailbox ramps linearly from a small starting cap to its full daily cap over N days. The cap is enforced on the send path — over-cap enrollments defer and retry, and a permanently mis-set cap fails out instead of looping forever. |
+| **Mailbox warm-up pool** | Mailboxes you enable exchange real threaded mail with each other on a ramping daily volume — recipient-side, Inroad rescues the message from spam, marks it read, and sometimes replies in-thread. Per-mailbox health (`healthy` / `watch` / `at risk`) is recomputed from measured inbox-vs-spam placement, and a mailbox that goes bad is paused instead of pushed. |
+| **Ramp + daily caps on campaigns** | Every mailbox ramps linearly from a small starting cap to its full daily cap over N days. The cap is enforced on the send path — over-cap enrollments defer and retry, and a permanently mis-set cap fails out instead of looping forever. |
 | **Reply detection & classification** | IMAP / Gmail history / Graph delta polling matches replies to the original send and classifies them — positive, negative, neutral, auto-reply, out-of-office, unsubscribe — with zero AI dependency and no network calls. |
 | **Out-of-office trap fix** | A vacation auto-responder gets tagged but does *not* halt the sequence. An explicit opt-out inside an auto-reply still suppresses, because compliance wins. |
 | **Bounce handling** | DSN parsing on inbound mail; hard bounces mark the send and stop the enrollment before the next step fires. |
@@ -92,6 +93,15 @@ applied to the connection test *and* to every subsequent send, so a mailbox can 
 downgrade to cleartext auth.
 
 ![Connect an SMTP mailbox](docs/images/connect-mailbox.png)
+
+### Warm them up
+
+Enable warmup on two or more mailboxes and they start exchanging real threaded mail on a ramping
+daily volume. Health is measured, not assumed — inbox-vs-spam placement over the trailing week
+decides whether a mailbox reads as healthy, watch, or at risk, and a mailbox that turns bad gets
+paused rather than pushed harder. Orange is reserved for this one concept in the whole product.
+
+![Warmup pool with per-mailbox health](docs/images/warmup.png)
 
 ### Import contacts
 
@@ -274,14 +284,14 @@ integration tests; what isn't built is listed here rather than implied by a feat
 
 **Working today:** multi-workspace auth with refresh-token rotation and reuse detection · Gmail /
 M365 / SMTP mailbox connect · multi-step sequences with reorder · enrollment engine with ramp-aware
-daily caps · reply and bounce polling across all three transports · deterministic reply
-classification · suppression and one-click unsubscribe · open/click tracking.
+daily caps · the warmup pool end-to-end (ramping volume, threaded replies, rescue-from-spam,
+mark-read, measured placement health, per-IP worker routing) · reply and bounce polling across all
+three transports · deterministic reply classification · suppression and one-click unsubscribe ·
+open/click tracking.
 
-**On the roadmap:** a peer-to-peer warm-up pool (mailboxes seeding conversations with each other —
-today the `warmup` tick is a placeholder and the ramped *daily cap* is what's enforced) ·
-enforcement of the per-mailbox minimum send interval (stored and editable, not yet applied at send
-time) · a unified cross-mailbox inbox UI · cloud KMS as a second `KeyProvider` · rate limiting and an
-audit log on auth, connect, and reply-driven suppression · a key-rotation CLI.
+**On the roadmap:** enforcement of the per-mailbox minimum send interval (stored and editable, not
+yet applied at send time) · a unified cross-mailbox inbox UI · cloud KMS as a second `KeyProvider` ·
+rate limiting and an audit log on auth, connect, and reply-driven suppression · a key-rotation CLI.
 
 ---
 

@@ -215,6 +215,47 @@ or SSRF. (Not a full threat model; that's future work.)
     registry is global infrastructure state — it holds no tenant rows and is never
     returned on a tenant-facing API.
 
+## Warm-up engine
+25. **Warm-up mail is strictly isolated from campaign reply/bounce handling.** The
+    inbox poller detects a warm-up message (invariant 26) and records it BEFORE
+    campaign classification, then returns — a warm-up message never reaches
+    `MarkReplied`/`MarkBounced`/`MarkUnsubscribed`/`RecordReplyClass`, even when its
+    `In-Reply-To`/`References` match a real prior send. So warm-up traffic can never
+    stop, suppress, or bounce a campaign enrollment (`internal/worker/inbox/poll.go`,
+    proven by `TestPollInboxWarmupRecordedEngagedAndIsolated` — same message, opposite
+    outcome, gated only on token validity).
+26. **A message is treated as warm-up only after its HMAC token verifies.** Every
+    warm-up send carries an `X-Inroad-Warmup` header signed with a per-deployment
+    secret (`INROAD_WARMUP_SECRET`, ≥16 bytes, falling back to `JWTSecret`);
+    `warmup.Verify` is a constant-time HMAC check AND the signed payload's
+    `workspace_id` must equal the polled mailbox's workspace. An absent, unsigned,
+    forged, or cross-workspace header falls through to normal classification —
+    an external party without the secret cannot forge one, so cannot swallow a real
+    reply as "warm-up" or inject a cross-tenant receipt.
+27. **Every warm-up query is `workspace_id`-pinned, every insert self-enforces
+    tenancy, and delivery is claim-idempotent.** Partner selection stays in-workspace
+    (a mailbox never warms a foreign peer); `warmup_threads`/`warmup_sends`/
+    `warmup_receipts` inserts are `INSERT … SELECT … FROM mailboxes WHERE id=$ AND
+    workspace_id=$` so a mismatched pair writes zero rows (upholds invariant 4);
+    the warm-up send + reply reuse the same claim-before-send lease as campaign sends
+    (deterministic id → a retry recovers-forward, never double-sends), and a receipt
+    is idempotent on `(warmup_send_id, recipient_mailbox)`.
+28. **Recipient-side engagement acts only on the recipient's own mailbox, through the
+    same guarded dials, and never builds raw IMAP commands from message content.**
+    The rescue-from-spam / mark-read / reply transport is resolved by a
+    `workspace_id`-pinned lookup for that receipt's recipient — an attacker cannot
+    steer it to another mailbox or tenant. IMAP dials go through the same `vetAddr`
+    SSRF guard + source-IP bind as the poller (Gmail/Graph use fixed hosts). The
+    attacker-influenceable `Message-ID` and source-folder are passed as go-imap
+    quoted/literal protocol arguments (`SEARCH HEADER`, `SELECT`), never
+    string-concatenated — no IMAP command injection (`TestSearchByMessageIDInjectionSafe`).
+29. **Inbox-vs-spam placement is attributed to the SENDER, not the observing
+    recipient.** A warm-up message landing in spam degrades the *sender's* health
+    (its outbound mail is not landing), resolved via `warmup_sends.from_mailbox`; the
+    recipient only observes it. Attributing spam to the recipient would invert the
+    health signal — punishing the innocent inbox owner and never flagging the bad
+    sender.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
@@ -230,6 +271,13 @@ or SSRF. (Not a full threat model; that's future work.)
   the contact or stops its enrollment. This is bounded (no cross-tenant effect, no
   data read) but unthrottled and unlogged today; a rate limit + audit trail on
   reply-driven state changes is the intended hardening.
+- Rate limiting + an audit log on warm-up engagement writes. Like the reply path
+  (above), the receipt/engage enqueue is workspace-bounded but spoofable WITHIN a
+  workspace by anyone holding the `INROAD_WARMUP_SECRET`. Bounded and low-value, but
+  it should be included when the reply-driven abuse-controls work lands.
+- Graph/M365 recipient-side engagement (rescue/mark-read). Warm-up SENDS work on all
+  three transports; the `mail.Engager` seam implements IMAP + Gmail, and M365 returns
+  `ErrEngageUnsupported` (a logged skip) until the Graph modify path is added.
 
 ## Checklist for a security-sensitive change
 - [ ] New stored credential? → sealed via a workspace Sealer from
