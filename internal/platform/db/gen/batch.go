@@ -134,3 +134,66 @@ func (b *SetEnrollmentDueBatchBatchResults) Close() error {
 	b.closed = true
 	return b.br.Close()
 }
+
+const upsertCampaignSender = `-- name: UpsertCampaignSender :batchexec
+INSERT INTO campaign_senders (workspace_id, campaign_id, mailbox_id, weight, enabled)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (campaign_id, mailbox_id)
+DO UPDATE SET weight = EXCLUDED.weight, enabled = EXCLUDED.enabled
+`
+
+type UpsertCampaignSenderBatchResults struct {
+	br     pgx.BatchResults
+	tot    int
+	closed bool
+}
+
+type UpsertCampaignSenderParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	Weight      int32     `json:"weight"`
+	Enabled     bool      `json:"enabled"`
+}
+
+// One pool member per call, pipelined as a single batch. ON CONFLICT updates only
+// the operator-owned columns, so assigned_count/last_assigned_at SURVIVE a pool
+// edit for a mailbox that stays in it — otherwise every weight tweak would reset
+// the rotation. The composite tenant FK rejects a mailbox from another workspace
+// outright, behind the service's 422.
+func (q *Queries) UpsertCampaignSender(ctx context.Context, arg []UpsertCampaignSenderParams) *UpsertCampaignSenderBatchResults {
+	batch := &pgx.Batch{}
+	for _, a := range arg {
+		vals := []interface{}{
+			a.WorkspaceID,
+			a.CampaignID,
+			a.MailboxID,
+			a.Weight,
+			a.Enabled,
+		}
+		batch.Queue(upsertCampaignSender, vals...)
+	}
+	br := q.db.SendBatch(ctx, batch)
+	return &UpsertCampaignSenderBatchResults{br, len(arg), false}
+}
+
+func (b *UpsertCampaignSenderBatchResults) Exec(f func(int, error)) {
+	defer b.br.Close()
+	for t := 0; t < b.tot; t++ {
+		if b.closed {
+			if f != nil {
+				f(t, ErrBatchAlreadyClosed)
+			}
+			continue
+		}
+		_, err := b.br.Exec()
+		if f != nil {
+			f(t, err)
+		}
+	}
+}
+
+func (b *UpsertCampaignSenderBatchResults) Close() error {
+	b.closed = true
+	return b.br.Close()
+}

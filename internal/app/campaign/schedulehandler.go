@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -102,24 +103,14 @@ func schedulePreview(s Schedule) []string {
 
 // getSchedule handles GET /campaigns/{id}/schedule.
 func (h *Handler) getSchedule(w http.ResponseWriter, r *http.Request) {
-	ws, ok := auth.WorkspaceID(w, r)
-	if !ok {
-		return
-	}
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "bad id")
-		return
-	}
-	sched, err := h.svc.GetSchedule(r.Context(), ws, id)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, "not found")
-	case err != nil:
-		httpx.Error(w, http.StatusInternalServerError, "could not load schedule")
-	default:
-		httpx.JSON(w, http.StatusOK, newScheduleResponse(sched))
-	}
+	serveCampaignChild(w, r, "could not load schedule",
+		func(ctx context.Context, ws, id uuid.UUID) (scheduleResponse, error) {
+			sched, err := h.svc.GetSchedule(ctx, ws, id)
+			if err != nil {
+				return scheduleResponse{}, err
+			}
+			return newScheduleResponse(sched), nil
+		})
 }
 
 // putSchedule handles PUT /campaigns/{id}/schedule — a full replace of the

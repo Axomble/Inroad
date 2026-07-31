@@ -58,6 +58,16 @@ type Store interface {
 	// ReplaceSchedule swaps the campaign's timezone and its whole set of windows
 	// atomically, so the campaign is never observed window-less.
 	ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, sched Schedule) error
+	// ListSenders returns the campaign's sender-pool members (including disabled
+	// ones — the panel edits them), ordered by mailbox email.
+	ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]Sender, error)
+	// FallbackSender projects campaigns.mailbox_id as a one-member pool, for a
+	// campaign that has no campaign_senders rows and therefore sends from it.
+	FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) (Sender, error)
+	// ReplaceSenders swaps the campaign's rotation mode and its whole pool
+	// atomically, PRESERVING assigned_count/last_assigned_at for mailboxes that
+	// stay in the pool so an edit doesn't reset the rotation.
+	ReplaceSenders(ctx context.Context, ws, campaignID uuid.UUID, mode string, senders []SenderInput) error
 	// ListSteps returns the campaign's ordered steps (for the detail view).
 	ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error)
 	// EnrollmentCounts returns enrollment counts grouped by status.
@@ -254,6 +264,96 @@ func insertWindows(ctx context.Context, q *gen.Queries, ws, campaignID uuid.UUID
 		firstErr = cerr
 	}
 	return firstErr
+}
+
+func (s *PgStore) ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]Sender, error) {
+	rows, err := s.q.ListCampaignSenders(ctx, gen.ListCampaignSendersParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Sender, len(rows))
+	for i, r := range rows {
+		out[i] = Sender{
+			MailboxID: r.MailboxID, Email: r.Email, Provider: r.Provider, Status: r.Status,
+			Weight: int(r.Weight), Enabled: r.Enabled,
+			AssignedCount: r.AssignedCount, LastAssignedAt: nullableTime(r.LastAssignedAt),
+		}
+	}
+	return out, nil
+}
+
+// FallbackSender reports campaigns.mailbox_id in the pool's shape. Weight 1 and
+// enabled true describe how it actually behaves — it is the campaign's only
+// sender — and the rotation state is genuinely absent, since no row tracks it.
+func (s *PgStore) FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) (Sender, error) {
+	r, err := s.q.GetCampaignFallbackSender(ctx, gen.GetCampaignFallbackSenderParams{ID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return Sender{}, err
+	}
+	return Sender{
+		MailboxID: r.MailboxID, Email: r.Email, Provider: r.Provider, Status: r.Status,
+		Weight: defaultSenderWeight, Enabled: true,
+	}, nil
+}
+
+// ReplaceSenders upserts every requested member then deletes the ones left out,
+// in one transaction and in that order: the reverse would leave a window where the
+// pool is empty, which the read and send paths both interpret as "never
+// configured" and answer with campaigns.mailbox_id. The upsert touches only
+// weight/enabled, so assigned_count/last_assigned_at survive for a retained
+// mailbox.
+func (s *PgStore) ReplaceSenders(ctx context.Context, ws, campaignID uuid.UUID, mode string, senders []SenderInput) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.SetCampaignRotationMode(ctx, gen.SetCampaignRotationModeParams{
+		ID: campaignID, WorkspaceID: ws, RotationMode: mode,
+	}); err != nil {
+		return err
+	}
+	params := make([]gen.UpsertCampaignSenderParams, len(senders))
+	keep := make([]uuid.UUID, len(senders))
+	for i, sender := range senders {
+		params[i] = gen.UpsertCampaignSenderParams{
+			WorkspaceID: ws, CampaignID: campaignID, MailboxID: sender.MailboxID,
+			Weight:  int32(sender.Weight), //nolint:gosec // 1..100, validated by SetSenders and CHECK-constrained
+			Enabled: sender.Enabled,
+		}
+		keep[i] = sender.MailboxID
+	}
+	var firstErr error
+	res := qtx.UpsertCampaignSender(ctx, params)
+	res.Exec(func(_ int, err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	})
+	if cerr := res.Close(); cerr != nil && firstErr == nil {
+		firstErr = cerr
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	if err := qtx.DeleteCampaignSendersExcept(ctx, gen.DeleteCampaignSendersExceptParams{
+		CampaignID: campaignID, WorkspaceID: ws, MailboxIds: keep,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// nullableTime turns a NULL-able timestamptz column into an optional Go time, so
+// the response DTO can carry JSON null rather than a zero timestamp.
+func nullableTime(ts pgtype.Timestamptz) *time.Time {
+	if !ts.Valid {
+		return nil
+	}
+	at := ts.Time
+	return &at
 }
 
 func (s *PgStore) ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error) {
