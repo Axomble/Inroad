@@ -1318,12 +1318,16 @@ export type CampaignSchedule = {
   /** IANA zone the windows are interpreted in */
   timezone: string;
   days: SendWindowDay[];
+  /** Campaign-wide cap on sends per UTC day, across every mailbox in the pool. null means no campaign limit. It can only lower throughput: a mailbox is never raised above its own ramped, health-scaled daily cap. */
+  daily_limit?: number | null;
   /** Human-readable preview of the next few send instants this schedule produces, in its own timezone. */
   preview?: string[];
 };
 export type CampaignScheduleRequest = {
   timezone: string;
   days: SendWindowDay[];
+  /** Campaign-wide sends per UTC day; null or omitted clears the limit. */
+  daily_limit?: number | null;
 };
 export type RotationMode = "round_robin" | "least_recently_used" | "weighted";
 export type CampaignSender = {
@@ -1339,6 +1343,14 @@ export type CampaignSender = {
   /** Contacts assigned to this mailbox so far */
   assigned_count: number;
   last_assigned_at?: string | null;
+  /** Read-only warmup health; null when the mailbox is not warming up. */
+  health_state?: ("healthy" | "watch" | "throttled" | "paused" | null) | null;
+  /** Read-only. False when this mailbox is not taking cold volume right now — paused by warmup, held out of rotation, or an inactive mailbox. */
+  sending?: boolean;
+  /** Read-only effective cap for today, after ramp and after warmup-health scaling. */
+  cap_today?: number;
+  /** Read-only count of sends from this mailbox today (UTC day). */
+  sent_today?: number;
 };
 export type CampaignSenderPool = {
   rotation_mode: RotationMode;
