@@ -29,6 +29,49 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestWebauthnDefaults(t *testing.T) {
+	cases := []struct {
+		name       string
+		publicURL  string
+		wantID     string
+		wantOrigin string
+	}{
+		{"host with port", "http://localhost:8080", "localhost", "http://localhost:8080"},
+		{"https no port", "https://app.example.com", "app.example.com", "https://app.example.com"},
+		{"https with port", "https://app.example.com:9443", "app.example.com", "https://app.example.com:9443"},
+		{"empty stays empty", "", "", ""},
+		{"no scheme stays empty", "app.example.com", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, origin := webauthnDefaults(tc.publicURL)
+			if id != tc.wantID || origin != tc.wantOrigin {
+				t.Fatalf("webauthnDefaults(%q) = (%q, %q), want (%q, %q)",
+					tc.publicURL, id, origin, tc.wantID, tc.wantOrigin)
+			}
+		})
+	}
+}
+
+func TestLoadDerivesRPFromPublicURL(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	t.Setenv("INROAD_PUBLIC_URL", "https://app.example.com")
+	os.Unsetenv("INROAD_RP_ID")
+	os.Unsetenv("INROAD_RP_ORIGIN")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.RPID != "app.example.com" {
+		t.Errorf("RPID = %q, want app.example.com", cfg.RPID)
+	}
+	if cfg.RPOrigin != "https://app.example.com" {
+		t.Errorf("RPOrigin = %q, want https://app.example.com", cfg.RPOrigin)
+	}
+}
+
 func TestLoadRejectsMissingSecret(t *testing.T) {
 	t.Setenv("INROAD_JWT_SECRET", "")
 	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")

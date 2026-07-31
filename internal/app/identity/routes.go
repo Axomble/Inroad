@@ -13,18 +13,22 @@ import (
 // introspection/management and workspace switching. verifier authenticates the
 // access token for the protected group.
 //
-// twofa (may be nil) is the twofa domain's router, mounted at "/2fa" so its
-// paths land under /api/v1/auth/2fa. It is mounted here rather than at the top
-// router because chi cannot mount a deeper prefix alongside the /api/v1/auth
-// mount that already owns this subtree. Passed as a bare http.Handler so identity
-// never imports the twofa package (the app-packages-don't-import-each-other
-// invariant); the composition root supplies the concrete router.
-func (h *Handler) Routes(verifier auth.Verifier, twofa http.Handler) http.Handler {
+// twofa and passkeys (either may be nil) are the twofa and passkey domain routers,
+// mounted at "/2fa" and "/passkeys" so their paths land under /api/v1/auth/2fa and
+// /api/v1/auth/passkeys. They are mounted here rather than at the top router because
+// chi cannot mount a deeper prefix alongside the /api/v1/auth mount that already
+// owns this subtree. Passed as bare http.Handlers so identity never imports those
+// packages (the app-packages-don't-import-each-other invariant); the composition
+// root supplies the concrete routers.
+func (h *Handler) Routes(verifier auth.Verifier, twofa, passkeys http.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Post("/register", h.register)
 	r.Post("/login", h.login)
 	if twofa != nil {
 		r.Mount("/2fa", twofa)
+	}
+	if passkeys != nil {
+		r.Mount("/passkeys", passkeys)
 	}
 	r.With(auth.RequireCSRF).Post("/refresh", h.refresh)
 	r.With(auth.RequireCSRF).Post("/logout", h.logout)

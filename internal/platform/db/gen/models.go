@@ -456,6 +456,33 @@ type WarmupThread struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
+type WebauthnChallenge struct {
+	ID          uuid.UUID          `json:"id"`
+	SessionKey  []byte             `json:"session_key"`
+	UserID      pgtype.UUID        `json:"user_id"`
+	SessionData []byte             `json:"session_data"`
+	Kind        string             `json:"kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WebauthnCredential struct {
+	ID              uuid.UUID          `json:"id"`
+	UserID          uuid.UUID          `json:"user_id"`
+	CredentialID    []byte             `json:"credential_id"`
+	PublicKey       []byte             `json:"public_key"`
+	SignCount       int64              `json:"sign_count"`
+	Aaguid          []byte             `json:"aaguid"`
+	Transports      string             `json:"transports"`
+	AttestationType string             `json:"attestation_type"`
+	BackupEligible  bool               `json:"backup_eligible"`
+	BackupState     bool               `json:"backup_state"`
+	Label           string             `json:"label"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
+}
+
 type Worker struct {
 	WorkerID   string             `json:"worker_id"`
 	EgressIp   string             `json:"egress_ip"`

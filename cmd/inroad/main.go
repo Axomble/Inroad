@@ -20,6 +20,7 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
+	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/app/tracking"
@@ -111,6 +112,19 @@ func run() error {
 	// completer = identHandler (issues the session on a passed 2FA verify);
 	// revoker = identSvc + buster = sessionVerifier (disable revokes other sessions).
 	twofaHandler := twofa.NewHandler(twofaSvc, identHandler, identSvc, sessionVerifier)
+	// Passkeys / WebAuthn. The Relying Party is derived from INROAD_RP_ID /
+	// INROAD_RP_ORIGIN (defaulting from the public URL). If the RP cannot be built
+	// (unset/invalid), the service is constructed with a nil library instance so the
+	// endpoints fail cleanly (501) — the feature is simply off rather than
+	// mis-validating. Like twofa, the passkey domain reaches identity only through
+	// the narrow CompleteLogin seam (a user-verified passkey login satisfies MFA and
+	// skips the TOTP gate), never an import.
+	web, err := passkey.NewWebAuthn(cfg.RPID, cfg.RPOrigin)
+	if err != nil {
+		logger.Warn("passkeys disabled: relying party not configured", "err", err)
+		web = nil
+	}
+	passkeyHandler := passkey.NewHandler(passkey.NewService(web, passkey.NewPgStore(pool)), identHandler)
 	mailboxStore := mailbox.NewPgStore(queries)
 	googleOAuth := mail.GoogleOAuth{
 		ClientID:     cfg.GoogleClientID,
@@ -168,7 +182,7 @@ func run() error {
 	//               route mounted here is authenticated by default, so a new
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
-		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier, twofaHandler.Routes(sessionVerifier))},
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier, twofaHandler.Routes(sessionVerifier), passkeyHandler.Routes(sessionVerifier))},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.

@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -44,6 +45,15 @@ type Config struct {
 	// PublicURL is the externally-reachable base URL used to build links
 	// (e.g. unsubscribe) embedded in outbound email.
 	PublicURL string
+
+	// WebAuthn Relying Party. RPID is the registrable domain (host only, no scheme
+	// or port) that passkey ceremonies are bound to; RPOrigin is the fully-qualified
+	// origin (scheme://host[:port]) the browser must present. Both default from
+	// INROAD_PUBLIC_URL's host/origin. When neither can be derived nor is set, the
+	// passkey endpoints fail cleanly (the feature is effectively off) rather than
+	// mis-validating a ceremony against a wrong domain.
+	RPID     string
+	RPOrigin string
 
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
@@ -169,6 +179,13 @@ func Load() (*Config, error) {
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 
+	// Derive the WebAuthn Relying Party from the public URL by default: RPID is the
+	// bare host (no port), RPOrigin is the scheme+host+port. An unparseable public
+	// URL leaves both empty, disabling passkeys rather than binding to a wrong RP.
+	defaultRPID, defaultRPOrigin := webauthnDefaults(cfg.PublicURL)
+	cfg.RPID = getenv("INROAD_RP_ID", defaultRPID)
+	cfg.RPOrigin = getenv("INROAD_RP_ORIGIN", defaultRPOrigin)
+
 	// Short by default: the access token is re-validated against the session
 	// store every request, so a ~5-minute TTL plus per-request revocation check
 	// is the revocation guarantee (a revoked session is rejected within the
@@ -221,6 +238,18 @@ func Load() (*Config, error) {
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
 
 	return cfg, nil
+}
+
+// webauthnDefaults derives the default RP id (bare host) and RP origin
+// (scheme://host[:port]) from the public base URL. An empty or unparseable URL, or
+// one without a host, yields two empty strings so passkeys stay disabled instead of
+// binding a ceremony to a wrong or empty domain.
+func webauthnDefaults(publicURL string) (rpID, rpOrigin string) {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", ""
+	}
+	return u.Hostname(), u.Scheme + "://" + u.Host
 }
 
 // defaultWorkerQueues is the queue set a worker consumes when INROAD_WORKER_QUEUES

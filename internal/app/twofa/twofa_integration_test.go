@@ -95,7 +95,7 @@ func testServer(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Qu
 	twofaHandler := NewHandler(twofaSvc, identHandler, identSvc, verifier)
 
 	r := chi.NewRouter()
-	r.Mount("/api/v1/auth", identHandler.Routes(verifier, twofaHandler.Routes(verifier)))
+	r.Mount("/api/v1/auth", identHandler.Routes(verifier, twofaHandler.Routes(verifier), nil))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 	return srv, gen.New(pool), twofaSvc

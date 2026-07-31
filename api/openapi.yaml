@@ -304,6 +304,115 @@ paths:
               schema: { $ref: '#/components/schemas/SessionResponse' }
         '400': { description: Validation error }
         '401': { description: Invalid or expired challenge / code }
+  /auth/passkeys:
+    get:
+      operationId: authPasskeyList
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: List the caller's registered passkeys. No key material is returned.
+      responses:
+        '200':
+          description: The caller's passkeys
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasskeyListResponse' }
+        '401': { description: Unauthorized }
+  /auth/passkeys/{id}:
+    delete:
+      operationId: authPasskeyDelete
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Delete one of the caller's passkeys (own-only). A foreign or unknown id
+        returns 404 so a caller cannot probe another user's credentials.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Passkey deleted }
+        '400': { description: Invalid id }
+        '401': { description: Unauthorized }
+        '404': { description: Passkey not found }
+  /auth/passkeys/register/begin:
+    post:
+      operationId: authPasskeyRegisterBegin
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Begin adding a passkey to the caller's account. Returns an opaque
+        session_id that binds the ceremony server-side plus the WebAuthn credential
+        creation options for navigator.credentials.create. Requires a resident key
+        and user verification.
+      responses:
+        '200':
+          description: Registration options + ceremony session id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasskeyBeginResponse' }
+        '401': { description: Unauthorized }
+        '501': { description: Passkeys are not configured }
+  /auth/passkeys/register/finish:
+    post:
+      operationId: authPasskeyRegisterFinish
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Complete registration: submit the attestation from
+        navigator.credentials.create along with the ceremony session_id. The
+        server-stored challenge is consumed (single-use), the attestation verified,
+        and the credential stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasskeyFinishRequest' }
+      responses:
+        '204': { description: Passkey registered }
+        '400': { description: Validation error, invalid/expired challenge, or attestation failed }
+        '401': { description: Unauthorized }
+        '409': { description: This authenticator is already registered }
+        '501': { description: Passkeys are not configured }
+  /auth/passkeys/login/begin:
+    post:
+      operationId: authPasskeyLoginBegin
+      tags: [auth]
+      security: []
+      description: >-
+        Begin a discoverable (usernameless) passkey login. Public — no session
+        exists yet. Returns an opaque session_id plus the WebAuthn credential
+        request options for navigator.credentials.get; the allowed-credentials list
+        is empty so the authenticator offers its resident keys.
+      responses:
+        '200':
+          description: Assertion options + ceremony session id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasskeyBeginResponse' }
+        '501': { description: Passkeys are not configured }
+  /auth/passkeys/login/finish:
+    post:
+      operationId: authPasskeyLoginFinish
+      tags: [auth]
+      security: []
+      description: >-
+        Complete a discoverable passkey login: submit the assertion from
+        navigator.credentials.get with the ceremony session_id. The user is
+        resolved ONLY from the authenticated credential, the signature counter is
+        verified to have increased (clone detection), and on success a session is
+        minted exactly like a password login — but the TOTP gate is skipped because
+        a user-verified passkey is strong auth. Any failure is a flat 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasskeyFinishRequest' }
+      responses:
+        '200':
+          description: Session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '400': { description: Validation error }
+        '401': { description: Authentication failed }
+        '501': { description: Passkeys are not configured }
   /workspaces/{id}/invites:
     post:
       operationId: createWorkspaceInvite
@@ -872,6 +981,58 @@ components:
       properties:
         challenge: { type: string, description: The challenge token returned by /auth/login. }
         code: { type: string, description: A TOTP code or a recovery code. }
+    PasskeyBeginResponse:
+      type: object
+      required: [session_id, publicKey]
+      properties:
+        session_id:
+          type: string
+          description: >-
+            Opaque single-use ceremony handle. Echo it back in the matching finish
+            call's session_id. The server holds the real challenge; this is never
+            the challenge itself.
+        publicKey:
+          type: object
+          additionalProperties: true
+          description: >-
+            The WebAuthn options object (PublicKeyCredentialCreationOptions for
+            register, PublicKeyCredentialRequestOptions for login) as defined by the
+            WebAuthn spec — pass straight to navigator.credentials.create/get.
+    PasskeyFinishRequest:
+      type: object
+      required: [session_id, credential]
+      properties:
+        session_id:
+          type: string
+          description: The opaque session_id from the matching begin call.
+        credential:
+          type: object
+          additionalProperties: true
+          description: >-
+            The PublicKeyCredential JSON returned by navigator.credentials.create
+            (attestation) or navigator.credentials.get (assertion), serialized.
+        label:
+          type: string
+          description: Optional friendly name for the passkey (registration only).
+    PasskeyInfo:
+      type: object
+      required: [id, label, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        transports:
+          type: array
+          items: { type: string }
+          description: Advisory transport hints (e.g. internal, hybrid).
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+    PasskeyListResponse:
+      type: object
+      required: [passkeys]
+      properties:
+        passkeys:
+          type: array
+          items: { $ref: '#/components/schemas/PasskeyInfo' }
     VerifyEmailRequest:
       type: object
       required: [token]
