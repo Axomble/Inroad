@@ -108,6 +108,10 @@ type Config struct {
 	// AppBaseURL is the frontend origin used to build links (verify/reset/
 	// invite) embedded in transactional email.
 	AppBaseURL string
+	// WebDir is the optional built SPA directory. When it exists, the API serves
+	// static assets and an index fallback; an empty or missing directory keeps
+	// local API-only development unchanged.
+	WebDir string
 
 	// Google OAuth (mailbox connect via Gmail). Empty client id/secret disables
 	// Gmail OAuth: the start endpoint returns 501 and gmail jobs fail cleanly.
@@ -244,6 +248,7 @@ func Load() (*Config, error) {
 	cfg.SystemSMTPPassword = getenv("INROAD_SYSTEM_SMTP_PASSWORD", "")
 	cfg.SystemEmailFrom = getenv("INROAD_SYSTEM_EMAIL_FROM", "")
 	cfg.AppBaseURL = getenv("INROAD_APP_BASE_URL", "http://localhost:5173")
+	cfg.WebDir = getenv("INROAD_WEB_DIR", "")
 	cfg.GoogleClientID = getenv("INROAD_GOOGLE_CLIENT_ID", "")
 	cfg.GoogleClientSecret = getenv("INROAD_GOOGLE_CLIENT_SECRET", "")
 	cfg.GoogleRedirectURL = getenv("INROAD_GOOGLE_REDIRECT_URL", cfg.PublicURL+"/oauth/google/callback")

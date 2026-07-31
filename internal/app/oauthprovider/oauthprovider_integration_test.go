@@ -48,6 +48,9 @@ func itSetup(t *testing.T) (*Service, *PgStore, func() (uuid.UUID, uuid.UUID)) {
 		if err := pool.QueryRow(ctx, "INSERT INTO users (email, password_hash) VALUES ($1, 'x') RETURNING id", email).Scan(&uid); err != nil {
 			t.Fatalf("insert user: %v", err)
 		}
+		if _, err := pool.Exec(ctx, "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", ws, uid); err != nil {
+			t.Fatalf("insert workspace membership: %v", err)
+		}
 		return ws, uid
 	}
 	return svc, store, mint
@@ -155,6 +158,9 @@ func TestPriorConsentIsWorkspaceScoped(t *testing.T) {
 	svc, store, mint := itSetup(t)
 	wsA, uid := mint()
 	wsB, _ := mint() // a second workspace the SAME user is active in
+	if _, err := store.pool.Exec(ctx, "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')", wsB, uid); err != nil {
+		t.Fatalf("insert user's workspace-B membership: %v", err)
+	}
 
 	reg, err := svc.RegisterClient(ctx, RegisterInput{
 		ClientName: "WS Scoped", RedirectURIs: []string{testRedirectURI},

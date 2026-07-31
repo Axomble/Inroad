@@ -208,7 +208,7 @@ type CreateOauthClientParams struct {
 	ClientType              string      `json:"client_type"`
 	TokenEndpointAuthMethod string      `json:"token_endpoint_auth_method"`
 	CreatedByUserID         pgtype.UUID `json:"created_by_user_id"`
-	WorkspaceID             pgtype.UUID `json:"workspace_id"`
+	WorkspaceID             uuid.UUID   `json:"workspace_id"`
 }
 
 // Register a client (RFC 7591). client_secret_hash is NULL for a public PKCE client.
@@ -457,14 +457,14 @@ type ListOauthClientsByWorkspaceRow struct {
 	ClientType              string             `json:"client_type"`
 	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 	CreatedByUserID         pgtype.UUID        `json:"created_by_user_id"`
-	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	WorkspaceID             uuid.UUID          `json:"workspace_id"`
 	CreatedAt               pgtype.Timestamptz `json:"created_at"`
 	RevokedAt               pgtype.Timestamptz `json:"revoked_at"`
 }
 
 // Admin management list. Deliberately omits client_secret_hash so no digest can
 // leak through a response DTO (secrets absent by construction).
-func (q *Queries) ListOauthClientsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) ([]ListOauthClientsByWorkspaceRow, error) {
+func (q *Queries) ListOauthClientsByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]ListOauthClientsByWorkspaceRow, error) {
 	rows, err := q.db.Query(ctx, listOauthClientsByWorkspace, workspaceID)
 	if err != nil {
 		return nil, err
@@ -542,8 +542,8 @@ WHERE client_id = $1 AND workspace_id = $2
 `
 
 type RevokeOauthClientParams struct {
-	ClientID    string      `json:"client_id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ClientID    string    `json:"client_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
 // Idempotent, tenant-pinned revoke: COALESCE keeps an already-set revoked_at, while

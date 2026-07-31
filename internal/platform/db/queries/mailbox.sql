@@ -31,6 +31,17 @@ SET status = $3, last_error = $4
 WHERE id = $1 AND workspace_id = $2
 RETURNING *;
 
+-- name: ReserveMailboxSendSlot :one
+-- Atomically enforces per-mailbox spacing across concurrent workers. Updating
+-- last_send_at is the reservation: only one worker can satisfy the predicate
+-- for a mailbox during the configured interval.
+UPDATE mailboxes
+SET last_send_at = now()
+WHERE id = $1 AND workspace_id = $2
+  AND (min_interval_seconds <= 0 OR last_send_at IS NULL
+       OR last_send_at <= now() - make_interval(secs => min_interval_seconds))
+RETURNING last_send_at;
+
 -- name: DeleteMailbox :execrows
 DELETE FROM mailboxes WHERE id = $1 AND workspace_id = $2;
 

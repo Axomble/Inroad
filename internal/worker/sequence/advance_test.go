@@ -28,11 +28,12 @@ type stubCore struct {
 	// reaching 'sent' after MarkStepDelivered commits: once set, every later claim
 	// returns ClaimAlreadySent — the recover-forward path. Absent both, a claim
 	// loses (ClaimSkip), modelling a row another worker owns.
-	claimOK    bool
-	claimErr   error
-	claimCalls int
-	sent       bool
-	delivered  *string // message id passed to MarkStepDelivered
+	claimOK       bool
+	claimDeferred bool
+	claimErr      error
+	claimCalls    int
+	sent          bool
+	delivered     *string // message id passed to MarkStepDelivered
 	// advanceFail makes the first N AdvanceStepCursor calls return an error, to
 	// exercise the cursor-advance-failure → recover-forward window.
 	advanceFail  int
@@ -54,6 +55,9 @@ func (s *stubCore) ClaimStepSend(context.Context, coreapi.StepSendJob) (coreapi.
 	}
 	if s.sent {
 		return coreapi.ClaimAlreadySent, nil
+	}
+	if s.claimDeferred {
+		return coreapi.ClaimDeferred, nil
 	}
 	if s.claimOK && s.claimCalls == 1 {
 		return coreapi.ClaimWon, nil
@@ -179,6 +183,25 @@ func TestAdvanceOverCapReEnqueues(t *testing.T) {
 	}
 	if core.finalized != nil {
 		t.Fatal("over-cap must not finalize/advance the cursor")
+	}
+}
+
+func TestAdvanceMailboxSpacingReEnqueuesWithoutSending(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.StepSendJob{
+			EffectiveDailyCap: 100, MinIntervalSeconds: 90,
+		},
+		claimDeferred: true,
+	}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if snd.called() || core.advanceCalls != 0 {
+		t.Fatal("spacing-deferred step must not send or advance")
+	}
+	if !enq.inCalled || enq.in != 90*time.Second {
+		t.Fatalf("expected retry after mailbox interval, got called=%v in=%v", enq.inCalled, enq.in)
 	}
 }
 

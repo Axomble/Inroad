@@ -62,6 +62,10 @@ func (f *fakeStore) CreateClient(_ context.Context, p CreateClientParams) (gen.O
 		f.createClientErr = nil // one-shot: the retry then succeeds
 		return gen.OauthClient{}, err
 	}
+	workspaceID := uuid.Nil
+	if p.WorkspaceID != nil {
+		workspaceID = *p.WorkspaceID
+	}
 	c := gen.OauthClient{
 		ID:                      uuid.New(),
 		ClientID:                p.ClientID,
@@ -74,7 +78,7 @@ func (f *fakeStore) CreateClient(_ context.Context, p CreateClientParams) (gen.O
 		ClientType:              p.ClientType,
 		TokenEndpointAuthMethod: p.TokenEndpointAuthMethod,
 		CreatedByUserID:         pgUUIDPtr(p.CreatedBy),
-		WorkspaceID:             pgUUIDPtr(p.WorkspaceID),
+		WorkspaceID:             workspaceID,
 		CreatedAt:               pgTime(f.now()),
 	}
 	f.clients[p.ClientID] = c
@@ -92,7 +96,7 @@ func (f *fakeStore) GetClient(_ context.Context, clientID string) (gen.OauthClie
 func (f *fakeStore) ListClientsByWorkspace(_ context.Context, ws uuid.UUID) ([]gen.ListOauthClientsByWorkspaceRow, error) {
 	var out []gen.ListOauthClientsByWorkspaceRow
 	for _, c := range f.clients {
-		if c.WorkspaceID.Valid && uuid.UUID(c.WorkspaceID.Bytes) == ws {
+		if c.WorkspaceID == ws {
 			out = append(out, gen.ListOauthClientsByWorkspaceRow{
 				ID: c.ID, ClientID: c.ClientID, ClientName: c.ClientName,
 				RedirectUris: c.RedirectUris, GrantTypes: c.GrantTypes,
@@ -108,7 +112,7 @@ func (f *fakeStore) ListClientsByWorkspace(_ context.Context, ws uuid.UUID) ([]g
 
 func (f *fakeStore) RevokeClient(_ context.Context, ws uuid.UUID, clientID string) (int64, error) {
 	c, ok := f.clients[clientID]
-	if !ok || !c.WorkspaceID.Valid || uuid.UUID(c.WorkspaceID.Bytes) != ws {
+	if !ok || c.WorkspaceID != ws {
 		return 0, nil
 	}
 	if !c.RevokedAt.Valid {

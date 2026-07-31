@@ -314,6 +314,21 @@ func run() error {
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
 		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
 	})
+	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(ctx); err != nil {
+			httpx.Error(w, http.StatusServiceUnavailable, "database unavailable")
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
+	if spa, ok := httpx.SPA(cfg.WebDir); ok {
+		router.NotFound(spa.ServeHTTP)
+		logger.Info("serving web app", "dir", cfg.WebDir)
+	} else if cfg.WebDir != "" {
+		logger.Warn("web app directory unavailable; API-only mode", "dir", cfg.WebDir)
+	}
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
 	logger.Info("api listening", "addr", cfg.HTTPAddr)

@@ -1,0 +1,148 @@
+-- This migration strengthens existing invariants and intentionally has a
+-- conservative rollback. Remove the added objects while preserving user data.
+ALTER TABLE mailbox_worker_assignments DROP CONSTRAINT IF EXISTS mailbox_worker_assignments_worker_fkey;
+
+DROP INDEX IF EXISTS idx_warmup_daily_stats_workspace_day;
+DROP INDEX IF EXISTS idx_warmup_receipts_workspace;
+DROP INDEX IF EXISTS idx_warmup_sends_to;
+DROP INDEX IF EXISTS idx_warmup_sends_from;
+DROP INDEX IF EXISTS idx_warmup_sends_thread;
+DROP INDEX IF EXISTS idx_warmup_sends_workspace;
+DROP INDEX IF EXISTS idx_warmup_threads_partner;
+DROP INDEX IF EXISTS idx_warmup_threads_sender;
+DROP INDEX IF EXISTS idx_warmup_threads_partner_pair_activity;
+DROP INDEX IF EXISTS idx_warmup_threads_sender_pair_activity;
+DROP INDEX IF EXISTS idx_warmup_participants_workspace_created;
+CREATE INDEX warmup_participants_ws ON warmup_participants(workspace_id) WHERE enabled;
+CREATE INDEX warmup_threads_partner ON warmup_threads(workspace_id, partner_mailbox, last_activity_at);
+
+DROP INDEX IF EXISTS idx_oauth_refresh_user;
+DROP INDEX IF EXISTS idx_oauth_refresh_workspace_user;
+DROP INDEX IF EXISTS idx_oauth_access_user;
+DROP INDEX IF EXISTS idx_oauth_access_workspace_user;
+DROP INDEX IF EXISTS idx_oauth_consents_workspace;
+DROP INDEX IF EXISTS idx_oauth_codes_user;
+DROP INDEX IF EXISTS idx_oauth_codes_workspace_user;
+DROP INDEX IF EXISTS idx_oauth_auth_requests_user;
+DROP INDEX IF EXISTS idx_oauth_auth_requests_workspace_user;
+DROP INDEX IF EXISTS idx_api_keys_created_by;
+DROP INDEX IF EXISTS idx_workspace_invites_invited_by;
+DROP INDEX IF EXISTS idx_workspace_invites_workspace_created;
+DROP INDEX IF EXISTS idx_webauthn_challenges_user;
+DROP INDEX IF EXISTS idx_two_factor_challenges_user;
+DROP INDEX IF EXISTS idx_recovery_codes_user;
+DROP INDEX IF EXISTS idx_email_otp_user;
+DROP INDEX IF EXISTS idx_sessions_workspace;
+DROP INDEX IF EXISTS idx_enrollments_contact;
+DROP INDEX IF EXISTS idx_sends_mailbox;
+DROP INDEX IF EXISTS idx_sends_contact;
+DROP INDEX IF EXISTS idx_campaigns_list;
+DROP INDEX IF EXISTS idx_campaigns_mailbox;
+
+DROP INDEX IF EXISTS idx_oauth_clients_workspace_created;
+CREATE INDEX idx_oauth_clients_workspace ON oauth_clients(workspace_id);
+DROP INDEX IF EXISTS idx_api_keys_workspace_created;
+CREATE INDEX idx_api_keys_workspace ON api_keys(workspace_id);
+DROP INDEX IF EXISTS idx_mailboxes_workspace_created;
+CREATE INDEX idx_mailboxes_workspace ON mailboxes(workspace_id);
+DROP INDEX IF EXISTS idx_lists_workspace_created;
+CREATE INDEX idx_lists_workspace ON lists(workspace_id);
+DROP INDEX IF EXISTS idx_campaigns_workspace_created;
+CREATE INDEX idx_campaigns_workspace ON campaigns(workspace_id);
+CREATE INDEX idx_sequence_steps_campaign ON sequence_steps(campaign_id, step_order);
+CREATE INDEX idx_suppression_email ON suppression(lower(email));
+CREATE INDEX idx_sends_workspace_created ON sends(workspace_id, created_at DESC);
+
+DROP INDEX IF EXISTS mailboxes_workspace_email_key;
+ALTER TABLE mailboxes ADD CONSTRAINT mailboxes_workspace_id_email_key UNIQUE (workspace_id, email);
+
+ALTER TABLE two_factor_challenges DROP CONSTRAINT IF EXISTS two_factor_attempts_check;
+ALTER TABLE email_otp_codes DROP CONSTRAINT IF EXISTS email_otp_attempts_check;
+ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_rate_limit_check;
+ALTER TABLE sends DROP CONSTRAINT IF EXISTS sends_attempts_check;
+ALTER TABLE sequence_enrollments DROP CONSTRAINT IF EXISTS sequence_enrollments_cap_deferrals_check;
+ALTER TABLE sequence_enrollments DROP CONSTRAINT IF EXISTS sequence_enrollments_reply_confidence_check;
+ALTER TABLE warmup_daily_stats DROP CONSTRAINT IF EXISTS warmup_daily_stats_nonnegative_check;
+ALTER TABLE warmup_threads DROP CONSTRAINT IF EXISTS warmup_threads_turn_check;
+ALTER TABLE warmup_threads DROP CONSTRAINT IF EXISTS warmup_threads_distinct_mailboxes_check;
+ALTER TABLE warmup_participants DROP CONSTRAINT IF EXISTS warmup_participants_reply_rate_check;
+ALTER TABLE warmup_participants DROP CONSTRAINT IF EXISTS warmup_participants_volume_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_ramp_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_min_interval_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_daily_cap_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_imap_port_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_smtp_port_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_status_check;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_provider_check;
+
+ALTER TABLE oauth_refresh_tokens DROP CONSTRAINT IF EXISTS oauth_refresh_client_tenant_fkey;
+ALTER TABLE oauth_refresh_tokens DROP CONSTRAINT IF EXISTS oauth_refresh_membership_fkey;
+ALTER TABLE oauth_access_tokens DROP CONSTRAINT IF EXISTS oauth_access_client_tenant_fkey;
+ALTER TABLE oauth_access_tokens DROP CONSTRAINT IF EXISTS oauth_access_membership_fkey;
+ALTER TABLE oauth_authorization_codes DROP CONSTRAINT IF EXISTS oauth_codes_client_tenant_fkey;
+ALTER TABLE oauth_authorization_codes DROP CONSTRAINT IF EXISTS oauth_codes_membership_fkey;
+ALTER TABLE oauth_consents DROP CONSTRAINT IF EXISTS oauth_consents_client_tenant_fkey;
+ALTER TABLE oauth_consents DROP CONSTRAINT IF EXISTS oauth_consents_membership_fkey;
+ALTER TABLE oauth_authorization_requests DROP CONSTRAINT IF EXISTS oauth_auth_requests_client_tenant_fkey;
+ALTER TABLE oauth_authorization_requests DROP CONSTRAINT IF EXISTS oauth_auth_requests_membership_fkey;
+ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_membership_fkey;
+
+ALTER TABLE warmup_daily_stats DROP CONSTRAINT IF EXISTS warmup_daily_stats_mailbox_tenant_fkey;
+ALTER TABLE warmup_daily_stats ADD FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE warmup_receipts DROP CONSTRAINT IF EXISTS warmup_receipts_send_tenant_fkey;
+ALTER TABLE warmup_receipts DROP CONSTRAINT IF EXISTS warmup_receipts_recipient_tenant_fkey;
+ALTER TABLE warmup_receipts ADD FOREIGN KEY (warmup_send_id) REFERENCES warmup_sends(id) ON DELETE SET NULL;
+ALTER TABLE warmup_receipts ADD FOREIGN KEY (recipient_mailbox) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE warmup_sends DROP CONSTRAINT IF EXISTS warmup_sends_to_tenant_fkey;
+ALTER TABLE warmup_sends DROP CONSTRAINT IF EXISTS warmup_sends_from_tenant_fkey;
+ALTER TABLE warmup_sends DROP CONSTRAINT IF EXISTS warmup_sends_thread_tenant_fkey;
+ALTER TABLE warmup_sends ADD FOREIGN KEY (thread_id) REFERENCES warmup_threads(id) ON DELETE CASCADE;
+ALTER TABLE warmup_sends ADD FOREIGN KEY (from_mailbox) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE warmup_sends ADD FOREIGN KEY (to_mailbox) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE warmup_threads DROP CONSTRAINT IF EXISTS warmup_threads_partner_tenant_fkey;
+ALTER TABLE warmup_threads DROP CONSTRAINT IF EXISTS warmup_threads_sender_tenant_fkey;
+ALTER TABLE warmup_threads ADD FOREIGN KEY (sender_mailbox) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE warmup_threads ADD FOREIGN KEY (partner_mailbox) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE warmup_participants DROP CONSTRAINT IF EXISTS warmup_participants_mailbox_tenant_fkey;
+ALTER TABLE warmup_participants ADD FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE mailbox_worker_assignments DROP CONSTRAINT IF EXISTS mailbox_worker_assignments_mailbox_tenant_fkey;
+ALTER TABLE mailbox_worker_assignments ADD FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE;
+ALTER TABLE tracking_events DROP CONSTRAINT IF EXISTS tracking_events_send_tenant_fkey;
+ALTER TABLE tracking_events DROP CONSTRAINT IF EXISTS tracking_events_campaign_tenant_fkey;
+ALTER TABLE tracking_events ADD FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE;
+ALTER TABLE sequence_enrollments DROP CONSTRAINT IF EXISTS sequence_enrollments_contact_tenant_fkey;
+ALTER TABLE sequence_enrollments DROP CONSTRAINT IF EXISTS sequence_enrollments_campaign_tenant_fkey;
+ALTER TABLE sequence_enrollments ADD FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE;
+ALTER TABLE sequence_enrollments ADD FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE;
+ALTER TABLE sequence_steps DROP CONSTRAINT IF EXISTS sequence_steps_campaign_tenant_fkey;
+ALTER TABLE sequence_steps ADD FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE;
+ALTER TABLE sends DROP CONSTRAINT IF EXISTS sends_mailbox_tenant_fkey;
+ALTER TABLE sends DROP CONSTRAINT IF EXISTS sends_contact_tenant_fkey;
+ALTER TABLE sends DROP CONSTRAINT IF EXISTS sends_campaign_tenant_fkey;
+ALTER TABLE sends ADD FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE;
+ALTER TABLE sends ADD FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE;
+ALTER TABLE sends ADD FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE;
+DROP TRIGGER IF EXISTS list_members_tenant_guard ON list_members;
+DROP FUNCTION IF EXISTS enforce_list_member_tenant();
+ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_list_tenant_fkey;
+ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_mailbox_tenant_fkey;
+ALTER TABLE campaigns ADD FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE RESTRICT;
+ALTER TABLE campaigns ADD FOREIGN KEY (list_id) REFERENCES lists(id) ON DELETE RESTRICT;
+
+ALTER TABLE oauth_clients DROP CONSTRAINT IF EXISTS oauth_clients_client_workspace_key;
+ALTER TABLE oauth_clients ALTER COLUMN workspace_id DROP NOT NULL;
+ALTER TABLE warmup_sends DROP CONSTRAINT IF EXISTS warmup_sends_id_workspace_key;
+ALTER TABLE warmup_threads DROP CONSTRAINT IF EXISTS warmup_threads_id_workspace_key;
+ALTER TABLE sends DROP CONSTRAINT IF EXISTS sends_id_workspace_key;
+ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_id_workspace_key;
+ALTER TABLE contacts DROP CONSTRAINT IF EXISTS contacts_id_workspace_key;
+ALTER TABLE lists DROP CONSTRAINT IF EXISTS lists_id_workspace_key;
+ALTER TABLE mailboxes DROP CONSTRAINT IF EXISTS mailboxes_id_workspace_key;
+
+ALTER TABLE sends DROP CONSTRAINT sends_pkey;
+ALTER TABLE sends ADD CONSTRAINT sends_pkey PRIMARY KEY (id, created_at);
+ALTER TABLE sends ADD CONSTRAINT sends_campaign_id_contact_id_created_at_key
+    UNIQUE (campaign_id, contact_id, created_at);
+
+DROP TRIGGER IF EXISTS sequence_steps_sync_campaign_content ON sequence_steps;
+DROP FUNCTION IF EXISTS sync_campaign_content_from_steps();

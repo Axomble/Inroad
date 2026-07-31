@@ -70,7 +70,7 @@ SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
-       m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
+       m.daily_cap, m.min_interval_seconds, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at
 FROM sequence_enrollments e
 JOIN campaigns cam ON cam.id = e.campaign_id
@@ -85,33 +85,34 @@ type GetStepEnrollmentBundleParams struct {
 }
 
 type GetStepEnrollmentBundleRow struct {
-	EnrollmentID     uuid.UUID          `json:"enrollment_id"`
-	WorkspaceID      uuid.UUID          `json:"workspace_id"`
-	ContactID        uuid.UUID          `json:"contact_id"`
-	CurrentStep      int32              `json:"current_step"`
-	Status           string             `json:"status"`
-	ThreadRootID     string             `json:"thread_root_id"`
-	CampaignID       uuid.UUID          `json:"campaign_id"`
-	MailboxID        uuid.UUID          `json:"mailbox_id"`
-	TrackingEnabled  bool               `json:"tracking_enabled"`
-	ToEmail          string             `json:"to_email"`
-	FirstName        string             `json:"first_name"`
-	LastName         string             `json:"last_name"`
-	Company          string             `json:"company"`
-	CustomFields     []byte             `json:"custom_fields"`
-	Provider         string             `json:"provider"`
-	FromEmail        string             `json:"from_email"`
-	FromName         string             `json:"from_name"`
-	SmtpHost         string             `json:"smtp_host"`
-	SmtpPort         int32              `json:"smtp_port"`
-	SmtpUsername     string             `json:"smtp_username"`
-	SecretCiphertext string             `json:"secret_ciphertext"`
-	AllowPlaintext   bool               `json:"allow_plaintext"`
-	DailyCap         int32              `json:"daily_cap"`
-	RampEnabled      bool               `json:"ramp_enabled"`
-	RampStartCap     int32              `json:"ramp_start_cap"`
-	RampDays         int32              `json:"ramp_days"`
-	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
+	EnrollmentID       uuid.UUID          `json:"enrollment_id"`
+	WorkspaceID        uuid.UUID          `json:"workspace_id"`
+	ContactID          uuid.UUID          `json:"contact_id"`
+	CurrentStep        int32              `json:"current_step"`
+	Status             string             `json:"status"`
+	ThreadRootID       string             `json:"thread_root_id"`
+	CampaignID         uuid.UUID          `json:"campaign_id"`
+	MailboxID          uuid.UUID          `json:"mailbox_id"`
+	TrackingEnabled    bool               `json:"tracking_enabled"`
+	ToEmail            string             `json:"to_email"`
+	FirstName          string             `json:"first_name"`
+	LastName           string             `json:"last_name"`
+	Company            string             `json:"company"`
+	CustomFields       []byte             `json:"custom_fields"`
+	Provider           string             `json:"provider"`
+	FromEmail          string             `json:"from_email"`
+	FromName           string             `json:"from_name"`
+	SmtpHost           string             `json:"smtp_host"`
+	SmtpPort           int32              `json:"smtp_port"`
+	SmtpUsername       string             `json:"smtp_username"`
+	SecretCiphertext   string             `json:"secret_ciphertext"`
+	AllowPlaintext     bool               `json:"allow_plaintext"`
+	DailyCap           int32              `json:"daily_cap"`
+	MinIntervalSeconds int32              `json:"min_interval_seconds"`
+	RampEnabled        bool               `json:"ramp_enabled"`
+	RampStartCap       int32              `json:"ramp_start_cap"`
+	RampDays           int32              `json:"ramp_days"`
+	MailboxCreatedAt   pgtype.Timestamptz `json:"mailbox_created_at"`
 }
 
 // Everything needed to build one step-send job, workspace-pinned. Joins the
@@ -144,6 +145,7 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 		&i.SecretCiphertext,
 		&i.AllowPlaintext,
 		&i.DailyCap,
+		&i.MinIntervalSeconds,
 		&i.RampEnabled,
 		&i.RampStartCap,
 		&i.RampDays,

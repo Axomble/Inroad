@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { toggleSidebar } from '@/store/slices/ui'
 import { cn } from '@/lib/utils'
@@ -42,12 +42,27 @@ export function AppShell({
   // Local state, not redux: nothing outside this subtree needs to know the
   // palette is open, and it must not be persisted across reloads.
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const mobileNavRef = useRef<HTMLDivElement>(null)
+  // The element focus came from, so dismissing the drawer returns the caret to
+  // the toggle rather than dropping it at the top of the document.
+  const navOpenerRef = useRef<HTMLElement | null>(null)
+  useHotkey({ key: 'Escape' }, close, open)
+  useEffect(() => {
+    if (open) {
+      navOpenerRef.current = document.activeElement as HTMLElement | null
+      mobileNavRef.current?.querySelector<HTMLElement>('a, button')?.focus()
+      return
+    }
+    navOpenerRef.current?.focus()
+    navOpenerRef.current = null
+  }, [open])
+
   useHotkey({ key: 'k', mod: true, whileTyping: true }, () => setPaletteOpen(true))
 
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col overflow-hidden bg-rail text-foreground">
-        <AppHeader onToggleNav={() => dispatch(toggleSidebar())} rightSlot={rightSlot} />
+        <AppHeader navOpen={open} onToggleNav={() => dispatch(toggleSidebar())} rightSlot={rightSlot} />
 
         <div className="flex min-h-0 flex-1">
           {/* Desktop sidebar */}
@@ -65,10 +80,23 @@ export function AppShell({
             aria-hidden="true"
           />
           <div
+            ref={mobileNavRef}
+            id="mobile-navigation"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Primary navigation"
             className={cn(
               'fixed inset-y-0 left-0 z-40 border-r border-border bg-rail transition-transform md:hidden',
               open ? 'translate-x-0' : '-translate-x-full',
             )}
+            // `inert`, not `aria-hidden`: when closed the drawer is only
+            // translated off-screen, so its links stay tabbable. aria-hidden
+            // over focusable content is the violation; inert removes the
+            // subtree from both the tab order and the accessibility tree.
+            inert={!open}
+            onClick={(event) => {
+              if ((event.target as HTMLElement).closest('a')) close()
+            }}
           >
             <AppSidebar />
           </div>

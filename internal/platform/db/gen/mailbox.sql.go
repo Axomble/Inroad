@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countMailboxByEmail = `-- name: CountMailboxByEmail :one
@@ -269,6 +270,30 @@ func (q *Queries) MailboxExists(ctx context.Context, id uuid.UUID) (bool, error)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const reserveMailboxSendSlot = `-- name: ReserveMailboxSendSlot :one
+UPDATE mailboxes
+SET last_send_at = now()
+WHERE id = $1 AND workspace_id = $2
+  AND (min_interval_seconds <= 0 OR last_send_at IS NULL
+       OR last_send_at <= now() - make_interval(secs => min_interval_seconds))
+RETURNING last_send_at
+`
+
+type ReserveMailboxSendSlotParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Atomically enforces per-mailbox spacing across concurrent workers. Updating
+// last_send_at is the reservation: only one worker can satisfy the predicate
+// for a mailbox during the configured interval.
+func (q *Queries) ReserveMailboxSendSlot(ctx context.Context, arg ReserveMailboxSendSlotParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, reserveMailboxSendSlot, arg.ID, arg.WorkspaceID)
+	var last_send_at pgtype.Timestamptz
+	err := row.Scan(&last_send_at)
+	return last_send_at, err
 }
 
 const setInboxCursor = `-- name: SetInboxCursor :exec

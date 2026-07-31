@@ -175,7 +175,7 @@ paths:
       responses:
         '204': { description: Verification email re-sent }
         '401': { description: Unauthorized }
-        '429': { description: Too many requests, try again shortly }
+        '429': { description: "Too many requests, try again shortly" }
   /auth/password/forgot:
     post:
       operationId: authForgotPassword
@@ -201,8 +201,8 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
       responses:
-        '204': { description: Password reset, all sessions revoked }
-        '400': { description: Validation error, or invalid/expired token }
+        '204': { description: "Password reset, all sessions revoked" }
+        '400': { description: "Validation error, or invalid/expired token" }
   /auth/invites/accept:
     post:
       operationId: authAcceptInvite
@@ -265,9 +265,9 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
       responses:
-        '204': { description: Two-factor disabled, other sessions revoked }
-        '400': { description: Validation error, or two-factor is not enabled }
-        '401': { description: Unauthorized, or invalid code }
+        '204': { description: "Two-factor disabled, other sessions revoked" }
+        '400': { description: "Validation error, or two-factor is not enabled" }
+        '401': { description: "Unauthorized, or invalid code" }
   /auth/2fa/totp/confirm:
     post:
       operationId: authTwoFactorConfirm
@@ -287,7 +287,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TwoFactorConfirmResponse' }
-        '400': { description: Enrollment not started, or invalid code }
+        '400': { description: "Enrollment not started, or invalid code" }
         '401': { description: Unauthorized }
         '409': { description: Two-factor is already enabled }
   /auth/2fa/verify:
@@ -375,7 +375,7 @@ paths:
             schema: { $ref: '#/components/schemas/PasskeyFinishRequest' }
       responses:
         '204': { description: Passkey registered }
-        '400': { description: Validation error, invalid/expired challenge, or attestation failed }
+        '400': { description: "Validation error, invalid/expired challenge, or attestation failed" }
         '401': { description: Unauthorized }
         '409': { description: This authenticator is already registered }
         '501': { description: Passkeys are not configured }
@@ -505,7 +505,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiKeyCreateResponse' }
-        '400': { description: Validation error (unknown scope, bad CIDR, past expiry, non-positive rate limit) }
+        '400': { description: "Validation error (unknown scope, bad CIDR, past expiry, non-positive rate limit)" }
         '401': { description: Unauthorized }
     get:
       operationId: authApiKeyList
@@ -551,7 +551,7 @@ paths:
         '201': { description: Created invite, content: { application/json: { schema: { $ref: '#/components/schemas/Invite' } } } }
         '400': { description: Validation error }
         '401': { description: Unauthorized }
-        '403': { description: Not an admin of this workspace, or workspace mismatch }
+        '403': { description: "Not an admin of this workspace, or workspace mismatch" }
         '409': { description: An invite is already pending for this email }
     get:
       operationId: listWorkspaceInvites
@@ -561,7 +561,7 @@ paths:
       responses:
         '200': { description: Pending invites, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Invite' } } } } }
         '401': { description: Unauthorized }
-        '403': { description: Not an admin of this workspace, or workspace mismatch }
+        '403': { description: "Not an admin of this workspace, or workspace mismatch" }
   /workspaces/{id}/invites/{inviteId}:
     delete:
       operationId: revokeWorkspaceInvite
@@ -574,7 +574,7 @@ paths:
         '204': { description: Invite revoked }
         '400': { description: Invalid invite id }
         '401': { description: Unauthorized }
-        '403': { description: Not an admin of this workspace, or workspace mismatch }
+        '403': { description: "Not an admin of this workspace, or workspace mismatch" }
   /mailboxes:
     get:
       operationId: listMailboxes
@@ -980,7 +980,7 @@ paths:
       parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
       responses:
         '302': { description: Redirect to the signed destination URL }
-        '404': { description: Malformed/tampered token or unknown send -- no redirect, nothing recorded }
+        '404': { description: "Malformed/tampered token or unknown send -- no redirect, nothing recorded" }
   # OAuth 2.1 authorization server (Inroad acting as an OAuth PROVIDER). Mounted at
   # the TOP level under /oauth2 -- outside the /api/v1 base -- and distinct from the
   # /oauth mailbox-connect flow (Inroad as an OAuth CLIENT to Google/Microsoft). This
@@ -1014,7 +1014,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/OAuth2Client' }
-        '400': { description: Validation error (bad redirect_uri, non-grantable scope, unsupported grant/response type or auth method) }
+        '400': { description: "Validation error (bad redirect_uri, non-grantable scope, unsupported grant/response type or auth method)" }
         '401': { description: Unauthorized }
         '403': { description: Not an admin }
         '429': { description: Registration rate limit exceeded }
@@ -1044,7 +1044,7 @@ paths:
         - { name: code_challenge, in: query, required: true, schema: { type: string } }
         - { name: code_challenge_method, in: query, required: true, schema: { type: string, enum: [S256] } }
       responses:
-        '302': { description: Redirect to the client redirect_uri (code+state or error+state), the SPA consent screen, or the SPA login page }
+        '302': { description: "Redirect to the client redirect_uri (code+state or error+state), the SPA consent screen, or the SPA login page" }
         '400':
           description: Unknown client or redirect_uri mismatch -- rendered inline, never redirected (anti-open-redirect)
           content:
@@ -1068,7 +1068,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OAuth2ConsentData' }
         '401': { description: Unauthorized }
-        '404': { description: Unknown, expired, consumed, or not this user's consent request }
+        '404': { description: "Unknown, expired, consumed, or not this user's consent request" }
   /oauth2/consent:
     servers: [{ url: / }]
     post:
@@ -1096,7 +1096,7 @@ paths:
         '400': { description: Validation error }
         '401': { description: Unauthorized }
         '403': { description: CSRF token mismatch }
-        '404': { description: Unknown, expired, consumed, or not this user's consent request }
+        '404': { description: "Unknown, expired, consumed, or not this user's consent request" }
   /oauth2/clients:
     servers: [{ url: / }]
     get:
@@ -1334,7 +1334,7 @@ components:
       required: [two_factor_required, challenge]
       properties:
         two_factor_required: { type: boolean, description: Always true; distinguishes this from a SessionResponse. }
-        challenge: { type: string, description: Single-use, short-lived challenge token to submit to /auth/2fa/verify. }
+        challenge: { type: string, description: "Single-use, short-lived challenge token to submit to /auth/2fa/verify." }
     TwoFactorStatusResponse:
       type: object
       required: [totp_enabled, recovery_codes_remaining]
@@ -1401,7 +1401,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
-        prefix: { type: string, description: Public, non-secret token prefix (the part before the secret). }
+        prefix: { type: string, description: "Public, non-secret token prefix (the part before the secret)." }
         scopes: { type: array, items: { type: string } }
         ip_allowlist: { type: array, nullable: true, items: { type: string } }
         rate_limit_per_min: { type: integer, nullable: true }
@@ -1836,7 +1836,7 @@ components:
         refresh_token: { type: string, description: refresh_token grant only }
         scope: { type: string, description: refresh_token grant only; a space-delimited SUBSET of the token's scopes (narrowing) }
         client_id: { type: string }
-        client_secret: { type: string, description: confidential client, client_secret_post (or use HTTP Basic) }
+        client_secret: { type: string, description: "confidential client, client_secret_post (or use HTTP Basic)" }
     OAuth2TokenResponse:
       type: object
       required: [access_token, token_type, expires_in, refresh_token, scope]

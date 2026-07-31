@@ -280,6 +280,9 @@ const (
 	// ClaimAlreadySent: this exact step already delivered ('sent'); advance the
 	// cursor only (recover-forward), never re-send.
 	ClaimAlreadySent
+	// ClaimDeferred: the mailbox's minimum send interval has not elapsed. The
+	// worker should re-enqueue this enrollment without sending or advancing.
+	ClaimDeferred
 )
 
 // ContactVars are the personalization values for a contact, applied worker-side
@@ -313,23 +316,24 @@ type StepSendJob struct {
 	// embed it in tracking tokens at MIME-build time; MarkStepSent writes it as
 	// the sends row's id, so the events recorded against it (via the pixel/
 	// click endpoints) line up with the eventual send row.
-	SendID            string
-	CurrentStep       int
-	StepOrder         int
-	NextDelaySeconds  int
-	LastStep          bool
-	Suppressed        bool
-	EffectiveDailyCap int
-	SentToday         int
-	ToEmail           string
-	Vars              ContactVars
-	Subject           string
-	ThreadSubject     string
-	BodyText          string
-	BodyHTML          string
-	UnsubURL          string
-	InReplyTo         string
-	References        string
+	SendID             string
+	CurrentStep        int
+	StepOrder          int
+	NextDelaySeconds   int
+	LastStep           bool
+	Suppressed         bool
+	EffectiveDailyCap  int
+	SentToday          int
+	MinIntervalSeconds int
+	ToEmail            string
+	Vars               ContactVars
+	Subject            string
+	ThreadSubject      string
+	BodyText           string
+	BodyHTML           string
+	UnsubURL           string
+	InReplyTo          string
+	References         string
 	// TrackingEnabled mirrors the campaign's tracking_enabled column: when true
 	// and BodyHTML is non-empty, the worker rewrites links and appends an open
 	// pixel before sending.

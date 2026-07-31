@@ -8,6 +8,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker/inbox"
+	"github.com/inroad/inroad/internal/worker/maintenance"
 	"github.com/inroad/inroad/internal/worker/sender"
 	"github.com/inroad/inroad/internal/worker/sequence"
 	"github.com/inroad/inroad/internal/worker/warmup"
@@ -18,6 +19,9 @@ import (
 // open and click tracking links (internal/worker/track) for campaigns with
 // tracking enabled.
 func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte) {
+	if cleaner, ok := core.(maintenance.Cleaner); ok {
+		mux.HandleFunc(queue.TaskMaintenanceCleanup, maintenance.CleanupHandler(cleaner))
+	}
 	// Warmup: send one warmup email per tick (lazy chain) + fan-out/health sweep +
 	// recipient-side engagement (rescue/mark-read/reply) of received warmup mail.
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.SendHandler(core, sndr, enq))

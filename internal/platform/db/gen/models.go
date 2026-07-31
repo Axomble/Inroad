@@ -341,7 +341,7 @@ type OauthClient struct {
 	ClientType              string             `json:"client_type"`
 	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 	CreatedByUserID         pgtype.UUID        `json:"created_by_user_id"`
-	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	WorkspaceID             uuid.UUID          `json:"workspace_id"`
 	CreatedAt               pgtype.Timestamptz `json:"created_at"`
 	RevokedAt               pgtype.Timestamptz `json:"revoked_at"`
 }

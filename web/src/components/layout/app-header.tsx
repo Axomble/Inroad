@@ -8,10 +8,12 @@ import { Button } from '@/components/ui/button'
  * which is the direction the layering rule mandates.
  */
 export function AppHeader({
+  navOpen,
   onToggleNav,
   rightSlot,
 }: {
   onToggleNav: () => void
+  navOpen: boolean
   rightSlot?: React.ReactNode
 }) {
   return (
@@ -22,6 +24,8 @@ export function AppHeader({
         className="md:hidden"
         onClick={onToggleNav}
         aria-label="Toggle navigation"
+        aria-expanded={navOpen}
+        aria-controls="mobile-navigation"
       >
         <Menu />
       </Button>

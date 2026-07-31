@@ -13,7 +13,10 @@
   "rules": {
     "react/rules-of-hooks": "error",
     "react/exhaustive-deps": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }],
+    "react/only-export-components": ["warn", {
+      "allowConstantExport": true,
+      "allowExportNames": ["Route", "buttonVariants", "badgeVariants"]
+    }],
     "react/react-in-jsx-scope": "off",
     "typescript/no-explicit-any": "error",
     "eqeqeq": ["error", "smart"],
@@ -22,5 +25,13 @@
     "import/no-unassigned-import": "off",
     "no-console": ["warn", { "allow": ["warn", "error"] }]
   },
+  "overrides": [
+    {
+      "files": ["src/routes/**/*.tsx"],
+      "rules": {
+        "react/only-export-components": "off"
+      }
+    }
+  ],
   "ignorePatterns": ["src/routeTree.gen.ts", "src/store/api.ts", "dist", "node_modules"]
 }

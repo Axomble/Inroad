@@ -53,7 +53,7 @@ const SORTS: readonly SortOption<Campaign>[] = [
 
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
-  const { data: campaigns = [], isLoading } = useListCampaignsQuery()
+  const { data: campaigns = [], isLoading, error: listError, refetch } = useListCampaignsQuery()
   const navigate = useNavigate()
 
   const controls = useListControls({
@@ -90,10 +90,25 @@ export function CampaignsPage() {
       />
 
       <StatStrip>
-        <Stat label="Total" value={campaigns.length} sub="campaigns" />
-        <Stat label="Running" value={statusCount('running')} dot={<StatusDot tone="running" />} sub="sending now" />
-        <Stat label="Draft" value={statusCount('draft')} dot={<StatusDot tone="draft" />} sub="not launched" />
-        <Stat label="Done" value={statusCount('done')} dot={<StatusDot tone="done" />} sub="finished" />
+        <Stat label="Total" value={listError ? '\u2014' : campaigns.length} sub="campaigns" />
+        <Stat
+          label="Running"
+          value={listError ? '\u2014' : statusCount('running')}
+          dot={<StatusDot tone="running" />}
+          sub="sending now"
+        />
+        <Stat
+          label="Draft"
+          value={listError ? '\u2014' : statusCount('draft')}
+          dot={<StatusDot tone="draft" />}
+          sub="not launched"
+        />
+        <Stat
+          label="Done"
+          value={listError ? '\u2014' : statusCount('done')}
+          dot={<StatusDot tone="done" />}
+          sub="finished"
+        />
       </StatStrip>
 
       {showForm && <CampaignForm onDone={() => setShowForm(false)} onCancel={() => setShowForm(false)} />}
@@ -115,6 +130,18 @@ export function CampaignsPage() {
       {isLoading ? (
         <PageBody>
           <LoadingRows />
+        </PageBody>
+      ) : listError ? (
+        <PageBody>
+          <EmptyBlock
+            title="Couldn't load campaigns"
+            description={`Your campaigns are still intact, but the server couldn't return them${httpStatus(listError) ? ` (${httpStatus(listError)})` : ''}. Try again in a moment.`}
+            action={
+              <Button variant="secondary" size="sm" onClick={() => void refetch()}>
+                Try again
+              </Button>
+            }
+          />
         </PageBody>
       ) : isEmpty ? (
         <PageBody>

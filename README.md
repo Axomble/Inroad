@@ -31,7 +31,7 @@ opt-outs are polled back in, classified, and used to stop the sequence automatic
 on your own hardware: one Postgres, one Redis, two Go binaries, and a React SPA. No SaaS account, no
 per-seat pricing, no third party holding your mailbox credentials.
 
-It's an open-core alternative to Instantly and Smartlead, built for people who would rather run the
+It's an open-source alternative to Instantly and Smartlead, built for people who would rather run the
 infrastructure than rent it.
 
 <div align="center">
@@ -284,13 +284,12 @@ integration tests; what isn't built is listed here rather than implied by a feat
 
 **Working today:** multi-workspace auth with refresh-token rotation and reuse detection · Gmail /
 M365 / SMTP mailbox connect · multi-step sequences with reorder · enrollment engine with ramp-aware
-daily caps · the warmup pool end-to-end (ramping volume, threaded replies, rescue-from-spam,
+daily caps and atomic per-mailbox send spacing · the warmup pool end-to-end (ramping volume, threaded replies, rescue-from-spam,
 mark-read, measured placement health, per-IP worker routing) · reply and bounce polling across all
 three transports · deterministic reply classification · suppression and one-click unsubscribe ·
 open/click tracking.
 
-**On the roadmap:** enforcement of the per-mailbox minimum send interval (stored and editable, not
-yet applied at send time) · a unified cross-mailbox inbox UI · cloud KMS as a second `KeyProvider` ·
+**On the roadmap:** a unified cross-mailbox inbox UI · cloud KMS as a second `KeyProvider` ·
 rate limiting and an audit log on auth, connect, and reply-driven suppression · a key-rotation CLI.
 
 ---

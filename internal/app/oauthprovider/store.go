@@ -11,6 +11,7 @@ package oauthprovider
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -156,6 +157,9 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 }
 
 func (s *PgStore) CreateClient(ctx context.Context, p CreateClientParams) (gen.OauthClient, error) {
+	if p.WorkspaceID == nil {
+		return gen.OauthClient{}, errors.New("oauthprovider: workspace ownership is required")
+	}
 	return s.q.CreateOauthClient(ctx, gen.CreateOauthClientParams{
 		ClientID:                p.ClientID,
 		ClientSecretHash:        p.ClientSecretHash,
@@ -167,7 +171,7 @@ func (s *PgStore) CreateClient(ctx context.Context, p CreateClientParams) (gen.O
 		ClientType:              p.ClientType,
 		TokenEndpointAuthMethod: p.TokenEndpointAuthMethod,
 		CreatedByUserID:         pgUUIDPtr(p.CreatedBy),
-		WorkspaceID:             pgUUIDPtr(p.WorkspaceID),
+		WorkspaceID:             *p.WorkspaceID,
 	})
 }
 
@@ -176,11 +180,11 @@ func (s *PgStore) GetClient(ctx context.Context, clientID string) (gen.OauthClie
 }
 
 func (s *PgStore) ListClientsByWorkspace(ctx context.Context, ws uuid.UUID) ([]gen.ListOauthClientsByWorkspaceRow, error) {
-	return s.q.ListOauthClientsByWorkspace(ctx, pgUUID(ws))
+	return s.q.ListOauthClientsByWorkspace(ctx, ws)
 }
 
 func (s *PgStore) RevokeClient(ctx context.Context, ws uuid.UUID, clientID string) (int64, error) {
-	return s.q.RevokeOauthClient(ctx, gen.RevokeOauthClientParams{ClientID: clientID, WorkspaceID: pgUUID(ws)})
+	return s.q.RevokeOauthClient(ctx, gen.RevokeOauthClientParams{ClientID: clientID, WorkspaceID: ws})
 }
 
 func (s *PgStore) CreateAuthRequest(ctx context.Context, p CreateAuthRequestParams) error {
