@@ -243,8 +243,8 @@ export function MailboxesPage() {
         <>
           <ListHeader>
             <ListHeaderCell className="min-w-0 flex-1">Mailbox</ListHeaderCell>
-            <ListHeaderCell className="w-40">Warmup</ListHeaderCell>
-            <ListHeaderCell className="w-16 text-right">Cap</ListHeaderCell>
+            <ListHeaderCell className="hidden w-40 xl:block">Warmup</ListHeaderCell>
+            <ListHeaderCell className="hidden w-16 text-right lg:block">Cap</ListHeaderCell>
             <ListHeaderCell className="w-20 text-right">Status</ListHeaderCell>
             <ListHeaderCell className="w-8" aria-label="Actions" />
           </ListHeader>
@@ -434,7 +434,7 @@ function MailboxRow({
       data-row-index={index}
       onMouseEnter={() => onHover(index)}
       className={cn(
-        'flex items-center gap-4 border-b border-border px-5 py-3 transition-colors',
+        'flex items-center gap-3 border-b border-border px-4 py-3 transition-colors sm:gap-4 sm:px-5',
         active && 'bg-surface-2/60',
       )}
     >
@@ -455,11 +455,11 @@ function MailboxRow({
         )}
       </div>
 
-      <div className="w-40 shrink-0">
+      <div className="hidden w-40 shrink-0 xl:block">
         <WarmupCell entry={warmup} />
       </div>
 
-      <div className="w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+      <div className="hidden w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground lg:block">
         {mailbox.daily_cap}/day
       </div>
 

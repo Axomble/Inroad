@@ -96,7 +96,7 @@ export function LoginForm() {
       window.location.assign(resume)
       return
     }
-    navigate({ to: '/app/mailboxes' })
+    navigate({ to: '/app' })
   }
 
   function onChallenge(challenge: string, email: string) {

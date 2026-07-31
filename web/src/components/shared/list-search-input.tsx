@@ -31,7 +31,7 @@ export function ListSearchInput({
   useHotkey({ key: '/' }, () => inputRef.current?.focus())
 
   return (
-    <div className={cn('relative flex h-7 items-center', className)}>
+    <div className={cn('relative flex h-7 w-36 items-center sm:w-auto', className)}>
       <Search
         className="pointer-events-none absolute left-2 size-3.5 text-faint"
         strokeWidth={1.75}
@@ -54,7 +54,7 @@ export function ListSearchInput({
           else e.currentTarget.blur()
         }}
         className={cn(
-          'h-7 w-44 rounded-md border border-input bg-surface-2 pl-7 text-[12.5px] text-foreground',
+          'h-7 w-full rounded-md border border-input bg-surface-2 pl-7 text-[12.5px] text-foreground sm:w-44',
           'shadow-[inset_0_1px_2px_var(--input-inset)] outline-none transition-colors',
           'placeholder:text-faint focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40',
           // The native search affordance duplicates our own clear button.

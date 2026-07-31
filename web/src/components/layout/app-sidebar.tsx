@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Mail, Megaphone, Users, Settings, Flame, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
+import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { useNavCounts } from './use-nav-counts'
@@ -38,8 +38,9 @@ interface NavGroup {
 }
 
 const NAV: NavGroup[] = [
-  // No "Overview" row: `/app` only redirects to `/app/mailboxes`, so it would
-  // duplicate the Mailboxes item. Add a real dashboard row once one exists.
+  {
+    items: [{ label: 'Overview', to: '/app', icon: LayoutDashboard }],
+  },
   {
     label: 'Sending',
     items: [
@@ -71,17 +72,17 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
     <Link
       to={item.to}
       className={cn(
-        'group flex h-7 items-center gap-2.5 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors',
-        'hover:bg-surface-2 hover:text-foreground',
+        'group relative flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-chrome-muted transition-colors',
+        'hover:bg-chrome-hover hover:text-chrome-text',
       )}
-      activeProps={{ className: 'bg-surface-2 font-medium text-foreground' }}
+      activeProps={{ className: 'bg-chrome-hover font-medium text-chrome-text shadow-[inset_0_0_0_1px_var(--chrome-border)] before:absolute before:left-0 before:h-4 before:w-0.5 before:rounded-full before:bg-primary' }}
     >
       <Icon className="size-4 shrink-0" strokeWidth={1.75} aria-hidden="true" />
       <span className="truncate">{item.label}</span>
       {count != null && (
         // Right-aligned, tabular, and quiet — a reference number, not a badge
         // demanding action.
-        <span className="ml-auto font-mono text-[11px] tabular-nums text-faint">{count}</span>
+        <span className="ml-auto rounded-md bg-chrome-surface px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-chrome-muted">{count}</span>
       )}
     </Link>
   )
@@ -93,14 +94,14 @@ export function AppSidebar() {
   const isAdmin = role === 'owner' || role === 'admin'
 
   return (
-    <nav aria-label="Primary" className="flex h-full w-64 flex-col gap-4 overflow-y-auto px-3 py-4">
+    <nav aria-label="Primary" className="flex h-full w-64 flex-col gap-5 overflow-y-auto bg-chrome px-3 py-4">
       {NAV.map((group, index) => {
         const items = group.items.filter((item) => !item.adminOnly || isAdmin)
         if (items.length === 0) return null
         return (
           <div key={group.label ?? index} className="flex flex-col gap-0.5">
             {group.label && (
-              <div className="px-2 pb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+              <div className="px-2.5 pb-1 font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-chrome-muted/70">
                 {group.label}
               </div>
             )}

@@ -46,7 +46,7 @@ function enablePasskeys() {
 
 // LoginForm uses the router's useNavigate + Link + the `/` route's search
 // (`return_to`); stub them and capture navigation. Default search is empty, so
-// completeLogin falls through to the /app/mailboxes redirect.
+// completeLogin falls through to the operational overview.
 const navigate = vi.fn()
 let loginSearch: { return_to?: string } = {}
 vi.mock('@tanstack/react-router', () => ({
@@ -129,7 +129,7 @@ test('a non-2FA login stores the session and redirects', async () => {
   renderWithProviders(<LoginForm />)
   fillCredentials()
 
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app' }))
 })
 
 // Swap in a stub `window.location` (keeping the real origin) whose `assign` we
@@ -158,7 +158,7 @@ test.each([
 
   await waitFor(() => expect(assign).toHaveBeenCalledWith(returnTo))
   // The SPA router is NOT used for the resume (the target may be a non-SPA path).
-  expect(navigate).not.toHaveBeenCalledWith({ to: '/app/mailboxes' })
+  expect(navigate).not.toHaveBeenCalledWith({ to: '/app' })
 })
 
 // Every open-redirect bypass family must be rejected: protocol-relative,
@@ -182,7 +182,7 @@ test.each([
   renderWithProviders(<LoginForm />)
   fillCredentials()
 
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app' }))
   // Never handed off to the browser at all — not to the malicious target, and
   // not to any normalized off-origin path.
   expect(assign).not.toHaveBeenCalled()
@@ -205,7 +205,7 @@ test('a 2FA-required login transitions to the challenge step, then verifies to a
   fireEvent.change(screen.getByLabelText(/authentication code/i), { target: { value: '123456' } })
   fireEvent.click(screen.getByRole('button', { name: /^verify$/i }))
 
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app' }))
 })
 
 test('a wrong code on the challenge step shows an error and stays put', async () => {
@@ -294,7 +294,7 @@ test('email-code: start → verify → navigates to the app on a session', async
   fireEvent.change(screen.getByLabelText(/sign-in code/i), { target: { value: '123456' } })
   fireEvent.click(screen.getByRole('button', { name: /^verify$/i }))
 
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app' }))
 })
 
 test('email-code: a 2FA-required verify routes into the shared 2FA challenge, not a session', async () => {
@@ -367,7 +367,7 @@ test('passkey login: begin → ceremony → finish mints a session and redirects
   expect(passed.publicKey.challenge).toBeInstanceOf(ArrayBuffer)
 
   // …and lands on the same session/redirect outcome as a password login.
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app' }))
 })
 
 test('passkey login: a 501 from begin retires the passkey button', async () => {

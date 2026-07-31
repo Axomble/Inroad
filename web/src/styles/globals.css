@@ -25,18 +25,25 @@
    white). All text is ink; buttons are black-on-lime.
    ============================================================ */
 :root {
-  --radius: 0.55rem;
+  --radius: 0.7rem;
 
   /* neutrals — faint lime-tinted paper, not pure grey */
-  --background:     #f7f9f1;
-  --foreground:     #12160b;
-  --rail:           #fbfcf6;
+  --background:     #f4f6ef;
+  --foreground:     #11150d;
+  --rail:           #fafbf7;
   --surface:        #ffffff;
-  --surface-2:      #f0f3e6;
-  --border:         #e3e8d6;
-  --border-strong:  #cfd6bc;
-  --muted-foreground: #565e48;
-  --faint:          #6e745c;
+  --surface-2:      #edf1e6;
+  --border:         #dde3d3;
+  --border-strong:  #c8d0b9;
+  --muted-foreground: #58604f;
+  --faint:          #747c69;
+
+  --chrome:         #0c110a;
+  --chrome-surface: #141b10;
+  --chrome-hover:   #1d2617;
+  --chrome-border:  #293321;
+  --chrome-text:    #f2f7e8;
+  --chrome-muted:   #9aa88d;
 
   /* accent — electric lime "volt", spent on the primary action */
   --primary:            #c3f53c;
@@ -51,6 +58,8 @@
      --primary is a FILL only (it fails contrast as text); anything that
      is lime-colored *type* uses --accent-ink instead. */
   --accent-ink:         #567200;
+  --data:               #087f91;
+  --security:           #6d55d9;
 
   /* shadcn-compatible aliases */
   --card:                 var(--surface);
@@ -116,10 +125,19 @@
   --muted-foreground: #a7b096;
   --faint:          #79826a;
 
+  --chrome:         #080b07;
+  --chrome-surface: #11170d;
+  --chrome-hover:   #1a2315;
+  --chrome-border:  #2a3522;
+  --chrome-text:    #f2f7e8;
+  --chrome-muted:   #9aa88d;
+
   --popover:            #161a10;
   --accent:             #1f2417;
   --primary-foreground: #10140a;   /* still ink on lime */
   --accent-ink:         #c3f53c;   /* lime reads fine as text on dark */
+  --data:               #35c5d6;
+  --security:           #a995ff;
   --ring:               #c3f53c;
 
   /* brighter accents read better on near-black than the deepened
@@ -150,6 +168,12 @@
   --color-border:          var(--border);
   --color-border-strong:   var(--border-strong);
   --color-faint:           var(--faint);
+  --color-chrome:          var(--chrome);
+  --color-chrome-surface:  var(--chrome-surface);
+  --color-chrome-hover:    var(--chrome-hover);
+  --color-chrome-border:   var(--chrome-border);
+  --color-chrome-text:     var(--chrome-text);
+  --color-chrome-muted:    var(--chrome-muted);
 
   --color-card:                 var(--card);
   --color-card-foreground:      var(--card-foreground);
@@ -171,6 +195,8 @@
 
   --color-warm:            var(--warm);
   --color-warm-foreground: var(--warm-foreground);
+  --color-data:            var(--data);
+  --color-security:        var(--security);
   --color-ok:              var(--ok);
   --color-warn:            var(--warn);
   --color-danger:          var(--danger);
@@ -199,6 +225,24 @@ body {
   @apply bg-background text-foreground antialiased;
   font-family: var(--font-sans);
 }
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 55%, transparent);
+  color: var(--foreground);
+}
+
+.workspace-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--border) 38%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--border) 38%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: -1px -1px;
+}
+
+@keyframes live-ping {
+  75%, 100% { transform: scale(2.1); opacity: 0; }
+}
+.live-ping { animation: live-ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite; }
 
 /* ============================================================
    Tactile controls — the signature interaction.
@@ -280,6 +324,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .live-ping { animation: none; }
   .tactile,
   .tactile-shallow {
     transition: none;

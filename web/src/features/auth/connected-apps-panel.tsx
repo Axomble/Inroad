@@ -228,8 +228,8 @@ function newUriRow(): { id: string; value: string } {
  * Register form → one-time secret reveal. A confidential client's `client_secret` is
  * returned by the server EXACTLY ONCE; it's held only in this component's local state
  * for display, and is never PERSISTED (it transits the in-memory RTK Query cache from
- * the register mutation, but the `api` reducer isn't redux-persist-whitelisted, so it
- * never reaches localStorage) nor logged. It's shown behind a "you won't see this
+ * the register mutation, but the API cache is memory-only, so it is neither
+ * written to browser storage nor logged. It's shown behind a "you won't see this
  * again" warning with copy-to-clipboard, and closing the dialog drops it for good. A
  * public (PKCE) client has no secret — only its `client_id` is shown.
  */

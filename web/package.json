@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "typecheck": "tsc -b",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "lint:api": "redocly lint ../api/openapi.yaml --config ../redocly.yaml",
     "preview": "vite preview",
     "gen:api": "rtk-query-codegen-openapi openapi-codegen.cts"
@@ -45,6 +46,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@redocly/cli": "^2.39.0",
     "@rtk-query/codegen-openapi": "^2.2.0",
     "@tailwindcss/vite": "^4.3.3",
