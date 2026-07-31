@@ -43,15 +43,30 @@ type FormValues = z.infer<typeof schema>
 type Pending = { challenge: string; email: string }
 
 /**
- * A `return_to` is only honoured when it is a same-origin internal path — starts
- * with a single `/` (rejecting `//evil.com` protocol-relative and absolute URLs
- * with a scheme). This blocks the login form from being turned into an open
- * redirect. Callers then navigate via `window.location.assign`, because the target
- * may be the API's `/oauth2/authorize` (not an SPA route) as well as an SPA path.
+ * A `return_to` is only honoured when it resolves to a same-origin target. We
+ * resolve it against `window.location.origin` and compare origins, then return
+ * the NORMALIZED same-origin path (`pathname + search + hash`) — never the raw
+ * string. This blocks the login form from being turned into an open redirect:
+ * a prefix check isn't enough (`/\evil.com` and `/\/evil.com` pass a `//` guard
+ * but WHATWG-normalize backslashes to `//`, so a browser would navigate to
+ * `https://evil.com/`). Resolving-then-verifying rejects protocol-relative
+ * (`//evil.com`), backslash (`/\evil.com`), absolute (`https://evil.com`), and
+ * scheme (`javascript:`, `data:`) inputs — they resolve off-origin or throw —
+ * while allowing a legitimate same-origin path including the API's
+ * `/oauth2/authorize?...` resume. Returning `pathname + search + hash` strips any
+ * authority so the validated path can't smuggle an off-origin target. Callers
+ * then navigate via `window.location.assign`, because the target may be the API's
+ * `/oauth2/authorize` (not an SPA route) as well as an SPA path.
  */
 function safeReturnTo(raw: string | undefined): string | null {
-  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return null
-  return raw
+  if (!raw) return null
+  try {
+    const u = new URL(raw, window.location.origin)
+    if (u.origin !== window.location.origin) return null
+    return u.pathname + u.search + u.hash
+  } catch {
+    return null
+  }
 }
 
 export function LoginForm() {

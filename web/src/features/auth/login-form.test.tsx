@@ -132,34 +132,59 @@ test('a non-2FA login stores the session and redirects', async () => {
   await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
 })
 
-test('a login with a safe return_to resumes there via a full navigation, not the SPA router', async () => {
-  loginSearch = { return_to: '/oauth/consent?consent_id=c-1' }
+// Swap in a stub `window.location` (keeping the real origin) whose `assign` we
+// can capture, so the open-redirect guard is exercised against the real
+// same-origin comparison. afterEach restores the real location.
+function stubAssign() {
   const assign = vi.fn()
   Object.defineProperty(window, 'location', {
     configurable: true,
     value: { ...window.location, assign },
   })
+  return assign
+}
+
+// Legit same-origin `return_to`s: resumed via a full navigation to the
+// NORMALIZED same-origin path (an SPA path, and the API's /oauth2/authorize).
+test.each([
+  '/oauth/consent?consent_id=c-1',
+  '/oauth2/authorize?client_id=abc&state=xyz&scope=mailboxes.read',
+])('a safe return_to (%s) resumes there via a full navigation, not the SPA router', async (returnTo) => {
+  loginSearch = { return_to: returnTo }
+  const assign = stubAssign()
 
   renderWithProviders(<LoginForm />)
   fillCredentials()
 
-  await waitFor(() => expect(assign).toHaveBeenCalledWith('/oauth/consent?consent_id=c-1'))
+  await waitFor(() => expect(assign).toHaveBeenCalledWith(returnTo))
   // The SPA router is NOT used for the resume (the target may be a non-SPA path).
   expect(navigate).not.toHaveBeenCalledWith({ to: '/app/mailboxes' })
 })
 
-test('an unsafe return_to is ignored (open-redirect guard) and falls back to the app', async () => {
-  loginSearch = { return_to: '//evil.example.com/steal' }
-  const assign = vi.fn()
-  Object.defineProperty(window, 'location', {
-    configurable: true,
-    value: { ...window.location, assign },
-  })
+// Every open-redirect bypass family must be rejected: protocol-relative,
+// backslash (WHATWG-normalized to `//` — the bug that shipped), absolute, and
+// scheme (`javascript:` / `data:`) URLs. None may reach `assign`; login must
+// fall back to the default post-login route. (`'/\\evil.com'` is the literal
+// `/\evil.com`; `'\\\\evil.com'` is `\\evil.com`.)
+test.each([
+  '//evil.com',
+  '/\\evil.com',
+  '/\\/evil.com',
+  'https://evil.com',
+  'http://evil.com',
+  'javascript:alert(1)',
+  'data:text/html,x',
+  '\\\\evil.com',
+])('an unsafe return_to (%j) is ignored (open-redirect guard) and falls back to the app', async (returnTo) => {
+  loginSearch = { return_to: returnTo }
+  const assign = stubAssign()
 
   renderWithProviders(<LoginForm />)
   fillCredentials()
 
   await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  // Never handed off to the browser at all — not to the malicious target, and
+  // not to any normalized off-origin path.
   expect(assign).not.toHaveBeenCalled()
 })
 

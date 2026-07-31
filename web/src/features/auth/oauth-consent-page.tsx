@@ -4,6 +4,7 @@ import { AlertCircle, Check, Loader2, ShieldCheck, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useAppSelector } from '@/store/hooks'
 import { httpStatus } from '@/lib/rtk-error'
+import type { OAuth2ConsentData } from '@/store/api'
 import { scopeConsentLabel } from './oauth-scopes'
 import { useOauth2ConsentDataQuery, useOauth2ConsentDecideMutation } from './oauth-provider-api'
 
@@ -88,7 +89,7 @@ function ConsentCard({
   data,
 }: {
   consentId: string
-  data: { client_name: string; requested_scopes: string[]; redirect_uri: string }
+  data: OAuth2ConsentData
 }) {
   const memberships = useAppSelector((s) => s.auth.memberships)
   const activeWorkspaceId = useAppSelector((s) => s.auth.activeWorkspaceId)
