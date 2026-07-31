@@ -198,8 +198,11 @@ func TestAdvanceOverCapReEnqueues(t *testing.T) {
 	if snd.called() || core.claimCalls != 0 {
 		t.Fatal("over-cap step must not claim or send")
 	}
-	if !enq.inCalled || enq.in != capBackoff {
-		t.Fatalf("expected re-enqueue in %v, got called=%v in=%v", capBackoff, enq.inCalled, enq.in)
+	// The cap clears when sent_today resets at the UTC boundary, so the retry targets
+	// that rather than a fixed poll. The exact arithmetic is pinned by the
+	// nextAttemptIn tests.
+	if !enq.inCalled || enq.in <= 0 || enq.in > capBackoff+24*time.Hour {
+		t.Fatalf("expected a bounded positive retry wait, got called=%v in=%v", enq.inCalled, enq.in)
 	}
 	if core.finalized != nil {
 		t.Fatal("over-cap must not finalize/advance the cursor")
@@ -314,18 +317,63 @@ func TestAdvanceZeroCapStopsFailed(t *testing.T) {
 	}
 }
 
-func TestAdvanceCapDeferralCeilingStopsFailed(t *testing.T) {
-	// Over cap AND past the deferral ceiling: stop 'failed' instead of re-enqueue.
-	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50}, deferrals: maxCapDeferrals + 1}
+// A mailbox daily cap is self-clearing — sent_today is counted over the UTC day, and
+// the only cap that can never clear is cap <= 0, which stops outright above. So
+// being over cap must never fail the enrollment, however long it has waited: the old
+// count-based ceiling killed the tail of every launch bigger than a day's capacity
+// (1000 contacts at 50/day → everything past ~400 failed at ~7.5 days).
+func TestAdvanceOverCapNeverFailsTheEnrollmentHoweverLongItWaits(t *testing.T) {
+	core := &stubCore{
+		job:       coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50},
+		deferrals: maxCapDeferrals * 100,
+	}
 	snd, enq := &fakeSender{}, &fakeEnq{}
 	if err := run(t, core, snd, enq); err != nil {
 		t.Fatal(err)
 	}
-	if core.stopped != "failed" {
-		t.Fatalf("want stop reason failed at deferral ceiling, got %q", core.stopped)
+	if core.stopped != "" {
+		t.Fatalf("a self-clearing cap must not stop the enrollment, got %q", core.stopped)
 	}
-	if enq.inCalled {
-		t.Fatal("past the ceiling must not re-enqueue")
+	if snd.called() {
+		t.Fatal("over cap must not send")
+	}
+	if !enq.inCalled || enq.in <= 0 {
+		t.Fatalf("expected a positive retry wait, got called=%v in=%v", enq.inCalled, enq.in)
+	}
+	// Still counted, so a genuinely stuck loop remains observable.
+	if core.incrCalls != 1 {
+		t.Errorf("deferral counter incremented %d times, want 1", core.incrCalls)
+	}
+}
+
+// The cap clears when sent_today resets, so the retry targets the UTC boundary
+// rather than polling — and lands inside the campaign's window, because a deferred
+// retry sends the moment it runs.
+func TestAdvanceOverCapRetriesAtTheDayBoundaryInsideTheWindow(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	sched := cadence.Schedule{Timezone: "America/New_York"}
+	for d := int(time.Monday); d <= int(time.Friday); d++ {
+		sched.Windows = append(sched.Windows,
+			cadence.SendWindow{Weekday: d, StartMinute: 9 * 60, EndMinute: 17 * 60})
+	}
+	win, err := sched.Compile()
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50, Schedule: sched}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if !enq.inCalled {
+		t.Fatal("no retry scheduled")
+	}
+	at := time.Now().Add(enq.in)
+	if !win.Contains(at) {
+		t.Errorf("retry at %s (%s local) is outside the campaign's window", at.UTC(), at.In(loc))
 	}
 }
 
