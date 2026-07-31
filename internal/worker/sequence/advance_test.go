@@ -205,6 +205,67 @@ func TestAdvanceOverCapReEnqueues(t *testing.T) {
 	}
 }
 
+// The campaign has hit campaigns.daily_limit. Every mailbox still has capacity, so
+// nothing about the mailbox numbers says "wait" — the explicit flag has to, and it
+// must defer rather than stop: the campaign gets a fresh allowance tomorrow.
+func TestAdvanceCampaignLimitedDefers(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{CampaignLimited: true}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if snd.called() || core.claimCalls != 0 {
+		t.Fatal("a campaign at its daily limit must not claim or send")
+	}
+	if core.stopped != "" {
+		t.Fatalf("a campaign limit must not stop the enrollment, got stop reason %q", core.stopped)
+	}
+	if !enq.inCalled || enq.in != capBackoff {
+		t.Fatalf("expected re-enqueue in %v, got called=%v in=%v", capBackoff, enq.inCalled, enq.in)
+	}
+	if core.incrCalls != 1 {
+		t.Errorf("cap-deferral counter incremented %d times, want 1", core.incrCalls)
+	}
+}
+
+// Invariant 3: the warmup engine has paused the mailbox this thread must send from.
+// The job carries no capacity of its own (the mailbox has plenty), so without the
+// flag being checked BEFORE the degenerate-cap branch this enrollment would be
+// STOPPED — and the mailbox may recover, while the thread cannot move to another
+// mailbox mid-sequence.
+func TestAdvanceHealthPausedDefersRatherThanStopping(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{HealthPaused: true, EffectiveDailyCap: 0}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if core.stopped != "" {
+		t.Fatalf("a paused mailbox must not stop the enrollment, got stop reason %q", core.stopped)
+	}
+	if snd.called() || core.claimCalls != 0 {
+		t.Fatal("a paused mailbox must not claim or send")
+	}
+	if !enq.inCalled || enq.in != capBackoff {
+		t.Fatalf("expected re-enqueue in %v, got called=%v in=%v", capBackoff, enq.inCalled, enq.in)
+	}
+}
+
+// A gated deferral is still bounded: a mailbox that never recovers must not
+// re-enqueue forever.
+func TestAdvanceGatedDeferralCeilingStopsFailed(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{HealthPaused: true}, deferrals: maxCapDeferrals + 1}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if core.stopped != "failed" {
+		t.Fatalf("want stop reason failed at the deferral ceiling, got %q", core.stopped)
+	}
+	if enq.inCalled {
+		t.Fatal("past the ceiling must not re-enqueue")
+	}
+}
+
 func TestAdvanceMailboxSpacingReEnqueuesWithoutSending(t *testing.T) {
 	core := &stubCore{
 		job: coreapi.StepSendJob{

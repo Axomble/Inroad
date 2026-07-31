@@ -79,9 +79,18 @@ func (q *Queries) DeleteCampaignSendersExcept(ctx context.Context, arg DeleteCam
 }
 
 const getCampaignFallbackSender = `-- name: GetCampaignFallbackSender :one
-SELECT cam.mailbox_id, m.email, m.provider, m.status
+SELECT cam.mailbox_id, m.email, m.provider, m.status,
+       m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
+       m.created_at AS mailbox_created_at,
+       COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
+       (SELECT count(*) FROM sends s
+         WHERE s.mailbox_id = cam.mailbox_id AND s.status = 'sent'
+           AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+           AND s.sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day'
+       ) AS sent_today
 FROM campaigns cam
 JOIN mailboxes m ON m.id = cam.mailbox_id AND m.workspace_id = cam.workspace_id
+LEFT JOIN warmup_participants wp ON wp.mailbox_id = cam.mailbox_id AND wp.workspace_id = cam.workspace_id
 WHERE cam.id = $1 AND cam.workspace_id = $2
 `
 
@@ -91,17 +100,26 @@ type GetCampaignFallbackSenderParams struct {
 }
 
 type GetCampaignFallbackSenderRow struct {
-	MailboxID uuid.UUID `json:"mailbox_id"`
-	Email     string    `json:"email"`
-	Provider  string    `json:"provider"`
-	Status    string    `json:"status"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	Email            string             `json:"email"`
+	Provider         string             `json:"provider"`
+	Status           string             `json:"status"`
+	DailyCap         int32              `json:"daily_cap"`
+	RampEnabled      bool               `json:"ramp_enabled"`
+	RampStartCap     int32              `json:"ramp_start_cap"`
+	RampDays         int32              `json:"ramp_days"`
+	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
+	HealthState      string             `json:"health_state"`
+	SentToday        int64              `json:"sent_today"`
 }
 
 // The implicit one-mailbox pool a campaign with NO campaign_senders rows sends
 // from (campaigns.mailbox_id). An empty pool means "never configured", not
 // "broken", so the read path projects the fallback in the same shape as a real
 // pool row rather than reporting a campaign with no senders it will in fact send
-// from. Workspace-pinned on both the campaign and the mailbox join.
+// from — including the health and capacity columns, since the fallback mailbox is
+// gated by its warmup health exactly like a pool member. Workspace-pinned on both
+// the campaign and the mailbox join.
 func (q *Queries) GetCampaignFallbackSender(ctx context.Context, arg GetCampaignFallbackSenderParams) (GetCampaignFallbackSenderRow, error) {
 	row := q.db.QueryRow(ctx, getCampaignFallbackSender, arg.ID, arg.WorkspaceID)
 	var i GetCampaignFallbackSenderRow
@@ -110,6 +128,13 @@ func (q *Queries) GetCampaignFallbackSender(ctx context.Context, arg GetCampaign
 		&i.Email,
 		&i.Provider,
 		&i.Status,
+		&i.DailyCap,
+		&i.RampEnabled,
+		&i.RampStartCap,
+		&i.RampDays,
+		&i.MailboxCreatedAt,
+		&i.HealthState,
+		&i.SentToday,
 	)
 	return i, err
 }
@@ -131,11 +156,35 @@ func (q *Queries) GetEnrollmentMailbox(ctx context.Context, arg GetEnrollmentMai
 	return mailbox_id, err
 }
 
+const getMailboxColdHealth = `-- name: GetMailboxColdHealth :one
+SELECT COALESCE((SELECT CASE WHEN wp.enabled THEN wp.health_state ELSE '' END
+                 FROM warmup_participants wp
+                 WHERE wp.mailbox_id = $1 AND wp.workspace_id = $2), '')::text AS health_state
+`
+
+type GetMailboxColdHealthParams struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// One mailbox's warmup health for the COLD send path, workspace-pinned. Read for
+// the sender a step actually resolved to — the enrollment's pinned mailbox, or a
+// freshly selected pool member — so health gating applies to a thread already in
+// flight and not only at assignment time. Empty means "no live health signal":
+// not a warmup participant, a disabled participant (whose stored state is frozen,
+// see ListCampaignSenders), or a mailbox that has been deleted.
+func (q *Queries) GetMailboxColdHealth(ctx context.Context, arg GetMailboxColdHealthParams) (string, error) {
+	row := q.db.QueryRow(ctx, getMailboxColdHealth, arg.MailboxID, arg.WorkspaceID)
+	var health_state string
+	err := row.Scan(&health_state)
+	return health_state, err
+}
+
 const listCampaignSenderCandidates = `-- name: ListCampaignSenderCandidates :many
 SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned_at,
        m.status AS mailbox_status, m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
-       COALESCE(wp.health_state, '') AS health_state,
+       COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -171,11 +220,17 @@ type ListCampaignSenderCandidatesRow struct {
 
 // Every pool row with the state rotation needs: the operator's weight/enabled
 // flags, rotation counters, the mailbox's status and cap/ramp config, its warmup
-// health (” when it is not a warmup participant), and how much it has already
-// sent today. Eligibility (enabled, active, under cap) is decided in Go so that
-// remaining capacity has exactly ONE implementation (the effectiveCap helper) and
-// so an exhausted pool can still report its aggregate capacity for the
-// cap-deferral path. Ordered by mailbox_id, matching rotation's tie-break.
+// health, and how much it has already sent today. Eligibility (enabled, active,
+// not health-paused, under its health-scaled cap) is decided in Go so that
+// remaining capacity has exactly ONE implementation (platform/sendcap) and so an
+// exhausted pool can still report its aggregate capacity for the cap-deferral
+// path. Ordered by mailbox_id, matching rotation's tie-break.
+//
+// health_state is ” when there is no LIVE health signal: not a warmup
+// participant, or a disabled one — the health sweep only recomputes health for
+// enabled participants, so a disabled row's state is frozen history, and gating
+// cold sending on it would block the mailbox forever with no engine able to
+// recover it.
 //
 // sent_today repeats CountSentToday's UTC-day half-open range verbatim so a
 // mailbox's cap means the same thing here as on the single-mailbox path, and so
@@ -216,9 +271,18 @@ func (q *Queries) ListCampaignSenderCandidates(ctx context.Context, arg ListCamp
 
 const listCampaignSenders = `-- name: ListCampaignSenders :many
 SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned_at,
-       m.email, m.provider, m.status
+       m.email, m.provider, m.status,
+       m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
+       m.created_at AS mailbox_created_at,
+       COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
+       (SELECT count(*) FROM sends s
+         WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
+           AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+           AND s.sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day'
+       ) AS sent_today
 FROM campaign_senders cs
 JOIN mailboxes m ON m.id = cs.mailbox_id AND m.workspace_id = cs.workspace_id
+LEFT JOIN warmup_participants wp ON wp.mailbox_id = cs.mailbox_id AND wp.workspace_id = cs.workspace_id
 WHERE cs.campaign_id = $1 AND cs.workspace_id = $2
 ORDER BY m.email
 `
@@ -229,21 +293,41 @@ type ListCampaignSendersParams struct {
 }
 
 type ListCampaignSendersRow struct {
-	MailboxID      uuid.UUID          `json:"mailbox_id"`
-	Weight         int32              `json:"weight"`
-	Enabled        bool               `json:"enabled"`
-	AssignedCount  int64              `json:"assigned_count"`
-	LastAssignedAt pgtype.Timestamptz `json:"last_assigned_at"`
-	Email          string             `json:"email"`
-	Provider       string             `json:"provider"`
-	Status         string             `json:"status"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	Weight           int32              `json:"weight"`
+	Enabled          bool               `json:"enabled"`
+	AssignedCount    int64              `json:"assigned_count"`
+	LastAssignedAt   pgtype.Timestamptz `json:"last_assigned_at"`
+	Email            string             `json:"email"`
+	Provider         string             `json:"provider"`
+	Status           string             `json:"status"`
+	DailyCap         int32              `json:"daily_cap"`
+	RampEnabled      bool               `json:"ramp_enabled"`
+	RampStartCap     int32              `json:"ramp_start_cap"`
+	RampDays         int32              `json:"ramp_days"`
+	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
+	HealthState      string             `json:"health_state"`
+	SentToday        int64              `json:"sent_today"`
 }
 
 // A campaign's whole sender pool for display: membership and weights joined to
-// the mailbox identity the UI shows, plus the rotation state so an operator can
-// see the spread actually happening. Disabled rows are INCLUDED — the panel edits
+// the mailbox identity the UI shows, the rotation state so an operator can see
+// the spread actually happening, and each mailbox's warmup health plus its
+// cap/ramp config and today's send count so the panel can explain a campaign
+// sending slower than configured. Disabled rows are INCLUDED — the panel edits
 // them. Workspace-pinned, and the mailbox join is pinned too so a row can never
 // surface another tenant's mailbox.
+//
+// health_state is ” for a mailbox that is not warming up, which includes a
+// DISABLED warmup participant (the API reports that absence as null): the health sweep only recomputes health for
+// enabled participants, so a disabled row's state is frozen history rather than a
+// live signal, and gating cold sending on it forever would be a silent trap. The
+// send path reads health the same way (ListCampaignSenderCandidates), so the
+// reported cap is the one that will actually be enforced.
+//
+// cap_today is deliberately NOT computed here: ramp and health scaling live in
+// platform/sendcap so the API and the sender cannot disagree about a mailbox's
+// capacity.
 func (q *Queries) ListCampaignSenders(ctx context.Context, arg ListCampaignSendersParams) ([]ListCampaignSendersRow, error) {
 	rows, err := q.db.Query(ctx, listCampaignSenders, arg.CampaignID, arg.WorkspaceID)
 	if err != nil {
@@ -262,6 +346,13 @@ func (q *Queries) ListCampaignSenders(ctx context.Context, arg ListCampaignSende
 			&i.Email,
 			&i.Provider,
 			&i.Status,
+			&i.DailyCap,
+			&i.RampEnabled,
+			&i.RampStartCap,
+			&i.RampDays,
+			&i.MailboxCreatedAt,
+			&i.HealthState,
+			&i.SentToday,
 		); err != nil {
 			return nil, err
 		}

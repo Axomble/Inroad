@@ -74,7 +74,7 @@ type fakeStore struct {
 
 	rescheduled        map[uuid.UUID]time.Time
 	rescheduleErr      error
-	replacedSchedule   *Schedule
+	replacedSchedule   *Plan
 	replaceScheduleErr error
 }
 
@@ -122,11 +122,11 @@ func (f *fakeStore) ListWindows(context.Context, uuid.UUID, uuid.UUID) ([]SendWi
 	return f.windows, nil
 }
 
-func (f *fakeStore) ReplaceSchedule(_ context.Context, _, _ uuid.UUID, sched Schedule) error {
+func (f *fakeStore) ReplaceSchedule(_ context.Context, _, _ uuid.UUID, plan Plan) error {
 	if f.replaceScheduleErr != nil {
 		return f.replaceScheduleErr
 	}
-	f.replacedSchedule = &sched
+	f.replacedSchedule = &plan
 	return nil
 }
 func (f *fakeStore) ListSenders(context.Context, uuid.UUID, uuid.UUID) ([]Sender, error) {

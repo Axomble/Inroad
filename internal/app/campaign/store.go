@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/sendcap"
 )
 
 // CreateInput carries the fields needed to create a new campaign. Timezone is
@@ -55,9 +56,10 @@ type Store interface {
 	// ListWindows returns the campaign's open sending intervals for the week,
 	// ordered by weekday then start minute.
 	ListWindows(ctx context.Context, ws, campaignID uuid.UUID) ([]SendWindow, error)
-	// ReplaceSchedule swaps the campaign's timezone and its whole set of windows
-	// atomically, so the campaign is never observed window-less.
-	ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, sched Schedule) error
+	// ReplaceSchedule swaps the campaign's timezone, its whole set of windows and
+	// its campaign-wide daily limit atomically, so the campaign is never observed
+	// window-less nor with half of a saved plan applied.
+	ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, plan Plan) error
 	// ListSenders returns the campaign's sender-pool members (including disabled
 	// ones — the panel edits them), ordered by mailbox email.
 	ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]Sender, error)
@@ -209,11 +211,13 @@ func (s *PgStore) ListWindows(ctx context.Context, ws, campaignID uuid.UUID) ([]
 	return out, nil
 }
 
-// ReplaceSchedule swaps the timezone and the whole window set in one
-// transaction: delete-then-insert would otherwise leave a window between the two
-// statements where the campaign has no schedule at all, which the cadence engine
-// reads as "no valid send instant exists".
-func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, sched Schedule) error {
+// ReplaceSchedule swaps the timezone, the whole window set and the daily limit in
+// one transaction: delete-then-insert would otherwise leave a window between the
+// two statements where the campaign has no schedule at all, which the cadence
+// engine reads as "no valid send instant exists". The limit rides along because it
+// is saved by the same panel: committing the windows without it would leave the
+// plan half-applied.
+func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, plan Plan) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -222,7 +226,12 @@ func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID,
 	qtx := s.q.WithTx(tx)
 
 	if err := qtx.SetCampaignTimezone(ctx, gen.SetCampaignTimezoneParams{
-		ID: campaignID, WorkspaceID: ws, Timezone: sched.Timezone,
+		ID: campaignID, WorkspaceID: ws, Timezone: plan.Timezone,
+	}); err != nil {
+		return err
+	}
+	if err := qtx.SetCampaignDailyLimit(ctx, gen.SetCampaignDailyLimitParams{
+		ID: campaignID, WorkspaceID: ws, DailyLimit: storedDailyLimit(plan.DailyLimit),
 	}); err != nil {
 		return err
 	}
@@ -231,10 +240,19 @@ func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID,
 	}); err != nil {
 		return err
 	}
-	if err := insertWindows(ctx, qtx, ws, campaignID, sched.Windows); err != nil {
+	if err := insertWindows(ctx, qtx, ws, campaignID, plan.Windows); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// storedDailyLimit narrows the validated limit to the column's type; nil clears it.
+func storedDailyLimit(limit *int) *int32 {
+	if limit == nil {
+		return nil
+	}
+	n := int32(*limit) //nolint:gosec // >= 1 and operator-entered; an INT column bounds it
+	return &n
 }
 
 // insertWindows queues one insert per interval as a single batch. Shared by
@@ -278,22 +296,67 @@ func (s *PgStore) ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]
 			Weight: int(r.Weight), Enabled: r.Enabled,
 			AssignedCount: r.AssignedCount, LastAssignedAt: nullableTime(r.LastAssignedAt),
 		}
+		senderCapacity{
+			dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
+			rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
+			mailboxStatus: r.Status, poolEnabled: r.Enabled,
+			healthState: r.HealthState, sentToday: r.SentToday,
+		}.fill(&out[i])
 	}
 	return out, nil
 }
 
 // FallbackSender reports campaigns.mailbox_id in the pool's shape. Weight 1 and
 // enabled true describe how it actually behaves — it is the campaign's only
-// sender — and the rotation state is genuinely absent, since no row tracks it.
+// sender — and the rotation state is genuinely absent, since no row tracks it. Its
+// health and capacity are real, though: the fallback mailbox is ramped and
+// health-gated exactly like a pool member.
 func (s *PgStore) FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) (Sender, error) {
 	r, err := s.q.GetCampaignFallbackSender(ctx, gen.GetCampaignFallbackSenderParams{ID: campaignID, WorkspaceID: ws})
 	if err != nil {
 		return Sender{}, err
 	}
-	return Sender{
+	out := Sender{
 		MailboxID: r.MailboxID, Email: r.Email, Provider: r.Provider, Status: r.Status,
 		Weight: defaultSenderWeight, Enabled: true,
-	}, nil
+	}
+	senderCapacity{
+		dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
+		rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
+		mailboxStatus: r.Status, poolEnabled: true,
+		healthState: r.HealthState, sentToday: r.SentToday,
+	}.fill(&out)
+	return out, nil
+}
+
+// senderCapacity is the health-and-capacity slice of a pool row, shared by the
+// pool listing and the fallback projection so both report the identical cap_today
+// for the identical mailbox. The two sqlc row types are distinct structs with the
+// same columns, so the shared logic takes the columns rather than either row.
+type senderCapacity struct {
+	dailyCap, rampStartCap, rampDays int32
+	rampEnabled                      bool
+	mailboxCreatedAt                 pgtype.Timestamptz
+	mailboxStatus                    string
+	poolEnabled                      bool
+	healthState                      string
+	sentToday                        int64
+}
+
+// fill sets s's reported health and capacity. cap_today is the SAME arithmetic the
+// send path applies (platform/sendcap: ramp, then warmup health), so an operator
+// reading the panel sees the cap that will actually be enforced. A paused mailbox
+// therefore reports a cap of 0 and sending=false, which is exactly what it does.
+func (c senderCapacity) fill(s *Sender) {
+	ageDays := int(time.Since(c.mailboxCreatedAt.Time).Hours() / 24)
+	ramped := sendcap.Effective(int(c.dailyCap), int(c.rampStartCap), int(c.rampDays), c.rampEnabled, ageDays)
+	s.CapToday = sendcap.Cold(ramped, c.healthState)
+	s.SentToday = int(c.sentToday)
+	s.Sending = c.poolEnabled && c.mailboxStatus == mailboxStatusActive && c.healthState != sendcap.HealthPaused
+	if c.healthState != "" {
+		state := c.healthState
+		s.HealthState = &state
+	}
 }
 
 // ReplaceSenders upserts every requested member then deletes the ones left out,

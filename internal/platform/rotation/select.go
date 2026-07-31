@@ -30,26 +30,20 @@ const (
 	ModeWeighted   = "weighted"
 )
 
-// Warmup health states a candidate can carry, mirroring the
-// warmup_participants.health_state CHECK constraint. Duplicated as plain strings
-// rather than imported: platform packages don't depend on each other, and this
-// package must stay free of anything but its own arithmetic.
-const (
-	healthWatch     = "watch"
-	healthThrottled = "throttled"
-	healthPaused    = "paused"
-)
-
 // Candidate is one pool member with the state selection needs. RemainingToday is
-// the mailbox's effective daily cap (ramp included) minus what it has already
-// sent today; HealthState is its warmup health, empty when it is not warming up.
+// the mailbox's cold-sending cap for today — ramped AND already scaled by warmup
+// health (platform/sendcap) — minus what it has already sent today.
 // LastAssignedAt is the zero time for a mailbox that has never been assigned.
+//
+// Deliberately health-free: health arrives here folded into RemainingToday, so a
+// health field or factor in this package would count it a SECOND time (a 'watch'
+// mailbox penalised 0.7 on capacity and 0.7 again on score = 0.49). See
+// TestCandidateCarriesNoHealthSignal.
 type Candidate struct {
 	MailboxID      string
 	Weight         int
 	RemainingToday int
 	WarmupAgeDays  int
-	HealthState    string
 	AssignedCount  int64
 	LastAssignedAt time.Time
 }
@@ -94,32 +88,17 @@ func order(mode string) func(a, b Candidate) int {
 }
 
 // score ranks a candidate for ModeWeighted: the operator's weight, scaled by how
-// much capacity it has left today, by its warmup health, and by a log2 age term
-// so an older mailbox absorbs more volume than a freshly-connected one. Capacity
-// is a factor here rather than a filter — an eligible candidate always has
-// RemainingToday > 0 — which is what makes 'weighted' the only mode that routes
-// around a nearly-exhausted mailbox before it hits its cap.
+// much capacity it has left today, and by a log2 age term so an older mailbox
+// absorbs more volume than a freshly-connected one. Capacity is a factor here
+// rather than a filter — an eligible candidate always has RemainingToday > 0 —
+// which is what makes 'weighted' the only mode that routes around a
+// nearly-exhausted mailbox before it hits its cap.
+//
+// Warmup health is NOT a term: it already scaled the caller's RemainingToday
+// (health gating), so multiplying by it again would square the penalty. This is
+// pure capacity/weight/age arithmetic and must stay that way.
 func score(c Candidate) float64 {
 	return float64(max(c.Weight, 0)) *
 		float64(max(c.RemainingToday, 0)) *
-		healthFactor(c.HealthState) *
 		(1 + math.Log2(float64(max(c.WarmupAgeDays, 0))+1))
-}
-
-// healthFactor scales a candidate's score by its warmup health. A paused mailbox
-// is DEPRIORITIZED, not excluded: excluding it would be health-gating of cold
-// sending, which is deliberately out of scope, and a pool whose every member is
-// unhealthy must still send.
-func healthFactor(state string) float64 {
-	switch state {
-	case healthWatch:
-		return 0.7
-	case healthThrottled:
-		return 0.4
-	case healthPaused:
-		return 0.1
-	default:
-		// 'healthy', or empty for a mailbox that is not warming up at all.
-		return 1
-	}
 }

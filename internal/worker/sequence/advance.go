@@ -85,17 +85,11 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			// entry point as every other halt; nothing is sent.
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonMailboxRemoved)
 		}
-		if job.EffectiveDailyCap <= 0 {
-			// Degenerate cap (daily_cap=0, or ramp_start_cap=0 on a brand-new
-			// mailbox): this enrollment can never send. Stop it 'failed' rather
-			// than deferring forever.
-			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
-		}
-		if job.SentToday >= job.EffectiveDailyCap {
-			// Over today's cap: bump the deferral counter and retry later,
-			// leaving the cursor unchanged so the same step is re-attempted —
-			// but fail out if we've deferred too long, so a permanently mis-set
-			// cap can't re-enqueue this enrollment indefinitely.
+		// deferForCapacity bumps the deferral counter and retries later, leaving the
+		// cursor unchanged so the same step is re-attempted — but fails out if we've
+		// deferred too long, so a ceiling that can never clear (a mis-set cap, a
+		// mailbox that never recovers) can't re-enqueue this enrollment forever.
+		deferForCapacity := func() error {
 			n, err := core.IncrementEnrollmentCapDeferrals(ctx, p.EnrollmentID, p.WorkspaceID)
 			if err != nil {
 				return err
@@ -104,6 +98,28 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
 			}
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, capBackoff)
+		}
+		// Deferrals that are NOT about this mailbox's own cap, and so carry no
+		// capacity numbers of their own: the campaign has hit its campaign-wide
+		// daily limit, or the warmup engine has paused the mailbox this thread must
+		// send from. Both are checked BEFORE the degenerate-cap branch below, which
+		// STOPS an enrollment: an unhealthy mailbox may recover and a limited
+		// campaign gets a fresh allowance tomorrow, so in both cases the thread has
+		// to wait rather than die — and it cannot be re-routed, since a follow-up
+		// must come from the mailbox that started the thread.
+		if job.CampaignLimited || job.HealthPaused {
+			return deferForCapacity()
+		}
+		if job.EffectiveDailyCap <= 0 {
+			// Degenerate cap (daily_cap=0, or ramp_start_cap=0 on a brand-new
+			// mailbox): this enrollment can never send. Stop it 'failed' rather
+			// than deferring forever.
+			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
+		}
+		if job.SentToday >= job.EffectiveDailyCap {
+			// Over today's cap — including a cap the mailbox's warmup health has
+			// scaled down, which is enforced here without a branch of its own.
+			return deferForCapacity()
 		}
 
 		// schedule enqueues the next step (lazy chain) unless the enrollment

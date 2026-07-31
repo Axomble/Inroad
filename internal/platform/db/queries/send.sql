@@ -110,3 +110,19 @@ LEFT JOIN sequence_enrollments e
 WHERE s.workspace_id = $1 AND s.message_id = $2 AND s.message_id <> ''
 ORDER BY s.created_at DESC
 LIMIT 1;
+
+-- name: CountCampaignSentToday :one
+-- Sends today for a whole CAMPAIGN, counted over the UTC calendar day — the
+-- consumption side of campaigns.daily_limit. Deliberately a campaign-wide total
+-- across every mailbox in the pool, which is what an operator means by "this
+-- campaign sends at most 100/day"; the per-mailbox ceiling is CountSentToday's
+-- job. The half-open UTC range repeats CountSentToday's verbatim so a day means
+-- the same thing on both gates, and so the partial index
+-- idx_sends_campaign_sent (campaign_id, sent_at WHERE status='sent') can
+-- range-seek today's rows instead of filtering the campaign's whole history.
+-- Workspace-pinned (CountSentToday is not, being keyed on an unguessable mailbox
+-- id; every new query is).
+SELECT count(*) FROM sends
+WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'sent'
+  AND sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+  AND sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day';

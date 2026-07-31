@@ -49,3 +49,9 @@ VALUES ($1, $2, $3, $4, $5);
 SELECT status, count(*) AS n FROM sends
 WHERE campaign_id = $1 AND workspace_id = $2
 GROUP BY status;
+
+-- name: SetCampaignDailyLimit :exec
+-- The campaign-wide ceiling on sends per UTC day; NULL clears it. Validated at
+-- the boundary (>= 1) against the same rule the column's CHECK enforces, so a
+-- rejected value is a 422 rather than a constraint violation surfacing as a 500.
+UPDATE campaigns SET daily_limit = $3 WHERE id = $1 AND workspace_id = $2;

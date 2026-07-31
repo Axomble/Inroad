@@ -2,6 +2,8 @@ package rotation
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,41 +79,41 @@ func TestSelectWeightedRespectsOperatorWeight(t *testing.T) {
 	}
 }
 
-func TestSelectWeightedDeprioritizesUnhealthyMailboxes(t *testing.T) {
-	for _, tc := range []struct{ state, want string }{
-		{"healthy", "candidate"},
-		{healthWatch, "healthy-peer"},
-		{healthThrottled, "healthy-peer"},
-		{healthPaused, "healthy-peer"},
-	} {
-		t.Run(tc.state, func(t *testing.T) {
-			// Same weight and capacity on both sides, so only health can decide.
-			got, err := Select(ModeWeighted, []Candidate{
-				{MailboxID: "candidate", Weight: 10, RemainingToday: 20, HealthState: tc.state},
-				{MailboxID: "healthy-peer", Weight: 10, RemainingToday: 20, HealthState: "healthy"},
-			})
-			if err != nil {
-				t.Fatalf("Select: %v", err)
-			}
-			if got.MailboxID != tc.want {
-				t.Errorf("mailbox = %q, want %q for health %q", got.MailboxID, tc.want, tc.state)
-			}
-		})
+// TestCandidateCarriesNoHealthSignal is the regression guard for double-counted
+// health. Health gating (platform/sendcap) scales a mailbox's cap BEFORE the
+// caller computes RemainingToday, so health is already inside every candidate's
+// capacity. If a health field returns to Candidate, whatever reads it multiplies
+// the penalty a second time — a 'watch' mailbox scored 0.7 × 0.7 = 0.49 — and no
+// ordering test would notice, because squaring a factor preserves the ordering
+// each factor produces on its own. So the guard is structural: this package must
+// have nowhere to put a health signal.
+func TestCandidateCarriesNoHealthSignal(t *testing.T) {
+	rt := reflect.TypeOf(Candidate{})
+	for i := range rt.NumField() {
+		name := rt.Field(i).Name
+		if strings.Contains(strings.ToLower(name), "health") {
+			t.Errorf("Candidate.%s: health must not reach the selector — it is already "+
+				"folded into RemainingToday, so scoring it here counts it twice", name)
+		}
 	}
 }
 
-// Unhealthy is deprioritized, never excluded: a pool where every mailbox is
-// paused must still send.
-func TestSelectWeightedStillPicksWhenEveryMailboxIsPaused(t *testing.T) {
+// The selector ranks on capacity alone, whatever the reason a candidate's capacity
+// is small. A health-scaled cap is just a smaller cap: the mailbox with more room
+// left wins, and applying a health factor to the score on TOP of the scaled
+// capacity would invert this pair (7 × 0.7 = 4.9 < 5).
+func TestSelectWeightedRanksScaledCapacityWithoutRescalingIt(t *testing.T) {
 	got, err := Select(ModeWeighted, []Candidate{
-		{MailboxID: "a", Weight: 1, RemainingToday: 5, HealthState: healthPaused},
-		{MailboxID: "b", Weight: 1, RemainingToday: 50, HealthState: healthPaused},
+		// A 'watch' mailbox whose ramped cap of 10 was already scaled to 7.
+		{MailboxID: "gated-but-roomier", Weight: 1, RemainingToday: 7},
+		{MailboxID: "ungated-tighter", Weight: 1, RemainingToday: 5},
 	})
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
-	if got.MailboxID != "b" {
-		t.Errorf("mailbox = %q, want b (still ranked on capacity)", got.MailboxID)
+	if got.MailboxID != "gated-but-roomier" {
+		t.Errorf("mailbox = %q, want gated-but-roomier: health is already in "+
+			"RemainingToday, so the selector must not scale by it again", got.MailboxID)
 	}
 }
 
@@ -142,15 +144,14 @@ func TestSelectWeightedFavoursTheOlderMailbox(t *testing.T) {
 }
 
 // The single-factor tests above each vary one term with the others held equal, so
-// they would all still pass if the RELATIVE magnitude of the terms drifted — a
-// health factor that swamped remaining capacity, or an age term that swamped an
-// explicit operator weight, would go unnoticed. These cases put two factors in
-// direct opposition and pin the trade-off, including from both sides of each
-// break-even so a change in either direction fails.
+// they would all still pass if the RELATIVE magnitude of the terms drifted — an
+// age term that swamped an explicit operator weight would go unnoticed. These
+// cases put two factors in direct opposition and pin the trade-off, including from
+// both sides of each break-even so a change in either direction fails.
 //
-// Scores for reference (weight × remaining × health × (1 + log2(age+1))):
-// health is 1.0 / 0.7 / 0.4 / 0.1 and the age term spans 1.0 at day 0 to ~9.5 at
-// a year, so age is a heavier term than its "tie-breaker" appearance suggests.
+// Scores for reference (weight × remaining × (1 + log2(age+1))): the age term
+// spans 1.0 at day 0 to ~9.5 at a year, so age is a heavier term than its
+// "tie-breaker" appearance suggests.
 func TestSelectWeightedResolvesConflictingFactors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -179,32 +180,14 @@ func TestSelectWeightedResolvesConflictingFactors(t *testing.T) {
 			want: "spacious",
 		},
 		{
-			name: "an aged watch-listed mailbox beats a brand-new healthy one",
-			// 20 vs 125. 'watch' is a mild degradation; a mailbox connected today has
-			// no sending reputation at all. The one with a month of history and more
-			// room is genuinely better able to carry cold volume.
-			a:    Candidate{MailboxID: "fresh-healthy", Weight: 1, RemainingToday: 20, HealthState: "healthy"},
-			b:    Candidate{MailboxID: "aged-watch", Weight: 1, RemainingToday: 30, HealthState: healthWatch, WarmupAgeDays: 30},
-			want: "aged-watch",
-		},
-		{
-			name: "health outranks a 5x capacity edge",
-			// 5 vs 10. The regression guard that matters most: a paused mailbox must
-			// not win on volume alone. health 0.1 puts the break-even at 10x capacity,
-			// so 5x is not enough.
-			a:    Candidate{MailboxID: "paused-roomy", Weight: 1, RemainingToday: 50, HealthState: healthPaused},
-			b:    Candidate{MailboxID: "healthy-tight", Weight: 1, RemainingToday: 10, HealthState: "healthy"},
-			want: "healthy-tight",
-		},
-		{
-			name: "a paused mailbox past the 10x break-even still wins",
-			// 20 vs 3. Deliberate: health WEIGHTS selection, it does not gate it
-			// (gating is out of scope), and a pool must still send when its healthy
-			// member has 3 sends left. See the report note — whether 10x is the right
-			// threshold is a product question, not a formula bug.
-			a:    Candidate{MailboxID: "paused-roomy", Weight: 1, RemainingToday: 200, HealthState: healthPaused},
-			b:    Candidate{MailboxID: "healthy-nearly-full", Weight: 1, RemainingToday: 3, HealthState: "healthy"},
-			want: "paused-roomy",
+			name: "an aged health-scaled mailbox beats a brand-new one at full cap",
+			// 20 vs 149. A 'watch' mailbox's cap of 30 arrives here scaled to 21; a
+			// mailbox connected today has no sending reputation at all. The one with a
+			// month of history and more remaining room is genuinely better able to
+			// carry cold volume even after its health penalty.
+			a:    Candidate{MailboxID: "fresh-full-cap", Weight: 1, RemainingToday: 20},
+			b:    Candidate{MailboxID: "aged-gated", Weight: 1, RemainingToday: 21, WarmupAgeDays: 30},
+			want: "aged-gated",
 		},
 		{
 			name: "an explicit weight outranks a year of age",
@@ -221,14 +204,6 @@ func TestSelectWeightedResolvesConflictingFactors(t *testing.T) {
 			a:    Candidate{MailboxID: "nudged", Weight: 2, RemainingToday: 10},
 			b:    Candidate{MailboxID: "veteran", Weight: 1, RemainingToday: 10, WarmupAgeDays: 365},
 			want: "veteran",
-		},
-		{
-			name: "healthy and new beats paused and aged at equal capacity",
-			// 20 vs 11.9. Age must not rehabilitate a paused mailbox: at equal
-			// capacity the healthy one wins even with no history at all.
-			a:    Candidate{MailboxID: "fresh-healthy", Weight: 1, RemainingToday: 20, HealthState: "healthy"},
-			b:    Candidate{MailboxID: "aged-paused", Weight: 1, RemainingToday: 20, HealthState: healthPaused, WarmupAgeDays: 30},
-			want: "fresh-healthy",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/rotation"
+	"github.com/inroad/inroad/internal/platform/sendcap"
 )
 
 // mailboxStatusActive is the only mailbox status a pool member may send from.
@@ -23,6 +24,13 @@ const mailboxStatusActive = "active"
 // send job carries plus today's capacity numbers the worker's cap check reads.
 // It is resolved from the enrollment's pinned mailbox, from the campaign's sender
 // pool, or — for a campaign that has no pool rows — from campaigns.mailbox_id.
+//
+// effectiveCap is the mailbox's cold-sending cap for today: ramped AND scaled by
+// warmup health, so the worker's existing cap gate enforces health gating without
+// knowing about it. healthPaused is carried separately because 'paused' is not a
+// cap of zero: a zero cap STOPS an enrollment, while a paused mailbox may recover
+// and its thread must wait for it (see the pools spec's threading constraint —
+// re-routing the thread is not an option).
 type resolvedSender struct {
 	mailboxID          uuid.UUID
 	provider           string
@@ -36,6 +44,7 @@ type resolvedSender struct {
 	minIntervalSeconds int32
 	effectiveCap       int
 	sentToday          int
+	healthPaused       bool
 }
 
 // threadLostItsMailbox reports whether this enrollment's thread has lost the
@@ -64,11 +73,11 @@ func threadLostItsMailbox(currentStep int32, pinned pgtype.UUID) bool {
 //     mailbox is pinned too, so configuring a pool later cannot re-route a thread
 //     already in flight.
 //
-// A pool whose every member is disabled, inactive or capped defers instead
-// (exhaustedPoolSender), and pins nothing.
+// A pool whose every member is disabled, inactive, health-paused or capped defers
+// instead (exhaustedPoolSender), and pins nothing.
 func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b gen.GetStepEnrollmentBundleRow) (resolvedSender, error) {
 	if b.EnrollmentMailboxID.Valid {
-		return c.withSentToday(ctx, bundleSender(b))
+		return c.withTodaysCapacity(ctx, ws, bundleSender(b))
 	}
 	rows, err := c.q.ListCampaignSenderCandidates(ctx, gen.ListCampaignSenderCandidatesParams{
 		CampaignID: b.CampaignID, WorkspaceID: ws,
@@ -98,13 +107,13 @@ func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b
 		return resolvedSender{}, err
 	}
 	if pinned == b.MailboxID {
-		return c.withSentToday(ctx, bundleSender(b))
+		return c.withTodaysCapacity(ctx, ws, bundleSender(b))
 	}
 	m, err := c.q.GetMailbox(ctx, gen.GetMailboxParams{ID: pinned, WorkspaceID: ws})
 	if err != nil {
 		return resolvedSender{}, err
 	}
-	return c.withSentToday(ctx, mailboxSender(m))
+	return c.withTodaysCapacity(ctx, ws, mailboxSender(m))
 }
 
 // claimEnrollmentSender pins the enrollment's sending mailbox write-once and bumps
@@ -155,38 +164,60 @@ func (c client) claimEnrollmentSender(ctx context.Context, ws, enrollmentID, cam
 	return mailboxID, nil
 }
 
-// eligibleCandidates keeps the pool rows that can send right now — enabled, an
-// active mailbox, and still under today's cap — and projects them onto the pure
-// selector's Candidate. Remaining capacity is computed here with effectiveCap so
-// ramp math keeps exactly one implementation. A never-assigned member's
-// LastAssignedAt is the zero time, which is what puts it first under LRU.
+// eligibleCandidates keeps the pool rows that can send cold mail right now and
+// projects them onto the pure selector's Candidate. RemainingToday carries the
+// health-scaled capacity, which is the ONLY place health enters selection — the
+// selector itself must not scale by it again (see rotation.Candidate).
+//
+// A never-assigned member's LastAssignedAt is the zero time, which is what puts it
+// first under LRU.
 func eligibleCandidates(rows []gen.ListCampaignSenderCandidatesRow) []rotation.Candidate {
 	out := make([]rotation.Candidate, 0, len(rows))
 	for _, r := range rows {
-		if !r.Enabled || r.MailboxStatus != mailboxStatusActive {
-			continue
-		}
-		remaining := candidateCap(r) - int(r.SentToday)
+		remaining := availableToday(r)
 		if remaining <= 0 {
 			continue
 		}
 		out = append(out, rotation.Candidate{
 			MailboxID: r.MailboxID.String(), Weight: int(r.Weight), RemainingToday: remaining,
-			WarmupAgeDays: mailboxAgeDays(r.MailboxCreatedAt), HealthState: r.HealthState,
+			WarmupAgeDays: mailboxAgeDays(r.MailboxCreatedAt),
 			AssignedCount: r.AssignedCount, LastAssignedAt: r.LastAssignedAt.Time,
 		})
 	}
 	return out
 }
 
+// availableToday is how much cold volume this pool row may still send today: its
+// health-scaled cap minus what it has already sent, never negative. Zero for a row
+// that cannot send at all — a disabled member, an inactive mailbox, or one the
+// warmup engine has PAUSED, which is excluded from the eligible set exactly like a
+// disabled row rather than merely deprioritised. The engine that knows a mailbox
+// is burning must be able to stop the thing burning it.
+//
+// The single place eligibility and remaining capacity are decided, so the selector
+// and the exhausted-pool report cannot disagree about which members can send.
+func availableToday(r gen.ListCampaignSenderCandidatesRow) int {
+	if !r.Enabled || r.MailboxStatus != mailboxStatusActive {
+		return 0
+	}
+	return max(sendcap.Cold(candidateCap(r), r.HealthState)-int(r.SentToday), 0)
+}
+
 // exhaustedPoolSender builds the job for a pool that HAS members but none that can
 // send right now. It reports the pool's aggregate capacity and consumption, so the
 // worker takes the existing cap-deferral branch (sent_today >= effective cap)
 // unchanged — no new outcome and no new failure mode, exactly as a capped
-// single-mailbox send behaves today. A disabled or inactive member counts its
-// whole cap as consumed, because none of it is available today; a pool whose
-// members all have a zero cap therefore reports zero capacity and stops the
-// enrollment, the same degenerate-cap verdict a single mailbox would get.
+// single-mailbox send behaves today. Every member's real (ramped) cap counts
+// towards the pool's capacity and whatever of it is not available today counts as
+// consumed: for a capped member that is what it sent, and for a disabled, inactive
+// or health-gated one it is the whole cap, since none of it can be used.
+//
+// A health-PAUSED member additionally sets healthPaused, which routes to the same
+// deferral explicitly. Belt and braces: the aggregate numbers above already defer,
+// but only while some member has a non-zero cap. A paused mailbox whose cap is
+// zero would otherwise report zero capacity and reach the degenerate-cap branch,
+// which STOPS the enrollment — and a paused mailbox may recover, so its thread has
+// to wait rather than die.
 //
 // Nothing is pinned: no mailbox was chosen. The transport stays the campaign's
 // fallback, which the deferral guarantees is never dialed.
@@ -196,29 +227,50 @@ func (c client) exhaustedPoolSender(b gen.GetStepEnrollmentBundleRow, rows []gen
 	for _, r := range rows {
 		limit := candidateCap(r)
 		poolCap += limit
-		if r.Enabled && r.MailboxStatus == mailboxStatusActive {
-			consumed += min(int(r.SentToday), limit)
-			continue
+		consumed += limit - min(availableToday(r), limit)
+		if r.Enabled && r.MailboxStatus == mailboxStatusActive && r.HealthState == sendcap.HealthPaused {
+			s.healthPaused = true
 		}
-		consumed += limit
 	}
 	s.effectiveCap, s.sentToday = poolCap, consumed
 	return s, nil
 }
 
-// candidateCap is a pool row's effective cap today, ramp included.
+// candidateCap is a pool row's effective cap today, ramp included and health NOT
+// applied — the mailbox's real ceiling. Health scaling is availableToday's job.
 func candidateCap(r gen.ListCampaignSenderCandidatesRow) int {
-	return effectiveCap(int(r.DailyCap), int(r.RampStartCap), int(r.RampDays), r.RampEnabled,
+	return sendcap.Effective(int(r.DailyCap), int(r.RampStartCap), int(r.RampDays), r.RampEnabled,
 		mailboxAgeDays(r.MailboxCreatedAt))
 }
 
-// withSentToday fills in how much the resolved mailbox has already sent today.
-func (c client) withSentToday(ctx context.Context, s resolvedSender) (resolvedSender, error) {
+// withTodaysCapacity fills in the resolved mailbox's consumption and its
+// cold-sending cap for today: what it has already sent, and its ramped cap scaled
+// by warmup health. Applied to EVERY resolved sender — the enrollment's pinned
+// mailbox included — so a thread pinned to a mailbox that later degrades is
+// throttled on its next step. Gating only new assignments would leave every
+// already-enrolled contact sending at full volume from a mailbox in trouble, which
+// is most of the volume.
+//
+// A paused mailbox keeps its real cap in effectiveCap and reports healthPaused
+// instead: the numbers a job carries reach the logs and must describe something
+// true, and a cap of zero would stop the enrollment rather than defer it.
+func (c client) withTodaysCapacity(ctx context.Context, ws uuid.UUID, s resolvedSender) (resolvedSender, error) {
 	n, err := c.q.CountSentToday(ctx, s.mailboxID)
 	if err != nil {
 		return resolvedSender{}, err
 	}
 	s.sentToday = int(n)
+	health, err := c.q.GetMailboxColdHealth(ctx, gen.GetMailboxColdHealthParams{
+		MailboxID: s.mailboxID, WorkspaceID: ws,
+	})
+	if err != nil {
+		return resolvedSender{}, err
+	}
+	if health == sendcap.HealthPaused {
+		s.healthPaused = true
+		return s, nil
+	}
+	s.effectiveCap = sendcap.Cold(s.effectiveCap, health)
 	return s, nil
 }
 
@@ -231,7 +283,7 @@ func bundleSender(b gen.GetStepEnrollmentBundleRow) resolvedSender {
 		smtpHost: b.SmtpHost, smtpPort: b.SmtpPort, smtpUsername: b.SmtpUsername,
 		secretCiphertext: b.SecretCiphertext, allowPlaintext: b.AllowPlaintext,
 		minIntervalSeconds: b.MinIntervalSeconds,
-		effectiveCap: effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled,
+		effectiveCap: sendcap.Effective(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled,
 			mailboxAgeDays(b.MailboxCreatedAt)),
 	}
 }
@@ -245,7 +297,7 @@ func mailboxSender(m gen.Mailbox) resolvedSender {
 		smtpHost: m.SmtpHost, smtpPort: m.SmtpPort, smtpUsername: m.SmtpUsername,
 		secretCiphertext: m.SecretCiphertext, allowPlaintext: m.AllowPlaintext,
 		minIntervalSeconds: m.MinIntervalSeconds,
-		effectiveCap: effectiveCap(int(m.DailyCap), int(m.RampStartCap), int(m.RampDays), m.RampEnabled,
+		effectiveCap: sendcap.Effective(int(m.DailyCap), int(m.RampStartCap), int(m.RampDays), m.RampEnabled,
 			mailboxAgeDays(m.CreatedAt)),
 	}
 }
