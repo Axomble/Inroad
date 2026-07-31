@@ -126,6 +126,23 @@ type Config struct {
 	EmailVerifyTTL   time.Duration
 	PasswordResetTTL time.Duration
 	InviteTTL        time.Duration
+
+	// TurnstileSecret is the Cloudflare Turnstile secret used to server-side
+	// validate captcha tokens on register/login/email-OTP-start. Empty (default)
+	// disables the captcha gate entirely (a no-op verifier that always passes) —
+	// self-hosters without a captcha provider aren't blocked. Never logged.
+	TurnstileSecret string
+
+	// Pre-authentication rate limits, in requests per minute (fixed window). Each
+	// abusable unauthenticated endpoint is throttled on the client IP and, where
+	// its body carries one, the target account (email). A non-positive value means
+	// "no cap" for that key. Backed by the shared Redis limiter (fails closed).
+	RateLimitLoginIP          int // POST /login per IP
+	RateLimitLoginAccount     int // POST /login per email
+	RateLimitVerifyIP         int // 2fa/passkey/email-OTP verify per IP
+	RateLimitVerifyAccount    int // email-OTP verify per email
+	RateLimitSensitiveIP      int // password/forgot + email-OTP start per IP
+	RateLimitSensitiveAccount int // password/forgot + email-OTP start per email
 }
 
 func Load() (*Config, error) {
@@ -237,6 +254,14 @@ func Load() (*Config, error) {
 	cfg.EmailVerifyTTL = getenvDuration("INROAD_EMAIL_VERIFY_TTL", 24*time.Hour)
 	cfg.PasswordResetTTL = getenvDuration("INROAD_PASSWORD_RESET_TTL", time.Hour)
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
+
+	cfg.TurnstileSecret = getenv("INROAD_TURNSTILE_SECRET", "")
+	cfg.RateLimitLoginIP = getenvInt("INROAD_RATELIMIT_LOGIN_IP", 10)
+	cfg.RateLimitLoginAccount = getenvInt("INROAD_RATELIMIT_LOGIN_ACCOUNT", 5)
+	cfg.RateLimitVerifyIP = getenvInt("INROAD_RATELIMIT_VERIFY_IP", 10)
+	cfg.RateLimitVerifyAccount = getenvInt("INROAD_RATELIMIT_VERIFY_ACCOUNT", 5)
+	cfg.RateLimitSensitiveIP = getenvInt("INROAD_RATELIMIT_SENSITIVE_IP", 5)
+	cfg.RateLimitSensitiveAccount = getenvInt("INROAD_RATELIMIT_SENSITIVE_ACCOUNT", 3)
 
 	return cfg, nil
 }

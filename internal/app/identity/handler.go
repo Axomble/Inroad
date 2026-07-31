@@ -213,7 +213,6 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	ua, ip := h.clientMeta(r)
 	// Password (and workspace-membership) check FIRST — a wrong password returns
 	// the same 401 whether or not the account has a second factor, so login never
 	// leaks 2FA status to someone without the password.
@@ -222,9 +221,25 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	h.CompleteFirstFactor(w, r, uid)
+}
+
+// CompleteFirstFactor finishes a login for a user whose FIRST factor has just been
+// proven (a correct password, or a valid email-OTP code) but who may still owe a
+// SECOND factor. It runs the fail-closed 2FA gate: a user with a confirmed second
+// factor gets a single-use challenge and NO session (they must clear
+// /auth/2fa/verify); everyone else is issued a session via the standard login
+// response. It is shared by the password login above and the email-OTP verify
+// handler (via emailotp.FirstFactorCompleter) so both first factors run the
+// IDENTICAL gate — email possession alone can never bypass configured MFA.
+//
+// This is distinct from CompleteLogin, which runs AFTER the second factor is
+// satisfied and therefore issues a session unconditionally (no gate).
+func (h *Handler) CompleteFirstFactor(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+	ua, ip := h.clientMeta(r)
 	// Fail-closed gate: a confirmed second factor gets a challenge and NO session.
 	if h.gate != nil {
-		challenge, required, gerr := h.gate.ChallengeIfRequired(r.Context(), uid, ip)
+		challenge, required, gerr := h.gate.ChallengeIfRequired(r.Context(), userID, ip)
 		if gerr != nil {
 			// The per-IP challenge throttle fired: surface 429, not a generic 500.
 			// The sentinel lives in auth so this never imports the twofa domain.
@@ -240,7 +255,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sess, err := h.svc.StartSessionForUser(r.Context(), uid, ua, ip)
+	sess, err := h.svc.StartSessionForUser(r.Context(), userID, ua, ip)
 	if err != nil {
 		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
 		return

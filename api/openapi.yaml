@@ -10,6 +10,8 @@ paths:
       operationId: authRegister
       tags: [auth]
       security: []
+      parameters:
+        - $ref: '#/components/parameters/CaptchaToken'
       requestBody:
         required: true
         content:
@@ -22,12 +24,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SessionResponse' }
         '400': { description: Validation error }
+        '403': { description: Captcha verification failed }
         '409': { description: Workspace or email already exists }
   /auth/login:
     post:
       operationId: authLogin
       tags: [auth]
       security: []
+      parameters:
+        - $ref: '#/components/parameters/CaptchaToken'
       requestBody:
         required: true
         content:
@@ -47,6 +52,8 @@ paths:
                   - $ref: '#/components/schemas/SessionResponse'
                   - $ref: '#/components/schemas/TwoFactorRequiredResponse'
         '401': { description: Invalid credentials }
+        '403': { description: Captcha verification failed }
+        '429': { description: Too many attempts (rate limited); see Retry-After }
   /auth/refresh:
     post:
       operationId: authRefresh
@@ -182,6 +189,7 @@ paths:
       responses:
         '204': { description: Reset email sent if the address matches an account (response is the same either way) }
         '400': { description: Validation error }
+        '429': { description: Too many requests (rate limited); see Retry-After }
   /auth/password/reset:
     post:
       operationId: authResetPassword
@@ -304,6 +312,7 @@ paths:
               schema: { $ref: '#/components/schemas/SessionResponse' }
         '400': { description: Validation error }
         '401': { description: Invalid or expired challenge / code }
+        '429': { description: Too many attempts (rate limited); see Retry-After }
   /auth/passkeys:
     get:
       operationId: authPasskeyList
@@ -412,7 +421,68 @@ paths:
               schema: { $ref: '#/components/schemas/SessionResponse' }
         '400': { description: Validation error }
         '401': { description: Authentication failed }
+        '429': { description: Too many attempts (rate limited); see Retry-After }
         '501': { description: Passkeys are not configured }
+  /auth/email-otp/start:
+    post:
+      operationId: authEmailOTPStart
+      tags: [auth]
+      security: []
+      description: >-
+        Request a passwordless login code by email. ALWAYS returns 200 with the
+        same generic body whether or not the email matches an account (no
+        user-enumeration oracle); only a matching account is emailed a single-use,
+        short-lived numeric code. Rate limited per client IP and per email
+        (mail-bombing prevention); when a captcha is configured, an
+        X-Captcha-Token header is required.
+      parameters:
+        - $ref: '#/components/parameters/CaptchaToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailOTPStartRequest' }
+      responses:
+        '200':
+          description: Generic acknowledgement (identical for existing and non-existing emails)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmailOTPStartResponse' }
+        '400': { description: Validation error }
+        '403': { description: Captcha verification failed }
+        '429': { description: Too many requests (rate limited); see Retry-After }
+  /auth/email-otp/verify:
+    post:
+      operationId: authEmailOTPVerify
+      tags: [auth]
+      security: []
+      description: >-
+        Exchange an emailed login code for a session. Email possession is a FIRST
+        factor equivalent to a password: a user with confirmed 2FA still receives a
+        TwoFactorRequiredResponse (no session) and must complete /auth/2fa/verify —
+        the code never bypasses configured MFA. The code is single-use, TTL'd, and
+        try-capped; every failure is a flat 401. Rate limited per client IP and per
+        email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailOTPVerifyRequest' }
+      responses:
+        '200':
+          description: >-
+            A session (SessionResponse) for a user without a confirmed second
+            factor, OR a single-use 2FA challenge (TwoFactorRequiredResponse, no
+            tokens) for a user with 2FA enabled.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SessionResponse'
+                  - $ref: '#/components/schemas/TwoFactorRequiredResponse'
+        '400': { description: Validation error }
+        '401': { description: Invalid or expired code }
+        '429': { description: Too many requests (rate limited); see Retry-After }
   /auth/api-keys:
     post:
       operationId: authApiKeyCreate
@@ -917,7 +987,34 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    CaptchaToken:
+      name: X-Captcha-Token
+      in: header
+      required: false
+      description: >-
+        Client-solved captcha (Cloudflare Turnstile) token. Required ONLY when the
+        server is configured with a captcha secret (INROAD_TURNSTILE_SECRET); on such
+        a server a missing or invalid token is rejected 403. On a server without a
+        captcha configured the header is ignored.
+      schema: { type: string }
   schemas:
+    EmailOTPStartRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    EmailOTPStartResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, description: Generic acknowledgement; identical whether or not the email matched an account. }
+    EmailOTPVerifyRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email: { type: string, format: email }
+        code: { type: string, description: The 6-digit numeric code delivered by email. }
     RegisterRequest:
       type: object
       required: [workspace_name, email, password]

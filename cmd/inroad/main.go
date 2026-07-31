@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
+	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
@@ -27,6 +29,7 @@ import (
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
+	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
@@ -38,6 +41,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/ratelimit"
+	"github.com/inroad/inroad/internal/platform/throttle"
 )
 
 func main() {
@@ -159,11 +163,45 @@ func run() error {
 	// management handler (create/list/revoke) is session-authed and mounts under
 	// /api/v1/auth/api-keys. The per-key rate limit uses an atomic Redis window on
 	// the same instance the queue runs on, failing closed if Redis is unreachable.
-	apiKeyLimiter := ratelimit.NewRedisLimiter(cfg.RedisAddr)
-	defer func() { _ = apiKeyLimiter.Close() }()
+	// The SAME limiter backs the pre-auth login throttles below (keys are namespaced
+	// per bucket, so there is no collision).
+	redisLimiter := ratelimit.NewRedisLimiter(cfg.RedisAddr)
+	defer func() { _ = redisLimiter.Close() }()
 	apiKeyStore := apikey.NewPgStore(pool)
 	apiKeyHandler := apikey.NewHandler(apikey.NewService(apiKeyStore))
-	apiKeyVerifier := apikey.NewVerifier(apiKeyStore, apiKeyLimiter, cfg.TrustedProxies)
+	apiKeyVerifier := apikey.NewVerifier(apiKeyStore, redisLimiter, cfg.TrustedProxies)
+
+	// Pre-authentication hardening: a config-gated captcha (register/login/OTP-start)
+	// and per-IP + per-account rate limits on the abusable unauthenticated surface.
+	// An empty Turnstile secret selects the no-op verifier (captcha effectively off).
+	ipResolver := httpx.NewClientIPResolver(cfg.TrustedProxies)
+	var captchaVerifier captcha.Verifier
+	if cfg.TurnstileSecret != "" {
+		captchaVerifier = captcha.NewTurnstile(cfg.TurnstileSecret, nil)
+	} else {
+		captchaVerifier = captcha.NewNoop()
+	}
+	captchaMW := captcha.Middleware(captchaVerifier, ipResolver)
+	throttleWindow := time.Minute
+	newThrottle := func(bucket string, ipLimit, acctLimit int) func(http.Handler) http.Handler {
+		return throttle.Config{
+			Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
+			IPLimit: ipLimit, AcctLimit: acctLimit,
+		}.Middleware(bucket)
+	}
+	loginThrottle := newThrottle("login", cfg.RateLimitLoginIP, cfg.RateLimitLoginAccount)
+	forgotThrottle := newThrottle("forgot", cfg.RateLimitSensitiveIP, cfg.RateLimitSensitiveAccount)
+	otpStartThrottle := newThrottle("otp-start", cfg.RateLimitSensitiveIP, cfg.RateLimitSensitiveAccount)
+	otpVerifyThrottle := newThrottle("otp-verify", cfg.RateLimitVerifyIP, cfg.RateLimitVerifyAccount)
+	// 2FA/passkey verify carry no email in the body, so they are IP-throttled only.
+	twofaVerifyThrottle := newThrottle("2fa-verify", cfg.RateLimitVerifyIP, 0)
+	passkeyFinishThrottle := newThrottle("passkey-login", cfg.RateLimitVerifyIP, 0)
+
+	// Email-OTP passwordless login. A dedicated slice (its own store/service) that
+	// reaches session-issuance + the 2FA gate only through identHandler's
+	// CompleteFirstFactor seam, so an OTP login runs the SAME first-factor path (and
+	// the SAME 2FA gate) a password login does — never a session from email alone.
+	emailOTPHandler := emailotp.NewHandler(emailotp.NewService(emailotp.NewPgStore(pool), sender), identHandler)
 	listSvc := list.NewService(list.NewPgStore(queries))
 	// contact takes only a small ListChecker interface (not the whole list
 	// service) so the contact package doesn't have to import app/list —
@@ -195,7 +233,16 @@ func run() error {
 	//               route mounted here is authenticated by default, so a new
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
-		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier, twofaHandler.Routes(sessionVerifier), passkeyHandler.Routes(sessionVerifier), apiKeyHandler.Routes(sessionVerifier))},
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(identity.RouteDeps{
+			Verifier:       sessionVerifier,
+			TwoFA:          twofaHandler.Routes(sessionVerifier, twofaVerifyThrottle),
+			Passkeys:       passkeyHandler.Routes(sessionVerifier, passkeyFinishThrottle),
+			APIKeys:        apiKeyHandler.Routes(sessionVerifier),
+			EmailOTP:       emailOTPHandler.Routes([]func(http.Handler) http.Handler{captchaMW, otpStartThrottle}, []func(http.Handler) http.Handler{otpVerifyThrottle}),
+			Captcha:        captchaMW,
+			LoginThrottle:  loginThrottle,
+			ForgotThrottle: forgotThrottle,
+		})},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.

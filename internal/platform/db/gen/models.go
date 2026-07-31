@@ -225,6 +225,17 @@ type Contact struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type EmailOtpCode struct {
+	ID          uuid.UUID          `json:"id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	CodeHash    string             `json:"code_hash"`
+	Attempts    int32              `json:"attempts"`
+	MaxAttempts int32              `json:"max_attempts"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type List struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`

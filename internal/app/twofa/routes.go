@@ -13,10 +13,17 @@ import (
 // endpoint is PUBLIC — it runs after the password step but before a session
 // exists, exactly like /auth/login — while enroll/confirm/disable/status require
 // an authenticated session (verifier authenticates the access token for them).
-func (h *Handler) Routes(verifier auth.Verifier) http.Handler {
+//
+// verifyThrottle (may be nil) is the pre-auth rate-limit middleware wrapping the
+// public /verify endpoint; it is applied only there, never to the authed group.
+func (h *Handler) Routes(verifier auth.Verifier, verifyThrottle func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
 	// Post-password, pre-session: the challenge token is the credential.
-	r.Post("/verify", h.verify)
+	if verifyThrottle != nil {
+		r.With(verifyThrottle).Post("/verify", h.verify)
+	} else {
+		r.Post("/verify", h.verify)
+	}
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.RequireAuth(verifier))
 		pr.Get("/", h.status)               // GET  /auth/2fa

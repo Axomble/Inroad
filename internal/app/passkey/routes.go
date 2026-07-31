@@ -14,11 +14,19 @@ import (
 // like /auth/login: the discoverable assertion is the credential. Register
 // begin/finish and list/delete require an authenticated session (verifier
 // authenticates the access token for them).
-func (h *Handler) Routes(verifier auth.Verifier) http.Handler {
+//
+// loginThrottle (may be nil) is the pre-auth rate-limit middleware wrapping the
+// public /login/finish endpoint (the assertion-verifying, credential-guessing
+// surface); it is applied only there, never to the authed group.
+func (h *Handler) Routes(verifier auth.Verifier, loginThrottle func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
 	// Public discoverable login: the signed assertion is the credential.
 	r.Post("/login/begin", h.loginBegin)
-	r.Post("/login/finish", h.loginFinish)
+	if loginThrottle != nil {
+		r.With(loginThrottle).Post("/login/finish", h.loginFinish)
+	} else {
+		r.Post("/login/finish", h.loginFinish)
+	}
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.RequireAuth(verifier))
 		pr.Get("/", h.list)                           // GET    /auth/passkeys

@@ -88,7 +88,7 @@ func newIdentityTestServerTTL(t *testing.T, cacheTTL time.Duration) (*httptest.S
 	)
 
 	r := chi.NewRouter()
-	r.Mount("/api/v1/auth", h.Routes(verifier, nil, nil, nil))
+	r.Mount("/api/v1/auth", h.Routes(RouteDeps{Verifier: verifier}))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
