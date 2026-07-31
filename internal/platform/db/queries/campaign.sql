@@ -10,6 +10,32 @@ UPDATE campaigns SET status = $3, launched_at = COALESCE(launched_at, $4)
 WHERE id = $1 AND workspace_id = $2;
 -- name: SetCampaignTracking :exec
 UPDATE campaigns SET tracking_enabled = $3 WHERE id = $1 AND workspace_id = $2;
+-- name: SetCampaignTimezone :exec
+-- The IANA zone every send window on the campaign is interpreted in. Validated
+-- at the boundary with time.LoadLocation before it reaches here.
+UPDATE campaigns SET timezone = $3 WHERE id = $1 AND workspace_id = $2;
+
+-- name: ListSendWindows :many
+-- A campaign's whole weekly schedule, ordered so the cadence engine receives
+-- each day's intervals already sorted and can skip re-sorting.
+SELECT weekday, start_minute, end_minute FROM campaign_send_windows
+WHERE campaign_id = $1 AND workspace_id = $2
+ORDER BY weekday, start_minute;
+
+-- name: DeleteSendWindows :exec
+-- Clears the schedule ahead of a full replace. Paired with CreateSendWindows in
+-- one transaction so a campaign is never observed window-less (an empty week
+-- means "no valid send instant exists" to the engine).
+DELETE FROM campaign_send_windows WHERE campaign_id = $1 AND workspace_id = $2;
+
+-- name: CreateSendWindows :batchexec
+-- One interval per call, pipelined as a single batch so replacing a whole week
+-- costs one round trip. Overlaps are rejected by the send_window_no_overlap
+-- exclusion constraint rather than trusted from the caller, so a bad batch fails
+-- inside the replace transaction and rolls back whole.
+INSERT INTO campaign_send_windows (workspace_id, campaign_id, weekday, start_minute, end_minute)
+VALUES ($1, $2, $3, $4, $5);
+
 -- name: CountSendsByStatus :many
 -- Workspace-scoped for defense in depth: even if a caller supplies a
 -- campaign id from another tenant, the workspace filter forces a 0-row

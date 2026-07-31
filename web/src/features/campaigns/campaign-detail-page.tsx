@@ -10,6 +10,7 @@ import { campaignTone, campaignLabel } from './status'
 import { MetricsPanel } from './metrics-panel'
 import { CampaignEnrollmentsList } from './campaign-enrollments-list'
 import { SequenceEditor } from './sequence-editor'
+import { SchedulePanel } from './schedule-panel'
 
 const routeApi = getRouteApi('/app/campaigns/$id')
 
@@ -73,6 +74,10 @@ export function CampaignDetailPage() {
         {/* The sequence is the campaign's definition — surface it first. Owns its
             own loading/empty/error states. */}
         <SequenceEditor campaignId={id} status={data?.status} />
+
+        {/* When a campaign sends is as much its definition as what it sends, so
+            the schedule sits directly under the steps. */}
+        <SchedulePanel campaignId={id} />
 
         {!isLoading && !error && (
           <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />

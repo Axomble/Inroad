@@ -212,6 +212,17 @@ type Campaign struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	LaunchedAt      pgtype.Timestamptz `json:"launched_at"`
 	TrackingEnabled bool               `json:"tracking_enabled"`
+	Timezone        string             `json:"timezone"`
+}
+
+type CampaignSendWindow struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	Weekday     int16              `json:"weekday"`
+	StartMinute int32              `json:"start_minute"`
+	EndMinute   int32              `json:"end_minute"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type Contact struct {

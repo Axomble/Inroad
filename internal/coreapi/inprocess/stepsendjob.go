@@ -14,9 +14,58 @@ import (
 
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
+
+// loadSchedule reads the campaign's send windows and compiles them with its
+// timezone, returning the validated schedule. An unconfigured campaign resolves
+// to the default business-hours window (see cadence.ScheduleFrom); a remaining
+// error means an unknown timezone — a binary without tzdata, or a zone removed
+// from the IANA database — and is surfaced rather than papered over, since the
+// alternative is sending outside the operator's window.
+func (c *client) loadSchedule(ctx context.Context, ws, campaignID uuid.UUID, timezone string) (cadence.Schedule, error) {
+	rows, err := c.q.ListSendWindows(ctx, gen.ListSendWindowsParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return cadence.Schedule{}, err
+	}
+	windows := make([]cadence.SendWindow, len(rows))
+	for i, r := range rows {
+		windows[i] = cadence.SendWindow{
+			Weekday: int(r.Weekday), StartMinute: int(r.StartMinute), EndMinute: int(r.EndMinute),
+		}
+	}
+	// ScheduleFrom substitutes the default when a campaign has no window rows —
+	// created by a path that doesn't seed them — instead of failing every send it
+	// will ever make.
+	sched := cadence.ScheduleFrom(timezone, windows)
+	if _, err := sched.Compile(); err != nil {
+		return cadence.Schedule{}, fmt.Errorf("campaign %s schedule: %w", campaignID, err)
+	}
+	return sched, nil
+}
+
+// nextStepDueAt places the following step's send inside the campaign's window.
+// The step delay sets the EARLIEST the next send may go out (measured from this
+// send, the cadence reference point); the window decides the actual instant, and
+// humanization keeps it off the clock grid.
+//
+// Keyed on the enrollment id so a retried MarkStepSent recomputes the identical
+// instant — the stamped next_due_at and the enqueued advance must not drift, or
+// the sweeper fires the step twice. Returns the zero time for a last step (there
+// is nothing to schedule).
+func nextStepDueAt(job coreapi.StepSendJob, sentAt time.Time) (time.Time, error) {
+	if job.LastStep {
+		return time.Time{}, nil
+	}
+	win, err := job.Schedule.Compile()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("enrollment %s next step: %w", job.EnrollmentID, err)
+	}
+	earliest := sentAt.Add(time.Duration(job.NextDelaySeconds) * time.Second)
+	return win.Next(earliest, job.EnrollmentID)
+}
 
 // stepSendIDNamespace is a fixed namespace for deriving each step-send's id
 // deterministically (uuid.NewSHA1) from (campaign, contact, step_order) —
@@ -208,6 +257,14 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	dailyCap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
 	token := unsub.MakeToken(c.jwtSecret, ws.String(), b.ToEmail)
 
+	// Load and validate the sending schedule BEFORE the send: MarkStepSent needs
+	// it to place the next step, and compiling it here means a corrupted schedule
+	// stops the send instead of surfacing after the message has already gone out.
+	sched, err := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
+	if err != nil {
+		return coreapi.StepSendJob{}, err
+	}
+
 	return coreapi.StepSendJob{
 		EnrollmentID: enrollmentID, WorkspaceID: ws.String(),
 		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: b.MailboxID.String(),
@@ -222,6 +279,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		},
 		Subject: replySubject(nextOrder, step.Subject, threadSubject), ThreadSubject: threadSubject,
 		BodyText: step.BodyText, BodyHTML: step.BodyHtml, TrackingEnabled: b.TrackingEnabled,
+		Schedule: sched,
 		UnsubURL: c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
 		FromEmail: b.FromEmail, FromName: b.FromName,
 		Provider: b.Provider, AccessToken: accessToken,
@@ -373,11 +431,12 @@ func (c client) AdvanceStepCursor(ctx context.Context, job coreapi.StepSendJob) 
 			threadRoot = st.MessageID
 		}
 	}
-	var nextDueAt time.Time
-	if !lastStep {
-		// Cadence reference point is now; the enrollment stamps last_sent_at=now()
-		// in the same transition.
-		nextDueAt = time.Now().Add(time.Duration(job.NextDelaySeconds) * time.Second)
+	// Cadence reference point is now; the enrollment stamps last_sent_at=now() in
+	// the same transition. The step delay is the earliest — the campaign's send
+	// window decides the instant.
+	nextDueAt, err := nextStepDueAt(job, time.Now())
+	if err != nil {
+		return coreapi.Advance{}, err
 	}
 
 	tx, err := c.pool.Begin(ctx)
@@ -447,11 +506,12 @@ func (c client) FinalizeStepSend(ctx context.Context, job coreapi.StepSendJob, r
 	if sentStep == 1 && res.Status == "sent" {
 		threadRoot = res.MessageID
 	}
-	var nextDueAt time.Time
-	if !lastStep {
-		// Cadence reference point is the send time (now); the enrollment stamps
-		// last_sent_at=now() in the same transition.
-		nextDueAt = time.Now().Add(time.Duration(job.NextDelaySeconds) * time.Second)
+	// Cadence reference point is the send time (now); the enrollment stamps
+	// last_sent_at=now() in the same transition. The step delay is the earliest —
+	// the campaign's send window decides the instant.
+	nextDueAt, err := nextStepDueAt(job, time.Now())
+	if err != nil {
+		return coreapi.Advance{}, err
 	}
 
 	// One transaction (spec §6): the send-row finalize and the cursor advance

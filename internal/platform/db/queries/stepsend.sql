@@ -4,7 +4,7 @@
 -- step content itself is fetched separately by step_order.
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        e.status, e.thread_root_id,
-       cam.id AS campaign_id, cam.mailbox_id, cam.tracking_enabled,
+       cam.id AS campaign_id, cam.mailbox_id, cam.tracking_enabled, cam.timezone,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,

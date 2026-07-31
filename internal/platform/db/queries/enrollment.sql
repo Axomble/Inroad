@@ -1,19 +1,16 @@
 -- name: EnrollListMembers :many
--- One active enrollment per list member for the campaign. next_due_at is
--- staggered per contact at insert time (row_number * 2s) so a launch of N
--- contacts doesn't burst the mailbox and the sweeper won't collapse the pacing
--- by treating them all as due at once. The spread is capped at 30 minutes so a
--- large list can't push the last contact hours out. ON CONFLICT keeps re-launch
--- idempotent (a contact already enrolled is left untouched).
--- RETURNING next_due_at alongside id so the launcher enqueues each advance at
--- the exact time the DB assigned: Postgres does NOT guarantee RETURNING row
--- order matches the window ORDER BY, so recomputing the stagger from the Go
--- slice index would drift the scheduled task off its enrollment's due time.
+-- One active enrollment per list member for the campaign. next_due_at is a
+-- placeholder (now()): the launcher immediately re-stamps every row through the
+-- cadence engine (SetEnrollmentDueBatch), which spreads the batch across the
+-- campaign's send window off the clock grid. This used to stagger here as
+-- row_number * 2s, which put every send of a launch on a uniform 2-second grid —
+-- one of the cheapest bulk-sender signals a receiving MTA can key on.
+-- ON CONFLICT keeps re-launch idempotent (a contact already enrolled is left
+-- untouched). RETURNING order no longer matters: Go assigns each enrollment its
+-- own instant explicitly and writes it back, rather than trying to keep two
+-- independent computations of the stagger in agreement.
 INSERT INTO sequence_enrollments (workspace_id, campaign_id, contact_id, next_due_at)
-SELECT cam.workspace_id, cam.id, lm.contact_id,
-       now() + LEAST(
-         (row_number() OVER (ORDER BY lm.contact_id) - 1) * interval '2 seconds',
-         interval '30 minutes')
+SELECT cam.workspace_id, cam.id, lm.contact_id, now()
 FROM campaigns cam
 JOIN list_members lm ON lm.list_id = cam.list_id
 JOIN contacts ct ON ct.id = lm.contact_id
@@ -69,6 +66,15 @@ WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 UPDATE sequence_enrollments
 SET reply_class = $3, reply_source = $4, reply_confidence = $5, replied_at = now()
 WHERE id = $1 AND workspace_id = $2;
+
+-- name: SetEnrollmentDueBatch :batchexec
+-- Stamps cadence-computed due times onto a whole launch: one statement per
+-- enrollment, pipelined as a single pgx batch, so a launch of N contacts costs
+-- one round trip instead of N. workspace_id is pinned and status='active'
+-- guarded for the same reasons as SetEnrollmentDue — a foreign id or an
+-- already-stopped enrollment matches zero rows instead of being re-stamped.
+UPDATE sequence_enrollments SET next_due_at = $3
+WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 
 -- name: SetEnrollmentDue :exec
 -- Re-stamp the next due time for an active enrollment (launch stagger + sweeper

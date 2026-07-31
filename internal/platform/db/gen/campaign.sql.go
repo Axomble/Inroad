@@ -53,7 +53,7 @@ func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatus
 
 const createCampaign = `-- name: CreateCampaign :one
 INSERT INTO campaigns (workspace_id, name, mailbox_id, list_id, subject, body_text, body_html)
-VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled
+VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone
 `
 
 type CreateCampaignParams struct {
@@ -90,12 +90,30 @@ func (q *Queries) CreateCampaign(ctx context.Context, arg CreateCampaignParams) 
 		&i.CreatedAt,
 		&i.LaunchedAt,
 		&i.TrackingEnabled,
+		&i.Timezone,
 	)
 	return i, err
 }
 
+const deleteSendWindows = `-- name: DeleteSendWindows :exec
+DELETE FROM campaign_send_windows WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteSendWindowsParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Clears the schedule ahead of a full replace. Paired with CreateSendWindows in
+// one transaction so a campaign is never observed window-less (an empty week
+// means "no valid send instant exists" to the engine).
+func (q *Queries) DeleteSendWindows(ctx context.Context, arg DeleteSendWindowsParams) error {
+	_, err := q.db.Exec(ctx, deleteSendWindows, arg.CampaignID, arg.WorkspaceID)
+	return err
+}
+
 const getCampaign = `-- name: GetCampaign :one
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled FROM campaigns WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone FROM campaigns WHERE id = $1 AND workspace_id = $2
 `
 
 type GetCampaignParams struct {
@@ -119,12 +137,13 @@ func (q *Queries) GetCampaign(ctx context.Context, arg GetCampaignParams) (Campa
 		&i.CreatedAt,
 		&i.LaunchedAt,
 		&i.TrackingEnabled,
+		&i.Timezone,
 	)
 	return i, err
 }
 
 const listCampaigns = `-- name: ListCampaigns :many
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]Campaign, error) {
@@ -149,7 +168,47 @@ func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]C
 			&i.CreatedAt,
 			&i.LaunchedAt,
 			&i.TrackingEnabled,
+			&i.Timezone,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSendWindows = `-- name: ListSendWindows :many
+SELECT weekday, start_minute, end_minute FROM campaign_send_windows
+WHERE campaign_id = $1 AND workspace_id = $2
+ORDER BY weekday, start_minute
+`
+
+type ListSendWindowsParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type ListSendWindowsRow struct {
+	Weekday     int16 `json:"weekday"`
+	StartMinute int32 `json:"start_minute"`
+	EndMinute   int32 `json:"end_minute"`
+}
+
+// A campaign's whole weekly schedule, ordered so the cadence engine receives
+// each day's intervals already sorted and can skip re-sorting.
+func (q *Queries) ListSendWindows(ctx context.Context, arg ListSendWindowsParams) ([]ListSendWindowsRow, error) {
+	rows, err := q.db.Query(ctx, listSendWindows, arg.CampaignID, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSendWindowsRow
+	for rows.Next() {
+		var i ListSendWindowsRow
+		if err := rows.Scan(&i.Weekday, &i.StartMinute, &i.EndMinute); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -179,6 +238,23 @@ func (q *Queries) SetCampaignStatus(ctx context.Context, arg SetCampaignStatusPa
 		arg.Status,
 		arg.LaunchedAt,
 	)
+	return err
+}
+
+const setCampaignTimezone = `-- name: SetCampaignTimezone :exec
+UPDATE campaigns SET timezone = $3 WHERE id = $1 AND workspace_id = $2
+`
+
+type SetCampaignTimezoneParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Timezone    string    `json:"timezone"`
+}
+
+// The IANA zone every send window on the campaign is interpreted in. Validated
+// at the boundary with time.LoadLocation before it reaches here.
+func (q *Queries) SetCampaignTimezone(ctx context.Context, arg SetCampaignTimezoneParams) error {
+	_, err := q.db.Exec(ctx, setCampaignTimezone, arg.ID, arg.WorkspaceID, arg.Timezone)
 	return err
 }
 

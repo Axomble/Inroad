@@ -34,6 +34,8 @@ func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r.With(read).Get("/{id}/enrollments", h.listEnrollments)
 	r.With(auth.RequireScope(auth.ScopeCampaignsSend), auth.RequireVerified(checker)).Post("/{id}/launch", h.launch)
 	r.With(write).Put("/{id}/tracking", h.toggleTracking)
+	r.With(read).Get("/{id}/schedule", h.getSchedule)
+	r.With(write).Put("/{id}/schedule", h.putSchedule)
 	for _, s := range h.subs {
 		s.Register(r)
 	}

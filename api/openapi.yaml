@@ -820,6 +820,38 @@ paths:
         '400': { description: Invalid JSON }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /campaigns/{id}/schedule:
+    get:
+      operationId: getCampaignSchedule
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: "The campaign's timezone, weekly send windows, and a preview of upcoming send times", content: { application/json: { schema: { $ref: '#/components/schemas/CampaignSchedule' } } } }
+        '400': { description: Invalid campaign id }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '500': { description: Could not load schedule }
+    put:
+      operationId: updateCampaignSchedule
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Full replace of the timezone and every send window. A weekday absent from
+        `days` is closed. Editable while the campaign is running: the change
+        applies to sends scheduled after it, and does not move work already
+        scheduled.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CampaignScheduleRequest' } } }
+      responses:
+        '200': { description: Schedule replaced, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignSchedule' } } } }
+        '400': { description: "Invalid JSON or campaign id" }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '422': { description: "Unknown timezone, an invalid or overlapping window, or a week with nothing open" }
+        '500': { description: Could not save schedule }
   /campaigns/{id}/enrollments:
     get:
       operationId: listCampaignEnrollments
@@ -1678,6 +1710,43 @@ components:
       type: object
       properties:
         enabled: { type: boolean }
+    SendWindowInterval:
+      type: object
+      description: >-
+        A half-open [start_minute, end_minute) span of minutes from local
+        midnight, so 540-720 and 720-1020 are adjacent rather than overlapping.
+      required: [start_minute, end_minute]
+      properties:
+        start_minute: { type: integer, minimum: 0, maximum: 1439 }
+        end_minute: { type: integer, minimum: 1, maximum: 1440 }
+    SendWindowDay:
+      type: object
+      description: One weekday's open sending intervals. 0 = Sunday.
+      required: [weekday, intervals]
+      properties:
+        weekday: { type: integer, minimum: 0, maximum: 6 }
+        intervals: { type: array, items: { $ref: '#/components/schemas/SendWindowInterval' } }
+    CampaignSchedule:
+      type: object
+      description: >-
+        A campaign's sending schedule. Sends are placed inside these windows,
+        spread through a distribution curve and nudged off the clock grid, so a
+        launch never emits on a uniform interval.
+      required: [timezone, days]
+      properties:
+        timezone: { type: string, description: "IANA zone the windows are interpreted in", example: America/New_York }
+        days: { type: array, items: { $ref: '#/components/schemas/SendWindowDay' } }
+        preview:
+          type: array
+          description: "Human-readable preview of the next few send instants this schedule produces, in its own timezone."
+          items: { type: string, example: 'Mon 09:14:37' }
+    CampaignScheduleRequest:
+      type: object
+      description: Full replace. A weekday absent from days is closed.
+      required: [timezone, days]
+      properties:
+        timezone: { type: string, example: America/New_York }
+        days: { type: array, items: { $ref: '#/components/schemas/SendWindowDay' } }
     WarmupSettings:
       type: object
       description: >-

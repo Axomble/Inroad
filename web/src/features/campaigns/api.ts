@@ -22,9 +22,12 @@ export type { CampaignEnrollment } from '@/store/api'
 // Step shapes are generated too; re-export so the sequence editor derives its
 // form/card types from the contract rather than hand-duplicating them.
 export type { SequenceStep, StepRequest } from '@/store/api'
+// The schedule shapes come from the contract too, so the editor's state is typed
+// by the same definition the API validates against.
+export type { CampaignSchedule, SendWindowDay, SendWindowInterval } from '@/store/api'
 
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign', 'Step'],
+  addTagTypes: ['Campaign', 'Step', 'Schedule'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -74,6 +77,15 @@ const campaignApi = api.enhanceEndpoints({
     reorderSteps: {
       invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
     },
+    // The sending schedule gets its own tag rather than reusing `Campaign`: a
+    // schedule save shouldn't refetch metrics and steps, and a campaign mutation
+    // shouldn't refetch the schedule.
+    getCampaignSchedule: {
+      providesTags: (_result, _error, arg) => [{ type: 'Schedule', id: arg.id }],
+    },
+    updateCampaignSchedule: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Schedule', id: arg.id }],
+    },
   },
 })
 
@@ -89,4 +101,6 @@ export const {
   useUpdateStepMutation,
   useDeleteStepMutation,
   useReorderStepsMutation,
+  useGetCampaignScheduleQuery,
+  useUpdateCampaignScheduleMutation,
 } = campaignApi
