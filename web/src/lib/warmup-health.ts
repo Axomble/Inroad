@@ -32,5 +32,15 @@ export const healthMeta: Record<
  * untyped, so we validate what actually crossed it.)
  */
 export function toWarmupHealth(value: string | null | undefined): WarmupHealth {
-  return value != null && value in healthMeta ? (value as WarmupHealth) : 'healthy'
+  return knownWarmupHealth(value) ?? 'healthy'
+}
+
+/**
+ * The same narrowing without a fallback: `null` for absent, null, or
+ * unrecognised values. Callers that must distinguish "not warming up at all"
+ * from "warming and healthy" — a campaign sender row, where a missing state is
+ * not a claim of health — use this rather than `toWarmupHealth`.
+ */
+export function knownWarmupHealth(value: string | null | undefined): WarmupHealth | null {
+  return value != null && value in healthMeta ? (value as WarmupHealth) : null
 }

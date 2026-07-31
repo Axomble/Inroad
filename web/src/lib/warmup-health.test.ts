@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { healthMeta, toWarmupHealth } from './warmup-health'
+import { healthMeta, knownWarmupHealth, toWarmupHealth } from './warmup-health'
 
 describe('warmup health mapping', () => {
   // Each state maps to a distinct label AND a distinct color token, so the four
@@ -31,5 +31,15 @@ describe('warmup health mapping', () => {
 
   test('a known state string narrows to itself', () => {
     expect(toWarmupHealth('throttled')).toBe('throttled')
+  })
+
+  // A campaign sender that isn't warming up has no health state at all, and
+  // presenting that as "healthy" would be an assertion the backend never made.
+  test('the fallback-free narrowing keeps absent and unknown states distinct from healthy', () => {
+    expect(knownWarmupHealth('watch')).toBe('watch')
+    expect(knownWarmupHealth(null)).toBeNull()
+    expect(knownWarmupHealth(undefined)).toBeNull()
+    expect(knownWarmupHealth('')).toBeNull()
+    expect(knownWarmupHealth('bogus')).toBeNull()
   })
 })

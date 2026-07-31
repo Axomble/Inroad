@@ -10,11 +10,20 @@ import { cn } from '@/lib/utils'
 import { useGetCampaignScheduleQuery, useUpdateCampaignScheduleMutation } from './api'
 import type { CampaignSchedule } from './api'
 import { WEEKDAY_SHORT } from './schedule-time'
-import { EMPTY_WEEK, fromDraft, newInterval, scheduleErrorMessage, toDraft } from './schedule-draft'
+import {
+  EMPTY_WEEK,
+  dailyLimitFromDraft,
+  dailyLimitToDraft,
+  fromDraft,
+  newInterval,
+  scheduleErrorMessage,
+  toDraft,
+} from './schedule-draft'
 import type { DraftWeek } from './schedule-draft'
 
 /**
- * The campaign's sending schedule: timezone plus a window per weekday.
+ * The campaign's sending plan: when (timezone plus a window per weekday) and how
+ * much (the campaign-wide daily limit).
  *
  * Sends are placed inside these windows, spread through a distribution curve and
  * nudged off the clock grid, so the preview below the editor shows real upcoming
@@ -27,6 +36,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
 
   const [timezone, setTimezone] = useState('')
   const [week, setWeek] = useState<DraftWeek>(EMPTY_WEEK)
+  const [dailyLimit, setDailyLimit] = useState('')
   const [problem, setProblem] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
 
@@ -37,6 +47,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
     if (!data || dirty) return
     setTimezone(data.timezone)
     setWeek(toDraft(data.days))
+    setDailyLimit(dailyLimitToDraft(data.daily_limit))
   }, [data, dirty])
 
   const zones = useMemo(supportedTimezones, [])
@@ -76,10 +87,22 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
       setProblem(result.problem)
       return
     }
+    const limit = dailyLimitFromDraft(dailyLimit)
+    if ('problem' in limit) {
+      setProblem(limit.problem)
+      return
+    }
     try {
       await save({
         id: campaignId,
-        campaignScheduleRequest: { timezone: timezone || 'UTC', days: result.days },
+        campaignScheduleRequest: {
+          timezone: timezone || 'UTC',
+          days: result.days,
+          // Explicitly null rather than omitted: this PUT is a full replace, so
+          // an omitted field would leave a previously set limit in place and the
+          // cleared field would silently not take effect.
+          daily_limit: limit.dailyLimit,
+        },
       }).unwrap()
       setDirty(false)
       setProblem(null)
@@ -207,6 +230,32 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
             )
           })}
         </ul>
+
+        <div className="max-w-xs space-y-1.5">
+          <Label htmlFor="schedule-daily-limit">Daily limit</Label>
+          <Input
+            id="schedule-daily-limit"
+            type="number"
+            min={1}
+            inputMode="numeric"
+            placeholder="No limit"
+            value={dailyLimit}
+            onChange={(e) => {
+              setDailyLimit(e.target.value)
+              setDirty(true)
+              setProblem(null)
+            }}
+          />
+          {/* Spelled out because "daily limit" reads as per-mailbox: an operator
+              who assumes that under-configures the campaign by the size of the
+              pool. The per-mailbox ceiling is the mailbox's own daily cap. */}
+          <p className="text-xs text-muted">
+            The most this campaign sends per day in total, added up across{' '}
+            <strong className="font-medium">every sender in its pool</strong> — not per mailbox. Leave it
+            empty for no campaign limit. Each mailbox still keeps its own daily cap, so this can only lower
+            volume, never raise it.
+          </p>
+        </div>
 
         {problem && (
           <p role="alert" className="text-sm text-danger">

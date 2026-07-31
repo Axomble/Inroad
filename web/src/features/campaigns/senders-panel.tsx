@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SectionBar } from '@/components/layout/page'
+import { HealthBadge } from '@/components/shared/health-badge'
 import { httpStatus } from '@/lib/rtk-error'
 import { relativeTime } from '@/lib/relative-time'
 import { cn } from '@/lib/utils'
@@ -15,7 +16,10 @@ import { useGetCampaignSendersQuery, useUpdateCampaignSendersMutation } from './
 import type { RotationMode } from './api'
 import {
   ROTATION_MODES,
+  capacityLabel,
   fromDraft,
+  gatedReason,
+  reducedCapReason,
   rotationModeDescription,
   senderErrorMessage,
   toDraft,
@@ -205,8 +209,13 @@ function SenderRow({
       />
 
       <span className="min-w-0 flex-1">
-        <span className={cn('block truncate text-sm', row.included ? 'text-foreground' : 'text-muted')}>
-          {row.email}
+        <span className="flex items-center gap-1.5">
+          <span className={cn('min-w-0 truncate text-sm', row.included ? 'text-foreground' : 'text-muted')}>
+            {row.email}
+          </span>
+          {/* Only for a mailbox that is actually warming up: no state means the
+              warmup engine has no opinion, which is not a claim of health. */}
+          {row.healthState && <HealthBadge state={row.healthState} className="shrink-0" />}
         </span>
         <span className="block text-xs text-muted">
           {row.provider ?? 'smtp'}
@@ -215,6 +224,7 @@ function SenderRow({
           {row.assignedCount === 1 ? '1 contact' : `${row.assignedCount} contacts`}
           {row.lastAssignedAt ? ` · last assigned ${relativeTime(row.lastAssignedAt)}` : ' · never assigned'}
         </span>
+        <SenderCapacity row={row} />
       </span>
 
       <span className="flex items-center gap-1.5">
@@ -243,5 +253,32 @@ function SenderRow({
         In rotation
       </label>
     </li>
+  )
+}
+
+/**
+ * What this mailbox has sent today against what it may send, and — when it is
+ * sending nothing — why.
+ *
+ * This is the whole reason the health/capacity fields exist on the row. Without
+ * it, warmup silently gating a mailbox shows up only as a campaign running slower
+ * than it was configured to, with nothing on screen accounting for the shortfall.
+ * Read-only throughout: these are the engine's numbers, not settings.
+ */
+function SenderCapacity({ row }: { row: DraftSender }) {
+  const capacity = capacityLabel(row)
+  const gated = gatedReason(row)
+  const note = gated ?? reducedCapReason(row)
+  if (!capacity && !note) return null
+  return (
+    <span className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-xs">
+      {capacity && <span className="font-mono text-foreground">{capacity}</span>}
+      {capacity && note && (
+        <span className="text-muted" aria-hidden="true">
+          ·
+        </span>
+      )}
+      {note && <span className={gated ? 'text-danger' : 'text-muted'}>{note}</span>}
+    </span>
   )
 }
