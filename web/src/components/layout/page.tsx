@@ -6,7 +6,10 @@ import { cn } from '@/lib/utils'
  * cards. Small tracked-uppercase eyebrows replace large titles.
  */
 
-type DivProps = React.HTMLAttributes<HTMLDivElement>
+// `ref` as a plain prop (React 19), matching the convention `components/ui/input.tsx`
+// already uses. `PageBody` needs it so a list can hand its scroll container to
+// `useListKeyboardNav` and keep the active row in view.
+type DivProps = React.HTMLAttributes<HTMLDivElement> & { ref?: React.Ref<HTMLDivElement> }
 
 export function Page({ className, ...props }: DivProps) {
   return <div data-slot="page" className={cn('flex h-full flex-col', className)} {...props} />
@@ -103,8 +106,71 @@ export function Stat({
   )
 }
 
+/**
+ * Column labels for a list. Rows in this app are flex, not `<table>`, so the
+ * header mirrors the row's own flex layout: give each cell the same width /
+ * `flex-1` as the column it names. Without this, values like `60/day` and a
+ * bare status word arrive unexplained on first view.
+ *
+ * `sticky` so the labels survive scrolling a long list.
+ */
+export function ListHeader({ className, ...props }: DivProps) {
+  return (
+    <div
+      data-slot="list-header"
+      role="row"
+      className={cn(
+        'sticky top-0 z-10 flex items-center gap-4 border-b border-border bg-surface-2/60 px-5 py-1.5',
+        'font-mono text-[10px] uppercase tracking-[0.14em] text-faint backdrop-blur-sm',
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
+/** One column label inside a `ListHeader`. `role="columnheader"` for a11y. */
+export function ListHeaderCell({ className, ...props }: DivProps) {
+  return <div role="columnheader" className={cn('shrink-0', className)} {...props} />
+}
+
 export function PageBody({ className, ...props }: DivProps) {
   return <div data-slot="page-body" className={cn('flex-1 overflow-y-auto', className)} {...props} />
+}
+
+/**
+ * Footer strip of keyboard affordances. Discoverability is the whole point of
+ * shortcuts — an unadvertised shortcut may as well not exist — so any list that
+ * wires `useListKeyboardNav` should render this beneath it.
+ */
+export function HintBar({
+  hints,
+  children,
+  className,
+}: {
+  hints: readonly { keys: string; label: string }[]
+  children?: React.ReactNode
+  className?: string
+}) {
+  return (
+    <div
+      data-slot="hint-bar"
+      className={cn(
+        'flex h-8 shrink-0 items-center gap-3 border-t border-border px-5 text-[11px] text-faint',
+        className,
+      )}
+    >
+      {hints.map((h) => (
+        <span key={h.keys} className="flex items-center gap-1.5">
+          <kbd className="rounded border border-border bg-surface-2 px-1 font-mono text-[10px] text-muted-foreground">
+            {h.keys}
+          </kbd>
+          {h.label}
+        </span>
+      ))}
+      {children && <div className="ml-auto flex items-center gap-2">{children}</div>}
+    </div>
+  )
 }
 
 export function EmptyBlock({

@@ -54,7 +54,21 @@ type sessionOut struct {
 // newIdentityTestServer wires the identity handler exactly as cmd/inroad/main.go
 // does (NewStore -> NewService -> NewHandler -> Routes(secret)), mounted at
 // /api/v1/auth on a real httptest.Server backed by a real Postgres pool.
+//
+// TTL 0 disables the verifier cache so every request re-reads the session's
+// live auth-state from Postgres — revocation/token_version assertions are then
+// deterministic without waiting out a cache window. Tests that specifically
+// prove the in-process cache BUST (logout/reset/switch) use newIdentityTestServerTTL
+// with a long TTL so the cache would otherwise serve stale "live" state.
 func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
+	return newIdentityTestServerTTL(t, 0)
+}
+
+// newIdentityTestServerTTL is newIdentityTestServer with an explicit verifier
+// cache TTL. A long TTL makes the cache the ONLY thing that could keep a
+// just-revoked access token alive, so a test that sees a prompt 401 proves the
+// handler busted the cache (not merely that the cache happened to miss).
+func newIdentityTestServerTTL(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Queries) {
 	t.Helper()
 	ctx := context.Background()
 	if err := db.Migrate(dsn()); err != nil {
@@ -66,13 +80,15 @@ func newIdentityTestServer(t *testing.T) (*httptest.Server, *gen.Queries) {
 	}
 	t.Cleanup(pool.Close)
 
+	store := NewStore(pool)
+	verifier := NewSessionVerifier(testJWTSecret, store, cacheTTL)
 	h := NewHandler(
-		NewService(NewStore(pool), testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
-		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil,
+		NewService(store, testRefreshTTL, &fakeSender{}, "https://app.example.test", time.Hour, time.Hour, time.Hour),
+		testJWTSecret, testAccessTTL, testRefreshTTL, false, "", nil, verifier, nil,
 	)
 
 	r := chi.NewRouter()
-	r.Mount("/api/v1/auth", h.Routes(testJWTSecret))
+	r.Mount("/api/v1/auth", h.Routes(RouteDeps{Verifier: verifier}))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
@@ -324,13 +340,26 @@ func TestIdentityAuthFlows(t *testing.T) {
 		}
 		otherOut := decodeSession(t, regResp)
 
+		// User A's register-session family was revoked by the reuse-detection
+		// subtest above; with revocable sessions that access token is now
+		// (correctly) rejected. Log A in fresh to get a live session before
+		// exercising the switch-authorization path.
+		loginResp := jsonRequest(t, srv, http.MethodPost, "/api/v1/auth/login", map[string]string{
+			"email": email, "password": password,
+		}, nil, "")
+		defer loginResp.Body.Close()
+		if loginResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 logging user A back in, got %d", loginResp.StatusCode)
+		}
+		freshAccess := decodeSession(t, loginResp).AccessToken
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/v1/auth/switch-workspace",
 			bytes.NewReader(mustJSON(t, map[string]string{"workspace_id": otherOut.ActiveWorkspaceID})))
 		if err != nil {
 			t.Fatalf("new request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+registerAccess)
+		req.Header.Set("Authorization", "Bearer "+freshAccess)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("do request: %v", err)

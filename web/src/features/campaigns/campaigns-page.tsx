@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { MoreVertical, Plus, Rocket } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -8,24 +9,73 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { StatusPill } from '@/components/shared/status-pill'
-import { Page, PageTopbar, StatStrip, Stat, SectionBar, PageBody, EmptyBlock } from '@/components/layout/page'
+import { StatusPill, StatusDot } from '@/components/shared/status-pill'
+import { ListSearchInput } from '@/components/shared/list-search-input'
+import { SortMenu } from '@/components/shared/sort-menu'
+import {
+  Page,
+  PageTopbar,
+  StatStrip,
+  Stat,
+  SectionBar,
+  PageBody,
+  EmptyBlock,
+  ListHeader,
+  ListHeaderCell,
+  HintBar,
+} from '@/components/layout/page'
 import { cn } from '@/lib/utils'
 import { httpStatus } from '@/lib/rtk-error'
+import { useListControls, byText, byRank, type SortOption } from '@/hooks/use-list-controls'
+import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-nav'
 import type { Campaign } from '@/store/api'
-import { useListCampaignsQuery, useGetCampaignQuery, useLaunchCampaignMutation } from './api'
+import { useListCampaignsQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
-import { MetricsPanel } from './metrics-panel'
-import { CampaignEnrollmentsList } from './campaign-enrollments-list'
-import { SequenceEditor } from './sequence-editor'
+
+/**
+ * Module scope, not inline: `useListControls` memoises on the active
+ * comparator's identity, so a fresh array each render would defeat the memo.
+ *
+ * "Needs attention first" leads because it is the ordering an operator actually
+ * wants — a draft nobody launched and a running campaign are the two states you
+ * act on, and `done` is the one you don't.
+ */
+const SORTS: readonly SortOption<Campaign>[] = [
+  {
+    id: 'attention',
+    label: 'Needs attention',
+    compare: byRank((c) => c.status, ['draft', 'running', 'paused', 'done']),
+  },
+  { id: 'name', label: 'Name', compare: byText((c) => c.name) },
+  { id: 'status', label: 'Status', compare: byText((c) => c.status) },
+]
 
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
-  const [selected, setSelected] = useState<string | null>(null)
   const { data: campaigns = [], isLoading } = useListCampaignsQuery()
+  const navigate = useNavigate()
 
-  const count = (s: string) => campaigns.filter((c) => c.status === s).length
+  const controls = useListControls({
+    items: campaigns,
+    searchFields: (c) => [c.name, c.subject, c.status],
+    sorts: SORTS,
+  })
+
+  const open = (campaign: Campaign) => {
+    if (campaign.id) void navigate({ to: '/app/campaigns/$id', params: { id: campaign.id } })
+  }
+
+  const nav = useListKeyboardNav({
+    count: controls.items.length,
+    onOpen: (index) => {
+      const campaign = controls.items[index]
+      if (campaign) open(campaign)
+    },
+  })
+
+  const statusCount = (status: string) => campaigns.filter((c) => c.status === status).length
+  const isEmpty = campaigns.length === 0
 
   return (
     <Page>
@@ -40,60 +90,101 @@ export function CampaignsPage() {
       />
 
       <StatStrip>
-        <Stat label="Total" value={campaigns.length} />
-        <Stat label="Running" value={count('running')} dot={<Dot className="bg-ok" />} />
-        <Stat label="Draft" value={count('draft')} dot={<Dot className="bg-faint" />} />
-        <Stat label="Done" value={count('done')} dot={<Dot className="bg-muted-foreground" />} />
+        <Stat label="Total" value={campaigns.length} sub="campaigns" />
+        <Stat label="Running" value={statusCount('running')} dot={<StatusDot tone="running" />} sub="sending now" />
+        <Stat label="Draft" value={statusCount('draft')} dot={<StatusDot tone="draft" />} sub="not launched" />
+        <Stat label="Done" value={statusCount('done')} dot={<StatusDot tone="done" />} sub="finished" />
       </StatStrip>
 
-      <PageBody>
-        {showForm && (
-          <CampaignForm
-            onDone={() => setShowForm(false)}
-            onCancel={() => setShowForm(false)}
+      {showForm && <CampaignForm onDone={() => setShowForm(false)} onCancel={() => setShowForm(false)} />}
+
+      {!isEmpty && (
+        <SectionBar
+          label="All campaigns"
+          count={controls.isFiltered ? `${controls.items.length}/${controls.totalCount}` : controls.totalCount}
+        >
+          <ListSearchInput
+            value={controls.query}
+            onChange={controls.setQuery}
+            placeholder="Search campaigns…"
           />
-        )}
+          <SortMenu options={SORTS} value={controls.sortId} onChange={controls.setSortId} />
+        </SectionBar>
+      )}
 
-        {selected && <CampaignDetail id={selected} onClose={() => setSelected(null)} />}
-
-        {isLoading ? (
+      {isLoading ? (
+        <PageBody>
           <LoadingRows />
-        ) : campaigns.length === 0 && !showForm ? (
-          <EmptyBlock
-            title="No campaigns yet"
-            description="Create a campaign from a connected mailbox to a contact list, then launch it to start sending."
-            action={
-              <Button variant="primary" size="sm" onClick={() => setShowForm(true)}>
-                <Plus className="size-4" />
-                New campaign
-              </Button>
-            }
-          />
-        ) : (
-          <ul>
-            {campaigns.map((c) => (
-              <CampaignRow
-                key={c.id}
-                campaign={c}
-                selected={c.id === selected}
-                onSelect={() => setSelected(c.id === selected ? null : (c.id ?? null))}
+        </PageBody>
+      ) : isEmpty ? (
+        <PageBody>
+          {!showForm && (
+            <EmptyBlock
+              title="No campaigns yet"
+              description="Create a campaign from a connected mailbox to a contact list, then launch it to start sending."
+              action={
+                <Button variant="primary" size="sm" onClick={() => setShowForm(true)}>
+                  <Plus className="size-4" />
+                  New campaign
+                </Button>
+              }
+            />
+          )}
+        </PageBody>
+      ) : (
+        <>
+          <ListHeader>
+            <ListHeaderCell className="min-w-0 flex-1">Campaign</ListHeaderCell>
+            <ListHeaderCell className="w-20 text-right">Status</ListHeaderCell>
+            <ListHeaderCell className="w-24 text-right">Actions</ListHeaderCell>
+          </ListHeader>
+
+          <PageBody ref={nav.containerRef}>
+            {controls.items.length === 0 ? (
+              <EmptyBlock
+                title="No campaigns match this search"
+                description={`Nothing matches "${controls.query}". Clear the search to see all ${controls.totalCount} campaigns.`}
+                action={
+                  <Button variant="secondary" size="sm" onClick={controls.clear}>
+                    Clear search
+                  </Button>
+                }
               />
-            ))}
-          </ul>
-        )}
-      </PageBody>
+            ) : (
+              <ul>
+                {controls.items.map((campaign, index) => (
+                  <CampaignRow
+                    key={campaign.id}
+                    campaign={campaign}
+                    index={index}
+                    active={nav.isActive(index)}
+                    onHover={nav.onRowHover}
+                    onOpen={open}
+                  />
+                ))}
+              </ul>
+            )}
+          </PageBody>
+
+          <HintBar hints={LIST_NAV_HINTS} />
+        </>
+      )}
     </Page>
   )
 }
 
 function CampaignRow({
   campaign,
-  selected,
-  onSelect,
+  index,
+  active,
+  onHover,
+  onOpen,
 }: {
   campaign: Campaign
-  selected: boolean
-  onSelect: () => void
+  index: number
+  active: boolean
+  onHover: (index: number) => void
+  onOpen: (campaign: Campaign) => void
 }) {
   const [launch, { isLoading }] = useLaunchCampaignMutation()
   const [error, setError] = useState<string | null>(null)
@@ -110,11 +201,15 @@ function CampaignRow({
 
   return (
     <li
+      data-row-index={index}
       className={cn(
-        'flex cursor-pointer items-center gap-4 border-b border-border px-5 py-3 transition-colors hover:bg-surface-2/40',
-        selected && 'bg-surface-2/40',
+        'flex cursor-pointer items-center gap-4 border-b border-border px-5 py-3 transition-colors',
+        // The keyboard cursor and hover share one highlight, so "current" always
+        // means the same thing however you got there.
+        active ? 'bg-surface-2/60' : 'hover:bg-surface-2/40',
       )}
-      onClick={onSelect}
+      onMouseEnter={() => onHover(index)}
+      onClick={() => onOpen(campaign)}
     >
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13.5px] font-medium text-foreground">{campaign.name}</div>
@@ -124,79 +219,45 @@ function CampaignRow({
         </div>
       </div>
 
-      <StatusPill tone={campaignTone(campaign.status)}>{campaignLabel(campaign.status)}</StatusPill>
+      <div className="flex w-20 justify-end">
+        <StatusPill tone={campaignTone(campaign.status)}>{campaignLabel(campaign.status)}</StatusPill>
+      </div>
 
-      {campaign.status === 'draft' && (
-        <Button
-          variant="secondary"
-          size="xs"
-          disabled={isLoading}
-          onClick={(e) => {
-            e.stopPropagation()
-            onLaunch()
-          }}
-        >
-          <Rocket className="size-3.5" />
-          Launch
-        </Button>
-      )}
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${campaign.name}`} onClick={(e) => e.stopPropagation()}>
-            <MoreVertical className="size-4" />
+      <div className="flex w-24 items-center justify-end gap-1">
+        {campaign.status === 'draft' && (
+          <Button
+            variant="secondary"
+            size="xs"
+            disabled={isLoading}
+            onClick={(e) => {
+              e.stopPropagation()
+              void onLaunch()
+            }}
+          >
+            <Rocket className="size-3.5" />
+            Launch
           </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={onSelect}>{selected ? 'Hide stats' : 'View stats'}</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+        )}
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Actions for ${campaign.name}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <MoreVertical className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {/* Same name as the row click's destination — the menu item and the
+                row now do, and say, the same thing. */}
+            <DropdownMenuItem onSelect={() => onOpen(campaign)}>Open campaign</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </li>
-  )
-}
-
-function CampaignDetail({ id, onClose }: { id: string; onClose: () => void }) {
-  const { data, isLoading, error } = useGetCampaignQuery({ id })
-  const stats = data?.stats ?? {}
-  const n = (k: string) => stats[k] ?? 0
-  return (
-    <div className="border-b border-border bg-surface/40">
-      {/* The sequence is the campaign's definition — surface it above the Sends
-          stats. Owns its own loading/empty/error states. */}
-      <SequenceEditor campaignId={id} status={data?.status} />
-
-      <SectionBar label={`Sends · ${data?.name ?? ''}`}>
-        <Button variant="ghost" size="xs" onClick={onClose}>
-          Close
-        </Button>
-      </SectionBar>
-      {isLoading ? (
-        <div className="px-5 py-4">
-          <Skeleton className="h-6 w-64" />
-        </div>
-      ) : error ? (
-        // A failed detail fetch must not masquerade as a real all-zero campaign
-        // (the grid below would be indistinguishable from an empty one).
-        <div role="alert" className="px-5 py-6 text-sm text-danger">
-          Couldn't load campaign stats{httpStatus(error) ? ` (${httpStatus(error)})` : ''} — try again.
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 md:grid-cols-4">
-          <Stat label="Queued" value={n('queued')} dot={<Dot className="bg-faint" />} />
-          <Stat label="Sent" value={n('sent')} dot={<Dot className="bg-ok" />} />
-          <Stat label="Failed" value={n('failed')} dot={<Dot className="bg-danger" />} />
-          <Stat label="Skipped" value={n('skipped')} dot={<Dot className="bg-warn" />} />
-        </div>
-      )}
-
-      {!isLoading && !error && (
-        <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
-      )}
-
-      {/* Contacts + their classified replies. Owns its own loading/empty/error
-          states, so it mounts regardless of the campaign-detail query. */}
-      <CampaignEnrollmentsList campaignId={id} />
-    </div>
   )
 }
 
@@ -214,8 +275,4 @@ function LoadingRows() {
       ))}
     </ul>
   )
-}
-
-function Dot({ className }: { className?: string }) {
-  return <span className={cn('size-1.5 rounded-full', className)} aria-hidden="true" />
 }

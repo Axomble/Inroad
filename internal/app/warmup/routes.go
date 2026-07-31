@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/inroad/inroad/internal/app/auth"
 )
 
 // Register mounts the per-mailbox warmup routes onto an already-authenticated
@@ -12,9 +14,12 @@ import (
 // mailbox scope and inherits the mailbox router's auth middleware — chi does not
 // allow two routers mounted at the same prefix. Satisfies mailbox.SubRouter.
 func (h *Handler) Register(r chi.Router) {
-	r.Get("/{id}/warmup", h.detail)
-	r.Put("/{id}/warmup", h.enable)
-	r.Delete("/{id}/warmup", h.disable)
+	// Warm-up is a mailbox capability, so it shares the mailbox scopes: reading a
+	// mailbox's warm-up state needs mailboxes:read, toggling it mailboxes:write.
+	// Transparent to session principals (they hold every scope).
+	r.With(auth.RequireScope(auth.ScopeMailboxesRead)).Get("/{id}/warmup", h.detail)
+	r.With(auth.RequireScope(auth.ScopeMailboxesWrite)).Put("/{id}/warmup", h.enable)
+	r.With(auth.RequireScope(auth.ScopeMailboxesWrite)).Delete("/{id}/warmup", h.disable)
 }
 
 // Routes returns the workspace-level warmup surface (GET /overview), mounted by

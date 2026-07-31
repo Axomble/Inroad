@@ -17,10 +17,15 @@ import { Route as RegisterRouteImport } from './routes/register'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
-import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
+import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
+import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
+import { Route as AppCampaignsIdRouteImport } from './routes/app.campaigns.$id'
+import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
+import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.oauth-apps'
+import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
 
 const IndexRoute = IndexRouteImport.update({
@@ -63,11 +68,6 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
-const AppCampaignsRoute = AppCampaignsRouteImport.update({
-  id: '/campaigns',
-  path: '/campaigns',
-  getParentRoute: () => AppRoute,
-} as any)
 const AppContactsRoute = AppContactsRouteImport.update({
   id: '/contacts',
   path: '/contacts',
@@ -81,6 +81,36 @@ const AppMailboxesRoute = AppMailboxesRouteImport.update({
 const AppWarmupRoute = AppWarmupRouteImport.update({
   id: '/warmup',
   path: '/warmup',
+  getParentRoute: () => AppRoute,
+} as any)
+const OauthConsentRoute = OauthConsentRouteImport.update({
+  id: '/oauth/consent',
+  path: '/oauth/consent',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppCampaignsIndexRoute = AppCampaignsIndexRouteImport.update({
+  id: '/campaigns/',
+  path: '/campaigns/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCampaignsIdRoute = AppCampaignsIdRouteImport.update({
+  id: '/campaigns/$id',
+  path: '/campaigns/$id',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsApiKeysRoute = AppSettingsApiKeysRouteImport.update({
+  id: '/settings/api-keys',
+  path: '/settings/api-keys',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsOauthAppsRoute = AppSettingsOauthAppsRouteImport.update({
+  id: '/settings/oauth-apps',
+  path: '/settings/oauth-apps',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsSecurityRoute = AppSettingsSecurityRouteImport.update({
+  id: '/settings/security',
+  path: '/settings/security',
   getParentRoute: () => AppRoute,
 } as any)
 const AppSettingsTeamRoute = AppSettingsTeamRouteImport.update({
@@ -97,12 +127,17 @@ export interface FileRoutesByFullPath {
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
-  '/app/campaigns': typeof AppCampaignsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
+  '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
+  '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
+  '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/app/campaigns/': typeof AppCampaignsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -111,12 +146,17 @@ export interface FileRoutesByTo {
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
-  '/app/campaigns': typeof AppCampaignsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
+  '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
+  '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
+  '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/app/campaigns': typeof AppCampaignsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -127,12 +167,17 @@ export interface FileRoutesById {
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
-  '/app/campaigns': typeof AppCampaignsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
+  '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
+  '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
+  '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/app/campaigns/': typeof AppCampaignsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -144,12 +189,17 @@ export interface FileRouteTypes {
     | '/register'
     | '/reset-password'
     | '/verify-email'
-    | '/app/campaigns'
     | '/app/contacts'
     | '/app/mailboxes'
     | '/app/warmup'
+    | '/oauth/consent'
     | '/app/'
+    | '/app/campaigns/$id'
+    | '/app/settings/api-keys'
+    | '/app/settings/oauth-apps'
+    | '/app/settings/security'
     | '/app/settings/team'
+    | '/app/campaigns/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -158,12 +208,17 @@ export interface FileRouteTypes {
     | '/register'
     | '/reset-password'
     | '/verify-email'
-    | '/app/campaigns'
     | '/app/contacts'
     | '/app/mailboxes'
     | '/app/warmup'
+    | '/oauth/consent'
     | '/app'
+    | '/app/campaigns/$id'
+    | '/app/settings/api-keys'
+    | '/app/settings/oauth-apps'
+    | '/app/settings/security'
     | '/app/settings/team'
+    | '/app/campaigns'
   id:
     | '__root__'
     | '/'
@@ -173,12 +228,17 @@ export interface FileRouteTypes {
     | '/register'
     | '/reset-password'
     | '/verify-email'
-    | '/app/campaigns'
     | '/app/contacts'
     | '/app/mailboxes'
     | '/app/warmup'
+    | '/oauth/consent'
     | '/app/'
+    | '/app/campaigns/$id'
+    | '/app/settings/api-keys'
+    | '/app/settings/oauth-apps'
+    | '/app/settings/security'
     | '/app/settings/team'
+    | '/app/campaigns/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -189,6 +249,7 @@ export interface RootRouteChildren {
   RegisterRoute: typeof RegisterRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
+  OauthConsentRoute: typeof OauthConsentRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -249,13 +310,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
-    '/app/campaigns': {
-      id: '/app/campaigns'
-      path: '/campaigns'
-      fullPath: '/app/campaigns'
-      preLoaderRoute: typeof AppCampaignsRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/app/contacts': {
       id: '/app/contacts'
       path: '/contacts'
@@ -277,6 +331,48 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppWarmupRouteImport
       parentRoute: typeof AppRoute
     }
+    '/oauth/consent': {
+      id: '/oauth/consent'
+      path: '/oauth/consent'
+      fullPath: '/oauth/consent'
+      preLoaderRoute: typeof OauthConsentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/app/campaigns/': {
+      id: '/app/campaigns/'
+      path: '/campaigns'
+      fullPath: '/app/campaigns/'
+      preLoaderRoute: typeof AppCampaignsIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/campaigns/$id': {
+      id: '/app/campaigns/$id'
+      path: '/campaigns/$id'
+      fullPath: '/app/campaigns/$id'
+      preLoaderRoute: typeof AppCampaignsIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/settings/api-keys': {
+      id: '/app/settings/api-keys'
+      path: '/settings/api-keys'
+      fullPath: '/app/settings/api-keys'
+      preLoaderRoute: typeof AppSettingsApiKeysRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/settings/oauth-apps': {
+      id: '/app/settings/oauth-apps'
+      path: '/settings/oauth-apps'
+      fullPath: '/app/settings/oauth-apps'
+      preLoaderRoute: typeof AppSettingsOauthAppsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/settings/security': {
+      id: '/app/settings/security'
+      path: '/settings/security'
+      fullPath: '/app/settings/security'
+      preLoaderRoute: typeof AppSettingsSecurityRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/team': {
       id: '/app/settings/team'
       path: '/settings/team'
@@ -288,21 +384,29 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
-  AppCampaignsRoute: typeof AppCampaignsRoute
   AppContactsRoute: typeof AppContactsRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
+  AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
+  AppSettingsOauthAppsRoute: typeof AppSettingsOauthAppsRoute
+  AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
+  AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
-  AppCampaignsRoute: AppCampaignsRoute,
   AppContactsRoute: AppContactsRoute,
   AppMailboxesRoute: AppMailboxesRoute,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
+  AppCampaignsIdRoute: AppCampaignsIdRoute,
+  AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
+  AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
+  AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
+  AppCampaignsIndexRoute: AppCampaignsIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
@@ -315,6 +419,7 @@ const rootRouteChildren: RootRouteChildren = {
   RegisterRoute: RegisterRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   VerifyEmailRoute: VerifyEmailRoute,
+  OauthConsentRoute: OauthConsentRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -13,9 +13,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bumpSessionTokenVersion = `-- name: BumpSessionTokenVersion :exec
+UPDATE sessions SET token_version = token_version + 1 WHERE id = $1
+`
+
+// Invalidate every live access token for a single session (a security event on
+// that session) by advancing its token_version past the `tv` those tokens carry.
+func (q *Queries) BumpSessionTokenVersion(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, bumpSessionTokenVersion, id)
+	return err
+}
+
+const bumpTokenVersionForUser = `-- name: BumpTokenVersionForUser :exec
+UPDATE sessions SET token_version = token_version + 1 WHERE user_id = $1
+`
+
+// Invalidate every live access token across ALL of a user's sessions (e.g. a
+// password reset). Belt-and-braces alongside RevokeAllForUser: even a session
+// that somehow escapes revocation has its outstanding access tokens rejected.
+func (q *Queries) BumpTokenVersionForUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, bumpTokenVersionForUser, userID)
+	return err
+}
+
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (user_id, workspace_id, token_hash, family_id, expires_at, user_agent, ip)
-VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, user_id, workspace_id, token_hash, family_id, expires_at, revoked_at, user_agent, ip, created_at
+VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, user_id, workspace_id, token_hash, family_id, expires_at, revoked_at, user_agent, ip, created_at, token_version
 `
 
 type CreateSessionParams struct {
@@ -50,12 +73,40 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.UserAgent,
 		&i.Ip,
 		&i.CreatedAt,
+		&i.TokenVersion,
+	)
+	return i, err
+}
+
+const getSessionAuthState = `-- name: GetSessionAuthState :one
+SELECT user_id, revoked_at, expires_at, token_version FROM sessions WHERE id = $1
+`
+
+type GetSessionAuthStateRow struct {
+	UserID       uuid.UUID          `json:"user_id"`
+	RevokedAt    pgtype.Timestamptz `json:"revoked_at"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+	TokenVersion int32              `json:"token_version"`
+}
+
+// The minimal per-request validation state the store-backed verifier needs:
+// primary-key lookup returning only revocation/expiry/token_version and the
+// owning user (to cross-check against the token's `sub`). Deliberately does
+// NOT return the token hash — the verifier never needs it.
+func (q *Queries) GetSessionAuthState(ctx context.Context, id uuid.UUID) (GetSessionAuthStateRow, error) {
+	row := q.db.QueryRow(ctx, getSessionAuthState, id)
+	var i GetSessionAuthStateRow
+	err := row.Scan(
+		&i.UserID,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.TokenVersion,
 	)
 	return i, err
 }
 
 const getSessionByHash = `-- name: GetSessionByHash :one
-SELECT id, user_id, workspace_id, token_hash, family_id, expires_at, revoked_at, user_agent, ip, created_at FROM sessions WHERE token_hash = $1
+SELECT id, user_id, workspace_id, token_hash, family_id, expires_at, revoked_at, user_agent, ip, created_at, token_version FROM sessions WHERE token_hash = $1
 `
 
 func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Session, error) {
@@ -72,12 +123,59 @@ func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Sessi
 		&i.UserAgent,
 		&i.Ip,
 		&i.CreatedAt,
+		&i.TokenVersion,
 	)
 	return i, err
 }
 
-const repointSessionWorkspace = `-- name: RepointSessionWorkspace :execrows
+const listActiveSessionsForUser = `-- name: ListActiveSessionsForUser :many
+SELECT id, workspace_id, user_agent, ip, created_at, expires_at
+FROM sessions
+WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()
+ORDER BY created_at DESC
+`
+
+type ListActiveSessionsForUserRow struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	UserAgent   *string            `json:"user_agent"`
+	Ip          *netip.Addr        `json:"ip"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+// A user's live (non-revoked, unexpired) sessions for the session-management
+// UI. Token hashes are never selected. Ordered newest-first.
+func (q *Queries) ListActiveSessionsForUser(ctx context.Context, userID uuid.UUID) ([]ListActiveSessionsForUserRow, error) {
+	rows, err := q.db.Query(ctx, listActiveSessionsForUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveSessionsForUserRow
+	for rows.Next() {
+		var i ListActiveSessionsForUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.UserAgent,
+			&i.Ip,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const repointSessionWorkspace = `-- name: RepointSessionWorkspace :one
 UPDATE sessions SET workspace_id = $2 WHERE id = $1 AND user_id = $3
+RETURNING token_version
 `
 
 type RepointSessionWorkspaceParams struct {
@@ -88,32 +186,107 @@ type RepointSessionWorkspaceParams struct {
 
 // user_id is included in the WHERE clause so a caller can only ever
 // repoint their OWN session, never someone else's — even if a session id
-// somehow leaked into a caller's context. RowsAffected() lets the service
-// surface a 403 when the (session, user) pair doesn't match.
-func (q *Queries) RepointSessionWorkspace(ctx context.Context, arg RepointSessionWorkspaceParams) (int64, error) {
-	result, err := q.db.Exec(ctx, repointSessionWorkspace, arg.ID, arg.WorkspaceID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+// somehow leaked into a caller's context. RETURNING token_version surfaces the
+// session's LIVE token_version so a same-session re-issue (switch-workspace)
+// mints an access token whose `tv` matches the session row — never a hardcoded
+// 0 that a later tv-bump would instantly invalidate. A non-matching (session,
+// user) pair updates 0 rows, so this returns pgx.ErrNoRows, which the store
+// maps to ErrNotMember (403).
+func (q *Queries) RepointSessionWorkspace(ctx context.Context, arg RepointSessionWorkspaceParams) (int32, error) {
+	row := q.db.QueryRow(ctx, repointSessionWorkspace, arg.ID, arg.WorkspaceID, arg.UserID)
+	var token_version int32
+	err := row.Scan(&token_version)
+	return token_version, err
 }
 
-const revokeAllForUser = `-- name: RevokeAllForUser :exec
+const revokeAllForUser = `-- name: RevokeAllForUser :many
 UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL
+RETURNING id
 `
 
-func (q *Queries) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
-	_, err := q.db.Exec(ctx, revokeAllForUser, userID)
-	return err
+// Revoke every still-live session for a user (logout-everywhere / password
+// reset), returning the ids actually flipped so the caller can bust each
+// session's cached auth-state in-process (mirrors RevokeOtherSessionsForUser).
+func (q *Queries) RevokeAllForUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, revokeAllForUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const revokeFamily = `-- name: RevokeFamily :exec
+const revokeFamily = `-- name: RevokeFamily :many
 UPDATE sessions SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NULL
+RETURNING id
 `
 
-func (q *Queries) RevokeFamily(ctx context.Context, familyID uuid.UUID) error {
-	_, err := q.db.Exec(ctx, revokeFamily, familyID)
-	return err
+// Revoke every still-live session in a refresh-token family, returning the ids
+// actually flipped so an in-process caller (logout) can bust the verifier's
+// cached auth-state for each one (a revoke otherwise waits out the cache TTL).
+func (q *Queries) RevokeFamily(ctx context.Context, familyID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, revokeFamily, familyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeOtherSessionsForUser = `-- name: RevokeOtherSessionsForUser :many
+UPDATE sessions SET revoked_at = now()
+WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL
+RETURNING id
+`
+
+type RevokeOtherSessionsForUserParams struct {
+	UserID uuid.UUID `json:"user_id"`
+	ID     uuid.UUID `json:"id"`
+}
+
+// Revoke every one of a user's active sessions EXCEPT the one given (revoke
+// "other" devices while keeping the current session alive), returning the ids
+// actually revoked so the caller can invalidate any cached auth-state for them.
+func (q *Queries) RevokeOtherSessionsForUser(ctx context.Context, arg RevokeOtherSessionsForUserParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, revokeOtherSessionsForUser, arg.UserID, arg.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const revokeSession = `-- name: RevokeSession :execrows
@@ -122,6 +295,25 @@ UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
 
 func (q *Queries) RevokeSession(ctx context.Context, id uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, revokeSession, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeSessionOwned = `-- name: RevokeSessionOwned :execrows
+UPDATE sessions SET revoked_at = now() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+`
+
+type RevokeSessionOwnedParams struct {
+	ID     uuid.UUID `json:"id"`
+	UserID uuid.UUID `json:"user_id"`
+}
+
+// Revoke a single session, pinned to its owning user so a caller can only ever
+// revoke their OWN session (a foreign or unknown id flips 0 rows).
+func (q *Queries) RevokeSessionOwned(ctx context.Context, arg RevokeSessionOwnedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeSessionOwned, arg.ID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}

@@ -2,7 +2,8 @@ import { AlertCircle, Flame } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Page, PageTopbar, StatStrip, Stat, PageBody, EmptyBlock } from '@/components/layout/page'
-import type { WarmupHealth } from './health'
+import { StatusDot } from '@/components/shared/status-pill'
+import type { WarmupHealth } from '@/lib/warmup-health'
 // Read-only cross-feature query-hook reuse is allowed (see features/campaigns/api.ts);
 // cross-feature UI imports are not, which is why the per-mailbox warmup controls
 // live here rather than being injected into the mailboxes page.
@@ -43,12 +44,12 @@ export function WarmupPage() {
           value={overviewError ? '—' : (overview?.pool_size ?? 0)}
           sub={overviewError ? undefined : active ? 'Exchanging mail' : 'Idle — needs 2+'}
         />
-        <Stat label="Healthy" value={overviewError ? '—' : countHealth('healthy')} dot={<Dot className="bg-ok" />} />
-        <Stat label="Watch" value={overviewError ? '—' : countHealth('watch')} dot={<Dot className="bg-warn" />} />
+        <Stat label="Healthy" value={overviewError ? '—' : countHealth('healthy')} dot={<StatusDot tone="running" />} />
+        <Stat label="Watch" value={overviewError ? '—' : countHealth('watch')} dot={<StatusDot tone="paused" />} />
         <Stat
           label="At risk"
           value={overviewError ? '—' : countHealth('throttled') + countHealth('paused')}
-          dot={<Dot className="bg-danger" />}
+          dot={<StatusDot tone="failing" />}
         />
       </StatStrip>
 
@@ -80,10 +81,6 @@ export function WarmupPage() {
       </PageBody>
     </Page>
   )
-}
-
-function Dot({ className }: { className?: string }) {
-  return <span className={cn('size-1.5 rounded-full', className)} aria-hidden="true" />
 }
 
 function LoadingRows() {

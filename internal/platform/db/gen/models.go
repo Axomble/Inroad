@@ -183,6 +183,22 @@ func (ns NullUserTokenKind) Value() (driver.Value, error) {
 	return string(ns.UserTokenKind), nil
 }
 
+type ApiKey struct {
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	CreatedByUserID pgtype.UUID        `json:"created_by_user_id"`
+	Name            string             `json:"name"`
+	Prefix          string             `json:"prefix"`
+	SecretHash      []byte             `json:"secret_hash"`
+	Scopes          []string           `json:"scopes"`
+	IpAllowlist     []string           `json:"ip_allowlist"`
+	RateLimitPerMin *int32             `json:"rate_limit_per_min"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type Campaign struct {
 	ID              uuid.UUID          `json:"id"`
 	WorkspaceID     uuid.UUID          `json:"workspace_id"`
@@ -207,6 +223,17 @@ type Contact struct {
 	Company      string             `json:"company"`
 	CustomFields []byte             `json:"custom_fields"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type EmailOtpCode struct {
+	ID          uuid.UUID          `json:"id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	CodeHash    string             `json:"code_hash"`
+	Attempts    int32              `json:"attempts"`
+	MaxAttempts int32              `json:"max_attempts"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type List struct {
@@ -256,6 +283,91 @@ type MailboxWorkerAssignment struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	WorkerID    string             `json:"worker_id"`
 	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+}
+
+type OauthAccessToken struct {
+	ID          uuid.UUID          `json:"id"`
+	TokenHash   []byte             `json:"token_hash"`
+	ClientID    string             `json:"client_id"`
+	FamilyID    uuid.UUID          `json:"family_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Scopes      []string           `json:"scopes"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type OauthAuthorizationCode struct {
+	ID                  uuid.UUID          `json:"id"`
+	CodeHash            []byte             `json:"code_hash"`
+	ClientID            string             `json:"client_id"`
+	RedirectUri         string             `json:"redirect_uri"`
+	CodeChallenge       string             `json:"code_challenge"`
+	CodeChallengeMethod string             `json:"code_challenge_method"`
+	Scopes              []string           `json:"scopes"`
+	UserID              uuid.UUID          `json:"user_id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type OauthAuthorizationRequest struct {
+	ID                  uuid.UUID          `json:"id"`
+	ConsentID           string             `json:"consent_id"`
+	ClientID            string             `json:"client_id"`
+	RedirectUri         string             `json:"redirect_uri"`
+	Scopes              []string           `json:"scopes"`
+	State               *string            `json:"state"`
+	CodeChallenge       string             `json:"code_challenge"`
+	CodeChallengeMethod string             `json:"code_challenge_method"`
+	UserID              uuid.UUID          `json:"user_id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type OauthClient struct {
+	ID                      uuid.UUID          `json:"id"`
+	ClientID                string             `json:"client_id"`
+	ClientSecretHash        []byte             `json:"client_secret_hash"`
+	ClientName              string             `json:"client_name"`
+	RedirectUris            []string           `json:"redirect_uris"`
+	GrantTypes              []string           `json:"grant_types"`
+	ResponseTypes           []string           `json:"response_types"`
+	Scopes                  []string           `json:"scopes"`
+	ClientType              string             `json:"client_type"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
+	CreatedByUserID         pgtype.UUID        `json:"created_by_user_id"`
+	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	RevokedAt               pgtype.Timestamptz `json:"revoked_at"`
+}
+
+type OauthConsent struct {
+	ID          uuid.UUID          `json:"id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	ClientID    string             `json:"client_id"`
+	Scopes      []string           `json:"scopes"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type OauthRefreshToken struct {
+	ID          uuid.UUID          `json:"id"`
+	TokenHash   []byte             `json:"token_hash"`
+	FamilyID    uuid.UUID          `json:"family_id"`
+	ClientID    string             `json:"client_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Scopes      []string           `json:"scopes"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type Send struct {
@@ -311,16 +423,17 @@ type SequenceStep struct {
 }
 
 type Session struct {
-	ID          uuid.UUID          `json:"id"`
-	UserID      uuid.UUID          `json:"user_id"`
-	WorkspaceID uuid.UUID          `json:"workspace_id"`
-	TokenHash   []byte             `json:"token_hash"`
-	FamilyID    uuid.UUID          `json:"family_id"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
-	UserAgent   *string            `json:"user_agent"`
-	Ip          *netip.Addr        `json:"ip"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID           uuid.UUID          `json:"id"`
+	UserID       uuid.UUID          `json:"user_id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	TokenHash    []byte             `json:"token_hash"`
+	FamilyID     uuid.UUID          `json:"family_id"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt    pgtype.Timestamptz `json:"revoked_at"`
+	UserAgent    *string            `json:"user_agent"`
+	Ip           *netip.Addr        `json:"ip"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	TokenVersion int32              `json:"token_version"`
 }
 
 type Suppression struct {
@@ -342,12 +455,31 @@ type TrackingEvent struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type TwoFactorChallenge struct {
+	ID            uuid.UUID          `json:"id"`
+	UserID        uuid.UUID          `json:"user_id"`
+	ChallengeHash []byte             `json:"challenge_hash"`
+	Attempts      int32              `json:"attempts"`
+	Ip            *netip.Addr        `json:"ip"`
+	ConsumedAt    pgtype.Timestamptz `json:"consumed_at"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
 type User struct {
 	ID              uuid.UUID          `json:"id"`
 	Email           string             `json:"email"`
 	PasswordHash    string             `json:"password_hash"`
 	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type UserRecoveryCode struct {
+	ID        uuid.UUID          `json:"id"`
+	UserID    uuid.UUID          `json:"user_id"`
+	CodeHash  string             `json:"code_hash"`
+	UsedAt    pgtype.Timestamptz `json:"used_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type UserToken struct {
@@ -358,6 +490,14 @@ type UserToken struct {
 	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type UserTotp struct {
+	UserID           uuid.UUID          `json:"user_id"`
+	SecretCiphertext string             `json:"secret_ciphertext"`
+	ConfirmedAt      pgtype.Timestamptz `json:"confirmed_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastStep         int64              `json:"last_step"`
 }
 
 type WarmupDailyStat struct {
@@ -426,6 +566,33 @@ type WarmupThread struct {
 	ContentKey     string             `json:"content_key"`
 	LastActivityAt pgtype.Timestamptz `json:"last_activity_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type WebauthnChallenge struct {
+	ID          uuid.UUID          `json:"id"`
+	SessionKey  []byte             `json:"session_key"`
+	UserID      pgtype.UUID        `json:"user_id"`
+	SessionData []byte             `json:"session_data"`
+	Kind        string             `json:"kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WebauthnCredential struct {
+	ID              uuid.UUID          `json:"id"`
+	UserID          uuid.UUID          `json:"user_id"`
+	CredentialID    []byte             `json:"credential_id"`
+	PublicKey       []byte             `json:"public_key"`
+	SignCount       int64              `json:"sign_count"`
+	Aaguid          []byte             `json:"aaguid"`
+	Transports      string             `json:"transports"`
+	AttestationType string             `json:"attestation_type"`
+	BackupEligible  bool               `json:"backup_eligible"`
+	BackupState     bool               `json:"backup_state"`
+	Label           string             `json:"label"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
 }
 
 type Worker struct {

@@ -18,7 +18,7 @@ import (
 
 func newTestHandler(store *fakeStore) *Handler {
 	svc := newTestService(store)
-	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil)
+	return NewHandler(svc, []byte("test-secret-test-secret"), 15*time.Minute, 30*24*time.Hour, false, "", nil, nil, nil)
 }
 
 func doRequest(h http.HandlerFunc, method, path string, body any) *httptest.ResponseRecorder {
@@ -195,7 +195,7 @@ func TestMeIncludesEmailVerified(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/me", http.NoBody)
 		req.Header.Set("Authorization", "Bearer "+access)
 		w := httptest.NewRecorder()
-		auth.RequireAuth(h.jwtSecret)(http.HandlerFunc(h.me)).ServeHTTP(w, req)
+		auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.me)).ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 		}
@@ -227,6 +227,37 @@ func TestMeIncludesEmailVerified(t *testing.T) {
 // ProtectedRoutes) and confirms the session named in the JWT is the one that
 // gets repointed - a body cannot smuggle in a different session id because
 // there is no such field to smuggle it through.
+// TestListSessionsEmptyReturnsEmptyArray is the empty-list edge: a user with no
+// active sessions must get a JSON empty ARRAY (`"sessions":[]`), never `null`.
+// The frontend contract treats sessions as always-an-array; a null would break
+// callers that iterate it directly. Driven through auth.RequireAuth with a JWT
+// verifier (which doesn't consult session rows), so the handler runs for a user
+// id the fake store has no sessions for.
+func TestListSessionsEmptyReturnsEmptyArray(t *testing.T) {
+	store := newFakeStore()
+	h := newTestHandler(store)
+
+	uid := uuid.New() // no session rows exist for this user
+	access, err := auth.IssueToken(h.jwtSecret, auth.Claims{
+		UserID: uid.String(), WorkspaceID: uuid.NewString(), Role: "owner", SessionID: uuid.NewString(),
+	}, h.accessTTL)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+access)
+	w := httptest.NewRecorder()
+	auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.listSessions)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"sessions":[]`)) {
+		t.Fatalf("expected an empty sessions ARRAY, got body %s", w.Body.String())
+	}
+}
+
 func TestSwitchWorkspaceUsesSessionIDFromJWTNotBody(t *testing.T) {
 	store := newFakeStore()
 	h := newTestHandler(store)
@@ -258,7 +289,7 @@ func TestSwitchWorkspaceUsesSessionIDFromJWTNotBody(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 
-	protected := auth.RequireAuth(h.jwtSecret)(http.HandlerFunc(h.switchWorkspace))
+	protected := auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.switchWorkspace))
 	protected.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {

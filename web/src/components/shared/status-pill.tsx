@@ -29,6 +29,22 @@ const dotColor: Record<NonNullable<VariantProps<typeof pillVariants>['tone']>, s
   done: 'bg-muted-foreground',
 }
 
+export type StatusTone = NonNullable<VariantProps<typeof pillVariants>['tone']>
+
+/**
+ * The bare status dot, on the same palette as StatusPill. Exported because
+ * `Stat` takes a `dot` slot and every page was otherwise redeclaring its own
+ * local `Dot` with hardcoded `bg-*` classes — one palette, one component.
+ */
+export function StatusDot({ tone = 'draft', className }: { tone?: StatusTone; className?: string }) {
+  return (
+    <span
+      className={cn('size-1.5 rounded-full', dotColor[tone], tone === 'warming' && 'warm-pulse', className)}
+      aria-hidden="true"
+    />
+  )
+}
+
 export interface StatusPillProps extends VariantProps<typeof pillVariants> {
   children: React.ReactNode
   className?: string
@@ -37,15 +53,9 @@ export interface StatusPillProps extends VariantProps<typeof pillVariants> {
 }
 
 export function StatusPill({ tone = 'draft', dot = true, className, children }: StatusPillProps) {
-  const t = tone ?? 'draft'
   return (
     <span data-slot="status-pill" className={cn('inline-flex items-center gap-1.5', className)}>
-      {dot && (
-        <span
-          className={cn('size-1.5 rounded-full', dotColor[t], t === 'warming' && 'warm-pulse')}
-          aria-hidden="true"
-        />
-      )}
+      {dot && <StatusDot tone={tone ?? 'draft'} />}
       <span className={pillVariants({ tone })}>{children}</span>
     </span>
   )

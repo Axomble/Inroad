@@ -1,0 +1,51 @@
+import { screen } from '@testing-library/react'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { renderWithProviders } from '@/test/render-with-providers'
+import { AppSidebar } from './app-sidebar'
+
+// The sidebar renders router <Link>s; stub them to plain anchors so we can
+// assert on the rendered nav without a real router.
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({ to, children, activeProps: _activeProps, ...props }: { to: string; children: React.ReactNode; activeProps?: unknown }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
+}))
+
+beforeEach(() => {
+  // useNavCounts fires the mailbox/campaign/warmup list queries; answer them
+  // with empty payloads so no count renders and nothing rejects.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })),
+  )
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+test('shows the API keys nav item for an admin', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'admin', status: 'authed' } },
+  })
+  expect(screen.getByRole('link', { name: /api keys/i })).toBeInTheDocument()
+})
+
+test('shows the API keys nav item for an owner', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'owner', status: 'authed' } },
+  })
+  expect(screen.getByRole('link', { name: /api keys/i })).toBeInTheDocument()
+})
+
+test('hides the API keys nav item from a non-admin member', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'member', status: 'authed' } },
+  })
+  expect(screen.queryByRole('link', { name: /api keys/i })).not.toBeInTheDocument()
+  // The rest of the Workspace group still renders.
+  expect(screen.getByRole('link', { name: /security/i })).toBeInTheDocument()
+})

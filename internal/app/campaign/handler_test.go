@@ -92,7 +92,7 @@ func TestListEnrollmentsMapsRows(t *testing.T) {
 
 	req := newAuthedEnrollmentsRequest(t, secret, ws, id, "limit=5&offset=10")
 	w := httptest.NewRecorder()
-	auth.RequireAuth(secret)(http.HandlerFunc(h.listEnrollments)).ServeHTTP(w, req)
+	auth.RequireAuth(auth.NewJWTVerifier(secret))(http.HandlerFunc(h.listEnrollments)).ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -145,7 +145,7 @@ func TestListEnrollmentsHandlerCrossTenantIsNotFound(t *testing.T) {
 
 	req := newAuthedEnrollmentsRequest(t, secret, ws, id, "")
 	w := httptest.NewRecorder()
-	auth.RequireAuth(secret)(http.HandlerFunc(h.listEnrollments)).ServeHTTP(w, req)
+	auth.RequireAuth(auth.NewJWTVerifier(secret))(http.HandlerFunc(h.listEnrollments)).ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
@@ -169,7 +169,7 @@ func TestToggleTrackingFlipsFlag(t *testing.T) {
 
 	req := newAuthedRequest(t, secret, ws, id, http.MethodPut, `{"enabled":false}`)
 	w := httptest.NewRecorder()
-	auth.RequireAuth(secret)(http.HandlerFunc(h.toggleTracking)).ServeHTTP(w, req)
+	auth.RequireAuth(auth.NewJWTVerifier(secret))(http.HandlerFunc(h.toggleTracking)).ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
@@ -201,7 +201,7 @@ func TestToggleTrackingCrossTenantIsNotFound(t *testing.T) {
 
 	req := newAuthedRequest(t, secret, ws, id, http.MethodPut, `{"enabled":true}`)
 	w := httptest.NewRecorder()
-	auth.RequireAuth(secret)(http.HandlerFunc(h.toggleTracking)).ServeHTTP(w, req)
+	auth.RequireAuth(auth.NewJWTVerifier(secret))(http.HandlerFunc(h.toggleTracking)).ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
@@ -224,7 +224,7 @@ func TestToggleTrackingInvalidJSON400(t *testing.T) {
 
 	req := newAuthedRequest(t, secret, ws, id, http.MethodPut, `not-json`)
 	w := httptest.NewRecorder()
-	auth.RequireAuth(secret)(http.HandlerFunc(h.toggleTracking)).ServeHTTP(w, req)
+	auth.RequireAuth(auth.NewJWTVerifier(secret))(http.HandlerFunc(h.toggleTracking)).ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())

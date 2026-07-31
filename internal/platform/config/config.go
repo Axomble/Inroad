@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -45,10 +46,27 @@ type Config struct {
 	// (e.g. unsubscribe) embedded in outbound email.
 	PublicURL string
 
+	// WebAuthn Relying Party. RPID is the registrable domain (host only, no scheme
+	// or port) that passkey ceremonies are bound to; RPOrigin is the fully-qualified
+	// origin (scheme://host[:port]) the browser must present. Both default from
+	// INROAD_PUBLIC_URL's host/origin. When neither can be derived nor is set, the
+	// passkey endpoints fail cleanly (the feature is effectively off) rather than
+	// mis-validating a ceremony against a wrong domain.
+	RPID     string
+	RPOrigin string
+
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 	CookieSecure    bool
 	CookieDomain    string
+
+	// SessionCacheTTL is how long the store-backed access-token verifier caches
+	// a session's auth-state (revocation/expiry/token_version) in-process before
+	// re-reading it from Postgres. A revoke performed by THIS process busts the
+	// entry immediately; an out-of-band change propagates within at most this
+	// TTL. Set <= 0 to disable the cache (every request hits the DB). Kept short
+	// because it bounds revocation-propagation latency across replicas.
+	SessionCacheTTL time.Duration
 
 	// WorkerConcurrency caps how many asynq tasks the worker processes
 	// simultaneously. Default 10; tune per SMTP throughput.
@@ -72,9 +90,10 @@ type Config struct {
 	// falls back to env-based defaults (debug in development, info elsewhere).
 	LogLevel string
 
-	// TrustedProxies is a list of CIDRs whose X-Forwarded-For / X-Real-IP
-	// headers the app will trust. Empty = trust none (default). Only the
-	// leftmost IP of X-Forwarded-For is consumed.
+	// TrustedProxies is a list of CIDRs whose X-Forwarded-For header the app will
+	// trust. Empty = trust none (default): the direct peer address is used. When a
+	// direct peer falls in this set, the client is the RIGHTMOST XFF entry that is
+	// not itself a listed proxy (see platform/httpx.ClientIPResolver).
 	TrustedProxies []string
 
 	// TransactionalDriver selects the notify.Sender used for system email:
@@ -107,6 +126,23 @@ type Config struct {
 	EmailVerifyTTL   time.Duration
 	PasswordResetTTL time.Duration
 	InviteTTL        time.Duration
+
+	// TurnstileSecret is the Cloudflare Turnstile secret used to server-side
+	// validate captcha tokens on register/login/email-OTP-start. Empty (default)
+	// disables the captcha gate entirely (a no-op verifier that always passes) —
+	// self-hosters without a captcha provider aren't blocked. Never logged.
+	TurnstileSecret string
+
+	// Pre-authentication rate limits, in requests per minute (fixed window). Each
+	// abusable unauthenticated endpoint is throttled on the client IP and, where
+	// its body carries one, the target account (email). A non-positive value means
+	// "no cap" for that key. Backed by the shared Redis limiter (fails closed).
+	RateLimitLoginIP          int // POST /login per IP
+	RateLimitLoginAccount     int // POST /login per email
+	RateLimitVerifyIP         int // 2fa/passkey/email-OTP verify per IP
+	RateLimitVerifyAccount    int // email-OTP verify per email
+	RateLimitSensitiveIP      int // password/forgot + email-OTP start per IP
+	RateLimitSensitiveAccount int // password/forgot + email-OTP start per email
 }
 
 func Load() (*Config, error) {
@@ -161,8 +197,20 @@ func Load() (*Config, error) {
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 
-	cfg.AccessTokenTTL = getenvDuration("INROAD_ACCESS_TOKEN_TTL", 15*time.Minute)
+	// Derive the WebAuthn Relying Party from the public URL by default: RPID is the
+	// bare host (no port), RPOrigin is the scheme+host+port. An unparseable public
+	// URL leaves both empty, disabling passkeys rather than binding to a wrong RP.
+	defaultRPID, defaultRPOrigin := webauthnDefaults(cfg.PublicURL)
+	cfg.RPID = getenv("INROAD_RP_ID", defaultRPID)
+	cfg.RPOrigin = getenv("INROAD_RP_ORIGIN", defaultRPOrigin)
+
+	// Short by default: the access token is re-validated against the session
+	// store every request, so a ~5-minute TTL plus per-request revocation check
+	// is the revocation guarantee (a revoked session is rejected within the
+	// session-cache TTL, not the token TTL).
+	cfg.AccessTokenTTL = getenvDuration("INROAD_ACCESS_TOKEN_TTL", 5*time.Minute)
 	cfg.RefreshTokenTTL = getenvDuration("INROAD_REFRESH_TOKEN_TTL", 720*time.Hour)
+	cfg.SessionCacheTTL = getenvDuration("INROAD_SESSION_CACHE_TTL", 5*time.Second)
 	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
 	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
@@ -207,7 +255,27 @@ func Load() (*Config, error) {
 	cfg.PasswordResetTTL = getenvDuration("INROAD_PASSWORD_RESET_TTL", time.Hour)
 	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
 
+	cfg.TurnstileSecret = getenv("INROAD_TURNSTILE_SECRET", "")
+	cfg.RateLimitLoginIP = getenvInt("INROAD_RATELIMIT_LOGIN_IP", 10)
+	cfg.RateLimitLoginAccount = getenvInt("INROAD_RATELIMIT_LOGIN_ACCOUNT", 5)
+	cfg.RateLimitVerifyIP = getenvInt("INROAD_RATELIMIT_VERIFY_IP", 10)
+	cfg.RateLimitVerifyAccount = getenvInt("INROAD_RATELIMIT_VERIFY_ACCOUNT", 5)
+	cfg.RateLimitSensitiveIP = getenvInt("INROAD_RATELIMIT_SENSITIVE_IP", 5)
+	cfg.RateLimitSensitiveAccount = getenvInt("INROAD_RATELIMIT_SENSITIVE_ACCOUNT", 3)
+
 	return cfg, nil
+}
+
+// webauthnDefaults derives the default RP id (bare host) and RP origin
+// (scheme://host[:port]) from the public base URL. An empty or unparseable URL, or
+// one without a host, yields two empty strings so passkeys stay disabled instead of
+// binding a ceremony to a wrong or empty domain.
+func webauthnDefaults(publicURL string) (rpID, rpOrigin string) {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", ""
+	}
+	return u.Hostname(), u.Scheme + "://" + u.Host
 }
 
 // defaultWorkerQueues is the queue set a worker consumes when INROAD_WORKER_QUEUES

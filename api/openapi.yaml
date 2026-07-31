@@ -10,6 +10,8 @@ paths:
       operationId: authRegister
       tags: [auth]
       security: []
+      parameters:
+        - $ref: '#/components/parameters/CaptchaToken'
       requestBody:
         required: true
         content:
@@ -22,12 +24,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SessionResponse' }
         '400': { description: Validation error }
+        '403': { description: Captcha verification failed }
         '409': { description: Workspace or email already exists }
   /auth/login:
     post:
       operationId: authLogin
       tags: [auth]
       security: []
+      parameters:
+        - $ref: '#/components/parameters/CaptchaToken'
       requestBody:
         required: true
         content:
@@ -35,11 +40,20 @@ paths:
             schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
         '200':
-          description: Session
+          description: >-
+            A session (SessionResponse) for a user without a confirmed second
+            factor, OR a single-use 2FA challenge (TwoFactorRequiredResponse,
+            no tokens) for a user with 2FA enabled — the caller must then POST
+            /auth/2fa/verify to obtain a session.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/SessionResponse' }
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SessionResponse'
+                  - $ref: '#/components/schemas/TwoFactorRequiredResponse'
         '401': { description: Invalid credentials }
+        '403': { description: Captcha verification failed }
+        '429': { description: Too many attempts (rate limited); see Retry-After }
   /auth/refresh:
     post:
       operationId: authRefresh
@@ -105,6 +119,41 @@ paths:
               schema: { $ref: '#/components/schemas/SwitchWorkspaceResponse' }
         '401': { description: Unauthorized }
         '403': { description: Not a member of the target workspace }
+  /auth/sessions:
+    get:
+      operationId: authListSessions
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The caller's active sessions (current one flagged)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionListResponse' }
+        '401': { description: Unauthorized }
+  /auth/sessions/revoke-others:
+    post:
+      operationId: authRevokeOtherSessions
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Revoked every session except the current one
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RevokeOthersResponse' }
+        '401': { description: Unauthorized }
+  /auth/sessions/{id}:
+    delete:
+      operationId: authRevokeSession
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Session revoked }
+        '400': { description: Invalid session id }
+        '401': { description: Unauthorized }
+        '404': { description: No such session belonging to the caller }
   /auth/verify-email:
     post:
       operationId: authVerifyEmail
@@ -140,6 +189,7 @@ paths:
       responses:
         '204': { description: Reset email sent if the address matches an account (response is the same either way) }
         '400': { description: Validation error }
+        '429': { description: Too many requests (rate limited); see Retry-After }
   /auth/password/reset:
     post:
       operationId: authResetPassword
@@ -172,6 +222,320 @@ paths:
         '400': { description: Validation error }
         '404': { description: Invalid or expired invite }
         '422': { description: Password required to create an account }
+  /auth/2fa:
+    get:
+      operationId: authTwoFactorStatus
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: 2FA status for the caller
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorStatusResponse' }
+        '401': { description: Unauthorized }
+  /auth/2fa/totp:
+    post:
+      operationId: authTwoFactorEnroll
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Begin TOTP enrollment. Returns the base32 secret and an otpauth:// URI
+        (render as a QR code). The secret is stored sealed but UNCONFIRMED and is
+        never returned again — confirm with a code at /auth/2fa/totp/confirm.
+      responses:
+        '200':
+          description: Pending enrollment secret
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorEnrollResponse' }
+        '401': { description: Unauthorized }
+        '409': { description: Two-factor is already enabled }
+    delete:
+      operationId: authTwoFactorDisable
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Disable 2FA. Requires a fresh TOTP code OR a recovery code as proof of
+        possession. Also revokes the caller's OTHER sessions (a second-factor
+        removal is a security downgrade).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+      responses:
+        '204': { description: Two-factor disabled, other sessions revoked }
+        '400': { description: Validation error, or two-factor is not enabled }
+        '401': { description: Unauthorized, or invalid code }
+  /auth/2fa/totp/confirm:
+    post:
+      operationId: authTwoFactorConfirm
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Activate a pending TOTP enrollment by proving possession with a code.
+        Returns the one-time recovery codes exactly once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorCodeRequest' }
+      responses:
+        '200':
+          description: Two-factor enabled; recovery codes returned once
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TwoFactorConfirmResponse' }
+        '400': { description: Enrollment not started, or invalid code }
+        '401': { description: Unauthorized }
+        '409': { description: Two-factor is already enabled }
+  /auth/2fa/verify:
+    post:
+      operationId: authTwoFactorVerify
+      tags: [auth]
+      security: []
+      description: >-
+        Complete the login gate: exchange a 2FA challenge (from /auth/login) plus
+        a TOTP or recovery code for a session. The challenge is single-use,
+        TTL'd, and try-capped; any failure is a flat 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TwoFactorVerifyRequest' }
+      responses:
+        '200':
+          description: Session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '400': { description: Validation error }
+        '401': { description: Invalid or expired challenge / code }
+        '429': { description: Too many attempts (rate limited); see Retry-After }
+  /auth/passkeys:
+    get:
+      operationId: authPasskeyList
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: List the caller's registered passkeys. No key material is returned.
+      responses:
+        '200':
+          description: The caller's passkeys
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasskeyListResponse' }
+        '401': { description: Unauthorized }
+  /auth/passkeys/{id}:
+    delete:
+      operationId: authPasskeyDelete
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Delete one of the caller's passkeys (own-only). A foreign or unknown id
+        returns 404 so a caller cannot probe another user's credentials.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Passkey deleted }
+        '400': { description: Invalid id }
+        '401': { description: Unauthorized }
+        '404': { description: Passkey not found }
+  /auth/passkeys/register/begin:
+    post:
+      operationId: authPasskeyRegisterBegin
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Begin adding a passkey to the caller's account. Returns an opaque
+        session_id that binds the ceremony server-side plus the WebAuthn credential
+        creation options for navigator.credentials.create. Requires a resident key
+        and user verification.
+      responses:
+        '200':
+          description: Registration options + ceremony session id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasskeyBeginResponse' }
+        '401': { description: Unauthorized }
+        '501': { description: Passkeys are not configured }
+  /auth/passkeys/register/finish:
+    post:
+      operationId: authPasskeyRegisterFinish
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Complete registration: submit the attestation from
+        navigator.credentials.create along with the ceremony session_id. The
+        server-stored challenge is consumed (single-use), the attestation verified,
+        and the credential stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasskeyFinishRequest' }
+      responses:
+        '204': { description: Passkey registered }
+        '400': { description: Validation error, invalid/expired challenge, or attestation failed }
+        '401': { description: Unauthorized }
+        '409': { description: This authenticator is already registered }
+        '501': { description: Passkeys are not configured }
+  /auth/passkeys/login/begin:
+    post:
+      operationId: authPasskeyLoginBegin
+      tags: [auth]
+      security: []
+      description: >-
+        Begin a discoverable (usernameless) passkey login. Public — no session
+        exists yet. Returns an opaque session_id plus the WebAuthn credential
+        request options for navigator.credentials.get; the allowed-credentials list
+        is empty so the authenticator offers its resident keys.
+      responses:
+        '200':
+          description: Assertion options + ceremony session id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PasskeyBeginResponse' }
+        '501': { description: Passkeys are not configured }
+  /auth/passkeys/login/finish:
+    post:
+      operationId: authPasskeyLoginFinish
+      tags: [auth]
+      security: []
+      description: >-
+        Complete a discoverable passkey login: submit the assertion from
+        navigator.credentials.get with the ceremony session_id. The user is
+        resolved ONLY from the authenticated credential, the signature counter is
+        verified to have increased (clone detection), and on success a session is
+        minted exactly like a password login — but the TOTP gate is skipped because
+        a user-verified passkey is strong auth. Any failure is a flat 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasskeyFinishRequest' }
+      responses:
+        '200':
+          description: Session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '400': { description: Validation error }
+        '401': { description: Authentication failed }
+        '429': { description: Too many attempts (rate limited); see Retry-After }
+        '501': { description: Passkeys are not configured }
+  /auth/email-otp/start:
+    post:
+      operationId: authEmailOTPStart
+      tags: [auth]
+      security: []
+      description: >-
+        Request a passwordless login code by email. ALWAYS returns 200 with the
+        same generic body whether or not the email matches an account (no
+        user-enumeration oracle); only a matching account is emailed a single-use,
+        short-lived numeric code. Rate limited per client IP and per email
+        (mail-bombing prevention); when a captcha is configured, an
+        X-Captcha-Token header is required.
+      parameters:
+        - $ref: '#/components/parameters/CaptchaToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailOTPStartRequest' }
+      responses:
+        '200':
+          description: Generic acknowledgement (identical for existing and non-existing emails)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmailOTPStartResponse' }
+        '400': { description: Validation error }
+        '403': { description: Captcha verification failed }
+        '429': { description: Too many requests (rate limited); see Retry-After }
+  /auth/email-otp/verify:
+    post:
+      operationId: authEmailOTPVerify
+      tags: [auth]
+      security: []
+      description: >-
+        Exchange an emailed login code for a session. Email possession is a FIRST
+        factor equivalent to a password: a user with confirmed 2FA still receives a
+        TwoFactorRequiredResponse (no session) and must complete /auth/2fa/verify —
+        the code never bypasses configured MFA. The code is single-use, TTL'd, and
+        try-capped; every failure is a flat 401. Rate limited per client IP and per
+        email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmailOTPVerifyRequest' }
+      responses:
+        '200':
+          description: >-
+            A session (SessionResponse) for a user without a confirmed second
+            factor, OR a single-use 2FA challenge (TwoFactorRequiredResponse, no
+            tokens) for a user with 2FA enabled.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/SessionResponse'
+                  - $ref: '#/components/schemas/TwoFactorRequiredResponse'
+        '400': { description: Validation error }
+        '401': { description: Invalid or expired code }
+        '429': { description: Too many requests (rate limited); see Retry-After }
+  /auth/api-keys:
+    post:
+      operationId: authApiKeyCreate
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Mint a scoped API key for the caller's workspace. The full token
+        (inrd_<prefix>_<secret>) is returned in this response EXACTLY ONCE and is
+        never retrievable again — only its SHA-256 is stored. Grant a subset of the
+        owned scope vocabulary; optionally restrict by CIDR allowlist, a per-minute
+        rate limit, and an expiry. Session-authed only (an API key cannot mint keys).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApiKeyCreateRequest' }
+      responses:
+        '201':
+          description: The created key metadata plus the one-time token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreateResponse' }
+        '400': { description: Validation error (unknown scope, bad CIDR, past expiry, non-positive rate limit) }
+        '401': { description: Unauthorized }
+    get:
+      operationId: authApiKeyList
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        List the caller's workspace API keys, newest first. No secret or hash is
+        ever returned — only the public prefix and metadata.
+      responses:
+        '200':
+          description: The workspace's API keys
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyListResponse' }
+        '401': { description: Unauthorized }
+  /auth/api-keys/{id}:
+    delete:
+      operationId: authApiKeyRevoke
+      tags: [auth]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Revoke one of the caller's workspace API keys. Idempotent (re-revoking
+        succeeds); a foreign or unknown id returns 404 so a caller cannot probe or
+        revoke another workspace's key.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Key revoked }
+        '400': { description: Invalid id }
+        '401': { description: Unauthorized }
+        '404': { description: API key not found }
   /workspaces/{id}/invites:
     post:
       operationId: createWorkspaceInvite
@@ -617,13 +981,275 @@ paths:
       responses:
         '302': { description: Redirect to the signed destination URL }
         '404': { description: Malformed/tampered token or unknown send -- no redirect, nothing recorded }
+  # OAuth 2.1 authorization server (Inroad acting as an OAuth PROVIDER). Mounted at
+  # the TOP level under /oauth2 -- outside the /api/v1 base -- and distinct from the
+  # /oauth mailbox-connect flow (Inroad as an OAuth CLIENT to Google/Microsoft). This
+  # is P6a: dynamic client registration, the authorization endpoint, and consent. P6b
+  # adds the token endpoint, introspection, and revocation below.
+  /oauth2/register:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2Register
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        RFC 7591 dynamic client registration, restricted to an authenticated workspace
+        ADMIN (and rate-limited per client IP as defense-in-depth). The registering
+        admin's user + workspace are recorded on the client, so every client is
+        workspace-owned and listable/revocable through the admin API. Public PKCE client
+        by default (token_endpoint_auth_method omitted or "none", no secret); request a
+        client_secret_* method to get a confidential client whose secret is returned in
+        this response EXACTLY ONCE (only its SHA-256 is stored). Each redirect_uri must
+        be https (or an http loopback for native apps), carry no fragment and no
+        userinfo, and requested scopes must all be OAuth-grantable (no admin/api-key/send
+        scopes).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OAuth2RegisterRequest' }
+      responses:
+        '201':
+          description: The registered client; client_secret present only for a confidential client (once)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2Client' }
+        '400': { description: Validation error (bad redirect_uri, non-grantable scope, unsupported grant/response type or auth method) }
+        '401': { description: Unauthorized }
+        '403': { description: Not an admin }
+        '429': { description: Registration rate limit exceeded }
+  /oauth2/authorize:
+    servers: [{ url: / }]
+    get:
+      operationId: oauth2Authorize
+      tags: [oauth2]
+      security: []
+      description: >-
+        OAuth 2.1 authorization endpoint (a top-level browser navigation, not an SPA
+        fetch). response_type MUST be "code"; PKCE is mandatory and S256-only. The
+        client and redirect_uri are validated FIRST (an unknown client or a
+        redirect_uri that does not EXACTLY match the registered allowlist renders an
+        error and never redirects); only after that are other errors returned by
+        redirecting to the validated redirect_uri with error+state. The resource owner
+        is resolved from the P1 session (never a parameter): if unauthenticated the
+        browser is redirected to the SPA login with a return_to; if authenticated and
+        a prior consent already covers the scopes a code is issued immediately,
+        otherwise the browser is redirected to the SPA consent screen.
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, enum: [code] } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: scope, in: query, required: true, schema: { type: string, description: space-delimited } }
+        - { name: state, in: query, required: false, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, enum: [S256] } }
+      responses:
+        '302': { description: Redirect to the client redirect_uri (code+state or error+state), the SPA consent screen, or the SPA login page }
+        '400':
+          description: Unknown client or redirect_uri mismatch -- rendered inline, never redirected (anti-open-redirect)
+          content:
+            text/html:
+              schema: { type: string }
+  /oauth2/consent/{consent_id}:
+    servers: [{ url: / }]
+    get:
+      operationId: oauth2ConsentData
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Return the pending consent request's display data for the SPA consent screen.
+        Session-authed; the request must belong to the session user and be live
+        (unconsumed, unexpired), else 404.
+      parameters: [{ name: consent_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: Consent request display data
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2ConsentData' }
+        '401': { description: Unauthorized }
+        '404': { description: Unknown, expired, consumed, or not this user's consent request }
+  /oauth2/consent:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2ConsentDecide
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Record the resource owner's approve/deny decision. Session-authed and
+        CSRF-guarded (double-submit); the service re-checks the session user owns the
+        request. On approve it consumes the single-use request, remembers the consent,
+        and issues a code; on deny it returns an access_denied redirect. The returned
+        redirect_to is the URL the SPA navigates the browser to. Requires the
+        X-CSRF-Token header (double-submit) matching the csrf_token cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OAuth2ConsentDecision' }
+      responses:
+        '200':
+          description: The URL to navigate the browser to (client redirect_uri with code+state, or error=access_denied+state)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2RedirectTo' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: CSRF token mismatch }
+        '404': { description: Unknown, expired, consumed, or not this user's consent request }
+  /oauth2/clients:
+    servers: [{ url: / }]
+    get:
+      operationId: oauth2ListClients
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        List the caller's workspace's registered OAuth clients, newest first. No
+        client secret or hash is ever returned. Session-authed + admin, workspace-pinned.
+      responses:
+        '200':
+          description: The workspace's OAuth clients
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2ClientList' }
+        '401': { description: Unauthorized }
+        '403': { description: Not an admin }
+  /oauth2/clients/{client_id}:
+    servers: [{ url: / }]
+    delete:
+      operationId: oauth2RevokeClient
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Revoke one of the caller's workspace's OAuth clients. Idempotent; a foreign or
+        unknown client_id returns 404. Session-authed + admin, workspace-pinned.
+      parameters: [{ name: client_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Client revoked }
+        '401': { description: Unauthorized }
+        '403': { description: Not an admin }
+        '404': { description: Client not found }
+  /oauth2/token:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2Token
+      tags: [oauth2]
+      security: []
+      description: >-
+        OAuth 2.1 token endpoint (RFC 6749 §4). The CLIENT authenticates itself (not a
+        session): a public client by its client_id + PKCE, a confidential client by its
+        secret via client_secret_basic (HTTP Basic) or client_secret_post (form field).
+        Supported grants: authorization_code (with mandatory PKCE code_verifier; the code
+        is single-use and its client_id/redirect_uri/PKCE bindings are all verified) and
+        refresh_token (rotating, single-use; presenting an already-used token is reuse and
+        revokes the whole family; scope may only narrow). No password/implicit/
+        client_credentials grant. Access tokens are opaque, short-lived, and revocable.
+        Errors use the RFC 6749 §5.2 JSON shape.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/OAuth2TokenRequest' }
+      responses:
+        '200':
+          description: The issued token pair (RFC 6749 §5.1)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2TokenResponse' }
+        '400':
+          description: invalid_request / invalid_grant / unsupported_grant_type / invalid_scope
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2TokenError' }
+        '401':
+          description: invalid_client (client authentication failed); carries a Basic WWW-Authenticate challenge
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2TokenError' }
+  /oauth2/introspect:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2Introspect
+      tags: [oauth2]
+      security: []
+      description: >-
+        RFC 7662 token introspection. The requesting client authenticates as at the token
+        endpoint. Returns active + metadata for a live access or refresh token; an unknown,
+        expired, or revoked token returns exactly {"active": false} with no other detail
+        (no token-existence oracle).
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/OAuth2IntrospectRequest' }
+      responses:
+        '200':
+          description: 'Token metadata (active) or {"active": false}'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2IntrospectResponse' }
+        '401':
+          description: invalid_client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2TokenError' }
+  /oauth2/revoke:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2Revoke
+      tags: [oauth2]
+      security: []
+      description: >-
+        RFC 7009 token revocation. The requesting client authenticates as at the token
+        endpoint and may revoke ONLY its own tokens; revoking a refresh token also revokes
+        its whole rotation family. Always returns 200 — even for an unknown or foreign
+        token — so there is no token-existence oracle.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { $ref: '#/components/schemas/OAuth2RevokeRequest' }
+      responses:
+        '200': { description: Revoked (or a no-op for an unknown/foreign token) }
+        '401':
+          description: invalid_client
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2TokenError' }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    CaptchaToken:
+      name: X-Captcha-Token
+      in: header
+      required: false
+      description: >-
+        Client-solved captcha (Cloudflare Turnstile) token. Required ONLY when the
+        server is configured with a captcha secret (INROAD_TURNSTILE_SECRET); on such
+        a server a missing or invalid token is rejected 403. On a server without a
+        captcha configured the header is ignored.
+      schema: { type: string }
   schemas:
+    EmailOTPStartRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    EmailOTPStartResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, description: Generic acknowledgement; identical whether or not the email matched an account. }
+    EmailOTPVerifyRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email: { type: string, format: email }
+        code: { type: string, description: The 6-digit numeric code delivered by email. }
     RegisterRequest:
       type: object
       required: [workspace_name, email, password]
@@ -672,6 +1298,29 @@ components:
       required: [workspace_id]
       properties:
         workspace_id: { type: string }
+    SessionInfo:
+      type: object
+      required: [id, workspace_id, created_at, expires_at, current]
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        user_agent: { type: string, nullable: true }
+        ip: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        current: { type: boolean, description: Whether this is the session tied to the caller's current access token. }
+    SessionListResponse:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items: { $ref: '#/components/schemas/SessionInfo' }
+    RevokeOthersResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { type: integer, description: Number of other sessions revoked. }
     SwitchWorkspaceResponse:
       type: object
       required: [access_token, expires_in, active_workspace_id, role]
@@ -680,6 +1329,155 @@ components:
         expires_in: { type: integer }
         active_workspace_id: { type: string }
         role: { type: string }
+    TwoFactorRequiredResponse:
+      type: object
+      required: [two_factor_required, challenge]
+      properties:
+        two_factor_required: { type: boolean, description: Always true; distinguishes this from a SessionResponse. }
+        challenge: { type: string, description: Single-use, short-lived challenge token to submit to /auth/2fa/verify. }
+    TwoFactorStatusResponse:
+      type: object
+      required: [totp_enabled, recovery_codes_remaining]
+      properties:
+        totp_enabled: { type: boolean }
+        recovery_codes_remaining: { type: integer, description: Number of unused single-use recovery codes. }
+    TwoFactorEnrollResponse:
+      type: object
+      required: [secret, otpauth_uri]
+      properties:
+        secret: { type: string, description: Base32 TOTP secret for manual entry. Returned only at enrollment. }
+        otpauth_uri: { type: string, description: otpauth:// provisioning URI to render as a QR code. }
+    TwoFactorConfirmResponse:
+      type: object
+      required: [recovery_codes]
+      properties:
+        recovery_codes:
+          type: array
+          description: Single-use recovery codes, shown exactly once.
+          items: { type: string }
+    TwoFactorCodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: A TOTP code or a recovery code. }
+    TwoFactorVerifyRequest:
+      type: object
+      required: [challenge, code]
+      properties:
+        challenge: { type: string, description: The challenge token returned by /auth/login. }
+        code: { type: string, description: A TOTP code or a recovery code. }
+    ApiKeyCreateRequest:
+      type: object
+      required: [name, scopes]
+      properties:
+        name: { type: string, description: Operator-facing label for the key. }
+        scopes:
+          type: array
+          minItems: 1
+          description: >-
+            Granted scopes; a subset of the owned vocabulary (e.g. mailboxes:read,
+            campaigns:send). The key holds exactly these.
+          items: { type: string }
+        ip_allowlist:
+          type: array
+          nullable: true
+          description: >-
+            Optional IPs or CIDRs the key may be used from; a bare IP is treated as
+            a host route. Omit or leave empty for no restriction.
+          items: { type: string }
+        rate_limit_per_min:
+          type: integer
+          nullable: true
+          description: Optional per-minute request cap. Omit for unlimited.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Optional RFC3339 expiry. Omit for a key that never expires.
+    ApiKey:
+      type: object
+      description: Non-secret view of an API key. Never carries the secret or its hash.
+      required: [id, name, prefix, scopes, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix: { type: string, description: Public, non-secret token prefix (the part before the secret). }
+        scopes: { type: array, items: { type: string } }
+        ip_allowlist: { type: array, nullable: true, items: { type: string } }
+        rate_limit_per_min: { type: integer, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    ApiKeyCreateResponse:
+      type: object
+      required: [token, api_key]
+      properties:
+        token:
+          type: string
+          description: >-
+            The full API key token (inrd_<prefix>_<secret>). SHOWN EXACTLY ONCE —
+            store it now; it is never retrievable again.
+        api_key: { $ref: '#/components/schemas/ApiKey' }
+    ApiKeyListResponse:
+      type: object
+      required: [api_keys]
+      properties:
+        api_keys:
+          type: array
+          items: { $ref: '#/components/schemas/ApiKey' }
+    PasskeyBeginResponse:
+      type: object
+      required: [session_id, publicKey]
+      properties:
+        session_id:
+          type: string
+          description: >-
+            Opaque single-use ceremony handle. Echo it back in the matching finish
+            call's session_id. The server holds the real challenge; this is never
+            the challenge itself.
+        publicKey:
+          type: object
+          additionalProperties: true
+          description: >-
+            The WebAuthn options object (PublicKeyCredentialCreationOptions for
+            register, PublicKeyCredentialRequestOptions for login) as defined by the
+            WebAuthn spec — pass straight to navigator.credentials.create/get.
+    PasskeyFinishRequest:
+      type: object
+      required: [session_id, credential]
+      properties:
+        session_id:
+          type: string
+          description: The opaque session_id from the matching begin call.
+        credential:
+          type: object
+          additionalProperties: true
+          description: >-
+            The PublicKeyCredential JSON returned by navigator.credentials.create
+            (attestation) or navigator.credentials.get (assertion), serialized.
+        label:
+          type: string
+          description: Optional friendly name for the passkey (registration only).
+    PasskeyInfo:
+      type: object
+      required: [id, label, transports, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        transports:
+          type: array
+          items: { type: string }
+          description: Advisory transport hints (e.g. internal, hybrid). Always present; empty when none.
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time, nullable: true }
+    PasskeyListResponse:
+      type: object
+      required: [passkeys]
+      properties:
+        passkeys:
+          type: array
+          items: { $ref: '#/components/schemas/PasskeyInfo' }
     VerifyEmailRequest:
       type: object
       required: [token]
@@ -957,3 +1755,129 @@ components:
           type: array
           description: daily stats, oldest first, up to 30 days
           items: { $ref: '#/components/schemas/WarmupDayStat' }
+    OAuth2RegisterRequest:
+      type: object
+      required: [client_name, redirect_uris]
+      description: RFC 7591 dynamic client registration request.
+      properties:
+        client_name: { type: string }
+        redirect_uris:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: https (or http loopback) URIs, no fragment; exact-matched at /authorize
+        grant_types:
+          type: array
+          items: { type: string, enum: [authorization_code, refresh_token] }
+          description: defaults to [authorization_code]
+        response_types:
+          type: array
+          items: { type: string, enum: [code] }
+          description: defaults to [code]
+        scope: { type: string, description: space-delimited; each scope must be OAuth-grantable }
+        token_endpoint_auth_method:
+          type: string
+          enum: [none, client_secret_basic, client_secret_post]
+          description: omitted or "none" => public PKCE client (no secret); client_secret_* => confidential
+    OAuth2Client:
+      type: object
+      required: [client_id, client_name, redirect_uris, grant_types, response_types, scope, client_type, token_endpoint_auth_method, created_at]
+      properties:
+        client_id: { type: string }
+        client_secret:
+          type: string
+          description: Present ONLY on a confidential client's registration response, shown exactly once. Never on a list.
+        client_name: { type: string }
+        redirect_uris: { type: array, items: { type: string } }
+        grant_types: { type: array, items: { type: string } }
+        response_types: { type: array, items: { type: string } }
+        scope: { type: string, description: space-delimited registered scopes }
+        client_type: { type: string, enum: [public, confidential] }
+        token_endpoint_auth_method: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+    OAuth2ClientList:
+      type: object
+      required: [clients]
+      properties:
+        clients:
+          type: array
+          items: { $ref: '#/components/schemas/OAuth2Client' }
+    OAuth2ConsentData:
+      type: object
+      required: [client_name, requested_scopes, redirect_uri]
+      description: Display data the SPA renders on the consent screen.
+      properties:
+        client_name: { type: string }
+        requested_scopes: { type: array, items: { type: string } }
+        redirect_uri: { type: string }
+    OAuth2ConsentDecision:
+      type: object
+      required: [consent_id, decision]
+      properties:
+        consent_id: { type: string }
+        decision: { type: string, enum: [approve, deny] }
+    OAuth2RedirectTo:
+      type: object
+      required: [redirect_to]
+      properties:
+        redirect_to: { type: string, description: URL the SPA navigates the browser to }
+    OAuth2TokenRequest:
+      type: object
+      required: [grant_type]
+      description: >-
+        Form body for the token endpoint. Fields used depend on grant_type. A confidential
+        client may instead present its secret via HTTP Basic (client_secret_basic).
+      properties:
+        grant_type: { type: string, enum: [authorization_code, refresh_token] }
+        code: { type: string, description: authorization_code grant only }
+        redirect_uri: { type: string, description: authorization_code grant only; must exactly match the code's redirect_uri }
+        code_verifier: { type: string, description: authorization_code grant only; the PKCE verifier (S256) }
+        refresh_token: { type: string, description: refresh_token grant only }
+        scope: { type: string, description: refresh_token grant only; a space-delimited SUBSET of the token's scopes (narrowing) }
+        client_id: { type: string }
+        client_secret: { type: string, description: confidential client, client_secret_post (or use HTTP Basic) }
+    OAuth2TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token, scope]
+      properties:
+        access_token: { type: string, description: opaque bearer token (inoa_ prefix) }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: access-token lifetime in seconds }
+        refresh_token: { type: string, description: rotating single-use refresh token (inor_ prefix) }
+        scope: { type: string, description: space-delimited granted scopes }
+    OAuth2TokenError:
+      type: object
+      required: [error]
+      description: RFC 6749 §5.2 error response.
+      properties:
+        error: { type: string, enum: [invalid_request, invalid_client, invalid_grant, unsupported_grant_type, invalid_scope, server_error] }
+        error_description: { type: string }
+    OAuth2IntrospectRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+        token_type_hint: { type: string, enum: [access_token, refresh_token] }
+        client_id: { type: string }
+        client_secret: { type: string }
+    OAuth2IntrospectResponse:
+      type: object
+      required: [active]
+      description: >-
+        RFC 7662 response. For an inactive/unknown token ONLY `active` (false) is present.
+      properties:
+        active: { type: boolean }
+        scope: { type: string }
+        client_id: { type: string }
+        sub: { type: string, description: the resource owner (user) id }
+        exp: { type: integer, description: expiry as a Unix timestamp }
+        token_type: { type: string }
+    OAuth2RevokeRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+        token_type_hint: { type: string, enum: [access_token, refresh_token] }
+        client_id: { type: string }
+        client_secret: { type: string }

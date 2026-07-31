@@ -12,6 +12,11 @@ export default defineConfig({
     },
   },
   server: {
-    proxy: { '/api': 'http://localhost:8080' },
+    // `/oauth2` is the OAuth 2.1 provider mounted at the API server root (a sibling
+    // of `/api/v1`), so the consent screen's fetches must be proxied to the API too.
+    proxy: {
+      '/api': 'http://localhost:8080',
+      '/oauth2': 'http://localhost:8080',
+    },
   },
 })

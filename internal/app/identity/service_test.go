@@ -184,24 +184,63 @@ func (f *fakeStore) RevokeSession(ctx context.Context, id uuid.UUID) (int64, err
 	return 1, nil
 }
 
-func (f *fakeStore) RevokeFamily(ctx context.Context, familyID uuid.UUID) error {
+func (f *fakeStore) RevokeFamily(ctx context.Context, familyID uuid.UUID) ([]uuid.UUID, error) {
+	var revoked []uuid.UUID
 	for id, row := range f.sessions {
 		if row.FamilyID == familyID && !row.RevokedAt.Valid {
 			row.RevokedAt = pgxTimestamp(time.Now())
 			f.sessions[id] = row
+			revoked = append(revoked, id)
 		}
 	}
-	return nil
+	return revoked, nil
 }
 
-func (f *fakeStore) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
+func (f *fakeStore) RevokeAllForUser(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	var revoked []uuid.UUID
 	for id, row := range f.sessions {
 		if row.UserID == userID && !row.RevokedAt.Valid {
 			row.RevokedAt = pgxTimestamp(time.Now())
 			f.sessions[id] = row
+			revoked = append(revoked, id)
 		}
 	}
-	return nil
+	return revoked, nil
+}
+
+func (f *fakeStore) ListActiveSessionsForUser(ctx context.Context, userID uuid.UUID) ([]gen.ListActiveSessionsForUserRow, error) {
+	var out []gen.ListActiveSessionsForUserRow
+	for _, row := range f.sessions {
+		if row.UserID == userID && !row.RevokedAt.Valid {
+			out = append(out, gen.ListActiveSessionsForUserRow{
+				ID: row.ID, WorkspaceID: row.WorkspaceID, UserAgent: row.UserAgent,
+				Ip: row.Ip, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) RevokeSessionOwned(ctx context.Context, sid, userID uuid.UUID) (int64, error) {
+	row, ok := f.sessions[sid]
+	if !ok || row.UserID != userID || row.RevokedAt.Valid {
+		return 0, nil
+	}
+	row.RevokedAt = pgxTimestamp(time.Now())
+	f.sessions[sid] = row
+	return 1, nil
+}
+
+func (f *fakeStore) RevokeOtherSessionsForUser(ctx context.Context, userID, keepSID uuid.UUID) ([]uuid.UUID, error) {
+	var revoked []uuid.UUID
+	for id, row := range f.sessions {
+		if row.UserID == userID && id != keepSID && !row.RevokedAt.Valid {
+			row.RevokedAt = pgxTimestamp(time.Now())
+			f.sessions[id] = row
+			revoked = append(revoked, id)
+		}
+	}
+	return revoked, nil
 }
 
 func (f *fakeStore) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
@@ -232,34 +271,33 @@ func (f *fakeStore) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash s
 // consumes the token, then overwrites the password hash and revokes every
 // session for the resulting user id, so tests can assert on either outcome
 // via the same fake maps used elsewhere.
-func (f *fakeStore) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) (uuid.UUID, error) {
+func (f *fakeStore) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) ([]uuid.UUID, error) {
 	uid, err := f.ConsumeUserToken(ctx, rawToken, kind)
 	if err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
 	if err := f.UpdatePasswordHash(ctx, uid, newHash); err != nil {
-		return uuid.Nil, err
+		return nil, err
 	}
-	if err := f.RevokeAllForUser(ctx, uid); err != nil {
-		return uuid.Nil, err
-	}
-	return uid, nil
+	return f.RevokeAllForUser(ctx, uid)
 }
 
-func (f *fakeStore) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) error {
+func (f *fakeStore) RepointSessionWorkspace(ctx context.Context, id, userID, wsID uuid.UUID) (int, error) {
 	row, ok := f.sessions[id]
 	if !ok {
-		return ErrNotMember
+		return 0, ErrNotMember
 	}
 	// The real store's WHERE binds (id, user_id) together: mismatched pairs
 	// yield 0 rows affected and surface as ErrNotMember. The fake mirrors
 	// that so cross-tenant IDOR tests exercise the same path.
 	if row.UserID != userID {
-		return ErrNotMember
+		return 0, ErrNotMember
 	}
 	row.WorkspaceID = wsID
 	f.sessions[id] = row
-	return nil
+	// Mirror the real store's RETURNING token_version so switchWorkspace tests
+	// exercise the same tv-sourcing path.
+	return int(row.TokenVersion), nil
 }
 
 func TestRegisterIssuesSession(t *testing.T) {
@@ -413,7 +451,7 @@ func TestSwitchWorkspaceNonMember(t *testing.T) {
 	sessionID := uuid.New()
 	target := uuid.New() // no membership registered for this workspace
 
-	_, _, err := svc.SwitchWorkspace(context.Background(), sessionID, userID, target)
+	_, _, _, err := svc.SwitchWorkspace(context.Background(), sessionID, userID, target)
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("expected ErrNotMember, got %v", err)
 	}
@@ -454,7 +492,7 @@ func TestSwitchWorkspaceForeignSessionIDRejected(t *testing.T) {
 	// Attacker attempts to repoint victim.SessionID (which they somehow
 	// guessed / stole) — attacker.UserID doesn't own it, so the store must
 	// treat this as a non-membership event.
-	_, _, err = svc.SwitchWorkspace(context.Background(), victim.SessionID, attacker.UserID, target)
+	_, _, _, err = svc.SwitchWorkspace(context.Background(), victim.SessionID, attacker.UserID, target)
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("expected ErrNotMember on foreign session repoint, got %v", err)
 	}
@@ -692,7 +730,7 @@ func TestResetPasswordSetsHashAndRevokesSessions(t *testing.T) {
 		t.Fatalf("IssueUserToken: %v", err)
 	}
 
-	if err := svc.ResetPassword(context.Background(), raw, "brand-new-password-456"); err != nil {
+	if _, err := svc.ResetPassword(context.Background(), raw, "brand-new-password-456"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 	if !auth.CheckPassword(store.usersByID[userID].PasswordHash, "brand-new-password-456") {
@@ -709,7 +747,7 @@ func TestResetPasswordInvalidToken(t *testing.T) {
 	store := newFakeStore()
 	svc := newTestService(store)
 
-	if err := svc.ResetPassword(context.Background(), "not-a-real-token", "brand-new-password-456"); !errors.Is(err, ErrTokenInvalid) {
+	if _, err := svc.ResetPassword(context.Background(), "not-a-real-token", "brand-new-password-456"); !errors.Is(err, ErrTokenInvalid) {
 		t.Fatalf("expected ErrTokenInvalid, got %v", err)
 	}
 }

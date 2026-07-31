@@ -69,10 +69,10 @@ func TestBuildRouterProtectedGroupRejectsAnonymous(t *testing.T) {
 	mb := chi.NewRouter()
 	mb.Get("/", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(), testSecret,
-		nil,
-		[]mount{{pattern: "/api/v1/mailboxes", handler: mb}},
-	)
+	r := buildRouter(discardLogger(), nil, []protectedGroup{{
+		verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
+		mounts:    []mount{{pattern: "/api/v1/mailboxes", handler: mb}},
+	}})
 
 	if code := do(t, r, http.MethodGet, "/api/v1/mailboxes/", "", nil); code != http.StatusUnauthorized {
 		t.Fatalf("no token: got %d, want 401", code)
@@ -91,10 +91,10 @@ func TestBuildRouterFailsSafeForNewRoutes(t *testing.T) {
 	brandNew := chi.NewRouter()
 	brandNew.Get("/", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(), testSecret,
-		nil,
-		[]mount{{pattern: "/api/v1/brand-new", handler: brandNew}},
-	)
+	r := buildRouter(discardLogger(), nil, []protectedGroup{{
+		verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
+		mounts:    []mount{{pattern: "/api/v1/brand-new", handler: brandNew}},
+	}})
 
 	if code := do(t, r, http.MethodGet, "/api/v1/brand-new/", "", nil); code != http.StatusUnauthorized {
 		t.Fatalf("fail-safe: unauthenticated new route got %d, want 401", code)
@@ -111,7 +111,7 @@ func TestBuildRouterPublicGroupNeedsNoToken(t *testing.T) {
 	pub.Post("/register", okHandler().ServeHTTP)
 	pub.Post("/login", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(), testSecret,
+	r := buildRouter(discardLogger(),
 		[]mount{{pattern: "/api/v1/auth", handler: pub}},
 		nil,
 	)
@@ -135,7 +135,7 @@ func TestBuildRouterPublicCSRFRouteNeedsCSRFNotBearer(t *testing.T) {
 	pub := chi.NewRouter()
 	pub.With(auth.RequireCSRF).Post("/refresh", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(), testSecret,
+	r := buildRouter(discardLogger(),
 		[]mount{{pattern: "/api/v1/auth", handler: pub}},
 		nil,
 	)
@@ -168,8 +168,8 @@ func TestBuildRouterPublicCSRFRouteNeedsCSRFNotBearer(t *testing.T) {
 func TestBuildRouterIdentityMeStaysGuarded(t *testing.T) {
 	h := &identity.Handler{}
 
-	r := buildRouter(discardLogger(), testSecret,
-		[]mount{{pattern: "/api/v1/auth", handler: h.Routes(testSecret)}},
+	r := buildRouter(discardLogger(),
+		[]mount{{pattern: "/api/v1/auth", handler: h.Routes(identity.RouteDeps{Verifier: auth.NewJWTVerifier(testSecret)})}},
 		nil,
 	)
 

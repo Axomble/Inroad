@@ -9,22 +9,30 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/apikey"
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
+	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
+	"github.com/inroad/inroad/internal/app/oauthprovider"
+	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/app/tracking"
+	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
+	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
@@ -33,6 +41,8 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/ratelimit"
+	"github.com/inroad/inroad/internal/platform/throttle"
 )
 
 func main() {
@@ -82,12 +92,46 @@ func run() error {
 		return err
 	}
 	identStore := identity.NewStore(pool)
+	// The store-backed verifier makes access tokens revocable: every request is
+	// validated against the session's live revocation/expiry/token_version. It
+	// is both the auth.Verifier for the protected group AND the cache-buster the
+	// identity handler calls when it revokes a session.
+	sessionVerifier := identity.NewSessionVerifier(cfg.JWTSecret, identStore, cfg.SessionCacheTTL)
+	identSvc := identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
+		cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL)
+	// TOTP 2FA. The secret is USER-level, sealed under a server-level HKDF subkey
+	// of the master key (crypto.ServerKeyring) — NOT a per-workspace DEK, since a
+	// user's second factor spans every workspace they belong to. The twofa service
+	// depends on identity only through narrow seams wired below (gate + completer +
+	// revoker), never an import.
+	serverKeyring, err := crypto.NewServerKeyring(cfg.MasterKey)
+	if err != nil {
+		logger.Error("server keyring init failed", "err", err)
+		return err
+	}
+	twofaSvc := twofa.NewService(twofa.NewPgStore(pool), serverKeyring)
+	// gate = twofaSvc: login interposes the 2FA challenge for confirmed-2FA users.
 	identHandler := identity.NewHandler(
-		identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
-			cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL),
+		identSvc,
 		cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL, cfg.CookieSecure, cfg.CookieDomain,
-		cfg.TrustedProxies,
+		cfg.TrustedProxies, sessionVerifier, twofaSvc,
 	)
+	// completer = identHandler (issues the session on a passed 2FA verify);
+	// revoker = identSvc + buster = sessionVerifier (disable revokes other sessions).
+	twofaHandler := twofa.NewHandler(twofaSvc, identHandler, identSvc, sessionVerifier)
+	// Passkeys / WebAuthn. The Relying Party is derived from INROAD_RP_ID /
+	// INROAD_RP_ORIGIN (defaulting from the public URL). If the RP cannot be built
+	// (unset/invalid), the service is constructed with a nil library instance so the
+	// endpoints fail cleanly (501) — the feature is simply off rather than
+	// mis-validating. Like twofa, the passkey domain reaches identity only through
+	// the narrow CompleteLogin seam (a user-verified passkey login satisfies MFA and
+	// skips the TOTP gate), never an import.
+	web, err := passkey.NewWebAuthn(cfg.RPID, cfg.RPOrigin)
+	if err != nil {
+		logger.Warn("passkeys disabled: relying party not configured", "err", err)
+		web = nil
+	}
+	passkeyHandler := passkey.NewHandler(passkey.NewService(web, passkey.NewPgStore(pool)), identHandler)
 	mailboxStore := mailbox.NewPgStore(queries)
 	googleOAuth := mail.GoogleOAuth{
 		ClientID:     cfg.GoogleClientID,
@@ -114,6 +158,69 @@ func run() error {
 
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
+
+	// Scoped API keys. The verifier authenticates `inrd_` tokens on the data-plane
+	// REST surface (attenuated to the key's granted scopes via RequireScope); the
+	// management handler (create/list/revoke) is session-authed and mounts under
+	// /api/v1/auth/api-keys. The per-key rate limit uses an atomic Redis window on
+	// the same instance the queue runs on, failing closed if Redis is unreachable.
+	// The SAME limiter backs the pre-auth login throttles below (keys are namespaced
+	// per bucket, so there is no collision).
+	redisLimiter := ratelimit.NewRedisLimiter(cfg.RedisAddr)
+	defer func() { _ = redisLimiter.Close() }()
+	apiKeyStore := apikey.NewPgStore(pool)
+	apiKeyHandler := apikey.NewHandler(apikey.NewService(apiKeyStore))
+	apiKeyVerifier := apikey.NewVerifier(apiKeyStore, redisLimiter, cfg.TrustedProxies)
+
+	// Pre-authentication hardening: a config-gated captcha (register/login/OTP-start)
+	// and per-IP + per-account rate limits on the abusable unauthenticated surface.
+	// An empty Turnstile secret selects the no-op verifier (captcha effectively off).
+	ipResolver := httpx.NewClientIPResolver(cfg.TrustedProxies)
+	var captchaVerifier captcha.Verifier
+	if cfg.TurnstileSecret != "" {
+		captchaVerifier = captcha.NewTurnstile(cfg.TurnstileSecret, nil)
+	} else {
+		captchaVerifier = captcha.NewNoop()
+	}
+	captchaMW := captcha.Middleware(captchaVerifier, ipResolver)
+	throttleWindow := time.Minute
+	newThrottle := func(bucket string, ipLimit, acctLimit int) func(http.Handler) http.Handler {
+		return throttle.Config{
+			Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
+			IPLimit: ipLimit, AcctLimit: acctLimit,
+		}.Middleware(bucket)
+	}
+	loginThrottle := newThrottle("login", cfg.RateLimitLoginIP, cfg.RateLimitLoginAccount)
+	forgotThrottle := newThrottle("forgot", cfg.RateLimitSensitiveIP, cfg.RateLimitSensitiveAccount)
+	otpStartThrottle := newThrottle("otp-start", cfg.RateLimitSensitiveIP, cfg.RateLimitSensitiveAccount)
+	otpVerifyThrottle := newThrottle("otp-verify", cfg.RateLimitVerifyIP, cfg.RateLimitVerifyAccount)
+	// 2FA/passkey verify carry no email in the body, so they are IP-throttled only.
+	twofaVerifyThrottle := newThrottle("2fa-verify", cfg.RateLimitVerifyIP, 0)
+	passkeyFinishThrottle := newThrottle("passkey-login", cfg.RateLimitVerifyIP, 0)
+	// Dynamic client registration carries no email; IP-throttle only, on the same
+	// per-IP cap as the other sensitive unauthenticated endpoints.
+	oauthRegisterThrottle := newThrottle("oauth-register", cfg.RateLimitSensitiveIP, 0)
+
+	// OAuth 2.1 authorization server (Inroad as an OAuth PROVIDER). Self-contained
+	// domain mounted under /oauth2 (distinct from the mailbox-connect /oauth mount).
+	// The resource owner is resolved from the P1 session through the ResourceOwner
+	// seam, backed here by the session verifier (never re-implementing login).
+	oauthStore := oauthprovider.NewPgStore(pool)
+	oauthProviderHandler := oauthprovider.NewHandler(
+		oauthprovider.NewService(oauthStore, cfg.PublicURL),
+		sessionResourceOwner{v: sessionVerifier},
+	)
+	// The OAuth access-token verifier engages on `inoa_` Bearer tokens and DEFERS on
+	// everything else, so it slots into the data-plane RequireAuth chain BEFORE the
+	// session verifier (which would hard-fail a non-JWT Bearer token). It mints a
+	// scope-only KindOAuth principal, attenuated by each route's RequireScope.
+	oauthVerifier := oauthprovider.NewVerifier(oauthStore)
+
+	// Email-OTP passwordless login. A dedicated slice (its own store/service) that
+	// reaches session-issuance + the 2FA gate only through identHandler's
+	// CompleteFirstFactor seam, so an OTP login runs the SAME first-factor path (and
+	// the SAME 2FA gate) a password login does — never a session from email alone.
+	emailOTPHandler := emailotp.NewHandler(emailotp.NewService(emailotp.NewPgStore(pool), sender), identHandler)
 	listSvc := list.NewService(list.NewPgStore(queries))
 	// contact takes only a small ListChecker interface (not the whole list
 	// service) so the contact package doesn't have to import app/list —
@@ -145,7 +252,19 @@ func run() error {
 	//               route mounted here is authenticated by default, so a new
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
-		{pattern: "/api/v1/auth", handler: identHandler.Routes(cfg.JWTSecret)},
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(identity.RouteDeps{
+			Verifier: sessionVerifier,
+			TwoFA:    twofaHandler.Routes(sessionVerifier, twofaVerifyThrottle),
+			Passkeys: passkeyHandler.Routes(sessionVerifier, passkeyFinishThrottle),
+			APIKeys:  apiKeyHandler.Routes(sessionVerifier),
+			// otpStartThrottle is OUTERMOST (listed first) so the cheap local Redis
+			// rate-limit sheds an over-cap /email-otp/start with a 429 BEFORE captcha
+			// fires its outbound siteverify round-trip. Throttle must gate captcha.
+			EmailOTP:       emailOTPHandler.Routes([]func(http.Handler) http.Handler{otpStartThrottle, captchaMW}, []func(http.Handler) http.Handler{otpVerifyThrottle}),
+			Captcha:        captchaMW,
+			LoginThrottle:  loginThrottle,
+			ForgotThrottle: forgotThrottle,
+		})},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
@@ -154,8 +273,21 @@ func run() error {
 		// the provider; they authenticate from the signed state, not the JWT
 		// cookie, so they mount here rather than the protected group.
 		{pattern: "/oauth", handler: mbHandler.CallbackRoutes()},
+		// OAuth 2.1 authorization server (provider). Mounted at /oauth2 — distinct
+		// from the /oauth mailbox-connect mount above. /authorize is a top-level
+		// browser navigation that resolves the resource owner from the session seam
+		// (unauth -> login redirect), so it is public here rather than in a
+		// RequireAuth group; its sub-routes apply their own session/admin/CSRF guards.
+		{pattern: "/oauth2", handler: oauthProviderHandler.Routes(sessionVerifier, oauthRegisterThrottle)},
 	}
-	protected := []mount{
+	// The data-plane REST surface accepts a session, an api-key, OR an OAuth access
+	// token. The api-key verifier runs first and DEFERS on a non-`inrd_` token; the
+	// OAuth verifier then engages on an `inoa_` token and DEFERS otherwise; a JWT falls
+	// through to the session verifier. A machine principal (api-key or OAuth grant) is
+	// attenuated to its granted scopes by each route's RequireScope (a session holds all
+	// scopes). Ordering matters: the OAuth verifier MUST precede the session verifier,
+	// which hard-fails a non-JWT Bearer token rather than deferring.
+	dataPlane := []mount{
 		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},
 		{pattern: "/api/v1/lists", handler: list.NewHandler(listSvc).Routes()},
 		// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
@@ -163,17 +295,25 @@ func run() error {
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
-		// /campaigns/{id}/steps lives under the protected group and inherits its
-		// RequireAuth. Routes(identStore) additionally applies RequireVerified to
-		// /launch (email-gated sending).
+		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
+		// Routes(identStore) additionally applies RequireVerified to /launch
+		// (email-gated sending).
 		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes(identStore)},
+	}
+	// Session-only surface: workspace administration and the warmup overview are not
+	// part of the api-key contract, so they authenticate with the session verifier
+	// alone — an `inrd_` token presented here is rejected 401 (fail closed).
+	sessionOnly := []mount{
 		{pattern: "/api/v1/workspaces", handler: identHandler.InviteRoutes()},
 		// Workspace-level warmup overview. The per-mailbox warmup routes
 		// (/mailboxes/{id}/warmup) are registered as a sub-router of the mailbox
 		// mount above, not here.
 		{pattern: "/api/v1/warmup", handler: warmupHandler.Routes()},
 	}
-	router := buildRouter(logger, cfg.JWTSecret, public, protected)
+	router := buildRouter(logger, public, []protectedGroup{
+		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
+		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
+	})
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
 	logger.Info("api listening", "addr", cfg.HTTPAddr)
@@ -190,22 +330,33 @@ type mount struct {
 	handler http.Handler
 }
 
+// protectedGroup is a set of mounts sharing one authentication chain: the group
+// root wraps them once in auth.RequireAuth(verifiers...). Different groups can
+// accept different credentials (e.g. the data plane adds the api-key verifier
+// ahead of the session verifier).
+type protectedGroup struct {
+	verifiers []auth.Verifier
+	mounts    []mount
+}
+
 // buildRouter assembles the API router with a deny-by-default posture. Public
-// mounts are served as-is; every protected mount is wrapped once, at the group
-// root, by auth.RequireAuth(secret). A route added under the protected group is
-// therefore authenticated whether or not it wires up any middleware of its own
-// -- forgetting a per-domain guard can no longer expose a route.
-func buildRouter(logger *slog.Logger, secret []byte, public, protected []mount) *chi.Mux {
+// mounts are served as-is; every protected group is wrapped once, at its group
+// root, by auth.RequireAuth(verifiers...). A route added under a protected group
+// is therefore authenticated whether or not it wires up any middleware of its
+// own -- forgetting a per-domain guard can no longer expose a route.
+func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup) *chi.Mux {
 	r := httpx.NewRouter(logger)
 	for _, m := range public {
 		r.Mount(m.pattern, m.handler)
 	}
-	r.Group(func(pr chi.Router) {
-		pr.Use(auth.RequireAuth(secret))
-		for _, m := range protected {
-			pr.Mount(m.pattern, m.handler)
-		}
-	})
+	for _, g := range groups {
+		r.Group(func(pr chi.Router) {
+			pr.Use(auth.RequireAuth(g.verifiers...))
+			for _, m := range g.mounts {
+				pr.Mount(m.pattern, m.handler)
+			}
+		})
+	}
 	return r
 }
 
@@ -258,6 +409,51 @@ func (c campaignStatusChecker) CampaignStatus(ctx context.Context, ws, campaignI
 		return "", err
 	}
 	return cam.Status, nil
+}
+
+// sessionResourceOwner backs the oauthprovider.ResourceOwner seam with the session
+// verifier: it resolves the current resource owner from the P1 session on the request
+// WITHOUT the oauthprovider domain importing identity (dependency inversion — the
+// domain defines the interface, the composition root supplies this identity-backed
+// impl). A definitive "not authenticated" (deferred verifier, or ErrUnauthorized) is
+// reported as (false, nil) so /authorize sends the user to log in rather than 500ing;
+// only a genuine infra failure surfaces as an error. A non-session (machine)
+// principal is treated as "no resource owner" — an API key cannot grant OAuth consent.
+type sessionResourceOwner struct{ v auth.Verifier }
+
+func (s sessionResourceOwner) Resolve(ctx context.Context, r *http.Request) (oauthprovider.Owner, bool, error) {
+	p, ok, err := s.v.Verify(ctx, r)
+	if err != nil {
+		if errors.Is(err, auth.ErrUnauthorized) {
+			return oauthprovider.Owner{}, false, nil
+		}
+		return oauthprovider.Owner{}, false, err
+	}
+	if !ok || p.Kind != auth.KindSession {
+		return oauthprovider.Owner{}, false, nil
+	}
+	uid, wid, parsed := parseOwnerIDs(p.UserID, p.WorkspaceID)
+	if !parsed {
+		// A malformed principal is treated as "no resource owner", not an infra
+		// error, so /authorize sends the user to log in rather than 500ing.
+		return oauthprovider.Owner{}, false, nil
+	}
+	return oauthprovider.Owner{UserID: uid, WorkspaceID: wid}, true, nil
+}
+
+// parseOwnerIDs parses a principal's user + workspace ids, reporting ok=false if
+// either is malformed. Returning a bool (not an error) keeps the caller's
+// "not authenticated" path free of a lingering error value.
+func parseOwnerIDs(userID, workspaceID string) (uuid.UUID, uuid.UUID, bool) {
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	wid, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	return uid, wid, true
 }
 
 // listCheckerAdapter satisfies contact.ListChecker so the contact package

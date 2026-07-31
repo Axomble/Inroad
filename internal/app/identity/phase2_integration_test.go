@@ -159,7 +159,7 @@ func TestPhase2ForgotResetFlow(t *testing.T) {
 	}
 	token := extractToken(t, sender.last.TextBody)
 
-	if err := svc.ResetPassword(ctx, token, newPassword); err != nil {
+	if _, err := svc.ResetPassword(ctx, token, newPassword); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 
@@ -379,7 +379,7 @@ func TestPhase2RequireVerifiedGatedRoute(t *testing.T) {
 	token := extractToken(t, sender.last.TextBody)
 
 	r := chi.NewRouter()
-	r.Use(auth.RequireAuth(testJWTSecret))
+	r.Use(auth.RequireAuth(auth.NewJWTVerifier(testJWTSecret)))
 	r.With(auth.RequireVerified(svc)).Get("/protected", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

@@ -15,7 +15,7 @@ func TestRequireRoleAllowsSufficient(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	h := RequireRole("admin")(next)
 	r := httptest.NewRequest("GET", "/x", http.NoBody).WithContext(
-		context.WithValue(context.Background(), ctxKey{}, Claims{Role: "owner"}))
+		context.WithValue(context.Background(), ctxKey{}, Principal{Role: "owner"}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != 200 {
@@ -27,7 +27,7 @@ func TestRequireRoleRejectsInsufficient(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	h := RequireRole("admin")(next)
 	r := httptest.NewRequest("GET", "/x", http.NoBody).WithContext(
-		context.WithValue(context.Background(), ctxKey{}, Claims{Role: "member"}))
+		context.WithValue(context.Background(), ctxKey{}, Principal{Role: "member"}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
@@ -59,7 +59,7 @@ func TestRequireVerifiedAllowsVerifiedUser(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	h := RequireVerified(fakeVerifiedChecker{verified: true})(next)
 	r := httptest.NewRequest("POST", "/x", http.NoBody).WithContext(
-		context.WithValue(context.Background(), ctxKey{}, Claims{UserID: uuid.New().String()}))
+		context.WithValue(context.Background(), ctxKey{}, Principal{UserID: uuid.New().String()}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != 200 {
@@ -71,7 +71,7 @@ func TestRequireVerifiedRejectsUnverifiedUser(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	h := RequireVerified(fakeVerifiedChecker{verified: false})(next)
 	r := httptest.NewRequest("POST", "/x", http.NoBody).WithContext(
-		context.WithValue(context.Background(), ctxKey{}, Claims{UserID: uuid.New().String()}))
+		context.WithValue(context.Background(), ctxKey{}, Principal{UserID: uuid.New().String()}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
@@ -97,7 +97,7 @@ func TestRequireVerifiedRejectsUnparseableUserID(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	h := RequireVerified(fakeVerifiedChecker{verified: true})(next)
 	r := httptest.NewRequest("POST", "/x", http.NoBody).WithContext(
-		context.WithValue(context.Background(), ctxKey{}, Claims{UserID: "not-a-uuid"}))
+		context.WithValue(context.Background(), ctxKey{}, Principal{UserID: "not-a-uuid"}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
@@ -109,7 +109,7 @@ func TestRequireVerifiedReturns500OnCheckerError(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	h := RequireVerified(fakeVerifiedChecker{err: errors.New("boom")})(next)
 	r := httptest.NewRequest("POST", "/x", http.NoBody).WithContext(
-		context.WithValue(context.Background(), ctxKey{}, Claims{UserID: uuid.New().String()}))
+		context.WithValue(context.Background(), ctxKey{}, Principal{UserID: uuid.New().String()}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusInternalServerError {
