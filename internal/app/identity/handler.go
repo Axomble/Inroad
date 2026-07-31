@@ -279,6 +279,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	if h.gate != nil {
 		challenge, required, gerr := h.gate.ChallengeIfRequired(r.Context(), uid, ip)
 		if gerr != nil {
+			// The per-IP challenge throttle fired: surface 429, not a generic 500.
+			// The sentinel lives in auth so this never imports the twofa domain.
+			if errors.Is(gerr, auth.ErrTwoFactorRateLimited) {
+				httpx.Error(w, http.StatusTooManyRequests, "too many attempts")
+				return
+			}
 			httpx.Error(w, http.StatusInternalServerError, "could not start two-factor challenge")
 			return
 		}

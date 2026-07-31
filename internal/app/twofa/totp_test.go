@@ -39,7 +39,7 @@ func TestVerifyTOTPValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	if !verifyTOTP(secret, totpAt(secret, now), now) {
+	if _, ok := verifyTOTP(secret, totpAt(secret, now), now); !ok {
 		t.Fatal("current-step code should verify")
 	}
 }
@@ -52,10 +52,10 @@ func TestVerifyTOTPAcceptsOneStepSkew(t *testing.T) {
 	now := time.Now()
 	prev := now.Add(-totpPeriodSec * time.Second)
 	next := now.Add(totpPeriodSec * time.Second)
-	if !verifyTOTP(secret, totpAt(secret, prev), now) {
+	if _, ok := verifyTOTP(secret, totpAt(secret, prev), now); !ok {
 		t.Error("previous-step code should verify within ±1 skew")
 	}
-	if !verifyTOTP(secret, totpAt(secret, next), now) {
+	if _, ok := verifyTOTP(secret, totpAt(secret, next), now); !ok {
 		t.Error("next-step code should verify within ±1 skew")
 	}
 }
@@ -67,7 +67,7 @@ func TestVerifyTOTPRejectsOutsideWindow(t *testing.T) {
 	}
 	now := time.Now()
 	twoAgo := now.Add(-2 * totpPeriodSec * time.Second)
-	if verifyTOTP(secret, totpAt(secret, twoAgo), now) {
+	if _, ok := verifyTOTP(secret, totpAt(secret, twoAgo), now); ok {
 		t.Error("a code two steps old must be rejected (skew is ±1)")
 	}
 }
@@ -79,7 +79,7 @@ func TestVerifyTOTPRejectsGarbage(t *testing.T) {
 	}
 	now := time.Now()
 	for _, bad := range []string{"", "12345", "1234567", "abcdef", "  12 34"} {
-		if verifyTOTP(secret, bad, now) {
+		if _, ok := verifyTOTP(secret, bad, now); ok {
 			t.Errorf("garbage code %q must not verify", bad)
 		}
 	}
@@ -89,7 +89,7 @@ func TestVerifyTOTPWrongSecret(t *testing.T) {
 	a, _ := newTOTPSecret()
 	b, _ := newTOTPSecret()
 	now := time.Now()
-	if verifyTOTP(b, totpAt(a, now), now) {
+	if _, ok := verifyTOTP(b, totpAt(a, now), now); ok {
 		t.Error("a code from a different secret must not verify")
 	}
 }

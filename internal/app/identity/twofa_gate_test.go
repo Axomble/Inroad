@@ -104,6 +104,19 @@ func TestLoginGateNonConfirmedUserGetsSession(t *testing.T) {
 	}
 }
 
+// TestLoginGateRateLimitedReturns429 proves the per-IP challenge throttle surfaces
+// as HTTP 429 (not a generic 500): when the gate returns the shared
+// auth.ErrTwoFactorRateLimited sentinel, login maps it to StatusTooManyRequests.
+func TestLoginGateRateLimitedReturns429(t *testing.T) {
+	gate := &fakeGate{err: auth.ErrTwoFactorRateLimited}
+	h, email, password := newGatedTestHandler(t, gate)
+
+	w := doRequest(h.login, http.MethodPost, "/login", map[string]string{"email": email, "password": password})
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestLoginGateNotConsultedOnWrongPassword proves the gate is never consulted
 // when the password is wrong — so a wrong password can't reveal 2FA status, and
 // the response is a flat 401 identical to a non-2FA account.

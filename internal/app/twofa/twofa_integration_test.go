@@ -9,18 +9,32 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/notify"
 )
+
+// nextStepCode returns a TOTP code for the step AFTER the current one. Confirm (and
+// any prior login) advances the per-user replay high-water mark to the step it
+// matched, so a fresh login must present a strictly-later step. A now+period code
+// is exactly +1 step: still inside the ±1 verification skew, yet always past the
+// confirm step — deterministic without sleeping across a real boundary.
+func nextStepCode(secret []byte) string {
+	return totpAt(secret, time.Now().Add(totpPeriodSec*time.Second))
+}
 
 func dsn() string {
 	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
@@ -53,7 +67,7 @@ func itMasterKey() []byte {
 // testServer wires identity + twofa exactly as cmd/inroad does, against a real
 // Postgres pool, with the given verifier cache TTL. It truncates the challenge
 // table so the per-IP throttle can't accumulate across runs.
-func testServer(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Queries) {
+func testServer(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Queries, *Service) {
 	t.Helper()
 	ctx := context.Background()
 	if err := db.Migrate(dsn()); err != nil {
@@ -84,7 +98,7 @@ func testServer(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Qu
 	r.Mount("/api/v1/auth", identHandler.Routes(verifier, twofaHandler.Routes(verifier)))
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
-	return srv, gen.New(pool)
+	return srv, gen.New(pool), twofaSvc
 }
 
 // call issues a JSON request and returns status + decoded-into-out body. bearer,
@@ -164,7 +178,7 @@ func enrolledUser(t *testing.T, srv *httptest.Server, prefix string) (email, pas
 // TestFullEnrollConfirmLoginVerifyFlow drives the whole happy path:
 // register → enroll → confirm → login-returns-challenge → verify → session.
 func TestFullEnrollConfirmLoginVerifyFlow(t *testing.T) {
-	srv, _ := testServer(t, 0)
+	srv, _, _ := testServer(t, 0)
 	email, password, access, secret, _ := enrolledUser(t, srv, "flow")
 
 	// Status shows enabled with a full set of recovery codes.
@@ -189,10 +203,11 @@ func TestFullEnrollConfirmLoginVerifyFlow(t *testing.T) {
 		t.Fatal("gated login must not issue an access token")
 	}
 
-	// Verify with the TOTP code issues a real session.
+	// Verify with a next-step TOTP code issues a real session (confirm consumed the
+	// current step, so a fresh login uses the following step).
 	var verified sessionBody
 	if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
-		map[string]string{"challenge": login.Challenge, "code": totpAt(secret, time.Now())}, &verified); code != http.StatusOK {
+		map[string]string{"challenge": login.Challenge, "code": nextStepCode(secret)}, &verified); code != http.StatusOK {
 		t.Fatalf("verify: got %d", code)
 	}
 	if verified.AccessToken == "" {
@@ -205,7 +220,7 @@ func TestFullEnrollConfirmLoginVerifyFlow(t *testing.T) {
 	// Replaying the same challenge fails (single-use).
 	var replay sessionBody
 	if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
-		map[string]string{"challenge": login.Challenge, "code": totpAt(secret, time.Now())}, &replay); code != http.StatusUnauthorized {
+		map[string]string{"challenge": login.Challenge, "code": nextStepCode(secret)}, &replay); code != http.StatusUnauthorized {
 		t.Fatalf("challenge replay: got %d, want 401", code)
 	}
 }
@@ -213,7 +228,7 @@ func TestFullEnrollConfirmLoginVerifyFlow(t *testing.T) {
 // TestLoginVerifyWithRecoveryCode proves a recovery code satisfies the gate and
 // is single-use.
 func TestLoginVerifyWithRecoveryCode(t *testing.T) {
-	srv, _ := testServer(t, 0)
+	srv, _, _ := testServer(t, 0)
 	email, password, _, _, recovery := enrolledUser(t, srv, "recovery")
 
 	login := loginChallenge(t, srv, email, password)
@@ -236,7 +251,7 @@ func TestLoginVerifyWithRecoveryCode(t *testing.T) {
 // TestVerifyAttemptCap proves a challenge dies after maxChallengeAttempts wrong
 // codes — a correct code afterward is rejected.
 func TestVerifyAttemptCap(t *testing.T) {
-	srv, _ := testServer(t, 0)
+	srv, _, _ := testServer(t, 0)
 	email, password, _, secret, _ := enrolledUser(t, srv, "cap")
 	challenge := loginChallenge(t, srv, email, password)
 
@@ -258,14 +273,16 @@ func TestVerifyAttemptCap(t *testing.T) {
 // the prompt 401 can only come from an explicit bust), while the acting session
 // stays alive.
 func TestDisableRevokesOtherSessionsAndBusts(t *testing.T) {
-	srv, _ := testServer(t, time.Hour) // long TTL: only an explicit Bust kills a token promptly
-	email, password, sessionA, secret, _ := enrolledUser(t, srv, "disable")
+	srv, _, _ := testServer(t, time.Hour) // long TTL: only an explicit Bust kills a token promptly
+	email, password, sessionA, secret, recovery := enrolledUser(t, srv, "disable")
 
-	// Establish a SECOND session via the 2FA login flow.
+	// Establish a SECOND session via the 2FA login flow. Use a recovery code here so
+	// it doesn't consume a TOTP step — leaving the following TOTP step free for the
+	// disable proof below (the replay high-water mark forbids reusing a step).
 	challenge := loginChallenge(t, srv, email, password)
 	var second sessionBody
 	if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
-		map[string]string{"challenge": challenge, "code": totpAt(secret, time.Now())}, &second); code != http.StatusOK {
+		map[string]string{"challenge": challenge, "code": recovery[0]}, &second); code != http.StatusOK {
 		t.Fatalf("second login verify: got %d", code)
 	}
 	sessionB := second.AccessToken
@@ -278,9 +295,9 @@ func TestDisableRevokesOtherSessionsAndBusts(t *testing.T) {
 		t.Fatalf("session B pre-disable: got %d", code)
 	}
 
-	// Disable 2FA using session B (proof = a fresh TOTP code).
+	// Disable 2FA using session B (proof = a fresh, next-step TOTP code).
 	if code := call(t, srv, http.MethodDelete, "/api/v1/auth/2fa/totp", sessionB,
-		map[string]string{"code": totpAt(secret, time.Now())}, nil); code != http.StatusNoContent {
+		map[string]string{"code": nextStepCode(secret)}, nil); code != http.StatusNoContent {
 		t.Fatalf("disable: got %d, want 204", code)
 	}
 
@@ -307,7 +324,7 @@ func TestDisableRevokesOtherSessionsAndBusts(t *testing.T) {
 // TestLoginEnumerationSafe proves a wrong password never reveals 2FA status: a
 // 2FA user and a non-2FA user both get a flat 401 with no challenge.
 func TestLoginEnumerationSafe(t *testing.T) {
-	srv, _ := testServer(t, 0)
+	srv, _, _ := testServer(t, 0)
 	email2fa, _, _, _, _ := enrolledUser(t, srv, "enum2fa")
 
 	// Non-2FA user.
@@ -343,4 +360,170 @@ func loginChallenge(t *testing.T, srv *httptest.Server, email, password string) 
 		t.Fatalf("expected a challenge, got %+v", login)
 	}
 	return login.Challenge
+}
+
+// TestTOTPStepReplayRejected proves FIX 1 over the real DB path: a TOTP code
+// accepted for one login challenge cannot satisfy a SECOND challenge within its
+// validity window (its step is now consumed), while a strictly-later step still
+// works. The service clock is driven deterministically so codes and verification
+// share the same time-step without sleeping across a real boundary.
+func TestTOTPStepReplayRejected(t *testing.T) {
+	srv, _, svc := testServer(t, 0)
+	email, password, _, secret, _ := enrolledUser(t, srv, "replay")
+
+	// Confirm consumed the enrollment step; drive the clock two steps forward and
+	// operate there so every code below is strictly past that mark.
+	base := time.Now().Add(2 * totpPeriodSec * time.Second)
+	svc.now = func() time.Time { return base }
+	code := totpAt(secret, base)
+
+	// First login with the code succeeds and consumes its step.
+	ch1 := loginChallenge(t, srv, email, password)
+	if got := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+		map[string]string{"challenge": ch1, "code": code}, nil); got != http.StatusOK {
+		t.Fatalf("first verify: got %d, want 200", got)
+	}
+
+	// Second, DIFFERENT challenge with the SAME still-valid code: rejected — the
+	// step is now <= last_step, so the code can't establish a second session.
+	ch2 := loginChallenge(t, srv, email, password)
+	if got := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+		map[string]string{"challenge": ch2, "code": code}, nil); got != http.StatusUnauthorized {
+		t.Fatalf("replayed step: got %d, want 401", got)
+	}
+
+	// A strictly-later step still works: advance the clock one step and use it.
+	svc.now = func() time.Time { return base.Add(totpPeriodSec * time.Second) }
+	ch3 := loginChallenge(t, srv, email, password)
+	if got := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+		map[string]string{"challenge": ch3, "code": totpAt(secret, base.Add(totpPeriodSec*time.Second))}, nil); got != http.StatusOK {
+		t.Fatalf("next-step verify: got %d, want 200", got)
+	}
+}
+
+// TestConcurrentAttemptCapNeverExceeds fires N parallel wrong-code verifies at one
+// challenge and proves the attempt cap held ATOMICALLY: attempts never exceeds
+// maxChallengeAttempts (a read-then-increment would have let all N through), no
+// wrong code was accepted, and the challenge is dead afterward. Mirrors identity's
+// concurrent-reuse race test.
+func TestConcurrentAttemptCapNeverExceeds(t *testing.T) {
+	srv, q, _ := testServer(t, 0)
+	email, password, _, secret, _ := enrolledUser(t, srv, "conccap")
+	challenge := loginChallenge(t, srv, email, password)
+
+	const workers = 20
+	var wg sync.WaitGroup
+	var accepted int32
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+				map[string]string{"challenge": challenge, "code": "000000"}, nil); code == http.StatusOK {
+				atomic.AddInt32(&accepted, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if accepted != 0 {
+		t.Fatalf("a wrong code was accepted %d times", accepted)
+	}
+	ch, err := q.GetChallengeByHash(context.Background(), auth.HashToken(challenge))
+	if err != nil {
+		t.Fatalf("get challenge: %v", err)
+	}
+	if ch.Attempts != maxChallengeAttempts {
+		t.Fatalf("attempts = %d, want exactly the cap %d (atomic claim neither overshot nor undershot)", ch.Attempts, maxChallengeAttempts)
+	}
+	// Dead challenge: even a correct, fresh-step code is rejected.
+	if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+		map[string]string{"challenge": challenge, "code": nextStepCode(secret)}, nil); code != http.StatusUnauthorized {
+		t.Fatalf("correct code after concurrent cap: got %d, want 401", code)
+	}
+}
+
+// TestRecoveryCodeExhaustionAPI drives all 10 recovery codes to used over the real
+// login path and proves recovery_codes_remaining reaches 0 and a spent code no
+// longer verifies. Recovery codes don't touch the TOTP replay mark, so each login
+// only needs its own fresh challenge.
+func TestRecoveryCodeExhaustionAPI(t *testing.T) {
+	srv, _, _ := testServer(t, 0)
+	email, password, access, _, recovery := enrolledUser(t, srv, "recexh")
+
+	for i, rc := range recovery {
+		ch := loginChallenge(t, srv, email, password)
+		if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+			map[string]string{"challenge": ch, "code": rc}, nil); code != http.StatusOK {
+			t.Fatalf("verify recovery %d: got %d, want 200", i, code)
+		}
+	}
+
+	var st statusResponse
+	if code := call(t, srv, http.MethodGet, "/api/v1/auth/2fa", access, nil, &st); code != http.StatusOK {
+		t.Fatalf("status: got %d", code)
+	}
+	if st.RecoveryCodesRemaining != 0 {
+		t.Fatalf("recovery_codes_remaining = %d, want 0 after exhausting all %d", st.RecoveryCodesRemaining, recoveryCodeCount)
+	}
+
+	// A spent code no longer verifies.
+	ch := loginChallenge(t, srv, email, password)
+	if code := call(t, srv, http.MethodPost, "/api/v1/auth/2fa/verify", "",
+		map[string]string{"challenge": ch, "code": recovery[0]}, nil); code != http.StatusUnauthorized {
+		t.Fatalf("spent recovery code: got %d, want 401", code)
+	}
+}
+
+// TestNullIPThrottleCountsTogether proves FIX 3 at the SQL level: challenges from
+// an unknown (NULL) IP share ONE bucket via IS NOT DISTINCT FROM, so the per-IP
+// throttle counts them together (fail closed) instead of matching nothing, while a
+// real IP stays its own bucket.
+func TestNullIPThrottleCountsTogether(t *testing.T) {
+	ctx := context.Background()
+	if err := db.Migrate(dsn()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	pool, err := db.Connect(ctx, dsn())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.Exec(ctx, "TRUNCATE two_factor_challenges"); err != nil {
+		t.Fatalf("truncate challenges: %v", err)
+	}
+
+	// A real user id (challenges FK-reference users).
+	var uid uuid.UUID
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+		uniqueEmail(t, "nullip"), "x").Scan(&uid); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	store := NewPgStore(pool)
+	since := time.Now().Add(-time.Hour)
+	exp := time.Now().Add(time.Hour)
+
+	const nNull, nIP = 3, 2
+	for i := 0; i < nNull; i++ {
+		if _, err := store.CreateChallenge(ctx, uid, []byte(fmt.Sprintf("null-%d", i)), nil, exp); err != nil {
+			t.Fatalf("create null-ip challenge %d: %v", i, err)
+		}
+	}
+	ip := netip.MustParseAddr("203.0.113.9")
+	for i := 0; i < nIP; i++ {
+		if _, err := store.CreateChallenge(ctx, uid, []byte(fmt.Sprintf("ip-%d", i)), &ip, exp); err != nil {
+			t.Fatalf("create ip challenge %d: %v", i, err)
+		}
+	}
+
+	// Unknown-IP callers share one bucket — all NULLs counted together.
+	if n, err := store.CountRecentChallengesForIP(ctx, nil, since); err != nil || n != nNull {
+		t.Fatalf("null-ip count = %d (err %v), want %d (nulls bucketed together)", n, err, nNull)
+	}
+	// A real IP is its own bucket, not conflated with the NULLs.
+	if n, err := store.CountRecentChallengesForIP(ctx, &ip, since); err != nil || n != nIP {
+		t.Fatalf("real-ip count = %d (err %v), want %d", n, err, nIP)
+	}
 }

@@ -58,11 +58,12 @@ func (s *PgStore) CountUnusedRecoveryCodes(ctx context.Context, userID uuid.UUID
 	return s.q.CountUnusedRecoveryCodes(ctx, userID)
 }
 
-// ConfirmTOTPTx activates the pending secret and seeds the recovery codes in one
-// transaction: either the factor becomes usable with its codes, or nothing lands.
-// Returns the number of rows confirmed (0 if already confirmed / missing, in
-// which case no codes are written).
-func (s *PgStore) ConfirmTOTPTx(ctx context.Context, userID uuid.UUID, codeHashes []string) (int64, error) {
+// ConfirmTOTPTx activates the pending secret, seeds the recovery codes, and seeds
+// the replay high-water mark (last_step) in one transaction: either the factor
+// becomes usable with its codes and mark, or nothing lands. Returns the number of
+// rows confirmed (0 if already confirmed / missing, in which case no codes are
+// written).
+func (s *PgStore) ConfirmTOTPTx(ctx context.Context, userID uuid.UUID, codeHashes []string, lastStep int64) (int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -70,7 +71,7 @@ func (s *PgStore) ConfirmTOTPTx(ctx context.Context, userID uuid.UUID, codeHashe
 	defer func() { _ = tx.Rollback(ctx) }()
 	qtx := s.q.WithTx(tx)
 
-	n, err := qtx.ConfirmTOTP(ctx, userID)
+	n, err := qtx.ConfirmTOTP(ctx, gen.ConfirmTOTPParams{UserID: userID, LastStep: lastStep})
 	if err != nil {
 		return 0, err
 	}
@@ -129,31 +130,29 @@ func (s *PgStore) GetChallengeByHash(ctx context.Context, hash []byte) (gen.TwoF
 	return s.q.GetChallengeByHash(ctx, hash)
 }
 
-// IncrementChallengeAttempts bumps the try counter and returns the new value so
-// the service can enforce the per-challenge cap.
-func (s *PgStore) IncrementChallengeAttempts(ctx context.Context, id uuid.UUID) (int32, error) {
-	return s.q.IncrementChallengeAttempts(ctx, id)
-}
-
-// ConsumeChallenge marks a challenge consumed (single-use). Returns rows affected
-// (0 if it was already consumed).
-func (s *PgStore) ConsumeChallenge(ctx context.Context, id uuid.UUID) (int64, error) {
-	return s.q.ConsumeChallenge(ctx, id)
+// ClaimChallengeAttempt atomically increments the challenge's attempt counter iff
+// it is still live (unconsumed) and under maxAttempts, returning the new count.
+// pgx.ErrNoRows signals a dead challenge (consumed or exhausted) — the single
+// statement is the atomic cap the service relies on against concurrent verifies.
+func (s *PgStore) ClaimChallengeAttempt(ctx context.Context, id uuid.UUID, maxAttempts int32) (int32, error) {
+	return s.q.ClaimChallengeAttempt(ctx, gen.ClaimChallengeAttemptParams{ID: id, Attempts: maxAttempts})
 }
 
 // CountRecentChallengesForIP counts challenges issued to ip since the given time
-// (per-IP throttle).
+// (per-IP throttle). A nil ip counts the shared unknown-IP bucket.
 func (s *PgStore) CountRecentChallengesForIP(ctx context.Context, ip *netip.Addr, since time.Time) (int64, error) {
 	return s.q.CountRecentChallengesForIP(ctx, gen.CountRecentChallengesForIPParams{Ip: ip, CreatedAt: pgxTimestamp(since)})
 }
 
-// ConsumeChallengeAndUseRecoveryTx atomically consumes the challenge and, if a
-// recovery code was used, marks that code used — so a successful verify burns
-// exactly one challenge and at most one recovery code, with no window for either
-// to be replayed. Returns false if the challenge was already consumed or the
-// recovery code was already used (a lost race), which the service treats as an
-// invalid challenge.
-func (s *PgStore) ConsumeChallengeAndUseRecoveryTx(ctx context.Context, challengeID uuid.UUID, recoveryID *uuid.UUID) (bool, error) {
+// ConsumeChallengeAndUseRecoveryTx atomically consumes the challenge and, in the
+// same transaction, marks a used recovery code (recoveryID != nil) and/or advances
+// the user's TOTP replay high-water mark to totpStep (totpStep > 0 for a TOTP
+// match) — so a successful verify burns exactly one challenge, at most one recovery
+// code, and at most one TOTP step, with no window for any to be replayed. Returns
+// false on a lost race for any of the three (challenge already consumed, recovery
+// code already used, or the step already advanced past totpStep by a concurrent
+// login), which the service treats as an invalid challenge.
+func (s *PgStore) ConsumeChallengeAndUseRecoveryTx(ctx context.Context, challengeID uuid.UUID, recoveryID *uuid.UUID, userID uuid.UUID, totpStep int64) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -175,6 +174,18 @@ func (s *PgStore) ConsumeChallengeAndUseRecoveryTx(ctx context.Context, challeng
 		}
 		if m == 0 {
 			return false, nil // recovery code already used concurrently
+		}
+	}
+	if totpStep > 0 {
+		// last_step < totpStep guard: 0 rows means a concurrent login already
+		// consumed this (or a later) step — reject this verify as a lost race so a
+		// single TOTP code cannot satisfy two challenges.
+		m, err := qtx.AdvanceTOTPStep(ctx, gen.AdvanceTOTPStepParams{UserID: userID, LastStep: totpStep})
+		if err != nil {
+			return false, err
+		}
+		if m == 0 {
+			return false, nil
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

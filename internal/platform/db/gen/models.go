@@ -385,6 +385,7 @@ type UserTotp struct {
 	SecretCiphertext string             `json:"secret_ciphertext"`
 	ConfirmedAt      pgtype.Timestamptz `json:"confirmed_at"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastStep         int64              `json:"last_step"`
 }
 
 type WarmupDailyStat struct {

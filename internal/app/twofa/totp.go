@@ -91,18 +91,21 @@ func totpAt(secret []byte, t time.Time) string {
 }
 
 // verifyTOTP reports whether code is a valid TOTP for secret at time t, accepting
-// the ±totpSkew step window. Every candidate is compared in constant time and the
-// loop never short-circuits, so neither the match position nor timing leaks which
-// step (if any) matched.
-func verifyTOTP(secret []byte, code string, t time.Time) bool {
+// the ±totpSkew step window, and returns the matched RFC 6238 time-step counter so
+// the caller can enforce the per-user replay high-water mark (last_step). Every
+// candidate is compared in constant time and the loop never short-circuits, so
+// neither the match position nor timing leaks which step (if any) matched; the
+// matched step is captured via a constant-time select for the same reason.
+// matchedStep is meaningful only when ok is true.
+func verifyTOTP(secret []byte, code string, t time.Time) (matchedStep int64, ok bool) {
 	code = strings.TrimSpace(code)
 	// A non-numeric or wrong-length code can never match; reject cheaply. The
 	// code value is not a secret, so this early return leaks nothing sensitive.
 	if len(code) != totpDigits {
-		return false
+		return 0, false
 	}
 	if _, err := strconv.Atoi(code); err != nil {
-		return false
+		return 0, false
 	}
 
 	center := int64(counterAt(t))
@@ -112,10 +115,14 @@ func verifyTOTP(secret []byte, code string, t time.Time) bool {
 		if c < 0 {
 			continue
 		}
-		candidate := hotp(secret, uint64(c))
-		matched |= subtle.ConstantTimeCompare([]byte(candidate), []byte(code))
+		eq := subtle.ConstantTimeCompare([]byte(hotp(secret, uint64(c))), []byte(code))
+		matched |= eq
+		// Record the matched step without short-circuiting: on a match eq==1 selects
+		// c, otherwise it keeps the running value. Step counters are small and
+		// positive, so the int round-trip is lossless.
+		matchedStep = int64(subtle.ConstantTimeSelect(eq, int(c), int(matchedStep)))
 	}
-	return matched == 1
+	return matchedStep, matched == 1
 }
 
 // provisioningURI builds the otpauth:// URI an authenticator app imports (via QR

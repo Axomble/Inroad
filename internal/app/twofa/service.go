@@ -28,7 +28,9 @@ var (
 	// expired, already consumed, or has exhausted its attempts — it is dead.
 	ErrChallengeInvalid = errors.New("challenge invalid or expired")
 	// ErrRateLimited is returned when challenge issuance is throttled for the IP.
-	ErrRateLimited = errors.New("too many requests")
+	// It aliases the shared auth sentinel so the identity login handler can map it
+	// to HTTP 429 without importing this domain.
+	ErrRateLimited = auth.ErrTwoFactorRateLimited
 )
 
 const (
@@ -51,14 +53,26 @@ type Store interface {
 	GetUserEmail(ctx context.Context, userID uuid.UUID) (string, error)
 	ListUnusedRecoveryCodes(ctx context.Context, userID uuid.UUID) ([]gen.ListUnusedRecoveryCodesRow, error)
 	CountUnusedRecoveryCodes(ctx context.Context, userID uuid.UUID) (int64, error)
-	ConfirmTOTPTx(ctx context.Context, userID uuid.UUID, codeHashes []string) (int64, error)
+	// ConfirmTOTPTx activates the pending factor, seeds recovery codes, and seeds
+	// the replay high-water mark with lastStep (the step the confirming code
+	// matched) — all in one transaction.
+	ConfirmTOTPTx(ctx context.Context, userID uuid.UUID, codeHashes []string, lastStep int64) (int64, error)
 	DeleteTwoFA(ctx context.Context, userID uuid.UUID) error
 	CreateChallenge(ctx context.Context, userID uuid.UUID, hash []byte, ip *netip.Addr, expiresAt time.Time) (uuid.UUID, error)
 	GetChallengeByHash(ctx context.Context, hash []byte) (gen.TwoFactorChallenge, error)
-	IncrementChallengeAttempts(ctx context.Context, id uuid.UUID) (int32, error)
-	ConsumeChallenge(ctx context.Context, id uuid.UUID) (int64, error)
+	// ClaimChallengeAttempt atomically increments the challenge's attempt counter
+	// iff it is still live (unconsumed) and under maxAttempts, returning the new
+	// count. It returns pgx.ErrNoRows when the challenge is already consumed or
+	// exhausted — a dead challenge. The single-statement check+increment is the
+	// atomic cap that N concurrent wrong guesses cannot exceed.
+	ClaimChallengeAttempt(ctx context.Context, id uuid.UUID, maxAttempts int32) (int32, error)
 	CountRecentChallengesForIP(ctx context.Context, ip *netip.Addr, since time.Time) (int64, error)
-	ConsumeChallengeAndUseRecoveryTx(ctx context.Context, challengeID uuid.UUID, recoveryID *uuid.UUID) (bool, error)
+	// ConsumeChallengeAndUseRecoveryTx atomically consumes the challenge, marks a
+	// used recovery code (recoveryID != nil), and/or advances the user's TOTP
+	// replay high-water mark to totpStep (totpStep > 0 for a TOTP match) — all in
+	// one transaction. A lost race on any of the three (already consumed, code
+	// already used, step already advanced) returns false.
+	ConsumeChallengeAndUseRecoveryTx(ctx context.Context, challengeID uuid.UUID, recoveryID *uuid.UUID, userID uuid.UUID, totpStep int64) (bool, error)
 }
 
 // Service implements the twofa business rules. It holds a crypto.ServerKeyring
@@ -143,7 +157,11 @@ func (s *Service) Confirm(ctx context.Context, userID uuid.UUID, code string) ([
 		return nil, err
 	}
 	defer zero(secret)
-	if !verifyTOTP(secret, code, s.now()) {
+	step, ok := verifyTOTP(secret, code, s.now())
+	// Reject a code whose step was already consumed (replay). A fresh enrollment's
+	// last_step is 0 and any real time-step is > 0, so the first confirm passes;
+	// this guards a confirm that reuses a step already burned by another factor op.
+	if !ok || step <= totp.LastStep {
 		return nil, ErrBadCode
 	}
 
@@ -160,7 +178,7 @@ func (s *Service) Confirm(ctx context.Context, userID uuid.UUID, code string) ([
 		hashes[i] = h
 	}
 
-	n, err := s.store.ConfirmTOTPTx(ctx, userID, hashes)
+	n, err := s.store.ConfirmTOTPTx(ctx, userID, hashes, step)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +204,10 @@ func (s *Service) Disable(ctx context.Context, userID uuid.UUID, code string) er
 	if !totp.ConfirmedAt.Valid {
 		return ErrNotEnrolled
 	}
-	_, ok, err := s.checkCode(ctx, userID, totp, code)
+	// checkCode rejects a TOTP whose step was already consumed (<= last_step), so a
+	// code already used to log in cannot double as the disable proof within its
+	// window. The factor row is deleted here, so no step advance is needed.
+	_, _, ok, err := s.checkCode(ctx, userID, totp, code)
 	if err != nil {
 		return err
 	}
@@ -274,80 +295,92 @@ func (s *Service) VerifyChallenge(ctx context.Context, rawChallenge, code string
 	if err != nil {
 		return uuid.Nil, ErrChallengeInvalid // unknown challenge (incl. pgx.ErrNoRows)
 	}
-	if ch.ConsumedAt.Valid || s.now().After(pgxTime(ch.ExpiresAt)) || ch.Attempts >= maxChallengeAttempts {
+	if ch.ConsumedAt.Valid || s.now().After(pgxTime(ch.ExpiresAt)) {
 		return uuid.Nil, ErrChallengeInvalid
+	}
+
+	// Atomically claim one attempt slot BEFORE checking the code: the single
+	// UPDATE ... WHERE attempts < max both enforces and advances the cap, so N
+	// concurrent verifies can never collectively exceed maxChallengeAttempts (the
+	// TOCTOU that a read-then-increment allowed). 0 rows means the challenge is
+	// already consumed or exhausted — dead.
+	if _, err := s.store.ClaimChallengeAttempt(ctx, ch.ID, maxChallengeAttempts); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, ErrChallengeInvalid
+		}
+		return uuid.Nil, err
 	}
 
 	totp, err := s.store.GetUserTOTP(ctx, ch.UserID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// The factor was disabled after the challenge was issued: no code can
-			// satisfy it. Treat as a wrong code (burns a try) rather than 500.
-			return uuid.Nil, s.failAttempt(ctx, ch)
+			// satisfy it. The attempt slot is already burned; report a bad code.
+			return uuid.Nil, ErrBadCode
 		}
 		return uuid.Nil, err
 	}
-	recoveryID, ok, err := s.checkCode(ctx, ch.UserID, totp, code)
+	recoveryID, totpStep, ok, err := s.checkCode(ctx, ch.UserID, totp, code)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	if !ok {
-		return uuid.Nil, s.failAttempt(ctx, ch)
+		// Wrong (or replayed) code. The attempt slot was already consumed
+		// atomically above, so a run of wrong guesses walks the cap down and the
+		// challenge dies once ClaimChallengeAttempt stops affecting a row.
+		return uuid.Nil, ErrBadCode
 	}
 
-	consumed, err := s.store.ConsumeChallengeAndUseRecoveryTx(ctx, ch.ID, recoveryID)
+	// Consume the challenge and, in the SAME transaction, mark any used recovery
+	// code and advance the TOTP replay high-water mark to totpStep. The step
+	// advance is guarded (last_step < totpStep), so a code already consumed by a
+	// concurrent login loses the race here and this verify is rejected.
+	consumed, err := s.store.ConsumeChallengeAndUseRecoveryTx(ctx, ch.ID, recoveryID, ch.UserID, totpStep)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	if !consumed {
-		return uuid.Nil, ErrChallengeInvalid // lost the consume race
+		return uuid.Nil, ErrChallengeInvalid // lost the consume / step-advance race
 	}
 	return ch.UserID, nil
 }
 
-// failAttempt records a wrong-code try on a challenge, killing it once the cap is
-// reached, and returns ErrBadCode.
-func (s *Service) failAttempt(ctx context.Context, ch gen.TwoFactorChallenge) error {
-	attempts, err := s.store.IncrementChallengeAttempts(ctx, ch.ID)
-	if err != nil {
-		return err
-	}
-	if attempts >= maxChallengeAttempts {
-		// Burn the dead challenge so it can never be reused, even before TTL.
-		if _, err := s.store.ConsumeChallenge(ctx, ch.ID); err != nil {
-			return err
-		}
-	}
-	return ErrBadCode
-}
-
 // checkCode reports whether code is a valid TOTP for the user's (confirmed)
 // secret or an unused recovery code. On a recovery-code match it returns that
-// code's id (so the caller can mark it used); a TOTP match returns a nil id. It
-// tries the cheap TOTP path first, falling back to the argon2 recovery scan only
-// on a TOTP miss. A user without a confirmed factor yields (nil, false, nil).
-func (s *Service) checkCode(ctx context.Context, userID uuid.UUID, totp gen.UserTotp, code string) (*uuid.UUID, bool, error) {
+// code's id (so the caller can mark it used) and a zero step; on a TOTP match it
+// returns a nil id and the matched step (> 0, for the caller to advance
+// last_step). It tries the cheap TOTP path first, falling back to the argon2
+// recovery scan only on a TOTP miss. A TOTP whose matched step was already
+// consumed (<= last_step) is a replay and is rejected as NOT ok — it does not fall
+// through to the recovery scan. A user without a confirmed factor yields
+// (nil, 0, false, nil).
+func (s *Service) checkCode(ctx context.Context, userID uuid.UUID, totp gen.UserTotp, code string) (recoveryID *uuid.UUID, totpStep int64, ok bool, err error) {
 	if !totp.ConfirmedAt.Valid {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
 	secret, err := s.keyring.SealerFor(userID).Open(totp.SecretCiphertext)
 	if err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	defer zero(secret)
-	if verifyTOTP(secret, code, s.now()) {
-		return nil, true, nil
+	if step, matched := verifyTOTP(secret, code, s.now()); matched {
+		if step <= totp.LastStep {
+			// Replayed step: reject outright rather than treating it as a candidate
+			// recovery code (a matched-but-stale TOTP is never a recovery code).
+			return nil, 0, false, nil
+		}
+		return nil, step, true, nil
 	}
 
 	codes, err := s.store.ListUnusedRecoveryCodes(ctx, userID)
 	if err != nil {
-		return nil, false, err
+		return nil, 0, false, err
 	}
 	for _, rc := range codes {
 		if recoveryCodeMatches(rc.CodeHash, code) {
 			id := rc.ID
-			return &id, true, nil
+			return &id, 0, true, nil
 		}
 	}
-	return nil, false, nil
+	return nil, 0, false, nil
 }
