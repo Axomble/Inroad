@@ -7,7 +7,7 @@
 import { api } from '@/store/api'
 
 const authApi = api.enhanceEndpoints({
-  addTagTypes: ['Session', 'Sessions', 'TwoFactor'],
+  addTagTypes: ['Session', 'Sessions', 'TwoFactor', 'Passkeys', 'ApiKeys'],
   endpoints: {
     authMe: {
       providesTags: [{ type: 'Session', id: 'CURRENT' }],
@@ -82,6 +82,57 @@ const authApi = api.enhanceEndpoints({
     authTwoFactorVerify: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
     },
+    // Passkeys (P4 auth hardening). The list is the single source of truth for
+    // the Security-page section; registering (finish) or deleting a passkey
+    // invalidates the `Passkeys` tag so the list refetches itself. Register/
+    // login BEGIN stage nothing durable, so they invalidate nothing.
+    authPasskeyList: {
+      providesTags: (result) =>
+        result
+          ? [
+              ...result.passkeys.map((p) => ({ type: 'Passkeys' as const, id: p.id })),
+              { type: 'Passkeys' as const, id: 'LIST' },
+            ]
+          : [{ type: 'Passkeys' as const, id: 'LIST' }],
+    },
+    authPasskeyRegisterFinish: {
+      invalidatesTags: [{ type: 'Passkeys', id: 'LIST' }],
+    },
+    authPasskeyDelete: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Passkeys', id: arg.id },
+        { type: 'Passkeys', id: 'LIST' },
+      ],
+    },
+    // A discoverable passkey login mints a session exactly like authLogin.
+    authPasskeyLoginFinish: {
+      invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
+    // Email-OTP login (P5). Verify mints a session (or a 2FA challenge) like a
+    // password login; start is anti-enumeration and durable-state-free.
+    authEmailOtpVerify: {
+      invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
+    // API keys (P6, admin-gated). The list drives the settings panel; creating
+    // or revoking a key invalidates the `ApiKeys` tag so the list refetches.
+    authApiKeyList: {
+      providesTags: (result) =>
+        result
+          ? [
+              ...result.api_keys.map((k) => ({ type: 'ApiKeys' as const, id: k.id })),
+              { type: 'ApiKeys' as const, id: 'LIST' },
+            ]
+          : [{ type: 'ApiKeys' as const, id: 'LIST' }],
+    },
+    authApiKeyCreate: {
+      invalidatesTags: [{ type: 'ApiKeys', id: 'LIST' }],
+    },
+    authApiKeyRevoke: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'ApiKeys', id: arg.id },
+        { type: 'ApiKeys', id: 'LIST' },
+      ],
+    },
   },
 })
 
@@ -106,4 +157,15 @@ export const {
   useAuthTwoFactorConfirmMutation,
   useAuthTwoFactorDisableMutation,
   useAuthTwoFactorVerifyMutation,
+  useAuthPasskeyListQuery,
+  useAuthPasskeyDeleteMutation,
+  useAuthPasskeyRegisterBeginMutation,
+  useAuthPasskeyRegisterFinishMutation,
+  useAuthPasskeyLoginBeginMutation,
+  useAuthPasskeyLoginFinishMutation,
+  useAuthEmailOtpStartMutation,
+  useAuthEmailOtpVerifyMutation,
+  useAuthApiKeyCreateMutation,
+  useAuthApiKeyListQuery,
+  useAuthApiKeyRevokeMutation,
 } = authApi

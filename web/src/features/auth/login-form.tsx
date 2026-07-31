@@ -2,7 +2,7 @@ import { useId, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { ArrowLeft, Loader2 } from 'lucide-react'
+import { ArrowLeft, Fingerprint, Loader2, Mail } from 'lucide-react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,7 +12,19 @@ import { useAppDispatch } from '@/store/hooks'
 import { setSession, setUserIdentity, type SessionResponse } from '@/store/slices/auth'
 import { httpStatus, isFetchBaseQueryError } from '@/lib/rtk-error'
 import { AuthLayout } from './auth-layout'
-import { useAuthLoginMutation, useAuthTwoFactorVerifyMutation } from './api'
+import {
+  isWebAuthnAvailable,
+  runAuthenticationCeremony,
+  webauthnErrorMessage,
+} from './webauthn'
+import {
+  useAuthLoginMutation,
+  useAuthTwoFactorVerifyMutation,
+  useAuthPasskeyLoginBeginMutation,
+  useAuthPasskeyLoginFinishMutation,
+  useAuthEmailOtpStartMutation,
+  useAuthEmailOtpVerifyMutation,
+} from './api'
 
 const schema = z.object({
   email: z.email('Enter a valid email address'),
@@ -32,14 +44,25 @@ export function LoginForm() {
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const [pending, setPending] = useState<Pending | null>(null)
+  // Which first-factor path the user is on. A discoverable passkey login skips
+  // the 2FA gate server-side, so it has no view of its own — it's an action on
+  // the credentials step that lands straight on a session.
+  const [view, setView] = useState<'credentials' | 'email-otp'>('credentials')
   // A message carried back to the credentials step when a challenge is abandoned
   // or dies (expired / used up), so the user understands why they're here again.
   const [returnNotice, setReturnNotice] = useState<string | null>(null)
 
-  function completeLogin(session: SessionResponse, email: string) {
+  // `email` is optional: a discoverable passkey login resolves the user
+  // server-side and returns no email, so there's nothing to seed the avatar with.
+  function completeLogin(session: SessionResponse, email?: string) {
     dispatch(setSession(session))
-    dispatch(setUserIdentity({ email }))
+    if (email) dispatch(setUserIdentity({ email }))
     navigate({ to: '/app/mailboxes' })
+  }
+
+  function onChallenge(challenge: string, email: string) {
+    setReturnNotice(null)
+    setPending({ challenge, email })
   }
 
   if (pending) {
@@ -57,14 +80,27 @@ export function LoginForm() {
     )
   }
 
+  if (view === 'email-otp') {
+    return (
+      <AuthLayout>
+        <EmailOtpStep
+          onSession={completeLogin}
+          onChallenge={onChallenge}
+          onBack={() => setView('credentials')}
+        />
+      </AuthLayout>
+    )
+  }
+
   return (
     <AuthLayout>
       <CredentialsStep
         returnNotice={returnNotice}
         onSession={completeLogin}
-        onChallenge={(challenge, email) => {
+        onChallenge={onChallenge}
+        onUseEmailCode={() => {
           setReturnNotice(null)
-          setPending({ challenge, email })
+          setView('email-otp')
         }}
       />
     </AuthLayout>
@@ -75,10 +111,12 @@ function CredentialsStep({
   returnNotice,
   onSession,
   onChallenge,
+  onUseEmailCode,
 }: {
   returnNotice: string | null
-  onSession: (session: SessionResponse, email: string) => void
+  onSession: (session: SessionResponse, email?: string) => void
   onChallenge: (challenge: string, email: string) => void
+  onUseEmailCode: () => void
 }) {
   const emailId = useId()
   const passwordId = useId()
@@ -186,7 +224,23 @@ function CredentialsStep({
         </Button>
       </form>
 
-      <p className="auth-rise mt-6 text-center text-sm text-muted-foreground" style={{ animationDelay: '340ms' }}>
+      <div className="auth-rise mt-5" style={{ animationDelay: '320ms' }}>
+        <div className="flex items-center gap-3">
+          <span className="h-px flex-1 bg-border" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">or</span>
+          <span className="h-px flex-1 bg-border" />
+        </div>
+
+        <div className="mt-4 flex flex-col gap-2.5">
+          <PasskeyLoginButton onSession={onSession} />
+          <Button type="button" variant="outline" size="lg" className="w-full" onClick={onUseEmailCode}>
+            <Mail className="size-4" aria-hidden="true" />
+            Sign in with an email code
+          </Button>
+        </div>
+      </div>
+
+      <p className="auth-rise mt-6 text-center text-sm text-muted-foreground" style={{ animationDelay: '360ms' }}>
         New to Inroad?{' '}
         <Link to="/register" className="font-medium text-accent-ink hover:underline">
           Create an account
@@ -194,6 +248,300 @@ function CredentialsStep({
       </p>
     </>
   )
+}
+
+/**
+ * Discoverable (usernameless) passkey login. Feature-detected: renders nothing
+ * where the browser has no WebAuthn support, and self-hides if the server
+ * answers 501 (passkeys not configured, `INROAD_RP_ID` unset) — so it's never a
+ * dead button. Success mints a session exactly like a password login; the server
+ * skips the 2FA gate because a user-verified passkey is already strong auth, so
+ * there's no challenge branch here.
+ */
+function PasskeyLoginButton({ onSession }: { onSession: (session: SessionResponse, email?: string) => void }) {
+  const [begin] = useAuthPasskeyLoginBeginMutation()
+  const [finish] = useAuthPasskeyLoginFinishMutation()
+  const [supported, setSupported] = useState(isWebAuthnAvailable())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (!supported) return null
+
+  async function onClick() {
+    setError(null)
+    setBusy(true)
+    try {
+      const begun = await begin()
+      if ('error' in begun) {
+        // Passkeys not configured on this server — retire the button quietly.
+        if (httpStatus(begun.error) === 501) {
+          setSupported(false)
+          return
+        }
+        setError('Passkey sign-in is unavailable right now. Please try another method.')
+        return
+      }
+
+      const credential = await runAuthenticationCeremony(begun.data.publicKey)
+
+      const done = await finish({
+        passkeyFinishRequest: { session_id: begun.data.session_id, credential },
+      })
+      if ('data' in done && done.data) {
+        onSession(done.data)
+        return
+      }
+      if (httpStatus(done.error) === 501) {
+        setSupported(false)
+        return
+      }
+      setError("That passkey didn't work. Please try again, or use another method.")
+    } catch (err) {
+      // A cancelled / unsupported / insecure-origin ceremony throws a DOMException.
+      setError(webauthnErrorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Button
+        type="button"
+        variant="outline"
+        size="lg"
+        className="w-full"
+        disabled={busy}
+        onClick={() => void onClick()}
+      >
+        {busy ? <Loader2 className="size-4 animate-spin" /> : <Fingerprint className="size-4" aria-hidden="true" />}
+        {busy ? 'Waiting for your device…' : 'Sign in with a passkey'}
+      </Button>
+      {error && (
+        <p role="alert" className="text-xs text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Passwordless email-code login. Step 1 requests a code (always the same generic
+ * acknowledgement — no account-enumeration oracle); step 2 exchanges the code for
+ * a session, OR routes through the SAME 2FA challenge as a password login when
+ * the account has a confirmed second factor. 429s surface a clear rate-limit
+ * message (honouring Retry-After when present).
+ */
+function EmailOtpStep({
+  onSession,
+  onChallenge,
+  onBack,
+}: {
+  onSession: (session: SessionResponse, email?: string) => void
+  onChallenge: (challenge: string, email: string) => void
+  onBack: () => void
+}) {
+  const emailId = useId()
+  const codeId = useId()
+  const [start, { isLoading: isStarting }] = useAuthEmailOtpStartMutation()
+  const [verify, { isLoading: isVerifying }] = useAuthEmailOtpVerifyMutation()
+
+  const [email, setEmail] = useState('')
+  const [code, setCode] = useState('')
+  const [sent, setSent] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function onStart(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    const parsed = z.email().safeParse(email.trim())
+    if (!parsed.success) {
+      setError('Enter a valid email address.')
+      return
+    }
+    const result = await start({ emailOtpStartRequest: { email: parsed.data } })
+    if ('error' in result) {
+      setError(rateLimitMessage(result.error) ?? "Couldn't send a code right now. Please try again.")
+      return
+    }
+    // Anti-enumeration: the same acknowledgement regardless of whether the
+    // address maps to an account.
+    setSent(true)
+  }
+
+  async function onVerify(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    const result = await verify({ emailOtpVerifyRequest: { email: email.trim(), code: code.trim() } })
+    if ('data' in result && result.data) {
+      const data = result.data
+      if ('two_factor_required' in data) {
+        onChallenge(data.challenge, email.trim())
+        return
+      }
+      onSession(data, email.trim())
+      return
+    }
+    const rate = rateLimitMessage(result.error)
+    setError(rate ?? "That code didn't work. Check it and try again, or request a new one.")
+  }
+
+  if (!sent) {
+    return (
+      <form onSubmit={(e) => void onStart(e)} noValidate className="flex flex-col gap-4">
+        <div className="auth-rise mb-1" style={{ animationDelay: '80ms' }}>
+          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-faint">Email code</p>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Sign in with an email code</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Enter your email and we'll send you a single-use sign-in code.
+          </p>
+        </div>
+
+        <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '140ms' }}>
+          <Label htmlFor={emailId}>Email</Label>
+          <Input
+            id={emailId}
+            type="email"
+            autoComplete="email"
+            autoFocus
+            placeholder="you@company.com"
+            value={email}
+            aria-invalid={!!error}
+            onChange={(e) => {
+              setEmail(e.target.value)
+              setError(null)
+            }}
+          />
+          {error && (
+            <span role="alert" className="text-xs text-danger">
+              {error}
+            </span>
+          )}
+        </div>
+
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          className="auth-rise mt-1 w-full"
+          style={{ animationDelay: '200ms' }}
+          disabled={isStarting || email.trim().length === 0}
+        >
+          {isStarting && <Loader2 className="animate-spin" />}
+          {isStarting ? 'Sending…' : 'Send code'}
+        </Button>
+
+        <button
+          type="button"
+          className="auth-rise flex items-center justify-center gap-1 text-xs text-muted-foreground transition-colors hover:text-accent-ink"
+          style={{ animationDelay: '240ms' }}
+          onClick={onBack}
+        >
+          <ArrowLeft className="size-3.5" aria-hidden="true" />
+          Back to password sign-in
+        </button>
+      </form>
+    )
+  }
+
+  return (
+    <form onSubmit={(e) => void onVerify(e)} noValidate className="flex flex-col gap-4">
+      <div className="auth-rise mb-1" style={{ animationDelay: '80ms' }}>
+        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-faint">Email code</p>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Check your email</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          If an account exists for <span className="font-medium text-foreground">{email.trim()}</span>, we sent it
+          a 6-digit code. Enter it below.
+        </p>
+      </div>
+
+      <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '140ms' }}>
+        <Label htmlFor={codeId}>Sign-in code</Label>
+        <Input
+          id={codeId}
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          autoFocus
+          placeholder="123456"
+          value={code}
+          aria-invalid={!!error}
+          onChange={(e) => {
+            setCode(e.target.value)
+            setError(null)
+          }}
+        />
+        {error && (
+          <span role="alert" className="text-xs text-danger">
+            {error}
+          </span>
+        )}
+      </div>
+
+      <Button
+        type="submit"
+        variant="primary"
+        size="lg"
+        className="auth-rise mt-1 w-full"
+        style={{ animationDelay: '200ms' }}
+        disabled={isVerifying || code.trim().length === 0}
+      >
+        {isVerifying && <Loader2 className="animate-spin" />}
+        {isVerifying ? 'Verifying…' : 'Verify'}
+      </Button>
+
+      <div className="auth-rise flex items-center justify-between text-xs" style={{ animationDelay: '240ms' }}>
+        <button
+          type="button"
+          className="text-muted-foreground transition-colors hover:text-accent-ink"
+          onClick={() => {
+            setSent(false)
+            setCode('')
+            setError(null)
+          }}
+        >
+          Use a different email
+        </button>
+        <button
+          type="button"
+          className="flex items-center gap-1 text-muted-foreground transition-colors hover:text-accent-ink"
+          onClick={onBack}
+        >
+          <ArrowLeft className="size-3.5" aria-hidden="true" />
+          Back to password
+        </button>
+      </div>
+    </form>
+  )
+}
+
+/**
+ * A rate-limit (429) message, honouring `Retry-After` when the server sends it
+ * (as seconds or an HTTP date). Returns `null` for any non-429 error so callers
+ * fall through to their own generic message.
+ */
+function rateLimitMessage(err: unknown): string | null {
+  if (httpStatus(err) !== 429) return null
+  const seconds = retryAfterSeconds(err)
+  if (seconds !== null) {
+    const mins = Math.ceil(seconds / 60)
+    return seconds <= 90
+      ? `Too many attempts. Please try again in about ${seconds} seconds.`
+      : `Too many attempts. Please try again in about ${mins} minute${mins === 1 ? '' : 's'}.`
+  }
+  return 'Too many attempts. Please wait a moment, then try again.'
+}
+
+function retryAfterSeconds(err: unknown): number | null {
+  if (!isFetchBaseQueryError(err) || !('meta' in err)) return null
+  const meta = (err as { meta?: { response?: { headers?: Headers } } }).meta
+  const header = meta?.response?.headers?.get('retry-after')
+  if (!header) return null
+  const asNumber = Number(header)
+  if (Number.isFinite(asNumber)) return Math.max(0, Math.round(asNumber))
+  const asDate = new Date(header).getTime()
+  if (Number.isFinite(asDate)) return Math.max(0, Math.round((asDate - Date.now()) / 1000))
+  return null
 }
 
 /**

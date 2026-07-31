@@ -22,6 +22,7 @@ import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
 import { Route as AppCampaignsIdRouteImport } from './routes/app.campaigns.$id'
+import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
 
@@ -90,6 +91,11 @@ const AppCampaignsIdRoute = AppCampaignsIdRouteImport.update({
   path: '/campaigns/$id',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsApiKeysRoute = AppSettingsApiKeysRouteImport.update({
+  id: '/settings/api-keys',
+  path: '/settings/api-keys',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsSecurityRoute = AppSettingsSecurityRouteImport.update({
   id: '/settings/security',
   path: '/settings/security',
@@ -114,6 +120,7 @@ export interface FileRoutesByFullPath {
   '/app/warmup': typeof AppWarmupRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
@@ -130,6 +137,7 @@ export interface FileRoutesByTo {
   '/app/warmup': typeof AppWarmupRoute
   '/app': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
@@ -148,6 +156,7 @@ export interface FileRoutesById {
   '/app/warmup': typeof AppWarmupRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
@@ -167,6 +176,7 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/settings/api-keys'
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
@@ -183,6 +193,7 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/app'
     | '/app/campaigns/$id'
+    | '/app/settings/api-keys'
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns'
@@ -200,6 +211,7 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/settings/api-keys'
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
@@ -308,6 +320,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCampaignsIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/api-keys': {
+      id: '/app/settings/api-keys'
+      path: '/settings/api-keys'
+      fullPath: '/app/settings/api-keys'
+      preLoaderRoute: typeof AppSettingsApiKeysRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/security': {
       id: '/app/settings/security'
       path: '/settings/security'
@@ -331,6 +350,7 @@ interface AppRouteChildren {
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
   AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
@@ -342,6 +362,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
   AppCampaignsIdRoute: AppCampaignsIdRoute,
+  AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppCampaignsIndexRoute: AppCampaignsIndexRoute,
