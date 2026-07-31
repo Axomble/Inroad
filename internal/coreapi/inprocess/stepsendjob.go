@@ -214,7 +214,8 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		SendID:      sendID.String(),
 		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
 		Suppressed: suppressed, EffectiveDailyCap: dailyCap, SentToday: int(sentToday),
-		ToEmail: b.ToEmail,
+		MinIntervalSeconds: int(b.MinIntervalSeconds),
+		ToEmail:            b.ToEmail,
 		Vars: coreapi.ContactVars{
 			FirstName: b.FirstName, LastName: b.LastName, Email: b.ToEmail,
 			Company: b.Company, Custom: decodeCustom(b.CustomFields),
@@ -266,7 +267,14 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 	if err != nil {
 		return coreapi.ClaimSkip, err
 	}
-	if _, err := c.q.ClaimStepSend(ctx, gen.ClaimStepSendParams{
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := c.q.WithTx(tx)
+
+	if _, err := qtx.ClaimStepSend(ctx, gen.ClaimStepSendParams{
 		ID:          sendID,
 		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
 		ToEmail: job.ToEmail, StepOrder: int32(job.StepOrder), ReferencesHeader: job.References,
@@ -275,6 +283,7 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return coreapi.ClaimSkip, err
 		}
+		_ = tx.Rollback(ctx)
 		// Lost the claim: learn the row's state to decide skip vs recover-forward.
 		st, serr := c.q.GetSendState(ctx, gen.GetSendStateParams{ID: sendID, WorkspaceID: ws})
 		if serr != nil {
@@ -288,6 +297,17 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 			return coreapi.ClaimAlreadySent, nil
 		}
 		return coreapi.ClaimSkip, nil
+	}
+	if _, err := qtx.ReserveMailboxSendSlot(ctx, gen.ReserveMailboxSendSlotParams{
+		ID: mailboxID, WorkspaceID: ws,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return coreapi.ClaimDeferred, nil
+		}
+		return coreapi.ClaimSkip, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return coreapi.ClaimSkip, err
 	}
 	return coreapi.ClaimWon, nil
 }

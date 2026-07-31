@@ -213,6 +213,38 @@ func TestClaimStepSendWorkspaceScoping(t *testing.T) {
 	}
 }
 
+func TestReserveMailboxSendSlotEnforcesSpacingAndWorkspace(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	fx := seedForClaim(t, ctx, q)
+	if _, err := pool.Exec(ctx,
+		"UPDATE mailboxes SET min_interval_seconds = 120 WHERE id = $1", fx.mailboxID,
+	); err != nil {
+		t.Fatalf("configure interval: %v", err)
+	}
+
+	owner := gen.ReserveMailboxSendSlotParams{ID: fx.mailboxID, WorkspaceID: fx.ws}
+	if _, err := q.ReserveMailboxSendSlot(ctx, owner); err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	if _, err := q.ReserveMailboxSendSlot(ctx, owner); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("reservation inside interval must defer, got %v", err)
+	}
+	foreign := gen.ReserveMailboxSendSlotParams{ID: fx.mailboxID, WorkspaceID: fx.foreignWS}
+	if _, err := q.ReserveMailboxSendSlot(ctx, foreign); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("foreign workspace must not reserve mailbox, got %v", err)
+	}
+
+	if _, err := pool.Exec(ctx,
+		"UPDATE mailboxes SET last_send_at = now() - interval '121 seconds' WHERE id = $1", fx.mailboxID,
+	); err != nil {
+		t.Fatalf("age reservation: %v", err)
+	}
+	if _, err := q.ReserveMailboxSendSlot(ctx, owner); err != nil {
+		t.Fatalf("reservation after interval: %v", err)
+	}
+}
+
 // insertQueuedSend inserts one direct-path send row in 'queued' (as EnqueueSends
 // would), returning its id.
 func insertQueuedSend(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx claimFixture) uuid.UUID {

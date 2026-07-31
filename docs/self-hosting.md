@@ -6,6 +6,7 @@
 ## Run
     cp .env.example .env
     # Generate real secrets (the compose stack refuses to start without them):
+    #   POSTGRES_PASSWORD   = a unique, strong database password
     #   INROAD_JWT_SECRET   = openssl rand -base64 32
     #   INROAD_MASTER_KEY   = openssl rand -base64 32   (must decode to 32 bytes)
     # Authentication (optional; see .env.example for defaults):
@@ -17,7 +18,8 @@
     docker compose up --build
 
 The API (with the built web UI) serves on http://localhost:8080. Migrations run
-automatically on the api container's startup. The worker connects to Redis.
+automatically on the api container's startup. The worker connects to Postgres
+through the current in-process `coreapi` adapter and consumes jobs from Redis.
 
 ## Encryption keys
 

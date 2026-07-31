@@ -8,7 +8,7 @@ SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
-       m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
+       m.daily_cap, m.min_interval_seconds, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at
 FROM sequence_enrollments e
 JOIN campaigns cam ON cam.id = e.campaign_id

@@ -131,6 +131,12 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		switch outcome {
 		case coreapi.ClaimSkip:
 			return nil
+		case coreapi.ClaimDeferred:
+			delay := time.Duration(job.MinIntervalSeconds) * time.Second
+			if delay < time.Second {
+				delay = time.Second
+			}
+			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, delay)
 		case coreapi.ClaimAlreadySent:
 			return advanceCursor()
 		}

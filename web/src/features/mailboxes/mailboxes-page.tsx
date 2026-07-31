@@ -91,7 +91,7 @@ export function MailboxesPage() {
   // Track which provider's start failed so the banner shows provider-correct
   // copy from the single shared mapping.
   const [startError, setStartError] = useState<{ provider: OauthProvider; kind: StartErrorKind } | null>(null)
-  const { data, isLoading } = useListMailboxesQuery()
+  const { data, isLoading, error: listError, refetch } = useListMailboxesQuery()
   // Warmup state belongs on the mailbox row: the mailbox is the unit of trust,
   // so its identity, sending status, and reputation must be answerable on one
   // screen instead of forcing a page switch to /app/warmup. Read-only, and the
@@ -165,10 +165,25 @@ export function MailboxesPage() {
       )}
 
       <StatStrip>
-        <Stat label="Total" value={mailboxes.length} sub="connected" />
-        <Stat label="Active" value={count('active')} dot={<StatusDot tone="running" />} sub="able to send" />
-        <Stat label="Paused" value={count('paused')} dot={<StatusDot tone="paused" />} sub="resumable" />
-        <Stat label="Error" value={count('error')} dot={<StatusDot tone="failing" />} sub="needs attention" />
+        <Stat label="Total" value={listError ? '\u2014' : mailboxes.length} sub="connected" />
+        <Stat
+          label="Active"
+          value={listError ? '\u2014' : count('active')}
+          dot={<StatusDot tone="running" />}
+          sub="able to send"
+        />
+        <Stat
+          label="Paused"
+          value={listError ? '\u2014' : count('paused')}
+          dot={<StatusDot tone="paused" />}
+          sub="resumable"
+        />
+        <Stat
+          label="Error"
+          value={listError ? '\u2014' : count('error')}
+          dot={<StatusDot tone="failing" />}
+          sub="needs attention"
+        />
       </StatStrip>
 
       {showConnect && (
@@ -192,6 +207,18 @@ export function MailboxesPage() {
       {isLoading ? (
         <PageBody>
           <LoadingRows />
+        </PageBody>
+      ) : listError ? (
+        <PageBody>
+          <EmptyBlock
+            title="Couldn't load mailboxes"
+            description={`Your mailbox data is safe, but the server couldn't return it${httpStatus(listError) ? ` (${httpStatus(listError)})` : ''}. Check the connection and try again.`}
+            action={
+              <Button variant="secondary" size="sm" onClick={() => void refetch()}>
+                Try again
+              </Button>
+            }
+          />
         </PageBody>
       ) : isEmpty ? (
         <PageBody>

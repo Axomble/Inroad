@@ -8,6 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "typecheck": "tsc -b",
+    "test": "vitest run",
+    "lint:api": "redocly lint ../api/openapi.yaml --config ../redocly.yaml",
     "preview": "vite preview",
     "gen:api": "rtk-query-codegen-openapi openapi-codegen.cts"
   },

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inroad
+          POSTGRES_PASSWORD: inroad
+          POSTGRES_DB: inroad
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U inroad"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      INROAD_DATABASE_URL: postgres://inroad:inroad@localhost:5432/inroad?sslmode=disable
+      # cmd/migrate loads the full config, so the crypto secrets must be present
+      # even for a migrate-only step. Throwaway CI values, never real secrets.
+      INROAD_JWT_SECRET: ci-jwt-secret-not-a-real-secret
+      INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      # v8 of the action is the one that drives golangci-lint v2, which is the
+      # schema .golangci.yml declares. Keep them in step when bumping either.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1.6
+      - name: Verify backend
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Verify database behavior
+        run: |
+          go run ./cmd/migrate up
+          go test -tags=integration ./...
+      - name: Verify API contract
+        working-directory: web
+        run: npm run lint:api
+      - name: Verify frontend
+        working-directory: web
+        run: |
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run build
+

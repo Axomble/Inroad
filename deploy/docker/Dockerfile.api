@@ -22,6 +22,8 @@ RUN adduser -D -u 10001 inroad
 COPY --from=build /out/inroad /usr/local/bin/inroad
 COPY --from=build /out/migrate /usr/local/bin/migrate
 COPY --from=web /web/dist /srv/web
+COPY deploy/docker/api-entrypoint.sh /usr/local/bin/api-entrypoint
+RUN chmod 0555 /usr/local/bin/api-entrypoint
 USER inroad
 EXPOSE 8080
-ENTRYPOINT ["inroad"]
+ENTRYPOINT ["/usr/local/bin/api-entrypoint"]
