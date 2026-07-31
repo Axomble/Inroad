@@ -233,8 +233,17 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{}, err
 	}
 	if limited {
+		// The schedule travels even though no sender is resolved: a deferred retry
+		// SENDS as soon as it runs, so the worker has to wake inside the campaign's
+		// window. Without it, a limited campaign resumes at whatever instant the
+		// backoff lands on — for a UTC-midnight retry, 20:00 in New York.
+		sched, serr := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
+		if serr != nil {
+			return coreapi.StepSendJob{}, serr
+		}
 		return coreapi.StepSendJob{
 			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), CampaignLimited: true,
+			Schedule: sched,
 		}, nil
 	}
 

@@ -51,20 +51,29 @@ const minBlockedBackoff = time.Minute
 //
 // A campaign that is BOTH limited and paused takes the shorter wait: the sooner
 // signal is the one worth re-checking.
+//
+// The instant is then snapped forward into the campaign's send window, because a
+// deferred retry SENDS as soon as it runs — this path re-enters the send flow, it
+// does not re-schedule through the cadence engine. Waking outside the window would
+// therefore send outside it, and "the next UTC midnight" is 20:00 in New York. A
+// job with no usable schedule (an older enqueued task, a campaign whose windows
+// cannot be compiled) keeps the raw instant rather than refusing to retry.
 func blockedBackoff(job coreapi.StepSendJob, now time.Time) time.Duration {
-	if !job.CampaignLimited {
-		return capBackoff
+	target := now.Add(capBackoff)
+	if job.CampaignLimited {
+		utc := now.UTC()
+		midnight := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+		// Both blocked → the sooner signal is the one worth re-checking.
+		if !job.HealthPaused || midnight.Before(target) {
+			target = midnight
+		}
 	}
-	utc := now.UTC()
-	untilMidnight := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).
-		AddDate(0, 0, 1).Sub(utc)
-	if untilMidnight < minBlockedBackoff {
-		untilMidnight = minBlockedBackoff
+	if win, err := job.Schedule.Compile(); err == nil {
+		if at, nerr := win.Next(target, job.EnrollmentID); nerr == nil {
+			target = at
+		}
 	}
-	if job.HealthPaused && capBackoff < untilMidnight {
-		return capBackoff
-	}
-	return untilMidnight
+	return max(target.Sub(now), minBlockedBackoff)
 }
 
 // maxCapDeferrals bounds the cap-exceeded re-enqueue loop, mirroring

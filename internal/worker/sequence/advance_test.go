@@ -12,6 +12,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
@@ -667,5 +668,52 @@ func TestBlockedBackoffUsesTheUTCDayBoundary(t *testing.T) {
 	now := time.Date(2026, 8, 2, 3, 30, 0, 0, loc)
 	if got := blockedBackoff(coreapi.StepSendJob{CampaignLimited: true}, now); got != 90*time.Minute {
 		t.Errorf("blockedBackoff = %s, want 1h30m from the UTC boundary", got)
+	}
+}
+
+// A deferred retry re-enters the SEND flow rather than re-scheduling through the
+// cadence engine, so the instant it wakes on is the instant it sends. Waking at the
+// raw block-clears moment would send outside the campaign's window — and for a
+// campaign-limit retry that moment is 00:00 UTC, i.e. 20:00 in New York, so the
+// violation would be systematic rather than occasional.
+func TestBlockedBackoffWakesInsideTheCampaignsSendWindow(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	businessHours := cadence.Schedule{Timezone: "America/New_York"}
+	for d := int(time.Monday); d <= int(time.Friday); d++ {
+		businessHours.Windows = append(businessHours.Windows,
+			cadence.SendWindow{Weekday: d, StartMinute: 9 * 60, EndMinute: 17 * 60})
+	}
+	win, err := businessHours.Compile()
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	// Tuesday 18:00 EDT = Tuesday 22:00 UTC. The limit clears at 00:00 UTC, which is
+	// 20:00 EDT — outside the window — so the retry must land Wednesday morning.
+	now := time.Date(2026, 8, 4, 18, 0, 0, 0, loc)
+	job := coreapi.StepSendJob{EnrollmentID: "e", CampaignLimited: true, Schedule: businessHours}
+
+	got := now.Add(blockedBackoff(job, now))
+	if !win.Contains(got) {
+		t.Fatalf("retry scheduled for %s (%s local), outside the campaign's window", got.UTC(), got.In(loc))
+	}
+	if local := got.In(loc); local.Hour() < 9 || local.Hour() >= 17 {
+		t.Errorf("retry local hour = %d, want business hours", local.Hour())
+	}
+	// It must still be after the block clears, not before it.
+	if !got.After(now) {
+		t.Errorf("retry %s is not after now %s", got, now)
+	}
+}
+
+// A job carrying no usable schedule must still retry rather than refuse to.
+func TestBlockedBackoffWithoutAScheduleKeepsTheRawInstant(t *testing.T) {
+	now := time.Date(2026, 8, 1, 22, 30, 0, 0, time.UTC)
+	job := coreapi.StepSendJob{EnrollmentID: "e", CampaignLimited: true} // no Schedule
+	if got := blockedBackoff(job, now); got != 90*time.Minute {
+		t.Errorf("blockedBackoff = %s, want 1h30m (the raw UTC rollover)", got)
 	}
 }
