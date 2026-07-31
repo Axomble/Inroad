@@ -42,13 +42,13 @@ const capBackoff = 6 * time.Hour
 // deferring forever.
 const maxCapDeferrals = 30
 
-// stopReasonSuppressed / stopReasonFailed mirror enrollment.StopSuppressed and
-// enrollment.StopFailed. Duplicated as string constants here because the worker
-// reaches the enrollment domain only through coreapi (app/* isolation); the
-// values must stay identical.
+// These mirror enrollment.StopSuppressed / StopFailed / StopMailboxRemoved.
+// Duplicated as string constants here because the worker reaches the enrollment
+// domain only through coreapi (app/* isolation); the values must stay identical.
 const (
-	stopReasonSuppressed = "suppressed"
-	stopReasonFailed     = "failed"
+	stopReasonSuppressed     = "suppressed"
+	stopReasonFailed         = "failed"
+	stopReasonMailboxRemoved = "mailbox_removed"
 )
 
 // AdvanceHandler returns an asynq handler for sequence:advance tasks. It owns
@@ -77,6 +77,13 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		}
 		if job.Suppressed {
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonSuppressed)
+		}
+		if job.MailboxRemoved {
+			// The thread's sending mailbox was deleted mid-sequence, so the thread
+			// has no identity to continue: any follow-up would come from a stranger
+			// referencing a Message-ID it never sent. Stop through the same single
+			// entry point as every other halt; nothing is sent.
+			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonMailboxRemoved)
 		}
 		if job.EffectiveDailyCap <= 0 {
 			// Degenerate cap (daily_cap=0, or ramp_start_cap=0 on a brand-new

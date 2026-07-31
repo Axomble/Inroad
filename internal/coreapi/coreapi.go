@@ -318,12 +318,18 @@ type StepSendJob struct {
 	// embed it in tracking tokens at MIME-build time; MarkStepSent writes it as
 	// the sends row's id, so the events recorded against it (via the pixel/
 	// click endpoints) line up with the eventual send row.
-	SendID             string
-	CurrentStep        int
-	StepOrder          int
-	NextDelaySeconds   int
-	LastStep           bool
-	Suppressed         bool
+	SendID           string
+	CurrentStep      int
+	StepOrder        int
+	NextDelaySeconds int
+	LastStep         bool
+	Suppressed       bool
+	// MailboxRemoved means this thread's sending mailbox has been deleted, so the
+	// enrollment's pin was cleared (ON DELETE SET NULL) and the sequence cannot
+	// legitimately continue: a follow-up would go out from a different address
+	// carrying In-Reply-To/References for a Message-ID that address never sent.
+	// Handled like Suppressed — the worker stops the enrollment and sends nothing.
+	MailboxRemoved     bool
 	EffectiveDailyCap  int
 	SentToday          int
 	MinIntervalSeconds int

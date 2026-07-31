@@ -213,6 +213,7 @@ type Campaign struct {
 	LaunchedAt      pgtype.Timestamptz `json:"launched_at"`
 	TrackingEnabled bool               `json:"tracking_enabled"`
 	Timezone        string             `json:"timezone"`
+	RotationMode    string             `json:"rotation_mode"`
 }
 
 type CampaignSendWindow struct {
@@ -223,6 +224,18 @@ type CampaignSendWindow struct {
 	StartMinute int32              `json:"start_minute"`
 	EndMinute   int32              `json:"end_minute"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type CampaignSender struct {
+	ID             uuid.UUID          `json:"id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	CampaignID     uuid.UUID          `json:"campaign_id"`
+	MailboxID      uuid.UUID          `json:"mailbox_id"`
+	Weight         int32              `json:"weight"`
+	Enabled        bool               `json:"enabled"`
+	AssignedCount  int64              `json:"assigned_count"`
+	LastAssignedAt pgtype.Timestamptz `json:"last_assigned_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
 type Contact struct {
@@ -418,6 +431,7 @@ type SequenceEnrollment struct {
 	ReplySource     *string            `json:"reply_source"`
 	ReplyConfidence *float32           `json:"reply_confidence"`
 	RepliedAt       pgtype.Timestamptz `json:"replied_at"`
+	MailboxID       pgtype.UUID        `json:"mailbox_id"`
 }
 
 type SequenceStep struct {

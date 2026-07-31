@@ -35,27 +35,11 @@ function detectOs(ua: string): string | null {
   return null
 }
 
-const UNITS: readonly [Intl.RelativeTimeFormatUnit, number][] = [
-  ['year', 31_536_000_000],
-  ['month', 2_592_000_000],
-  ['day', 86_400_000],
-  ['hour', 3_600_000],
-  ['minute', 60_000],
-]
-
-/**
- * Relative phrasing for an ISO timestamp, e.g. "in 5 days" / "3 hours ago".
- * `now` is injectable so tests are deterministic.
- */
-export function relativeTime(iso: string, now: number = Date.now()): string {
-  const diffMs = new Date(iso).getTime() - now
-  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
-  const abs = Math.abs(diffMs)
-  for (const [unit, ms] of UNITS) {
-    if (abs >= ms) return rtf.format(Math.round(diffMs / ms), unit)
-  }
-  return rtf.format(Math.round(diffMs / 1000), 'second')
-}
+// Relative phrasing moved to `@/lib/relative-time` once the campaign sender pool
+// needed it too — features may not import each other, so the one implementation
+// lives in lib. Re-exported here so this module stays the auth screens' single
+// formatting import.
+export { relativeTime } from '@/lib/relative-time'
 
 /** Absolute, locale-aware date+time for the "started" column. */
 export function formatDateTime(iso: string): string {

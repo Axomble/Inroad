@@ -53,7 +53,7 @@ func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatus
 
 const createCampaign = `-- name: CreateCampaign :one
 INSERT INTO campaigns (workspace_id, name, mailbox_id, list_id, subject, body_text, body_html)
-VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone
+VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode
 `
 
 type CreateCampaignParams struct {
@@ -91,6 +91,7 @@ func (q *Queries) CreateCampaign(ctx context.Context, arg CreateCampaignParams) 
 		&i.LaunchedAt,
 		&i.TrackingEnabled,
 		&i.Timezone,
+		&i.RotationMode,
 	)
 	return i, err
 }
@@ -113,7 +114,7 @@ func (q *Queries) DeleteSendWindows(ctx context.Context, arg DeleteSendWindowsPa
 }
 
 const getCampaign = `-- name: GetCampaign :one
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone FROM campaigns WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode FROM campaigns WHERE id = $1 AND workspace_id = $2
 `
 
 type GetCampaignParams struct {
@@ -138,12 +139,13 @@ func (q *Queries) GetCampaign(ctx context.Context, arg GetCampaignParams) (Campa
 		&i.LaunchedAt,
 		&i.TrackingEnabled,
 		&i.Timezone,
+		&i.RotationMode,
 	)
 	return i, err
 }
 
 const listCampaigns = `-- name: ListCampaigns :many
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]Campaign, error) {
@@ -169,6 +171,7 @@ func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]C
 			&i.LaunchedAt,
 			&i.TrackingEnabled,
 			&i.Timezone,
+			&i.RotationMode,
 		); err != nil {
 			return nil, err
 		}
@@ -217,6 +220,24 @@ func (q *Queries) ListSendWindows(ctx context.Context, arg ListSendWindowsParams
 		return nil, err
 	}
 	return items, nil
+}
+
+const setCampaignRotationMode = `-- name: SetCampaignRotationMode :exec
+UPDATE campaigns SET rotation_mode = $3 WHERE id = $1 AND workspace_id = $2
+`
+
+type SetCampaignRotationModeParams struct {
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	RotationMode string    `json:"rotation_mode"`
+}
+
+// How a contact is assigned a mailbox from the campaign's sender pool. Validated
+// at the boundary against the rotation package's mode constants, which mirror the
+// column's CHECK constraint.
+func (q *Queries) SetCampaignRotationMode(ctx context.Context, arg SetCampaignRotationModeParams) error {
+	_, err := q.db.Exec(ctx, setCampaignRotationMode, arg.ID, arg.WorkspaceID, arg.RotationMode)
+	return err
 }
 
 const setCampaignStatus = `-- name: SetCampaignStatus :exec

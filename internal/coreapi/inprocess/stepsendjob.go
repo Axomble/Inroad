@@ -171,6 +171,18 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	if b.Status != string(enrollment.StatusActive) {
 		return coreapi.StepSendJob{Skip: true}, nil
 	}
+	// The thread lost its mailbox (deleted mid-sequence, see threadLostItsMailbox).
+	// Re-resolving would send the follow-up "Re:" from a DIFFERENT address,
+	// carrying In-Reply-To/References for a Message-ID that address never sent
+	// while thread_root_id still points at the dead thread — broken for the
+	// recipient and a spam signal. Stop instead, returning BEFORE a sender is
+	// resolved or any credential is opened, so nothing is sent and no mailbox is
+	// pinned.
+	if threadLostItsMailbox(b.CurrentStep, b.EnrollmentMailboxID) {
+		return coreapi.StepSendJob{
+			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), MailboxRemoved: true,
+		}, nil
+	}
 
 	// Resolve the next step by order rather than current_step+1: DeleteStep does
 	// not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep skips gaps;
@@ -224,13 +236,22 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	// stepSendIDNamespace.
 	sendID := deriveStepSendID(b.CampaignID, b.ContactID, nextOrder)
 
+	// Which mailbox this step sends from: the enrollment's pinned mailbox, a pool
+	// selection claimed and pinned now, or campaigns.mailbox_id for a campaign with
+	// no pool. Resolved BEFORE the transport is loaded, so the credentials opened
+	// below belong to the RESOLVED mailbox rather than the campaign's.
+	sender, err := c.resolveSender(ctx, ws, eid, b)
+	if err != nil {
+		return coreapi.StepSendJob{}, err
+	}
+
 	// Transport dispatch on the mailbox provider (see GetSendJob): API providers
 	// (gmail, m365) return a refreshed short-lived access token and no password
 	// (the provider's oauth2 config selects the refresh endpoint); smtp unseals
 	// the stored password unchanged.
 	var accessToken, password []byte
-	if b.Provider == "gmail" || b.Provider == "m365" {
-		at, err := c.oauthAccessToken(ctx, b.Provider, b.MailboxID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
+	if sender.provider == "gmail" || sender.provider == "m365" {
+		at, err := c.oauthAccessToken(ctx, sender.provider, sender.mailboxID, ws, sender.secretCiphertext, c.oauthConfigFor(sender.provider))
 		if err != nil {
 			return coreapi.StepSendJob{}, err
 		}
@@ -240,7 +261,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		if serr != nil {
 			return coreapi.StepSendJob{}, serr
 		}
-		password, err = sealer.Open(b.SecretCiphertext)
+		password, err = sealer.Open(sender.secretCiphertext)
 		if err != nil {
 			return coreapi.StepSendJob{}, err
 		}
@@ -249,12 +270,6 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	if err != nil {
 		return coreapi.StepSendJob{}, err
 	}
-	sentToday, err := c.q.CountSentToday(ctx, b.MailboxID)
-	if err != nil {
-		return coreapi.StepSendJob{}, err
-	}
-	ageDays := int(time.Since(b.MailboxCreatedAt.Time).Hours() / 24)
-	dailyCap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
 	token := unsub.MakeToken(c.jwtSecret, ws.String(), b.ToEmail)
 
 	// Load and validate the sending schedule BEFORE the send: MarkStepSent needs
@@ -267,11 +282,11 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 
 	return coreapi.StepSendJob{
 		EnrollmentID: enrollmentID, WorkspaceID: ws.String(),
-		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: b.MailboxID.String(),
+		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: sender.mailboxID.String(),
 		SendID:      sendID.String(),
 		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
-		Suppressed: suppressed, EffectiveDailyCap: dailyCap, SentToday: int(sentToday),
-		MinIntervalSeconds: int(b.MinIntervalSeconds),
+		Suppressed: suppressed, EffectiveDailyCap: sender.effectiveCap, SentToday: sender.sentToday,
+		MinIntervalSeconds: int(sender.minIntervalSeconds),
 		ToEmail:            b.ToEmail,
 		Vars: coreapi.ContactVars{
 			FirstName: b.FirstName, LastName: b.LastName, Email: b.ToEmail,
@@ -281,10 +296,10 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		BodyText: step.BodyText, BodyHTML: step.BodyHtml, TrackingEnabled: b.TrackingEnabled,
 		Schedule: sched,
 		UnsubURL: c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
-		FromEmail: b.FromEmail, FromName: b.FromName,
-		Provider: b.Provider, AccessToken: accessToken,
-		SMTPHost: b.SmtpHost, SMTPPort: int(b.SmtpPort),
-		SMTPUsername: b.SmtpUsername, SMTPPassword: password, AllowPlaintext: b.AllowPlaintext,
+		FromEmail: sender.fromEmail, FromName: sender.fromName,
+		Provider: sender.provider, AccessToken: accessToken,
+		SMTPHost: sender.smtpHost, SMTPPort: int(sender.smtpPort),
+		SMTPUsername: sender.smtpUsername, SMTPPassword: password, AllowPlaintext: sender.allowPlaintext,
 	}, nil
 }
 

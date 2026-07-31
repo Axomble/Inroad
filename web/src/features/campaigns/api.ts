@@ -25,9 +25,17 @@ export type { SequenceStep, StepRequest } from '@/store/api'
 // The schedule shapes come from the contract too, so the editor's state is typed
 // by the same definition the API validates against.
 export type { CampaignSchedule, SendWindowDay, SendWindowInterval } from '@/store/api'
+// Sender-pool shapes likewise: the panel's draft state is derived from the
+// contract's types rather than re-declaring the row shape.
+export type {
+  CampaignSender,
+  CampaignSenderPool,
+  CampaignSenderPoolRequest,
+  RotationMode,
+} from '@/store/api'
 
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign', 'Step', 'Schedule'],
+  addTagTypes: ['Campaign', 'Step', 'Schedule', 'SenderPool'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -86,6 +94,14 @@ const campaignApi = api.enhanceEndpoints({
     updateCampaignSchedule: {
       invalidatesTags: (_result, _error, arg) => [{ type: 'Schedule', id: arg.id }],
     },
+    // Same reasoning for the sender pool: its own tag so replacing the pool
+    // doesn't refetch metrics, steps, or the schedule.
+    getCampaignSenders: {
+      providesTags: (_result, _error, arg) => [{ type: 'SenderPool', id: arg.id }],
+    },
+    updateCampaignSenders: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'SenderPool', id: arg.id }],
+    },
   },
 })
 
@@ -103,4 +119,6 @@ export const {
   useReorderStepsMutation,
   useGetCampaignScheduleQuery,
   useUpdateCampaignScheduleMutation,
+  useGetCampaignSendersQuery,
+  useUpdateCampaignSendersMutation,
 } = campaignApi

@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,6 +30,35 @@ type Handler struct {
 // group (see cmd/inroad), so the handler no longer carries a jwtSecret.
 func NewHandler(svc *Service, enq Enqueuer, subs ...SubRouter) *Handler {
 	return &Handler{svc: svc, enq: enq, subs: subs}
+}
+
+// serveCampaignChild handles a read-only campaign sub-resource: pull the
+// workspace from the JWT, parse the campaign id, load through fn, and map the
+// outcome to 200/400/404/500. The schedule and senders GETs differ only in what
+// they load and the failure message, so they share this instead of repeating the
+// mapping — where they would drift apart.
+func serveCampaignChild[T any](
+	w http.ResponseWriter, r *http.Request, failure string,
+	load func(ctx context.Context, ws, campaignID uuid.UUID) (T, error),
+) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	got, err := load(r.Context(), ws, id)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, failure)
+	default:
+		httpx.JSON(w, http.StatusOK, got)
+	}
 }
 
 type createRequest struct {

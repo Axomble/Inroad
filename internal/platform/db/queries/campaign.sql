@@ -10,6 +10,12 @@ UPDATE campaigns SET status = $3, launched_at = COALESCE(launched_at, $4)
 WHERE id = $1 AND workspace_id = $2;
 -- name: SetCampaignTracking :exec
 UPDATE campaigns SET tracking_enabled = $3 WHERE id = $1 AND workspace_id = $2;
+-- name: SetCampaignRotationMode :exec
+-- How a contact is assigned a mailbox from the campaign's sender pool. Validated
+-- at the boundary against the rotation package's mode constants, which mirror the
+-- column's CHECK constraint.
+UPDATE campaigns SET rotation_mode = $3 WHERE id = $1 AND workspace_id = $2;
+
 -- name: SetCampaignTimezone :exec
 -- The IANA zone every send window on the campaign is interpreted in. Validated
 -- at the boundary with time.LoadLocation before it reaches here.

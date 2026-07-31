@@ -55,9 +55,23 @@ type fakeStore struct {
 	// windowsErr forces the load to fail. rescheduled
 	// captures the cadence-computed due times Launch stamps, and replacedSchedule
 	// the last schedule written.
-	windows            []SendWindow
-	windowsErr         error
-	campaignTimezone   string
+	windows          []SendWindow
+	windowsErr       error
+	campaignTimezone string
+	// sender-pool fixtures/spies. senders is what ListSenders returns — nil means
+	// the campaign has no pool rows, which must resolve to fallbackSender rather
+	// than an empty pool. replacedSenders/replacedRotationMode capture the last
+	// replace so a test can prove a rejected pool was never written.
+	senders              []Sender
+	sendersErr           error
+	fallbackSender       Sender
+	fallbackSenderErr    error
+	rotationMode         string
+	replacedSenders      []SenderInput
+	replacedRotationMode string
+	replaceSendersCalls  int
+	replaceSendersErr    error
+
 	rescheduled        map[uuid.UUID]time.Time
 	rescheduleErr      error
 	replacedSchedule   *Schedule
@@ -75,7 +89,7 @@ func (f *fakeStore) Get(_ context.Context, ws, id uuid.UUID) (gen.Campaign, erro
 		}
 		return c, nil
 	}
-	return gen.Campaign{Status: f.status, Timezone: f.campaignTimezone}, nil
+	return gen.Campaign{Status: f.status, Timezone: f.campaignTimezone, RotationMode: f.rotationMode}, nil
 }
 func (*fakeStore) List(context.Context, uuid.UUID) ([]gen.Campaign, error) { return nil, nil }
 func (f *fakeStore) Stats(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
@@ -115,6 +129,36 @@ func (f *fakeStore) ReplaceSchedule(_ context.Context, _, _ uuid.UUID, sched Sch
 	f.replacedSchedule = &sched
 	return nil
 }
+func (f *fakeStore) ListSenders(context.Context, uuid.UUID, uuid.UUID) ([]Sender, error) {
+	// nil is returned as-is: a campaign with no pool rows falling back to
+	// campaigns.mailbox_id is the production behaviour, so the fake must not
+	// pre-substitute it.
+	return f.senders, f.sendersErr
+}
+
+func (f *fakeStore) FallbackSender(context.Context, uuid.UUID, uuid.UUID) (Sender, error) {
+	return f.fallbackSender, f.fallbackSenderErr
+}
+
+func (f *fakeStore) ReplaceSenders(_ context.Context, ws, campaignID uuid.UUID, mode string, senders []SenderInput) error {
+	f.replaceSendersCalls++
+	if f.replaceSendersErr != nil {
+		return f.replaceSendersErr
+	}
+	f.replacedRotationMode, f.replacedSenders = mode, senders
+	// The read-back SetSenders does must see what was written.
+	f.rotationMode = mode
+	if c, ok := f.campaigns[[2]uuid.UUID{ws, campaignID}]; ok {
+		c.RotationMode = mode
+		f.campaigns[[2]uuid.UUID{ws, campaignID}] = c
+	}
+	f.senders = make([]Sender, len(senders))
+	for i, s := range senders {
+		f.senders[i] = Sender{MailboxID: s.MailboxID, Weight: s.Weight, Enabled: s.Enabled}
+	}
+	return nil
+}
+
 func (f *fakeStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return f.stepList, nil
 }

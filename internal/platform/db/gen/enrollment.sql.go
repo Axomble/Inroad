@@ -198,7 +198,7 @@ func (q *Queries) EnrollListMembers(ctx context.Context, arg EnrollListMembersPa
 }
 
 const getEnrollment = `-- name: GetEnrollment :one
-SELECT id, workspace_id, campaign_id, contact_id, current_step, status, stop_reason, enrolled_at, last_sent_at, next_due_at, thread_root_id, completed_at, stopped_at, cap_deferrals, reply_class, reply_source, reply_confidence, replied_at FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, campaign_id, contact_id, current_step, status, stop_reason, enrolled_at, last_sent_at, next_due_at, thread_root_id, completed_at, stopped_at, cap_deferrals, reply_class, reply_source, reply_confidence, replied_at, mailbox_id FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2
 `
 
 type GetEnrollmentParams struct {
@@ -228,6 +228,7 @@ func (q *Queries) GetEnrollment(ctx context.Context, arg GetEnrollmentParams) (S
 		&i.ReplySource,
 		&i.ReplyConfidence,
 		&i.RepliedAt,
+		&i.MailboxID,
 	)
 	return i, err
 }

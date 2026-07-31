@@ -421,6 +421,22 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.campaignScheduleRequest,
       }),
     }),
+    getCampaignSenders: build.query<
+      GetCampaignSendersApiResponse,
+      GetCampaignSendersApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/senders` }),
+    }),
+    updateCampaignSenders: build.mutation<
+      UpdateCampaignSendersApiResponse,
+      UpdateCampaignSendersApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/senders`,
+        method: "PUT",
+        body: queryArg.campaignSenderPoolRequest,
+      }),
+    }),
     listCampaignEnrollments: build.query<
       ListCampaignEnrollmentsApiResponse,
       ListCampaignEnrollmentsApiArg
@@ -813,6 +829,17 @@ export type UpdateCampaignScheduleApiResponse =
 export type UpdateCampaignScheduleApiArg = {
   id: string;
   campaignScheduleRequest: CampaignScheduleRequest;
+};
+export type GetCampaignSendersApiResponse =
+  /** status 200 The campaign's sender pool and rotation mode */ CampaignSenderPool;
+export type GetCampaignSendersApiArg = {
+  id: string;
+};
+export type UpdateCampaignSendersApiResponse =
+  /** status 200 Sender pool replaced */ CampaignSenderPool;
+export type UpdateCampaignSendersApiArg = {
+  id: string;
+  campaignSenderPoolRequest: CampaignSenderPoolRequest;
 };
 export type ListCampaignEnrollmentsApiResponse =
   /** status 200 Per-contact reply status for the campaign's enrollments */ CampaignEnrollment[];
@@ -1298,6 +1325,34 @@ export type CampaignScheduleRequest = {
   timezone: string;
   days: SendWindowDay[];
 };
+export type RotationMode = "round_robin" | "least_recently_used" | "weighted";
+export type CampaignSender = {
+  mailbox_id: string;
+  /** Read-only, for display */
+  email: string;
+  /** Read-only mailbox provider */
+  provider?: string;
+  /** Read-only mailbox status */
+  status?: string;
+  weight: number;
+  enabled: boolean;
+  /** Contacts assigned to this mailbox so far */
+  assigned_count: number;
+  last_assigned_at?: string | null;
+};
+export type CampaignSenderPool = {
+  rotation_mode: RotationMode;
+  senders: CampaignSender[];
+};
+export type CampaignSenderRequest = {
+  mailbox_id: string;
+  weight?: number;
+  enabled?: boolean;
+};
+export type CampaignSenderPoolRequest = {
+  rotation_mode: RotationMode;
+  senders: CampaignSenderRequest[];
+};
 export type CampaignEnrollment = {
   email: string;
   first_name: string;
@@ -1489,6 +1544,8 @@ export const {
   useUpdateCampaignTrackingMutation,
   useGetCampaignScheduleQuery,
   useUpdateCampaignScheduleMutation,
+  useGetCampaignSendersQuery,
+  useUpdateCampaignSendersMutation,
   useListCampaignEnrollmentsQuery,
   useListStepsQuery,
   useCreateStepMutation,
