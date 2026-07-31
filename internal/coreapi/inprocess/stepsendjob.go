@@ -148,6 +148,30 @@ func (c client) threading(ctx context.Context, order int, campaignID, contactID 
 	return "", ""
 }
 
+// campaignLimitReached reports whether the campaign has already used up
+// campaigns.daily_limit for the UTC day. A nil limit is "no campaign limit" —
+// today's behaviour for every campaign that has not set one — and skips the count
+// entirely, so an unlimited campaign pays nothing for this feature. A non-positive
+// stored limit can only come from a direct write (the column CHECKs > 0 and the API
+// rejects below 1) and is treated as unset rather than as a campaign that may never
+// send.
+//
+// The limit is a campaign-wide total across the whole sender pool, which is what an
+// operator means by "this campaign sends at most 100/day". It can only ever lower
+// throughput: it is a second gate, never a raise of any mailbox's own cap.
+func (c client) campaignLimitReached(ctx context.Context, ws, campaignID uuid.UUID, limit *int32) (bool, error) {
+	if limit == nil || *limit <= 0 {
+		return false, nil
+	}
+	sent, err := c.q.CountCampaignSentToday(ctx, gen.CountCampaignSentTodayParams{
+		CampaignID: campaignID, WorkspaceID: ws,
+	})
+	if err != nil {
+		return false, err
+	}
+	return sent >= int64(*limit), nil
+}
+
 // GetStepSendJob resolves the enrollment's next due step and builds the send
 // job. Read-only: creates no rows. workspaceID is pinned in the SQL WHERE
 // (defense in depth on the unguessable enrollment UUID).
@@ -197,6 +221,31 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{}, err
 	}
 	nextOrder := int(step.StepOrder)
+
+	// The campaign-wide daily limit, stacked on top of the per-mailbox caps: the
+	// mailbox gate protects the mailbox, this one protects the campaign, and neither
+	// can raise the other. Checked here — after we know a step is actually due, but
+	// BEFORE a mailbox is pinned or a credential is unsealed — so a limited campaign
+	// neither decrypts secrets it will not use nor bumps a pool member's rotation
+	// counters for a send that does not happen.
+	limited, err := c.campaignLimitReached(ctx, ws, b.CampaignID, b.DailyLimit)
+	if err != nil {
+		return coreapi.StepSendJob{}, err
+	}
+	if limited {
+		// The schedule travels even though no sender is resolved: a deferred retry
+		// SENDS as soon as it runs, so the worker has to wake inside the campaign's
+		// window. Without it, a limited campaign resumes at whatever instant the
+		// backoff lands on — for a UTC-midnight retry, 20:00 in New York.
+		sched, serr := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
+		if serr != nil {
+			return coreapi.StepSendJob{}, serr
+		}
+		return coreapi.StepSendJob{
+			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), CampaignLimited: true,
+			Schedule: sched,
+		}, nil
+	}
 
 	// Is there a step after this one? Its existence decides last-step; its delay
 	// is the cadence gap to the following send. One query answers both.
@@ -285,7 +334,8 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		CampaignID: b.CampaignID.String(), ContactID: b.ContactID.String(), MailboxID: sender.mailboxID.String(),
 		SendID:      sendID.String(),
 		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
-		Suppressed: suppressed, EffectiveDailyCap: sender.effectiveCap, SentToday: sender.sentToday,
+		Suppressed: suppressed, HealthPaused: sender.healthPaused,
+		EffectiveDailyCap: sender.effectiveCap, SentToday: sender.sentToday,
 		MinIntervalSeconds: int(sender.minIntervalSeconds),
 		ToEmail:            b.ToEmail,
 		Vars: coreapi.ContactVars{

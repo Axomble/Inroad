@@ -2,7 +2,9 @@
 // rules live in one place and are unit-tested directly, and so the panel file
 // only exports components (fast refresh).
 import { httpStatus, isFetchBaseQueryError } from '@/lib/rtk-error'
-import type { CampaignSenderPool, CampaignSenderPoolRequest, RotationMode } from './api'
+import { knownWarmupHealth } from '@/lib/warmup-health'
+import type { WarmupHealth } from '@/lib/warmup-health'
+import type { CampaignSender, CampaignSenderPool, CampaignSenderPoolRequest, RotationMode } from './api'
 import type { Mailbox } from '@/store/api'
 
 /**
@@ -22,6 +24,18 @@ export type DraftSender = {
   /** Read-only rotation state, straight from the server. */
   assignedCount: number
   lastAssignedAt: string | null
+  /**
+   * Read-only health and capacity, straight from the server. Every one of these
+   * is `null` when the server didn't report it — a mailbox that isn't warming up
+   * has no health state, and a row for a mailbox outside the pool has no
+   * figures at all. `null` means "unknown", never zero and never "not sending":
+   * rendering a `0 / 0` or claiming a mailbox is gated on missing data would be
+   * a worse lie than saying nothing.
+   */
+  healthState: WarmupHealth | null
+  sending: boolean | null
+  capToday: number | null
+  sentToday: number | null
 }
 
 /** The rotation modes, with the copy that explains the selected one. */
@@ -78,8 +92,7 @@ export function toDraft(
       included: member !== undefined,
       weight: String(member?.weight ?? 1),
       enabled: member?.enabled ?? true,
-      assignedCount: member?.assigned_count ?? 0,
-      lastAssignedAt: member?.last_assigned_at ?? null,
+      ...serverState(member),
     })
   }
 
@@ -95,14 +108,70 @@ export function toDraft(
       included: true,
       weight: String(member.weight),
       enabled: member.enabled,
-      assignedCount: member.assigned_count,
-      lastAssignedAt: member.last_assigned_at ?? null,
+      ...serverState(member),
     })
   }
 
   // Sorted by address, not by membership: editing a weight or excluding a
   // mailbox must not make the rows jump around under the cursor.
   return [...rows.values()].sort((a, b) => a.email.localeCompare(b.email))
+}
+
+/**
+ * The read-only half of a row, from the pool member the server returned.
+ *
+ * The health/capacity fields are optional in the contract, so each one is read
+ * defensively: absent (or a non-number that crossed the JSON boundary) becomes
+ * `null`, which the panel renders as nothing rather than `undefined`/`NaN`.
+ */
+function serverState(
+  member: CampaignSender | undefined,
+): Pick<DraftSender, 'assignedCount' | 'lastAssignedAt' | 'healthState' | 'sending' | 'capToday' | 'sentToday'> {
+  return {
+    assignedCount: member?.assigned_count ?? 0,
+    lastAssignedAt: member?.last_assigned_at ?? null,
+    healthState: knownWarmupHealth(member?.health_state),
+    sending: typeof member?.sending === 'boolean' ? member.sending : null,
+    capToday: finiteOrNull(member?.cap_today),
+    sentToday: finiteOrNull(member?.sent_today),
+  }
+}
+
+function finiteOrNull(value: number | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * Today's consumption against today's ceiling, or `null` when the server sent
+ * neither figure. Both are required: half a fraction says less than nothing.
+ */
+export function capacityLabel(row: DraftSender): string | null {
+  if (row.sentToday === null || row.capToday === null) return null
+  return `${row.sentToday} / ${row.capToday} sent today`
+}
+
+/**
+ * Why this mailbox is taking no cold volume right now, or `null` when it is (or
+ * when the server didn't say). Reads only server-reported state, never the
+ * draft's own `included`/`enabled` — an unsaved tick must not be presented as
+ * something the sending engine has already acted on.
+ */
+export function gatedReason(row: DraftSender): string | null {
+  if (row.sending !== false) return null
+  if (row.healthState === 'paused') return 'Paused by warmup — not sending'
+  if (row.status && row.status !== 'active') return `Mailbox is ${row.status} — not sending`
+  return 'Held out of rotation — not sending'
+}
+
+/**
+ * Why a sending mailbox's cap is lower than its configured daily cap. The factor
+ * itself is deliberately not quoted: it is a backend constant, and `cap_today`
+ * already carries the result, so naming a percentage here would just be a second
+ * copy of it waiting to drift.
+ */
+export function reducedCapReason(row: DraftSender): string | null {
+  if (row.healthState !== 'watch' && row.healthState !== 'throttled') return null
+  return "Cap lowered by warmup health — it will rise again as the mailbox's placement recovers"
 }
 
 /**

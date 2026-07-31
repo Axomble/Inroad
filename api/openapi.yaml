@@ -1763,6 +1763,22 @@ components:
         enabled: { type: boolean }
         assigned_count: { type: integer, format: int64, description: "Contacts assigned to this mailbox so far" }
         last_assigned_at: { type: string, format: date-time, nullable: true }
+        health_state:
+          type: string
+          nullable: true
+          description: "Read-only warmup health; null when the mailbox is not warming up."
+          enum: [healthy, watch, throttled, paused, null]
+        sending:
+          type: boolean
+          description: >-
+            Read-only. False when this mailbox is not taking cold volume right now —
+            paused by warmup, held out of rotation, or an inactive mailbox.
+        cap_today:
+          type: integer
+          description: "Read-only effective cap for today, after ramp and after warmup-health scaling."
+        sent_today:
+          type: integer
+          description: "Read-only count of sends from this mailbox today (UTC day)." 
     CampaignSenderPool:
       type: object
       required: [rotation_mode, senders]
@@ -1802,13 +1818,25 @@ components:
     CampaignSchedule:
       type: object
       description: >-
-        A campaign's sending schedule. Sends are placed inside these windows,
-        spread through a distribution curve and nudged off the clock grid, so a
-        launch never emits on a uniform interval.
+        A campaign's sending plan: when it may send, and at most how much. Sends are
+        placed inside these windows, spread through a distribution curve and nudged
+        off the clock grid, so a launch never emits on a uniform interval.
       required: [timezone, days]
       properties:
         timezone: { type: string, description: "IANA zone the windows are interpreted in", example: America/New_York }
         days: { type: array, items: { $ref: '#/components/schemas/SendWindowDay' } }
+        daily_limit:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          nullable: true
+          description: >-
+            Campaign-wide cap on sends per UTC day, across every mailbox in the pool.
+            null means no campaign limit. It can only lower throughput: a mailbox is
+            never raised above its own ramped, health-scaled daily cap. Bounded at
+            1000000 because the column is a 32-bit integer — an unbounded value would
+            reach Postgres out of range and surface as a 500 instead of a validation
+            error.
         preview:
           type: array
           description: "Human-readable preview of the next few send instants this schedule produces, in its own timezone."
@@ -1820,6 +1848,13 @@ components:
       properties:
         timezone: { type: string, example: America/New_York }
         days: { type: array, items: { $ref: '#/components/schemas/SendWindowDay' } }
+        daily_limit:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          nullable: true
+          description: "Campaign-wide sends per UTC day; null or omitted clears the limit."
+
     WarmupSettings:
       type: object
       description: >-

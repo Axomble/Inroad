@@ -45,35 +45,35 @@ func TestGetScheduleCrossTenantIsNotFound(t *testing.T) {
 func TestSetScheduleRejectsInvalidSchedulesWithoutWriting(t *testing.T) {
 	cases := []struct {
 		name string
-		in   Schedule
+		in   Plan
 		want error
 	}{
 		{
 			name: "unknown timezone",
-			in:   Schedule{Timezone: "Mars/Olympus_Mons", Windows: []SendWindow{{Weekday: 1, StartMinute: 540, EndMinute: 1020}}},
+			in:   Plan{Schedule: Schedule{Timezone: "Mars/Olympus_Mons", Windows: []SendWindow{{Weekday: 1, StartMinute: 540, EndMinute: 1020}}}},
 			want: cadence.ErrUnknownTimezone,
 		},
 		{
 			name: "nothing open all week",
-			in:   Schedule{Timezone: "UTC"},
+			in:   Plan{Schedule: Schedule{Timezone: "UTC"}},
 			want: cadence.ErrEmptySchedule,
 		},
 		{
 			name: "inverted interval",
-			in:   Schedule{Timezone: "UTC", Windows: []SendWindow{{Weekday: 1, StartMinute: 1020, EndMinute: 540}}},
+			in:   Plan{Schedule: Schedule{Timezone: "UTC", Windows: []SendWindow{{Weekday: 1, StartMinute: 1020, EndMinute: 540}}}},
 			want: cadence.ErrBadSchedule,
 		},
 		{
 			name: "overlapping intervals on one day",
-			in: Schedule{Timezone: "UTC", Windows: []SendWindow{
+			in: Plan{Schedule: Schedule{Timezone: "UTC", Windows: []SendWindow{
 				{Weekday: 1, StartMinute: 540, EndMinute: 720},
 				{Weekday: 1, StartMinute: 700, EndMinute: 900},
-			}},
+			}}},
 			want: cadence.ErrBadSchedule,
 		},
 		{
 			name: "weekday out of range",
-			in:   Schedule{Timezone: "UTC", Windows: []SendWindow{{Weekday: 9, StartMinute: 540, EndMinute: 1020}}},
+			in:   Plan{Schedule: Schedule{Timezone: "UTC", Windows: []SendWindow{{Weekday: 9, StartMinute: 540, EndMinute: 1020}}}},
 			want: cadence.ErrBadSchedule,
 		},
 	}
@@ -101,9 +101,9 @@ func TestSetScheduleDefaultsBlankTimezoneToUTC(t *testing.T) {
 	store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id}}}
 	svc := NewService(store, okChecker{active: true})
 
-	got, err := svc.SetSchedule(context.Background(), ws, id, Schedule{
+	got, err := svc.SetSchedule(context.Background(), ws, id, Plan{Schedule: Schedule{
 		Windows: []SendWindow{{Weekday: 1, StartMinute: 540, EndMinute: 1020}},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("SetSchedule: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestSetSchedulePropagatesStoreFailure(t *testing.T) {
 	}
 	svc := NewService(store, okChecker{active: true})
 
-	if _, err := svc.SetSchedule(context.Background(), ws, id, DefaultSchedule("UTC")); !errors.Is(err, boom) {
+	if _, err := svc.SetSchedule(context.Background(), ws, id, Plan{Schedule: DefaultSchedule("UTC")}); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the store error", err)
 	}
 }

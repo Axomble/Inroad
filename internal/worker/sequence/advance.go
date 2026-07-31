@@ -8,11 +8,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker/personalize"
@@ -35,6 +37,58 @@ type Enqueuer interface {
 // capBackoff is how long to wait before retrying an enrollment blocked by the
 // mailbox's daily cap. Matches the direct sender's 6h re-enqueue.
 const capBackoff = 6 * time.Hour
+
+// minBlockedBackoff floors the campaign-limit wait so an advance that lands in the
+// last seconds of a UTC day doesn't re-enqueue itself immediately and spin.
+const minBlockedBackoff = time.Minute
+
+// blockedBackoff is how long to wait before re-attempting a step blocked by
+// something other than this mailbox's own cap. It picks the moment the block can
+// actually clear, rather than a fixed retry:
+//
+//   - a campaign at its daily_limit clears at the next UTC midnight, when the
+//     allowance resets — retrying sooner just burns a task to learn nothing;
+//   - a warmup-paused mailbox clears whenever the health sweep steps it back down,
+//     which is not on a schedule this worker can predict, so it reuses capBackoff.
+//
+// A campaign that is BOTH limited and paused takes the shorter wait: the sooner
+// signal is the one worth re-checking.
+//
+// The instant is then snapped forward into the campaign's send window, because a
+// deferred retry SENDS as soon as it runs — this path re-enters the send flow, it
+// does not re-schedule through the cadence engine. Waking outside the window would
+// therefore send outside it, and "the next UTC midnight" is 20:00 in New York. A
+// job with no usable schedule (an older enqueued task, a campaign whose windows
+// cannot be compiled) keeps the raw instant rather than refusing to retry.
+func blockedBackoff(job coreapi.StepSendJob, now time.Time) time.Duration {
+	return nextAttemptIn(job.Schedule, job.EnrollmentID, job.CampaignLimited, job.HealthPaused, now)
+}
+
+// nextAttemptIn is when a step blocked by a SELF-CLEARING condition should be
+// re-attempted, snapped into the campaign's send window.
+//
+// dayBoundary: the block lifts at the next UTC midnight. True for a campaign daily
+// limit and for a mailbox's own daily cap — sent_today is counted over the UTC day,
+// so both allowances reset then, and re-checking earlier burns a task to learn
+// nothing. poll: the block lifts on no schedule this worker can predict (a warmup
+// pause clears whenever the health sweep steps it down), so it retries on capBackoff.
+// Both true takes the sooner of the two.
+func nextAttemptIn(sched cadence.Schedule, key string, dayBoundary, poll bool, now time.Time) time.Duration {
+	target := now.Add(capBackoff)
+	if dayBoundary {
+		utc := now.UTC()
+		midnight := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+		if !poll || midnight.Before(target) {
+			target = midnight
+		}
+	}
+	if win, err := sched.Compile(); err == nil {
+		if at, nerr := win.Next(target, key); nerr == nil {
+			target = at
+		}
+	}
+	return max(target.Sub(now), minBlockedBackoff)
+}
 
 // maxCapDeferrals bounds the cap-exceeded re-enqueue loop, mirroring
 // sender.maxSendAttempts: an enrollment that keeps hitting a daily cap it can
@@ -85,6 +139,58 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			// entry point as every other halt; nothing is sent.
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonMailboxRemoved)
 		}
+		// deferForCapacity retries a step blocked by this mailbox's own daily cap,
+		// leaving the cursor unchanged so the same step is re-attempted at the next
+		// UTC midnight, when sent_today resets, snapped into the campaign's window.
+		//
+		// It does NOT fail the enrollment past a deferral count, and that is a fix
+		// rather than an omission. A daily cap is self-clearing by construction:
+		// sent_today is counted over the UTC day, and the only cap that can never
+		// clear is cap <= 0, which the degenerate branch below stops outright. The
+		// old count-based ceiling therefore protected against nothing real while
+		// destroying the tail of any launch larger than a day's capacity — 1000
+		// contacts against a 50/day cap means the first ~400 send and reset their
+		// (consecutive) counter, and everything after it accumulates 30 deferrals and
+		// dies as 'failed' at ~7.5 days. That reads as a deliverability problem and is
+		// a scheduling one.
+		//
+		// The counter is still incremented, and crossing the old ceiling now logs
+		// instead of stopping: a genuinely stuck loop stays visible without silently
+		// discarding an operator's contacts.
+		deferForCapacity := func() error {
+			n, err := core.IncrementEnrollmentCapDeferrals(ctx, p.EnrollmentID, p.WorkspaceID)
+			if err != nil {
+				return err
+			}
+			if n > maxCapDeferrals {
+				slog.Warn("sequence_cap_deferrals_high",
+					"enrollment_id", p.EnrollmentID, "deferrals", n,
+					"effective_cap", job.EffectiveDailyCap, "sent_today", job.SentToday)
+			}
+			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID,
+				nextAttemptIn(job.Schedule, p.EnrollmentID, true, false, time.Now()))
+		}
+		// Blocked by something that is NOT this mailbox's own cap: the campaign has
+		// hit its campaign-wide daily limit, or the warmup engine has paused the
+		// mailbox this thread must send from.
+		//
+		// Checked BEFORE the degenerate-cap branch below, which STOPS an enrollment:
+		// an unhealthy mailbox may recover and a limited campaign gets a fresh
+		// allowance tomorrow, so the thread waits rather than dies — and it cannot
+		// be re-routed, since a follow-up must come from the mailbox that started
+		// the thread.
+		//
+		// Deliberately NOT deferForCapacity: that budget exists to kill a ceiling
+		// that can never clear (a mis-set cap, a stuck counter), and neither of
+		// these is one. A campaign daily_limit is a setting the operator chose —
+		// daily_limit 10 over 1000 contacts is a correctly configured 100-day
+		// campaign, and charging its waiting enrollments against a 30 × 6h ≈ 7.5-day
+		// budget would mark ~99% of them 'failed' for working as instructed. A
+		// warmup pause is timed and self-clearing. So these wait indefinitely,
+		// staying 'active' and visible in the UI, which is the honest state.
+		if job.CampaignLimited || job.HealthPaused {
+			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now()))
+		}
 		if job.EffectiveDailyCap <= 0 {
 			// Degenerate cap (daily_cap=0, or ramp_start_cap=0 on a brand-new
 			// mailbox): this enrollment can never send. Stop it 'failed' rather
@@ -92,18 +198,9 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
 		}
 		if job.SentToday >= job.EffectiveDailyCap {
-			// Over today's cap: bump the deferral counter and retry later,
-			// leaving the cursor unchanged so the same step is re-attempted —
-			// but fail out if we've deferred too long, so a permanently mis-set
-			// cap can't re-enqueue this enrollment indefinitely.
-			n, err := core.IncrementEnrollmentCapDeferrals(ctx, p.EnrollmentID, p.WorkspaceID)
-			if err != nil {
-				return err
-			}
-			if n > maxCapDeferrals {
-				return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
-			}
-			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, capBackoff)
+			// Over today's cap — including a cap the mailbox's warmup health has
+			// scaled down, which is enforced here without a branch of its own.
+			return deferForCapacity()
 		}
 
 		// schedule enqueues the next step (lazy chain) unless the enrollment

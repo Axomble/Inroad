@@ -10,6 +10,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/sendcap"
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
 
@@ -70,7 +71,7 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 		return coreapi.SendJob{}, err
 	}
 	ageDays := int(time.Since(b.MailboxCreatedAt.Time).Hours() / 24)
-	dailyCap := effectiveCap(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
+	dailyCap := sendcap.Effective(int(b.DailyCap), int(b.RampStartCap), int(b.RampDays), b.RampEnabled, ageDays)
 	token := unsub.MakeToken(c.jwtSecret, b.WorkspaceID.String(), b.ToEmail)
 
 	return coreapi.SendJob{

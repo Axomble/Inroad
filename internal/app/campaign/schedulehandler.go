@@ -16,13 +16,15 @@ import (
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
-// scheduleResponse is the wire shape of a campaign's sending schedule: the zone
-// plus the week's open intervals, grouped per weekday so the UI renders a row per
-// day without regrouping a flat list.
+// scheduleResponse is the wire shape of a campaign's sending plan: the zone plus
+// the week's open intervals, grouped per weekday so the UI renders a row per day
+// without regrouping a flat list, and the campaign-wide daily limit (null = no
+// limit).
 type scheduleResponse struct {
-	Timezone string        `json:"timezone"`
-	Days     []scheduleDay `json:"days"`
-	Preview  []string      `json:"preview"`
+	Timezone   string        `json:"timezone"`
+	Days       []scheduleDay `json:"days"`
+	DailyLimit *int          `json:"daily_limit"`
+	Preview    []string      `json:"preview"`
 }
 
 type scheduleDay struct {
@@ -36,13 +38,15 @@ type scheduleInterval struct {
 }
 
 // scheduleRequest is the full-replace payload. Days not present are closed, so
-// omitting a weekday is how the client turns sending off for it.
+// omitting a weekday is how the client turns sending off for it; an omitted or null
+// daily_limit is how it clears the campaign-wide limit.
 type scheduleRequest struct {
-	Timezone string        `json:"timezone"`
-	Days     []scheduleDay `json:"days"`
+	Timezone   string        `json:"timezone"`
+	Days       []scheduleDay `json:"days"`
+	DailyLimit *int          `json:"daily_limit"`
 }
 
-func (r scheduleRequest) toSchedule() Schedule {
+func (r scheduleRequest) toPlan() Plan {
 	windows := make([]SendWindow, 0, len(r.Days))
 	for _, d := range r.Days {
 		for _, iv := range d.Intervals {
@@ -51,20 +55,23 @@ func (r scheduleRequest) toSchedule() Schedule {
 			})
 		}
 	}
-	return Schedule{Timezone: r.Timezone, Windows: windows}
+	return Plan{Schedule: Schedule{Timezone: r.Timezone, Windows: windows}, DailyLimit: r.DailyLimit}
 }
 
 // newScheduleResponse groups the flat window list by weekday and renders a short
 // preview of upcoming send instants, so the operator can see the cadence the
 // schedule produces rather than having to trust it.
-func newScheduleResponse(s Schedule) scheduleResponse {
+func newScheduleResponse(p Plan) scheduleResponse {
 	byDay := map[int][]scheduleInterval{}
-	for _, w := range s.Windows {
+	for _, w := range p.Windows {
 		byDay[w.Weekday] = append(byDay[w.Weekday], scheduleInterval{
 			StartMinute: w.StartMinute, EndMinute: w.EndMinute,
 		})
 	}
-	out := scheduleResponse{Timezone: s.Timezone, Days: make([]scheduleDay, 0, len(byDay)), Preview: schedulePreview(s)}
+	out := scheduleResponse{
+		Timezone: p.Timezone, Days: make([]scheduleDay, 0, len(byDay)),
+		DailyLimit: p.DailyLimit, Preview: schedulePreview(p.Schedule),
+	}
 	for weekday := range 7 {
 		if intervals, ok := byDay[weekday]; ok {
 			out.Days = append(out.Days, scheduleDay{Weekday: weekday, Intervals: intervals})
@@ -105,17 +112,17 @@ func schedulePreview(s Schedule) []string {
 func (h *Handler) getSchedule(w http.ResponseWriter, r *http.Request) {
 	serveCampaignChild(w, r, "could not load schedule",
 		func(ctx context.Context, ws, id uuid.UUID) (scheduleResponse, error) {
-			sched, err := h.svc.GetSchedule(ctx, ws, id)
+			plan, err := h.svc.GetSchedule(ctx, ws, id)
 			if err != nil {
 				return scheduleResponse{}, err
 			}
-			return newScheduleResponse(sched), nil
+			return newScheduleResponse(plan), nil
 		})
 }
 
 // putSchedule handles PUT /campaigns/{id}/schedule — a full replace of the
-// timezone and every window. Editable while running: it only affects sends
-// scheduled after the change.
+// timezone, every window and the campaign-wide daily limit. Editable while
+// running: it only affects sends scheduled after the change.
 func (h *Handler) putSchedule(w http.ResponseWriter, r *http.Request) {
 	ws, ok := auth.WorkspaceID(w, r)
 	if !ok {
@@ -131,10 +138,12 @@ func (h *Handler) putSchedule(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	sched, err := h.svc.SetSchedule(r.Context(), ws, id, req.toSchedule())
+	plan, err := h.svc.SetSchedule(r.Context(), ws, id, req.toPlan())
 	switch {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrDailyLimit):
+		httpx.Error(w, http.StatusUnprocessableEntity, "daily limit must be between 1 and 1000000")
 	case errors.Is(err, cadence.ErrUnknownTimezone):
 		httpx.Error(w, http.StatusUnprocessableEntity, "unknown timezone")
 	case errors.Is(err, cadence.ErrEmptySchedule):
@@ -144,6 +153,6 @@ func (h *Handler) putSchedule(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not save schedule")
 	default:
-		httpx.JSON(w, http.StatusOK, newScheduleResponse(sched))
+		httpx.JSON(w, http.StatusOK, newScheduleResponse(plan))
 	}
 }

@@ -329,7 +329,19 @@ type StepSendJob struct {
 	// legitimately continue: a follow-up would go out from a different address
 	// carrying In-Reply-To/References for a Message-ID that address never sent.
 	// Handled like Suppressed — the worker stops the enrollment and sends nothing.
-	MailboxRemoved     bool
+	MailboxRemoved bool
+	// CampaignLimited means the campaign has reached campaigns.daily_limit for the
+	// UTC day: its whole pool is still under its per-mailbox caps, but the campaign
+	// as a whole may not send more today. HealthPaused means the mailbox this
+	// thread must send from has been paused by the warmup engine.
+	//
+	// Both defer the step (backoff + cap_deferrals) exactly as an over-cap mailbox
+	// does, and both are carried EXPLICITLY rather than expressed by reporting
+	// SentToday >= EffectiveDailyCap: those two numbers reach the logs and describe
+	// the mailbox, so a campaign-wide limit or a health pause must not masquerade as
+	// a mailbox that has used up its cap.
+	CampaignLimited    bool
+	HealthPaused       bool
 	EffectiveDailyCap  int
 	SentToday          int
 	MinIntervalSeconds int

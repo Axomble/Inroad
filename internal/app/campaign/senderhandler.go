@@ -21,10 +21,13 @@ type senderPoolResponse struct {
 	Senders      []senderResponse `json:"senders"`
 }
 
-// senderResponse is one pool member. email/provider/status and the rotation state
-// (assigned_count/last_assigned_at) are read-only; only weight and enabled are
-// editable. last_assigned_at is RFC3339 (UTC) or null when the mailbox has never
-// been assigned a contact.
+// senderResponse is one pool member. email/provider/status, the rotation state
+// (assigned_count/last_assigned_at) and the health/capacity block
+// (health_state/sending/cap_today/sent_today) are all read-only; only weight and
+// enabled are editable. last_assigned_at is RFC3339 (UTC) or null when the mailbox
+// has never been assigned a contact; health_state is null when the mailbox is not
+// warming up. cap_today is today's cap after ramp AND warmup health, so
+// sent_today/cap_today is why this mailbox is or isn't sending right now.
 type senderResponse struct {
 	MailboxID      string  `json:"mailbox_id"`
 	Email          string  `json:"email"`
@@ -34,6 +37,10 @@ type senderResponse struct {
 	Enabled        bool    `json:"enabled"`
 	AssignedCount  int64   `json:"assigned_count"`
 	LastAssignedAt *string `json:"last_assigned_at"`
+	HealthState    *string `json:"health_state"`
+	Sending        bool    `json:"sending"`
+	CapToday       int     `json:"cap_today"`
+	SentToday      int     `json:"sent_today"`
 }
 
 // senderPoolRequest is the full-replace payload: mailboxes not listed leave the
@@ -83,6 +90,8 @@ func newSenderPoolResponse(p SenderPool) senderPoolResponse {
 			MailboxID: s.MailboxID.String(), Email: s.Email, Provider: s.Provider, Status: s.Status,
 			Weight: s.Weight, Enabled: s.Enabled,
 			AssignedCount: s.AssignedCount, LastAssignedAt: lastAssignedAt,
+			HealthState: s.HealthState, Sending: s.Sending,
+			CapToday: s.CapToday, SentToday: s.SentToday,
 		})
 	}
 	return senderPoolResponse{RotationMode: p.RotationMode, Senders: senders}

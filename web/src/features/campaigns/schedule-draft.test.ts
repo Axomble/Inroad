@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { fromDraft, newInterval, toDraft } from './schedule-draft'
+import {
+  MAX_DAILY_LIMIT,
+  dailyLimitFromDraft,
+  dailyLimitToDraft,
+  fromDraft,
+  newInterval,
+  toDraft,
+} from './schedule-draft'
 import { minutesToTime, timeToMinutes } from './schedule-time'
 
 describe('timeToMinutes', () => {
@@ -140,5 +147,50 @@ describe('fromDraft', () => {
     const week = empty()
     week[6] = [newInterval('10:00', '09:00')]
     expect(fromDraft(week)).toEqual({ problem: expect.stringContaining('Sat') })
+  })
+})
+
+describe('dailyLimitToDraft', () => {
+  it('shows a set limit as its digits', () => {
+    expect(dailyLimitToDraft(250)).toBe('250')
+    // Not filtered out as falsy: a 0 the server somehow returned must be visible
+    // and rejected, not silently displayed as "no limit".
+    expect(dailyLimitToDraft(0)).toBe('0')
+  })
+
+  it('shows no limit as an empty field', () => {
+    expect(dailyLimitToDraft(null)).toBe('')
+    expect(dailyLimitToDraft(undefined)).toBe('')
+  })
+})
+
+describe('dailyLimitFromDraft', () => {
+  it('reads an empty field as no campaign limit', () => {
+    expect(dailyLimitFromDraft('')).toEqual({ dailyLimit: null })
+    expect(dailyLimitFromDraft('   ')).toEqual({ dailyLimit: null })
+  })
+
+  it('reads digits as the limit', () => {
+    expect(dailyLimitFromDraft('100')).toEqual({ dailyLimit: 100 })
+    expect(dailyLimitFromDraft(' 1 ')).toEqual({ dailyLimit: 1 })
+  })
+
+  // The API's own minimum is 1; refusing here gives the specific reason instead
+  // of a 422 the operator has to interpret.
+  it.each(['0', '-5', '2.5', 'lots', '1e3', '1 000'])('refuses %j', (raw) => {
+    expect(dailyLimitFromDraft(raw)).toEqual({ problem: expect.stringContaining('1 or more') })
+  })
+})
+
+describe('dailyLimitFromDraft upper bound', () => {
+  // The column is a 32-bit integer. Without a bound, a value above int32 range
+  // reaches Postgres out of range and surfaces as a 500 rather than a validation
+  // error — and beyond 2^53 the JSON number stops being exact.
+  it('accepts the documented maximum', () => {
+    expect(dailyLimitFromDraft(String(MAX_DAILY_LIMIT))).toEqual({ dailyLimit: MAX_DAILY_LIMIT })
+  })
+
+  it.each([String(MAX_DAILY_LIMIT + 1), '2147483648', '99999999999'])('refuses %s', (raw) => {
+    expect(dailyLimitFromDraft(raw)).toEqual({ problem: expect.stringContaining('or less') })
   })
 })

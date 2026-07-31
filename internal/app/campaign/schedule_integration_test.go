@@ -158,13 +158,13 @@ func TestOverlappingWindowIsRejectedByTheDatabase(t *testing.T) {
 
 	// Bypass the service's validation the way a buggy caller would, writing
 	// straight through the store.
-	err := store.ReplaceSchedule(ctx, ws, cam.ID, Schedule{
+	err := store.ReplaceSchedule(ctx, ws, cam.ID, Plan{Schedule: Schedule{
 		Timezone: "UTC",
 		Windows: []SendWindow{
 			{Weekday: 1, StartMinute: 540, EndMinute: 720},
 			{Weekday: 1, StartMinute: 700, EndMinute: 900}, // overlaps the first
 		},
-	})
+	}})
 	if err == nil {
 		t.Fatal("the database accepted overlapping windows on one weekday")
 	}
@@ -185,13 +185,13 @@ func TestAdjacentWindowsAreAccepted(t *testing.T) {
 	ctx := context.Background()
 	store, _, _, ws, cam := scheduleFixture(t, ctx, 1)
 
-	if err := store.ReplaceSchedule(ctx, ws, cam.ID, Schedule{
+	if err := store.ReplaceSchedule(ctx, ws, cam.ID, Plan{Schedule: Schedule{
 		Timezone: "UTC",
 		Windows: []SendWindow{
 			{Weekday: 1, StartMinute: 540, EndMinute: 720},
 			{Weekday: 1, StartMinute: 720, EndMinute: 1020},
 		},
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("adjacent windows rejected: %v", err)
 	}
 	windows, err := store.ListWindows(ctx, ws, cam.ID)
@@ -207,10 +207,10 @@ func TestReplaceScheduleUpdatesTimezoneAndWindowsTogether(t *testing.T) {
 	ctx := context.Background()
 	store, q, _, ws, cam := scheduleFixture(t, ctx, 1)
 
-	if err := store.ReplaceSchedule(ctx, ws, cam.ID, Schedule{
+	if err := store.ReplaceSchedule(ctx, ws, cam.ID, Plan{Schedule: Schedule{
 		Timezone: "America/New_York",
 		Windows:  []SendWindow{{Weekday: 2, StartMinute: 600, EndMinute: 900}},
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("ReplaceSchedule: %v", err)
 	}
 	got, err := q.GetCampaign(ctx, gen.GetCampaignParams{ID: cam.ID, WorkspaceID: ws})
@@ -248,9 +248,9 @@ func TestScheduleQueriesArePinnedToTheWorkspace(t *testing.T) {
 	}
 
 	// A cross-tenant replace must not delete the owner's windows.
-	if err := store.ReplaceSchedule(ctx, other.ID, cam.ID, Schedule{
+	if err := store.ReplaceSchedule(ctx, other.ID, cam.ID, Plan{Schedule: Schedule{
 		Timezone: "UTC", Windows: []SendWindow{{Weekday: 0, StartMinute: 0, EndMinute: 60}},
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("ReplaceSchedule: %v", err)
 	}
 	owned, err := store.ListWindows(ctx, ws, cam.ID)

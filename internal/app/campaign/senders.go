@@ -31,10 +31,25 @@ const (
 // footing with every other unweighted member.
 const defaultSenderWeight = 1
 
+// mailboxStatusActive is the only mailbox status that takes cold volume. A plain
+// string rather than an import: app/* packages don't depend on each other, and the
+// mailbox domain owns the vocabulary.
+const mailboxStatusActive = "active"
+
 // Sender is one member of a campaign's sender pool: the mailbox identity the UI
-// displays (read-only), the operator-owned weight/enabled flags, and the rotation
-// state so an operator can see the spread actually happening. LastAssignedAt is
-// nil for a mailbox that has never been assigned a contact.
+// displays (read-only), the operator-owned weight/enabled flags, the rotation
+// state so an operator can see the spread actually happening, and today's health
+// and capacity so a campaign sending slower than configured explains itself
+// instead of looking broken. LastAssignedAt is nil for a mailbox that has never
+// been assigned a contact.
+//
+// HealthState is nil when the mailbox is not warming up (including a disabled
+// warmup participant, whose stored state is frozen and therefore not a live
+// signal). Sending is false when the mailbox is taking no cold volume at all —
+// paused by warmup, held out of the rotation, or not active. CapToday is the cap
+// the send path will actually enforce: ramped AND health-scaled, computed with the
+// same platform/sendcap arithmetic, so the panel cannot promise capacity the
+// sender does not honour.
 type Sender struct {
 	MailboxID      uuid.UUID
 	Email          string
@@ -44,6 +59,10 @@ type Sender struct {
 	Enabled        bool
 	AssignedCount  int64
 	LastAssignedAt *time.Time
+	HealthState    *string
+	Sending        bool
+	CapToday       int
+	SentToday      int
 }
 
 // SenderPool is a campaign's whole pool plus the mode that selects from it.

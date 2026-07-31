@@ -12,6 +12,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
@@ -197,11 +198,88 @@ func TestAdvanceOverCapReEnqueues(t *testing.T) {
 	if snd.called() || core.claimCalls != 0 {
 		t.Fatal("over-cap step must not claim or send")
 	}
-	if !enq.inCalled || enq.in != capBackoff {
-		t.Fatalf("expected re-enqueue in %v, got called=%v in=%v", capBackoff, enq.inCalled, enq.in)
+	// The cap clears when sent_today resets at the UTC boundary, so the retry targets
+	// that rather than a fixed poll. The exact arithmetic is pinned by the
+	// nextAttemptIn tests.
+	if !enq.inCalled || enq.in <= 0 || enq.in > capBackoff+24*time.Hour {
+		t.Fatalf("expected a bounded positive retry wait, got called=%v in=%v", enq.inCalled, enq.in)
 	}
 	if core.finalized != nil {
 		t.Fatal("over-cap must not finalize/advance the cursor")
+	}
+}
+
+// The campaign has hit campaigns.daily_limit. Every mailbox still has capacity, so
+// nothing about the mailbox numbers says "wait" — the explicit flag has to, and it
+// must defer rather than stop: the campaign gets a fresh allowance tomorrow.
+func TestAdvanceCampaignLimitedDefers(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{CampaignLimited: true}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if snd.called() || core.claimCalls != 0 {
+		t.Fatal("a campaign at its daily limit must not claim or send")
+	}
+	if core.stopped != "" {
+		t.Fatalf("a campaign limit must not stop the enrollment, got stop reason %q", core.stopped)
+	}
+	// The wait targets the UTC day rollover, when the allowance resets — the exact
+	// arithmetic is pinned by TestBlockedBackoffWaitsForTheMomentTheBlockCanClear.
+	if !enq.inCalled || enq.in <= 0 || enq.in > 24*time.Hour {
+		t.Fatalf("re-enqueue delay = %v (called=%v), want a positive wait within the day",
+			enq.in, enq.inCalled)
+	}
+}
+
+// Invariant 3: the warmup engine has paused the mailbox this thread must send from.
+// The job carries no capacity of its own (the mailbox has plenty), so without the
+// flag being checked BEFORE the degenerate-cap branch this enrollment would be
+// STOPPED — and the mailbox may recover, while the thread cannot move to another
+// mailbox mid-sequence.
+func TestAdvanceHealthPausedDefersRatherThanStopping(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{HealthPaused: true, EffectiveDailyCap: 0}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if core.stopped != "" {
+		t.Fatalf("a paused mailbox must not stop the enrollment, got stop reason %q", core.stopped)
+	}
+	if snd.called() || core.claimCalls != 0 {
+		t.Fatal("a paused mailbox must not claim or send")
+	}
+	if !enq.inCalled || enq.in != capBackoff {
+		t.Fatalf("expected re-enqueue in %v, got called=%v in=%v", capBackoff, enq.inCalled, enq.in)
+	}
+}
+
+// A blocked thread waits INDEFINITELY: over many more attempts than the
+// cap-deferral ceiling allows, it stays active and keeps being re-scheduled. The
+// spelled-out form of the budget rule — a campaign that needs 100 days to finish
+// must still be running on day 8.
+func TestBlockedEnrollmentStaysActivePastTheDeferralCeiling(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{CampaignLimited: true}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	for attempt := range maxCapDeferrals + 5 {
+		enq.inCalled = false
+		if err := run(t, core, snd, enq); err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		if core.stopped != "" {
+			t.Fatalf("attempt %d: enrollment stopped %q; a campaign limit is a setting, not a failure",
+				attempt, core.stopped)
+		}
+		if !enq.inCalled {
+			t.Fatalf("attempt %d: no retry scheduled; the thread would never resume", attempt)
+		}
+	}
+	if core.incrCalls != 0 {
+		t.Errorf("cap-deferral budget consumed %d times across %d attempts, want never",
+			core.incrCalls, maxCapDeferrals+5)
+	}
+	if snd.called() || core.claimCalls != 0 {
+		t.Error("a blocked thread sent something")
 	}
 }
 
@@ -239,18 +317,63 @@ func TestAdvanceZeroCapStopsFailed(t *testing.T) {
 	}
 }
 
-func TestAdvanceCapDeferralCeilingStopsFailed(t *testing.T) {
-	// Over cap AND past the deferral ceiling: stop 'failed' instead of re-enqueue.
-	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50}, deferrals: maxCapDeferrals + 1}
+// A mailbox daily cap is self-clearing — sent_today is counted over the UTC day, and
+// the only cap that can never clear is cap <= 0, which stops outright above. So
+// being over cap must never fail the enrollment, however long it has waited: the old
+// count-based ceiling killed the tail of every launch bigger than a day's capacity
+// (1000 contacts at 50/day → everything past ~400 failed at ~7.5 days).
+func TestAdvanceOverCapNeverFailsTheEnrollmentHoweverLongItWaits(t *testing.T) {
+	core := &stubCore{
+		job:       coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50},
+		deferrals: maxCapDeferrals * 100,
+	}
 	snd, enq := &fakeSender{}, &fakeEnq{}
 	if err := run(t, core, snd, enq); err != nil {
 		t.Fatal(err)
 	}
-	if core.stopped != "failed" {
-		t.Fatalf("want stop reason failed at deferral ceiling, got %q", core.stopped)
+	if core.stopped != "" {
+		t.Fatalf("a self-clearing cap must not stop the enrollment, got %q", core.stopped)
 	}
-	if enq.inCalled {
-		t.Fatal("past the ceiling must not re-enqueue")
+	if snd.called() {
+		t.Fatal("over cap must not send")
+	}
+	if !enq.inCalled || enq.in <= 0 {
+		t.Fatalf("expected a positive retry wait, got called=%v in=%v", enq.inCalled, enq.in)
+	}
+	// Still counted, so a genuinely stuck loop remains observable.
+	if core.incrCalls != 1 {
+		t.Errorf("deferral counter incremented %d times, want 1", core.incrCalls)
+	}
+}
+
+// The cap clears when sent_today resets, so the retry targets the UTC boundary
+// rather than polling — and lands inside the campaign's window, because a deferred
+// retry sends the moment it runs.
+func TestAdvanceOverCapRetriesAtTheDayBoundaryInsideTheWindow(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	sched := cadence.Schedule{Timezone: "America/New_York"}
+	for d := int(time.Monday); d <= int(time.Friday); d++ {
+		sched.Windows = append(sched.Windows,
+			cadence.SendWindow{Weekday: d, StartMinute: 9 * 60, EndMinute: 17 * 60})
+	}
+	win, err := sched.Compile()
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50, Schedule: sched}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if !enq.inCalled {
+		t.Fatal("no retry scheduled")
+	}
+	at := time.Now().Add(enq.in)
+	if !win.Contains(at) {
+		t.Errorf("retry at %s (%s local) is outside the campaign's window", at.UTC(), at.In(loc))
 	}
 }
 
@@ -485,5 +608,160 @@ func TestAdvanceRecoverForwardAfterCursorAdvanceFailure(t *testing.T) {
 	}
 	if core.advanceCalls != 2 {
 		t.Fatalf("cursor advance should be attempted on both runs (fail, then succeed), got %d", core.advanceCalls)
+	}
+}
+
+// A campaign at its daily_limit is correctly configured, not broken: daily_limit 10
+// over 1000 contacts is a 100-day campaign. Charging its waiting enrollments against
+// the cap-deferral budget (30 × 6h ≈ 7.5 days) would mark ~99% of them 'failed' for
+// doing exactly what the operator asked. So these deferrals must not touch the
+// budget, and must survive far past it.
+func TestCampaignLimitedDeferralNeverConsumesTheFailBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  coreapi.StepSendJob
+	}{
+		{"campaign at its daily limit", coreapi.StepSendJob{CampaignLimited: true}},
+		{"mailbox paused by warmup", coreapi.StepSendJob{HealthPaused: true, EffectiveDailyCap: 50}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// deferrals already far past the ceiling: if this path consulted the
+			// budget at all, the enrollment would be stopped here.
+			core := &stubCore{job: tc.job, deferrals: maxCapDeferrals * 10}
+			enq := &fakeEnq{}
+
+			if err := run(t, core, &fakeSender{}, enq); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			if core.incrCalls != 0 {
+				t.Errorf("consumed the cap-deferral budget %d time(s); these blocks are not misconfigurations", core.incrCalls)
+			}
+			if core.stopped != "" {
+				t.Errorf("enrollment stopped %q; a self-clearing block must leave it active", core.stopped)
+			}
+			if !enq.inCalled {
+				t.Error("no retry scheduled; the thread would never resume")
+			}
+			if enq.in <= 0 {
+				t.Errorf("retry delay = %s, want a positive wait", enq.in)
+			}
+		})
+	}
+}
+
+func TestBlockedBackoffWaitsForTheMomentTheBlockCanClear(t *testing.T) {
+	// 22:30 UTC → the campaign's allowance resets in 90 minutes.
+	evening := time.Date(2026, 8, 1, 22, 30, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		job  coreapi.StepSendJob
+		now  time.Time
+		want time.Duration
+	}{
+		{
+			name: "campaign limit waits for the UTC day to roll over",
+			job:  coreapi.StepSendJob{CampaignLimited: true},
+			now:  evening,
+			want: 90 * time.Minute,
+		},
+		{
+			// A pause clears when the health sweep steps it down, on no schedule this
+			// worker can predict, so it reuses the ordinary cap backoff.
+			name: "health pause reuses the cap backoff",
+			job:  coreapi.StepSendJob{HealthPaused: true},
+			now:  evening,
+			want: capBackoff,
+		},
+		{
+			// Both blocked: re-check at the sooner of the two.
+			name: "both blocked takes the shorter wait",
+			job:  coreapi.StepSendJob{CampaignLimited: true, HealthPaused: true},
+			now:  evening,
+			want: 90 * time.Minute,
+		},
+		{
+			name: "both blocked early in the day still takes the shorter wait",
+			job:  coreapi.StepSendJob{CampaignLimited: true, HealthPaused: true},
+			now:  time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC),
+			want: capBackoff,
+		},
+		{
+			// Landing in the last seconds of the day must not re-enqueue instantly
+			// and spin.
+			name: "a wait at the very end of the day is floored",
+			job:  coreapi.StepSendJob{CampaignLimited: true},
+			now:  time.Date(2026, 8, 1, 23, 59, 59, 0, time.UTC),
+			want: minBlockedBackoff,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := blockedBackoff(tc.job, tc.now); got != tc.want {
+				t.Errorf("blockedBackoff = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// A non-UTC local clock must not shift the day boundary the limit resets on.
+func TestBlockedBackoffUsesTheUTCDayBoundary(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Karachi") // UTC+5, no DST
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	// 03:30 local on 2 Aug is 22:30 UTC on 1 Aug — 90 minutes from the UTC rollover,
+	// not from the local one.
+	now := time.Date(2026, 8, 2, 3, 30, 0, 0, loc)
+	if got := blockedBackoff(coreapi.StepSendJob{CampaignLimited: true}, now); got != 90*time.Minute {
+		t.Errorf("blockedBackoff = %s, want 1h30m from the UTC boundary", got)
+	}
+}
+
+// A deferred retry re-enters the SEND flow rather than re-scheduling through the
+// cadence engine, so the instant it wakes on is the instant it sends. Waking at the
+// raw block-clears moment would send outside the campaign's window — and for a
+// campaign-limit retry that moment is 00:00 UTC, i.e. 20:00 in New York, so the
+// violation would be systematic rather than occasional.
+func TestBlockedBackoffWakesInsideTheCampaignsSendWindow(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	businessHours := cadence.Schedule{Timezone: "America/New_York"}
+	for d := int(time.Monday); d <= int(time.Friday); d++ {
+		businessHours.Windows = append(businessHours.Windows,
+			cadence.SendWindow{Weekday: d, StartMinute: 9 * 60, EndMinute: 17 * 60})
+	}
+	win, err := businessHours.Compile()
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	// Tuesday 18:00 EDT = Tuesday 22:00 UTC. The limit clears at 00:00 UTC, which is
+	// 20:00 EDT — outside the window — so the retry must land Wednesday morning.
+	now := time.Date(2026, 8, 4, 18, 0, 0, 0, loc)
+	job := coreapi.StepSendJob{EnrollmentID: "e", CampaignLimited: true, Schedule: businessHours}
+
+	got := now.Add(blockedBackoff(job, now))
+	if !win.Contains(got) {
+		t.Fatalf("retry scheduled for %s (%s local), outside the campaign's window", got.UTC(), got.In(loc))
+	}
+	if local := got.In(loc); local.Hour() < 9 || local.Hour() >= 17 {
+		t.Errorf("retry local hour = %d, want business hours", local.Hour())
+	}
+	// It must still be after the block clears, not before it.
+	if !got.After(now) {
+		t.Errorf("retry %s is not after now %s", got, now)
+	}
+}
+
+// A job carrying no usable schedule must still retry rather than refuse to.
+func TestBlockedBackoffWithoutAScheduleKeepsTheRawInstant(t *testing.T) {
+	now := time.Date(2026, 8, 1, 22, 30, 0, 0, time.UTC)
+	job := coreapi.StepSendJob{EnrollmentID: "e", CampaignLimited: true} // no Schedule
+	if got := blockedBackoff(job, now); got != 90*time.Minute {
+		t.Errorf("blockedBackoff = %s, want 1h30m (the raw UTC rollover)", got)
 	}
 }

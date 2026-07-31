@@ -12,27 +12,40 @@ const SCHEDULE = {
     { weekday: 1, intervals: [{ start_minute: 540, end_minute: 1020 }] },
     { weekday: 3, intervals: [{ start_minute: 600, end_minute: 780 }] },
   ],
+  daily_limit: 250,
   preview: ['Mon 09:14:37', 'Mon 10:02:11', 'Mon 11:47:03'],
 }
 
 /** Stubs fetch for the schedule GET, and PUT with the given status. */
-function stubSchedule({ putStatus = 200 }: { putStatus?: number } = {}) {
+function stubSchedule({
+  putStatus = 200,
+  schedule = SCHEDULE as Record<string, unknown>,
+}: { putStatus?: number; schedule?: Record<string, unknown> } = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const req = input as Request
     if (!req.url.endsWith('/campaigns/c-1/schedule')) {
       return new Response(null, { status: 404 })
     }
     if (req.method === 'PUT') {
-      const body = putStatus === 200 ? JSON.stringify(SCHEDULE) : JSON.stringify({ error: 'nope' })
+      const body = putStatus === 200 ? JSON.stringify(schedule) : JSON.stringify({ error: 'nope' })
       return new Response(body, { status: putStatus, headers: { 'content-type': 'application/json' } })
     }
-    return new Response(JSON.stringify(SCHEDULE), {
+    return new Response(JSON.stringify(schedule), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
+}
+
+/** The body of the first PUT, once one has been made. */
+async function readPut(fetchMock: ReturnType<typeof stubSchedule>) {
+  await waitFor(() => {
+    expect(fetchMock.mock.calls.some((c) => (c[0] as Request).method === 'PUT')).toBe(true)
+  })
+  const put = fetchMock.mock.calls.find((c) => (c[0] as Request).method === 'PUT')?.[0] as Request
+  return (await put.json()) as { timezone: string; days: { weekday: number }[]; daily_limit: number | null }
 }
 
 describe('SchedulePanel', () => {
@@ -145,6 +158,82 @@ describe('SchedulePanel', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/That schedule is invalid/)
     // The edit stays in the form so it can be corrected rather than retyped.
     expect(screen.getByLabelText('Mon window 1 start')).toHaveValue('10:30')
+  })
+
+  test('renders the saved daily limit and says it is campaign-wide, not per mailbox', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Daily limit')).toHaveValue(250))
+    // The whole point of the copy: read as per-mailbox, an operator configures a
+    // pool of 5 to a fifth of the volume they intended.
+    expect(screen.getByText(/every sender in its pool/)).toBeInTheDocument()
+    expect(screen.getByText(/not per mailbox/)).toBeInTheDocument()
+  })
+
+  test('no campaign limit shows as an empty field, not as a zero', async () => {
+    stubSchedule({ schedule: { ...SCHEDULE, daily_limit: null } })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
+    expect(screen.getByLabelText('Daily limit')).toHaveValue(null)
+  })
+
+  test('a field the server omitted entirely still renders empty', async () => {
+    const { daily_limit: _omitted, ...withoutLimit } = SCHEDULE
+    stubSchedule({ schedule: withoutLimit })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
+    expect(screen.getByLabelText('Daily limit')).toHaveValue(null)
+  })
+
+  test('a typed limit is sent as a number', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Daily limit')).toHaveValue(250))
+    fireEvent.change(screen.getByLabelText('Daily limit'), { target: { value: '80' } })
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    expect((await readPut(fetchMock)).daily_limit).toBe(80)
+  })
+
+  test('clearing the limit sends null, which is how the limit is removed', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Daily limit')).toHaveValue(250))
+    fireEvent.change(screen.getByLabelText('Daily limit'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    // Omitting the field would leave the old limit in place on a full-replace PUT.
+    const body = await readPut(fetchMock)
+    expect(body.daily_limit).toBeNull()
+    expect('daily_limit' in body).toBe(true)
+  })
+
+  test('a limit below 1 is refused client-side with no request', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Daily limit')).toHaveValue(250))
+    fireEvent.change(screen.getByLabelText('Daily limit'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/1 or more/)
+    expect(fetchMock.mock.calls.some((c) => (c[0] as Request).method === 'PUT')).toBe(false)
+  })
+
+  test('editing only the limit is enough to enable the save', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Daily limit')).toHaveValue(250))
+    expect(screen.queryByRole('button', { name: /save schedule/i })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Daily limit'), { target: { value: '300' } })
+    expect(screen.getByRole('button', { name: /save schedule/i })).toBeInTheDocument()
   })
 
   test('the preview is withheld while edits are unsaved', async () => {

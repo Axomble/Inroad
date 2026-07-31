@@ -194,6 +194,101 @@ describe('SendersPanel', () => {
     expect(putCalls(fetchMock)).toHaveLength(0)
   })
 
+  test("renders each row's consumption against its cap for today", async () => {
+    stubSenders({
+      pool: {
+        rotation_mode: 'weighted',
+        senders: [
+          { ...POOL.senders[0]!, health_state: 'healthy', sending: true, cap_today: 40, sent_today: 12 },
+        ],
+      },
+    })
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByText('12 / 40 sent today')).toBeInTheDocument())
+    expect(screen.getByText('Healthy')).toBeInTheDocument()
+  })
+
+  test('a mailbox warmup has paused says so, instead of just sending nothing', async () => {
+    stubSenders({
+      pool: {
+        rotation_mode: 'weighted',
+        senders: [
+          { ...POOL.senders[0]!, health_state: 'paused', sending: false, cap_today: 0, sent_today: 0 },
+        ],
+      },
+    })
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    // Without this the campaign just runs slow with nothing on screen explaining it.
+    await waitFor(() => expect(screen.getByText('Paused by warmup — not sending')).toBeInTheDocument())
+    expect(screen.getByText('0 / 0 sent today')).toBeInTheDocument()
+    // The state is legible as text, not only as a color.
+    expect(screen.getByText('Paused')).toBeInTheDocument()
+  })
+
+  test('a throttled mailbox accounts for its reduced cap', async () => {
+    stubSenders({
+      pool: {
+        rotation_mode: 'weighted',
+        senders: [
+          { ...POOL.senders[0]!, health_state: 'throttled', sending: true, cap_today: 25, sent_today: 25 },
+        ],
+      },
+    })
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByText('25 / 25 sent today')).toBeInTheDocument())
+    expect(screen.getByText(/Cap lowered by warmup health/)).toBeInTheDocument()
+    expect(screen.getByText('Throttled')).toBeInTheDocument()
+    // Still sending, so the gated copy must not appear.
+    expect(screen.queryByText(/not sending/)).not.toBeInTheDocument()
+  })
+
+  test('a server that reports none of the new fields renders no numbers at all', async () => {
+    stubSenders()
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    // The fields are optional in the contract; absent must read as unknown rather
+    // than as `undefined / NaN sent today` or a false "not sending".
+    await waitFor(() => expect(screen.getByLabelText('Rotation mode')).toBeInTheDocument())
+    expect(screen.queryByText(/sent today/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/not sending/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/NaN|undefined/)).not.toBeInTheDocument()
+  })
+
+  test('a partially reported row renders no fraction rather than half of one', async () => {
+    stubSenders({
+      pool: {
+        rotation_mode: 'weighted',
+        senders: [{ ...POOL.senders[0]!, health_state: 'watch', sending: true, sent_today: 9 }],
+      },
+    })
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByText('Watch')).toBeInTheDocument())
+    expect(screen.queryByText(/sent today/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/NaN|undefined/)).not.toBeInTheDocument()
+  })
+
+  test('the health and capacity display is read-only', async () => {
+    stubSenders({
+      pool: {
+        rotation_mode: 'weighted',
+        senders: [
+          { ...POOL.senders[0]!, health_state: 'paused', sending: false, cap_today: 0, sent_today: 0 },
+        ],
+      },
+    })
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByText('Paused by warmup — not sending')).toBeInTheDocument())
+    // Only the three pre-existing controls per row; nothing new is editable.
+    expect(screen.queryAllByRole('textbox')).toHaveLength(0)
+    expect(screen.getAllByRole('spinbutton')).toHaveLength(2)
+    expect(screen.getAllByRole('checkbox')).toHaveLength(4)
+  })
+
   test("a rejected save surfaces the server's reason and keeps the edits", async () => {
     stubSenders({ putStatus: 422, putBody: { error: 'mailbox is not active' } })
     renderWithProviders(<SendersPanel campaignId="c-1" />)

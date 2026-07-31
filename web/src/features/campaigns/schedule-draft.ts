@@ -80,11 +80,45 @@ export function fromDraft(week: DraftWeek): { days: SendWindowDay[] } | { proble
   return { days }
 }
 
+/**
+ * The daily limit as the editor holds it: a raw string, empty meaning "no
+ * limit". Same reasoning as the interval bounds — a half-cleared field must stay
+ * empty rather than being coerced to 0, which the API would reject.
+ */
+/** Matches the contract's `maximum` on `daily_limit`, which the API also enforces. */
+export const MAX_DAILY_LIMIT = 1_000_000
+
+export function dailyLimitToDraft(limit: number | null | undefined): string {
+  return typeof limit === 'number' ? String(limit) : ''
+}
+
+/**
+ * Parses the daily-limit field: empty ⇄ `null` (no campaign limit), otherwise a
+ * whole number of 1 or more. Below 1 is refused here so the operator gets the
+ * specific reason instead of the API's 422.
+ */
+export function dailyLimitFromDraft(raw: string): { dailyLimit: number | null } | { problem: string } {
+  const trimmed = raw.trim()
+  if (trimmed === '') return { dailyLimit: null }
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) < 1) {
+    return {
+      problem: 'Daily limit must be a whole number of 1 or more — leave it empty for no campaign limit.',
+    }
+  }
+  // Upper bound, not cosmetic: the column is a 32-bit integer, so an unbounded value
+  // reaches Postgres out of range and surfaces as a 500 rather than a validation
+  // error. It also stays inside the range JSON numbers represent exactly.
+  if (Number(trimmed) > MAX_DAILY_LIMIT) {
+    return { problem: `Daily limit must be ${MAX_DAILY_LIMIT.toLocaleString()} or less.` }
+  }
+  return { dailyLimit: Number(trimmed) }
+}
+
 /** Maps a schedule-save failure to human copy, mirroring the API's 422 reasons. */
 export function scheduleErrorMessage(error: unknown): string {
   const status = httpStatus(error)
   if (status === 422) {
-    return 'That schedule is invalid — check for overlapping or inverted times, and leave at least one window open.'
+    return 'That schedule is invalid — check for overlapping or inverted times, leave at least one window open, and keep the daily limit at 1 or more.'
   }
   if (status === 404) return 'This campaign no longer exists.'
   return "Couldn't save the schedule. Please try again."

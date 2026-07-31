@@ -214,6 +214,7 @@ type Campaign struct {
 	TrackingEnabled bool               `json:"tracking_enabled"`
 	Timezone        string             `json:"timezone"`
 	RotationMode    string             `json:"rotation_mode"`
+	DailyLimit      *int32             `json:"daily_limit"`
 }
 
 type CampaignSendWindow struct {
