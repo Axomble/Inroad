@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -157,5 +158,85 @@ func TestBodyRestoredForHandler(t *testing.T) {
 	}
 	if seen != "keep@example.test" {
 		t.Fatalf("handler saw email %q, want body restored intact", seen)
+	}
+}
+
+// runThroughPeek drives r through the throttle middleware (which internally peeks
+// the body for an account key) with AcctLimit>0 so the peek path runs, and a
+// handler that echoes back the body it received. It returns the recorder and the
+// bytes the handler saw — asserting both that the peek never failed the request and
+// that the body was restored for the handler.
+func runThroughPeek(t *testing.T, r *http.Request) (*httptest.ResponseRecorder, []byte) {
+	t.Helper()
+	var seen []byte
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("handler could not read restored body: %v", err)
+		}
+		seen = b
+		w.WriteHeader(http.StatusOK)
+	})
+	h := cfg(newFakeLimiter(), 1000, 1000).Middleware("login")(next)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	return rec, seen
+}
+
+// TestBodyPeek_MalformedJSON asserts an unparseable body degrades peekEmail to ""
+// (IP-only throttling) without failing the request, and the handler still receives
+// the body intact.
+func TestBodyPeek_MalformedJSON(t *testing.T) {
+	const raw = `{"email": "broken`
+	if got := peekEmail(httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw))); got != "" {
+		t.Fatalf("peekEmail on malformed JSON: got %q, want \"\" (IP-only fallback)", got)
+	}
+	rec, seen := runThroughPeek(t, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("malformed body: got %d, want 200 (peek never fails the request)", rec.Code)
+	}
+	if string(seen) != raw {
+		t.Fatalf("handler saw %q, want body restored intact %q", seen, raw)
+	}
+}
+
+// TestBodyPeek_EmptyBody asserts a missing/empty body degrades peekEmail to "" and
+// passes through to the handler (which sees an empty body) without erroring.
+func TestBodyPeek_EmptyBody(t *testing.T) {
+	if got := peekEmail(httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(""))); got != "" {
+		t.Fatalf("peekEmail on empty body: got %q, want \"\"", got)
+	}
+	rec, seen := runThroughPeek(t, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("")))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty body: got %d, want 200", rec.Code)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("handler saw %q, want an empty body", seen)
+	}
+}
+
+// TestBodyPeek_OversizedBody asserts a body larger than maxBodyPeek degrades
+// peekEmail to "" WITHOUT parsing a partial body (so it can't be an account-key
+// bypass) and still passes through. The restored body is truncated at the peek cap:
+// that is truncated-but-safe — a downstream JSON decode fails to a 400, never a
+// throttle bypass or a 500.
+func TestBodyPeek_OversizedBody(t *testing.T) {
+	// Syntactically valid JSON carrying an email, but larger than the peek cap.
+	pad := strings.Repeat("x", maxBodyPeek+1024)
+	raw := `{"email":"big@example.test","pad":"` + pad + `"}`
+	if len(raw) <= maxBodyPeek {
+		t.Fatalf("test body %d bytes is not over the %d cap", len(raw), maxBodyPeek)
+	}
+	if got := peekEmail(httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw))); got != "" {
+		t.Fatalf("peekEmail on oversized body: got %q, want \"\" (IP-only, no partial parse)", got)
+	}
+	rec, seen := runThroughPeek(t, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("oversized body: got %d, want 200 (peek never fails the request)", rec.Code)
+	}
+	// The restore keeps only what the peek read (maxBodyPeek+1 sentinel bytes) —
+	// truncated, but safe (decode-fails to 400 downstream, no bypass).
+	if len(seen) != maxBodyPeek+1 {
+		t.Fatalf("restored oversized body = %d bytes, want %d (truncated at peek cap)", len(seen), maxBodyPeek+1)
 	}
 }

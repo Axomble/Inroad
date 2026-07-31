@@ -110,7 +110,10 @@ func peekEmail(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	// Restore the body for the handler regardless of what we parse out of it.
+	// Restore the body for the handler regardless of what we parse out of it. For
+	// an oversized body this restores only what we read (truncated to the peek cap):
+	// pre-auth bodies are tiny, so a truncated one simply decode-fails to a 400
+	// downstream — never a throttle bypass.
 	r.Body = io.NopCloser(bytes.NewReader(buf))
 	if len(buf) > maxBodyPeek {
 		return "" // oversized: don't parse a partial body, IP-throttle only

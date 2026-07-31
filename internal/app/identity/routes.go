@@ -57,7 +57,11 @@ func mw(ms ...func(http.Handler) http.Handler) []func(http.Handler) http.Handler
 func (h *Handler) Routes(d RouteDeps) http.Handler {
 	r := chi.NewRouter()
 	r.With(mw(d.Captcha)...).Post("/register", h.register)
-	r.With(mw(d.Captcha, d.LoginThrottle)...).Post("/login", h.login)
+	// LoginThrottle is OUTERMOST (listed first), captcha inner: the cheap local
+	// Redis rate-limit sheds an over-cap request with a 429 BEFORE the captcha
+	// middleware fires its outbound siteverify round-trip (a network call holding
+	// a goroutine up to its timeout). Order matters — throttle must gate captcha.
+	r.With(mw(d.LoginThrottle, d.Captcha)...).Post("/login", h.login)
 	if d.TwoFA != nil {
 		r.Mount("/2fa", d.TwoFA)
 	}

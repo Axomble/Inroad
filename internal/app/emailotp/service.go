@@ -57,6 +57,11 @@ type Service struct {
 	// anti-enumeration shape identity.ForgotPassword uses. Defaults to a bare
 	// goroutine; tests override it to run inline for determinism.
 	dispatch func(func())
+	// compare runs the constant-time argon2 comparison. It is a field (defaulting
+	// to codeMatches) so EVERY verify outcome — including the ones that reject
+	// before reaching a real wrong-code compare — can pay exactly one compare and
+	// stay timing-indistinguishable, and a test can assert that.
+	compare func(hash, presented string) bool
 }
 
 // NewService builds a Service over store, emailing codes via sender.
@@ -66,6 +71,7 @@ func NewService(store Store, sender notify.Sender) *Service {
 		sender:   sender,
 		now:      time.Now,
 		dispatch: func(f func()) { go f() },
+		compare:  codeMatches,
 	}
 }
 
@@ -120,15 +126,19 @@ func (s *Service) Start(ctx context.Context, email string) error {
 func (s *Service) Verify(ctx context.Context, email, code string) (uuid.UUID, error) {
 	userID, err := s.store.GetUserIDByEmail(ctx, email)
 	if err != nil {
-		codeMatches(dummyHash, code) // equalize timing with the real-account path
+		s.compare(dummyHash, code) // equalize timing with the real-account path
 		return uuid.Nil, ErrInvalidCode
 	}
 	row, err := s.store.GetActiveCode(ctx, userID)
 	if err != nil {
-		codeMatches(dummyHash, code) // no active code: still burn the comparison cost
+		s.compare(dummyHash, code) // no active code: still burn the comparison cost
 		return uuid.Nil, ErrInvalidCode
 	}
 	if row.ConsumedAt.Valid || s.now().After(pgxTime(row.ExpiresAt)) {
+		// Expired/consumed: pay one compare too, so this outcome is timing-
+		// indistinguishable from a real wrong-code compare (returning early here
+		// would otherwise leak that this address had a code that just expired).
+		s.compare(dummyHash, code)
 		return uuid.Nil, ErrInvalidCode
 	}
 	// Claim one attempt slot BEFORE checking the code: the single UPDATE ... WHERE
@@ -141,7 +151,7 @@ func (s *Service) Verify(ctx context.Context, email, code string) (uuid.UUID, er
 		}
 		return uuid.Nil, err
 	}
-	if !codeMatches(row.CodeHash, code) {
+	if !s.compare(row.CodeHash, code) {
 		// Wrong code: the attempt slot was already consumed atomically above.
 		return uuid.Nil, ErrInvalidCode
 	}

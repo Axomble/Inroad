@@ -104,6 +104,39 @@ func TestVerifyExpiredCode(t *testing.T) {
 	}
 }
 
+// TestVerifyExpiredCodePaysCompare documents the timing-side-channel fix: the
+// expired/consumed branch must pay exactly one argon2 compare before returning
+// ErrInvalidCode, so it is wall-clock-indistinguishable from a real wrong-code
+// compare (an early return would leak that this address had a just-expired code).
+func TestVerifyExpiredCodePaysCompare(t *testing.T) {
+	store := newFakeStore()
+	store.addUser("user@example.test")
+	sender := &captureSender{}
+	t0 := time.Now()
+	svc := newTestService(store, sender, t0)
+
+	// Count compares by wrapping the (in-package) compare seam; delegate to the
+	// real argon2 comparison so behavior is otherwise unchanged.
+	var compares int
+	baseCompare := svc.compare
+	svc.compare = func(hash, presented string) bool {
+		compares++
+		return baseCompare(hash, presented)
+	}
+
+	_ = svc.Start(context.Background(), "user@example.test")
+	code := sentCode(t, sender)
+
+	// Advance the service clock past the code TTL so the expired branch is taken.
+	svc.now = func() time.Time { return t0.Add(codeTTL + time.Minute) }
+	if _, err := svc.Verify(context.Background(), "user@example.test", code); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expired code: got %v, want ErrInvalidCode", err)
+	}
+	if compares != 1 {
+		t.Fatalf("expired verify performed %d argon2 compares, want exactly 1 (timing-equalized)", compares)
+	}
+}
+
 func TestVerifyAttemptCapExhaustion(t *testing.T) {
 	store := newFakeStore()
 	store.addUser("user@example.test")
@@ -137,6 +170,26 @@ func TestStartUnknownEmailIsNoop(t *testing.T) {
 	}
 	if _, ok := sender.last(); ok {
 		t.Fatal("an email was sent for a non-existent account (enumeration oracle)")
+	}
+}
+
+// TestStartLookupFailureIsSilentNoop covers the anti-enumeration branch at
+// service.go where a non-NoRows DB error from the user lookup must be logged and
+// still return nil (no error surfaced, no email dispatched) — a lookup outage must
+// not become an account-existence oracle by behaving differently from an unknown
+// address.
+func TestStartLookupFailureIsSilentNoop(t *testing.T) {
+	store := newFakeStore()
+	store.addUser("user@example.test") // a real account exists…
+	store.failLookup = errors.New("db down")
+	sender := &captureSender{}
+	svc := newTestService(store, sender, time.Now())
+
+	if err := svc.Start(context.Background(), "user@example.test"); err != nil {
+		t.Fatalf("Start on lookup failure: got %v, want nil (no error surfaced)", err)
+	}
+	if _, ok := sender.last(); ok {
+		t.Fatal("an email was dispatched despite the lookup failing (should be a silent no-op)")
 	}
 }
 

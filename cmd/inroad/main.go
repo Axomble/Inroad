@@ -234,11 +234,14 @@ func run() error {
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
 		{pattern: "/api/v1/auth", handler: identHandler.Routes(identity.RouteDeps{
-			Verifier:       sessionVerifier,
-			TwoFA:          twofaHandler.Routes(sessionVerifier, twofaVerifyThrottle),
-			Passkeys:       passkeyHandler.Routes(sessionVerifier, passkeyFinishThrottle),
-			APIKeys:        apiKeyHandler.Routes(sessionVerifier),
-			EmailOTP:       emailOTPHandler.Routes([]func(http.Handler) http.Handler{captchaMW, otpStartThrottle}, []func(http.Handler) http.Handler{otpVerifyThrottle}),
+			Verifier: sessionVerifier,
+			TwoFA:    twofaHandler.Routes(sessionVerifier, twofaVerifyThrottle),
+			Passkeys: passkeyHandler.Routes(sessionVerifier, passkeyFinishThrottle),
+			APIKeys:  apiKeyHandler.Routes(sessionVerifier),
+			// otpStartThrottle is OUTERMOST (listed first) so the cheap local Redis
+			// rate-limit sheds an over-cap /email-otp/start with a 429 BEFORE captcha
+			// fires its outbound siteverify round-trip. Throttle must gate captcha.
+			EmailOTP:       emailOTPHandler.Routes([]func(http.Handler) http.Handler{otpStartThrottle, captchaMW}, []func(http.Handler) http.Handler{otpVerifyThrottle}),
 			Captcha:        captchaMW,
 			LoginThrottle:  loginThrottle,
 			ForgotThrottle: forgotThrottle,
