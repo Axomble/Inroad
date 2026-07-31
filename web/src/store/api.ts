@@ -107,6 +107,48 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.acceptInviteRequest,
       }),
     }),
+    authTwoFactorStatus: build.query<
+      AuthTwoFactorStatusApiResponse,
+      AuthTwoFactorStatusApiArg
+    >({
+      query: () => ({ url: `/auth/2fa` }),
+    }),
+    authTwoFactorEnroll: build.mutation<
+      AuthTwoFactorEnrollApiResponse,
+      AuthTwoFactorEnrollApiArg
+    >({
+      query: () => ({ url: `/auth/2fa/totp`, method: "POST" }),
+    }),
+    authTwoFactorDisable: build.mutation<
+      AuthTwoFactorDisableApiResponse,
+      AuthTwoFactorDisableApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/2fa/totp`,
+        method: "DELETE",
+        body: queryArg.twoFactorCodeRequest,
+      }),
+    }),
+    authTwoFactorConfirm: build.mutation<
+      AuthTwoFactorConfirmApiResponse,
+      AuthTwoFactorConfirmApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/2fa/totp/confirm`,
+        method: "POST",
+        body: queryArg.twoFactorCodeRequest,
+      }),
+    }),
+    authTwoFactorVerify: build.mutation<
+      AuthTwoFactorVerifyApiResponse,
+      AuthTwoFactorVerifyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/2fa/verify`,
+        method: "POST",
+        body: queryArg.twoFactorVerifyRequest,
+      }),
+    }),
     createWorkspaceInvite: build.mutation<
       CreateWorkspaceInviteApiResponse,
       CreateWorkspaceInviteApiArg
@@ -336,7 +378,9 @@ export type AuthRegisterApiResponse = /** status 200 Session */ SessionResponse;
 export type AuthRegisterApiArg = {
   registerRequest: RegisterRequest;
 };
-export type AuthLoginApiResponse = /** status 200 Session */ SessionResponse;
+export type AuthLoginApiResponse =
+  | /** status 200 A session (SessionResponse) for a user without a confirmed second factor, OR a single-use 2FA challenge (TwoFactorRequiredResponse, no tokens) for a user with 2FA enabled — the caller must then POST /auth/2fa/verify to obtain a session. */ SessionResponse
+  | TwoFactorRequiredResponse;
 export type AuthLoginApiArg = {
   loginRequest: LoginRequest;
 };
@@ -387,6 +431,26 @@ export type AuthAcceptInviteApiResponse =
   /** status 200 Session */ SessionResponse;
 export type AuthAcceptInviteApiArg = {
   acceptInviteRequest: AcceptInviteRequest;
+};
+export type AuthTwoFactorStatusApiResponse =
+  /** status 200 2FA status for the caller */ TwoFactorStatusResponse;
+export type AuthTwoFactorStatusApiArg = void;
+export type AuthTwoFactorEnrollApiResponse =
+  /** status 200 Pending enrollment secret */ TwoFactorEnrollResponse;
+export type AuthTwoFactorEnrollApiArg = void;
+export type AuthTwoFactorDisableApiResponse = unknown;
+export type AuthTwoFactorDisableApiArg = {
+  twoFactorCodeRequest: TwoFactorCodeRequest;
+};
+export type AuthTwoFactorConfirmApiResponse =
+  /** status 200 Two-factor enabled; recovery codes returned once */ TwoFactorConfirmResponse;
+export type AuthTwoFactorConfirmApiArg = {
+  twoFactorCodeRequest: TwoFactorCodeRequest;
+};
+export type AuthTwoFactorVerifyApiResponse =
+  /** status 200 Session */ SessionResponse;
+export type AuthTwoFactorVerifyApiArg = {
+  twoFactorVerifyRequest: TwoFactorVerifyRequest;
 };
 export type CreateWorkspaceInviteApiResponse =
   /** status 201 Created invite */ Invite;
@@ -568,6 +632,12 @@ export type RegisterRequest = {
   email: string;
   password: string;
 };
+export type TwoFactorRequiredResponse = {
+  /** Always true; distinguishes this from a SessionResponse. */
+  two_factor_required: boolean;
+  /** Single-use */
+  challenge: string;
+};
 export type LoginRequest = {
   email: string;
   password: string;
@@ -619,6 +689,31 @@ export type ResetPasswordRequest = {
 export type AcceptInviteRequest = {
   token: string;
   password?: string;
+};
+export type TwoFactorStatusResponse = {
+  totp_enabled: boolean;
+  /** Number of unused single-use recovery codes. */
+  recovery_codes_remaining: number;
+};
+export type TwoFactorEnrollResponse = {
+  /** Base32 TOTP secret for manual entry. Returned only at enrollment. */
+  secret: string;
+  /** otpauth:// provisioning URI to render as a QR code. */
+  otpauth_uri: string;
+};
+export type TwoFactorCodeRequest = {
+  /** A TOTP code or a recovery code. */
+  code: string;
+};
+export type TwoFactorConfirmResponse = {
+  /** Single-use recovery codes, shown exactly once. */
+  recovery_codes: string[];
+};
+export type TwoFactorVerifyRequest = {
+  /** The challenge token returned by /auth/login. */
+  challenge: string;
+  /** A TOTP code or a recovery code. */
+  code: string;
 };
 export type Invite = {
   id?: string;
@@ -851,6 +946,11 @@ export const {
   useAuthForgotPasswordMutation,
   useAuthResetPasswordMutation,
   useAuthAcceptInviteMutation,
+  useAuthTwoFactorStatusQuery,
+  useAuthTwoFactorEnrollMutation,
+  useAuthTwoFactorDisableMutation,
+  useAuthTwoFactorConfirmMutation,
+  useAuthTwoFactorVerifyMutation,
   useCreateWorkspaceInviteMutation,
   useListWorkspaceInvitesQuery,
   useRevokeWorkspaceInviteMutation,

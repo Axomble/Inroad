@@ -7,7 +7,7 @@
 import { api } from '@/store/api'
 
 const authApi = api.enhanceEndpoints({
-  addTagTypes: ['Session', 'Sessions'],
+  addTagTypes: ['Session', 'Sessions', 'TwoFactor'],
   endpoints: {
     authMe: {
       providesTags: [{ type: 'Session', id: 'CURRENT' }],
@@ -60,6 +60,28 @@ const authApi = api.enhanceEndpoints({
     authAcceptInvite: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
     },
+    // Two-factor (P2 auth hardening). The status query is the single source of
+    // truth for the settings panel; confirm (activate) and disable both flip
+    // `totp_enabled`, so they invalidate the `TwoFactor` tag to refetch it.
+    // Enroll only stages an UNCONFIRMED secret — it doesn't change status, so
+    // it invalidates nothing. Disabling also revokes the caller's other
+    // sessions server-side, so it invalidates the `Sessions` list too.
+    authTwoFactorStatus: {
+      providesTags: [{ type: 'TwoFactor', id: 'STATUS' }],
+    },
+    authTwoFactorConfirm: {
+      invalidatesTags: [{ type: 'TwoFactor', id: 'STATUS' }],
+    },
+    authTwoFactorDisable: {
+      invalidatesTags: [
+        { type: 'TwoFactor', id: 'STATUS' },
+        { type: 'Sessions', id: 'LIST' },
+      ],
+    },
+    // Completing the 2FA login gate mints a session, exactly like authLogin.
+    authTwoFactorVerify: {
+      invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
   },
 })
 
@@ -79,4 +101,9 @@ export const {
   useAuthListSessionsQuery,
   useAuthRevokeSessionMutation,
   useAuthRevokeOtherSessionsMutation,
+  useAuthTwoFactorStatusQuery,
+  useAuthTwoFactorEnrollMutation,
+  useAuthTwoFactorConfirmMutation,
+  useAuthTwoFactorDisableMutation,
+  useAuthTwoFactorVerifyMutation,
 } = authApi

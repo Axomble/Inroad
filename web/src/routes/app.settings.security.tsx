@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { ActiveSessions } from '@/features/auth/active-sessions'
+import { SecurityPage } from '@/features/auth/security-page'
 
 export const Route = createFileRoute('/app/settings/security')({
-  component: ActiveSessions,
+  component: SecurityPage,
 })
