@@ -58,6 +58,10 @@ type WarmupEngagePayload struct {
 // participant health. Scheduled every 5 minutes.
 const TaskWarmupSweep = "warmup:sweep"
 
+// TaskMaintenanceCleanup is the daily retention job for expired security
+// artifacts (sessions, challenges, one-time codes, and OAuth credentials).
+const TaskMaintenanceCleanup = "maintenance:cleanup"
+
 const TaskSendEmail = "send:email"
 
 // SendEmailPayload is the body of a send:email task. WorkspaceID is
@@ -370,6 +374,13 @@ func RegisterInboxSweep(sch *asynq.Scheduler) error {
 // to fan out a warmup:tick for every due participant and recompute health.
 func RegisterWarmupSweep(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil))
+	return err
+}
+
+// RegisterMaintenanceCleanup registers the low-frequency retention pass. The
+// handler is idempotent, so scheduler restarts and retries are safe.
+func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 24h", asynq.NewTask(TaskMaintenanceCleanup, nil))
 	return err
 }
 

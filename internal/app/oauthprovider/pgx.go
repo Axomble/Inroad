@@ -7,14 +7,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// pgUUID wraps a uuid.UUID as a non-null pgtype.UUID (for the nullable workspace_id
-// column on a workspace-pinned query).
-func pgUUID(id uuid.UUID) pgtype.UUID {
-	return pgtype.UUID{Bytes: id, Valid: true}
-}
-
 // pgUUIDPtr wraps an optional uuid.UUID as a nullable pgtype.UUID (nil -> SQL NULL),
-// for the anonymous-registration created_by / workspace columns.
+// for the optional client creator column.
 func pgUUIDPtr(id *uuid.UUID) pgtype.UUID {
 	if id == nil {
 		return pgtype.UUID{}

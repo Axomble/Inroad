@@ -1,0 +1,9 @@
+DROP INDEX IF EXISTS idx_oauth_refresh_expires_at;
+DROP INDEX IF EXISTS idx_oauth_access_expires_at;
+DROP INDEX IF EXISTS idx_oauth_codes_expires_at;
+DROP INDEX IF EXISTS idx_oauth_auth_requests_expires_at;
+DROP INDEX IF EXISTS idx_email_otp_codes_expires_at;
+DROP INDEX IF EXISTS idx_webauthn_challenges_expires_at;
+DROP INDEX IF EXISTS idx_two_factor_challenges_expires_at;
+DROP INDEX IF EXISTS idx_workspace_invites_expires_at;
+DROP INDEX IF EXISTS idx_sessions_expires_at;
