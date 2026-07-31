@@ -285,6 +285,64 @@ type MailboxWorkerAssignment struct {
 	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
 }
 
+type OauthAuthorizationCode struct {
+	ID                  uuid.UUID          `json:"id"`
+	CodeHash            []byte             `json:"code_hash"`
+	ClientID            string             `json:"client_id"`
+	RedirectUri         string             `json:"redirect_uri"`
+	CodeChallenge       string             `json:"code_challenge"`
+	CodeChallengeMethod string             `json:"code_challenge_method"`
+	Scopes              []string           `json:"scopes"`
+	UserID              uuid.UUID          `json:"user_id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type OauthAuthorizationRequest struct {
+	ID                  uuid.UUID          `json:"id"`
+	ConsentID           string             `json:"consent_id"`
+	ClientID            string             `json:"client_id"`
+	RedirectUri         string             `json:"redirect_uri"`
+	Scopes              []string           `json:"scopes"`
+	State               *string            `json:"state"`
+	CodeChallenge       string             `json:"code_challenge"`
+	CodeChallengeMethod string             `json:"code_challenge_method"`
+	UserID              uuid.UUID          `json:"user_id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type OauthClient struct {
+	ID                      uuid.UUID          `json:"id"`
+	ClientID                string             `json:"client_id"`
+	ClientSecretHash        []byte             `json:"client_secret_hash"`
+	ClientName              string             `json:"client_name"`
+	RedirectUris            []string           `json:"redirect_uris"`
+	GrantTypes              []string           `json:"grant_types"`
+	ResponseTypes           []string           `json:"response_types"`
+	Scopes                  []string           `json:"scopes"`
+	ClientType              string             `json:"client_type"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
+	CreatedByUserID         pgtype.UUID        `json:"created_by_user_id"`
+	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	RevokedAt               pgtype.Timestamptz `json:"revoked_at"`
+}
+
+type OauthConsent struct {
+	ID          uuid.UUID          `json:"id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	ClientID    string             `json:"client_id"`
+	Scopes      []string           `json:"scopes"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Send struct {
 	ID               uuid.UUID          `json:"id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`

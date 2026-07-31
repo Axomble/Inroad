@@ -23,6 +23,7 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
+	"github.com/inroad/inroad/internal/app/oauthprovider"
 	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
@@ -196,6 +197,18 @@ func run() error {
 	// 2FA/passkey verify carry no email in the body, so they are IP-throttled only.
 	twofaVerifyThrottle := newThrottle("2fa-verify", cfg.RateLimitVerifyIP, 0)
 	passkeyFinishThrottle := newThrottle("passkey-login", cfg.RateLimitVerifyIP, 0)
+	// Dynamic client registration carries no email; IP-throttle only, on the same
+	// per-IP cap as the other sensitive unauthenticated endpoints.
+	oauthRegisterThrottle := newThrottle("oauth-register", cfg.RateLimitSensitiveIP, 0)
+
+	// OAuth 2.1 authorization server (Inroad as an OAuth PROVIDER). Self-contained
+	// domain mounted under /oauth2 (distinct from the mailbox-connect /oauth mount).
+	// The resource owner is resolved from the P1 session through the ResourceOwner
+	// seam, backed here by the session verifier (never re-implementing login).
+	oauthProviderHandler := oauthprovider.NewHandler(
+		oauthprovider.NewService(oauthprovider.NewPgStore(pool), cfg.PublicURL),
+		sessionResourceOwner{v: sessionVerifier},
+	)
 
 	// Email-OTP passwordless login. A dedicated slice (its own store/service) that
 	// reaches session-issuance + the 2FA gate only through identHandler's
@@ -254,6 +267,12 @@ func run() error {
 		// the provider; they authenticate from the signed state, not the JWT
 		// cookie, so they mount here rather than the protected group.
 		{pattern: "/oauth", handler: mbHandler.CallbackRoutes()},
+		// OAuth 2.1 authorization server (provider). Mounted at /oauth2 — distinct
+		// from the /oauth mailbox-connect mount above. /authorize is a top-level
+		// browser navigation that resolves the resource owner from the session seam
+		// (unauth -> login redirect), so it is public here rather than in a
+		// RequireAuth group; its sub-routes apply their own session/admin/CSRF guards.
+		{pattern: "/oauth2", handler: oauthProviderHandler.Routes(sessionVerifier, oauthRegisterThrottle)},
 	}
 	// The data-plane REST surface accepts EITHER a session or an api-key credential.
 	// The api-key verifier runs first and DEFERS on a non-`inrd_` token, so a JWT
@@ -381,6 +400,51 @@ func (c campaignStatusChecker) CampaignStatus(ctx context.Context, ws, campaignI
 		return "", err
 	}
 	return cam.Status, nil
+}
+
+// sessionResourceOwner backs the oauthprovider.ResourceOwner seam with the session
+// verifier: it resolves the current resource owner from the P1 session on the request
+// WITHOUT the oauthprovider domain importing identity (dependency inversion — the
+// domain defines the interface, the composition root supplies this identity-backed
+// impl). A definitive "not authenticated" (deferred verifier, or ErrUnauthorized) is
+// reported as (false, nil) so /authorize sends the user to log in rather than 500ing;
+// only a genuine infra failure surfaces as an error. A non-session (machine)
+// principal is treated as "no resource owner" — an API key cannot grant OAuth consent.
+type sessionResourceOwner struct{ v auth.Verifier }
+
+func (s sessionResourceOwner) Resolve(ctx context.Context, r *http.Request) (oauthprovider.Owner, bool, error) {
+	p, ok, err := s.v.Verify(ctx, r)
+	if err != nil {
+		if errors.Is(err, auth.ErrUnauthorized) {
+			return oauthprovider.Owner{}, false, nil
+		}
+		return oauthprovider.Owner{}, false, err
+	}
+	if !ok || p.Kind != auth.KindSession {
+		return oauthprovider.Owner{}, false, nil
+	}
+	uid, wid, parsed := parseOwnerIDs(p.UserID, p.WorkspaceID)
+	if !parsed {
+		// A malformed principal is treated as "no resource owner", not an infra
+		// error, so /authorize sends the user to log in rather than 500ing.
+		return oauthprovider.Owner{}, false, nil
+	}
+	return oauthprovider.Owner{UserID: uid, WorkspaceID: wid}, true, nil
+}
+
+// parseOwnerIDs parses a principal's user + workspace ids, reporting ok=false if
+// either is malformed. Returning a bool (not an error) keeps the caller's
+// "not authenticated" path free of a lingering error value.
+func parseOwnerIDs(userID, workspaceID string) (uuid.UUID, uuid.UUID, bool) {
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	wid, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	return uid, wid, true
 }
 
 // listCheckerAdapter satisfies contact.ListChecker so the contact package

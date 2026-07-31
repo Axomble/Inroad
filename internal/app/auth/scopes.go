@@ -45,3 +45,45 @@ func IsKnownScope(scope string) bool {
 	}
 	return false
 }
+
+// OAuthGrantableScopes is the STRICT subset of the vocabulary a third-party OAuth
+// client (the oauthprovider authorization server) may EVER be granted. It is the
+// single source of truth for that cap: dynamic client registration rejects a
+// requested scope outside this set, and /authorize additionally requires the
+// requested scope be a subset of both the client's registered scopes AND this set.
+//
+// The set structurally EXCLUDES every dangerous capability so a delegated
+// third-party grant can never reach one:
+//
+//   - ScopeCampaignsSend — sending mail is the single highest-abuse capability
+//     (spam, sender-reputation damage, real cost); it must never be reachable via a
+//     delegated grant, only by a logged-in human or a workspace-minted API key.
+//   - ScopeCampaignsWrite — mutating a sequence/campaign is a step toward triggering
+//     sends and can destructively alter a live campaign.
+//   - ScopeMailboxesWrite — mutates mailbox connections/credentials, which is
+//     security-sensitive infrastructure, not third-party data access.
+//
+// Admin and API-key management are NOT scopes at all (they are session + admin-role
+// gated, never scope-gated — see RequireRole), so they are structurally unreachable
+// through any grant regardless of this list. What remains is read access plus the
+// two low-risk data-entry writes (contacts/lists) a legitimate integration needs.
+var OAuthGrantableScopes = []string{
+	ScopeMailboxesRead,
+	ScopeCampaignsRead,
+	ScopeContactsRead,
+	ScopeContactsWrite,
+	ScopeListsRead,
+	ScopeListsWrite,
+}
+
+// IsOAuthGrantableScope reports whether scope may be granted to a third-party OAuth
+// client. A scope absent from OAuthGrantableScopes (unknown, or a deliberately
+// excluded privileged/destructive one) is not grantable.
+func IsOAuthGrantableScope(scope string) bool {
+	for _, s := range OAuthGrantableScopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}

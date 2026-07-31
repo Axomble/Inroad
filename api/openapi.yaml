@@ -981,6 +981,150 @@ paths:
       responses:
         '302': { description: Redirect to the signed destination URL }
         '404': { description: Malformed/tampered token or unknown send -- no redirect, nothing recorded }
+  # OAuth 2.1 authorization server (Inroad acting as an OAuth PROVIDER). Mounted at
+  # the TOP level under /oauth2 -- outside the /api/v1 base -- and distinct from the
+  # /oauth mailbox-connect flow (Inroad as an OAuth CLIENT to Google/Microsoft). This
+  # is P6a: dynamic client registration, the authorization endpoint, and consent. The
+  # token endpoint is P6b.
+  /oauth2/register:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2Register
+      tags: [oauth2]
+      security: []
+      description: >-
+        RFC 7591 dynamic client registration. PUBLIC but rate-limited per client IP.
+        Public PKCE client by default (token_endpoint_auth_method omitted or "none",
+        no secret); request a client_secret_* method to get a confidential client
+        whose secret is returned in this response EXACTLY ONCE (only its SHA-256 is
+        stored). Each redirect_uri must be https (or a http loopback for native apps),
+        carry no fragment, and requested scopes must all be OAuth-grantable (no
+        admin/api-key/send scopes). When a session is present it is recorded so a
+        workspace admin can later list/revoke the client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OAuth2RegisterRequest' }
+      responses:
+        '201':
+          description: The registered client; client_secret present only for a confidential client (once)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2Client' }
+        '400': { description: Validation error (bad redirect_uri, non-grantable scope, unsupported grant/response type or auth method) }
+        '429': { description: Registration rate limit exceeded }
+  /oauth2/authorize:
+    servers: [{ url: / }]
+    get:
+      operationId: oauth2Authorize
+      tags: [oauth2]
+      security: []
+      description: >-
+        OAuth 2.1 authorization endpoint (a top-level browser navigation, not an SPA
+        fetch). response_type MUST be "code"; PKCE is mandatory and S256-only. The
+        client and redirect_uri are validated FIRST (an unknown client or a
+        redirect_uri that does not EXACTLY match the registered allowlist renders an
+        error and never redirects); only after that are other errors returned by
+        redirecting to the validated redirect_uri with error+state. The resource owner
+        is resolved from the P1 session (never a parameter): if unauthenticated the
+        browser is redirected to the SPA login with a return_to; if authenticated and
+        a prior consent already covers the scopes a code is issued immediately,
+        otherwise the browser is redirected to the SPA consent screen.
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, enum: [code] } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: scope, in: query, required: true, schema: { type: string, description: space-delimited } }
+        - { name: state, in: query, required: false, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, enum: [S256] } }
+      responses:
+        '302': { description: Redirect to the client redirect_uri (code+state or error+state), the SPA consent screen, or the SPA login page }
+        '400':
+          description: Unknown client or redirect_uri mismatch -- rendered inline, never redirected (anti-open-redirect)
+          content:
+            text/html:
+              schema: { type: string }
+  /oauth2/consent/{consent_id}:
+    servers: [{ url: / }]
+    get:
+      operationId: oauth2ConsentData
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Return the pending consent request's display data for the SPA consent screen.
+        Session-authed; the request must belong to the session user and be live
+        (unconsumed, unexpired), else 404.
+      parameters: [{ name: consent_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200':
+          description: Consent request display data
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2ConsentData' }
+        '401': { description: Unauthorized }
+        '404': { description: Unknown, expired, consumed, or not this user's consent request }
+  /oauth2/consent:
+    servers: [{ url: / }]
+    post:
+      operationId: oauth2ConsentDecide
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Record the resource owner's approve/deny decision. Session-authed and
+        CSRF-guarded (double-submit); the service re-checks the session user owns the
+        request. On approve it consumes the single-use request, remembers the consent,
+        and issues a code; on deny it returns an access_denied redirect. The returned
+        redirect_to is the URL the SPA navigates the browser to. Requires the
+        X-CSRF-Token header (double-submit) matching the csrf_token cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OAuth2ConsentDecision' }
+      responses:
+        '200':
+          description: The URL to navigate the browser to (client redirect_uri with code+state, or error=access_denied+state)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2RedirectTo' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: CSRF token mismatch }
+        '404': { description: Unknown, expired, consumed, or not this user's consent request }
+  /oauth2/clients:
+    servers: [{ url: / }]
+    get:
+      operationId: oauth2ListClients
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        List the caller's workspace's registered OAuth clients, newest first. No
+        client secret or hash is ever returned. Session-authed + admin, workspace-pinned.
+      responses:
+        '200':
+          description: The workspace's OAuth clients
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuth2ClientList' }
+        '401': { description: Unauthorized }
+        '403': { description: Not an admin }
+  /oauth2/clients/{client_id}:
+    servers: [{ url: / }]
+    delete:
+      operationId: oauth2RevokeClient
+      tags: [oauth2]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Revoke one of the caller's workspace's OAuth clients. Idempotent; a foreign or
+        unknown client_id returns 404. Session-authed + admin, workspace-pinned.
+      parameters: [{ name: client_id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Client revoked }
+        '401': { description: Unauthorized }
+        '403': { description: Not an admin }
+        '404': { description: Client not found }
 components:
   securitySchemes:
     bearerAuth:
@@ -1520,3 +1664,70 @@ components:
           type: array
           description: daily stats, oldest first, up to 30 days
           items: { $ref: '#/components/schemas/WarmupDayStat' }
+    OAuth2RegisterRequest:
+      type: object
+      required: [client_name, redirect_uris]
+      description: RFC 7591 dynamic client registration request.
+      properties:
+        client_name: { type: string }
+        redirect_uris:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: https (or http loopback) URIs, no fragment; exact-matched at /authorize
+        grant_types:
+          type: array
+          items: { type: string, enum: [authorization_code, refresh_token] }
+          description: defaults to [authorization_code]
+        response_types:
+          type: array
+          items: { type: string, enum: [code] }
+          description: defaults to [code]
+        scope: { type: string, description: space-delimited; each scope must be OAuth-grantable }
+        token_endpoint_auth_method:
+          type: string
+          enum: [none, client_secret_basic, client_secret_post]
+          description: omitted or "none" => public PKCE client (no secret); client_secret_* => confidential
+    OAuth2Client:
+      type: object
+      required: [client_id, client_name, redirect_uris, grant_types, response_types, scope, client_type, token_endpoint_auth_method, created_at]
+      properties:
+        client_id: { type: string }
+        client_secret:
+          type: string
+          description: Present ONLY on a confidential client's registration response, shown exactly once. Never on a list.
+        client_name: { type: string }
+        redirect_uris: { type: array, items: { type: string } }
+        grant_types: { type: array, items: { type: string } }
+        response_types: { type: array, items: { type: string } }
+        scope: { type: string, description: space-delimited registered scopes }
+        client_type: { type: string, enum: [public, confidential] }
+        token_endpoint_auth_method: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+    OAuth2ClientList:
+      type: object
+      required: [clients]
+      properties:
+        clients:
+          type: array
+          items: { $ref: '#/components/schemas/OAuth2Client' }
+    OAuth2ConsentData:
+      type: object
+      required: [client_name, requested_scopes, redirect_uri]
+      description: Display data the SPA renders on the consent screen.
+      properties:
+        client_name: { type: string }
+        requested_scopes: { type: array, items: { type: string } }
+        redirect_uri: { type: string }
+    OAuth2ConsentDecision:
+      type: object
+      required: [consent_id, decision]
+      properties:
+        consent_id: { type: string }
+        decision: { type: string, enum: [approve, deny] }
+    OAuth2RedirectTo:
+      type: object
+      required: [redirect_to]
+      properties:
+        redirect_to: { type: string, description: URL the SPA navigates the browser to }
