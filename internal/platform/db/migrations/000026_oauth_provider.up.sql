@@ -35,11 +35,13 @@ CREATE TABLE oauth_clients (
     -- RFC 7591 token_endpoint_auth_method: 'none' for public, otherwise a
     -- client_secret_* method for confidential.
     token_endpoint_auth_method TEXT NOT NULL,
-    -- The session user + workspace that registered the client, when registration
-    -- carried a session. Both NULL for an anonymous (unauthenticated) registration:
-    -- such a client is constrained to non-privileged scopes + validated redirect
-    -- URIs, but is not listable/revocable through the workspace admin API. SET NULL
-    -- on user delete (the client outlives its creator); CASCADE on workspace delete.
+    -- The admin user + workspace that registered the client. Registration REQUIRES an
+    -- authenticated workspace admin (see internal/app/oauthprovider Routes), so both
+    -- are populated for every client minted through the API, making every client
+    -- workspace-owned and listable/revocable through the workspace admin API. The
+    -- columns stay nullable to avoid a breaking NOT NULL migration (and for any row
+    -- an operator seeds directly). SET NULL on user delete (the client outlives its
+    -- creator); CASCADE on workspace delete.
     created_by_user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
     workspace_id               UUID REFERENCES workspaces(id) ON DELETE CASCADE,
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -87,8 +89,13 @@ CREATE TABLE oauth_consents (
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- One consent row per (user, client); a grant upserts it.
-    UNIQUE (user_id, client_id)
+    -- One consent row per (user, client, workspace): consent is WORKSPACE-SCOPED.
+    -- The same user consenting to the same client is a SEPARATE grant per workspace,
+    -- so a consent remembered while active in workspace A can never let an authorize
+    -- run in workspace B skip the consent screen (which would mint a code bound to a
+    -- workspace the user never approved for that client). A grant upserts the row for
+    -- the CURRENT workspace only.
+    UNIQUE (user_id, client_id, workspace_id)
 );
 
 -- Single-use authorization codes (consumed by the P6b token endpoint). The raw code

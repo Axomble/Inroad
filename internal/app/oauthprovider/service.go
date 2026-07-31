@@ -71,9 +71,11 @@ func NewService(store Store, publicURL string) *Service {
 // Dynamic client registration (RFC 7591)
 // ---------------------------------------------------------------------------
 
-// RegisterInput is a validated dynamic-registration request. CreatedBy/WorkspaceID
-// are set only when the registration carried a session (recorded so a workspace
-// admin can later list/revoke the client); both nil for an anonymous registration.
+// RegisterInput is a validated dynamic-registration request. Registration is
+// admin-authed, so CreatedBy/WorkspaceID carry the registering admin's user +
+// workspace (always set via the API), recorded so a workspace admin can later
+// list/revoke the client. They are pointers only so the persistence layer can map an
+// (unexpected) absent value to SQL NULL rather than a zero UUID.
 type RegisterInput struct {
 	ClientName              string
 	RedirectURIs            []string
@@ -267,6 +269,16 @@ func (s *Service) Authorize(ctx context.Context, in AuthorizeInput) (AuthorizeRe
 		return s.redirectErr(in.RedirectURI, "unsupported_response_type", in.State)
 	}
 
+	// (3b) The client must have REGISTERED both the `code` response type and the
+	// `authorization_code` grant. A client that registered only e.g. refresh_token
+	// (or no response types) must not be able to obtain an authorization code, even
+	// though the request asked for response_type=code. Delivered on the validated
+	// redirect_uri as the spec `unauthorized_client` error.
+	if !containsExact(client.ResponseTypes, responseTypeCode) ||
+		!containsExact(client.GrantTypes, grantAuthorizationCode) {
+		return s.redirectErr(in.RedirectURI, "unauthorized_client", in.State)
+	}
+
 	// (4) PKCE is MANDATORY and S256-only (reject missing and `plain`). Per OAuth 2.1
 	// these are request errors on a validated redirect_uri, so — like every other
 	// post-redirect-validation error — they are delivered via a redirect carrying
@@ -289,9 +301,14 @@ func (s *Service) Authorize(ctx context.Context, in AuthorizeInput) (AuthorizeRe
 		return AuthorizeResult{Outcome: OutcomeRedirect, RedirectTo: s.loginRedirect(in.RawQuery)}, nil
 	}
 
-	// (7) Prior-consent skip: if a remembered consent already covers ALL requested
-	// scopes for this (user, client), issue a code immediately without re-prompting.
-	consent, err := s.store.GetConsent(ctx, in.Owner.UserID, in.ClientID)
+	// (7) Prior-consent skip: issue a code immediately without re-prompting ONLY when a
+	// remembered consent exists FOR THE CURRENT WORKSPACE (in.Owner.WorkspaceID) and it
+	// covers ALL requested scopes. Pinning the lookup to the session's workspace is the
+	// anti-cross-tenant guard: a consent the user granted while active in another
+	// workspace must never let this authorize mint a code bound to THIS workspace — the
+	// user never approved this client for it. A miss (including a consent that exists
+	// only in a different workspace) falls through to the consent screen below.
+	consent, err := s.store.GetConsent(ctx, in.Owner.UserID, in.ClientID, in.Owner.WorkspaceID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return AuthorizeResult{}, err
 	}
@@ -590,10 +607,10 @@ func validateGrantableScopes(scopes []string) ([]string, error) {
 // grant type (notably the removed implicit grant).
 func normalizeGrantTypes(in []string) ([]string, error) {
 	if len(in) == 0 {
-		return []string{"authorization_code"}, nil
+		return []string{grantAuthorizationCode}, nil
 	}
 	for _, g := range in {
-		if g != "authorization_code" && g != "refresh_token" {
+		if g != grantAuthorizationCode && g != grantRefreshToken {
 			return nil, fmt.Errorf("%w: unsupported grant_type %q", ErrValidation, g)
 		}
 	}

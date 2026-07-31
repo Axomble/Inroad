@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/inroad/inroad/internal/app/auth"
 )
 
 // fakeOwner is an injectable ResourceOwner: it returns a fixed resolution regardless
@@ -21,6 +23,83 @@ type fakeOwner struct {
 
 func (f fakeOwner) Resolve(context.Context, *http.Request) (Owner, bool, error) {
 	return f.owner, f.ok, f.err
+}
+
+// fakeVerifier is an injectable auth.Verifier that always authenticates a request as
+// the given principal, so a route-level test can exercise the RequireAuth + RequireRole
+// gate without a real session store.
+type fakeVerifier struct{ p auth.Principal }
+
+func (f fakeVerifier) Verify(context.Context, *http.Request) (auth.Principal, bool, error) {
+	return f.p, true, nil
+}
+
+// cappingThrottle is a deterministic fake rate-limit middleware: it passes the first
+// `limit` requests through and answers every request beyond that with a 429, so a test
+// can trip the register throttle without Redis or a clock.
+func cappingThrottle(limit int) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		var seen int
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seen++
+			if seen > limit {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// TestRegisterRateLimitedReturns429 drives POST /oauth2/register past the injected
+// per-IP cap as an authenticated admin and asserts the over-cap request is a
+// deterministic 429 (the throttle sits OUTERMOST, ahead of the session/admin gate).
+func TestRegisterRateLimitedReturns429(t *testing.T) {
+	h, _ := newTestHandler(fakeOwner{})
+	admin := auth.Principal{
+		UserID:      uuid.NewString(),
+		WorkspaceID: uuid.NewString(),
+		Role:        "admin",
+		Kind:        auth.KindSession,
+	}
+	const limit = 2
+	srv := h.Routes(fakeVerifier{p: admin}, cappingThrottle(limit))
+
+	body := `{"client_name":"Acme","redirect_uris":["` + testRedirectURI + `"],"scope":"contacts:read"}`
+	send := func() int {
+		r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := 0; i < limit; i++ {
+		if code := send(); code != http.StatusCreated {
+			t.Fatalf("request %d under the cap must register (201), got %d", i+1, code)
+		}
+	}
+	if code := send(); code != http.StatusTooManyRequests {
+		t.Fatalf("request over the cap must be 429, got %d", code)
+	}
+}
+
+// TestRegisterRequiresAdmin proves an authenticated NON-admin (member) cannot register a
+// client: the RequireRole("admin") gate answers 403 before the handler runs.
+func TestRegisterRequiresAdmin(t *testing.T) {
+	h, _ := newTestHandler(fakeOwner{})
+	member := auth.Principal{
+		UserID:      uuid.NewString(),
+		WorkspaceID: uuid.NewString(),
+		Role:        "member",
+		Kind:        auth.KindSession,
+	}
+	srv := h.Routes(fakeVerifier{p: member}, nil)
+	body := `{"client_name":"Acme","redirect_uris":["` + testRedirectURI + `"],"scope":"contacts:read"}`
+	r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("a non-admin must be 403, got %d", w.Code)
+	}
 }
 
 func newTestHandler(owner ResourceOwner) (*Handler, *fakeStore) {

@@ -25,6 +25,7 @@ var ErrInvalidRedirectURI = errors.New("invalid redirect_uri")
 //     (XSS/exfil vectors) and plain http:// to a non-loopback host (cleartext).
 //   - A URI carrying a fragment (#…): the authorization response appends query
 //     params, and a fragment can shadow/rewrite them.
+//   - A URI carrying userinfo (user:pass@host): it can obscure the real host.
 //   - An opaque or relative URI, or one missing a host where a host is required.
 func validateRedirectURI(raw string) error {
 	if raw == "" {
@@ -41,6 +42,12 @@ func validateRedirectURI(raw string) error {
 	}
 	// A fragment can shadow the appended query response — never allow one.
 	if u.Fragment != "" || rawHasFragment(raw) {
+		return ErrInvalidRedirectURI
+	}
+	// Userinfo (user:pass@host) is refused even over https: it obscures the true host
+	// (e.g. https://trusted@evil.example resolves to evil.example) and has no place in
+	// an OAuth redirect target.
+	if u.User != nil {
 		return ErrInvalidRedirectURI
 	}
 	switch u.Scheme {

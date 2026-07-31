@@ -19,8 +19,9 @@ import (
 // Handler exposes the OAuth 2.1 authorization-server surface: dynamic client
 // registration, admin client management, the authorization endpoint, and the consent
 // data + decision endpoints. Route-level auth (session/admin/CSRF) and the
-// registration rate limit are applied in Routes; the authorize + register handlers
-// resolve any resource owner through the ResourceOwner seam, never a request param.
+// registration rate limit are applied in Routes; the authorize handler resolves the
+// resource owner through the ResourceOwner seam (never a request param), while the
+// session-gated handlers read their principal from the request context.
 type Handler struct {
 	svc   *Service
 	owner ResourceOwner
@@ -84,11 +85,20 @@ type decideResponse struct {
 // Dynamic client registration + management
 // ---------------------------------------------------------------------------
 
-// register handles RFC 7591 dynamic client registration. It is public but
-// rate-limited (see Routes). When the request carries a valid session, the caller's
-// user + workspace are recorded so a workspace admin can later list/revoke the
-// client; an anonymous registration records neither.
+// register handles RFC 7591 dynamic client registration, restricted to an
+// authenticated workspace admin (session + admin gate + rate limit applied in Routes).
+// The registering admin's workspace + user (from the session RequireAuth stashed on the
+// context) are recorded on the client, so every client is workspace-owned and
+// listable/revocable through the admin API.
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	uid, ok := callerUserID(w, r)
+	if !ok {
+		return
+	}
 	var body registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
@@ -101,12 +111,8 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		ResponseTypes:           body.ResponseTypes,
 		Scope:                   body.Scope,
 		TokenEndpointAuthMethod: body.TokenEndpointAuthMethod,
-	}
-	// Best-effort: record the registering user + workspace when a session is present.
-	// A resolution failure never blocks an (otherwise anonymous) registration.
-	if owner, ok, err := h.owner.Resolve(r.Context(), r); err == nil && ok {
-		uid, wid := owner.UserID, owner.WorkspaceID
-		in.CreatedBy, in.WorkspaceID = &uid, &wid
+		CreatedBy:               &uid,
+		WorkspaceID:             &ws,
 	}
 
 	res, err := h.svc.RegisterClient(r.Context(), in)
@@ -188,7 +194,9 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) {
 	// infra error fails the request; "no session" leaves Owner nil -> login redirect.
 	owner, ok, err := h.owner.Resolve(r.Context(), r)
 	if err != nil {
-		renderAuthorizeError(w, "could not verify your session")
+		// A resolver INFRA failure (session store / DB outage) is a server fault: 500,
+		// not the 400 reserved for a malformed client request.
+		renderAuthorizeError(w, http.StatusInternalServerError, "could not verify your session")
 		return
 	}
 	if ok {
@@ -197,12 +205,16 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.svc.Authorize(r.Context(), in)
 	if err != nil {
-		renderAuthorizeError(w, "the authorization request could not be processed")
+		// A non-nil error from Authorize is always an infra fault (a DB error) — every
+		// validation outcome is returned as an AuthorizeResult, never an error. 500.
+		renderAuthorizeError(w, http.StatusInternalServerError, "the authorization request could not be processed")
 		return
 	}
 	switch res.Outcome {
 	case OutcomeError:
-		renderAuthorizeError(w, res.RenderMessage)
+		// A pre-redirect-validation client error (unknown client / redirect_uri
+		// mismatch): a 400 rendered inline, never redirected (anti-open-redirect).
+		renderAuthorizeError(w, http.StatusBadRequest, res.RenderMessage)
 	case OutcomeRedirect:
 		http.Redirect(w, r, res.RedirectTo, http.StatusFound)
 	}
@@ -284,12 +296,14 @@ func callerUserID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	return uid, true
 }
 
-// renderAuthorizeError writes a minimal, static HTML error page (400) for the
-// no-redirect authorization failures. msg is always a server-owned literal; it is
-// still HTML-escaped defensively so it can never carry markup.
-func renderAuthorizeError(w http.ResponseWriter, msg string) {
+// renderAuthorizeError writes a minimal, static HTML error page at the given status
+// for the no-redirect authorization failures (400 for a malformed client request, 500
+// for a server-side infra fault). msg is always a server-owned literal — it never
+// echoes internal error detail — and is HTML-escaped defensively so it can never carry
+// markup.
+func renderAuthorizeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusBadRequest)
+	w.WriteHeader(status)
 	page := "<!doctype html><html><head><title>Authorization error</title></head>" +
 		"<body><h1>Authorization error</h1><p>" + html.EscapeString(msg) + "</p></body></html>"
 	_, _ = w.Write([]byte(page))

@@ -34,7 +34,11 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func consentKey(userID uuid.UUID, clientID string) string { return userID.String() + "|" + clientID }
+// consentKey mirrors the PgStore's (user_id, client_id, workspace_id) uniqueness so the
+// fake's consent skip is workspace-scoped exactly like the real store.
+func consentKey(userID uuid.UUID, clientID string, ws uuid.UUID) string {
+	return userID.String() + "|" + clientID + "|" + ws.String()
+}
 
 func (f *fakeStore) CreateClient(_ context.Context, p CreateClientParams) (gen.OauthClient, error) {
 	if f.createClientErr != nil {
@@ -127,8 +131,8 @@ func (f *fakeStore) ConsumeAuthRequest(_ context.Context, consentID string, user
 	return 1, nil
 }
 
-func (f *fakeStore) GetConsent(_ context.Context, userID uuid.UUID, clientID string) (gen.OauthConsent, error) {
-	c, ok := f.consents[consentKey(userID, clientID)]
+func (f *fakeStore) GetConsent(_ context.Context, userID uuid.UUID, clientID string, ws uuid.UUID) (gen.OauthConsent, error) {
+	c, ok := f.consents[consentKey(userID, clientID, ws)]
 	if !ok {
 		return gen.OauthConsent{}, pgx.ErrNoRows
 	}
@@ -154,7 +158,7 @@ func (f *fakeStore) Approve(ctx context.Context, p ApproveParams) error {
 	if n == 0 {
 		return ErrRequestNotClaimable
 	}
-	f.consents[consentKey(p.UserID, p.ClientID)] = gen.OauthConsent{
+	f.consents[consentKey(p.UserID, p.ClientID, p.WorkspaceID)] = gen.OauthConsent{
 		ID: uuid.New(), UserID: p.UserID, ClientID: p.ClientID,
 		Scopes: p.Scopes, WorkspaceID: p.WorkspaceID,
 		CreatedAt: pgTime(f.now()), UpdatedAt: pgTime(f.now()),
@@ -170,7 +174,7 @@ func (f *fakeStore) codeByRaw(rawCode string) (gen.OauthAuthorizationCode, bool)
 
 // seedConsent records a prior consent (test helper for the skip path).
 func (f *fakeStore) seedConsent(userID uuid.UUID, clientID string, scopes []string, ws uuid.UUID) {
-	f.consents[consentKey(userID, clientID)] = gen.OauthConsent{
+	f.consents[consentKey(userID, clientID, ws)] = gen.OauthConsent{
 		ID: uuid.New(), UserID: userID, ClientID: clientID, Scopes: scopes, WorkspaceID: ws,
 		CreatedAt: pgTime(f.now()), UpdatedAt: pgTime(f.now()),
 	}

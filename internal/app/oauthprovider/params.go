@@ -11,6 +11,13 @@ const (
 	// rejected (it offers no protection if the challenge leaks).
 	challengeMethodS256 = "S256"
 
+	// grantAuthorizationCode is the OAuth 2.1 authorization-code grant. A client must
+	// have REGISTERED it (and the code response type) to obtain an authorization code.
+	grantAuthorizationCode = "authorization_code"
+	// grantRefreshToken is the refresh-token grant (a client may register it too; it
+	// does not by itself entitle the client to an authorization code).
+	grantRefreshToken = "refresh_token"
+
 	clientTypePublic       = "public"
 	clientTypeConfidential = "confidential"
 

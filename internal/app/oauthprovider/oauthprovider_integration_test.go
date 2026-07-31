@@ -143,6 +143,83 @@ func TestFullRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPriorConsentIsWorkspaceScoped proves the remembered-consent SKIP is
+// workspace-scoped over the real DB: a user who consented to a client while active in
+// workspace A, re-authorizing the SAME client + scopes in a workspace-B session, must
+// NOT skip the consent screen. Before the fix the consent was keyed on (user, client)
+// only, so the B-session authorize skipped and minted a code bound to workspace B — a
+// cross-tenant grant the user never approved. It must instead persist a fresh pending
+// consent request bound to workspace B.
+func TestPriorConsentIsWorkspaceScoped(t *testing.T) {
+	ctx := context.Background()
+	svc, store, mint := itSetup(t)
+	wsA, uid := mint()
+	wsB, _ := mint() // a second workspace the SAME user is active in
+
+	reg, err := svc.RegisterClient(ctx, RegisterInput{
+		ClientName: "WS Scoped", RedirectURIs: []string{testRedirectURI},
+		Scope: "contacts:read", CreatedBy: &uid, WorkspaceID: &wsA,
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient: %v", err)
+	}
+
+	// The user consents in workspace A: authorize -> approve records a consent row
+	// bound to (uid, client, wsA).
+	inA := baseAuthorize(reg.Client.ClientID)
+	ownerA := Owner{UserID: uid, WorkspaceID: wsA}
+	inA.Owner = &ownerA
+	resA, err := svc.Authorize(ctx, inA)
+	if err != nil {
+		t.Fatalf("Authorize A: %v", err)
+	}
+	uA, _ := url.Parse(resA.RedirectTo)
+	consentA := uA.Query().Get("consent_id")
+	if consentA == "" {
+		t.Fatalf("A: expected a consent handoff, got %s", resA.RedirectTo)
+	}
+	if _, err := svc.DecideConsent(ctx, DecideInput{ConsentID: consentA, UserID: uid, Approve: true}); err != nil {
+		t.Fatalf("DecideConsent A: %v", err)
+	}
+
+	// Same user, SAME client + scopes, now active in workspace B. The remembered
+	// consent belongs to workspace A only, so the consent screen MUST NOT be skipped.
+	inB := baseAuthorize(reg.Client.ClientID)
+	ownerB := Owner{UserID: uid, WorkspaceID: wsB}
+	inB.Owner = &ownerB
+	resB, err := svc.Authorize(ctx, inB)
+	if err != nil {
+		t.Fatalf("Authorize B: %v", err)
+	}
+	uB, _ := url.Parse(resB.RedirectTo)
+	if code := uB.Query().Get("code"); code != "" {
+		t.Fatalf("B: a code must NOT be issued for a consent remembered in another workspace, got %s", resB.RedirectTo)
+	}
+	consentB := uB.Query().Get("consent_id")
+	if consentB == "" {
+		t.Fatalf("B: cross-workspace authorize must hand off to consent, got %s", resB.RedirectTo)
+	}
+	req, err := store.q.GetOauthAuthRequest(ctx, consentB)
+	if err != nil {
+		t.Fatalf("GetOauthAuthRequest B: %v", err)
+	}
+	if req.WorkspaceID != wsB || req.UserID != uid {
+		t.Fatalf("B request not bound to (uid, wsB): user=%s ws=%s", req.UserID, req.WorkspaceID)
+	}
+
+	// Belt-and-braces: the workspace-A session still skips straight to a code.
+	inA2 := baseAuthorize(reg.Client.ClientID)
+	inA2.Owner = &ownerA
+	resA2, err := svc.Authorize(ctx, inA2)
+	if err != nil {
+		t.Fatalf("Authorize A2: %v", err)
+	}
+	uA2, _ := url.Parse(resA2.RedirectTo)
+	if uA2.Query().Get("code") == "" {
+		t.Fatalf("A2: workspace-A consent should still skip to a code, got %s", resA2.RedirectTo)
+	}
+}
+
 // TestForeignWorkspaceCannotListOrRevoke proves client management is tenant-isolated.
 func TestForeignWorkspaceCannotListOrRevoke(t *testing.T) {
 	ctx := context.Background()

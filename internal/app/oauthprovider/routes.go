@@ -13,9 +13,11 @@ import (
 // there is no chi mount collision).
 //
 // Auth posture per endpoint:
-//   - POST /register     — PUBLIC (RFC 7591 open dynamic registration) but
-//     rate-limited (registerThrottle) and structurally capped to non-privileged
-//     scopes + validated redirect URIs. A present session is recorded best-effort.
+//   - POST /register     — SESSION-authed + ADMIN (RFC 7591 dynamic registration,
+//     restricted to a workspace admin) and rate-limited (registerThrottle, kept as
+//     defense-in-depth). The registering admin's user + workspace are recorded so the
+//     client is workspace-owned and revocable; scopes are capped to the grantable
+//     allowlist and redirect URIs are validated.
 //   - GET  /authorize    — PUBLIC top-level navigation; the resource owner is
 //     resolved via the ResourceOwner seam inside the handler (unauth -> login
 //     redirect), NOT by RequireAuth (which would 401 instead of redirecting).
@@ -28,9 +30,18 @@ import (
 func (h *Handler) Routes(verifier auth.Verifier, registerThrottle func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
 
-	// Public, rate-limited dynamic registration + the authorization endpoint.
-	r.With(nonNil(registerThrottle)...).Post("/register", h.register)
+	// The authorization endpoint (public top-level navigation; self-guards via the seam).
 	r.Get("/authorize", h.authorize)
+
+	// Admin-authed, rate-limited dynamic client registration. The throttle is OUTERMOST
+	// (defense-in-depth: it sheds an over-cap flood before the auth check), then session
+	// + admin. The handler records the admin's workspace + user from the session.
+	r.Group(func(pr chi.Router) {
+		pr.Use(nonNil(registerThrottle)...)
+		pr.Use(auth.RequireAuth(verifier))
+		pr.Use(auth.RequireRole("admin"))
+		pr.Post("/register", h.register)
+	})
 
 	// Consent data + decision: the logged-in resource owner only.
 	r.Group(func(pr chi.Router) {

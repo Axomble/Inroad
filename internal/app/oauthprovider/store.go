@@ -31,8 +31,8 @@ type CreateClientParams struct {
 	Scopes                  []string
 	ClientType              string
 	TokenEndpointAuthMethod string
-	CreatedBy               *uuid.UUID // nil for an anonymous registration
-	WorkspaceID             *uuid.UUID // nil for an anonymous registration
+	CreatedBy               *uuid.UUID // the registering admin's user (always set via the API)
+	WorkspaceID             *uuid.UUID // the registering admin's workspace (always set via the API)
 }
 
 // CreateAuthRequestParams is the persistence input for a pending consent request.
@@ -96,9 +96,11 @@ type Store interface {
 	// and TTL; returns rows affected (0 = unknown/consumed/expired/not this user's).
 	ConsumeAuthRequest(ctx context.Context, consentID string, userID uuid.UUID) (int64, error)
 
-	// GetConsent returns the remembered consent for (user, client) (pgx.ErrNoRows if
-	// none).
-	GetConsent(ctx context.Context, userID uuid.UUID, clientID string) (gen.OauthConsent, error)
+	// GetConsent returns the remembered consent for (user, client) IN workspace ws
+	// (pgx.ErrNoRows if none). Consent is workspace-scoped: a grant made while active
+	// in one workspace never satisfies a lookup for another, so the prior-consent skip
+	// can never issue a code for a workspace the user did not approve for this client.
+	GetConsent(ctx context.Context, userID uuid.UUID, clientID string, ws uuid.UUID) (gen.OauthConsent, error)
 
 	// CreateAuthCode persists a single-use authorization code (prior-consent-skip
 	// path, which issues a code without a consent handoff).
@@ -174,13 +176,20 @@ func (s *PgStore) ConsumeAuthRequest(ctx context.Context, consentID string, user
 	return s.q.ConsumeOauthAuthRequest(ctx, gen.ConsumeOauthAuthRequestParams{ConsentID: consentID, UserID: userID})
 }
 
-func (s *PgStore) GetConsent(ctx context.Context, userID uuid.UUID, clientID string) (gen.OauthConsent, error) {
-	return s.q.GetOauthConsent(ctx, gen.GetOauthConsentParams{UserID: userID, ClientID: clientID})
+func (s *PgStore) GetConsent(ctx context.Context, userID uuid.UUID, clientID string, ws uuid.UUID) (gen.OauthConsent, error) {
+	return s.q.GetOauthConsent(ctx, gen.GetOauthConsentParams{UserID: userID, ClientID: clientID, WorkspaceID: ws})
 }
 
 func (s *PgStore) CreateAuthCode(ctx context.Context, p CreateAuthCodeParams) error {
 	return s.q.CreateOauthAuthCode(ctx, codeParams(p))
 }
+
+// P6b: the atomic single-use authorization-code CONSUME lands with the P6b token
+// endpoint, as a ConsumeAuthCode method backed by
+//   UPDATE oauth_authorization_codes SET consumed_at = now()
+//   WHERE code_hash = $1 AND consumed_at IS NULL
+// returning rows-affected (exactly-one = claimed). Its real-DB single-use test ships
+// with P6b, alongside the token exchange that verifies the PKCE code_verifier.
 
 // Approve consumes the pending request, upserts the remembered consent, and inserts
 // the issued code in ONE transaction: either the user has a fresh single-use code and

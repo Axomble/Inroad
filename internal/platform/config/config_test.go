@@ -130,6 +130,13 @@ func TestLoadRejectsWeakTrackingSecret(t *testing.T) {
 func TestLoadTokenDefaults(t *testing.T) {
 	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
 	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	// Pin (clear) every env var whose DEFAULT this test asserts, so an ambient .env
+	// (e.g. INROAD_ACCESS_TOKEN_TTL=15m) can't make the defaults check fail. An empty
+	// value is treated as unset by the getenv helpers, yielding the compiled default.
+	t.Setenv("INROAD_ACCESS_TOKEN_TTL", "")
+	t.Setenv("INROAD_REFRESH_TOKEN_TTL", "")
+	t.Setenv("INROAD_SESSION_CACHE_TTL", "")
+	t.Setenv("INROAD_COOKIE_SECURE", "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load: %v", err)

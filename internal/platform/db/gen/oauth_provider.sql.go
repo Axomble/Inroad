@@ -129,8 +129,10 @@ type CreateOauthClientParams struct {
 	WorkspaceID             pgtype.UUID `json:"workspace_id"`
 }
 
-// Register a client (RFC 7591). client_secret_hash is NULL for a public PKCE
-// client. created_by_user_id / workspace_id are NULL for an anonymous registration.
+// Register a client (RFC 7591). client_secret_hash is NULL for a public PKCE client.
+// created_by_user_id / workspace_id carry the registering admin's user + workspace:
+// registration is admin-authed, so both are populated for every API-minted client
+// (the columns stay nullable only to avoid a breaking NOT NULL migration).
 func (q *Queries) CreateOauthClient(ctx context.Context, arg CreateOauthClientParams) (OauthClient, error) {
 	row := q.db.QueryRow(ctx, createOauthClient,
 		arg.ClientID,
@@ -245,18 +247,21 @@ func (q *Queries) GetOauthClient(ctx context.Context, clientID string) (OauthCli
 }
 
 const getOauthConsent = `-- name: GetOauthConsent :one
-SELECT id, user_id, client_id, scopes, workspace_id, created_at, updated_at FROM oauth_consents WHERE user_id = $1 AND client_id = $2
+SELECT id, user_id, client_id, scopes, workspace_id, created_at, updated_at FROM oauth_consents WHERE user_id = $1 AND client_id = $2 AND workspace_id = $3
 `
 
 type GetOauthConsentParams struct {
-	UserID   uuid.UUID `json:"user_id"`
-	ClientID string    `json:"client_id"`
+	UserID      uuid.UUID `json:"user_id"`
+	ClientID    string    `json:"client_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-// The remembered consent for (user, client), used to SKIP the consent screen when it
-// already covers the requested scopes.
+// The remembered consent for (user, client) IN A SPECIFIC WORKSPACE, used to SKIP the
+// consent screen only when it already covers the requested scopes FOR THE CURRENT
+// workspace. Pinning on workspace_id is the anti-cross-tenant guard: a consent granted
+// while active in workspace A must never satisfy an authorize running in workspace B.
 func (q *Queries) GetOauthConsent(ctx context.Context, arg GetOauthConsentParams) (OauthConsent, error) {
-	row := q.db.QueryRow(ctx, getOauthConsent, arg.UserID, arg.ClientID)
+	row := q.db.QueryRow(ctx, getOauthConsent, arg.UserID, arg.ClientID, arg.WorkspaceID)
 	var i OauthConsent
 	err := row.Scan(
 		&i.ID,
@@ -354,7 +359,7 @@ func (q *Queries) RevokeOauthClient(ctx context.Context, arg RevokeOauthClientPa
 const upsertOauthConsent = `-- name: UpsertOauthConsent :exec
 INSERT INTO oauth_consents (user_id, client_id, scopes, workspace_id)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (user_id, client_id)
+ON CONFLICT (user_id, client_id, workspace_id)
 DO UPDATE SET scopes = EXCLUDED.scopes, updated_at = now()
 `
 
@@ -365,8 +370,9 @@ type UpsertOauthConsentParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-// Record/refresh a granted consent. One row per (user, client): a re-grant replaces
-// the stored scope set and stamps updated_at.
+// Record/refresh a granted consent. One row per (user, client, workspace): a re-grant
+// in the SAME workspace replaces the stored scope set and stamps updated_at; a grant in
+// a different workspace is a separate row (consent is workspace-scoped).
 func (q *Queries) UpsertOauthConsent(ctx context.Context, arg UpsertOauthConsentParams) error {
 	_, err := q.db.Exec(ctx, upsertOauthConsent,
 		arg.UserID,

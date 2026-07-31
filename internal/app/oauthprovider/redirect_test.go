@@ -28,6 +28,9 @@ func TestValidateRedirectURI(t *testing.T) {
 		{"https no host", "https:///cb", false},
 		{"https with fragment", "https://app.example.com/cb#frag", false},
 		{"https with bare hash", "https://app.example.com/cb#", false},
+		{"https with userinfo user:pass", "https://user:pass@app.example.com/cb", false},
+		{"https with userinfo user only", "https://user@app.example.com/cb", false},
+		{"loopback with userinfo", "http://user@127.0.0.1/cb", false},
 		{"127.x non-loopback literal", "http://127.0.0.2/cb", false},
 	}
 	for _, c := range cases {

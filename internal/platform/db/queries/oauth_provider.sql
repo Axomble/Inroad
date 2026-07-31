@@ -1,6 +1,8 @@
 -- name: CreateOauthClient :one
--- Register a client (RFC 7591). client_secret_hash is NULL for a public PKCE
--- client. created_by_user_id / workspace_id are NULL for an anonymous registration.
+-- Register a client (RFC 7591). client_secret_hash is NULL for a public PKCE client.
+-- created_by_user_id / workspace_id carry the registering admin's user + workspace:
+-- registration is admin-authed, so both are populated for every API-minted client
+-- (the columns stay nullable only to avoid a breaking NOT NULL migration).
 INSERT INTO oauth_clients (
     client_id, client_secret_hash, client_name, redirect_uris, grant_types,
     response_types, scopes, client_type, token_endpoint_auth_method,
@@ -47,16 +49,19 @@ UPDATE oauth_authorization_requests SET consumed_at = now()
 WHERE consent_id = $1 AND user_id = $2 AND consumed_at IS NULL AND expires_at > now();
 
 -- name: GetOauthConsent :one
--- The remembered consent for (user, client), used to SKIP the consent screen when it
--- already covers the requested scopes.
-SELECT * FROM oauth_consents WHERE user_id = $1 AND client_id = $2;
+-- The remembered consent for (user, client) IN A SPECIFIC WORKSPACE, used to SKIP the
+-- consent screen only when it already covers the requested scopes FOR THE CURRENT
+-- workspace. Pinning on workspace_id is the anti-cross-tenant guard: a consent granted
+-- while active in workspace A must never satisfy an authorize running in workspace B.
+SELECT * FROM oauth_consents WHERE user_id = $1 AND client_id = $2 AND workspace_id = $3;
 
 -- name: UpsertOauthConsent :exec
--- Record/refresh a granted consent. One row per (user, client): a re-grant replaces
--- the stored scope set and stamps updated_at.
+-- Record/refresh a granted consent. One row per (user, client, workspace): a re-grant
+-- in the SAME workspace replaces the stored scope set and stamps updated_at; a grant in
+-- a different workspace is a separate row (consent is workspace-scoped).
 INSERT INTO oauth_consents (user_id, client_id, scopes, workspace_id)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (user_id, client_id)
+ON CONFLICT (user_id, client_id, workspace_id)
 DO UPDATE SET scopes = EXCLUDED.scopes, updated_at = now();
 
 -- name: CreateOauthAuthCode :exec

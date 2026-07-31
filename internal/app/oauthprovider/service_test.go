@@ -233,6 +233,28 @@ func TestAuthorizeRejectsNonCodeResponseType(t *testing.T) {
 	assertErrRedirect(t, res, "unsupported_response_type", "st-123")
 }
 
+func TestAuthorizeRejectsClientMissingCodeGrantOrResponseType(t *testing.T) {
+	// A client that registered ONLY the refresh_token grant must not obtain an
+	// authorization code, even though the request asks for response_type=code.
+	s, f := newTestService()
+	c := mustRegister(t, s, RegisterInput{
+		ClientName: "Refresh Only", RedirectURIs: []string{testRedirectURI},
+		Scope: "contacts:read", GrantTypes: []string{"refresh_token"},
+	})
+	res, _ := s.Authorize(context.Background(), baseAuthorize(c.Client.ClientID))
+	assertErrRedirect(t, res, "unauthorized_client", "st-123")
+
+	// A client whose registered response_types do not include `code` is likewise
+	// rejected (constructed directly: registration always defaults response_types to
+	// {code}, so this guards a hand-seeded / drifted row).
+	c2 := mustRegister(t, s, RegisterInput{ClientName: "No Code RT", RedirectURIs: []string{testRedirectURI}, Scope: "contacts:read"})
+	stored := f.clients[c2.Client.ClientID]
+	stored.ResponseTypes = []string{}
+	f.clients[c2.Client.ClientID] = stored
+	res2, _ := s.Authorize(context.Background(), baseAuthorize(c2.Client.ClientID))
+	assertErrRedirect(t, res2, "unauthorized_client", "st-123")
+}
+
 func TestAuthorizeRequiresPKCES256(t *testing.T) {
 	s, _ := newTestService()
 	c := mustRegister(t, s, RegisterInput{ClientName: "Acme", RedirectURIs: []string{testRedirectURI}, Scope: "contacts:read"})
@@ -361,6 +383,51 @@ func TestAuthorizePriorConsentSkipsToCode(t *testing.T) {
 	}
 }
 
+// TestAuthorizePriorConsentIsWorkspaceScoped proves a consent remembered while the user
+// was active in workspace A does NOT skip the consent screen for a workspace-B session:
+// the skip is pinned to the session workspace, so a B-session authorize must persist a
+// fresh consent request rather than mint a code bound to a workspace the user never
+// approved for this client (the cross-tenant consent-bypass guard).
+func TestAuthorizePriorConsentIsWorkspaceScoped(t *testing.T) {
+	s, f := newTestService()
+	c := mustRegister(t, s, RegisterInput{ClientName: "Acme", RedirectURIs: []string{testRedirectURI}, Scope: "contacts:read"})
+	uid := uuid.New()
+	wsA, wsB := uuid.New(), uuid.New()
+	// The user consented ONLY in workspace A.
+	f.seedConsent(uid, c.Client.ClientID, []string{"contacts:read"}, wsA)
+
+	// A workspace-B session, same client + scopes, must NOT skip: hand off to consent.
+	inB := baseAuthorize(c.Client.ClientID)
+	inB.Owner = &Owner{UserID: uid, WorkspaceID: wsB}
+	resB, err := s.Authorize(context.Background(), inB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resB.Outcome != OutcomeRedirect || !strings.HasPrefix(resB.RedirectTo, testPublicURL+consentPath) {
+		t.Fatalf("workspace-B session must require consent, got %s", resB.RedirectTo)
+	}
+	if len(f.codes) != 0 {
+		t.Fatal("no code may be minted for a consent remembered in another workspace")
+	}
+	u, _ := url.Parse(resB.RedirectTo)
+	req, ok := f.requests[u.Query().Get("consent_id")]
+	if !ok || req.WorkspaceID != wsB || req.UserID != uid {
+		t.Fatalf("B request not persisted for (uid, wsB): %+v", req)
+	}
+
+	// The workspace-A session still skips straight to a code.
+	inA := baseAuthorize(c.Client.ClientID)
+	inA.Owner = &Owner{UserID: uid, WorkspaceID: wsA}
+	resA, err := s.Authorize(context.Background(), inA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ua, _ := url.Parse(resA.RedirectTo)
+	if ua.Query().Get("code") == "" {
+		t.Fatalf("workspace-A session should skip to a code, got %s", resA.RedirectTo)
+	}
+}
+
 // --- Consent data + decision ------------------------------------------------
 
 // startConsent runs an authenticated authorize that produces a consent handoff and
@@ -427,8 +494,8 @@ func TestDecideApproveIssuesBoundCode(t *testing.T) {
 		stored.UserID != owner.UserID || stored.WorkspaceID != owner.WorkspaceID {
 		t.Fatal("approved code not bound to the request params")
 	}
-	// The remembered consent was recorded.
-	if _, ok := f.consents[consentKey(owner.UserID, c.Client.ClientID)]; !ok {
+	// The remembered consent was recorded (for this user+client IN this workspace).
+	if _, ok := f.consents[consentKey(owner.UserID, c.Client.ClientID, owner.WorkspaceID)]; !ok {
 		t.Fatal("approve must upsert the remembered consent")
 	}
 	// Single-use: a second approve on the consumed request fails.

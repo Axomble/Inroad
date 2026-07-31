@@ -991,16 +991,18 @@ paths:
     post:
       operationId: oauth2Register
       tags: [oauth2]
-      security: []
+      security: [{ bearerAuth: [] }]
       description: >-
-        RFC 7591 dynamic client registration. PUBLIC but rate-limited per client IP.
-        Public PKCE client by default (token_endpoint_auth_method omitted or "none",
-        no secret); request a client_secret_* method to get a confidential client
-        whose secret is returned in this response EXACTLY ONCE (only its SHA-256 is
-        stored). Each redirect_uri must be https (or a http loopback for native apps),
-        carry no fragment, and requested scopes must all be OAuth-grantable (no
-        admin/api-key/send scopes). When a session is present it is recorded so a
-        workspace admin can later list/revoke the client.
+        RFC 7591 dynamic client registration, restricted to an authenticated workspace
+        ADMIN (and rate-limited per client IP as defense-in-depth). The registering
+        admin's user + workspace are recorded on the client, so every client is
+        workspace-owned and listable/revocable through the admin API. Public PKCE client
+        by default (token_endpoint_auth_method omitted or "none", no secret); request a
+        client_secret_* method to get a confidential client whose secret is returned in
+        this response EXACTLY ONCE (only its SHA-256 is stored). Each redirect_uri must
+        be https (or an http loopback for native apps), carry no fragment and no
+        userinfo, and requested scopes must all be OAuth-grantable (no admin/api-key/send
+        scopes).
       requestBody:
         required: true
         content:
@@ -1013,6 +1015,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OAuth2Client' }
         '400': { description: Validation error (bad redirect_uri, non-grantable scope, unsupported grant/response type or auth method) }
+        '401': { description: Unauthorized }
+        '403': { description: Not an admin }
         '429': { description: Registration rate limit exceeded }
   /oauth2/authorize:
     servers: [{ url: / }]
