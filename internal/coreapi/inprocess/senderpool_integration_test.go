@@ -384,6 +384,109 @@ func TestFollowUpStepReusesThePinnedMailboxAfterThePoolChanges(t *testing.T) {
 	}
 }
 
+// Deleting a mailbox mid-sequence clears the enrollment's pin (ON DELETE SET
+// NULL) and CASCADEs its pool rows away. The thread's identity is gone, so the
+// enrollment must STOP — never re-resolve onto another mailbox, which would send
+// "Re:" from a new address referencing a Message-ID it never sent.
+func TestDeletedMailboxStopsTheThreadInsteadOfRerouting(t *testing.T) {
+	ctx, f := setupPool(t)
+	// B alone in the pool, so step 1 deterministically pins B. B is NOT
+	// campaigns.mailbox_id, which is what makes it deletable at all
+	// (campaigns_mailbox_tenant_fkey is ON DELETE RESTRICT).
+	f.addSender(t, ctx, f.mailboxB, 1, true)
+	enrollmentID := f.enroll(t, ctx)
+
+	// Step 1 pins the mailbox and delivers, so the thread has an identity.
+	first, err := f.core.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("first step: %v", err)
+	}
+	if first.MailboxID != f.mailboxB.String() {
+		t.Fatalf("first step mailbox = %s, want B %s", first.MailboxID, f.mailboxB)
+	}
+	if _, err := f.core.ClaimStepSend(ctx, first); err != nil {
+		t.Fatalf("claim step 1: %v", err)
+	}
+	if err := f.core.MarkStepDelivered(ctx, first, "<step1@acme.test>"); err != nil {
+		t.Fatalf("deliver step 1: %v", err)
+	}
+	if _, err := f.core.AdvanceStepCursor(ctx, first); err != nil {
+		t.Fatalf("advance cursor: %v", err)
+	}
+
+	// Put A in the pool too, so a re-resolve would have somewhere to go — the whole
+	// point is that it must NOT go there.
+	f.addSender(t, ctx, f.mailboxA, 100, true)
+
+	// The operator deletes the mailbox the thread was sending from: its pool row
+	// CASCADEs away and the enrollment's pin is SET NULL.
+	if _, err := f.pool.Exec(ctx, `DELETE FROM mailboxes WHERE id = $1`, f.mailboxB); err != nil {
+		t.Fatalf("delete mailbox: %v", err)
+	}
+	if got := f.storedMailbox(t, ctx, enrollmentID); got != uuid.Nil {
+		t.Fatalf("pin = %s after the delete, want cleared by ON DELETE SET NULL", got)
+	}
+
+	// The next advance must carry the stop, not a send.
+	second, err := f.core.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("second step: %v", err)
+	}
+	if !second.MailboxRemoved {
+		t.Fatalf("job = %+v, want MailboxRemoved", second)
+	}
+	if second.MailboxID != "" || second.SMTPPassword != nil || second.AccessToken != nil {
+		t.Error("the stop job resolved a sender or opened a credential")
+	}
+
+	// Drive the stop through the same entry point the worker uses.
+	if err := f.core.MarkStepStopped(ctx, enrollmentID.String(), f.ws.String(), "mailbox_removed"); err != nil {
+		t.Fatalf("MarkStepStopped: %v", err)
+	}
+	var status string
+	var reason *string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT status, stop_reason FROM sequence_enrollments WHERE id = $1`, enrollmentID,
+	).Scan(&status, &reason); err != nil {
+		t.Fatalf("read enrollment: %v", err)
+	}
+	if status != "stopped" || reason == nil || *reason != "mailbox_removed" {
+		t.Errorf("enrollment = %q/%v, want stopped/mailbox_removed", status, reason)
+	}
+	// No step-2 send row, and the surviving pool member (A) was never pinned.
+	var step2 int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM sends WHERE campaign_id = $1 AND step_order = 2`, f.campaignID,
+	).Scan(&step2); err != nil {
+		t.Fatalf("count step-2 sends: %v", err)
+	}
+	if step2 != 0 {
+		t.Errorf("step-2 send rows = %d, want none", step2)
+	}
+	if got := f.storedMailbox(t, ctx, enrollmentID); got != uuid.Nil {
+		t.Errorf("pinned %s (the surviving member is A %s) after the mailbox was deleted", got, f.mailboxA)
+	}
+}
+
+// A first send legitimately has no pin, so the deleted-mailbox rule must not fire
+// on it — otherwise every new enrollment would stop instead of sending.
+func TestUnpinnedFirstSendIsNotTreatedAsARemovedMailbox(t *testing.T) {
+	ctx, f := setupPool(t)
+	f.addSender(t, ctx, f.mailboxA, 1, true)
+	enrollmentID := f.enroll(t, ctx)
+
+	job, err := f.core.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob: %v", err)
+	}
+	if job.MailboxRemoved {
+		t.Fatal("a pre-first-send enrollment was mistaken for a deleted mailbox")
+	}
+	if job.MailboxID != f.mailboxA.String() {
+		t.Errorf("mailbox = %s, want A %s", job.MailboxID, f.mailboxA)
+	}
+}
+
 // A foreign workspace id must resolve nothing, even with a valid enrollment id.
 func TestSenderResolutionIsWorkspacePinned(t *testing.T) {
 	ctx, f := setupPool(t)

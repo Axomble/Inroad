@@ -49,6 +49,18 @@ ALTER TABLE campaigns
 ALTER TABLE sequence_enrollments
     ADD COLUMN mailbox_id UUID REFERENCES mailboxes(id) ON DELETE SET NULL;
 
+-- Extend the stop-reason CHECK (last set in 000014) with 'mailbox_removed'. The
+-- SET NULL above is a live hazard for a thread mid-flight: deleting a pool-only
+-- mailbox clears the pin, and a naive re-resolve would send "Re: <subject>"
+-- from a NEW address carrying In-Reply-To/References for a Message-ID that
+-- mailbox never sent — the exact broken-threading spam signal the pin exists to
+-- prevent. The thread's identity is gone, so the sequence stops with a reason of
+-- its own instead of continuing incorrectly.
+ALTER TABLE sequence_enrollments DROP CONSTRAINT sequence_enrollments_stop_reason_check;
+ALTER TABLE sequence_enrollments ADD CONSTRAINT sequence_enrollments_stop_reason_check
+    CHECK (stop_reason IS NULL OR stop_reason IN
+        ('replied','bounced','suppressed','manual','failed','unsubscribed','mailbox_removed'));
+
 -- Backfill: every existing campaign becomes a one-mailbox pool, so the API shows
 -- the mailbox it actually sends from rather than an empty pool.
 INSERT INTO campaign_senders (workspace_id, campaign_id, mailbox_id)

@@ -28,4 +28,10 @@ const (
 	// progress on: a degenerate mailbox cap of 0, or a cap-defer loop that has
 	// exceeded its ceiling without ever clearing.
 	StopFailed StopReason = "failed"
+	// StopMailboxRemoved halts an enrollment whose thread lost its sending
+	// mailbox: the mailbox was deleted mid-sequence, so sequence_enrollments.
+	// mailbox_id was cleared by ON DELETE SET NULL. Continuing would send a
+	// follow-up "Re:" from a different address, referencing a Message-ID that
+	// address never sent — so the sequence stops instead.
+	StopMailboxRemoved StopReason = "mailbox_removed"
 )

@@ -169,6 +169,25 @@ func TestAdvanceSuppressedStops(t *testing.T) {
 	}
 }
 
+// A thread whose sending mailbox was deleted must stop, not send a follow-up from
+// a different address referencing a Message-ID that address never sent. Note the
+// job carries no cap/transport at all — the control plane returns the stop before
+// resolving a sender — so the handler must act on MailboxRemoved BEFORE the
+// degenerate-cap branch, or the enrollment would stop as 'failed' instead.
+func TestAdvanceMailboxRemovedStops(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{MailboxRemoved: true}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if core.stopped != "mailbox_removed" {
+		t.Fatalf("want stop reason mailbox_removed, got %q", core.stopped)
+	}
+	if snd.called() || core.claimCalls != 0 || enq.atCalled || enq.inCalled {
+		t.Fatal("a thread with no mailbox must not be claimed, emailed, or re-enqueued")
+	}
+}
+
 func TestAdvanceOverCapReEnqueues(t *testing.T) {
 	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50}}
 	snd, enq := &fakeSender{}, &fakeEnq{}

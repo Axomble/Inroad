@@ -171,6 +171,18 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	if b.Status != string(enrollment.StatusActive) {
 		return coreapi.StepSendJob{Skip: true}, nil
 	}
+	// The thread lost its mailbox (deleted mid-sequence, see threadLostItsMailbox).
+	// Re-resolving would send the follow-up "Re:" from a DIFFERENT address,
+	// carrying In-Reply-To/References for a Message-ID that address never sent
+	// while thread_root_id still points at the dead thread — broken for the
+	// recipient and a spam signal. Stop instead, returning BEFORE a sender is
+	// resolved or any credential is opened, so nothing is sent and no mailbox is
+	// pinned.
+	if threadLostItsMailbox(b.CurrentStep, b.EnrollmentMailboxID) {
+		return coreapi.StepSendJob{
+			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), MailboxRemoved: true,
+		}, nil
+	}
 
 	// Resolve the next step by order rather than current_step+1: DeleteStep does
 	// not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep skips gaps;

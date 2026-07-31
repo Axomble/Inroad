@@ -38,6 +38,18 @@ type resolvedSender struct {
 	sentToday          int
 }
 
+// threadLostItsMailbox reports whether this enrollment's thread has lost the
+// mailbox it was sending from.
+//
+// An enrollment past step 1 ALWAYS has a pinned mailbox: every send pins one, and
+// migration 000032 backfilled every already-sent enrollment. So a cleared pin at
+// current_step > 0 can only be sequence_enrollments.mailbox_id's ON DELETE SET
+// NULL firing when the mailbox was deleted. current_step = 0 with no pin is the
+// normal pre-first-send state and is emphatically NOT this case.
+func threadLostItsMailbox(currentStep int32, pinned pgtype.UUID) bool {
+	return currentStep > 0 && !pinned.Valid
+}
+
 // resolveSender decides which mailbox this enrollment's next step sends from.
 //
 //  1. An enrollment that already has a mailbox keeps it. A follow-up step is a
