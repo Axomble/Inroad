@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"time"
 
@@ -94,7 +95,10 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (KeyView, string, 
 	}
 	var rate *int32
 	if in.RateLimitPerMin != nil {
-		if *in.RateLimitPerMin <= 0 {
+		// Reject the > MaxInt32 upper bound too: narrowing a larger value to int32
+		// wraps NEGATIVE, which the verifier's `> 0` check reads as "no cap" — the
+		// silent OPPOSITE of a caller asking for a very high limit.
+		if *in.RateLimitPerMin <= 0 || *in.RateLimitPerMin > math.MaxInt32 {
 			return KeyView{}, "", ErrInvalidRateLimit
 		}
 		v := int32(*in.RateLimitPerMin)

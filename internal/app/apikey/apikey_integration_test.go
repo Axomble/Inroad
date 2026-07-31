@@ -42,6 +42,10 @@ func setup(t *testing.T) (*PgStore, *Service, *Verifier, func() (uuid.UUID, uuid
 	store := NewPgStore(pool)
 	svc := NewService(store)
 	verifier := NewVerifier(store, &fakeLimiter{allow: true}, nil)
+	// Synchronous touch in tests: the production async goroutine can outlive the
+	// pool Cleanup below and log a "closed pool" WARN. Awaiting it here keeps
+	// integration logs clean without changing production's fire-and-forget stamp.
+	verifier.touch = func(id uuid.UUID) { _ = store.TouchLastUsed(context.Background(), id) }
 
 	mint := func() (uuid.UUID, uuid.UUID) {
 		var ws, uid uuid.UUID

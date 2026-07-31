@@ -16,6 +16,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
 // verifierStore is the narrow persistence seam the verifier needs
@@ -43,21 +44,27 @@ type RateLimiter interface {
 type Verifier struct {
 	store   verifierStore
 	limiter RateLimiter
-	ip      clientIPResolver
+	ip      httpx.ClientIPResolver
 	// now is overridable in tests for deterministic expiry checks.
 	now func() time.Time
+	// touch stamps last_used_at for a verified key. Production wires the
+	// fire-and-forget async default (touchAsync); tests may inject a synchronous
+	// stub so a pending goroutine can't outlive a closing pool.
+	touch func(id uuid.UUID)
 }
 
 // NewVerifier builds a Verifier. limiter may be a no-op only in tests that never
 // set a per-key rate limit; production always wires a real limiter. trustedProxies
 // scopes which peers may set X-Forwarded-For for the IP-allowlist check.
 func NewVerifier(store verifierStore, limiter RateLimiter, trustedProxies []string) *Verifier {
-	return &Verifier{
+	v := &Verifier{
 		store:   store,
 		limiter: limiter,
-		ip:      newClientIPResolver(trustedProxies),
+		ip:      httpx.NewClientIPResolver(trustedProxies),
 		now:     time.Now,
 	}
+	v.touch = v.touchAsync
+	return v
 }
 
 // Verify implements auth.Verifier. See the type doc for engage-vs-defer; every
@@ -99,7 +106,7 @@ func (v *Verifier) Verify(ctx context.Context, r *http.Request) (auth.Principal,
 
 	// IP allowlist (fail-closed): when set, the resolved client IP must fall inside
 	// a listed CIDR. An indeterminate client IP with an allowlist present is denied.
-	if len(key.IpAllowlist) > 0 && !ipAllowed(v.ip.resolve(r), key.IpAllowlist) {
+	if len(key.IpAllowlist) > 0 && !ipAllowed(v.ip.ClientIP(r), key.IpAllowlist) {
 		return auth.Principal{}, false, auth.ErrUnauthorized
 	}
 
@@ -127,10 +134,10 @@ func (v *Verifier) Verify(ctx context.Context, r *http.Request) (auth.Principal,
 	}, true, nil
 }
 
-// touch stamps last_used_at off the request path. It is fire-and-forget with a
-// bounded timeout: a slow or failed update must never delay or fail an otherwise
-// authenticated request.
-func (v *Verifier) touch(id uuid.UUID) {
+// touchAsync stamps last_used_at off the request path. It is fire-and-forget with
+// a bounded timeout: a slow or failed update must never delay or fail an otherwise
+// authenticated request. It is the production default for v.touch.
+func (v *Verifier) touchAsync(id uuid.UUID) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -45,12 +46,7 @@ func (p Principal) HasScope(scope string) bool {
 	if p.Kind == KindSession {
 		return true
 	}
-	for _, s := range p.Scopes {
-		if s == scope {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(p.Scopes, scope)
 }
 
 // ErrUnauthorized is the sentinel a Verifier returns for a DEFINITIVE

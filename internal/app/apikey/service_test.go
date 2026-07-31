@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,16 @@ func TestCreateValidatesAllowlistExpiryAndRate(t *testing.T) {
 	bad.RateLimitPerMin = &zero
 	if _, _, err := svc.Create(context.Background(), bad); !errors.Is(err, ErrInvalidRateLimit) {
 		t.Fatalf("zero rate: err = %v, want ErrInvalidRateLimit", err)
+	}
+
+	// A rate above MaxInt32 would wrap NEGATIVE on narrowing to int32 and be read
+	// as "unlimited" by the verifier — the guard must reject it, not silently
+	// disable the cap.
+	tooBig := math.MaxInt32 + 1
+	bad = ok
+	bad.RateLimitPerMin = &tooBig
+	if _, _, err := svc.Create(context.Background(), bad); !errors.Is(err, ErrInvalidRateLimit) {
+		t.Fatalf("overflow rate: err = %v, want ErrInvalidRateLimit", err)
 	}
 }
 

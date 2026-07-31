@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/netip"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -44,14 +42,14 @@ type TwoFactorGate interface {
 // Handler exposes the identity domain (register/login/refresh/logout,
 // session introspection + management, and workspace switching) over HTTP.
 type Handler struct {
-	svc            *Service
-	jwtSecret      []byte
-	accessTTL      time.Duration
-	refreshTTL     time.Duration
-	cookieSecure   bool
-	cookieDomain   string
-	trustedProxies []*net.IPNet
-	buster         sessionCacheBuster
+	svc          *Service
+	jwtSecret    []byte
+	accessTTL    time.Duration
+	refreshTTL   time.Duration
+	cookieSecure bool
+	cookieDomain string
+	ipResolver   httpx.ClientIPResolver
+	buster       sessionCacheBuster
 	// gate (may be nil) is consulted on login to interpose the 2FA challenge for
 	// users with a confirmed second factor. Nil disables the gate entirely (every
 	// user logs in with password alone) — the shape before P2 and in unit tests.
@@ -61,20 +59,16 @@ type Handler struct {
 // NewHandler constructs a Handler backed by svc. accessTTL/refreshTTL size
 // the access token and refresh cookie lifetimes; cookieSecure/cookieDomain
 // control the cookie attributes (Secure should be true outside local dev).
-// trustedProxies is the CIDR list whose X-Forwarded-For / X-Real-IP the
-// handler will honor; unparsable entries are silently dropped (loudness
-// belongs in cmd startup, not per-request). buster (may be nil) invalidates
-// the verifier's session-auth cache when a session is revoked in-process.
+// trustedProxies is the CIDR list whose X-Forwarded-For the handler will honor
+// (via the shared httpx resolver); unparsable entries are silently dropped
+// (loudness belongs in cmd startup, not per-request). buster (may be nil)
+// invalidates the verifier's session-auth cache when a session is revoked
+// in-process.
 func NewHandler(svc *Service, jwtSecret []byte, accessTTL, refreshTTL time.Duration, cookieSecure bool, cookieDomain string, trustedProxies []string, buster sessionCacheBuster, gate TwoFactorGate) *Handler {
-	nets := make([]*net.IPNet, 0, len(trustedProxies))
-	for _, c := range trustedProxies {
-		if _, n, err := net.ParseCIDR(c); err == nil {
-			nets = append(nets, n)
-		}
-	}
 	return &Handler{
 		svc: svc, jwtSecret: jwtSecret, accessTTL: accessTTL, refreshTTL: refreshTTL,
-		cookieSecure: cookieSecure, cookieDomain: cookieDomain, trustedProxies: nets, buster: buster, gate: gate,
+		cookieSecure: cookieSecure, cookieDomain: cookieDomain,
+		ipResolver: httpx.NewClientIPResolver(trustedProxies), buster: buster, gate: gate,
 	}
 }
 
@@ -101,67 +95,20 @@ type sessionResponse struct {
 	Memberships       []membershipDTO `json:"memberships"`
 }
 
-// clientMeta extracts the user-agent and bare client IP from the request.
-// RemoteAddr is "host:port" (or "[ipv6]:port"); the service's parseIP wants
-// a bare IP (an IP with a stray port fails to parse and is stored as NULL),
-// so the port is stripped here before it ever reaches the service layer.
-// net.SplitHostPort correctly unwraps bracketed IPv6 addresses, unlike a
-// naive split on ":" which mangles them (an IPv6 address itself contains
-// colons). If RemoteAddr has no port (or isn't in host:port form), fall
-// back to using it as-is.
-//
-// When RemoteAddr matches one of h.trustedProxies, X-Forwarded-For's
-// leftmost IP (or, absent that, X-Real-IP) is preferred — behind a reverse
-// proxy those headers carry the original client. Trusting them
-// unconditionally would let any caller spoof their IP, so trust is opt-in
-// via INROAD_TRUSTED_PROXIES.
+// clientMeta extracts the user-agent and bare client IP from the request. The IP
+// is resolved by the shared httpx resolver, which walks X-Forwarded-For from the
+// RIGHT past trusted-proxy hops (INROAD_TRUSTED_PROXIES) — so behind a reverse
+// proxy the original client is used, and an untrusted peer's forged header is
+// ignored. An indeterminate address yields "" (stored as NULL) rather than a
+// mangled value. This is logging / 2FA-throttle metadata, not an access-control
+// boundary.
 func (h *Handler) clientMeta(r *http.Request) (ua, ip string) {
-	direct := remoteIPOnly(r.RemoteAddr)
-	if h.isTrustedProxy(direct) {
-		if v := r.Header.Get("X-Forwarded-For"); v != "" {
-			// Leftmost = original client; anything to the right is a hop.
-			if i := indexComma(v); i > 0 {
-				return r.UserAgent(), trimSpace(v[:i])
-			}
-			return r.UserAgent(), trimSpace(v)
-		}
-		if v := r.Header.Get("X-Real-IP"); v != "" {
-			return r.UserAgent(), trimSpace(v)
-		}
+	addr := h.ipResolver.ClientIP(r)
+	if !addr.IsValid() {
+		return r.UserAgent(), ""
 	}
-	return r.UserAgent(), direct
+	return r.UserAgent(), addr.String()
 }
-
-// remoteIPOnly strips the port from a RemoteAddr, or returns it unchanged
-// if no port is present (e.g. a fuzz-test injecting a bare IP).
-func remoteIPOnly(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		return remoteAddr
-	}
-	return host
-}
-
-func (h *Handler) isTrustedProxy(ipStr string) bool {
-	if ipStr == "" || len(h.trustedProxies) == 0 {
-		return false
-	}
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	for _, n := range h.trustedProxies {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// indexComma returns the index of the first comma in s, or -1 if none.
-func indexComma(s string) int { return strings.IndexByte(s, ',') }
-
-func trimSpace(s string) string { return strings.TrimSpace(s) }
 
 func toMembershipDTOs(mems []Membership) []membershipDTO {
 	dto := make([]membershipDTO, len(mems))

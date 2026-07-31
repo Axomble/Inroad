@@ -90,9 +90,10 @@ type Config struct {
 	// falls back to env-based defaults (debug in development, info elsewhere).
 	LogLevel string
 
-	// TrustedProxies is a list of CIDRs whose X-Forwarded-For / X-Real-IP
-	// headers the app will trust. Empty = trust none (default). Only the
-	// leftmost IP of X-Forwarded-For is consumed.
+	// TrustedProxies is a list of CIDRs whose X-Forwarded-For header the app will
+	// trust. Empty = trust none (default): the direct peer address is used. When a
+	// direct peer falls in this set, the client is the RIGHTMOST XFF entry that is
+	// not itself a listed proxy (see platform/httpx.ClientIPResolver).
 	TrustedProxies []string
 
 	// TransactionalDriver selects the notify.Sender used for system email:
