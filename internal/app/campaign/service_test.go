@@ -231,8 +231,10 @@ func TestLaunchRejectsEmptyList(t *testing.T) {
 }
 
 func TestLaunchSucceeds(t *testing.T) {
-	// Distinct next_due_at per enrollment (the staggered values EnrollListMembers
-	// assigns) so the alignment assertion below is meaningful.
+	// NextDueAt here is the placeholder EnrollListMembers now returns; Launch
+	// overwrites it with a cadence instant. Distinct values make it visible if the
+	// launcher ever went back to enqueuing against the insert's value instead of
+	// the one it stamped.
 	base := time.Now()
 	enrollments := []Enrollment{
 		{ID: uuid.New(), NextDueAt: base},
