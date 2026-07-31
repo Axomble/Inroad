@@ -3,6 +3,7 @@ package sequencestep
 import (
 	"github.com/go-chi/chi/v5"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -12,14 +13,19 @@ import (
 // inherit the campaign router's auth middleware — chi does not allow two
 // routers mounted at the same prefix.
 func (h *Handler) Register(r chi.Router) {
-	r.Get("/{id}/steps", h.List)
-	r.Post("/{id}/steps", h.Create)
+	// Steps are part of a campaign, so they share the campaign scopes: listing needs
+	// campaigns:read, structural edits campaigns:write. Transparent to session
+	// principals (they hold every scope).
+	read := auth.RequireScope(auth.ScopeCampaignsRead)
+	write := auth.RequireScope(auth.ScopeCampaignsWrite)
+	r.With(read).Get("/{id}/steps", h.List)
+	r.With(write).Post("/{id}/steps", h.Create)
 	// Static /reorder is registered alongside the /{stepId} wildcard; chi
 	// prefers the literal segment, so POST .../steps/reorder never resolves to
 	// the {stepId} routes (which are PUT/DELETE anyway).
-	r.Post("/{id}/steps/reorder", h.Reorder)
-	r.Put("/{id}/steps/{stepId}", h.Update)
-	r.Delete("/{id}/steps/{stepId}", h.Delete)
+	r.With(write).Post("/{id}/steps/reorder", h.Reorder)
+	r.With(write).Put("/{id}/steps/{stepId}", h.Update)
+	r.With(write).Delete("/{id}/steps/{stepId}", h.Delete)
 }
 
 type stepResponse struct {

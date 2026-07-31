@@ -13,14 +13,17 @@ import (
 // introspection/management and workspace switching. verifier authenticates the
 // access token for the protected group.
 //
-// twofa and passkeys (either may be nil) are the twofa and passkey domain routers,
-// mounted at "/2fa" and "/passkeys" so their paths land under /api/v1/auth/2fa and
-// /api/v1/auth/passkeys. They are mounted here rather than at the top router because
-// chi cannot mount a deeper prefix alongside the /api/v1/auth mount that already
-// owns this subtree. Passed as bare http.Handlers so identity never imports those
-// packages (the app-packages-don't-import-each-other invariant); the composition
-// root supplies the concrete routers.
-func (h *Handler) Routes(verifier auth.Verifier, twofa, passkeys http.Handler) http.Handler {
+// twofa, passkeys, and apikeys (any may be nil) are the twofa, passkey, and
+// api-key domain routers, mounted at "/2fa", "/passkeys", and "/api-keys" so their
+// paths land under /api/v1/auth/2fa, /api/v1/auth/passkeys, and
+// /api/v1/auth/api-keys. They are mounted here rather than at the top router
+// because chi cannot mount a deeper prefix alongside the /api/v1/auth mount that
+// already owns this subtree. Passed as bare http.Handlers so identity never imports
+// those packages (the app-packages-don't-import-each-other invariant); the
+// composition root supplies the concrete routers. api-key management is
+// session-authed (its own router wraps RequireAuth with the session verifier), so a
+// key can never mint or revoke keys.
+func (h *Handler) Routes(verifier auth.Verifier, twofa, passkeys, apikeys http.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Post("/register", h.register)
 	r.Post("/login", h.login)
@@ -29,6 +32,9 @@ func (h *Handler) Routes(verifier auth.Verifier, twofa, passkeys http.Handler) h
 	}
 	if passkeys != nil {
 		r.Mount("/passkeys", passkeys)
+	}
+	if apikeys != nil {
+		r.Mount("/api-keys", apikeys)
 	}
 	r.With(auth.RequireCSRF).Post("/refresh", h.refresh)
 	r.With(auth.RequireCSRF).Post("/logout", h.logout)

@@ -22,14 +22,19 @@ type SubRouter interface{ Register(r chi.Router) }
 func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r := chi.NewRouter()
 
-	r.With(auth.RequireVerified(checker)).Post("/", h.connect)
-	r.With(auth.RequireVerified(checker)).Post("/oauth/google/start", h.startGoogleOAuth)
-	r.With(auth.RequireVerified(checker)).Post("/oauth/microsoft/start", h.startMicrosoftOAuth)
-	r.Get("/", h.list)
-	r.Get("/{id}", h.get)
-	r.Post("/{id}/pause", h.pause)
-	r.Post("/{id}/resume", h.resume)
-	r.Delete("/{id}", h.delete)
+	// RequireScope attenuates machine (api-key) principals to their granted scopes;
+	// a session principal implicitly holds every scope, so these are transparent to
+	// human callers. Read routes need mailboxes:read, mutating routes mailboxes:write.
+	write := auth.RequireScope(auth.ScopeMailboxesWrite)
+	read := auth.RequireScope(auth.ScopeMailboxesRead)
+	r.With(write, auth.RequireVerified(checker)).Post("/", h.connect)
+	r.With(write, auth.RequireVerified(checker)).Post("/oauth/google/start", h.startGoogleOAuth)
+	r.With(write, auth.RequireVerified(checker)).Post("/oauth/microsoft/start", h.startMicrosoftOAuth)
+	r.With(read).Get("/", h.list)
+	r.With(read).Get("/{id}", h.get)
+	r.With(write).Post("/{id}/pause", h.pause)
+	r.With(write).Post("/{id}/resume", h.resume)
+	r.With(write).Delete("/{id}", h.delete)
 	for _, s := range h.subs {
 		s.Register(r)
 	}

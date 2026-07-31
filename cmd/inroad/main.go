@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/apikey"
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
@@ -36,6 +37,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/ratelimit"
 )
 
 func main() {
@@ -151,6 +153,17 @@ func run() error {
 
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
+
+	// Scoped API keys. The verifier authenticates `inrd_` tokens on the data-plane
+	// REST surface (attenuated to the key's granted scopes via RequireScope); the
+	// management handler (create/list/revoke) is session-authed and mounts under
+	// /api/v1/auth/api-keys. The per-key rate limit uses an atomic Redis window on
+	// the same instance the queue runs on, failing closed if Redis is unreachable.
+	apiKeyLimiter := ratelimit.NewRedisLimiter(cfg.RedisAddr)
+	defer func() { _ = apiKeyLimiter.Close() }()
+	apiKeyStore := apikey.NewPgStore(pool)
+	apiKeyHandler := apikey.NewHandler(apikey.NewService(apiKeyStore))
+	apiKeyVerifier := apikey.NewVerifier(apiKeyStore, apiKeyLimiter, cfg.TrustedProxies)
 	listSvc := list.NewService(list.NewPgStore(queries))
 	// contact takes only a small ListChecker interface (not the whole list
 	// service) so the contact package doesn't have to import app/list —
@@ -182,7 +195,7 @@ func run() error {
 	//               route mounted here is authenticated by default, so a new
 	//               domain that forgets its own middleware still fails closed.
 	public := []mount{
-		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier, twofaHandler.Routes(sessionVerifier), passkeyHandler.Routes(sessionVerifier))},
+		{pattern: "/api/v1/auth", handler: identHandler.Routes(sessionVerifier, twofaHandler.Routes(sessionVerifier), passkeyHandler.Routes(sessionVerifier), apiKeyHandler.Routes(sessionVerifier))},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
@@ -192,7 +205,11 @@ func run() error {
 		// cookie, so they mount here rather than the protected group.
 		{pattern: "/oauth", handler: mbHandler.CallbackRoutes()},
 	}
-	protected := []mount{
+	// The data-plane REST surface accepts EITHER a session or an api-key credential.
+	// The api-key verifier runs first and DEFERS on a non-`inrd_` token, so a JWT
+	// falls through to the session verifier; an api-key principal is then attenuated
+	// to its granted scopes by each route's RequireScope (a session holds all scopes).
+	dataPlane := []mount{
 		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},
 		{pattern: "/api/v1/lists", handler: list.NewHandler(listSvc).Routes()},
 		// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
@@ -200,17 +217,25 @@ func run() error {
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
-		// /campaigns/{id}/steps lives under the protected group and inherits its
-		// RequireAuth. Routes(identStore) additionally applies RequireVerified to
-		// /launch (email-gated sending).
+		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
+		// Routes(identStore) additionally applies RequireVerified to /launch
+		// (email-gated sending).
 		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes(identStore)},
+	}
+	// Session-only surface: workspace administration and the warmup overview are not
+	// part of the api-key contract, so they authenticate with the session verifier
+	// alone — an `inrd_` token presented here is rejected 401 (fail closed).
+	sessionOnly := []mount{
 		{pattern: "/api/v1/workspaces", handler: identHandler.InviteRoutes()},
 		// Workspace-level warmup overview. The per-mailbox warmup routes
 		// (/mailboxes/{id}/warmup) are registered as a sub-router of the mailbox
 		// mount above, not here.
 		{pattern: "/api/v1/warmup", handler: warmupHandler.Routes()},
 	}
-	router := buildRouter(logger, sessionVerifier, public, protected)
+	router := buildRouter(logger, public, []protectedGroup{
+		{verifiers: []auth.Verifier{apiKeyVerifier, sessionVerifier}, mounts: dataPlane},
+		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
+	})
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
 	logger.Info("api listening", "addr", cfg.HTTPAddr)
@@ -227,22 +252,33 @@ type mount struct {
 	handler http.Handler
 }
 
+// protectedGroup is a set of mounts sharing one authentication chain: the group
+// root wraps them once in auth.RequireAuth(verifiers...). Different groups can
+// accept different credentials (e.g. the data plane adds the api-key verifier
+// ahead of the session verifier).
+type protectedGroup struct {
+	verifiers []auth.Verifier
+	mounts    []mount
+}
+
 // buildRouter assembles the API router with a deny-by-default posture. Public
-// mounts are served as-is; every protected mount is wrapped once, at the group
-// root, by auth.RequireAuth(verifier). A route added under the protected group
+// mounts are served as-is; every protected group is wrapped once, at its group
+// root, by auth.RequireAuth(verifiers...). A route added under a protected group
 // is therefore authenticated whether or not it wires up any middleware of its
 // own -- forgetting a per-domain guard can no longer expose a route.
-func buildRouter(logger *slog.Logger, verifier auth.Verifier, public, protected []mount) *chi.Mux {
+func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup) *chi.Mux {
 	r := httpx.NewRouter(logger)
 	for _, m := range public {
 		r.Mount(m.pattern, m.handler)
 	}
-	r.Group(func(pr chi.Router) {
-		pr.Use(auth.RequireAuth(verifier))
-		for _, m := range protected {
-			pr.Mount(m.pattern, m.handler)
-		}
-	})
+	for _, g := range groups {
+		r.Group(func(pr chi.Router) {
+			pr.Use(auth.RequireAuth(g.verifiers...))
+			for _, m := range g.mounts {
+				pr.Mount(m.pattern, m.handler)
+			}
+		})
+	}
 	return r
 }
 

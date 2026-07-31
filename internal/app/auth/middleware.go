@@ -84,9 +84,12 @@ func RequireAuth(verifiers ...Verifier) func(http.Handler) http.Handler {
 			for _, v := range verifiers {
 				p, ok, err := v.Verify(r.Context(), r)
 				if err != nil {
-					if errors.Is(err, ErrUnauthorized) {
+					switch {
+					case errors.Is(err, ErrRateLimited):
+						httpx.Error(w, http.StatusTooManyRequests, "rate limited")
+					case errors.Is(err, ErrUnauthorized):
 						httpx.Error(w, http.StatusUnauthorized, "invalid token")
-					} else {
+					default:
 						httpx.Error(w, http.StatusInternalServerError, "auth check failed")
 					}
 					return

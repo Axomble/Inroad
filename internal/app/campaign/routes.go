@@ -23,12 +23,17 @@ type SubRouter interface{ Register(r chi.Router) }
 // being mounted under /campaigns.
 func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r := chi.NewRouter()
-	r.Post("/", h.create)
-	r.Get("/", h.list)
-	r.Get("/{id}", h.get)
-	r.Get("/{id}/enrollments", h.listEnrollments)
-	r.With(auth.RequireVerified(checker)).Post("/{id}/launch", h.launch)
-	r.Put("/{id}/tracking", h.toggleTracking)
+	// RequireScope attenuates machine (api-key) principals to their granted scopes;
+	// a session principal implicitly holds every scope, so these are transparent to
+	// human callers. Launch requires the dedicated campaigns:send scope.
+	read := auth.RequireScope(auth.ScopeCampaignsRead)
+	write := auth.RequireScope(auth.ScopeCampaignsWrite)
+	r.With(write).Post("/", h.create)
+	r.With(read).Get("/", h.list)
+	r.With(read).Get("/{id}", h.get)
+	r.With(read).Get("/{id}/enrollments", h.listEnrollments)
+	r.With(auth.RequireScope(auth.ScopeCampaignsSend), auth.RequireVerified(checker)).Post("/{id}/launch", h.launch)
+	r.With(write).Put("/{id}/tracking", h.toggleTracking)
 	for _, s := range h.subs {
 		s.Register(r)
 	}

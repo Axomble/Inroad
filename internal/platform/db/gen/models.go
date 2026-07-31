@@ -183,6 +183,22 @@ func (ns NullUserTokenKind) Value() (driver.Value, error) {
 	return string(ns.UserTokenKind), nil
 }
 
+type ApiKey struct {
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	CreatedByUserID pgtype.UUID        `json:"created_by_user_id"`
+	Name            string             `json:"name"`
+	Prefix          string             `json:"prefix"`
+	SecretHash      []byte             `json:"secret_hash"`
+	Scopes          []string           `json:"scopes"`
+	IpAllowlist     []string           `json:"ip_allowlist"`
+	RateLimitPerMin *int32             `json:"rate_limit_per_min"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type Campaign struct {
 	ID              uuid.UUID          `json:"id"`
 	WorkspaceID     uuid.UUID          `json:"workspace_id"`

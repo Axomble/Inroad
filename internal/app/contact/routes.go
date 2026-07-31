@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/inroad/inroad/internal/app/auth"
 )
 
 // Routes returns this domain's HTTP surface, mounted by the server at
@@ -18,7 +20,9 @@ import (
 // Auth is enforced by the protected router group, not here.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Post("/import", h.importCSV)
-	r.Get("/", h.listContacts)
+	// RequireScope attenuates machine (api-key) principals; a session principal
+	// implicitly holds every scope.
+	r.With(auth.RequireScope(auth.ScopeContactsWrite)).Post("/import", h.importCSV)
+	r.With(auth.RequireScope(auth.ScopeContactsRead)).Get("/", h.listContacts)
 	return r
 }
