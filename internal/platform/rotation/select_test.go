@@ -141,6 +141,109 @@ func TestSelectWeightedFavoursTheOlderMailbox(t *testing.T) {
 	}
 }
 
+// The single-factor tests above each vary one term with the others held equal, so
+// they would all still pass if the RELATIVE magnitude of the terms drifted — a
+// health factor that swamped remaining capacity, or an age term that swamped an
+// explicit operator weight, would go unnoticed. These cases put two factors in
+// direct opposition and pin the trade-off, including from both sides of each
+// break-even so a change in either direction fails.
+//
+// Scores for reference (weight × remaining × health × (1 + log2(age+1))):
+// health is 1.0 / 0.7 / 0.4 / 0.1 and the age term spans 1.0 at day 0 to ~9.5 at
+// a year, so age is a heavier term than its "tie-breaker" appearance suggests.
+func TestSelectWeightedResolvesConflictingFactors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		why  string
+		a, b Candidate
+		want string
+	}{
+		{
+			name: "operator weight outranks a capacity edge",
+			// 500 vs 40. A 100:1 weight is the operator saying "send from this one";
+			// an 8x capacity edge must not overrule an instruction that explicit.
+			// Concentration stays bounded anyway — A drops out of the eligible set
+			// after its remaining 5 sends.
+			a:    Candidate{MailboxID: "heavy", Weight: 100, RemainingToday: 5},
+			b:    Candidate{MailboxID: "roomy", Weight: 1, RemainingToday: 40},
+			want: "heavy",
+		},
+		{
+			name: "a large enough capacity edge outranks a modest weight",
+			// 50 vs 60. The other side of the same break-even: weight is a
+			// preference, not a lexicographic priority, so 12x the capacity beats a
+			// 10x weight. Without this the first case could pass on a formula that
+			// ignored capacity entirely.
+			a:    Candidate{MailboxID: "preferred", Weight: 10, RemainingToday: 5},
+			b:    Candidate{MailboxID: "spacious", Weight: 1, RemainingToday: 60},
+			want: "spacious",
+		},
+		{
+			name: "an aged watch-listed mailbox beats a brand-new healthy one",
+			// 20 vs 125. 'watch' is a mild degradation; a mailbox connected today has
+			// no sending reputation at all. The one with a month of history and more
+			// room is genuinely better able to carry cold volume.
+			a:    Candidate{MailboxID: "fresh-healthy", Weight: 1, RemainingToday: 20, HealthState: "healthy"},
+			b:    Candidate{MailboxID: "aged-watch", Weight: 1, RemainingToday: 30, HealthState: healthWatch, WarmupAgeDays: 30},
+			want: "aged-watch",
+		},
+		{
+			name: "health outranks a 5x capacity edge",
+			// 5 vs 10. The regression guard that matters most: a paused mailbox must
+			// not win on volume alone. health 0.1 puts the break-even at 10x capacity,
+			// so 5x is not enough.
+			a:    Candidate{MailboxID: "paused-roomy", Weight: 1, RemainingToday: 50, HealthState: healthPaused},
+			b:    Candidate{MailboxID: "healthy-tight", Weight: 1, RemainingToday: 10, HealthState: "healthy"},
+			want: "healthy-tight",
+		},
+		{
+			name: "a paused mailbox past the 10x break-even still wins",
+			// 20 vs 3. Deliberate: health WEIGHTS selection, it does not gate it
+			// (gating is out of scope), and a pool must still send when its healthy
+			// member has 3 sends left. See the report note — whether 10x is the right
+			// threshold is a product question, not a formula bug.
+			a:    Candidate{MailboxID: "paused-roomy", Weight: 1, RemainingToday: 200, HealthState: healthPaused},
+			b:    Candidate{MailboxID: "healthy-nearly-full", Weight: 1, RemainingToday: 3, HealthState: "healthy"},
+			want: "paused-roomy",
+		},
+		{
+			name: "an explicit weight outranks a year of age",
+			// 500 vs 95. The specific inversion to guard: the age term maxes out
+			// around 9.5x, so it must never overrule a 50:1 operator weight.
+			a:    Candidate{MailboxID: "weighted", Weight: 50, RemainingToday: 10},
+			b:    Candidate{MailboxID: "veteran", Weight: 1, RemainingToday: 10, WarmupAgeDays: 365},
+			want: "weighted",
+		},
+		{
+			name: "age outranks a token weight bump",
+			// 20 vs 95. The other side: nudging a weight from 1 to 2 does not
+			// out-rank a year of sending history, so age stays meaningful.
+			a:    Candidate{MailboxID: "nudged", Weight: 2, RemainingToday: 10},
+			b:    Candidate{MailboxID: "veteran", Weight: 1, RemainingToday: 10, WarmupAgeDays: 365},
+			want: "veteran",
+		},
+		{
+			name: "healthy and new beats paused and aged at equal capacity",
+			// 20 vs 11.9. Age must not rehabilitate a paused mailbox: at equal
+			// capacity the healthy one wins even with no history at all.
+			a:    Candidate{MailboxID: "fresh-healthy", Weight: 1, RemainingToday: 20, HealthState: "healthy"},
+			b:    Candidate{MailboxID: "aged-paused", Weight: 1, RemainingToday: 20, HealthState: healthPaused, WarmupAgeDays: 30},
+			want: "fresh-healthy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Select(ModeWeighted, []Candidate{tc.a, tc.b})
+			if err != nil {
+				t.Fatalf("Select: %v", err)
+			}
+			if got.MailboxID != tc.want {
+				t.Errorf("winner = %q, want %q (scores: %s=%.2f %s=%.2f)",
+					got.MailboxID, tc.want, tc.a.MailboxID, score(tc.a), tc.b.MailboxID, score(tc.b))
+			}
+		})
+	}
+}
+
 // Two identical candidates must resolve the same way every time and regardless of
 // slice order, or two concurrent assigners would disagree before the write-once
 // claim ever arbitrates.
