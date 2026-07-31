@@ -21,9 +21,10 @@ import (
 // These tests drive the PgStore against a real Postgres to prove the SQL-level
 // invariants the passkey service leans on: signature-counter forward-only advance
 // (clone/replay defense), single-use + TTL'd challenges, own-only deletion, and the
-// unique-credential constraint. The full browser WebAuthn ceremony (register →
-// login → session) requires a software authenticator and is integration-deferred;
-// the clone DECISION is proven deterministically in TestCloneDetectionSemantics.
+// unique-credential constraint. The full WebAuthn ceremony (register → login →
+// session) over the real protocol is covered by TestWebAuthnCeremonyEndToEnd (a
+// software authenticator); the clone DECISION is proven deterministically in
+// TestCloneDetectionSemantics.
 
 func dsn() string {
 	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {

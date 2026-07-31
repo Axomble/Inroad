@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -234,10 +236,19 @@ func (s *Service) FinishLogin(ctx context.Context, sessionID string, assertionJS
 	handler := func(rawID, _ []byte) (webauthn.User, error) {
 		row, err := s.store.GetCredentialByCredentialID(ctx, rawID)
 		if err != nil {
+			// The library flattens whatever we return here into an undifferentiated
+			// auth failure (a flat 401, no credential-existence oracle) — so the real
+			// cause is otherwise invisible. An unknown credential is an expected miss;
+			// anything else is real infrastructure trouble (e.g. a DB outage) an
+			// operator must be able to see, so log it server-side (no secrets).
+			if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("passkey: resolve credential for login failed", "err", err)
+			}
 			return nil, err
 		}
 		rows, err := s.store.ListCredentialsByUser(ctx, row.UserID)
 		if err != nil {
+			slog.Error("passkey: list credentials for login failed", "err", err)
 			return nil, err
 		}
 		resolvedUserID = row.UserID

@@ -1016,14 +1016,14 @@ components:
           description: Optional friendly name for the passkey (registration only).
     PasskeyInfo:
       type: object
-      required: [id, label, created_at]
+      required: [id, label, transports, created_at]
       properties:
         id: { type: string, format: uuid }
         label: { type: string }
         transports:
           type: array
           items: { type: string }
-          description: Advisory transport hints (e.g. internal, hybrid).
+          description: Advisory transport hints (e.g. internal, hybrid). Always present; empty when none.
         created_at: { type: string, format: date-time }
         last_used_at: { type: string, format: date-time, nullable: true }
     PasskeyListResponse:

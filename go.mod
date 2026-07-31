@@ -3,6 +3,7 @@ module github.com/inroad/inroad
 go 1.25.0
 
 require (
+	github.com/descope/virtualwebauthn v1.0.5
 	github.com/emersion/go-imap v1.2.1
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-playground/validator/v10 v10.30.3

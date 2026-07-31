@@ -54,4 +54,3 @@ CREATE TABLE webauthn_challenges (
     consumed_at  TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_webauthn_challenges_session_key ON webauthn_challenges (session_key);

@@ -41,11 +41,10 @@ func decodeTransports(s string) []protocol.AuthenticatorTransport {
 }
 
 // transportsList splits the stored transports into a plain []string for the manage
-// DTO, dropping empty segments so "" yields a nil slice.
+// DTO, dropping empty segments. It always returns a non-nil slice so an empty
+// transport list serializes as a JSON [] (a non-nullable array in the API contract),
+// never null.
 func transportsList(s string) []string {
-	if s == "" {
-		return nil
-	}
 	segs := strings.Split(s, ",")
 	out := make([]string, 0, len(segs))
 	for _, seg := range segs {
