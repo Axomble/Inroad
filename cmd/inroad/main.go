@@ -205,10 +205,16 @@ func run() error {
 	// domain mounted under /oauth2 (distinct from the mailbox-connect /oauth mount).
 	// The resource owner is resolved from the P1 session through the ResourceOwner
 	// seam, backed here by the session verifier (never re-implementing login).
+	oauthStore := oauthprovider.NewPgStore(pool)
 	oauthProviderHandler := oauthprovider.NewHandler(
-		oauthprovider.NewService(oauthprovider.NewPgStore(pool), cfg.PublicURL),
+		oauthprovider.NewService(oauthStore, cfg.PublicURL),
 		sessionResourceOwner{v: sessionVerifier},
 	)
+	// The OAuth access-token verifier engages on `inoa_` Bearer tokens and DEFERS on
+	// everything else, so it slots into the data-plane RequireAuth chain BEFORE the
+	// session verifier (which would hard-fail a non-JWT Bearer token). It mints a
+	// scope-only KindOAuth principal, attenuated by each route's RequireScope.
+	oauthVerifier := oauthprovider.NewVerifier(oauthStore)
 
 	// Email-OTP passwordless login. A dedicated slice (its own store/service) that
 	// reaches session-issuance + the 2FA gate only through identHandler's
@@ -274,10 +280,13 @@ func run() error {
 		// RequireAuth group; its sub-routes apply their own session/admin/CSRF guards.
 		{pattern: "/oauth2", handler: oauthProviderHandler.Routes(sessionVerifier, oauthRegisterThrottle)},
 	}
-	// The data-plane REST surface accepts EITHER a session or an api-key credential.
-	// The api-key verifier runs first and DEFERS on a non-`inrd_` token, so a JWT
-	// falls through to the session verifier; an api-key principal is then attenuated
-	// to its granted scopes by each route's RequireScope (a session holds all scopes).
+	// The data-plane REST surface accepts a session, an api-key, OR an OAuth access
+	// token. The api-key verifier runs first and DEFERS on a non-`inrd_` token; the
+	// OAuth verifier then engages on an `inoa_` token and DEFERS otherwise; a JWT falls
+	// through to the session verifier. A machine principal (api-key or OAuth grant) is
+	// attenuated to its granted scopes by each route's RequireScope (a session holds all
+	// scopes). Ordering matters: the OAuth verifier MUST precede the session verifier,
+	// which hard-fails a non-JWT Bearer token rather than deferring.
 	dataPlane := []mount{
 		{pattern: "/api/v1/mailboxes", handler: mbHandler.Routes(identStore)},
 		{pattern: "/api/v1/lists", handler: list.NewHandler(listSvc).Routes()},
@@ -302,7 +311,7 @@ func run() error {
 		{pattern: "/api/v1/warmup", handler: warmupHandler.Routes()},
 	}
 	router := buildRouter(logger, public, []protectedGroup{
-		{verifiers: []auth.Verifier{apiKeyVerifier, sessionVerifier}, mounts: dataPlane},
+		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
 		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
 	})
 

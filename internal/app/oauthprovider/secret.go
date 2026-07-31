@@ -19,6 +19,19 @@ const (
 	authCodeBytes = 32
 	// consentIDBytes -> 256-bit opaque consent-handoff id carried in the SPA URL.
 	consentIDBytes = 32
+	// accessTokenBytes / refreshTokenBytes -> 256-bit opaque bearer + refresh secrets
+	// (P6b). Both are hashed at rest; the raw value is returned to the client once.
+	accessTokenBytes  = 32
+	refreshTokenBytes = 32
+)
+
+const (
+	// accessTokenPrefix marks an issued OAuth access token so the oauthVerifier can
+	// ENGAGE (vs DEFER) cleanly, distinct from a session JWT and the api-key `inrd_`
+	// prefix. A leaked value is recognizable/greppable.
+	accessTokenPrefix = "inoa_"
+	// refreshTokenPrefix marks a refresh token (presented only at /oauth2/token).
+	refreshTokenPrefix = "inor_"
 )
 
 // b64 is URL-safe base64 without padding — safe to embed in a URL query and free of
@@ -69,6 +82,29 @@ func newAuthCode() (code string, hash []byte, err error) {
 
 // newConsentID mints the opaque consent-handoff id (not a secret; stored verbatim).
 func newConsentID() (string, error) { return randToken(consentIDBytes) }
+
+// newAccessToken mints an opaque bearer access token and returns both the raw token
+// (returned to the client once) and the SHA-256 digest that is stored. The hash is over
+// the FULL prefixed token, exactly what the verifier re-hashes on lookup.
+func newAccessToken() (token string, hash []byte, err error) {
+	s, err := randToken(accessTokenBytes)
+	if err != nil {
+		return "", nil, err
+	}
+	token = accessTokenPrefix + s
+	return token, hashSecret(token), nil
+}
+
+// newRefreshToken mints an opaque rotating refresh token and returns both the raw token
+// (returned once) and the SHA-256 digest that is stored.
+func newRefreshToken() (token string, hash []byte, err error) {
+	s, err := randToken(refreshTokenBytes)
+	if err != nil {
+		return "", nil, err
+	}
+	token = refreshTokenPrefix + s
+	return token, hashSecret(token), nil
+}
 
 // hashSecret returns the SHA-256 of a presented raw secret/code, for a stored-digest
 // comparison (used by tests here and by the P6b token endpoint).

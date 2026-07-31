@@ -12,6 +12,39 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeOauthAuthCode = `-- name: ConsumeOauthAuthCode :one
+UPDATE oauth_authorization_codes
+SET consumed_at = now()
+WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+RETURNING id, code_hash, client_id, redirect_uri, code_challenge, code_challenge_method, scopes, user_id, workspace_id, expires_at, consumed_at, created_at
+`
+
+// Atomic single-use consume of an authorization code at the token endpoint (P6b):
+// claim the row ONLY if it is still unconsumed and unexpired, stamping consumed_at,
+// and RETURN its bindings so the exchange can verify client_id/redirect_uri/PKCE. Zero
+// rows (unknown / already consumed / expired) surfaces as pgx.ErrNoRows -> the caller
+// maps it to invalid_grant. A concurrent double-redeem: only the first UPDATE matches
+// (consumed_at IS NULL), the loser gets zero rows — so a code is redeemable exactly once.
+func (q *Queries) ConsumeOauthAuthCode(ctx context.Context, codeHash []byte) (OauthAuthorizationCode, error) {
+	row := q.db.QueryRow(ctx, consumeOauthAuthCode, codeHash)
+	var i OauthAuthorizationCode
+	err := row.Scan(
+		&i.ID,
+		&i.CodeHash,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.CodeChallenge,
+		&i.CodeChallengeMethod,
+		&i.Scopes,
+		&i.UserID,
+		&i.WorkspaceID,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const consumeOauthAuthRequest = `-- name: ConsumeOauthAuthRequest :execrows
 UPDATE oauth_authorization_requests SET consumed_at = now()
 WHERE consent_id = $1 AND user_id = $2 AND consumed_at IS NULL AND expires_at > now()
@@ -31,6 +64,52 @@ func (q *Queries) ConsumeOauthAuthRequest(ctx context.Context, arg ConsumeOauthA
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const consumeOauthRefreshToken = `-- name: ConsumeOauthRefreshToken :execrows
+UPDATE oauth_refresh_tokens SET consumed_at = now()
+WHERE token_hash = $1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+`
+
+// Guarded single-use rotation: mark the presented refresh token consumed ONLY if it is
+// still live (unconsumed, unrevoked, unexpired). 0 rows means it was consumed/revoked/
+// expired between the caller's read and here (a lost race = concurrent reuse) -> the
+// caller revokes the whole family and rejects.
+func (q *Queries) ConsumeOauthRefreshToken(ctx context.Context, tokenHash []byte) (int64, error) {
+	result, err := q.db.Exec(ctx, consumeOauthRefreshToken, tokenHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const createOauthAccessToken = `-- name: CreateOauthAccessToken :exec
+INSERT INTO oauth_access_tokens (
+    token_hash, client_id, user_id, workspace_id, scopes, expires_at
+) VALUES ($1, $2, $3, $4, $5, $6)
+`
+
+type CreateOauthAccessTokenParams struct {
+	TokenHash   []byte             `json:"token_hash"`
+	ClientID    string             `json:"client_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Scopes      []string           `json:"scopes"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Persist an issued opaque access token (only its SHA-256 hash), pinned to the client,
+// resource owner, workspace, and granted scope subset.
+func (q *Queries) CreateOauthAccessToken(ctx context.Context, arg CreateOauthAccessTokenParams) error {
+	_, err := q.db.Exec(ctx, createOauthAccessToken,
+		arg.TokenHash,
+		arg.ClientID,
+		arg.UserID,
+		arg.WorkspaceID,
+		arg.Scopes,
+		arg.ExpiresAt,
+	)
+	return err
 }
 
 const createOauthAuthCode = `-- name: CreateOauthAuthCode :exec
@@ -167,12 +246,66 @@ func (q *Queries) CreateOauthClient(ctx context.Context, arg CreateOauthClientPa
 	return i, err
 }
 
+const createOauthRefreshToken = `-- name: CreateOauthRefreshToken :exec
+INSERT INTO oauth_refresh_tokens (
+    token_hash, family_id, client_id, user_id, workspace_id, scopes, expires_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
+`
+
+type CreateOauthRefreshTokenParams struct {
+	TokenHash   []byte             `json:"token_hash"`
+	FamilyID    uuid.UUID          `json:"family_id"`
+	ClientID    string             `json:"client_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Scopes      []string           `json:"scopes"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Persist an issued rotating refresh token (only its SHA-256 hash), tagged with its
+// rotation family so a reuse revoke can kill the whole chain.
+func (q *Queries) CreateOauthRefreshToken(ctx context.Context, arg CreateOauthRefreshTokenParams) error {
+	_, err := q.db.Exec(ctx, createOauthRefreshToken,
+		arg.TokenHash,
+		arg.FamilyID,
+		arg.ClientID,
+		arg.UserID,
+		arg.WorkspaceID,
+		arg.Scopes,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const getOauthAccessTokenByHash = `-- name: GetOauthAccessTokenByHash :one
+SELECT id, token_hash, client_id, user_id, workspace_id, scopes, expires_at, revoked_at, created_at FROM oauth_access_tokens WHERE token_hash = $1
+`
+
+// The verifier + introspection lookup: resolve an access token by its hash. The
+// verifier re-checks revoked_at + expiry each request, so revocation is immediate.
+func (q *Queries) GetOauthAccessTokenByHash(ctx context.Context, tokenHash []byte) (OauthAccessToken, error) {
+	row := q.db.QueryRow(ctx, getOauthAccessTokenByHash, tokenHash)
+	var i OauthAccessToken
+	err := row.Scan(
+		&i.ID,
+		&i.TokenHash,
+		&i.ClientID,
+		&i.UserID,
+		&i.WorkspaceID,
+		&i.Scopes,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getOauthAuthCode = `-- name: GetOauthAuthCode :one
 SELECT id, code_hash, client_id, redirect_uri, code_challenge, code_challenge_method, scopes, user_id, workspace_id, expires_at, consumed_at, created_at FROM oauth_authorization_codes WHERE code_hash = $1
 `
 
 // Read an authorization code by its hash (P6a tests assert the persisted binding;
-// the P6b token endpoint will add its own atomic single-use consume).
+// the P6b token endpoint adds its own atomic single-use consume below).
 func (q *Queries) GetOauthAuthCode(ctx context.Context, codeHash []byte) (OauthAuthorizationCode, error) {
 	row := q.db.QueryRow(ctx, getOauthAuthCode, codeHash)
 	var i OauthAuthorizationCode
@@ -275,6 +408,31 @@ func (q *Queries) GetOauthConsent(ctx context.Context, arg GetOauthConsentParams
 	return i, err
 }
 
+const getOauthRefreshTokenByHash = `-- name: GetOauthRefreshTokenByHash :one
+SELECT id, token_hash, family_id, client_id, user_id, workspace_id, scopes, expires_at, consumed_at, revoked_at, created_at FROM oauth_refresh_tokens WHERE token_hash = $1
+`
+
+// Resolve a presented refresh token by its hash for the rotation grant + introspection
+// + revoke. The caller inspects consumed_at/revoked_at/expires_at to detect reuse.
+func (q *Queries) GetOauthRefreshTokenByHash(ctx context.Context, tokenHash []byte) (OauthRefreshToken, error) {
+	row := q.db.QueryRow(ctx, getOauthRefreshTokenByHash, tokenHash)
+	var i OauthRefreshToken
+	err := row.Scan(
+		&i.ID,
+		&i.TokenHash,
+		&i.FamilyID,
+		&i.ClientID,
+		&i.UserID,
+		&i.WorkspaceID,
+		&i.Scopes,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listOauthClientsByWorkspace = `-- name: ListOauthClientsByWorkspace :many
 SELECT id, client_id, client_name, redirect_uris, grant_types, response_types,
        scopes, client_type, token_endpoint_auth_method, created_by_user_id,
@@ -336,6 +494,27 @@ func (q *Queries) ListOauthClientsByWorkspace(ctx context.Context, workspaceID p
 	return items, nil
 }
 
+const revokeOauthAccessToken = `-- name: RevokeOauthAccessToken :execrows
+UPDATE oauth_access_tokens SET revoked_at = COALESCE(revoked_at, now())
+WHERE token_hash = $1 AND client_id = $2
+`
+
+type RevokeOauthAccessTokenParams struct {
+	TokenHash []byte `json:"token_hash"`
+	ClientID  string `json:"client_id"`
+}
+
+// Client-scoped revoke (RFC 7009): a client may revoke only its OWN access token. A
+// foreign or unknown (token_hash, client_id) pair flips 0 rows, so the handler still
+// returns 200 with no token-existence oracle. Idempotent via COALESCE.
+func (q *Queries) RevokeOauthAccessToken(ctx context.Context, arg RevokeOauthAccessTokenParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeOauthAccessToken, arg.TokenHash, arg.ClientID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const revokeOauthClient = `-- name: RevokeOauthClient :execrows
 UPDATE oauth_clients SET revoked_at = COALESCE(revoked_at, now())
 WHERE client_id = $1 AND workspace_id = $2
@@ -350,6 +529,22 @@ type RevokeOauthClientParams struct {
 // a foreign or unknown (workspace_id, client_id) pair affects 0 rows -> 404.
 func (q *Queries) RevokeOauthClient(ctx context.Context, arg RevokeOauthClientParams) (int64, error) {
 	result, err := q.db.Exec(ctx, revokeOauthClient, arg.ClientID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeOauthRefreshFamily = `-- name: RevokeOauthRefreshFamily :execrows
+UPDATE oauth_refresh_tokens SET revoked_at = now()
+WHERE family_id = $1 AND revoked_at IS NULL
+`
+
+// Revoke every still-live refresh token sharing a rotation family — the reuse-detection
+// kill switch and the RFC 7009 refresh revoke (revoking one refresh token revokes its
+// whole family). Idempotent.
+func (q *Queries) RevokeOauthRefreshFamily(ctx context.Context, familyID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeOauthRefreshFamily, familyID)
 	if err != nil {
 		return 0, err
 	}

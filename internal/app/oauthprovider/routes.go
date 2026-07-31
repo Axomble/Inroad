@@ -33,6 +33,14 @@ func (h *Handler) Routes(verifier auth.Verifier, registerThrottle func(http.Hand
 	// The authorization endpoint (public top-level navigation; self-guards via the seam).
 	r.Get("/authorize", h.authorize)
 
+	// Token endpoint + introspection + revocation. These are CLIENT-authenticated (never
+	// session-authed): the client authenticates itself in the handler/service (public
+	// client by client_id, confidential by secret via client_secret_basic/post), so they
+	// mount here alongside /authorize rather than under a session RequireAuth group.
+	r.Post("/token", h.token)
+	r.Post("/introspect", h.introspect)
+	r.Post("/revoke", h.revoke)
+
 	// Admin-authed, rate-limited dynamic client registration. The throttle is OUTERMOST
 	// (defense-in-depth: it sheds an over-cap flood before the auth check), then session
 	// + admin. The handler records the admin's workspace + user from the session.

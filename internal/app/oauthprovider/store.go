@@ -110,6 +110,31 @@ type Store interface {
 	// ErrRequestNotClaimable is returned when the pending request could not be
 	// consumed (unknown/expired/already used/not this user's).
 	Approve(ctx context.Context, p ApproveParams) error
+
+	// --- P6b: token endpoint (exchange / rotation / introspection / revoke) ------
+
+	// ConsumeAuthCode atomically single-use-consumes an authorization code by its
+	// hash, returning the consumed row's bindings. pgx.ErrNoRows means the code is
+	// unknown, already consumed, or expired (all -> invalid_grant, no oracle).
+	ConsumeAuthCode(ctx context.Context, codeHash []byte) (gen.OauthAuthorizationCode, error)
+	// IssueTokenPair persists a freshly-minted access token AND its rotating refresh
+	// token in ONE transaction (both land or neither), so an exchange never leaves an
+	// access token with no refresh successor.
+	IssueTokenPair(ctx context.Context, access CreateAccessTokenParams, refresh CreateRefreshTokenParams) error
+	// GetAccessToken resolves an access token by its hash (pgx.ErrNoRows if unknown).
+	GetAccessToken(ctx context.Context, tokenHash []byte) (gen.OauthAccessToken, error)
+	// GetRefreshToken resolves a refresh token by its hash (pgx.ErrNoRows if unknown).
+	GetRefreshToken(ctx context.Context, tokenHash []byte) (gen.OauthRefreshToken, error)
+	// ConsumeRefreshToken guarded-single-use-consumes a refresh token by its hash
+	// (stamping consumed_at only if still live); returns rows affected (0 = a lost race
+	// the caller treats as reuse).
+	ConsumeRefreshToken(ctx context.Context, tokenHash []byte) (int64, error)
+	// RevokeRefreshFamily revokes every still-live refresh token in a rotation family
+	// (reuse detection + RFC 7009 refresh revoke); returns rows affected.
+	RevokeRefreshFamily(ctx context.Context, familyID uuid.UUID) (int64, error)
+	// RevokeAccessToken revokes an access token by hash, pinned to the owning client so
+	// a client can never revoke another client's token; returns rows affected.
+	RevokeAccessToken(ctx context.Context, tokenHash []byte, clientID string) (int64, error)
 }
 
 // PgStore is the sqlc-backed persistence for the oauthprovider domain. It holds the

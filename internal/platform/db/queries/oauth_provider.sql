@@ -74,5 +74,63 @@ INSERT INTO oauth_authorization_codes (
 
 -- name: GetOauthAuthCode :one
 -- Read an authorization code by its hash (P6a tests assert the persisted binding;
--- the P6b token endpoint will add its own atomic single-use consume).
+-- the P6b token endpoint adds its own atomic single-use consume below).
 SELECT * FROM oauth_authorization_codes WHERE code_hash = $1;
+
+-- name: ConsumeOauthAuthCode :one
+-- Atomic single-use consume of an authorization code at the token endpoint (P6b):
+-- claim the row ONLY if it is still unconsumed and unexpired, stamping consumed_at,
+-- and RETURN its bindings so the exchange can verify client_id/redirect_uri/PKCE. Zero
+-- rows (unknown / already consumed / expired) surfaces as pgx.ErrNoRows -> the caller
+-- maps it to invalid_grant. A concurrent double-redeem: only the first UPDATE matches
+-- (consumed_at IS NULL), the loser gets zero rows — so a code is redeemable exactly once.
+UPDATE oauth_authorization_codes
+SET consumed_at = now()
+WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+RETURNING *;
+
+-- name: CreateOauthAccessToken :exec
+-- Persist an issued opaque access token (only its SHA-256 hash), pinned to the client,
+-- resource owner, workspace, and granted scope subset.
+INSERT INTO oauth_access_tokens (
+    token_hash, client_id, user_id, workspace_id, scopes, expires_at
+) VALUES ($1, $2, $3, $4, $5, $6);
+
+-- name: GetOauthAccessTokenByHash :one
+-- The verifier + introspection lookup: resolve an access token by its hash. The
+-- verifier re-checks revoked_at + expiry each request, so revocation is immediate.
+SELECT * FROM oauth_access_tokens WHERE token_hash = $1;
+
+-- name: RevokeOauthAccessToken :execrows
+-- Client-scoped revoke (RFC 7009): a client may revoke only its OWN access token. A
+-- foreign or unknown (token_hash, client_id) pair flips 0 rows, so the handler still
+-- returns 200 with no token-existence oracle. Idempotent via COALESCE.
+UPDATE oauth_access_tokens SET revoked_at = COALESCE(revoked_at, now())
+WHERE token_hash = $1 AND client_id = $2;
+
+-- name: CreateOauthRefreshToken :exec
+-- Persist an issued rotating refresh token (only its SHA-256 hash), tagged with its
+-- rotation family so a reuse revoke can kill the whole chain.
+INSERT INTO oauth_refresh_tokens (
+    token_hash, family_id, client_id, user_id, workspace_id, scopes, expires_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: GetOauthRefreshTokenByHash :one
+-- Resolve a presented refresh token by its hash for the rotation grant + introspection
+-- + revoke. The caller inspects consumed_at/revoked_at/expires_at to detect reuse.
+SELECT * FROM oauth_refresh_tokens WHERE token_hash = $1;
+
+-- name: ConsumeOauthRefreshToken :execrows
+-- Guarded single-use rotation: mark the presented refresh token consumed ONLY if it is
+-- still live (unconsumed, unrevoked, unexpired). 0 rows means it was consumed/revoked/
+-- expired between the caller's read and here (a lost race = concurrent reuse) -> the
+-- caller revokes the whole family and rejects.
+UPDATE oauth_refresh_tokens SET consumed_at = now()
+WHERE token_hash = $1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > now();
+
+-- name: RevokeOauthRefreshFamily :execrows
+-- Revoke every still-live refresh token sharing a rotation family — the reuse-detection
+-- kill switch and the RFC 7009 refresh revoke (revoking one refresh token revokes its
+-- whole family). Idempotent.
+UPDATE oauth_refresh_tokens SET revoked_at = now()
+WHERE family_id = $1 AND revoked_at IS NULL;

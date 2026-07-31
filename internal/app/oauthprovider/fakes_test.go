@@ -19,6 +19,8 @@ type fakeStore struct {
 	requests map[string]gen.OauthAuthorizationRequest // by consent_id
 	consents map[string]gen.OauthConsent              // by userID|clientID
 	codes    map[string]gen.OauthAuthorizationCode    // by hex(code_hash)
+	access   map[string]gen.OauthAccessToken          // by hex(token_hash)
+	refresh  map[string]gen.OauthRefreshToken         // by hex(token_hash)
 	now      func() time.Time
 
 	createClientErr error // injectable to exercise the collision-retry path
@@ -30,6 +32,8 @@ func newFakeStore() *fakeStore {
 		requests: map[string]gen.OauthAuthorizationRequest{},
 		consents: map[string]gen.OauthConsent{},
 		codes:    map[string]gen.OauthAuthorizationCode{},
+		access:   map[string]gen.OauthAccessToken{},
+		refresh:  map[string]gen.OauthRefreshToken{},
 		now:      time.Now,
 	}
 }
@@ -164,6 +168,87 @@ func (f *fakeStore) Approve(ctx context.Context, p ApproveParams) error {
 		CreatedAt: pgTime(f.now()), UpdatedAt: pgTime(f.now()),
 	}
 	return f.CreateAuthCode(ctx, p.Code)
+}
+
+// --- P6b token-endpoint fakes ------------------------------------------------
+
+// ConsumeAuthCode mirrors the atomic single-use consume: it claims the code only if
+// unconsumed and unexpired, stamping consumed_at, else returns pgx.ErrNoRows.
+func (f *fakeStore) ConsumeAuthCode(_ context.Context, codeHash []byte) (gen.OauthAuthorizationCode, error) {
+	key := hex.EncodeToString(codeHash)
+	c, ok := f.codes[key]
+	if !ok || c.ConsumedAt.Valid || !f.now().Before(c.ExpiresAt.Time) {
+		return gen.OauthAuthorizationCode{}, pgx.ErrNoRows
+	}
+	c.ConsumedAt = pgTime(f.now())
+	f.codes[key] = c
+	return c, nil
+}
+
+func (f *fakeStore) IssueTokenPair(_ context.Context, access CreateAccessTokenParams, refresh CreateRefreshTokenParams) error {
+	f.access[hex.EncodeToString(access.TokenHash)] = gen.OauthAccessToken{
+		ID: uuid.New(), TokenHash: access.TokenHash, ClientID: access.ClientID,
+		UserID: access.UserID, WorkspaceID: access.WorkspaceID, Scopes: access.Scopes,
+		ExpiresAt: pgTime(access.ExpiresAt), CreatedAt: pgTime(f.now()),
+	}
+	f.refresh[hex.EncodeToString(refresh.TokenHash)] = gen.OauthRefreshToken{
+		ID: uuid.New(), TokenHash: refresh.TokenHash, FamilyID: refresh.FamilyID,
+		ClientID: refresh.ClientID, UserID: refresh.UserID, WorkspaceID: refresh.WorkspaceID,
+		Scopes: refresh.Scopes, ExpiresAt: pgTime(refresh.ExpiresAt), CreatedAt: pgTime(f.now()),
+	}
+	return nil
+}
+
+func (f *fakeStore) GetAccessToken(_ context.Context, tokenHash []byte) (gen.OauthAccessToken, error) {
+	t, ok := f.access[hex.EncodeToString(tokenHash)]
+	if !ok {
+		return gen.OauthAccessToken{}, pgx.ErrNoRows
+	}
+	return t, nil
+}
+
+func (f *fakeStore) GetRefreshToken(_ context.Context, tokenHash []byte) (gen.OauthRefreshToken, error) {
+	t, ok := f.refresh[hex.EncodeToString(tokenHash)]
+	if !ok {
+		return gen.OauthRefreshToken{}, pgx.ErrNoRows
+	}
+	return t, nil
+}
+
+func (f *fakeStore) ConsumeRefreshToken(_ context.Context, tokenHash []byte) (int64, error) {
+	key := hex.EncodeToString(tokenHash)
+	t, ok := f.refresh[key]
+	if !ok || t.ConsumedAt.Valid || t.RevokedAt.Valid || !f.now().Before(t.ExpiresAt.Time) {
+		return 0, nil
+	}
+	t.ConsumedAt = pgTime(f.now())
+	f.refresh[key] = t
+	return 1, nil
+}
+
+func (f *fakeStore) RevokeRefreshFamily(_ context.Context, familyID uuid.UUID) (int64, error) {
+	var n int64
+	for k, t := range f.refresh {
+		if t.FamilyID == familyID && !t.RevokedAt.Valid {
+			t.RevokedAt = pgTime(f.now())
+			f.refresh[k] = t
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeStore) RevokeAccessToken(_ context.Context, tokenHash []byte, clientID string) (int64, error) {
+	key := hex.EncodeToString(tokenHash)
+	t, ok := f.access[key]
+	if !ok || t.ClientID != clientID {
+		return 0, nil
+	}
+	if !t.RevokedAt.Valid {
+		t.RevokedAt = pgTime(f.now())
+		f.access[key] = t
+	}
+	return 1, nil
 }
 
 // codeByHash looks a stored code up by its raw code (test helper).

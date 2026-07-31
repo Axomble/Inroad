@@ -285,6 +285,18 @@ type MailboxWorkerAssignment struct {
 	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
 }
 
+type OauthAccessToken struct {
+	ID          uuid.UUID          `json:"id"`
+	TokenHash   []byte             `json:"token_hash"`
+	ClientID    string             `json:"client_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Scopes      []string           `json:"scopes"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type OauthAuthorizationCode struct {
 	ID                  uuid.UUID          `json:"id"`
 	CodeHash            []byte             `json:"code_hash"`
@@ -341,6 +353,20 @@ type OauthConsent struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type OauthRefreshToken struct {
+	ID          uuid.UUID          `json:"id"`
+	TokenHash   []byte             `json:"token_hash"`
+	FamilyID    uuid.UUID          `json:"family_id"`
+	ClientID    string             `json:"client_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Scopes      []string           `json:"scopes"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type Send struct {
