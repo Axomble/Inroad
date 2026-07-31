@@ -8,8 +8,16 @@
 // dropping every non-grantable scope, so there is one scope vocabulary to maintain.
 import { API_KEY_SCOPE_GROUPS, type ScopeGroup } from './api-key-scopes'
 
-/** Scopes an API key may hold that an OAuth client may NOT be granted. */
-const OAUTH_EXCLUDED_SCOPES = new Set<string>(['campaigns:send'])
+// Scopes an API key may hold that an OAuth client may NOT be granted. This MUST
+// mirror the backend's exclusion (internal/app/auth/scopes.go OAuthGrantableScopes,
+// enforced at registration + /authorize): sending, campaign mutation, and mailbox
+// mutation are never delegable to a third-party client. Offering one here would only
+// produce a confusing hard failure at submit, since the backend fails closed.
+const OAUTH_EXCLUDED_SCOPES = new Set<string>([
+  'campaigns:send',
+  'campaigns:write',
+  'mailboxes:write',
+])
 
 /** The domain-grouped, OAuth-grantable subset of the API-key scope picker. */
 export const OAUTH_SCOPE_GROUPS: readonly ScopeGroup[] = API_KEY_SCOPE_GROUPS.map((group) => ({

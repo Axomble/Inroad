@@ -13,10 +13,23 @@ test('every grantable scope has a distinct human-readable consent label', () => 
   expect(new Set(labels).size).toBe(labels.length)
 })
 
-test('the grantable set excludes non-OAuth scopes (send) but keeps read/write', () => {
+test('the grantable set mirrors the backend exactly: no send/write-campaign/write-mailbox', () => {
+  // Must match internal/app/auth/scopes.go OAuthGrantableScopes exactly, else the
+  // picker offers a scope the backend rejects at submit (a confusing hard failure).
+  expect([...OAUTH_GRANTABLE_SCOPES].sort()).toEqual(
+    [
+      'campaigns:read',
+      'contacts:read',
+      'contacts:write',
+      'lists:read',
+      'lists:write',
+      'mailboxes:read',
+    ].sort(),
+  )
+  // The three dangerous scopes are structurally excluded.
   expect(OAUTH_GRANTABLE_SCOPES).not.toContain('campaigns:send')
-  expect(OAUTH_GRANTABLE_SCOPES).toContain('contacts:read')
-  expect(OAUTH_GRANTABLE_SCOPES).toContain('lists:write')
+  expect(OAUTH_GRANTABLE_SCOPES).not.toContain('campaigns:write')
+  expect(OAUTH_GRANTABLE_SCOPES).not.toContain('mailboxes:write')
   // Grantable scopes are a strict subset of the API-key scope vocabulary.
   for (const scope of OAUTH_GRANTABLE_SCOPES) {
     expect(API_KEY_SCOPES).toContain(scope)
