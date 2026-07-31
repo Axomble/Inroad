@@ -34,7 +34,7 @@ export function WorkspaceSwitcher() {
   // an inert placeholder rather than an empty/crashing dropdown.
   if (memberships.length === 0) {
     return (
-      <span className="flex items-center gap-1.5 px-2 text-[13px] font-medium text-muted-foreground">
+      <span className="flex items-center gap-1.5 px-2 text-[13px] font-medium text-chrome-muted">
         <Building2 className="size-4" />
         No workspace
       </span>
@@ -75,13 +75,13 @@ export function WorkspaceSwitcher() {
         <Button
           variant="ghost"
           size="sm"
-          className="gap-1.5 px-2 font-semibold"
+          className="gap-1.5 px-2 font-semibold text-chrome-text hover:bg-chrome-hover hover:text-chrome-text"
           disabled={isLoading}
           aria-label="Switch workspace"
         >
-          <Building2 className="text-muted-foreground" />
+          <Building2 className="text-chrome-muted" />
           <span className="max-w-40 truncate">{active?.workspace_name ?? 'Select workspace'}</span>
-          <ChevronsUpDown className="text-muted-foreground" />
+          <ChevronsUpDown className="text-chrome-muted" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-56">

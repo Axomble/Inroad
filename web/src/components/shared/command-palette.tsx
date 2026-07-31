@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { Mail, Megaphone, Users, Settings, Flame, CornerDownLeft } from 'lucide-react'
+import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, CornerDownLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface Command {
@@ -15,6 +15,7 @@ interface Command {
 }
 
 const COMMANDS: readonly Command[] = [
+  { id: 'overview', label: 'Overview', group: 'Workspace', icon: LayoutDashboard, to: '/app', keywords: 'home dashboard health activity' },
   { id: 'mailboxes', label: 'Mailboxes', group: 'Sending', icon: Mail, to: '/app/mailboxes', keywords: 'smtp gmail microsoft connect accounts' },
   { id: 'warmup', label: 'Warmup', group: 'Sending', icon: Flame, to: '/app/warmup', keywords: 'reputation ramp health pool deliverability' },
   { id: 'campaigns', label: 'Campaigns', group: 'Outreach', icon: Megaphone, to: '/app/campaigns', keywords: 'sequence steps send launch' },
@@ -97,6 +98,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       >
         <input
           ref={inputRef}
+          type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Go to…"

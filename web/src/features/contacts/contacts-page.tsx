@@ -77,8 +77,8 @@ export function ContactsPage() {
         <Stat label="Duplicates" value={lastImport?.duplicates ?? '—'} sub="already in list" />
       </StatStrip>
 
-      <PageBody className="flex overflow-hidden">
-        <div className="flex w-56 shrink-0 flex-col overflow-y-auto border-r border-border">
+      <PageBody className="flex flex-col overflow-hidden md:flex-row">
+        <div className="flex max-h-40 w-full shrink-0 flex-col overflow-y-auto border-b border-border md:max-h-none md:w-56 md:border-b-0 md:border-r">
           {showNewList && (
             <NewListForm
               onDone={(id) => {
@@ -102,7 +102,7 @@ export function ContactsPage() {
           ) : lists.length === 0 && !showNewList ? (
             <p className="p-4 text-xs text-muted-foreground">No lists yet.</p>
           ) : (
-            <ul>
+            <ul className="grid grid-cols-2 sm:grid-cols-3 md:block">
               {lists.map((list) => (
                 <li key={list.id}>
                   <button
@@ -190,7 +190,7 @@ function ContactsPane({
       {!isLoading && !error && page.length > 0 && (
         <ListHeader>
           <ListHeaderCell className="min-w-0 flex-1">Email</ListHeaderCell>
-          <ListHeaderCell className="w-40">First name</ListHeaderCell>
+          <ListHeaderCell className="hidden w-40 sm:block">First name</ListHeaderCell>
         </ListHeader>
       )}
 
@@ -227,14 +227,14 @@ function ContactsPane({
             {controls.items.map((c) => (
               <li key={c.id} className="flex items-center gap-4 border-b border-border px-5 py-2.5">
                 <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{c.email}</span>
-                <span className="w-40 truncate text-xs text-muted-foreground">{c.first_name || '—'}</span>
+                <span className="hidden w-40 truncate text-xs text-muted-foreground sm:block">{c.first_name || '—'}</span>
               </li>
             ))}
           </ul>
         )}
       </div>
 
-      <div className="flex items-center gap-2 border-t border-border px-5 py-2">
+      <div className="flex items-center gap-2 border-t border-border px-4 py-2 sm:px-5">
         {/*
           The API returns a page, not a total, so this is an honest "showing
           1–50" rather than a "1–50 of 248" we can't actually substantiate.

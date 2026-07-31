@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+playwright-report/
+test-results/
 
 # TanStack Router plugin cache
 .tanstack

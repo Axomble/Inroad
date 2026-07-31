@@ -1,6 +1,4 @@
 import { Suspense, lazy, useEffect, useRef, useState } from 'react'
-import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { toggleSidebar } from '@/store/slices/ui'
 import { cn } from '@/lib/utils'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useHotkey } from '@/hooks/use-hotkey'
@@ -33,10 +31,9 @@ export function AppShell({
   children: React.ReactNode
   rightSlot?: React.ReactNode
 }) {
-  const open = useAppSelector((s) => s.ui.sidebarOpen)
-  const dispatch = useAppDispatch()
+  const [navOpen, setNavOpen] = useState(false)
   const close = () => {
-    if (open) dispatch(toggleSidebar())
+    setNavOpen(false)
   }
 
   // Local state, not redux: nothing outside this subtree needs to know the
@@ -46,23 +43,28 @@ export function AppShell({
   // The element focus came from, so dismissing the drawer returns the caret to
   // the toggle rather than dropping it at the top of the document.
   const navOpenerRef = useRef<HTMLElement | null>(null)
-  useHotkey({ key: 'Escape' }, close, open)
+  useHotkey({ key: 'Escape' }, close, navOpen)
   useEffect(() => {
-    if (open) {
+    if (navOpen) {
       navOpenerRef.current = document.activeElement as HTMLElement | null
       mobileNavRef.current?.querySelector<HTMLElement>('a, button')?.focus()
       return
     }
     navOpenerRef.current?.focus()
     navOpenerRef.current = null
-  }, [open])
+  }, [navOpen])
 
   useHotkey({ key: 'k', mod: true, whileTyping: true }, () => setPaletteOpen(true))
 
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col overflow-hidden bg-rail text-foreground">
-        <AppHeader navOpen={open} onToggleNav={() => dispatch(toggleSidebar())} rightSlot={rightSlot} />
+        <AppHeader
+          navOpen={navOpen}
+          onToggleNav={() => setNavOpen((value) => !value)}
+          onOpenPalette={() => setPaletteOpen(true)}
+          rightSlot={rightSlot}
+        />
 
         <div className="flex min-h-0 flex-1">
           {/* Desktop sidebar */}
@@ -74,7 +76,7 @@ export function AppShell({
           <div
             className={cn(
               'fixed inset-0 z-40 bg-background/60 backdrop-blur-sm transition-opacity md:hidden',
-              open ? 'opacity-100' : 'pointer-events-none opacity-0',
+              navOpen ? 'opacity-100' : 'pointer-events-none opacity-0',
             )}
             onClick={close}
             aria-hidden="true"
@@ -87,13 +89,13 @@ export function AppShell({
             aria-label="Primary navigation"
             className={cn(
               'fixed inset-y-0 left-0 z-40 border-r border-border bg-rail transition-transform md:hidden',
-              open ? 'translate-x-0' : '-translate-x-full',
+              navOpen ? 'translate-x-0' : '-translate-x-full',
             )}
             // `inert`, not `aria-hidden`: when closed the drawer is only
             // translated off-screen, so its links stay tabbable. aria-hidden
             // over focusable content is the violation; inert removes the
             // subtree from both the tab order and the accessibility tree.
-            inert={!open}
+            inert={!navOpen}
             onClick={(event) => {
               if ((event.target as HTMLElement).closest('a')) close()
             }}
@@ -101,7 +103,7 @@ export function AppShell({
             <AppSidebar />
           </div>
 
-          <main className="min-w-0 flex-1 overflow-hidden border-t border-border bg-background md:rounded-tl-2xl md:border-l">
+          <main className="workspace-grid min-w-0 flex-1 overflow-hidden bg-background md:rounded-tl-[22px] md:border-l md:border-t md:border-chrome-border">
             {children}
           </main>
         </div>

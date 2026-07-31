@@ -1,6 +1,7 @@
 import { configureStore, combineReducers } from '@reduxjs/toolkit'
 import { persistReducer, persistStore } from 'redux-persist'
 import { storage } from './storage'
+import { PERSIST_KEY } from './persist-key'
 import { api } from './api'
 import ui from './slices/ui'
 import auth from './slices/auth'
@@ -13,8 +14,9 @@ const rootReducer = combineReducers({
 
 // Persist the UI slice ONLY. The session lives in memory (restored from the
 // httpOnly refresh cookie on boot, see features/auth/use-auth-bootstrap.ts) and
-// the RTK Query `api` cache must never be persisted.
-const persistConfig = { key: 'inroad', storage, whitelist: ['ui'] }
+// the RTK Query `api` cache must never be persisted. persist-whitelist.test.ts
+// asserts this against what redux-persist actually writes to storage.
+const persistConfig = { key: PERSIST_KEY, storage, whitelist: ['ui'] }
 const persisted = persistReducer(persistConfig, rootReducer)
 
 export const store = configureStore({

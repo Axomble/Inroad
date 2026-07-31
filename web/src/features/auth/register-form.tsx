@@ -64,7 +64,7 @@ export function RegisterForm() {
       // Capture the form's email for the header avatar until the API exposes
       // it on the session response.
       dispatch(setUserIdentity({ email: values.email }))
-      navigate({ to: '/app/mailboxes' })
+      navigate({ to: '/app' })
     }
   }
 

@@ -80,7 +80,7 @@ export function AcceptInvitePage() {
     })
     if ('data' in result && result.data) {
       dispatch(setSession(result.data))
-      navigate({ to: '/app/mailboxes' })
+      navigate({ to: '/app' })
     }
   }
 

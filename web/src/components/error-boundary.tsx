@@ -1,7 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 /**
- * Top-level React error boundary wrapped around the Provider/PersistGate tree
+ * Top-level React error boundary wrapped around the Provider/router tree
  * in `main.tsx`. Router-level errors are handled by the router's
  * `defaultErrorComponent`; this catches everything else (a render throw in a
  * provider, a lazy chunk load failure) so the whole tab doesn't go blank.

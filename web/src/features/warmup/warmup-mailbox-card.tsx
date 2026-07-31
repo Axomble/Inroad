@@ -57,7 +57,7 @@ export function WarmupMailboxCard({
 
   return (
     <li className="border-b border-border">
-      <div className="flex items-center gap-4 px-5 py-3">
+      <div className="flex flex-col items-stretch gap-3 px-4 py-3 sm:flex-row sm:items-center sm:gap-4 sm:px-5">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-[13.5px] font-medium text-foreground">{mailbox.email}</span>
@@ -80,7 +80,7 @@ export function WarmupMailboxCard({
           )}
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {enrolled ? (
             <>
               <Button variant="outline" size="xs" onClick={() => setEditing((v) => !v)} aria-label={`Warmup settings for ${mailbox.email}`}>

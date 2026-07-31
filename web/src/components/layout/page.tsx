@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
 type DivProps = React.HTMLAttributes<HTMLDivElement> & { ref?: React.Ref<HTMLDivElement> }
 
 export function Page({ className, ...props }: DivProps) {
-  return <div data-slot="page" className={cn('flex h-full flex-col', className)} {...props} />
+  return <div data-slot="page" className={cn('flex h-full flex-col bg-background/92', className)} {...props} />
 }
 
 export function PageTopbar({
@@ -32,14 +32,16 @@ export function PageTopbar({
     <div
       data-slot="page-topbar"
       className={cn(
-        'sticky top-0 z-20 flex h-12 items-center gap-3 border-b border-border bg-surface px-5',
+        'sticky top-0 z-20 flex min-h-16 items-center gap-3 border-b border-border bg-surface/90 px-4 py-3 backdrop-blur-xl sm:px-6',
         className,
       )}
     >
-      <span className="font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-faint">{eyebrow}</span>
-      {title && <span className="text-sm font-semibold text-foreground">{title}</span>}
-      {subtitle && <span className="truncate text-xs text-muted-foreground">{subtitle}</span>}
-      {actions && <div className="ml-auto flex items-center gap-2">{actions}</div>}
+      <div className="min-w-0">
+        {title && <span className="block font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-faint">{eyebrow}</span>}
+        <span className="block truncate text-[17px] font-semibold tracking-[-0.02em] text-foreground">{title ?? eyebrow}</span>
+      </div>
+      {subtitle && <span className="hidden truncate text-xs text-muted-foreground lg:inline">{subtitle}</span>}
+      {actions && <div className="ml-auto flex shrink-0 items-center gap-2">{actions}</div>}
     </div>
   )
 }
@@ -58,11 +60,11 @@ export function SectionBar({
   return (
     <div
       data-slot="section-bar"
-      className={cn('flex h-10 items-center gap-2 border-b border-border px-5', className)}
+      className={cn('flex min-h-10 flex-wrap items-center gap-2 border-b border-border px-4 py-1.5 sm:px-5', className)}
     >
       <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">{label}</span>
       {count != null && <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{count}</span>}
-      {children && <div className="ml-auto flex items-center gap-2">{children}</div>}
+      {children && <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">{children}</div>}
     </div>
   )
 }
@@ -71,7 +73,7 @@ export function StatStrip({ className, ...props }: DivProps) {
   return (
     <div
       data-slot="stat-strip"
-      className={cn('grid grid-cols-2 border-b border-border md:grid-cols-4', className)}
+      className={cn('grid grid-cols-2 border-b border-border bg-surface/60 md:grid-cols-4', className)}
       {...props}
     />
   )
@@ -94,13 +96,13 @@ export function Stat({
   return (
     <div
       data-slot="stat"
-      className={cn('border-r border-border px-5 py-3.5 last:border-r-0 [&:nth-child(2)]:border-r-0 md:[&:nth-child(2)]:border-r', className)}
+      className={cn('group border-r border-border px-4 py-4 transition-colors hover:bg-surface sm:px-6 last:border-r-0 [&:nth-child(2)]:border-r-0 md:[&:nth-child(2)]:border-r', className)}
     >
       <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
         {dot}
         {label}
       </div>
-      <div className="mt-1 text-[27px] font-light leading-none tabular-nums text-foreground">{value}</div>
+      <div className="mt-1.5 text-[29px] font-light leading-none tracking-[-0.04em] tabular-nums text-foreground">{value}</div>
       {sub && <div className="mt-1 font-mono text-[11px] text-muted-foreground">{sub}</div>}
     </div>
   )

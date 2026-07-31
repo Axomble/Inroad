@@ -4,12 +4,19 @@ import { Provider } from 'react-redux'
 import { PersistGate } from 'redux-persist/integration/react'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { store, persistor } from './store'
+import { applyTheme, readPersistedTheme, startThemeSync } from './lib/theme'
 import { routeTree } from './routeTree.gen'
 import { PageSkeleton } from './components/shared/page-skeleton'
 import { RouteError } from './components/shared/route-error'
 import { NotFound } from './components/shared/not-found'
 import { ErrorBoundary } from './components/error-boundary'
 import './styles/globals.css'
+
+// Paint the persisted theme before React mounts, then hand ongoing sync to the
+// store. Reading storage directly here is deliberate: redux-persist rehydrates
+// asynchronously, so deferring to the store would flash the wrong theme.
+applyTheme(readPersistedTheme())
+startThemeSync(store)
 
 // The store is injected into router context so route guards (see routes/app.tsx)
 // can read auth state without importing the store singleton directly — that

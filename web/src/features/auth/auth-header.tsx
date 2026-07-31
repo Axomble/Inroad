@@ -12,6 +12,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { clearSession } from '@/store/slices/auth'
 import { useAuthLogoutAllMutation, useAuthLogoutMutation } from './api'
 import { WorkspaceSwitcher } from './workspace-switcher'
+import { ThemeToggle } from '@/components/layout/theme-toggle'
 
 /**
  * Auth-owned header slot: workspace switcher + account menu (profile,
@@ -76,15 +77,16 @@ export function AuthHeader() {
 
   return (
     <>
-      <div className="hidden items-center gap-1 border-l border-border pl-3 sm:flex">
+      <div className="hidden items-center gap-1 border-l border-chrome-border pl-3 sm:flex">
         <WorkspaceSwitcher />
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        <ThemeToggle />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
-              className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="rounded-full outline-none ring-offset-2 ring-offset-chrome focus-visible:ring-2 focus-visible:ring-primary"
               aria-label="Account menu"
             >
               <Avatar>

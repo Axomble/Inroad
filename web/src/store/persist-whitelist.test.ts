@@ -1,15 +1,15 @@
 import { beforeEach, expect, test } from 'vitest'
 import { store, persistor } from './index'
+import { PERSIST_STORAGE_KEY } from './persist-key'
+import { readPersistedTheme } from '@/lib/theme'
 import { setSession } from './slices/auth'
-import { toggleSidebar } from './slices/ui'
+import { setTheme, type ThemePreference } from './slices/ui'
 
 // Security regression guard. The access token lives in memory ONLY — the persist
-// whitelist must be ['ui'] and never include 'auth'. A one-line whitelist slip
-// would flush the Bearer token to localStorage, where any XSS could read it.
-// This test asserts against what redux-persist actually writes to storage, so it
-// fails loudly the moment 'auth' (or the token) leaks into the persisted blob.
-
-const PERSIST_KEY = 'persist:inroad'
+// whitelist must be ['ui'] and never include 'auth' or the RTK Query 'api' cache.
+// A one-line whitelist slip would flush the Bearer token to localStorage, where
+// any XSS could read it. This asserts against what redux-persist actually writes,
+// so it fails loudly the moment anything else leaks into the persisted blob.
 
 const session = {
   access_token: 'super-secret-access-token',
@@ -28,10 +28,10 @@ test('redux-persist writes the ui slice but never the auth slice or its token', 
   // Put a real token in the auth slice and mutate ui so both have persistable
   // content, then force redux-persist to flush its pending write.
   store.dispatch(setSession(session))
-  store.dispatch(toggleSidebar())
+  store.dispatch(setTheme('dark'))
   await persistor.flush()
 
-  const raw = localStorage.getItem(PERSIST_KEY)
+  const raw = localStorage.getItem(PERSIST_STORAGE_KEY)
   expect(raw).not.toBeNull()
 
   const persisted = JSON.parse(raw as string) as Record<string, unknown>
@@ -40,6 +40,49 @@ test('redux-persist writes the ui slice but never the auth slice or its token', 
 
   // Belt-and-suspenders: the token string must not appear anywhere in storage.
   expect(raw).not.toContain('super-secret-access-token')
+})
+
+test('the RTK Query cache is never persisted', async () => {
+  store.dispatch(setTheme('light'))
+  await persistor.flush()
+
+  const raw = localStorage.getItem(PERSIST_STORAGE_KEY)
+  const persisted = JSON.parse(raw as string) as Record<string, unknown>
+  // Server responses can carry contact and mailbox data; none of it belongs in
+  // localStorage, so the api reducer must stay outside the whitelist.
+  expect(Object.keys(persisted)).not.toContain('api')
+})
+
+test('the persisted ui slice round-trips the theme preference', async () => {
+  store.dispatch(setTheme('dark'))
+  await persistor.flush()
+
+  const persisted = JSON.parse(localStorage.getItem(PERSIST_STORAGE_KEY) as string) as { ui: string }
+  expect(JSON.parse(persisted.ui)).toMatchObject({ theme: 'dark' })
+})
+
+// The pre-paint read in lib/theme.ts parses redux-persist's blob by hand rather
+// than through the library, so it has to be verified against a blob the real
+// persistor wrote — not a hand-built fixture. This is what catches a storage
+// shape change on a redux-persist upgrade.
+/**
+ * Persists `to` and reads it back through the pre-paint parser.
+ *
+ * Dispatches `from` first so `to` is always a real state change: redux-persist
+ * skips the write when the persisted subtree is unchanged, and these tests share
+ * the module-singleton store, so setting a value it already holds after
+ * `localStorage.clear()` would assert against an empty blob.
+ */
+async function persistThenRead(from: ThemePreference, to: ThemePreference) {
+  store.dispatch(setTheme(from))
+  store.dispatch(setTheme(to))
+  await persistor.flush()
+  return readPersistedTheme()
+}
+
+test('readPersistedTheme parses what the real persistor writes', async () => {
+  expect(await persistThenRead('light', 'dark')).toBe('dark')
+  expect(await persistThenRead('dark', 'light')).toBe('light')
 })
 
 test('the in-memory store still holds the token it refused to persist', () => {
