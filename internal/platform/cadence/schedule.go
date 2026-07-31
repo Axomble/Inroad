@@ -54,6 +54,27 @@ func DefaultSchedule(tz string) Schedule {
 	return Schedule{Timezone: tz, Windows: windows}
 }
 
+// ScheduleFrom builds a Schedule from persisted rows, treating an EMPTY window
+// set as "never configured" and substituting the default.
+//
+// This is the single boundary every reader goes through, and the reason it exists
+// is that "campaign has window rows" cannot be enforced by the schema: a campaign
+// created by anything other than the store's Create — a direct INSERT, the seeder,
+// a future importer — would otherwise have no windows, and treating that as
+// corrupted state would permanently break its sequence. Since a persisted
+// schedule can never legitimately be empty (Compile rejects an all-closed week,
+// so no write path can store one), zero rows unambiguously means "never
+// configured", and defaulting is both safe and correct.
+func ScheduleFrom(timezone string, windows []SendWindow) Schedule {
+	if len(windows) == 0 {
+		return DefaultSchedule(timezone)
+	}
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	return Schedule{Timezone: timezone, Windows: windows}
+}
+
 // Compile validates the schedule and turns it into a Window. It is the single
 // boundary where persisted or client-supplied schedule data becomes trusted: an
 // unknown zone, a malformed interval, an overlap, or a week with nothing open is

@@ -50,9 +50,9 @@ type fakeStore struct {
 	listEnrollmentsCalls                        int
 	listEnrollmentsLimit, listEnrollmentsOffset int32
 
-	// schedule fixtures/spies. windows is what ListWindows returns (nil means
-	// "use the Mon–Fri default", so existing tests get a sane schedule without
-	// each one restating it); windowsErr forces the load to fail. rescheduled
+	// schedule fixtures/spies. windows is what ListWindows returns (nil means the
+	// campaign has none, which resolves to the Mon–Fri default downstream);
+	// windowsErr forces the load to fail. rescheduled
 	// captures the cadence-computed due times Launch stamps, and replacedSchedule
 	// the last schedule written.
 	windows            []SendWindow
@@ -102,10 +102,10 @@ func (f *fakeStore) ListWindows(context.Context, uuid.UUID, uuid.UUID) ([]SendWi
 	if f.windowsErr != nil {
 		return nil, f.windowsErr
 	}
-	if f.windows != nil {
-		return f.windows, nil
-	}
-	return DefaultSchedule("UTC").Windows, nil
+	// nil is returned as-is: an unconfigured campaign resolving to the default
+	// schedule is the production behavior (cadence.ScheduleFrom), so the fake must
+	// not pre-substitute it.
+	return f.windows, nil
 }
 
 func (f *fakeStore) ReplaceSchedule(_ context.Context, _, _ uuid.UUID, sched Schedule) error {

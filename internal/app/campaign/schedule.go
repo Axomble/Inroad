@@ -30,7 +30,9 @@ func (s *Service) GetSchedule(ctx context.Context, ws, campaignID uuid.UUID) (Sc
 	if err != nil {
 		return Schedule{}, err
 	}
-	return Schedule{Timezone: c.Timezone, Windows: windows}, nil
+	// A campaign with no window rows was never configured (a direct insert, the
+	// seeder) rather than corrupted, so it reads as the default schedule.
+	return cadence.ScheduleFrom(c.Timezone, windows), nil
 }
 
 // SetSchedule replaces the campaign's schedule wholesale. Validation runs before
@@ -64,7 +66,7 @@ func (s *Service) window(ctx context.Context, ws uuid.UUID, c campaignSchedule) 
 	if err != nil {
 		return cadence.Window{}, err
 	}
-	return Schedule{Timezone: c.timezone, Windows: windows}.Compile()
+	return cadence.ScheduleFrom(c.timezone, windows).Compile()
 }
 
 // campaignSchedule is the slice of a campaign the scheduler needs, so window()

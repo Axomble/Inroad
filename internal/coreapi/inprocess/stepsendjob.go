@@ -19,23 +19,27 @@ import (
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
 
-// loadSchedule reads the campaign's send windows and compiles them together with
-// its timezone, returning the validated schedule. A campaign always has at least
-// one window (seeded by Create, backfilled by migration 000031), so an error here
-// means genuinely corrupted state or a binary without tzdata — either way the
-// caller must not fall back to sending immediately, which is why this returns an
-// error rather than a permissive default.
+// loadSchedule reads the campaign's send windows and compiles them with its
+// timezone, returning the validated schedule. An unconfigured campaign resolves
+// to the default business-hours window (see cadence.ScheduleFrom); a remaining
+// error means an unknown timezone — a binary without tzdata, or a zone removed
+// from the IANA database — and is surfaced rather than papered over, since the
+// alternative is sending outside the operator's window.
 func (c *client) loadSchedule(ctx context.Context, ws, campaignID uuid.UUID, timezone string) (cadence.Schedule, error) {
 	rows, err := c.q.ListSendWindows(ctx, gen.ListSendWindowsParams{CampaignID: campaignID, WorkspaceID: ws})
 	if err != nil {
 		return cadence.Schedule{}, err
 	}
-	sched := cadence.Schedule{Timezone: timezone, Windows: make([]cadence.SendWindow, len(rows))}
+	windows := make([]cadence.SendWindow, len(rows))
 	for i, r := range rows {
-		sched.Windows[i] = cadence.SendWindow{
+		windows[i] = cadence.SendWindow{
 			Weekday: int(r.Weekday), StartMinute: int(r.StartMinute), EndMinute: int(r.EndMinute),
 		}
 	}
+	// ScheduleFrom substitutes the default when a campaign has no window rows —
+	// created by a path that doesn't seed them — instead of failing every send it
+	// will ever make.
+	sched := cadence.ScheduleFrom(timezone, windows)
 	if _, err := sched.Compile(); err != nil {
 		return cadence.Schedule{}, fmt.Errorf("campaign %s schedule: %w", campaignID, err)
 	}

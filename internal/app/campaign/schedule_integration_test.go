@@ -97,6 +97,59 @@ func TestCreateSeedsDefaultSendWindow(t *testing.T) {
 	}
 }
 
+// The regression CI caught: a campaign created WITHOUT window rows — a direct
+// insert, the seeder, an importer, i.e. any path that isn't the store's Create —
+// must still schedule. Treating zero rows as corrupted state broke every send such
+// a campaign would ever make.
+func TestCampaignWithNoWindowRowsStillSchedules(t *testing.T) {
+	ctx := context.Background()
+	store, _, pool, ws, cam := scheduleFixture(t, ctx, 5)
+
+	// Strip the seeded windows to reproduce a campaign that never got any.
+	if _, err := pool.Exec(ctx, `DELETE FROM campaign_send_windows WHERE campaign_id = $1`, cam.ID); err != nil {
+		t.Fatalf("clear windows: %v", err)
+	}
+	windows, err := store.ListWindows(ctx, ws, cam.ID)
+	if err != nil {
+		t.Fatalf("ListWindows: %v", err)
+	}
+	if len(windows) != 0 {
+		t.Fatalf("windows = %d, want 0 for this fixture", len(windows))
+	}
+
+	svc := NewService(store, alwaysOKChecker{})
+	if _, err := svc.Launch(ctx, ws, cam.ID, noopEnqueuer{}); err != nil {
+		t.Fatalf("launching an unconfigured campaign failed: %v", err)
+	}
+
+	// It must be scheduled into the DEFAULT business-hours window, not immediately.
+	due, err := dueTimes(ctx, pool, ws, cam.ID)
+	if err != nil {
+		t.Fatalf("read due times: %v", err)
+	}
+	if len(due) != 5 {
+		t.Fatalf("stamped due times = %d, want 5", len(due))
+	}
+	win, err := DefaultSchedule("UTC").Compile()
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	for _, at := range due {
+		if !win.Contains(at) {
+			t.Errorf("send due at %s, outside the default window", at.UTC())
+		}
+	}
+
+	// And the schedule endpoint reports the default rather than an empty week.
+	sched, err := svc.GetSchedule(ctx, ws, cam.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if len(sched.Windows) != 5 {
+		t.Errorf("GetSchedule returned %d windows, want the 5-weekday default", len(sched.Windows))
+	}
+}
+
 // The database, not just Go, must reject overlapping intervals — that is what the
 // send_window_no_overlap GiST exclusion constraint is for.
 func TestOverlappingWindowIsRejectedByTheDatabase(t *testing.T) {
