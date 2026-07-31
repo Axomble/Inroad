@@ -132,6 +132,11 @@ type Store interface {
 	// RevokeRefreshFamily revokes every still-live refresh token in a rotation family
 	// (reuse detection + RFC 7009 refresh revoke); returns rows affected.
 	RevokeRefreshFamily(ctx context.Context, familyID uuid.UUID) (int64, error)
+	// RevokeAccessFamily revokes every still-live access token in a rotation family,
+	// called alongside RevokeRefreshFamily on reuse detection so a compromised chain's
+	// access tokens die on the next request rather than living out their TTL; returns
+	// rows affected.
+	RevokeAccessFamily(ctx context.Context, familyID uuid.UUID) (int64, error)
 	// RevokeAccessToken revokes an access token by hash, pinned to the owning client so
 	// a client can never revoke another client's token; returns rows affected.
 	RevokeAccessToken(ctx context.Context, tokenHash []byte, clientID string) (int64, error)

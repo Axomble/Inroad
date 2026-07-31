@@ -91,10 +91,11 @@ RETURNING *;
 
 -- name: CreateOauthAccessToken :exec
 -- Persist an issued opaque access token (only its SHA-256 hash), pinned to the client,
--- resource owner, workspace, and granted scope subset.
+-- resource owner, workspace, granted scope subset, and rotation family (so a family
+-- revoke on reuse detection kills this access token alongside its refresh siblings).
 INSERT INTO oauth_access_tokens (
-    token_hash, client_id, user_id, workspace_id, scopes, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6);
+    token_hash, family_id, client_id, user_id, workspace_id, scopes, expires_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7);
 
 -- name: GetOauthAccessTokenByHash :one
 -- The verifier + introspection lookup: resolve an access token by its hash. The
@@ -107,6 +108,14 @@ SELECT * FROM oauth_access_tokens WHERE token_hash = $1;
 -- returns 200 with no token-existence oracle. Idempotent via COALESCE.
 UPDATE oauth_access_tokens SET revoked_at = COALESCE(revoked_at, now())
 WHERE token_hash = $1 AND client_id = $2;
+
+-- name: RevokeOauthAccessFamily :execrows
+-- Revoke every still-live access token sharing a rotation family. Called alongside
+-- RevokeOauthRefreshFamily when refresh-token reuse is detected, so an access token
+-- already minted from a compromised chain is rejected on its next request (the verifier
+-- re-checks revoked_at every call) instead of surviving its full ~1h TTL. Idempotent.
+UPDATE oauth_access_tokens SET revoked_at = now()
+WHERE family_id = $1 AND revoked_at IS NULL;
 
 -- name: CreateOauthRefreshToken :exec
 -- Persist an issued rotating refresh token (only its SHA-256 hash), tagged with its

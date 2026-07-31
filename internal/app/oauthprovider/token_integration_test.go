@@ -67,7 +67,10 @@ func TestTokenRoundTripAndReuseDetection(t *testing.T) {
 		ClientName:   "Token RT",
 		RedirectURIs: []string{testRedirectURI},
 		Scope:        "contacts:read lists:read",
-		CreatedBy:    &uid, WorkspaceID: &ws,
+		// Registered for BOTH grants: the round-trip exercises authorization_code then
+		// refresh_token, and /token now enforces the client's registered grant_types.
+		GrantTypes: []string{grantAuthorizationCode, grantRefreshToken},
+		CreatedBy:  &uid, WorkspaceID: &ws,
 	})
 	if err != nil {
 		t.Fatalf("RegisterClient: %v", err)
@@ -131,7 +134,18 @@ func TestTokenRoundTripAndReuseDetection(t *testing.T) {
 		t.Fatal("family sibling must be revoked after reuse detection")
 	}
 
-	// Revoke the rotated access token; the verifier rejects it on the next request.
+	// Family-access-revoke (the P6b signature property): reuse detection ALSO killed the
+	// ACCESS token minted in that family (rot.AccessToken), so the oauthVerifier rejects it
+	// on the very next request — WITHOUT any explicit RFC 7009 revoke. Without this, a
+	// compromised chain's access token would stay valid for its full ~1h TTL after reuse.
+	rReuse := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	rReuse.Header.Set("Authorization", "Bearer "+rot.AccessToken)
+	if _, ok, _ := v.Verify(ctx, rReuse); ok {
+		t.Fatal("family-access-revoke: an access token in a reuse-revoked family must be rejected")
+	}
+
+	// And an explicit RFC 7009 access-token revoke is idempotent on the now already-revoked
+	// token and the verifier still rejects it.
 	if err := svc.Revoke(ctx, rot.AccessToken, ClientCredentials{ID: cid}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
@@ -139,6 +153,67 @@ func TestTokenRoundTripAndReuseDetection(t *testing.T) {
 	r2.Header.Set("Authorization", "Bearer "+rot.AccessToken)
 	if _, ok, _ := v.Verify(ctx, r2); ok {
 		t.Fatal("revoked access token must be rejected")
+	}
+}
+
+// registerBothGrants registers a public client for authorization_code + refresh_token
+// against real Postgres and returns its client_id.
+func registerBothGrants(t *testing.T, svc *Service, name string, uid, ws uuid.UUID) string {
+	t.Helper()
+	reg, err := svc.RegisterClient(context.Background(), RegisterInput{
+		ClientName: name, RedirectURIs: []string{testRedirectURI},
+		Scope:      "contacts:read lists:read",
+		GrantTypes: []string{grantAuthorizationCode, grantRefreshToken},
+		CreatedBy:  &uid, WorkspaceID: &ws,
+	})
+	if err != nil {
+		t.Fatalf("RegisterClient(%s): %v", name, err)
+	}
+	return reg.Client.ClientID
+}
+
+// TestRevokeForeignTokensNoOpDB proves the own-client revoke policy against real Postgres
+// for BOTH token types: a client revoking ANOTHER client's ACCESS token — and, on the
+// separate refresh lookup path, another client's REFRESH token — is a silent 200 no-op,
+// leaving the victim token live. Mirrors the fake-store TestRevokeForeignTokenIsNoOp.
+func TestRevokeForeignTokensNoOpDB(t *testing.T) {
+	ctx := context.Background()
+	svc, store, mint := itSetup(t)
+	ws, uid := mint()
+	owner := Owner{UserID: uid, WorkspaceID: ws}
+
+	victim := registerBothGrants(t, svc, "Victim", uid, ws)
+	attacker := registerBothGrants(t, svc, "Attacker", uid, ws)
+
+	code := codeFor(t, svc, victim, owner)
+	tok, err := svc.Token(ctx, TokenRequest{
+		GrantType: "authorization_code", Code: code, RedirectURI: testRedirectURI,
+		CodeVerifier: itVerifier, Client: ClientCredentials{ID: victim},
+	})
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+
+	// Attacker revokes the victim's ACCESS token -> silent no-op; token stays live.
+	if err := svc.Revoke(ctx, tok.AccessToken, ClientCredentials{ID: attacker}); err != nil {
+		t.Fatalf("foreign access revoke should be a silent no-op: %v", err)
+	}
+	v := NewVerifier(store)
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	if _, ok, err := v.Verify(ctx, r); !ok || err != nil {
+		t.Fatalf("victim access token must stay live after a foreign revoke: ok=%v err=%v", ok, err)
+	}
+
+	// Attacker revokes the victim's REFRESH token (separate store lookup path) -> no-op;
+	// the victim can still rotate it.
+	if err := svc.Revoke(ctx, tok.RefreshToken, ClientCredentials{ID: attacker}); err != nil {
+		t.Fatalf("foreign refresh revoke should be a silent no-op: %v", err)
+	}
+	if _, err := svc.Token(ctx, TokenRequest{
+		GrantType: "refresh_token", RefreshToken: tok.RefreshToken, Client: ClientCredentials{ID: victim},
+	}); err != nil {
+		t.Fatalf("victim refresh token must still rotate after a foreign revoke: %v", err)
 	}
 }
 

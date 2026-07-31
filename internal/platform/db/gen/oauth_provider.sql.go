@@ -85,12 +85,13 @@ func (q *Queries) ConsumeOauthRefreshToken(ctx context.Context, tokenHash []byte
 
 const createOauthAccessToken = `-- name: CreateOauthAccessToken :exec
 INSERT INTO oauth_access_tokens (
-    token_hash, client_id, user_id, workspace_id, scopes, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6)
+    token_hash, family_id, client_id, user_id, workspace_id, scopes, expires_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
 `
 
 type CreateOauthAccessTokenParams struct {
 	TokenHash   []byte             `json:"token_hash"`
+	FamilyID    uuid.UUID          `json:"family_id"`
 	ClientID    string             `json:"client_id"`
 	UserID      uuid.UUID          `json:"user_id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
@@ -99,10 +100,12 @@ type CreateOauthAccessTokenParams struct {
 }
 
 // Persist an issued opaque access token (only its SHA-256 hash), pinned to the client,
-// resource owner, workspace, and granted scope subset.
+// resource owner, workspace, granted scope subset, and rotation family (so a family
+// revoke on reuse detection kills this access token alongside its refresh siblings).
 func (q *Queries) CreateOauthAccessToken(ctx context.Context, arg CreateOauthAccessTokenParams) error {
 	_, err := q.db.Exec(ctx, createOauthAccessToken,
 		arg.TokenHash,
+		arg.FamilyID,
 		arg.ClientID,
 		arg.UserID,
 		arg.WorkspaceID,
@@ -278,7 +281,7 @@ func (q *Queries) CreateOauthRefreshToken(ctx context.Context, arg CreateOauthRe
 }
 
 const getOauthAccessTokenByHash = `-- name: GetOauthAccessTokenByHash :one
-SELECT id, token_hash, client_id, user_id, workspace_id, scopes, expires_at, revoked_at, created_at FROM oauth_access_tokens WHERE token_hash = $1
+SELECT id, token_hash, client_id, family_id, user_id, workspace_id, scopes, expires_at, revoked_at, created_at FROM oauth_access_tokens WHERE token_hash = $1
 `
 
 // The verifier + introspection lookup: resolve an access token by its hash. The
@@ -290,6 +293,7 @@ func (q *Queries) GetOauthAccessTokenByHash(ctx context.Context, tokenHash []byt
 		&i.ID,
 		&i.TokenHash,
 		&i.ClientID,
+		&i.FamilyID,
 		&i.UserID,
 		&i.WorkspaceID,
 		&i.Scopes,
@@ -492,6 +496,23 @@ func (q *Queries) ListOauthClientsByWorkspace(ctx context.Context, workspaceID p
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokeOauthAccessFamily = `-- name: RevokeOauthAccessFamily :execrows
+UPDATE oauth_access_tokens SET revoked_at = now()
+WHERE family_id = $1 AND revoked_at IS NULL
+`
+
+// Revoke every still-live access token sharing a rotation family. Called alongside
+// RevokeOauthRefreshFamily when refresh-token reuse is detected, so an access token
+// already minted from a compromised chain is rejected on its next request (the verifier
+// re-checks revoked_at every call) instead of surviving its full ~1h TTL. Idempotent.
+func (q *Queries) RevokeOauthAccessFamily(ctx context.Context, familyID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeOauthAccessFamily, familyID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const revokeOauthAccessToken = `-- name: RevokeOauthAccessToken :execrows

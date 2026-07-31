@@ -114,6 +114,21 @@ or SSRF. (Not a full threat model; that's future work.)
     never be exfiltrated off-host. Cursor values are never logged verbatim — only
     their length.
 
+## OAuth provider (token endpoint)
+The `/oauth2/token`, `/oauth2/introspect`, and `/oauth2/revoke` endpoints (Inroad acting
+as an OAuth 2.1 PROVIDER, distinct from the mailbox-connect client above) are
+CLIENT-credentialed — a public client authenticates by `client_id` + PKCE, a confidential
+client by `client_secret_basic`/`_post` — and are NOT IP- or account-rate-limited. This is
+the intended, accepted posture: PKCE brute force is defeated by consume-first single-use
+(a wrong `code_verifier` attempt still burns the authorization code) combined with 256-bit
+S256 challenge entropy, and refresh-token theft is bounded by single-use rotation with
+reuse detection that revokes the ENTIRE rotation family — both the refresh tokens AND the
+access tokens minted in it (shared `family_id`), so a detected reuse invalidates access on
+the next request rather than after the ~1h access TTL. A client may introspect/revoke ONLY
+its own tokens (own-client policy; a foreign token is inactive/no-op, no cross-client
+oracle), and a client may only exercise the grant types it registered for. Adding a rate
+limit / abuse control here is tracked in the Deferred list below.
+
 ## Field encryption keys (per-workspace DEK)
 14. **Field secrets are sealed under a per-workspace data-encryption key (DEK),
     not the master key directly.** SMTP passwords and Gmail/M365 OAuth tokens are

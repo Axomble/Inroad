@@ -92,6 +92,15 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (TokenResponse, e
 	if err != nil {
 		return TokenResponse{}, err
 	}
+	// OAuth 2.1: a client may only exercise a grant_type it registered for. Enforcing the
+	// client's registered grant_types here means a client registered for only
+	// authorization_code cannot use the refresh_token grant. Registration caps grant_types
+	// to {authorization_code, refresh_token}, so this also keeps password/
+	// client_credentials/implicit wholesale-rejected (never registrable) as
+	// unsupported_grant_type — the switch default below is defense-in-depth.
+	if !containsExact(client.grantTypes, req.GrantType) {
+		return TokenResponse{}, errUnsupportedGrant
+	}
 	switch req.GrantType {
 	case grantAuthorizationCode:
 		return s.grantAuthorizationCode(ctx, req, client)
@@ -193,7 +202,7 @@ func (s *Service) grantRefreshToken(ctx context.Context, req TokenRequest, c cli
 	// Reuse detection: presenting an already-rotated (consumed) or revoked token kills
 	// the whole family and rejects — the exact P1 session strategy.
 	if row.ConsumedAt.Valid || row.RevokedAt.Valid {
-		_, _ = s.store.RevokeRefreshFamily(ctx, row.FamilyID)
+		s.revokeFamily(ctx, row.FamilyID)
 		return TokenResponse{}, errInvalidGrant
 	}
 	// Expired (but never used): reject without a family revoke — it isn't reuse.
@@ -218,10 +227,22 @@ func (s *Service) grantRefreshToken(ctx context.Context, req TokenRequest, c cli
 		return TokenResponse{}, err
 	}
 	if n == 0 {
-		_, _ = s.store.RevokeRefreshFamily(ctx, row.FamilyID)
+		s.revokeFamily(ctx, row.FamilyID)
 		return TokenResponse{}, errInvalidGrant
 	}
 	return s.issueTokens(ctx, c.id, row.UserID, row.WorkspaceID, scopes, row.FamilyID)
+}
+
+// revokeFamily kills an entire rotation family on reuse detection: every still-live
+// refresh token AND every access token minted in it. Revoking the access tokens too is
+// what makes "revoke the whole family" complete — an access token already issued from a
+// compromised chain is rejected on its next request (the verifier re-checks revoked_at
+// every call) instead of surviving its ~1h TTL. Both revokes are best-effort: the caller
+// is already returning invalid_grant, so a failed revoke must not surface as a 500 and
+// leak internal detail; the sweep is idempotent and retried on the next reuse attempt.
+func (s *Service) revokeFamily(ctx context.Context, familyID uuid.UUID) {
+	_, _ = s.store.RevokeRefreshFamily(ctx, familyID)
+	_, _ = s.store.RevokeAccessFamily(ctx, familyID)
 }
 
 // issueTokens mints an opaque access token and a rotating refresh token, persists both
@@ -239,7 +260,7 @@ func (s *Service) issueTokens(ctx context.Context, clientID string, userID, wsID
 	now := s.now()
 	if err := s.store.IssueTokenPair(ctx,
 		CreateAccessTokenParams{
-			TokenHash: accessHash, ClientID: clientID, UserID: userID,
+			TokenHash: accessHash, FamilyID: familyID, ClientID: clientID, UserID: userID,
 			WorkspaceID: wsID, Scopes: scopes, ExpiresAt: now.Add(accessTokenTTL),
 		},
 		CreateRefreshTokenParams{
@@ -292,7 +313,8 @@ type IntrospectResult struct {
 // token; a live one returns active + metadata, everything else returns inactive. There
 // is no oracle beyond active/inactive.
 func (s *Service) Introspect(ctx context.Context, token string, client ClientCredentials) (IntrospectResult, error) {
-	if _, err := s.authenticateClient(ctx, client); err != nil {
+	authed, err := s.authenticateClient(ctx, client)
+	if err != nil {
 		return IntrospectResult{}, err
 	}
 	if token == "" {
@@ -300,10 +322,13 @@ func (s *Service) Introspect(ctx context.Context, token string, client ClientCre
 	}
 	hash := hashSecret(token)
 
+	// Own-client policy: a client may introspect ONLY tokens issued to itself. A token
+	// belonging to another client returns inactive (no metadata), mirroring Revoke's
+	// own-only posture, so introspection is never a cross-client existence/metadata oracle.
 	at, err := s.store.GetAccessToken(ctx, hash)
 	switch {
 	case err == nil:
-		if !at.RevokedAt.Valid && s.now().Before(at.ExpiresAt.Time) {
+		if at.ClientID == authed.id && !at.RevokedAt.Valid && s.now().Before(at.ExpiresAt.Time) {
 			return IntrospectResult{
 				Active: true, Scope: strings.Join(at.Scopes, " "), ClientID: at.ClientID,
 				Sub: at.UserID.String(), Exp: at.ExpiresAt.Time.Unix(), TokenType: bearerTokenType,
@@ -317,7 +342,7 @@ func (s *Service) Introspect(ctx context.Context, token string, client ClientCre
 	rt, err := s.store.GetRefreshToken(ctx, hash)
 	switch {
 	case err == nil:
-		if !rt.RevokedAt.Valid && !rt.ConsumedAt.Valid && s.now().Before(rt.ExpiresAt.Time) {
+		if rt.ClientID == authed.id && !rt.RevokedAt.Valid && !rt.ConsumedAt.Valid && s.now().Before(rt.ExpiresAt.Time) {
 			return IntrospectResult{
 				Active: true, Scope: strings.Join(rt.Scopes, " "), ClientID: rt.ClientID,
 				Sub: rt.UserID.String(), Exp: rt.ExpiresAt.Time.Unix(),

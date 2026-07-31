@@ -17,6 +17,12 @@ CREATE TABLE oauth_access_tokens (
     -- The client the token was issued to (its public client_id). A client may revoke
     -- only its own tokens (RFC 7009), enforced by matching this column.
     client_id    TEXT NOT NULL,
+    -- The rotation family this access token was minted in (shared with its sibling
+    -- refresh token and every rotation successor). When reuse detection kills a refresh
+    -- family, the matching access tokens are revoked by the SAME family_id, so a
+    -- compromised chain's access tokens die on their next request rather than living out
+    -- their ~1h TTL. Mirrors oauth_refresh_tokens.family_id.
+    family_id    UUID NOT NULL,
     -- The resource owner + workspace the grant is pinned to. Every scoped request the
     -- token authenticates is bound to THIS workspace, never a caller-supplied one.
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -25,10 +31,14 @@ CREATE TABLE oauth_access_tokens (
     -- the principal to exactly these.
     scopes       TEXT[] NOT NULL,
     expires_at   TIMESTAMPTZ NOT NULL,
-    -- Set on explicit revoke (RFC 7009). The verifier rejects a revoked token at once.
+    -- Set on explicit revoke (RFC 7009) or a family revoke on reuse detection. The
+    -- verifier rejects a revoked token at once.
     revoked_at   TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Family revoke (reuse detection kills the whole chain's access tokens too) scans by
+-- family_id — mirrors the refresh-token family index below.
+CREATE INDEX idx_oauth_access_tokens_family ON oauth_access_tokens (family_id);
 
 -- Longer-TTL (~30d) rotating refresh tokens with reuse detection. Every refresh token
 -- belongs to a rotation FAMILY (family_id): a token exchange rotates the presented

@@ -11,9 +11,18 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
+// testClock is a mutable clock so a test can advance time deterministically. It is
+// shared (by pointer) between the fake store and the service under test (see
+// newTestService), so their TTL / consume / expiry checks always agree on "now".
+type testClock struct{ t time.Time }
+
+func (c *testClock) now() time.Time          { return c.t }
+func (c *testClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
 // fakeStore is an in-memory Store for unit tests: no DB, no network. It mirrors the
 // PgStore's tenancy + single-use semantics faithfully enough to assert behavior. Its
-// clock is shared with the service under test so TTL/consume checks line up.
+// clock (`clock`) is shared with the service under test (newTestService wires the
+// service's now to the same clock) so TTL/consume checks line up.
 type fakeStore struct {
 	clients  map[string]gen.OauthClient               // by client_id
 	requests map[string]gen.OauthAuthorizationRequest // by consent_id
@@ -21,12 +30,14 @@ type fakeStore struct {
 	codes    map[string]gen.OauthAuthorizationCode    // by hex(code_hash)
 	access   map[string]gen.OauthAccessToken          // by hex(token_hash)
 	refresh  map[string]gen.OauthRefreshToken         // by hex(token_hash)
+	clock    *testClock
 	now      func() time.Time
 
 	createClientErr error // injectable to exercise the collision-retry path
 }
 
 func newFakeStore() *fakeStore {
+	clk := &testClock{t: time.Now()}
 	return &fakeStore{
 		clients:  map[string]gen.OauthClient{},
 		requests: map[string]gen.OauthAuthorizationRequest{},
@@ -34,7 +45,8 @@ func newFakeStore() *fakeStore {
 		codes:    map[string]gen.OauthAuthorizationCode{},
 		access:   map[string]gen.OauthAccessToken{},
 		refresh:  map[string]gen.OauthRefreshToken{},
-		now:      time.Now,
+		clock:    clk,
+		now:      clk.now,
 	}
 }
 
@@ -187,9 +199,9 @@ func (f *fakeStore) ConsumeAuthCode(_ context.Context, codeHash []byte) (gen.Oau
 
 func (f *fakeStore) IssueTokenPair(_ context.Context, access CreateAccessTokenParams, refresh CreateRefreshTokenParams) error {
 	f.access[hex.EncodeToString(access.TokenHash)] = gen.OauthAccessToken{
-		ID: uuid.New(), TokenHash: access.TokenHash, ClientID: access.ClientID,
-		UserID: access.UserID, WorkspaceID: access.WorkspaceID, Scopes: access.Scopes,
-		ExpiresAt: pgTime(access.ExpiresAt), CreatedAt: pgTime(f.now()),
+		ID: uuid.New(), TokenHash: access.TokenHash, FamilyID: access.FamilyID,
+		ClientID: access.ClientID, UserID: access.UserID, WorkspaceID: access.WorkspaceID,
+		Scopes: access.Scopes, ExpiresAt: pgTime(access.ExpiresAt), CreatedAt: pgTime(f.now()),
 	}
 	f.refresh[hex.EncodeToString(refresh.TokenHash)] = gen.OauthRefreshToken{
 		ID: uuid.New(), TokenHash: refresh.TokenHash, FamilyID: refresh.FamilyID,
@@ -249,6 +261,18 @@ func (f *fakeStore) RevokeAccessToken(_ context.Context, tokenHash []byte, clien
 		f.access[key] = t
 	}
 	return 1, nil
+}
+
+func (f *fakeStore) RevokeAccessFamily(_ context.Context, familyID uuid.UUID) (int64, error) {
+	var n int64
+	for k, t := range f.access {
+		if t.FamilyID == familyID && !t.RevokedAt.Valid {
+			t.RevokedAt = pgTime(f.now())
+			f.access[k] = t
+			n++
+		}
+	}
+	return n, nil
 }
 
 // codeByHash looks a stored code up by its raw code (test helper).

@@ -43,27 +43,50 @@ func seedCode(t *testing.T, f *fakeStore, s *Service, clientID string, scopes []
 	return raw
 }
 
-// publicClient registers a public PKCE client and returns its id.
+// bothGrants is the registered grant_type set for a client that uses BOTH the
+// authorization_code exchange and the refresh_token rotation (the token endpoint now
+// enforces a client's registered grant_types, so a refresh-using client must register
+// for it).
+var bothGrants = []string{grantAuthorizationCode, grantRefreshToken}
+
+// publicClient registers a public PKCE client (authorization_code + refresh_token) and
+// returns its id.
 func publicClient(t *testing.T, s *Service) string {
 	t.Helper()
 	uid, ws := uuid.New(), uuid.New()
 	res := mustRegister(t, s, RegisterInput{
 		ClientName: "Public", RedirectURIs: []string{testRedirectURI},
-		Scope: "contacts:read lists:read", CreatedBy: &uid, WorkspaceID: &ws,
+		Scope: "contacts:read lists:read", GrantTypes: bothGrants,
+		CreatedBy: &uid, WorkspaceID: &ws,
 	})
 	return res.Client.ClientID
 }
 
-// confidentialClient registers a confidential client and returns its id + raw secret.
+// confidentialClient registers a confidential client (authorization_code +
+// refresh_token) and returns its id + raw secret.
 func confidentialClient(t *testing.T, s *Service) (string, string) {
 	t.Helper()
 	uid, ws := uuid.New(), uuid.New()
 	res := mustRegister(t, s, RegisterInput{
 		ClientName: "Confidential", RedirectURIs: []string{testRedirectURI},
-		Scope: "contacts:read lists:read", TokenEndpointAuthMethod: "client_secret_basic",
-		CreatedBy: &uid, WorkspaceID: &ws,
+		Scope: "contacts:read lists:read", GrantTypes: bothGrants,
+		TokenEndpointAuthMethod: "client_secret_basic",
+		CreatedBy:               &uid, WorkspaceID: &ws,
 	})
 	return res.Client.ClientID, res.ClientSecret
+}
+
+// codeOnlyClient registers a public client for ONLY the authorization_code grant, to
+// exercise the grant_types enforcement at /token (a refresh attempt must be rejected).
+func codeOnlyClient(t *testing.T, s *Service) string {
+	t.Helper()
+	uid, ws := uuid.New(), uuid.New()
+	res := mustRegister(t, s, RegisterInput{
+		ClientName: "CodeOnly", RedirectURIs: []string{testRedirectURI},
+		Scope: "contacts:read", GrantTypes: []string{grantAuthorizationCode},
+		CreatedBy: &uid, WorkspaceID: &ws,
+	})
+	return res.Client.ClientID
 }
 
 func asTokenErr(t *testing.T, err error) *TokenError {
@@ -503,6 +526,107 @@ func TestRevokeUnknownTokenIsNoOp(t *testing.T) {
 	cid := publicClient(t, s)
 	if err := s.Revoke(context.Background(), "inoa_unknown", ClientCredentials{ID: cid}); err != nil {
 		t.Fatalf("unknown revoke should be a no-op, got %v", err)
+	}
+}
+
+// --- grant_types enforcement -------------------------------------------------
+
+func TestTokenGrantTypeNotRegistered(t *testing.T) {
+	s, _ := newTestService()
+	cid := codeOnlyClient(t, s)
+	// The client is registered for authorization_code ONLY, so the refresh_token grant is
+	// rejected as unsupported_grant_type BEFORE any token lookup (the refresh value here is
+	// never consulted).
+	_, err := s.Token(context.Background(), TokenRequest{
+		GrantType: "refresh_token", RefreshToken: "inor_whatever", Client: ClientCredentials{ID: cid},
+	})
+	if te := asTokenErr(t, err); te.Code != "unsupported_grant_type" {
+		t.Fatalf("code-only client using refresh grant: want unsupported_grant_type, got %s", te.Code)
+	}
+}
+
+func TestTokenGrantTypeRegisteredCodeStillWorks(t *testing.T) {
+	s, f := newTestService()
+	cid := codeOnlyClient(t, s)
+	uid, ws := uuid.New(), uuid.New()
+	code := seedCode(t, f, s, cid, []string{"contacts:read"}, s256(testVerifier), uid, ws)
+	// The grant it IS registered for still works (enforcement rejects only unregistered).
+	if _, err := s.Token(context.Background(), TokenRequest{
+		GrantType: "authorization_code", Code: code, RedirectURI: testRedirectURI,
+		CodeVerifier: testVerifier, Client: ClientCredentials{ID: cid},
+	}); err != nil {
+		t.Fatalf("registered authorization_code grant must still work: %v", err)
+	}
+}
+
+// --- introspection own-client policy -----------------------------------------
+
+func TestIntrospectForeignAccessTokenInactive(t *testing.T) {
+	s, f := newTestService()
+	cid := publicClient(t, s)
+	other := publicClient(t, s)
+	tok := exchangeForTokens(t, s, f, cid, []string{"contacts:read"})
+
+	// `other` introspects cid's ACCESS token: own-client policy -> inactive, no metadata,
+	// no cross-client oracle.
+	res, err := s.Introspect(context.Background(), tok.AccessToken, ClientCredentials{ID: other})
+	if err != nil {
+		t.Fatalf("introspect foreign access: %v", err)
+	}
+	if res.Active || res.ClientID != "" || res.Scope != "" {
+		t.Fatalf("foreign access token must introspect inactive with no detail: %+v", res)
+	}
+	// Sanity: the owning client still sees its own token active (it is genuinely live).
+	if own, _ := s.Introspect(context.Background(), tok.AccessToken, ClientCredentials{ID: cid}); !own.Active {
+		t.Fatal("owning client must still introspect its own access token active")
+	}
+}
+
+func TestIntrospectForeignRefreshTokenInactive(t *testing.T) {
+	s, f := newTestService()
+	cid := publicClient(t, s)
+	other := publicClient(t, s)
+	tok := exchangeForTokens(t, s, f, cid, []string{"contacts:read"})
+
+	// The refresh lookup path is separate from the access path; the own-client gate must
+	// apply there too.
+	res, err := s.Introspect(context.Background(), tok.RefreshToken, ClientCredentials{ID: other})
+	if err != nil {
+		t.Fatalf("introspect foreign refresh: %v", err)
+	}
+	if res.Active || res.ClientID != "" || res.Scope != "" {
+		t.Fatalf("foreign refresh token must introspect inactive with no detail: %+v", res)
+	}
+	if own, _ := s.Introspect(context.Background(), tok.RefreshToken, ClientCredentials{ID: cid}); !own.Active {
+		t.Fatal("owning client must still introspect its own refresh token active")
+	}
+}
+
+// --- expiry is NOT reuse -----------------------------------------------------
+
+func TestRefreshExpiredIsNotReuse(t *testing.T) {
+	s, f := newTestService()
+	cid := publicClient(t, s)
+	first := exchangeForTokens(t, s, f, cid, []string{"contacts:read"})
+
+	// Advance the shared clock past the refresh TTL: the token is expired but was NEVER
+	// used (no consume, no reuse).
+	f.clock.advance(refreshTokenTTL + time.Minute)
+
+	_, err := s.Token(context.Background(), TokenRequest{
+		GrantType: "refresh_token", RefreshToken: first.RefreshToken, Client: ClientCredentials{ID: cid},
+	})
+	if te := asTokenErr(t, err); te.Code != "invalid_grant" {
+		t.Fatalf("expired refresh: want invalid_grant, got %s", te.Code)
+	}
+	// Expiry must NOT trigger a family revoke (unlike reuse): a sibling/family token stays
+	// usable. The presented row itself must remain unrevoked.
+	rt, ok := f.refresh[hexHash(first.RefreshToken)]
+	if !ok {
+		t.Fatal("refresh row unexpectedly gone")
+	}
+	if rt.RevokedAt.Valid {
+		t.Fatal("an expired (never-used) refresh token must NOT revoke its family")
 	}
 }
 

@@ -25,6 +25,10 @@ const (
 func newTestService() (*Service, *fakeStore) {
 	f := newFakeStore()
 	s := NewService(f, testPublicURL)
+	// Share ONE clock (f.clock) between the fake store and the service so their TTL /
+	// consume / expiry checks agree and a test can advance time deterministically
+	// (f.clock.advance). f.now is the bound method on that same *testClock.
+	s.now = f.now
 	return s, f
 }
 

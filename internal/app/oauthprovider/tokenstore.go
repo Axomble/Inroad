@@ -10,9 +10,12 @@ import (
 )
 
 // CreateAccessTokenParams is the persistence input for an issued opaque access token,
-// in clean Go types so the service never touches pgtype values.
+// in clean Go types so the service never touches pgtype values. FamilyID ties the token
+// to its rotation family so a reuse-detection family revoke kills it alongside the
+// refresh siblings.
 type CreateAccessTokenParams struct {
 	TokenHash   []byte
+	FamilyID    uuid.UUID
 	ClientID    string
 	UserID      uuid.UUID
 	WorkspaceID uuid.UUID
@@ -48,6 +51,7 @@ func (s *PgStore) IssueTokenPair(ctx context.Context, access CreateAccessTokenPa
 
 	if err := qtx.CreateOauthAccessToken(ctx, gen.CreateOauthAccessTokenParams{
 		TokenHash:   access.TokenHash,
+		FamilyID:    access.FamilyID,
 		ClientID:    access.ClientID,
 		UserID:      access.UserID,
 		WorkspaceID: access.WorkspaceID,
@@ -88,4 +92,8 @@ func (s *PgStore) RevokeRefreshFamily(ctx context.Context, familyID uuid.UUID) (
 
 func (s *PgStore) RevokeAccessToken(ctx context.Context, tokenHash []byte, clientID string) (int64, error) {
 	return s.q.RevokeOauthAccessToken(ctx, gen.RevokeOauthAccessTokenParams{TokenHash: tokenHash, ClientID: clientID})
+}
+
+func (s *PgStore) RevokeAccessFamily(ctx context.Context, familyID uuid.UUID) (int64, error) {
+	return s.q.RevokeOauthAccessFamily(ctx, familyID)
 }

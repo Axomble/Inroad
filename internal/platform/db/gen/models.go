@@ -289,6 +289,7 @@ type OauthAccessToken struct {
 	ID          uuid.UUID          `json:"id"`
 	TokenHash   []byte             `json:"token_hash"`
 	ClientID    string             `json:"client_id"`
+	FamilyID    uuid.UUID          `json:"family_id"`
 	UserID      uuid.UUID          `json:"user_id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	Scopes      []string           `json:"scopes"`
