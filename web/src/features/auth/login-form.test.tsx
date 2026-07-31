@@ -44,10 +44,14 @@ function enablePasskeys() {
   })
 }
 
-// LoginForm uses the router's useNavigate + Link; stub them and capture navigation.
+// LoginForm uses the router's useNavigate + Link + the `/` route's search
+// (`return_to`); stub them and capture navigation. Default search is empty, so
+// completeLogin falls through to the /app/mailboxes redirect.
 const navigate = vi.fn()
+let loginSearch: { return_to?: string } = {}
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => navigate,
+  getRouteApi: () => ({ useSearch: () => loginSearch }),
   Link: ({ to, children, ...props }: { to: string; children: React.ReactNode }) => (
     <a href={to} {...props}>
       {children}
@@ -76,6 +80,7 @@ let passkeyFinishResponder: () => Response
 
 beforeEach(() => {
   navigate.mockClear()
+  loginSearch = {}
   loginResponder = () => new Response(JSON.stringify(SESSION), { status: 200, headers: jsonHeaders })
   verifyResponder = () => new Response(JSON.stringify(SESSION), { status: 200, headers: jsonHeaders })
   otpStartResponder = () => new Response(JSON.stringify({ status: 'ok' }), { status: 200, headers: jsonHeaders })
@@ -98,9 +103,14 @@ beforeEach(() => {
   )
 })
 
+const ORIGINAL_LOCATION = window.location
+
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  // A couple of tests swap in a stub `window.location` to capture `assign`; put
+  // the real one back so it doesn't leak into later tests.
+  Object.defineProperty(window, 'location', { configurable: true, value: ORIGINAL_LOCATION })
 })
 
 function fillCredentials() {
@@ -120,6 +130,37 @@ test('a non-2FA login stores the session and redirects', async () => {
   fillCredentials()
 
   await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+})
+
+test('a login with a safe return_to resumes there via a full navigation, not the SPA router', async () => {
+  loginSearch = { return_to: '/oauth/consent?consent_id=c-1' }
+  const assign = vi.fn()
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: { ...window.location, assign },
+  })
+
+  renderWithProviders(<LoginForm />)
+  fillCredentials()
+
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/oauth/consent?consent_id=c-1'))
+  // The SPA router is NOT used for the resume (the target may be a non-SPA path).
+  expect(navigate).not.toHaveBeenCalledWith({ to: '/app/mailboxes' })
+})
+
+test('an unsafe return_to is ignored (open-redirect guard) and falls back to the app', async () => {
+  loginSearch = { return_to: '//evil.example.com/steal' }
+  const assign = vi.fn()
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: { ...window.location, assign },
+  })
+
+  renderWithProviders(<LoginForm />)
+  fillCredentials()
+
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+  expect(assign).not.toHaveBeenCalled()
 })
 
 test('a 2FA-required login transitions to the challenge step, then verifies to a session', async () => {

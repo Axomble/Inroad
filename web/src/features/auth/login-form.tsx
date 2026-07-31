@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { ArrowLeft, Fingerprint, Loader2, Mail } from 'lucide-react'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { getRouteApi, Link, useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -26,6 +26,8 @@ import {
   useAuthEmailOtpVerifyMutation,
 } from './api'
 
+const routeApi = getRouteApi('/')
+
 const schema = z.object({
   email: z.email('Enter a valid email address'),
   password: z.string().min(1, 'Enter your password'),
@@ -40,7 +42,20 @@ type FormValues = z.infer<typeof schema>
  */
 type Pending = { challenge: string; email: string }
 
+/**
+ * A `return_to` is only honoured when it is a same-origin internal path — starts
+ * with a single `/` (rejecting `//evil.com` protocol-relative and absolute URLs
+ * with a scheme). This blocks the login form from being turned into an open
+ * redirect. Callers then navigate via `window.location.assign`, because the target
+ * may be the API's `/oauth2/authorize` (not an SPA route) as well as an SPA path.
+ */
+function safeReturnTo(raw: string | undefined): string | null {
+  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return null
+  return raw
+}
+
 export function LoginForm() {
+  const { return_to: returnTo } = routeApi.useSearch()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const [pending, setPending] = useState<Pending | null>(null)
@@ -57,6 +72,15 @@ export function LoginForm() {
   function completeLogin(session: SessionResponse, email?: string) {
     dispatch(setSession(session))
     if (email) dispatch(setUserIdentity({ email }))
+    const resume = safeReturnTo(returnTo)
+    if (resume) {
+      // Full navigation, not the SPA router: the resume target may be the API's
+      // /oauth2/authorize (a top-level browser nav the backend handles), not just
+      // an SPA route. The refresh cookie login just set survives the reload, so the
+      // bootstrap restores the in-memory session on the resumed page.
+      window.location.assign(resume)
+      return
+    }
     navigate({ to: '/app/mailboxes' })
   }
 
