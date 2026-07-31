@@ -46,9 +46,20 @@ type Passkey = { id: string; label: string; transports: string[]; created_at: st
 
 let passkeys: Passkey[]
 let createMock: ReturnType<typeof vi.fn>
+// Per-test overridable responders for the two-step registration ceremony.
+let beginResponder: () => Response
+let finishResponder: () => Response
 
 beforeEach(() => {
   passkeys = []
+
+  beginResponder = () => new Response(JSON.stringify(BEGIN_OPTIONS), { status: 200, headers: jsonHeaders })
+  finishResponder = () => {
+    passkeys = [
+      { id: 'p1', label: 'MacBook', transports: ['internal'], created_at: new Date().toISOString(), last_used_at: null },
+    ]
+    return new Response(null, { status: 204 })
+  }
 
   createMock = vi.fn().mockResolvedValue(new FakePublicKeyCredential())
   vi.stubGlobal('PublicKeyCredential', FakePublicKeyCredential)
@@ -65,13 +76,10 @@ beforeEach(() => {
       const method = init?.method ?? request?.method ?? 'GET'
 
       if (url.includes('/auth/passkeys/register/begin')) {
-        return new Response(JSON.stringify(BEGIN_OPTIONS), { status: 200, headers: jsonHeaders })
+        return beginResponder()
       }
       if (url.includes('/auth/passkeys/register/finish')) {
-        passkeys = [
-          { id: 'p1', label: 'MacBook', transports: ['internal'], created_at: new Date().toISOString(), last_used_at: null },
-        ]
-        return new Response(null, { status: 204 })
+        return finishResponder()
       }
       if (url.includes('/auth/passkeys/')) {
         if (method === 'DELETE') {
@@ -132,6 +140,40 @@ test('a cancelled ceremony shows an inline error, not a stuck spinner', async ()
 
   expect(await screen.findByText(/cancelled or timed out/i)).toBeInTheDocument()
   // The create button is interactive again (no stuck busy state).
+  expect(screen.getByRole('button', { name: /create passkey/i })).toBeEnabled()
+})
+
+test('a 501 from register/begin shows the not-configured message, not a generic retry', async () => {
+  beginResponder = () =>
+    new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers: jsonHeaders })
+
+  renderWithProviders(<PasskeysSettings />)
+  await screen.findByText('No passkeys yet')
+  fireEvent.click(screen.getByRole('button', { name: /add a passkey/i }))
+  fireEvent.change(screen.getByLabelText(/passkey name/i), { target: { value: 'MacBook' } })
+  fireEvent.click(screen.getByRole('button', { name: /create passkey/i }))
+
+  expect(await screen.findByText(/not configured on this server/i)).toBeInTheDocument()
+  expect(screen.queryByText(/couldn't start passkey setup/i)).not.toBeInTheDocument()
+  // The ceremony never ran (begin failed first) and the button is usable again.
+  expect(createMock).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: /create passkey/i })).toBeEnabled()
+})
+
+test('a 501 from register/finish shows the not-configured message, not a generic retry', async () => {
+  finishResponder = () =>
+    new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers: jsonHeaders })
+
+  renderWithProviders(<PasskeysSettings />)
+  await screen.findByText('No passkeys yet')
+  fireEvent.click(screen.getByRole('button', { name: /add a passkey/i }))
+  fireEvent.change(screen.getByLabelText(/passkey name/i), { target: { value: 'MacBook' } })
+  fireEvent.click(screen.getByRole('button', { name: /create passkey/i }))
+
+  // The ceremony ran, but the finish call reported passkeys aren't configured.
+  await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1))
+  expect(await screen.findByText(/not configured on this server/i)).toBeInTheDocument()
+  expect(screen.queryByText(/that didn't work/i)).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: /create passkey/i })).toBeEnabled()
 })
 

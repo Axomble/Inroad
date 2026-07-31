@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   base64urlToBuffer,
   bufferToBase64url,
+  encodeAuthenticationCredential,
+  encodeRegistrationCredential,
   isWebAuthnAvailable,
   toCreationOptions,
   toRequestOptions,
@@ -10,6 +12,10 @@ import {
 
 function toArray(buffer: ArrayBuffer): number[] {
   return Array.from(new Uint8Array(buffer))
+}
+
+function bytes(values: number[]): ArrayBuffer {
+  return new Uint8Array(values).buffer
 }
 
 describe('base64url <-> ArrayBuffer', () => {
@@ -66,6 +72,117 @@ describe('toRequestOptions', () => {
     expect(toArray(opts.challenge as ArrayBuffer)).toEqual([0, 1, 2])
     expect(opts.allowCredentials).toEqual([])
     expect(opts.userVerification).toBe('required')
+  })
+})
+
+describe('encodeRegistrationCredential', () => {
+  test('re-encodes rawId, clientDataJSON, and attestationObject to base64url', () => {
+    // 0xff 0xfe 0xfd -> "__79" exercises the URL-safe alphabet on the way out.
+    const credential = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: bytes([0xff, 0xfe, 0xfd]),
+      authenticatorAttachment: 'platform',
+      getClientExtensionResults: () => ({}),
+      response: {
+        clientDataJSON: bytes([0, 1, 2]),
+        attestationObject: bytes([10, 20, 30, 40, 50]),
+        getTransports: () => ['internal', 'hybrid'],
+      },
+    } as unknown as PublicKeyCredential
+
+    const out = encodeRegistrationCredential(credential) as {
+      id: string
+      rawId: string
+      type: string
+      authenticatorAttachment?: string
+      response: { clientDataJSON: string; attestationObject: string; transports: string[] }
+    }
+
+    expect(out.id).toBe('cred-id')
+    expect(out.type).toBe('public-key')
+    expect(out.authenticatorAttachment).toBe('platform')
+
+    // Exact base64url for the known inputs — a regression to standard base64
+    // (with +/ or padding) would break this.
+    expect(out.rawId).toBe('__79')
+    expect(out.response.clientDataJSON).toBe('AAEC')
+    expect(out.rawId).not.toMatch(/[+/=]/)
+
+    // Round-trip the attestation bytes to prove a lossless re-encode.
+    expect(toArray(base64urlToBuffer(out.response.attestationObject))).toEqual([10, 20, 30, 40, 50])
+    expect(out.response.transports).toEqual(['internal', 'hybrid'])
+  })
+
+  test('falls back to an empty transports list when getTransports is unavailable', () => {
+    const credential = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: bytes([1]),
+      getClientExtensionResults: () => ({}),
+      response: {
+        clientDataJSON: bytes([2]),
+        attestationObject: bytes([3]),
+        // No getTransports (older authenticators / Safari).
+      },
+    } as unknown as PublicKeyCredential
+
+    const out = encodeRegistrationCredential(credential) as { response: { transports: string[] } }
+    expect(out.response.transports).toEqual([])
+  })
+})
+
+describe('encodeAuthenticationCredential', () => {
+  test('re-encodes authenticatorData, signature, and a present userHandle to base64url', () => {
+    const credential = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: bytes([0xff, 0xfe, 0xfd]),
+      authenticatorAttachment: 'cross-platform',
+      getClientExtensionResults: () => ({}),
+      response: {
+        clientDataJSON: bytes([0, 1, 2]),
+        authenticatorData: bytes([9, 8, 7, 6]),
+        signature: bytes([255, 0, 128]),
+        userHandle: bytes([0, 1, 2]),
+      },
+    } as unknown as PublicKeyCredential
+
+    const out = encodeAuthenticationCredential(credential) as {
+      rawId: string
+      response: {
+        clientDataJSON: string
+        authenticatorData: string
+        signature: string
+        userHandle: string | null
+      }
+    }
+
+    expect(out.rawId).toBe('__79')
+    expect(out.response.clientDataJSON).toBe('AAEC')
+    expect(out.response.userHandle).toBe('AAEC')
+    // Round-trip the binary fields — proves the bytes survive intact.
+    expect(toArray(base64urlToBuffer(out.response.authenticatorData))).toEqual([9, 8, 7, 6])
+    expect(toArray(base64urlToBuffer(out.response.signature))).toEqual([255, 0, 128])
+    expect(out.response.signature).not.toMatch(/[+/=]/)
+  })
+
+  test('serializes userHandle to null when the authenticator returns none', () => {
+    const credential = {
+      id: 'cred-id',
+      type: 'public-key',
+      rawId: bytes([1, 2, 3]),
+      getClientExtensionResults: () => ({}),
+      response: {
+        clientDataJSON: bytes([4, 5, 6]),
+        authenticatorData: bytes([7, 8, 9]),
+        signature: bytes([10, 11, 12]),
+        userHandle: null,
+      },
+    } as unknown as PublicKeyCredential
+
+    const out = encodeAuthenticationCredential(credential) as { response: { userHandle: string | null } }
+    expect(out.response.userHandle).toBeNull()
   })
 })
 

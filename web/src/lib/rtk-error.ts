@@ -21,3 +21,23 @@ export function httpStatus(err: unknown): number | undefined {
   if (isFetchBaseQueryError(err) && typeof err.status === 'number') return err.status
   return undefined
 }
+
+/**
+ * The `Retry-After` value (in seconds) from a rate-limited RTK Query error, or
+ * `null` when the header is absent/unparseable. The header rides on the raw
+ * `Response` that `fetchBaseQuery` stashes on `error.meta` — this encapsulates
+ * that guarded reach so callers inspect it through the one error seam rather
+ * than an inline structural cast. Accepts both forms the spec allows: a delay
+ * in seconds (`"120"`) or an HTTP date (`"Wed, 21 Oct 2026 07:28:00 GMT"`).
+ */
+export function retryAfterSeconds(err: unknown): number | null {
+  if (!isFetchBaseQueryError(err) || !('meta' in err)) return null
+  const meta = (err as { meta?: { response?: { headers?: Headers } } }).meta
+  const header = meta?.response?.headers?.get('retry-after')
+  if (!header) return null
+  const asNumber = Number(header)
+  if (Number.isFinite(asNumber)) return Math.max(0, Math.round(asNumber))
+  const asDate = new Date(header).getTime()
+  if (Number.isFinite(asDate)) return Math.max(0, Math.round((asDate - Date.now()) / 1000))
+  return null
+}

@@ -3,6 +3,47 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { LoginForm } from './login-form'
 
+// A minimal PublicKeyCredential stand-in for the discoverable-login ceremony.
+// `runAuthenticationCeremony` narrows the `navigator.credentials.get` result
+// with `instanceof PublicKeyCredential`, so the resolved object must be an
+// instance of the same (stubbed) global.
+class FakePublicKeyCredential {
+  id = 'cred-abc'
+  type = 'public-key'
+  rawId = new Uint8Array([1, 2, 3]).buffer
+  authenticatorAttachment: string | null = 'platform'
+  response = {
+    clientDataJSON: new Uint8Array([4, 5, 6]).buffer,
+    authenticatorData: new Uint8Array([7, 8, 9]).buffer,
+    signature: new Uint8Array([10, 11, 12]).buffer,
+    userHandle: null as ArrayBuffer | null,
+  }
+  getClientExtensionResults() {
+    return {}
+  }
+}
+
+const PASSKEY_BEGIN = {
+  session_id: 'sess-login-1',
+  publicKey: { challenge: 'AAEC', allowCredentials: [], userVerification: 'required' },
+}
+
+let getMock: ReturnType<typeof vi.fn>
+
+/**
+ * Turn on WebAuthn for a test: expose `PublicKeyCredential` (so the button
+ * renders) and a `navigator.credentials.get` that resolves the fake credential.
+ * Mirrors how the passkeys-settings tests enable `create`.
+ */
+function enablePasskeys() {
+  getMock = vi.fn().mockResolvedValue(new FakePublicKeyCredential())
+  vi.stubGlobal('PublicKeyCredential', FakePublicKeyCredential)
+  Object.defineProperty(navigator, 'credentials', {
+    configurable: true,
+    value: { get: getMock, create: vi.fn() },
+  })
+}
+
 // LoginForm uses the router's useNavigate + Link; stub them and capture navigation.
 const navigate = vi.fn()
 vi.mock('@tanstack/react-router', () => ({
@@ -30,6 +71,8 @@ let loginResponder: () => Response
 let verifyResponder: () => Response
 let otpStartResponder: () => Response
 let otpVerifyResponder: () => Response
+let passkeyBeginResponder: () => Response
+let passkeyFinishResponder: () => Response
 
 beforeEach(() => {
   navigate.mockClear()
@@ -37,6 +80,8 @@ beforeEach(() => {
   verifyResponder = () => new Response(JSON.stringify(SESSION), { status: 200, headers: jsonHeaders })
   otpStartResponder = () => new Response(JSON.stringify({ status: 'ok' }), { status: 200, headers: jsonHeaders })
   otpVerifyResponder = () => new Response(JSON.stringify(SESSION), { status: 200, headers: jsonHeaders })
+  passkeyBeginResponder = () => new Response(JSON.stringify(PASSKEY_BEGIN), { status: 200, headers: jsonHeaders })
+  passkeyFinishResponder = () => new Response(JSON.stringify(SESSION), { status: 200, headers: jsonHeaders })
 
   vi.stubGlobal(
     'fetch',
@@ -45,6 +90,8 @@ beforeEach(() => {
       if (url.includes('/auth/2fa/verify')) return verifyResponder()
       if (url.includes('/auth/email-otp/start')) return otpStartResponder()
       if (url.includes('/auth/email-otp/verify')) return otpVerifyResponder()
+      if (url.includes('/auth/passkeys/login/begin')) return passkeyBeginResponder()
+      if (url.includes('/auth/passkeys/login/finish')) return passkeyFinishResponder()
       if (url.includes('/auth/login')) return loginResponder()
       return new Response(null, { status: 404 })
     }),
@@ -236,4 +283,65 @@ test('email-code: a rate-limited start surfaces a clear too-many-attempts messag
   expect(await screen.findByText(/too many attempts/i)).toBeInTheDocument()
   // Still on the request step — no code field yet.
   expect(screen.queryByLabelText(/sign-in code/i)).not.toBeInTheDocument()
+})
+
+// ── Passkey (discoverable) login (F3) ─────────────────────────────────────────
+
+const passkeyButton = () => screen.queryByRole('button', { name: /sign in with a passkey/i })
+
+test('passkey login: begin → ceremony → finish mints a session and redirects', async () => {
+  enablePasskeys()
+  renderWithProviders(<LoginForm />)
+
+  fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+
+  // The browser ceremony ran with decoded (binary) assertion options…
+  await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1))
+  const passed = getMock.mock.calls[0]?.[0] as { publicKey: PublicKeyCredentialRequestOptions }
+  expect(passed.publicKey.challenge).toBeInstanceOf(ArrayBuffer)
+
+  // …and lands on the same session/redirect outcome as a password login.
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: '/app/mailboxes' }))
+})
+
+test('passkey login: a 501 from begin retires the passkey button', async () => {
+  passkeyBeginResponder = () =>
+    new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers: jsonHeaders })
+  enablePasskeys()
+  renderWithProviders(<LoginForm />)
+
+  fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+
+  await waitFor(() => expect(passkeyButton()).not.toBeInTheDocument())
+  // The ceremony never ran and no session was minted.
+  expect(getMock).not.toHaveBeenCalled()
+  expect(navigate).not.toHaveBeenCalled()
+})
+
+test('passkey login: a 501 from finish retires the passkey button', async () => {
+  passkeyFinishResponder = () =>
+    new Response(JSON.stringify({ error: 'not_configured' }), { status: 501, headers: jsonHeaders })
+  enablePasskeys()
+  renderWithProviders(<LoginForm />)
+
+  fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+
+  await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(passkeyButton()).not.toBeInTheDocument())
+  expect(navigate).not.toHaveBeenCalled()
+})
+
+test('passkey login: a user-cancelled ceremony shows an inline error, keeps the button, no stuck spinner', async () => {
+  enablePasskeys()
+  getMock.mockRejectedValueOnce(new DOMException('cancelled', 'NotAllowedError'))
+  renderWithProviders(<LoginForm />)
+
+  fireEvent.click(screen.getByRole('button', { name: /sign in with a passkey/i }))
+
+  expect(await screen.findByText(/cancelled or timed out/i)).toBeInTheDocument()
+  // Button is still present and interactive (busy resolved), and no redirect.
+  const button = passkeyButton()
+  expect(button).toBeInTheDocument()
+  expect(button).toBeEnabled()
+  expect(navigate).not.toHaveBeenCalled()
 })

@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { Mail, Megaphone, Users, Settings, Flame, ShieldCheck, KeyRound, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useAppSelector } from '@/store/hooks'
 import { useNavCounts } from './use-nav-counts'
 
 /**
@@ -22,6 +23,12 @@ interface NavItem {
   label: string
   to: string
   icon: LucideIcon
+  /**
+   * Hide the row from non-admins. The route itself stays reachable (the panel
+   * renders its own "admins only" state on a deep-link) — this only keeps the
+   * nav honest, so a member isn't pointed at a screen they can't use.
+   */
+  adminOnly?: boolean
 }
 
 interface NavGroup {
@@ -52,7 +59,7 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Team', to: '/app/settings/team', icon: Settings },
       { label: 'Security', to: '/app/settings/security', icon: ShieldCheck },
-      { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound },
+      { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound, adminOnly: true },
     ],
   },
 ]
@@ -81,21 +88,27 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
 
 export function AppSidebar() {
   const counts = useNavCounts()
+  const role = useAppSelector((s) => s.auth.role)
+  const isAdmin = role === 'owner' || role === 'admin'
 
   return (
     <nav aria-label="Primary" className="flex h-full w-64 flex-col gap-4 overflow-y-auto px-3 py-4">
-      {NAV.map((group, index) => (
-        <div key={group.label ?? index} className="flex flex-col gap-0.5">
-          {group.label && (
-            <div className="px-2 pb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-              {group.label}
-            </div>
-          )}
-          {group.items.map((item) => (
-            <NavRow key={item.to} item={item} count={counts[item.to]} />
-          ))}
-        </div>
-      ))}
+      {NAV.map((group, index) => {
+        const items = group.items.filter((item) => !item.adminOnly || isAdmin)
+        if (items.length === 0) return null
+        return (
+          <div key={group.label ?? index} className="flex flex-col gap-0.5">
+            {group.label && (
+              <div className="px-2 pb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+                {group.label}
+              </div>
+            )}
+            {items.map((item) => (
+              <NavRow key={item.to} item={item} count={counts[item.to]} />
+            ))}
+          </div>
+        )
+      })}
     </nav>
   )
 }

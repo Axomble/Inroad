@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label'
 import { PasswordInput } from '@/components/ui/password-input'
 import { useAppDispatch } from '@/store/hooks'
 import { setSession, setUserIdentity, type SessionResponse } from '@/store/slices/auth'
-import { httpStatus, isFetchBaseQueryError } from '@/lib/rtk-error'
+import { httpStatus, isFetchBaseQueryError, retryAfterSeconds } from '@/lib/rtk-error'
 import { AuthLayout } from './auth-layout'
 import {
   isWebAuthnAvailable,
@@ -530,18 +530,6 @@ function rateLimitMessage(err: unknown): string | null {
       : `Too many attempts. Please try again in about ${mins} minute${mins === 1 ? '' : 's'}.`
   }
   return 'Too many attempts. Please wait a moment, then try again.'
-}
-
-function retryAfterSeconds(err: unknown): number | null {
-  if (!isFetchBaseQueryError(err) || !('meta' in err)) return null
-  const meta = (err as { meta?: { response?: { headers?: Headers } } }).meta
-  const header = meta?.response?.headers?.get('retry-after')
-  if (!header) return null
-  const asNumber = Number(header)
-  if (Number.isFinite(asNumber)) return Math.max(0, Math.round(asNumber))
-  const asDate = new Date(header).getTime()
-  if (Number.isFinite(asDate)) return Math.max(0, Math.round((asDate - Date.now()) / 1000))
-  return null
 }
 
 /**

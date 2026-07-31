@@ -29,9 +29,11 @@ type ApiKey = {
 }
 
 let keys: ApiKey[]
+let lastCreateBody: { name: string; scopes: string[]; expires_at: string | null } | null
 
 beforeEach(() => {
   keys = []
+  lastCreateBody = null
 
   vi.stubGlobal(
     'fetch',
@@ -45,7 +47,8 @@ beforeEach(() => {
           // fetchBaseQuery calls fetch(Request), so the body rides on the
           // Request object, not the init arg.
           const raw = request ? await request.text() : String(init?.body ?? '{}')
-          const body = JSON.parse(raw) as { name: string; scopes: string[] }
+          const body = JSON.parse(raw) as { name: string; scopes: string[]; expires_at: string | null }
+          lastCreateBody = body
           const created: ApiKey = {
             id: 'k1',
             name: body.name,
@@ -133,6 +136,32 @@ test('create is disabled until a name and at least one scope are provided', asyn
   const firstScope = screen.getAllByRole('checkbox')[0]
   fireEvent.click(firstScope as HTMLElement)
   expect(create).toBeEnabled()
+})
+
+test('a chosen expiry date is sent as end-of-day in the local zone, not UTC midnight', async () => {
+  renderWithProviders(<ApiKeysPanel />, { preloadedState: admin })
+
+  await screen.findByText('No API keys yet')
+  fireEvent.click(screen.getByRole('button', { name: /create api key/i }))
+
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Expiring key' } })
+  const firstScope = screen.getAllByRole('checkbox')[0]
+  fireEvent.click(firstScope as HTMLElement)
+  fireEvent.change(screen.getByLabelText(/expires/i), { target: { value: '2026-08-01' } })
+
+  fireEvent.click(screen.getByRole('button', { name: /create key/i }))
+  await screen.findByText(FULL_TOKEN)
+
+  expect(lastCreateBody?.expires_at).not.toBeNull()
+  const sent = new Date(lastCreateBody?.expires_at as string)
+  // The instant must fall on the LOCAL calendar day the user picked — a UTC
+  // midnight bug would land on 2026-08-01T00:00:00Z, which is still Aug 1 in
+  // UTC but reads as the wrong day / an early expiry west of UTC.
+  expect(sent.getFullYear()).toBe(2026)
+  expect(sent.getMonth()).toBe(7) // August (0-indexed)
+  expect(sent.getDate()).toBe(1)
+  expect(sent.getHours()).toBe(23)
+  expect(sent.getMinutes()).toBe(59)
 })
 
 test('revoking a key confirms and surfaces the outcome', async () => {

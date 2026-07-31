@@ -99,6 +99,21 @@ export function ApiKeysPanel() {
   )
 }
 
+/**
+ * Turn a `type="date"` value (`YYYY-MM-DD`, no zone) into an ISO timestamp at
+ * the END of that day in the user's LOCAL zone. `new Date('2026-08-01')` parses
+ * as UTC midnight, so "expires 2026-08-01" could kill a key a day early for
+ * anyone at a negative UTC offset; treating it as 23:59:59.999 local keeps the
+ * key valid through the whole chosen day everywhere. Returns `null` only for an
+ * unparseable value (unreachable via a native date input, guarded for safety).
+ */
+function endOfDayLocalIso(date: string): string | null {
+  const [year, month, day] = date.split('-').map(Number)
+  if (year === undefined || month === undefined || day === undefined) return null
+  const local = new Date(year, month - 1, day, 23, 59, 59, 999)
+  return Number.isNaN(local.getTime()) ? null : local.toISOString()
+}
+
 /** The lifecycle state of a key, derived from its metadata (revoked > expired > active). */
 function keyState(apiKey: ApiKey): { tone: StatusTone; label: string } {
   if (apiKey.revoked_at) return { tone: 'failing', label: 'Revoked' }
@@ -247,7 +262,7 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
         scopes,
         ip_allowlist: ips.length > 0 ? ips : null,
         rate_limit_per_min: rate,
-        expires_at: expiry ? new Date(expiry).toISOString() : null,
+        expires_at: expiry ? endOfDayLocalIso(expiry) : null,
       },
     })
 
