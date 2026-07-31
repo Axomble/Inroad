@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { dailyLimitFromDraft, dailyLimitToDraft, fromDraft, newInterval, toDraft } from './schedule-draft'
+import {
+  MAX_DAILY_LIMIT,
+  dailyLimitFromDraft,
+  dailyLimitToDraft,
+  fromDraft,
+  newInterval,
+  toDraft,
+} from './schedule-draft'
 import { minutesToTime, timeToMinutes } from './schedule-time'
 
 describe('timeToMinutes', () => {
@@ -172,5 +179,18 @@ describe('dailyLimitFromDraft', () => {
   // of a 422 the operator has to interpret.
   it.each(['0', '-5', '2.5', 'lots', '1e3', '1 000'])('refuses %j', (raw) => {
     expect(dailyLimitFromDraft(raw)).toEqual({ problem: expect.stringContaining('1 or more') })
+  })
+})
+
+describe('dailyLimitFromDraft upper bound', () => {
+  // The column is a 32-bit integer. Without a bound, a value above int32 range
+  // reaches Postgres out of range and surfaces as a 500 rather than a validation
+  // error — and beyond 2^53 the JSON number stops being exact.
+  it('accepts the documented maximum', () => {
+    expect(dailyLimitFromDraft(String(MAX_DAILY_LIMIT))).toEqual({ dailyLimit: MAX_DAILY_LIMIT })
+  })
+
+  it.each([String(MAX_DAILY_LIMIT + 1), '2147483648', '99999999999'])('refuses %s', (raw) => {
+    expect(dailyLimitFromDraft(raw)).toEqual({ problem: expect.stringContaining('or less') })
   })
 })

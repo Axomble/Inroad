@@ -1828,11 +1828,15 @@ components:
         daily_limit:
           type: integer
           minimum: 1
+          maximum: 1000000
           nullable: true
           description: >-
             Campaign-wide cap on sends per UTC day, across every mailbox in the pool.
             null means no campaign limit. It can only lower throughput: a mailbox is
-            never raised above its own ramped, health-scaled daily cap.
+            never raised above its own ramped, health-scaled daily cap. Bounded at
+            1000000 because the column is a 32-bit integer — an unbounded value would
+            reach Postgres out of range and surface as a 500 instead of a validation
+            error.
         preview:
           type: array
           description: "Human-readable preview of the next few send instants this schedule produces, in its own timezone."
@@ -1847,6 +1851,7 @@ components:
         daily_limit:
           type: integer
           minimum: 1
+          maximum: 1000000
           nullable: true
           description: "Campaign-wide sends per UTC day; null or omitted clears the limit."
 

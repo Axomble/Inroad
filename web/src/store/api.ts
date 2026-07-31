@@ -1318,7 +1318,7 @@ export type CampaignSchedule = {
   /** IANA zone the windows are interpreted in */
   timezone: string;
   days: SendWindowDay[];
-  /** Campaign-wide cap on sends per UTC day, across every mailbox in the pool. null means no campaign limit. It can only lower throughput: a mailbox is never raised above its own ramped, health-scaled daily cap. */
+  /** Campaign-wide cap on sends per UTC day, across every mailbox in the pool. null means no campaign limit. It can only lower throughput: a mailbox is never raised above its own ramped, health-scaled daily cap. Bounded at 1000000 because the column is a 32-bit integer — an unbounded value would reach Postgres out of range and surface as a 500 instead of a validation error. */
   daily_limit?: number | null;
   /** Human-readable preview of the next few send instants this schedule produces, in its own timezone. */
   preview?: string[];

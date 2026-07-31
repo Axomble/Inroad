@@ -85,6 +85,9 @@ export function fromDraft(week: DraftWeek): { days: SendWindowDay[] } | { proble
  * limit". Same reasoning as the interval bounds — a half-cleared field must stay
  * empty rather than being coerced to 0, which the API would reject.
  */
+/** Matches the contract's `maximum` on `daily_limit`, which the API also enforces. */
+export const MAX_DAILY_LIMIT = 1_000_000
+
 export function dailyLimitToDraft(limit: number | null | undefined): string {
   return typeof limit === 'number' ? String(limit) : ''
 }
@@ -101,6 +104,12 @@ export function dailyLimitFromDraft(raw: string): { dailyLimit: number | null } 
     return {
       problem: 'Daily limit must be a whole number of 1 or more — leave it empty for no campaign limit.',
     }
+  }
+  // Upper bound, not cosmetic: the column is a 32-bit integer, so an unbounded value
+  // reaches Postgres out of range and surfaces as a 500 rather than a validation
+  // error. It also stays inside the range JSON numbers represent exactly.
+  if (Number(trimmed) > MAX_DAILY_LIMIT) {
+    return { problem: `Daily limit must be ${MAX_DAILY_LIMIT.toLocaleString()} or less.` }
   }
   return { dailyLimit: Number(trimmed) }
 }

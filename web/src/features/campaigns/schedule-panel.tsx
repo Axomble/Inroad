@@ -14,6 +14,7 @@ import {
   EMPTY_WEEK,
   dailyLimitFromDraft,
   dailyLimitToDraft,
+  MAX_DAILY_LIMIT,
   fromDraft,
   newInterval,
   scheduleErrorMessage,
@@ -237,6 +238,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
             id="schedule-daily-limit"
             type="number"
             min={1}
+            max={MAX_DAILY_LIMIT}
             inputMode="numeric"
             placeholder="No limit"
             value={dailyLimit}
