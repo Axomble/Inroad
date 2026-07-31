@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -320,6 +321,10 @@ type LaunchResult struct {
 	TotalEnrolled      int
 	EnqueuedCount      int
 	FailedEnqueueCount int
+	// LastScheduledAt is when the final send of the launch is scheduled. A narrow
+	// window and a large list can push it days out; surfacing it lets the UI warn
+	// rather than leaving the operator to discover it from an idle campaign.
+	LastScheduledAt time.Time
 }
 
 // Launch transitions a draft campaign to running: it materializes one
@@ -354,19 +359,71 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 		return LaunchResult{}, ErrEmptyList
 	}
 	res := LaunchResult{TotalEnrolled: len(enrollments)}
+	due, err := s.spread(ctx, ws, campaignSchedule{id: campaignID, timezone: c.Timezone}, enrollments)
+	if err != nil {
+		// The enrollments are committed; without due times they'd all be due
+		// immediately, which is the burst the cadence spread exists to prevent.
+		// Surface it — the campaign is running and the sweeper will pick the rows
+		// up, but the operator must know the schedule was not applied.
+		return res, err
+	}
+	if err := s.store.RescheduleBatch(ctx, ws, due); err != nil {
+		return res, err
+	}
 	for _, e := range enrollments {
-		// EnrollListMembers already staggered next_due_at at insert time; we
-		// enqueue each advance at exactly that DB-assigned time (asynq needs one
-		// task per enrollment) so the scheduled task and the enrollment's due
-		// cursor are identical by construction — never recompute the stagger in
-		// Go, since RETURNING row order isn't guaranteed to match the window
-		// ORDER BY. A failed enqueue is non-fatal — the enrollment sweeper
-		// reconciles it next tick.
-		if err := enq.EnqueueAdvanceAt(e.ID.String(), ws.String(), e.NextDueAt); err != nil {
+		// Enqueue each advance at exactly the instant just stamped on its
+		// enrollment, so the scheduled task and the enrollment's due cursor are
+		// identical by construction. A failed enqueue is non-fatal — the
+		// enrollment sweeper reconciles it next tick.
+		if err := enq.EnqueueAdvanceAt(e.ID.String(), ws.String(), due[e.ID]); err != nil {
 			res.FailedEnqueueCount++
 			continue
 		}
 		res.EnqueuedCount++
+		res.LastScheduledAt = maxTime(res.LastScheduledAt, due[e.ID])
 	}
 	return res, nil
+}
+
+// spread assigns each new enrollment its own send instant: offsets drawn through
+// the cadence distribution curve, resolved against the campaign's send window so
+// a batch larger than one day's open time rolls into the following days rather
+// than spilling past a window edge.
+//
+// Keyed on the enrollment id, so a retried launch recomputes identical instants.
+func (s *Service) spread(ctx context.Context, ws uuid.UUID, cs campaignSchedule, enrollments []Enrollment) (map[uuid.UUID]time.Time, error) {
+	win, err := s.window(ctx, ws, cs)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	// Anchor on the first open instant at or after now, so offsets are measured
+	// from when sending can actually start rather than from a closed window.
+	start, err := win.Next(now, cs.id.String())
+	if err != nil {
+		return nil, err
+	}
+	open := win.OpenDuration(start)
+	offsets := cadence.Offsets(open, len(enrollments), cs.id.String())
+
+	due := make(map[uuid.UUID]time.Time, len(enrollments))
+	for i, e := range enrollments {
+		offset := time.Duration(0)
+		if i < len(offsets) {
+			offset = offsets[i]
+		}
+		at, err := win.NextAfterOffset(start, offset, e.ID.String())
+		if err != nil {
+			return nil, err
+		}
+		due[e.ID] = at
+	}
+	return due, nil
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }

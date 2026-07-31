@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/inroad/inroad/internal/platform/cadence"
 )
 
 // ErrCrossTenant is returned when a coreapi implementation detects a row
@@ -338,8 +340,14 @@ type StepSendJob struct {
 	// and BodyHTML is non-empty, the worker rewrites links and appends an open
 	// pixel before sending.
 	TrackingEnabled bool
-	FromEmail       string
-	FromName        string
+	// Schedule is the campaign's sending window, carried on the job so
+	// MarkStepSent can place the NEXT step's due time inside it without a second
+	// round trip. Compiled (and therefore validated) at job-build time, before the
+	// send happens, so a corrupted schedule stops the send rather than being
+	// discovered after the message is already out.
+	Schedule  cadence.Schedule
+	FromEmail string
+	FromName  string
 	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
 	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
 	// SMTPPassword. For gmail the SMTP* fields are empty.

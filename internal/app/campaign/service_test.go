@@ -49,6 +49,19 @@ type fakeStore struct {
 	enrollmentRows                              []gen.ListCampaignEnrollmentsRow
 	listEnrollmentsCalls                        int
 	listEnrollmentsLimit, listEnrollmentsOffset int32
+
+	// schedule fixtures/spies. windows is what ListWindows returns (nil means
+	// "use the Mon–Fri default", so existing tests get a sane schedule without
+	// each one restating it); windowsErr forces the load to fail. rescheduled
+	// captures the cadence-computed due times Launch stamps, and replacedSchedule
+	// the last schedule written.
+	windows            []SendWindow
+	windowsErr         error
+	campaignTimezone   string
+	rescheduled        map[uuid.UUID]time.Time
+	rescheduleErr      error
+	replacedSchedule   *Schedule
+	replaceScheduleErr error
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
@@ -62,7 +75,7 @@ func (f *fakeStore) Get(_ context.Context, ws, id uuid.UUID) (gen.Campaign, erro
 		}
 		return c, nil
 	}
-	return gen.Campaign{Status: f.status}, nil
+	return gen.Campaign{Status: f.status, Timezone: f.campaignTimezone}, nil
 }
 func (*fakeStore) List(context.Context, uuid.UUID) ([]gen.Campaign, error) { return nil, nil }
 func (f *fakeStore) Stats(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
@@ -76,6 +89,32 @@ func (f *fakeStore) EnrollTx(context.Context, uuid.UUID, uuid.UUID) ([]Enrollmen
 	return f.enrollments, nil
 }
 func (*fakeStore) Reschedule(context.Context, uuid.UUID, uuid.UUID, time.Time) error { return nil }
+
+func (f *fakeStore) RescheduleBatch(_ context.Context, _ uuid.UUID, due map[uuid.UUID]time.Time) error {
+	if f.rescheduleErr != nil {
+		return f.rescheduleErr
+	}
+	f.rescheduled = due
+	return nil
+}
+
+func (f *fakeStore) ListWindows(context.Context, uuid.UUID, uuid.UUID) ([]SendWindow, error) {
+	if f.windowsErr != nil {
+		return nil, f.windowsErr
+	}
+	if f.windows != nil {
+		return f.windows, nil
+	}
+	return DefaultSchedule("UTC").Windows, nil
+}
+
+func (f *fakeStore) ReplaceSchedule(_ context.Context, _, _ uuid.UUID, sched Schedule) error {
+	if f.replaceScheduleErr != nil {
+		return f.replaceScheduleErr
+	}
+	f.replacedSchedule = &sched
+	return nil
+}
 func (f *fakeStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return f.stepList, nil
 }
@@ -219,12 +258,23 @@ func TestLaunchSucceeds(t *testing.T) {
 	if len(enq.enqueued) != len(enrollments) {
 		t.Fatalf("enqueued: got %d want %d", len(enq.enqueued), len(enrollments))
 	}
-	// Fix B: each advance is scheduled at exactly the enrollment's DB-assigned
-	// next_due_at, not a Go-recomputed offset — so the scheduled task and the
-	// sweeper's due cursor stay aligned.
+	// Each advance is scheduled at exactly the cadence instant stamped on its
+	// enrollment, so the scheduled task and the sweeper's due cursor stay aligned.
+	// The stamped value — not the placeholder next_due_at the insert returned — is
+	// the contract now that Go, rather than the INSERT, decides the instant.
+	if len(store.rescheduled) != len(enrollments) {
+		t.Fatalf("stamped due times: got %d want %d", len(store.rescheduled), len(enrollments))
+	}
 	for _, e := range enrollments {
-		if got := enq.at[e.ID.String()]; !got.Equal(e.NextDueAt) {
-			t.Fatalf("enqueue ETA for %s: got %v want %v", e.ID, got, e.NextDueAt)
+		stamped, ok := store.rescheduled[e.ID]
+		if !ok {
+			t.Fatalf("enrollment %s got no cadence due time", e.ID)
+		}
+		if got := enq.at[e.ID.String()]; !got.Equal(stamped) {
+			t.Fatalf("enqueue ETA for %s: got %v want the stamped %v", e.ID, got, stamped)
+		}
+		if stamped.Second() == 0 && stamped.Nanosecond() == 0 {
+			t.Errorf("enrollment %s scheduled at %v, exactly on a clock boundary", e.ID, stamped)
 		}
 	}
 	if !store.enrollCalled {

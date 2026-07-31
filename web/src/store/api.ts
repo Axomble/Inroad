@@ -405,6 +405,22 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.updateCampaignTrackingRequest,
       }),
     }),
+    getCampaignSchedule: build.query<
+      GetCampaignScheduleApiResponse,
+      GetCampaignScheduleApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/schedule` }),
+    }),
+    updateCampaignSchedule: build.mutation<
+      UpdateCampaignScheduleApiResponse,
+      UpdateCampaignScheduleApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/schedule`,
+        method: "PUT",
+        body: queryArg.campaignScheduleRequest,
+      }),
+    }),
     listCampaignEnrollments: build.query<
       ListCampaignEnrollmentsApiResponse,
       ListCampaignEnrollmentsApiArg
@@ -787,6 +803,17 @@ export type UpdateCampaignTrackingApiArg = {
   id: string;
   updateCampaignTrackingRequest: UpdateCampaignTrackingRequest;
 };
+export type GetCampaignScheduleApiResponse =
+  /** status 200 The campaign's timezone, weekly send windows, and a preview of upcoming send times */ CampaignSchedule;
+export type GetCampaignScheduleApiArg = {
+  id: string;
+};
+export type UpdateCampaignScheduleApiResponse =
+  /** status 200 Schedule replaced */ CampaignSchedule;
+export type UpdateCampaignScheduleApiArg = {
+  id: string;
+  campaignScheduleRequest: CampaignScheduleRequest;
+};
 export type ListCampaignEnrollmentsApiResponse =
   /** status 200 Per-contact reply status for the campaign's enrollments */ CampaignEnrollment[];
 export type ListCampaignEnrollmentsApiArg = {
@@ -915,7 +942,7 @@ export type RegisterRequest = {
 export type TwoFactorRequiredResponse = {
   /** Always true; distinguishes this from a SessionResponse. */
   two_factor_required: boolean;
-  /** Single-use */
+  /** Single-use, short-lived challenge token to submit to /auth/2fa/verify. */
   challenge: string;
 };
 export type LoginRequest = {
@@ -1039,7 +1066,7 @@ export type EmailOtpVerifyRequest = {
 export type ApiKey = {
   id: string;
   name: string;
-  /** Public */
+  /** Public, non-secret token prefix (the part before the secret). */
   prefix: string;
   scopes: string[];
   ip_allowlist?: string[] | null;
@@ -1252,6 +1279,25 @@ export type CampaignDetail = {
 export type UpdateCampaignTrackingRequest = {
   enabled?: boolean;
 };
+export type SendWindowInterval = {
+  start_minute: number;
+  end_minute: number;
+};
+export type SendWindowDay = {
+  weekday: number;
+  intervals: SendWindowInterval[];
+};
+export type CampaignSchedule = {
+  /** IANA zone the windows are interpreted in */
+  timezone: string;
+  days: SendWindowDay[];
+  /** Human-readable preview of the next few send instants this schedule produces, in its own timezone. */
+  preview?: string[];
+};
+export type CampaignScheduleRequest = {
+  timezone: string;
+  days: SendWindowDay[];
+};
 export type CampaignEnrollment = {
   email: string;
   first_name: string;
@@ -1363,7 +1409,7 @@ export type OAuth2TokenRequest = {
   /** refresh_token grant only; a space-delimited SUBSET of the token's scopes (narrowing) */
   scope?: string;
   client_id?: string;
-  /** confidential client */
+  /** confidential client, client_secret_post (or use HTTP Basic) */
   client_secret?: string;
 };
 export type OAuth2IntrospectResponse = {
@@ -1441,6 +1487,8 @@ export const {
   useCreateCampaignMutation,
   useGetCampaignQuery,
   useUpdateCampaignTrackingMutation,
+  useGetCampaignScheduleQuery,
+  useUpdateCampaignScheduleMutation,
   useListCampaignEnrollmentsQuery,
   useListStepsQuery,
   useCreateStepMutation,

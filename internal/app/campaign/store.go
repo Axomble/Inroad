@@ -11,10 +11,13 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
-// CreateInput carries the fields needed to create a new campaign.
+// CreateInput carries the fields needed to create a new campaign. Timezone is
+// optional (empty = UTC) and sets the zone the default Mon–Fri 09:00–17:00 send
+// window is interpreted in.
 type CreateInput struct {
 	Name, Subject, BodyText, BodyHTML string
 	MailboxID, ListID                 uuid.UUID
+	Timezone                          string
 }
 
 // Enrollment is a newly created enrollment returned by EnrollTx: its id and the
@@ -45,6 +48,16 @@ type Store interface {
 	EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]Enrollment, error)
 	// Reschedule re-stamps an active enrollment's next_due_at (launch stagger).
 	Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at time.Time) error
+	// RescheduleBatch re-stamps many active enrollments at once (the launch
+	// cadence spread), one round trip for the whole batch. Only 'active' rows are
+	// touched, so a concurrent stop still wins.
+	RescheduleBatch(ctx context.Context, ws uuid.UUID, due map[uuid.UUID]time.Time) error
+	// ListWindows returns the campaign's open sending intervals for the week,
+	// ordered by weekday then start minute.
+	ListWindows(ctx context.Context, ws, campaignID uuid.UUID) ([]SendWindow, error)
+	// ReplaceSchedule swaps the campaign's timezone and its whole set of windows
+	// atomically, so the campaign is never observed window-less.
+	ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, sched Schedule) error
 	// ListSteps returns the campaign's ordered steps (for the detail view).
 	ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error)
 	// EnrollmentCounts returns enrollment counts grouped by status.
@@ -112,6 +125,22 @@ func (s *PgStore) Create(ctx context.Context, ws uuid.UUID, in CreateInput) (gen
 	}); err != nil {
 		return gen.Campaign{}, err
 	}
+	// Seed the default sending schedule in the same transaction: a campaign must
+	// never exist without a window, since an empty week means "no valid send
+	// instant exists" to the cadence engine. Migration 000031 backfills the same
+	// default for campaigns created before this existed.
+	sched := DefaultSchedule(in.Timezone)
+	if in.Timezone != "" {
+		if err := qtx.SetCampaignTimezone(ctx, gen.SetCampaignTimezoneParams{
+			ID: c.ID, WorkspaceID: ws, Timezone: sched.Timezone,
+		}); err != nil {
+			return gen.Campaign{}, err
+		}
+		c.Timezone = sched.Timezone
+	}
+	if err := insertWindows(ctx, qtx, ws, c.ID, sched.Windows); err != nil {
+		return gen.Campaign{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return gen.Campaign{}, err
 	}
@@ -126,6 +155,105 @@ func (s *PgStore) Reschedule(ctx context.Context, ws, enrollmentID uuid.UUID, at
 	return s.q.SetEnrollmentDue(ctx, gen.SetEnrollmentDueParams{
 		ID: enrollmentID, WorkspaceID: ws, NextDueAt: pgtype.Timestamptz{Time: at, Valid: true},
 	})
+}
+
+// RescheduleBatch stamps a whole launch's cadence-computed due times in one
+// pipelined batch. A per-statement error is returned rather than swallowed: the
+// launcher counts it and the enrollment sweeper reconciles the row on its next
+// tick, but a silent partial write would leave enrollments due immediately —
+// exactly the burst the cadence spread exists to prevent.
+func (s *PgStore) RescheduleBatch(ctx context.Context, ws uuid.UUID, due map[uuid.UUID]time.Time) error {
+	if len(due) == 0 {
+		return nil
+	}
+	params := make([]gen.SetEnrollmentDueBatchParams, 0, len(due))
+	for id, at := range due {
+		params = append(params, gen.SetEnrollmentDueBatchParams{
+			ID: id, WorkspaceID: ws, NextDueAt: pgtype.Timestamptz{Time: at, Valid: true},
+		})
+	}
+	var firstErr error
+	res := s.q.SetEnrollmentDueBatch(ctx, params)
+	res.Exec(func(_ int, err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	})
+	if cerr := res.Close(); cerr != nil && firstErr == nil {
+		firstErr = cerr
+	}
+	return firstErr
+}
+
+func (s *PgStore) ListWindows(ctx context.Context, ws, campaignID uuid.UUID) ([]SendWindow, error) {
+	rows, err := s.q.ListSendWindows(ctx, gen.ListSendWindowsParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SendWindow, len(rows))
+	for i, r := range rows {
+		out[i] = SendWindow{
+			Weekday: int(r.Weekday), StartMinute: int(r.StartMinute), EndMinute: int(r.EndMinute),
+		}
+	}
+	return out, nil
+}
+
+// ReplaceSchedule swaps the timezone and the whole window set in one
+// transaction: delete-then-insert would otherwise leave a window between the two
+// statements where the campaign has no schedule at all, which the cadence engine
+// reads as "no valid send instant exists".
+func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, sched Schedule) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.SetCampaignTimezone(ctx, gen.SetCampaignTimezoneParams{
+		ID: campaignID, WorkspaceID: ws, Timezone: sched.Timezone,
+	}); err != nil {
+		return err
+	}
+	if err := qtx.DeleteSendWindows(ctx, gen.DeleteSendWindowsParams{
+		CampaignID: campaignID, WorkspaceID: ws,
+	}); err != nil {
+		return err
+	}
+	if err := insertWindows(ctx, qtx, ws, campaignID, sched.Windows); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// insertWindows queues one insert per interval as a single batch. Shared by
+// ReplaceSchedule and Create so the default schedule and an edited one take the
+// identical path (and hit the identical overlap constraint).
+func insertWindows(ctx context.Context, q *gen.Queries, ws, campaignID uuid.UUID, windows []SendWindow) error {
+	if len(windows) == 0 {
+		return nil
+	}
+	params := make([]gen.CreateSendWindowsParams, len(windows))
+	for i, w := range windows {
+		params[i] = gen.CreateSendWindowsParams{
+			WorkspaceID: ws, CampaignID: campaignID,
+			Weekday:     int16(w.Weekday),     //nolint:gosec // 0..6, validated by Schedule.Compile
+			StartMinute: int32(w.StartMinute), //nolint:gosec // 0..1439, CHECK-constrained
+			EndMinute:   int32(w.EndMinute),   //nolint:gosec // 1..1440, CHECK-constrained
+		}
+	}
+	var firstErr error
+	res := q.CreateSendWindows(ctx, params)
+	res.Exec(func(_ int, err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	})
+	if cerr := res.Close(); cerr != nil && firstErr == nil {
+		firstErr = cerr
+	}
+	return firstErr
 }
 
 func (s *PgStore) ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error) {

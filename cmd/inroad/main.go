@@ -11,6 +11,13 @@ import (
 	"syscall"
 	"time"
 
+	// time/tzdata embeds the IANA zone database in the binary. Campaign send
+	// windows are evaluated in the campaign's own timezone, and the runtime images
+	// are bare alpine with no tzdata package — without this, LoadLocation fails in
+	// production for every non-UTC zone. Embedding it also keeps behavior identical
+	// across Alpine, a developer's machine, and CI.
+	_ "time/tzdata"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
