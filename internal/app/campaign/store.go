@@ -251,7 +251,7 @@ func storedDailyLimit(limit *int) *int32 {
 	if limit == nil {
 		return nil
 	}
-	n := int32(*limit) //nolint:gosec // >= 1 and operator-entered; an INT column bounds it
+	n := int32(*limit) //nolint:gosec // SetSchedule bounds it to [1, maxDailyLimit], well inside int32
 	return &n
 }
 

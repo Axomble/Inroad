@@ -55,7 +55,9 @@ func TestGetScheduleReportsNoLimitAsNil(t *testing.T) {
 }
 
 func TestSetScheduleRejectsAnUnusableDailyLimitWithoutWriting(t *testing.T) {
-	for _, limit := range []int{0, -1, maxDailyLimit + 1} {
+	// The boundary values on both sides, plus a figure that would overflow the INT
+	// column if the upper bound were left to Postgres.
+	for _, limit := range []int{0, -1, maxDailyLimit + 1, 99999999999} {
 		ws, id := uuid.New(), uuid.New()
 		store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id}}}
 		svc := NewService(store, okChecker{active: true})
@@ -70,6 +72,23 @@ func TestSetScheduleRejectsAnUnusableDailyLimitWithoutWriting(t *testing.T) {
 		// Validation precedes persistence: a rejected plan leaves the previous one.
 		if store.replacedSchedule != nil {
 			t.Errorf("limit %d was persisted: %+v", limit, *store.replacedSchedule)
+		}
+	}
+}
+
+// The bounds are inclusive: both ends of the contract's range must save.
+func TestSetScheduleAcceptsTheLimitBoundaries(t *testing.T) {
+	for _, limit := range []int{minDailyLimit, maxDailyLimit} {
+		ws, id := uuid.New(), uuid.New()
+		store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id}}}
+		svc := NewService(store, okChecker{active: true})
+
+		in := Plan{
+			Schedule:   Schedule{Timezone: "UTC", Windows: []SendWindow{{Weekday: 1, StartMinute: 540, EndMinute: 1020}}},
+			DailyLimit: &limit,
+		}
+		if _, err := svc.SetSchedule(context.Background(), ws, id, in); err != nil {
+			t.Errorf("limit %d rejected: %v", limit, err)
 		}
 	}
 }
@@ -133,13 +152,18 @@ func TestPutScheduleRoundTripsDailyLimit(t *testing.T) {
 	}
 }
 
-// A limit below 1 is a 422, not a 400 and not a silently-clamped save: the field is
-// well-formed, its value is unacceptable.
-func TestPutScheduleRejectsALimitBelowOne(t *testing.T) {
+// A limit outside [1, 1000000] is a 422, not a 400 and not a silently-clamped save:
+// the field is well-formed, its value is unacceptable. The upper bound matters as
+// much as the lower one — the column is a 32-bit INT, so an unbounded value is a
+// well-formed JSON number that reaches Postgres out of range and surfaces as a 500.
+func TestPutScheduleRejectsALimitOutsideItsRange(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	for _, body := range []string{
 		`{"timezone":"UTC","daily_limit":0,"days":[{"weekday":1,"intervals":[{"start_minute":540,"end_minute":1020}]}]}`,
 		`{"timezone":"UTC","daily_limit":-5,"days":[{"weekday":1,"intervals":[{"start_minute":540,"end_minute":1020}]}]}`,
+		`{"timezone":"UTC","daily_limit":1000001,"days":[{"weekday":1,"intervals":[{"start_minute":540,"end_minute":1020}]}]}`,
+		// Past int32 entirely: the value the bound exists to stop reaching the column.
+		`{"timezone":"UTC","daily_limit":99999999999,"days":[{"weekday":1,"intervals":[{"start_minute":540,"end_minute":1020}]}]}`,
 	} {
 		ws, id := uuid.New(), uuid.New()
 		store := &fakeStore{campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws, Timezone: "UTC"}}}

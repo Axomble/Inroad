@@ -3,7 +3,6 @@ package campaign
 import (
 	"context"
 	"errors"
-	"math"
 
 	"github.com/google/uuid"
 
@@ -87,12 +86,15 @@ func (s *Service) SetSchedule(ctx context.Context, ws, campaignID uuid.UUID, in 
 
 // minDailyLimit is the smallest meaningful campaign-wide daily limit. Zero is not
 // "no limit" — that is nil — it would be "never send", which an operator expresses
-// by pausing the campaign. maxDailyLimit is the column's ceiling, checked at the
-// boundary so an absurd figure is a 422 instead of an integer overflow on the way
-// to Postgres.
+// by pausing the campaign.
+//
+// maxDailyLimit mirrors the OpenAPI contract's maximum. Bounded here rather than
+// left to the INT column: a value like 99999999999 is a well-formed JSON number
+// that reaches Postgres out of range, which surfaces as a 500 instead of the 422
+// this is. The client's own bound is a convenience — this is the guarantee.
 const (
 	minDailyLimit = 1
-	maxDailyLimit = math.MaxInt32
+	maxDailyLimit = 1_000_000
 )
 
 // dailyLimit converts the nullable column into the optional Go value, so "no

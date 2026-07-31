@@ -143,7 +143,7 @@ func (h *Handler) putSchedule(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrDailyLimit):
-		httpx.Error(w, http.StatusUnprocessableEntity, "daily limit must be at least 1")
+		httpx.Error(w, http.StatusUnprocessableEntity, "daily limit must be between 1 and 1000000")
 	case errors.Is(err, cadence.ErrUnknownTimezone):
 		httpx.Error(w, http.StatusUnprocessableEntity, "unknown timezone")
 	case errors.Is(err, cadence.ErrEmptySchedule):

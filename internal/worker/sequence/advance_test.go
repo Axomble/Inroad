@@ -220,11 +220,11 @@ func TestAdvanceCampaignLimitedDefers(t *testing.T) {
 	if core.stopped != "" {
 		t.Fatalf("a campaign limit must not stop the enrollment, got stop reason %q", core.stopped)
 	}
-	if !enq.inCalled || enq.in != capBackoff {
-		t.Fatalf("expected re-enqueue in %v, got called=%v in=%v", capBackoff, enq.inCalled, enq.in)
-	}
-	if core.incrCalls != 1 {
-		t.Errorf("cap-deferral counter incremented %d times, want 1", core.incrCalls)
+	// The wait targets the UTC day rollover, when the allowance resets — the exact
+	// arithmetic is pinned by TestBlockedBackoffWaitsForTheMomentTheBlockCanClear.
+	if !enq.inCalled || enq.in <= 0 || enq.in > 24*time.Hour {
+		t.Fatalf("re-enqueue delay = %v (called=%v), want a positive wait within the day",
+			enq.in, enq.inCalled)
 	}
 }
 
@@ -250,19 +250,32 @@ func TestAdvanceHealthPausedDefersRatherThanStopping(t *testing.T) {
 	}
 }
 
-// A gated deferral is still bounded: a mailbox that never recovers must not
-// re-enqueue forever.
-func TestAdvanceGatedDeferralCeilingStopsFailed(t *testing.T) {
-	core := &stubCore{job: coreapi.StepSendJob{HealthPaused: true}, deferrals: maxCapDeferrals + 1}
+// A blocked thread waits INDEFINITELY: over many more attempts than the
+// cap-deferral ceiling allows, it stays active and keeps being re-scheduled. The
+// spelled-out form of the budget rule — a campaign that needs 100 days to finish
+// must still be running on day 8.
+func TestBlockedEnrollmentStaysActivePastTheDeferralCeiling(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{CampaignLimited: true}}
 	snd, enq := &fakeSender{}, &fakeEnq{}
-	if err := run(t, core, snd, enq); err != nil {
-		t.Fatal(err)
+	for attempt := range maxCapDeferrals + 5 {
+		enq.inCalled = false
+		if err := run(t, core, snd, enq); err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		if core.stopped != "" {
+			t.Fatalf("attempt %d: enrollment stopped %q; a campaign limit is a setting, not a failure",
+				attempt, core.stopped)
+		}
+		if !enq.inCalled {
+			t.Fatalf("attempt %d: no retry scheduled; the thread would never resume", attempt)
+		}
 	}
-	if core.stopped != "failed" {
-		t.Fatalf("want stop reason failed at the deferral ceiling, got %q", core.stopped)
+	if core.incrCalls != 0 {
+		t.Errorf("cap-deferral budget consumed %d times across %d attempts, want never",
+			core.incrCalls, maxCapDeferrals+5)
 	}
-	if enq.inCalled {
-		t.Fatal("past the ceiling must not re-enqueue")
+	if snd.called() || core.claimCalls != 0 {
+		t.Error("a blocked thread sent something")
 	}
 }
 
@@ -546,5 +559,113 @@ func TestAdvanceRecoverForwardAfterCursorAdvanceFailure(t *testing.T) {
 	}
 	if core.advanceCalls != 2 {
 		t.Fatalf("cursor advance should be attempted on both runs (fail, then succeed), got %d", core.advanceCalls)
+	}
+}
+
+// A campaign at its daily_limit is correctly configured, not broken: daily_limit 10
+// over 1000 contacts is a 100-day campaign. Charging its waiting enrollments against
+// the cap-deferral budget (30 × 6h ≈ 7.5 days) would mark ~99% of them 'failed' for
+// doing exactly what the operator asked. So these deferrals must not touch the
+// budget, and must survive far past it.
+func TestCampaignLimitedDeferralNeverConsumesTheFailBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  coreapi.StepSendJob
+	}{
+		{"campaign at its daily limit", coreapi.StepSendJob{CampaignLimited: true}},
+		{"mailbox paused by warmup", coreapi.StepSendJob{HealthPaused: true, EffectiveDailyCap: 50}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// deferrals already far past the ceiling: if this path consulted the
+			// budget at all, the enrollment would be stopped here.
+			core := &stubCore{job: tc.job, deferrals: maxCapDeferrals * 10}
+			enq := &fakeEnq{}
+
+			if err := run(t, core, &fakeSender{}, enq); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			if core.incrCalls != 0 {
+				t.Errorf("consumed the cap-deferral budget %d time(s); these blocks are not misconfigurations", core.incrCalls)
+			}
+			if core.stopped != "" {
+				t.Errorf("enrollment stopped %q; a self-clearing block must leave it active", core.stopped)
+			}
+			if !enq.inCalled {
+				t.Error("no retry scheduled; the thread would never resume")
+			}
+			if enq.in <= 0 {
+				t.Errorf("retry delay = %s, want a positive wait", enq.in)
+			}
+		})
+	}
+}
+
+func TestBlockedBackoffWaitsForTheMomentTheBlockCanClear(t *testing.T) {
+	// 22:30 UTC → the campaign's allowance resets in 90 minutes.
+	evening := time.Date(2026, 8, 1, 22, 30, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		job  coreapi.StepSendJob
+		now  time.Time
+		want time.Duration
+	}{
+		{
+			name: "campaign limit waits for the UTC day to roll over",
+			job:  coreapi.StepSendJob{CampaignLimited: true},
+			now:  evening,
+			want: 90 * time.Minute,
+		},
+		{
+			// A pause clears when the health sweep steps it down, on no schedule this
+			// worker can predict, so it reuses the ordinary cap backoff.
+			name: "health pause reuses the cap backoff",
+			job:  coreapi.StepSendJob{HealthPaused: true},
+			now:  evening,
+			want: capBackoff,
+		},
+		{
+			// Both blocked: re-check at the sooner of the two.
+			name: "both blocked takes the shorter wait",
+			job:  coreapi.StepSendJob{CampaignLimited: true, HealthPaused: true},
+			now:  evening,
+			want: 90 * time.Minute,
+		},
+		{
+			name: "both blocked early in the day still takes the shorter wait",
+			job:  coreapi.StepSendJob{CampaignLimited: true, HealthPaused: true},
+			now:  time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC),
+			want: capBackoff,
+		},
+		{
+			// Landing in the last seconds of the day must not re-enqueue instantly
+			// and spin.
+			name: "a wait at the very end of the day is floored",
+			job:  coreapi.StepSendJob{CampaignLimited: true},
+			now:  time.Date(2026, 8, 1, 23, 59, 59, 0, time.UTC),
+			want: minBlockedBackoff,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := blockedBackoff(tc.job, tc.now); got != tc.want {
+				t.Errorf("blockedBackoff = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// A non-UTC local clock must not shift the day boundary the limit resets on.
+func TestBlockedBackoffUsesTheUTCDayBoundary(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Karachi") // UTC+5, no DST
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	// 03:30 local on 2 Aug is 22:30 UTC on 1 Aug — 90 minutes from the UTC rollover,
+	// not from the local one.
+	now := time.Date(2026, 8, 2, 3, 30, 0, 0, loc)
+	if got := blockedBackoff(coreapi.StepSendJob{CampaignLimited: true}, now); got != 90*time.Minute {
+		t.Errorf("blockedBackoff = %s, want 1h30m from the UTC boundary", got)
 	}
 }
