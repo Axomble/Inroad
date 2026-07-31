@@ -214,13 +214,6 @@ func (s *PgStore) CreateAuthCode(ctx context.Context, p CreateAuthCodeParams) er
 	return s.q.CreateOauthAuthCode(ctx, codeParams(p))
 }
 
-// P6b: the atomic single-use authorization-code CONSUME lands with the P6b token
-// endpoint, as a ConsumeAuthCode method backed by
-//   UPDATE oauth_authorization_codes SET consumed_at = now()
-//   WHERE code_hash = $1 AND consumed_at IS NULL
-// returning rows-affected (exactly-one = claimed). Its real-DB single-use test ships
-// with P6b, alongside the token exchange that verifies the PKCE code_verifier.
-
 // Approve consumes the pending request, upserts the remembered consent, and inserts
 // the issued code in ONE transaction: either the user has a fresh single-use code and
 // a recorded consent, or nothing changed. Consuming FIRST (and requiring exactly one
