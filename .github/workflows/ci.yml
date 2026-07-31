@@ -42,25 +42,30 @@ jobs:
       INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.25.x"
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: Install frontend dependencies
         working-directory: web
         run: npm ci
-      # v8 of the action is the one that drives golangci-lint v2, which is the
-      # schema .golangci.yml declares. Keep them in step when bumping either.
-      - uses: golangci/golangci-lint-action@v8
+      # install-mode goinstall, not the default prebuilt binary: the published
+      # v2.1.6 binary is built with go1.24, and golangci-lint refuses to load a
+      # config whose target Go version (1.25.0, from go.mod) is newer than its own
+      # build toolchain. Compiling it here with the Go set up above makes the CI
+      # linter identical to the `go install`-ed one `make lint` runs locally, so
+      # neither side can pass while the other fails.
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.1.6
+          install-mode: goinstall
       - name: Verify backend
         run: |
           go vet ./...
@@ -89,7 +94,7 @@ jobs:
         run: npm run test:e2e
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: web/playwright-report
