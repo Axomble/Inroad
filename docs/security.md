@@ -271,6 +271,33 @@ limit / abuse control here is tracked in the Deferred list below.
     health signal — punishing the innocent inbox owner and never flagging the bad
     sender.
 
+## Sender pools & rotation
+30. **A campaign can only ever send from a mailbox in its own workspace.**
+    `campaign_senders` carries composite tenant foreign keys
+    (`(campaign_id, workspace_id)` → `campaigns`, `(mailbox_id, workspace_id)` →
+    `mailboxes`, the migration-000028 pattern), so a cross-tenant pool member is
+    unrepresentable rather than merely rejected in Go — the service's 422 is the
+    friendly message, the constraint is the guarantee. Every pool query
+    (list/replace/counter-bump) and the enrollment assignment claim/read are
+    `workspace_id`-pinned (invariant 4), and the mailbox joins are pinned too, so a
+    pool row can never surface or select another tenant's mailbox.
+31. **Credentials are opened for the RESOLVED sending mailbox, not the campaign's.**
+    `GetStepSendJob` resolves the mailbox first (the enrollment's pinned mailbox →
+    a rotation selection → `campaigns.mailbox_id`) and only then unseals the SMTP
+    password or refreshes the OAuth token, through the same per-workspace
+    `Keyring.SealerFor` / control-plane refresh path as before. No new secret is
+    stored, no secret is added to a response DTO (the sender-pool DTO carries
+    mailbox id/email/provider/status only), and no new outbound dial is
+    introduced — the resolved mailbox's transport goes through the identical
+    `mail.vetAddr`-guarded send path.
+32. **Assignment is write-once, so two workers can never disagree about a thread's
+    mailbox.** The claim is
+    `UPDATE sequence_enrollments SET mailbox_id = $3 WHERE id = $1 AND workspace_id = $2 AND mailbox_id IS NULL`;
+    zero rows means another worker won, and the loser RE-READS the stored value
+    rather than using its own selection. The rotation counter bump commits in the
+    same transaction. An exhausted pool pins nothing and defers through the
+    existing cap-deferral path.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
