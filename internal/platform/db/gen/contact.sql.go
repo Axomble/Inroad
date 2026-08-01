@@ -26,55 +26,6 @@ func (q *Queries) AddListMember(ctx context.Context, arg AddListMemberParams) er
 	return err
 }
 
-const listContactsByList = `-- name: ListContactsByList :many
-SELECT c.id, c.workspace_id, c.email, c.first_name, c.last_name, c.company, c.custom_fields, c.created_at FROM contacts c
-JOIN list_members lm ON lm.contact_id = c.id
-WHERE lm.list_id = $1 AND c.workspace_id = $2
-ORDER BY c.created_at DESC
-LIMIT $3 OFFSET $4
-`
-
-type ListContactsByListParams struct {
-	ListID      uuid.UUID `json:"list_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	Limit       int32     `json:"limit"`
-	Offset      int32     `json:"offset"`
-}
-
-func (q *Queries) ListContactsByList(ctx context.Context, arg ListContactsByListParams) ([]Contact, error) {
-	rows, err := q.db.Query(ctx, listContactsByList,
-		arg.ListID,
-		arg.WorkspaceID,
-		arg.Limit,
-		arg.Offset,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []Contact
-	for rows.Next() {
-		var i Contact
-		if err := rows.Scan(
-			&i.ID,
-			&i.WorkspaceID,
-			&i.Email,
-			&i.FirstName,
-			&i.LastName,
-			&i.Company,
-			&i.CustomFields,
-			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const upsertContact = `-- name: UpsertContact :one
 INSERT INTO contacts (workspace_id, email, first_name, last_name, company)
 VALUES ($1, $2, $3, $4, $5)

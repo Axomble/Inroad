@@ -6,19 +6,37 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-
-	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
-type fakeStore struct{ upserts int }
+// fakeStore is the whole persistence dependency of this domain, so the service
+// is exercised without a database. searchRows/searchErr and countN/countErr are
+// what the search tests script; importing only touches upserts.
+type fakeStore struct {
+	upserts int
+
+	searchRows []SearchRow
+	searchErr  error
+	lastSearch SearchParams
+
+	countN     int64
+	countErr   error
+	lastFilter SearchFilter
+}
 
 func (f *fakeStore) Upsert(_ context.Context, _ uuid.UUID, _ UpsertInput) (uuid.UUID, bool, error) {
 	f.upserts++
 	return uuid.New(), true, nil
 }
 func (f *fakeStore) AddToList(context.Context, uuid.UUID, uuid.UUID) error { return nil }
-func (f *fakeStore) ListByList(context.Context, uuid.UUID, uuid.UUID, int32, int32) ([]gen.Contact, error) {
-	return nil, nil
+
+func (f *fakeStore) Search(_ context.Context, _ uuid.UUID, p SearchParams) ([]SearchRow, error) {
+	f.lastSearch = p
+	return f.searchRows, f.searchErr
+}
+
+func (f *fakeStore) CountMatches(_ context.Context, _ uuid.UUID, filter SearchFilter, _ int) (int64, error) {
+	f.lastFilter = filter
+	return f.countN, f.countErr
 }
 
 func TestImportCSVParsesHeaderAndSkipsBadRows(t *testing.T) {
