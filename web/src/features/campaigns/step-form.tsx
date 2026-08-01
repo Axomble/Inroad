@@ -6,7 +6,7 @@ import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
+import { Textarea } from '@/components/ui/textarea'
 import { useCreateStepMutation, useUpdateStepMutation, type SequenceStep } from './api'
 import { delayToSeconds, secondsToDelay } from './step-delay'
 import { stepErrorMessage } from './step-error'
@@ -18,9 +18,6 @@ const schema = z.object({
   body_text: z.string().optional(),
 })
 type Values = z.infer<typeof schema>
-
-const field =
-  'h-9 w-full rounded-md border border-border-strong bg-surface-2 px-3 text-[13px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
 /**
  * Inline add/edit form for a sequence step. Collects the delay as whole
@@ -138,11 +135,10 @@ export function StepForm({
 
       <div className="flex flex-col gap-1.5">
         <Label htmlFor={bodyId}>Body</Label>
-        <textarea
+        <Textarea
           id={bodyId}
           rows={5}
           placeholder={'Hi {{first_name}},\n\n…'}
-          className={cn(field, 'h-auto resize-y py-2 leading-relaxed')}
           {...register('body_text')}
         />
         <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">

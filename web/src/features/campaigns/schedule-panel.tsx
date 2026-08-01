@@ -3,6 +3,7 @@ import { Clock, Plus, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SectionBar } from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
@@ -149,9 +150,8 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
       <div className="space-y-4 px-5 py-4">
         <div className="max-w-xs space-y-1.5">
           <Label htmlFor="schedule-timezone">Timezone</Label>
-          <select
+          <Select
             id="schedule-timezone"
-            className="h-9 w-full rounded-md border border-border bg-surface px-2 text-sm"
             value={timezone}
             onChange={(e) => {
               setTimezone(e.target.value)
@@ -167,8 +167,8 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
                 {zone}
               </option>
             ))}
-          </select>
-          <p className="text-xs text-muted">Windows below are in this timezone.</p>
+          </Select>
+          <p className="text-xs text-muted-foreground">Windows below are in this timezone.</p>
         </div>
 
         <ul className="divide-y divide-border rounded-md border border-border">
@@ -179,13 +179,13 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
                 <span
                   className={cn(
                     'w-10 shrink-0 text-xs font-medium',
-                    intervals.length === 0 ? 'text-muted' : 'text-foreground',
+                    intervals.length === 0 ? 'text-faint' : 'text-foreground',
                   )}
                 >
                   {label}
                 </span>
                 {intervals.length === 0 ? (
-                  <span className="text-xs text-muted">No sending</span>
+                  <span className="text-xs text-faint">No sending</span>
                 ) : (
                   <div className="flex flex-wrap items-center gap-2">
                     {intervals.map((iv, index) => (
@@ -197,7 +197,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
                           value={iv.start}
                           onChange={(e) => setBound(weekday, index, 'start', e.target.value)}
                         />
-                        <span className="text-xs text-muted">to</span>
+                        <span className="text-xs text-muted-foreground">to</span>
                         <Input
                           type="time"
                           aria-label={`${label} window ${index + 1} end`}
@@ -251,7 +251,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
           {/* Spelled out because "daily limit" reads as per-mailbox: an operator
               who assumes that under-configures the campaign by the size of the
               pool. The per-mailbox ceiling is the mailbox's own daily cap. */}
-          <p className="text-xs text-muted">
+          <p className="text-xs text-muted-foreground">
             The most this campaign sends per day in total, added up across{' '}
             <strong className="font-medium">every sender in its pool</strong> — not per mailbox. Leave it
             empty for no campaign limit. Each mailbox still keeps its own daily cap, so this can only lower
@@ -270,7 +270,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
           </p>
         )}
         {isSuccess && !dirty && !saveError && (
-          <p className="text-sm text-muted">Schedule saved. It applies to sends scheduled from now on.</p>
+          <p className="text-sm text-muted-foreground">Schedule saved. It applies to sends scheduled from now on.</p>
         )}
 
         <SchedulePreview preview={data?.preview} dirty={dirty} />
@@ -286,17 +286,17 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
  */
 function SchedulePreview({ preview, dirty }: { preview?: CampaignSchedule['preview']; dirty: boolean }) {
   if (dirty) {
-    return <p className="text-xs text-muted">Save to see the send times this schedule produces.</p>
+    return <p className="text-xs text-muted-foreground">Save to see the send times this schedule produces.</p>
   }
   if (!preview || preview.length === 0) return null
   return (
     <div className="space-y-1">
-      <p className="flex items-center gap-1.5 text-xs font-medium text-muted">
+      <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <Clock className="size-3.5" />
         Next send times
       </p>
       <p className="font-mono text-xs text-foreground">{preview.join(' · ')}</p>
-      <p className="text-xs text-muted">
+      <p className="text-xs text-muted-foreground">
         Spread across the window and nudged off exact minutes, so sends don't arrive on a fixed interval.
       </p>
     </div>

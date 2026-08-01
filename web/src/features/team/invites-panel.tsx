@@ -3,10 +3,10 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2, Plus, X } from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, PageBody, EmptyBlock } from '@/components/layout/page'
@@ -14,9 +14,6 @@ import { useAppSelector } from '@/store/hooks'
 import { httpStatus } from '@/lib/rtk-error'
 import type { Invite } from '@/store/api'
 import { useCreateWorkspaceInviteMutation, useListWorkspaceInvitesQuery, useRevokeWorkspaceInviteMutation } from './api'
-
-const field =
-  'h-9 w-full rounded-md border border-border-strong bg-surface-2 px-3 text-[13px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
 const schema = z.object({
   email: z.email('Enter a valid email address'),
@@ -161,7 +158,14 @@ function InviteForm({
         <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">Invite a teammate</span>
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} noValidate className="grid gap-4 p-5 md:grid-cols-[1fr_auto_auto]">
+      {/* Columns are capped rather than `1fr`: an email field stretched across a
+          wide viewport pushes the actions to the far edge, so the row stops
+          reading as one form. `justify-start` keeps the group left-aligned. */}
+      <form
+        onSubmit={handleSubmit(onSubmit)}
+        noValidate
+        className="grid gap-4 p-5 md:grid-cols-[minmax(0,26rem)_9rem_auto] md:justify-start"
+      >
         <div className="flex flex-col gap-1.5">
           <Label htmlFor={emailId}>Email</Label>
           <Input
@@ -181,10 +185,10 @@ function InviteForm({
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor={roleId}>Role</Label>
-          <select id={roleId} className={cn(field)} {...register('role')}>
+          <Select id={roleId} {...register('role')}>
             <option value="member">Member</option>
             <option value="admin">Admin</option>
-          </select>
+          </Select>
         </div>
 
         <div className="flex items-end gap-2">
