@@ -128,12 +128,14 @@ test('typing issues one request per pause, not one per keystroke, and lands in t
   // Echoed immediately — the field never waits on the request.
   expect(screen.getByRole('searchbox', { name: /search all contacts/i })).toHaveValue('acme')
 
-  await waitFor(() => expect(router.search.q).toBe('acme'))
-  await waitFor(() => expect(contactRequests).toHaveLength(2))
+  // Generous timeouts: the assertion is "one request", not "within 300ms" — a
+  // loaded machine firing the timer late must not read as a failure.
+  await waitFor(() => expect(router.search.q).toBe('acme'), { timeout: 5000 })
+  await waitFor(() => expect(contactRequests).toHaveLength(2), { timeout: 5000 })
   expect(lastRequest().searchParams.get('q')).toBe('acme')
 
   // Give any further debounce firing a chance to prove itself wrong.
-  await new Promise((resolve) => setTimeout(resolve, 350))
+  await new Promise((resolve) => setTimeout(resolve, 500))
   expect(contactRequests).toHaveLength(2)
 })
 
@@ -143,8 +145,8 @@ test('a one-character query is explained rather than sent, since the API rejects
 
   typeSearch('a')
 
-  expect(await screen.findByText(/at least 2 characters/i)).toBeInTheDocument()
-  await new Promise((resolve) => setTimeout(resolve, 350))
+  expect(await screen.findByText(/at least 2 characters/i, {}, { timeout: 5000 })).toBeInTheDocument()
+  await new Promise((resolve) => setTimeout(resolve, 500))
   expect(contactRequests).toHaveLength(1)
   expect(router.search.q).toBeUndefined()
 })

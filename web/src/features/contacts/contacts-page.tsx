@@ -3,7 +3,6 @@ import { Plus } from 'lucide-react'
 import { useSearch } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Page,
@@ -265,9 +264,17 @@ function ContactsPane({
           placeholder={listId ? 'Search this list…' : 'Search all contacts…'}
         />
         <SortMenu options={CONTACT_SORTS} value={sort} onChange={(id) => applySearch({ sort: id })} />
-        <Select
+        {/*
+          Native, like the campaign panels' selects: a three-item list gets the
+          platform keyboard model, typeahead, and the mobile picker for free.
+          Sized to the 40px SectionBar rather than the taller form control.
+        */}
+        <select
           aria-label="Contacts per page"
-          className="h-7 w-auto py-0 text-[12.5px]"
+          className={cn(
+            'h-7 rounded-md border border-border bg-surface px-2 text-[12.5px] text-foreground',
+            'outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40',
+          )}
           value={limit}
           onChange={(e) => applySearch({ limit: Number(e.target.value) })}
         >
@@ -276,7 +283,7 @@ function ContactsPane({
               {size} / page
             </option>
           ))}
-        </Select>
+        </select>
         {listId && <ImportCsvForm listId={listId} onImported={onImported} />}
       </SectionBar>
 
