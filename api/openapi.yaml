@@ -761,13 +761,41 @@ paths:
       operationId: listContacts
       tags: [contacts]
       security: [{ bearerAuth: [] }]
+      description: >-
+        Keyset-paginated contact search. Pages seek by cursor rather than OFFSET, so
+        a deep page costs the same as the first. Omitting `list` searches every
+        contact in the workspace. `total` is exact below the cap and flagged capped
+        above it, so the count can never become an unbounded scan.
       parameters:
-        - { name: list, in: query, required: true, schema: { type: string, format: uuid } }
-        - { name: limit, in: query, schema: { type: integer, default: 50 } }
-        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - name: list
+          in: query
+          required: false
+          description: Restrict to one list. Omit for all contacts in the workspace.
+          schema: { type: string, format: uuid }
+        - name: q
+          in: query
+          description: >-
+            Case-insensitive substring match across email, first name, last name and
+            company. Minimum 2 characters.
+          schema: { type: string, minLength: 2 }
+        - name: sort
+          in: query
+          schema: { $ref: '#/components/schemas/ContactSort' }
+        - name: cursor
+          in: query
+          description: >-
+            Opaque cursor from a previous page's next_cursor/prev_cursor. Omit for
+            the first page. Must match the current sort.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
       responses:
-        '200': { description: Contacts, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Contact' } } } } }
+        '200': { description: A page of contacts, content: { application/json: { schema: { $ref: '#/components/schemas/ContactPage' } } } }
+        '400': { description: "Malformed cursor, or a cursor that does not match the requested sort" }
         '401': { description: Unauthorized }
+        '404': { description: List not found }
+        '422': { description: "q shorter than 2 characters, unknown sort, or limit out of range" }
   /campaigns:
     get:
       operationId: listCampaigns
@@ -1743,6 +1771,37 @@ components:
       type: object
       properties:
         enabled: { type: boolean }
+    ContactSort:
+      type: string
+      description: >-
+        newest/oldest order by created_at, email orders alphabetically. Each is
+        backed by its own index, and a cursor is only valid for the sort that
+        produced it.
+      enum: [newest, oldest, email]
+      default: newest
+    ContactPage:
+      type: object
+      required: [items, total, total_is_capped]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Contact' } }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Cursor for the following page; null on the last page.
+        prev_cursor:
+          type: string
+          nullable: true
+          description: Cursor for the preceding page; null on the first page.
+        total:
+          type: integer
+          description: >-
+            Matching contacts. Exact when below the cap; equal to the cap when
+            total_is_capped is true.
+        total_is_capped:
+          type: boolean
+          description: >-
+            True when there are at least `total` matches and counting stopped there.
+            Render as "N+" — counting further would be an unbounded scan.
     RotationMode:
       type: string
       description: >-
