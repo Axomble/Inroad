@@ -377,8 +377,11 @@ function ContactsPane({
         {/* Dimming alone would leave the state invisible to a screen reader. */}
         {busy && <span className="text-[11px] text-muted-foreground">Loading…</span>}
         <div className="ml-auto flex items-center gap-2">
+          {/* outline, not ghost: these sit beside a text range label, and a ghost
+              button with nothing to hover reads as more of that prose. Pagination
+              is the one place on the page where the control has to look like one. */}
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             aria-label="Previous page"
             disabled={cursor === undefined || busy}
@@ -387,7 +390,7 @@ function ContactsPane({
             Previous
           </Button>
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             aria-label="Next page"
             disabled={!page?.next_cursor || busy}
