@@ -80,3 +80,36 @@ export function useUrlState(
 
   return [value, setValue] as const
 }
+
+/**
+ * Writes several search params in one navigation.
+ *
+ * Two `useUrlState` setters called from the same handler are two navigations,
+ * and the second reads a `prev` that may not include the first yet — so "new
+ * search, back to page one" can land as a new search on page forty. Anything
+ * that changes more than one param at a time belongs here.
+ *
+ * A key set to `undefined` or `''` is removed, matching `useUrlState`.
+ */
+export function useUrlPatch({
+  push = false,
+}: UrlStateOptions = {}): (patch: Record<string, string | number | undefined>) => void {
+  const navigate = useNavigate() as unknown as SearchMergeNavigate
+
+  return useCallback(
+    (patch) => {
+      void navigate({
+        search: (prev) => {
+          const next = { ...prev }
+          for (const [key, value] of Object.entries(patch)) {
+            if (value === undefined || value === '') delete next[key]
+            else next[key] = value
+          }
+          return next
+        },
+        replace: !push,
+      })
+    },
+    [navigate, push],
+  )
+}
