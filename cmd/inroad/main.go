@@ -232,7 +232,7 @@ func run() error {
 	// contact takes only a small ListChecker interface (not the whole list
 	// service) so the contact package doesn't have to import app/list —
 	// keeps the "app packages don't import each other" invariant intact.
-	contactSvc := contact.NewService(contact.NewPgStore(queries), listCheckerAdapter{lists: listSvc})
+	contactSvc := contact.NewService(contact.NewPgStore(pool), listCheckerAdapter{lists: listSvc})
 	// checker adapts the mailbox and list stores for campaign ownership checks.
 	campaignStore := campaign.NewPgStore(pool)
 	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc})

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Plus } from 'lucide-react'
+import { useSearch } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -15,43 +16,45 @@ import {
   ListHeaderCell,
 } from '@/components/layout/page'
 import { ListSearchInput } from '@/components/shared/list-search-input'
-import type { Contact, ImportResult } from '@/store/api'
+import { SortMenu } from '@/components/shared/sort-menu'
+import type { ImportResult } from '@/store/api'
 import { httpStatus } from '@/lib/rtk-error'
-import { useUrlState } from '@/hooks/use-url-state'
-import { useListControls, byText, type SortOption } from '@/hooks/use-list-controls'
+import { useUrlState, useUrlPatch } from '@/hooks/use-url-state'
+import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListListsQuery, useListContactsQuery } from './api'
+import {
+  CONTACT_SORTS,
+  MIN_QUERY_LENGTH,
+  PAGE_SIZES,
+  contactsErrorMessage,
+  isStaleCursorError,
+  isTooShort,
+  limitOrDefault,
+  parseContactsSearch,
+  popCursor,
+  pushCursor,
+  queryParam,
+  rangeLabel,
+  sortOrDefault,
+  type CursorStack,
+} from './contacts-search'
 import { NewListForm } from './new-list-form'
 import { ImportCsvForm } from './import-csv-form'
-
-/**
- * Module scope — see the memoization note in `useListControls`.
- *
- * Only email and first name are sortable because that is all the API returns:
- * `Contact` in `api/openapi.yaml` exposes `id`, `email`, `first_name`. The
- * contacts table also stores `last_name` and `company` (the CSV importer fills
- * them), so a Company column is a contract change away, not a UI change.
- */
-const SORTS: readonly SortOption<Contact>[] = [
-  { id: 'email', label: 'Email', compare: byText((c) => c.email) },
-  { id: 'name', label: 'Name', compare: byText((c) => c.first_name) },
-]
 
 export function ContactsPage() {
   const [showNewList, setShowNewList] = useState(false)
   // The selected list lives in the URL (`?list=`), so a list is linkable and
-  // survives a reload instead of snapping back to the first one every visit.
-  const [selectedListId, setSelectedListId] = useUrlState('list')
+  // survives a reload. No list selected is a real mode now — all contacts in the
+  // workspace — so there is nothing to auto-select on first visit.
+  const [selectedListId] = useUrlState('list')
+  const patch = useUrlPatch()
   const [lastImport, setLastImport] = useState<ImportResult | null>(null)
   const { data: listsData, isLoading: listsLoading, error: listsError } = useListListsQuery()
   const lists = listsData ?? []
 
-  // Land on the first list once lists have loaded, so the contacts pane isn't
-  // empty on first visit. Depend on the stable query result (not the derived
-  // `lists` array, which is a new reference every render).
-  useEffect(() => {
-    const first = listsData?.[0]?.id
-    if (!selectedListId && first) setSelectedListId(first)
-  }, [listsData, selectedListId, setSelectedListId])
+  // Switching scope invalidates the cursor: it points into the old result set.
+  // One navigation, so the list can never land with a page-forty cursor.
+  const selectList = (id: string) => patch({ list: id || undefined, cursor: undefined })
 
   return (
     <Page>
@@ -83,11 +86,17 @@ export function ContactsPage() {
             <NewListForm
               onDone={(id) => {
                 setShowNewList(false)
-                setSelectedListId(id)
+                selectList(id)
               }}
               onCancel={() => setShowNewList(false)}
             />
           )}
+
+          <ScopeButton
+            label="All contacts"
+            active={selectedListId === ''}
+            onSelect={() => selectList('')}
+          />
 
           {listsLoading ? (
             <div className="space-y-2 p-3">
@@ -105,17 +114,11 @@ export function ContactsPage() {
             <ul className="grid grid-cols-2 sm:grid-cols-3 md:block">
               {lists.map((list) => (
                 <li key={list.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedListId(list.id ?? '')}
-                    className={cn(
-                      'block w-full truncate px-4 py-2 text-left text-[13px] text-muted-foreground transition-colors',
-                      'hover:bg-surface-2 hover:text-foreground',
-                      selectedListId === list.id && 'bg-surface-2 font-medium text-foreground',
-                    )}
-                  >
-                    {list.name}
-                  </button>
+                  <ScopeButton
+                    label={list.name ?? 'Untitled list'}
+                    active={selectedListId === list.id}
+                    onSelect={() => selectList(list.id ?? '')}
+                  />
                 </li>
               ))}
             </ul>
@@ -123,21 +126,39 @@ export function ContactsPage() {
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          {selectedListId ? (
-            <ContactsPane
-              listId={selectedListId}
-              listName={lists.find((l) => l.id === selectedListId)?.name ?? ''}
-              onImported={setLastImport}
-            />
-          ) : (
-            <EmptyBlock
-              title="No list selected"
-              description="Create a list to start importing contacts, or select one from the left."
-            />
-          )}
+          <ContactsPane
+            listId={selectedListId || undefined}
+            listName={lists.find((l) => l.id === selectedListId)?.name ?? ''}
+            onImported={setLastImport}
+          />
         </div>
       </PageBody>
     </Page>
+  )
+}
+
+function ScopeButton({
+  label,
+  active,
+  onSelect,
+}: {
+  label: string
+  active: boolean
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={active ? 'true' : undefined}
+      className={cn(
+        'block w-full truncate px-4 py-2 text-left text-[13px] text-muted-foreground transition-colors',
+        'hover:bg-surface-2 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
+        active && 'bg-surface-2 font-medium text-foreground',
+      )}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -146,55 +167,165 @@ function ContactsPane({
   listName,
   onImported,
 }: {
-  listId: string
+  listId: string | undefined
   listName: string
   onImported: (result: ImportResult) => void
 }) {
-  const [offset, setOffset] = useState(0)
-  const limit = 50
-  // Fetch one extra row so we can distinguish "exactly `limit` results" (no
-  // next page) from "at least `limit`+1 results" (next page available). The
-  // extra row is trimmed off before render.
-  const { data, isLoading, error } = useListContactsQuery({ list: listId, limit: limit + 1, offset })
-  const fetched = data ?? []
-  const hasMore = fetched.length > limit
-  const page = hasMore ? fetched.slice(0, limit) : fetched
+  const search = parseContactsSearch(useSearch({ strict: false }))
+  const patch = useUrlPatch()
+  const sort = sortOrDefault(search.sort)
+  const limit = limitOrDefault(search.limit)
+  const cursor = search.cursor
+  const appliedQuery = search.q
 
-  // Filtering applies to the loaded page, so the label below says so rather than
-  // implying it searched the whole list. Server-side search is the fix when a
-  // list outgrows one page; the `?q=` param is already in the right place for it.
-  const controls = useListControls({
-    items: page,
-    searchFields: (c) => [c.email, c.first_name],
-    sorts: SORTS,
-  })
+  // Keyset pagination can name the next page but not "page N back", so the pages
+  // already visited are stacked as they're left. The stack is component state,
+  // not URL state — it's this tab's history, and a pasted link legitimately
+  // arrives without one.
+  const [stack, setStack] = useState<CursorStack>([])
+  const [recoveredFromStaleCursor, setRecoveredFromStaleCursor] = useState(false)
 
+  // Any route back to the first page (Back, a new search, a list switch) also
+  // empties the stack, so the "pages walked" count can't outlive the cursor it
+  // describes.
   useEffect(() => {
-    setOffset(0)
-  }, [listId])
+    if (!cursor) setStack([])
+  }, [cursor])
 
-  const firstRow = offset + 1
-  const lastRow = offset + page.length
+  const {
+    data: page,
+    currentData,
+    isLoading,
+    isFetching,
+    error,
+  } = useListContactsQuery(
+    { list: listId, q: appliedQuery, sort, cursor, limit },
+    // Contacts change underneath this view constantly — a CSV import, a teammate,
+    // a worker suppressing a bounce — and none of that goes through a client
+    // mutation, so no cache tag can ever invalidate it. Without this, returning to
+    // a page size (or query, or cursor) visited earlier in the session replays the
+    // cached response, showing a stale row set AND a stale `total`: 24 contacts
+    // beside a pager that knows there are 154. Same reasoning, same fix as the
+    // campaign enrollments list.
+    { refetchOnMountOrArgChange: true },
+  )
+
+  // `data` is RTK Query's last successful result for this hook regardless of the
+  // current args, `currentData` only the one matching them. Rendering `data`
+  // is the keep-previous-page behaviour: the old rows stay up, dimmed, while the
+  // next page loads — no skeleton flash and no layout jump per keystroke.
+  const busy = isFetching && !currentData
+
+  // Every control except the pager changes what is being searched, which makes
+  // the current cursor meaningless — it points into the old result set. One
+  // navigation, so the new query can never land on the old page forty.
+  const applySearch = (next: { q?: string; sort?: string; limit?: number }) => {
+    setRecoveredFromStaleCursor(false)
+    setStack([])
+    patch({ ...next, cursor: undefined })
+  }
+
+  const [typedQuery, setTypedQuery] = useDebouncedInput(appliedQuery ?? '', (next) =>
+    applySearch({ q: queryParam(next) }),
+  )
+
+  // A cursor the server rejects (minted for another sort, or an encoding that
+  // moved on) must not dead-end the list: drop it, reload page one, and say so.
+  const staleCursor = cursor !== undefined && isStaleCursorError(error)
+  useEffect(() => {
+    if (!staleCursor) return
+    setStack([])
+    setRecoveredFromStaleCursor(true)
+    patch({ cursor: undefined })
+  }, [staleCursor, patch])
+
+  const goNext = () => {
+    const next = page?.next_cursor
+    if (!next) return
+    setRecoveredFromStaleCursor(false)
+    setStack((s) => pushCursor(s, cursor))
+    patch({ cursor: next })
+  }
+
+  const goPrev = () => {
+    setRecoveredFromStaleCursor(false)
+    const { stack: rest, cursor: back } = popCursor(stack)
+    setStack(rest)
+    // An empty stack means this tab never walked here — a link opened straight
+    // onto a deep page — and the page's own `prev_cursor` is the only way back.
+    // It is not the same as the stack *saying* "the first page", which is a
+    // cursor-less `undefined` and must stay one.
+    patch({ cursor: stack.length > 0 ? back : page?.prev_cursor ?? undefined })
+  }
+
+  const showError = error !== undefined && !staleCursor
+  const items = page?.items ?? []
+  // A cursor with no stack behind it is a pasted deep link: this tab never
+  // walked here, so the row numbers are unknowable rather than zero.
+  const pagesWalked = cursor !== undefined && stack.length === 0 ? null : stack.length
+  const scopeLabel = listId ? listName || 'this list' : 'this workspace'
 
   return (
     <>
-      <SectionBar label={listName || 'List'} count={page.length}>
+      <SectionBar label={listId ? listName || 'List' : 'All contacts'}>
         <ListSearchInput
-          value={controls.query}
-          onChange={controls.setQuery}
-          placeholder="Filter this page…"
+          value={typedQuery}
+          onChange={setTypedQuery}
+          placeholder={listId ? 'Search this list…' : 'Search all contacts…'}
         />
-        <ImportCsvForm listId={listId} onImported={onImported} />
+        <SortMenu options={CONTACT_SORTS} value={sort} onChange={(id) => applySearch({ sort: id })} />
+        {/*
+          Native, like the campaign panels' selects: a three-item list gets the
+          platform keyboard model, typeahead, and the mobile picker for free.
+          Sized to the 40px SectionBar rather than the taller form control.
+        */}
+        <select
+          aria-label="Contacts per page"
+          className={cn(
+            'h-7 rounded-md border border-border bg-surface px-2 text-[12.5px] text-foreground',
+            'outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40',
+          )}
+          value={limit}
+          onChange={(e) => applySearch({ limit: Number(e.target.value) })}
+        >
+          {PAGE_SIZES.map((size) => (
+            <option key={size} value={size}>
+              {size} / page
+            </option>
+          ))}
+        </select>
+        {listId && <ImportCsvForm listId={listId} onImported={onImported} />}
       </SectionBar>
 
-      {!isLoading && !error && page.length > 0 && (
+      {isTooShort(typedQuery) && (
+        <p role="status" className="border-b border-border px-5 py-1.5 text-xs text-muted-foreground">
+          Type at least {MIN_QUERY_LENGTH} characters to search.
+        </p>
+      )}
+
+      {recoveredFromStaleCursor && (
+        <p role="status" className="border-b border-border px-5 py-1.5 text-xs text-warn">
+          That page link has expired — showing the first page.
+        </p>
+      )}
+
+      {!isLoading && !showError && items.length > 0 && (
         <ListHeader>
           <ListHeaderCell className="min-w-0 flex-1">Email</ListHeaderCell>
           <ListHeaderCell className="hidden w-40 sm:block">First name</ListHeaderCell>
         </ListHeader>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      {/*
+        No virtualization, deliberately: a page is at most 100 rows, so the DOM
+        is nowhere near the bottleneck — the query was, and keyset paging is the
+        fix. A virtualizer here would buy nothing and cost scroll restoration,
+        find-in-page, and Ctrl+F. Don't add one reflexively.
+      */}
+      <div
+        aria-busy={busy}
+        className={cn('flex-1 overflow-y-auto transition-opacity', busy && 'opacity-50')}
+      >
         {isLoading ? (
           <ul>
             {[0, 1, 2].map((i) => (
@@ -203,31 +334,46 @@ function ContactsPane({
               </li>
             ))}
           </ul>
-        ) : error ? (
+        ) : showError ? (
           <div role="alert" className="px-5 py-6 text-sm text-danger">
-            Couldn't load contacts{httpStatus(error) ? ` (${httpStatus(error)})` : ''} — try again.
+            {contactsErrorMessage(error)}
           </div>
-        ) : page.length === 0 ? (
-          <EmptyBlock
-            title="No contacts in this list"
-            description="Import a CSV with an email column to populate this list."
-          />
-        ) : controls.items.length === 0 ? (
-          <EmptyBlock
-            title="No contacts match this filter"
-            description={`Nothing on this page matches "${controls.query}".`}
-            action={
-              <Button variant="secondary" size="sm" onClick={controls.clear}>
-                Clear filter
-              </Button>
-            }
-          />
+        ) : items.length === 0 ? (
+          appliedQuery ? (
+            <EmptyBlock
+              title="No contacts match this search"
+              description={`Nothing in ${scopeLabel} matches "${appliedQuery}".`}
+              action={
+                // Distinct from the field's own X, which shares the visible
+                // word, so the two are separable by name.
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  aria-label="Clear search and show all contacts"
+                  onClick={() => applySearch({ q: undefined })}
+                >
+                  Clear search
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyBlock
+              title={listId ? 'No contacts in this list' : 'No contacts yet'}
+              description={
+                listId
+                  ? 'Import a CSV with an email column to populate this list.'
+                  : 'Create a list and import a CSV with an email column to get started.'
+              }
+            />
+          )
         ) : (
           <ul>
-            {controls.items.map((c) => (
+            {items.map((c) => (
               <li key={c.id} className="flex items-center gap-4 border-b border-border px-5 py-2.5">
                 <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{c.email}</span>
-                <span className="hidden w-40 truncate text-xs text-muted-foreground sm:block">{c.first_name || '—'}</span>
+                <span className="hidden w-40 truncate text-xs text-muted-foreground sm:block">
+                  {c.first_name || '—'}
+                </span>
               </li>
             ))}
           </ul>
@@ -235,24 +381,31 @@ function ContactsPane({
       </div>
 
       <div className="flex items-center gap-2 border-t border-border px-4 py-2 sm:px-5">
-        {/*
-          The API returns a page, not a total, so this is an honest "showing
-          1–50" rather than a "1–50 of 248" we can't actually substantiate.
-        */}
         <span className="font-mono text-[11px] tabular-nums text-faint">
-          {page.length === 0 ? 'No contacts' : `Showing ${firstRow}–${lastRow}`}
-          {controls.isFiltered && ` · ${controls.items.length} matching`}
+          {page && !showError ? rangeLabel(page, pagesWalked, limit) : 'No contacts'}
         </span>
+        {/* Dimming alone would leave the state invisible to a screen reader. */}
+        {busy && <span className="text-[11px] text-muted-foreground">Loading…</span>}
         <div className="ml-auto flex items-center gap-2">
+          {/* outline, not ghost: these sit beside a text range label, and a ghost
+              button with nothing to hover reads as more of that prose. Pagination
+              is the one place on the page where the control has to look like one. */}
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            disabled={offset === 0}
-            onClick={() => setOffset((o) => Math.max(0, o - limit))}
+            aria-label="Previous page"
+            disabled={cursor === undefined || busy}
+            onClick={goPrev}
           >
             Previous
           </Button>
-          <Button variant="ghost" size="sm" disabled={!hasMore} onClick={() => setOffset((o) => o + limit)}>
+          <Button
+            variant="outline"
+            size="sm"
+            aria-label="Next page"
+            disabled={!page?.next_cursor || busy}
+            onClick={goNext}
+          >
             Next
           </Button>
         </div>

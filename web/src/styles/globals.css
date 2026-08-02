@@ -38,12 +38,26 @@
   --muted-foreground: #58604f;
   --faint:          #747c69;
 
-  --chrome:         #0c110a;
-  --chrome-surface: #141b10;
-  --chrome-hover:   #1d2617;
-  --chrome-border:  #293321;
-  --chrome-text:    #f2f7e8;
-  --chrome-muted:   #9aa88d;
+  /* app chrome (header + sidebar). Theme-aware like every other neutral:
+     light chrome on the light theme, near-black on dark. Kept as its own
+     family rather than reusing --rail/--surface so the shell can carry a
+     slightly different weight from the content surfaces it frames. */
+  --chrome:         #fbfcf6;
+  --chrome-surface: #eef2e4;
+  --chrome-hover:   #e5ebd7;
+  --chrome-border:  #dde3d3;
+  --chrome-text:    #11150d;
+  --chrome-muted:   #58604f;
+
+  /* Inverted "spotlight" panel — the overview hero. Deliberately dark in BOTH
+     themes: it is a feature card that inverts against the page, not app
+     chrome, so it must not follow the theme the way --chrome now does. */
+  --spotlight:         #0c110a;
+  --spotlight-surface: #141b10;
+  --spotlight-hover:   #1d2617;
+  --spotlight-border:  #293321;
+  --spotlight-text:    #f2f7e8;
+  --spotlight-muted:   #9aa88d;
 
   /* accent — electric lime "volt", spent on the primary action */
   --primary:            #c3f53c;
@@ -174,6 +188,13 @@
   --color-chrome-border:   var(--chrome-border);
   --color-chrome-text:     var(--chrome-text);
   --color-chrome-muted:    var(--chrome-muted);
+
+  --color-spotlight:         var(--spotlight);
+  --color-spotlight-surface: var(--spotlight-surface);
+  --color-spotlight-hover:   var(--spotlight-hover);
+  --color-spotlight-border:  var(--spotlight-border);
+  --color-spotlight-text:    var(--spotlight-text);
+  --color-spotlight-muted:   var(--spotlight-muted);
 
   --color-card:                 var(--card);
   --color-card-foreground:      var(--card-foreground);

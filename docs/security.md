@@ -298,6 +298,37 @@ limit / abuse control here is tracked in the Deferred list below.
     same transaction. An exhausted pool pins nothing and defers through the
     existing cap-deferral path.
 
+## Contact search & keyset pagination
+33. **Every contact-search statement is workspace-pinned as its FIRST bound
+    argument, and the pin is inside the index.** The search SQL is assembled per
+    access path (`internal/app/contact/search.go`) rather than written as static
+    sqlc queries, so the tenant filter is enforced structurally: `where()` emits
+    `c.workspace_id = $1` before any optional clause, and every generated shape —
+    page and capped count, all three sorts, both travel directions, with and
+    without the text/list filters — is asserted to carry it
+    (`TestEveryStatementPinsWorkspaceFirst`). The workspace comes from
+    `auth.WorkspaceID` (the JWT), never a query param. `idx_contacts_search` is a
+    composite `gin (workspace_id, search_text gin_trgm_ops)`, so a search does not
+    even read another tenant's index entries to discard them.
+34. **The cursor is opaque and carries no authority.** A cursor encodes a sort,
+    a direction, a row id and a sort key — never a workspace. Replaying a cursor
+    minted in workspace A against workspace B therefore cannot widen the query;
+    it only names a position within B's own workspace-pinned scan
+    (`TestCrossWorkspaceContactsNeverAppear`). A malformed cursor, or one from a
+    different sort, is a typed error mapped to 400 — never a silent reset to the
+    first page, which would hide the fault.
+35. **A `list` filter is ownership-checked before any read.** The service calls
+    `ListChecker.ListExists(ctx, ws, listID)` first, so another tenant's list id
+    is a 404 rather than a silently empty page, and the id never reaches a query.
+36. **Search work is bounded by construction.** The page fetches `limit + 1`
+    rows (limit ≤ 100, rejected outside 1..100 rather than clamped) and the total
+    counts through a subquery capped at 10,001 rows, so neither a broad query nor
+    a deep page can become an unbounded scan. `q` shorter than 2 characters is
+    rejected instead of answered with a non-selective pattern, and LIKE
+    metacharacters in `q` are escaped so a caller cannot turn a keystroke into a
+    wildcard that defeats the trigram index. Measured on 200,000 contacts: see
+    `perf_integration_test.go`.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

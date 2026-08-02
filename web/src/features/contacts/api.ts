@@ -22,8 +22,11 @@ const contactsApi = api
       createList: {
         invalidatesTags: [{ type: 'List', id: 'LIST' }],
       },
+      // One coarse tag for every page: `list` is now optional, and a page is
+      // also keyed by q/sort/cursor/limit, so per-list tags would leave the
+      // all-contacts view and every other search stale after an import.
       listContacts: {
-        providesTags: (_result, _error, arg) => [{ type: 'Contact', id: `LIST-${arg.list}` }],
+        providesTags: [{ type: 'Contact', id: 'LIST' }],
       },
     },
   })
@@ -35,7 +38,7 @@ const contactsApi = api
           body.append('file', file)
           return { url: '/contacts/import', method: 'POST', body, params: { list } }
         },
-        invalidatesTags: (_result, _error, arg) => [{ type: 'Contact', id: `LIST-${arg.list}` }],
+        invalidatesTags: [{ type: 'Contact', id: 'LIST' }],
       }),
     }),
     overrideExisting: false,

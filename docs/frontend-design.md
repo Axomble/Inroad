@@ -51,7 +51,9 @@ values; `:root.dark` overrides only what changes for dark. The accent lime is sh
 | Token | Light value (default) | Dark value | Role |
 |---|---|---|---|
 | `--background` | `#f7f9f1` | `#0b0e0a` | App ground |
-| `--rail` | `#fbfcf6` | `#0f130a` | Sidebar / chrome |
+| `--rail` | `#fbfcf6` | `#0f130a` | Shell ground behind the sidebar |
+| `--chrome*` | `#fbfcf6` … | `#080b07` … | App chrome (header + sidebar) — **theme-aware** |
+| `--spotlight*` | `#0c110a` … | `#0c110a` … | Inverted hero panel — **dark in both themes** |
 | `--surface` | `#ffffff` | `#13160f` | Raised panels, header, toolbars |
 | `--surface-2` | `#f0f3e6` | `#1a1e14` | Inputs, chips, nested surfaces |
 | `--border` | `#e3e8d6` | `#282d1f` | Hairline dividers |
@@ -69,7 +71,12 @@ values; `:root.dark` overrides only what changes for dark. The accent lime is sh
 | `--danger` | `#cb2f38` | `#fb6d77` | Error, failing, destructive |
 
 > `--muted` (no `-foreground`) is a *background* alias of `--surface-2`, not the secondary-text color —
-> secondary text is `--muted-foreground`. `--warm` (orange) and `--warn` (amber) are deliberately
+> secondary text is `--muted-foreground`. `text-muted` is therefore always a bug: it paints text in the
+> surface color and renders it invisible in both themes.
+>
+> The `--chrome-*` family follows the theme like every other neutral, so the header and sidebar are light
+> on the light theme. When a surface must stay dark *against* the theme — the overview hero — use
+> `--spotlight-*`, which is identical in both themes. Never reach for `--chrome-*` to get "a dark panel". `--warm` (orange) and `--warn` (amber) are deliberately
 > distinct hues so the "heat" signal never reads as a generic warning.
 >
 > **Why the accents differ by theme.** These hues carry small text (error messages, status pills,

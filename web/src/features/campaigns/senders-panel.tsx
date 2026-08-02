@@ -3,6 +3,7 @@ import { GitBranch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SectionBar } from '@/components/layout/page'
 import { HealthBadge } from '@/components/shared/health-badge'
@@ -117,9 +118,8 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
       <div className="space-y-4 px-5 py-4">
         <div className="max-w-xs space-y-1.5">
           <Label htmlFor="rotation-mode">Rotation mode</Label>
-          <select
+          <Select
             id="rotation-mode"
-            className="h-9 w-full rounded-md border border-border bg-surface px-2 text-sm"
             value={mode}
             onChange={(e) => {
               setMode(e.target.value as RotationMode)
@@ -132,18 +132,18 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
                 {option.label}
               </option>
             ))}
-          </select>
-          <p className="text-xs text-muted">{rotationModeDescription(mode)}</p>
+          </Select>
+          <p className="text-xs text-muted-foreground">{rotationModeDescription(mode)}</p>
         </div>
 
         {rows.length === 0 ? (
-          <p className="text-sm text-muted">
+          <p className="text-sm text-muted-foreground">
             No active mailboxes to send from. Connect a mailbox first — until then this campaign sends from
             the mailbox it was created with.
           </p>
         ) : (
           <div className="space-y-1.5">
-            <p className="text-xs text-muted">
+            <p className="text-xs text-muted-foreground">
               Tick a mailbox to put it in the pool. Clearing <em>In rotation</em> holds one out of new
               assignments while keeping its weight and history, so it can come back without resetting the
               spread.
@@ -156,7 +156,7 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
           </div>
         )}
 
-        <p className="flex items-start gap-1.5 text-xs text-muted">
+        <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <GitBranch className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
           <span>
             Follow-ups always send from the mailbox that started the thread — a reply from a different
@@ -176,7 +176,7 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
           </p>
         )}
         {isSuccess && !dirty && !saveError && (
-          <p className="text-sm text-muted">
+          <p className="text-sm text-muted-foreground">
             Senders saved. {includedCount === 1 ? '1 mailbox is' : `${includedCount} mailboxes are`} in
             rotation for contacts assigned from now on.
           </p>
@@ -210,14 +210,14 @@ function SenderRow({
 
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
-          <span className={cn('min-w-0 truncate text-sm', row.included ? 'text-foreground' : 'text-muted')}>
+          <span className={cn('min-w-0 truncate text-sm', row.included ? 'text-foreground' : 'text-muted-foreground')}>
             {row.email}
           </span>
           {/* Only for a mailbox that is actually warming up: no state means the
               warmup engine has no opinion, which is not a claim of health. */}
           {row.healthState && <HealthBadge state={row.healthState} className="shrink-0" />}
         </span>
-        <span className="block text-xs text-muted">
+        <span className="block text-xs text-muted-foreground">
           {row.provider ?? 'smtp'}
           {row.status && row.status !== 'active' ? ` · ${row.status}` : ''}
           {' · '}
@@ -228,7 +228,7 @@ function SenderRow({
       </span>
 
       <span className="flex items-center gap-1.5">
-        <span className="text-xs text-muted">Weight</span>
+        <span className="text-xs text-muted-foreground">Weight</span>
         <Input
           type="number"
           min={1}
@@ -241,7 +241,7 @@ function SenderRow({
         />
       </span>
 
-      <label className="flex items-center gap-1.5 text-xs text-muted">
+      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <input
           type="checkbox"
           aria-label={`In rotation for ${row.email}`}
@@ -274,11 +274,11 @@ function SenderCapacity({ row }: { row: DraftSender }) {
     <span className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-xs">
       {capacity && <span className="font-mono text-foreground">{capacity}</span>}
       {capacity && note && (
-        <span className="text-muted" aria-hidden="true">
+        <span className="text-faint" aria-hidden="true">
           ·
         </span>
       )}
-      {note && <span className={gated ? 'text-danger' : 'text-muted'}>{note}</span>}
+      {note && <span className={gated ? 'text-danger' : 'text-muted-foreground'}>{note}</span>}
     </span>
   )
 }

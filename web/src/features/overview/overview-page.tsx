@@ -86,11 +86,14 @@ export function OverviewPage() {
       />
       <PageBody>
         <div className="mx-auto w-full max-w-[1480px] p-4 sm:p-6 lg:p-8">
-          <section className="relative overflow-hidden rounded-2xl border border-chrome-border bg-chrome px-5 py-6 text-chrome-text shadow-[0_18px_50px_rgba(13,18,9,0.18)] sm:px-7 sm:py-7">
+          {/* Spotlight, not chrome: this hero inverts against the page in both
+              themes, so it uses the --spotlight family rather than the app-shell
+              tokens, which follow the light/dark theme. */}
+          <section className="relative overflow-hidden rounded-2xl border border-spotlight-border bg-spotlight px-5 py-6 text-spotlight-text shadow-[0_18px_50px_rgba(13,18,9,0.18)] sm:px-7 sm:py-7">
             <div className="absolute right-0 top-0 h-56 w-56 rounded-full bg-primary/10 blur-3xl" aria-hidden="true" />
             <div className="relative flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
               <div>
-                <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-chrome-border bg-chrome-surface px-2.5 py-1 font-mono text-[9px] uppercase tracking-[0.16em] text-chrome-muted">
+                <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-spotlight-border bg-spotlight-surface px-2.5 py-1 font-mono text-[9px] uppercase tracking-[0.16em] text-spotlight-muted">
                   <span className="relative flex size-1.5">
                     <span className="live-ping absolute inline-flex size-full rounded-full bg-primary opacity-70" />
                     <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
@@ -100,15 +103,15 @@ export function OverviewPage() {
                 <h1 className="max-w-2xl text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">
                   {firstName ? `Good to see you, ${firstName}.` : 'Your outreach command center.'}
                 </h1>
-                <p className="mt-2 max-w-xl text-sm leading-6 text-chrome-muted">
+                <p className="mt-2 max-w-xl text-sm leading-6 text-spotlight-muted">
                   Protect sender reputation, keep capacity visible, and move the right campaign forward.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button asChild variant="outline" size="sm" className="border-chrome-border text-chrome-text hover:bg-chrome-hover">
+                <Button asChild variant="outline" size="sm" className="border-spotlight-border text-spotlight-text hover:bg-spotlight-hover">
                   <Link to="/app/mailboxes"><Mail />Mailboxes</Link>
                 </Button>
-                <Button asChild variant="outline" size="sm" className="border-chrome-border text-chrome-text hover:bg-chrome-hover">
+                <Button asChild variant="outline" size="sm" className="border-spotlight-border text-spotlight-text hover:bg-spotlight-hover">
                   <Link to="/app/contacts"><Users />Contacts</Link>
                 </Button>
               </div>

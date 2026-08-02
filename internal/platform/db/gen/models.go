@@ -248,6 +248,7 @@ type Contact struct {
 	Company      string             `json:"company"`
 	CustomFields []byte             `json:"custom_fields"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	SearchText   *string            `json:"search_text"`
 }
 
 type EmailOtpCode struct {

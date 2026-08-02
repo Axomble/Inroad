@@ -374,8 +374,10 @@ const injectedRtkApi = api.injectEndpoints({
         url: `/contacts`,
         params: {
           list: queryArg.list,
+          q: queryArg.q,
+          sort: queryArg.sort,
+          cursor: queryArg.cursor,
           limit: queryArg.limit,
-          offset: queryArg.offset,
         },
       }),
     }),
@@ -793,11 +795,17 @@ export type ImportContactsApiArg = {
     file?: Blob;
   };
 };
-export type ListContactsApiResponse = /** status 200 Contacts */ Contact[];
+export type ListContactsApiResponse =
+  /** status 200 A page of contacts */ ContactPage;
 export type ListContactsApiArg = {
-  list: string;
+  /** Restrict to one list. Omit for all contacts in the workspace. */
+  list?: string;
+  /** Case-insensitive substring match across email, first name, last name and company. Minimum 2 characters. */
+  q?: string;
+  sort?: ContactSort;
+  /** Opaque cursor from a previous page's next_cursor/prev_cursor. Omit for the first page. Must match the current sort. */
+  cursor?: string;
   limit?: number;
-  offset?: number;
 };
 export type ListCampaignsApiResponse = /** status 200 Campaigns */ Campaign[];
 export type ListCampaignsApiArg = void;
@@ -1246,6 +1254,18 @@ export type Contact = {
   email?: string;
   first_name?: string;
 };
+export type ContactPage = {
+  items: Contact[];
+  /** Cursor for the following page; null on the last page. */
+  next_cursor?: string | null;
+  /** Cursor for the preceding page; null on the first page. */
+  prev_cursor?: string | null;
+  /** Matching contacts. Exact when below the cap; equal to the cap when total_is_capped is true. */
+  total: number;
+  /** True when there are at least `total` matches and counting stopped there. Render as "N+" — counting further would be an unbounded scan. */
+  total_is_capped: boolean;
+};
+export type ContactSort = "newest" | "oldest" | "email";
 export type Campaign = {
   id?: string;
   name?: string;

@@ -6,7 +6,8 @@ import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { cn } from '@/lib/utils'
+import { Select } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
 import { httpStatus } from '@/lib/rtk-error'
 import { useCreateCampaignMutation } from './api'
 // Cross-feature query-hook imports are allowed for read-only reference data
@@ -30,8 +31,6 @@ function createErrorMessage(error: unknown): string {
   if (status === 400) return 'Please fill in all required fields.'
   return "Couldn't create the campaign. Please try again."
 }
-
-const field = 'h-9 w-full rounded-md border border-border-strong bg-surface-2 px-3 text-[13px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring'
 
 export function CampaignForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
   const { data: mailboxes = [] } = useListMailboxesQuery()
@@ -71,14 +70,14 @@ export function CampaignForm({ onDone, onCancel }: { onDone: () => void; onCance
         <div className="grid gap-4 md:grid-cols-2">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor={mailboxId}>Send from</Label>
-            <select id={mailboxId} className={cn(field)} aria-invalid={!!errors.mailbox_id} {...register('mailbox_id')}>
+            <Select id={mailboxId} aria-invalid={!!errors.mailbox_id} {...register('mailbox_id')}>
               <option value="">Select a mailbox…</option>
               {activeMailboxes.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.email}
                 </option>
               ))}
-            </select>
+            </Select>
             {errors.mailbox_id && <span className="text-xs text-danger">{errors.mailbox_id.message}</span>}
             {activeMailboxes.length === 0 && (
               <span className="text-xs text-muted-foreground">No active mailboxes — connect one first.</span>
@@ -86,14 +85,14 @@ export function CampaignForm({ onDone, onCancel }: { onDone: () => void; onCance
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor={listId}>To list</Label>
-            <select id={listId} className={cn(field)} aria-invalid={!!errors.list_id} {...register('list_id')}>
+            <Select id={listId} aria-invalid={!!errors.list_id} {...register('list_id')}>
               <option value="">Select a list…</option>
               {lists.map((l) => (
                 <option key={l.id} value={l.id}>
                   {l.name}
                 </option>
               ))}
-            </select>
+            </Select>
             {errors.list_id && <span className="text-xs text-danger">{errors.list_id.message}</span>}
           </div>
         </div>
@@ -106,11 +105,10 @@ export function CampaignForm({ onDone, onCancel }: { onDone: () => void; onCance
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor={bodyId}>Body</Label>
-          <textarea
+          <Textarea
             id={bodyId}
             rows={6}
             placeholder={'Hi {{first_name}},\n\n…'}
-            className={cn(field, 'h-auto resize-y py-2 leading-relaxed')}
             {...register('body_text')}
           />
           <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">

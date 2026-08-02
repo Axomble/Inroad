@@ -51,7 +51,10 @@ async function mockApi(page: Page) {
       ]))
     }
     if (path.endsWith('/lists')) return route.fulfill(json([{ id: 'list-1', name: 'SaaS founders' }]))
-    if (path.includes('/contacts')) return route.fulfill(json([]))
+    // `GET /contacts` answers with a keyset page, not a bare array.
+    if (path.includes('/contacts')) {
+      return route.fulfill(json({ items: [], next_cursor: null, prev_cursor: null, total: 0, total_is_capped: false }))
+    }
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"unhandled e2e route"}' })
   })
 }
