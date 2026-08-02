@@ -98,6 +98,12 @@ func (stubCore) ListDueWarmupMailboxes(context.Context) ([]coreapi.MailboxRef, e
 	return nil, nil
 }
 func (stubCore) EvaluateWarmupHealth(context.Context) error { return nil }
+func (stubCore) ListStaleSendingDomains(context.Context, time.Duration) ([]coreapi.SendingDomainRef, error) {
+	return nil, nil
+}
+func (stubCore) RecordSendingDomainAuth(context.Context, coreapi.SendingDomainAuth) error {
+	return nil
+}
 
 // --- shared test doubles for Sender and Enqueuer ---
 

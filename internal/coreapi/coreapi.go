@@ -265,6 +265,49 @@ type Client interface {
 	// the resulting state. Called on the sweep tick. Global fan-out; each write is
 	// workspace-pinned.
 	EvaluateWarmupHealth(ctx context.Context) error
+
+	// --- Sending-domain authentication (domainauth:sweep) ---
+
+	// ListStaleSendingDomains returns every domain the deployment sends from
+	// whose last COMPLETED check is older than staleAfter (or which has never
+	// been checked), each paired with its workspace. The domain set is derived
+	// from mailboxes.email, so a newly connected mailbox's domain appears
+	// immediately. Global fan-out — domain authentication is infrastructure
+	// maintenance, not a tenant read — and each returned row carries the
+	// workspace its write-back is pinned to.
+	ListStaleSendingDomains(ctx context.Context, staleAfter time.Duration) ([]SendingDomainRef, error)
+	// RecordSendingDomainAuth persists one COMPLETED check, workspace-pinned.
+	// A result whose State is "unknown" is REJECTED here (a no-op, not an
+	// error): a transient resolver failure must never overwrite a known-good
+	// verdict, and it must not stamp checked_at, or the sweep would wait out the
+	// staleness window on an answer it never got. The sweep handler skips those
+	// too — this is the belt-and-braces half of that rule.
+	RecordSendingDomainAuth(ctx context.Context, in SendingDomainAuth) error
+}
+
+// SendingDomainRef is a (workspace id, domain) pair from the staleness scan.
+// Strings at the seam, like every other coreapi id; the implementation parses
+// and pins them.
+type SendingDomainRef struct {
+	WorkspaceID string
+	Domain      string
+}
+
+// SendingDomainAuth is one completed check, reported by the sweep. State is the
+// verdict the checker computed ("passing" | "failing"; "unknown" is not
+// persisted). DKIM is carried for display only and never contributes to State —
+// selectors are not discoverable from DNS, so DKIMFound=false means "none of the
+// probed selectors matched", not "unsigned".
+type SendingDomainAuth struct {
+	WorkspaceID  string
+	Domain       string
+	State        string
+	SPFFound     bool
+	SPFRecord    string
+	DKIMFound    bool
+	DKIMSelector string
+	DMARCFound   bool
+	DMARCPolicy  string
 }
 
 // ClaimOutcome is the result of ClaimStepSend: what the advance handler should

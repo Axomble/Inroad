@@ -19,6 +19,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/dnsauth"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -141,6 +142,10 @@ func run() error {
 		logger.Error("scheduler register (maintenance cleanup) failed", "err", err)
 		return err
 	}
+	if err := queue.RegisterDomainAuthSweep(sch); err != nil {
+		logger.Error("scheduler register (domain auth sweep) failed", "err", err)
+		return err
+	}
 	go func() {
 		if err := sch.Run(); err != nil {
 			logger.Error("scheduler exited", "err", err)
@@ -150,7 +155,10 @@ func run() error {
 
 	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues)
 	mux := queue.NewMux()
-	worker.Register(mux, core, sndr, engager, reader, enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
+	// The DNS resolver for the domain-authentication sweep. It resolves only
+	// domains derived from connected mailboxes (coreapi supplies the list), and
+	// a TXT lookup dials no user-supplied host, so it needs no SSRF vet.
+	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {

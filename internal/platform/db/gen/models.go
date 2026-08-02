@@ -414,6 +414,21 @@ type Send struct {
 	ClaimedAt        pgtype.Timestamptz `json:"claimed_at"`
 }
 
+type SendingDomain struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	Domain       string             `json:"domain"`
+	State        string             `json:"state"`
+	SpfFound     bool               `json:"spf_found"`
+	SpfRecord    string             `json:"spf_record"`
+	DkimFound    bool               `json:"dkim_found"`
+	DkimSelector string             `json:"dkim_selector"`
+	DmarcFound   bool               `json:"dmarc_found"`
+	DmarcPolicy  string             `json:"dmarc_policy"`
+	CheckedAt    pgtype.Timestamptz `json:"checked_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
 type SequenceEnrollment struct {
 	ID              uuid.UUID          `json:"id"`
 	WorkspaceID     uuid.UUID          `json:"workspace_id"`

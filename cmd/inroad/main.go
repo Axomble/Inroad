@@ -32,6 +32,7 @@ import (
 	"github.com/inroad/inroad/internal/app/mailbox"
 	"github.com/inroad/inroad/internal/app/oauthprovider"
 	"github.com/inroad/inroad/internal/app/passkey"
+	"github.com/inroad/inroad/internal/app/sendingdomain"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/app/tracking"
@@ -42,6 +43,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/dnsauth"
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
@@ -306,6 +308,13 @@ func run() error {
 		// Routes(identStore) additionally applies RequireVerified to /launch
 		// (email-gated sending).
 		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes(identStore)},
+		// Sending-domain authentication (SPF/DKIM/DMARC). Read-only status plus an
+		// on-demand recheck; the domain list is derived from this workspace's
+		// mailboxes, and the recheck resolves a domain ONLY after confirming the
+		// workspace sends from it (404 otherwise), so it is not a resolver proxy.
+		{pattern: "/api/v1/sending-domains", handler: sendingdomain.NewHandler(
+			sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver()),
+		).Routes()},
 	}
 	// Session-only surface: workspace administration and the warmup overview are not
 	// part of the api-key contract, so they authenticate with the session verifier

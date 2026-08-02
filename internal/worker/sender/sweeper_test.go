@@ -99,6 +99,12 @@ func (f *fakeCore) ListDueWarmupMailboxes(context.Context) ([]coreapi.MailboxRef
 	return nil, nil
 }
 func (f *fakeCore) EvaluateWarmupHealth(context.Context) error { return nil }
+func (f *fakeCore) ListStaleSendingDomains(context.Context, time.Duration) ([]coreapi.SendingDomainRef, error) {
+	return nil, nil
+}
+func (f *fakeCore) RecordSendingDomainAuth(context.Context, coreapi.SendingDomainAuth) error {
+	return nil
+}
 
 type fakeSendEnqueuer struct {
 	fail     map[string]bool

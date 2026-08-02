@@ -329,6 +329,33 @@ limit / abuse control here is tracked in the Deferred list below.
     wildcard that defeats the trigram index. Measured on 200,000 contacts: see
     `perf_integration_test.go`.
 
+## Sending-domain authentication (DNS)
+37. **The resolver only ever answers about domains the workspace already sends
+    from.** `POST /sending-domains/{domain}/check` takes a caller-controlled path
+    parameter, so the service resolves it against the workspace's OWN mailboxes
+    first (`Store.Get`, `workspace_id` from the JWT — invariant 4) and returns
+    404 BEFORE any lookup happens; the sweep's domain list comes from
+    `mailboxes.email` the same way. Without that ordering the endpoint would be
+    an open resolver proxy — an authenticated caller could probe arbitrary names
+    from our egress and read the answers. Proven by
+    `TestCheckRejectsAForeignDomainBeforeAnyLookup` /
+    `TestCheckForeignDomainIs404AndNeverResolves`, which assert the resolver was
+    called ZERO times, and by the integration test's foreign-domain 404.
+38. **A DNS TXT lookup is not an outbound dial to a user-supplied host, so it
+    does not go through (and does not need) `mail.vetAddr`.** It reaches the
+    host's configured nameservers, never an address from the request, and returns
+    text — there is no connection to a caller-chosen endpoint to redirect. What
+    protects the seam is the ownership gate above (which names are asked about)
+    plus the per-lookup timeout and the whole-probe budget in
+    `internal/platform/dnsauth` (how much work one request can cause).
+39. **The domain check is informational and workspace-pinned.** Nothing on the
+    send path reads `sending_domains` — an advisory that turns out to be wrong
+    must not be able to stop a campaign — and every row is
+    `workspace_id`-scoped, so two tenants sending from the same domain keep
+    separate verdicts (`TestSendingDomainsAreWorkspacePinned`). The response DTO
+    carries only public DNS data (records already published to the world), and no
+    credential or ciphertext field exists on it by construction.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
