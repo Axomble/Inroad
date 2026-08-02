@@ -13,6 +13,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/rotation"
@@ -40,10 +41,10 @@ type poolFixture struct {
 func setupPool(t *testing.T) (context.Context, poolFixture) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(itDSN()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, itDSN())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

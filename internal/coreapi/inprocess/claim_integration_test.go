@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -23,19 +23,12 @@ import (
 
 var claimMasterKey = bytes.Repeat([]byte{9}, 32)
 
-func claimDSN() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
-
 func claimConnect(t *testing.T) (*pgxpool.Pool, *gen.Queries) {
 	t.Helper()
-	if err := db.Migrate(claimDSN()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(context.Background(), claimDSN())
+	pool, err := db.Connect(context.Background(), dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

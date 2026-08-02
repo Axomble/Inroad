@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/rotation"
 )
@@ -29,10 +30,10 @@ type senderFixture struct {
 
 func setupSenders(t *testing.T, ctx context.Context) senderFixture {
 	t.Helper()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

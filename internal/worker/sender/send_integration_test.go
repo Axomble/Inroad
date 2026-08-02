@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -50,13 +51,6 @@ func (f *fakeSender) Send(_ context.Context, _ mail.OutboundJob, msg mail.Messag
 	return "<test-message-id@inroad>", nil
 }
 
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
-
 func redisAddr() string {
 	if v := os.Getenv("INROAD_REDIS_ADDR"); v != "" {
 		return v
@@ -70,10 +64,10 @@ func redisAddr() string {
 // wire is mocked; everything else is real.
 func TestSendPipelineEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -199,10 +193,10 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 // two already-enqueued are skipped) for a running total of 3.
 func TestEnqueueSendsDedupOnRelaunch(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

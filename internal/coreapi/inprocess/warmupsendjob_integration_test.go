@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,6 +14,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -23,13 +23,6 @@ import (
 
 // itMasterKey is the fixed 32-byte KEK/legacy key for these integration tests.
 var itMasterKey = bytes.Repeat([]byte{9}, 32)
-
-func itDSN() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 func itKeyring(t *testing.T, q *gen.Queries) *crypto.Keyring {
 	t.Helper()
@@ -82,10 +75,10 @@ type warmupFixture struct {
 func setupWarmup(t *testing.T) (context.Context, warmupFixture) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(itDSN()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, itDSN())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

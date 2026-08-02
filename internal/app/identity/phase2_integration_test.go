@@ -17,6 +17,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -31,10 +32,10 @@ import (
 func newPhase2TestService(t *testing.T) (*Service, *fakeSender, *gen.Queries) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

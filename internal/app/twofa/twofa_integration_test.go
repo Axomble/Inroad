@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +22,7 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/notify"
 )
@@ -34,13 +34,6 @@ import (
 // confirm step — deterministic without sleeping across a real boundary.
 func nextStepCode(secret []byte) string {
 	return totpAt(secret, time.Now().Add(totpPeriodSec*time.Second))
-}
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
 }
 
 var itSecret = []byte("twofa-it-secret-twofa-it-secret")
@@ -70,10 +63,10 @@ func itMasterKey() []byte {
 func testServer(t *testing.T, cacheTTL time.Duration) (*httptest.Server, *gen.Queries, *Service) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -481,10 +474,10 @@ func TestRecoveryCodeExhaustionAPI(t *testing.T) {
 // real IP stays its own bucket.
 func TestNullIPThrottleCountsTogether(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -16,16 +15,10 @@ import (
 
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/track"
 )
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 // itSecret signs every token minted in this file -- a fixed value (rather
 // than random per-test) so failures are reproducible.
@@ -34,10 +27,10 @@ var itSecret = []byte("0123456789abcdef0123456789abcdef")
 func connect(t *testing.T) (*pgxpool.Pool, *gen.Queries, func()) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

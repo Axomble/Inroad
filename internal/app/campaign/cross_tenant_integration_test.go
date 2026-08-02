@@ -5,22 +5,15 @@ package campaign
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 // TestCrossTenantGetIsNotFound proves the "workspace_id in the WHERE clause"
 // pin on GetCampaign is doing its job at the DB layer: workspace A asking
@@ -28,10 +21,10 @@ func dsn() string {
 // maps to 404), not the leaked row.
 func TestCrossTenantGetIsNotFound(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

@@ -5,7 +5,6 @@ package contact
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -14,15 +13,9 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/cursor"
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 // dbListChecker is the real cross-domain ownership check, workspace-pinned, so
 // the integration tests exercise the same 404 path the server wires up.
@@ -48,10 +41,10 @@ type fixture struct {
 // invocation; it is idempotent.
 func connect(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

@@ -5,7 +5,6 @@ package warmup
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -13,15 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 // fixture bundles a per-test environment so the setup helper returns one value
 // (keeps the helper's signature simple rather than a long result list).
@@ -38,10 +31,10 @@ type fixture struct {
 func setup(t *testing.T) fixture {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
