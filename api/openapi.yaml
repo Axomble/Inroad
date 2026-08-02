@@ -796,6 +796,37 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: List not found }
         '422': { description: "q shorter than 2 characters, unknown sort, or limit out of range" }
+  /sending-domains:
+    get:
+      operationId: listSendingDomains
+      tags: [mailboxes]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Email-authentication status for every domain this workspace sends from,
+        derived from its mailboxes. Informational: nothing here blocks a send. A
+        domain that has never been checked appears with state "unknown" and a null
+        checked_at rather than being omitted.
+      responses:
+        '200': { description: "One row per sending domain", content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/SendingDomain' } } } } }
+        '401': { description: Unauthorized }
+        '500': { description: "Could not load domains" }
+  /sending-domains/{domain}/check:
+    post:
+      operationId: checkSendingDomain
+      tags: [mailboxes]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Re-run the DNS lookups for one domain now, so an operator who has just
+        fixed a record does not wait for the daily sweep. Only domains the
+        workspace actually sends from can be checked; anything else is a 404, so
+        this cannot be used to resolve arbitrary names through our resolver.
+      parameters:
+        - { name: domain, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: "Updated status", content: { application/json: { schema: { $ref: '#/components/schemas/SendingDomain' } } } }
+        '401': { description: Unauthorized }
+        '404': { description: "This workspace has no mailbox on that domain" }
+        '500': { description: "Lookup could not be performed" }
   /campaigns:
     get:
       operationId: listCampaigns
@@ -1771,6 +1802,53 @@ components:
       type: object
       properties:
         enabled: { type: boolean }
+    DomainAuthState:
+      type: string
+      description: >-
+        passing requires SPF AND DMARC. DKIM is deliberately excluded: selectors
+        are not discoverable from DNS, so a "not found" means none of the probed
+        selectors matched, not that the domain is unsigned. unknown means a lookup
+        could not be completed (timeout, SERVFAIL) and is NOT a failure — a
+        resolver hiccup must never read as a misconfigured domain.
+      enum: [unknown, passing, failing]
+    SpfStatus:
+      type: object
+      required: [found]
+      properties:
+        found: { type: boolean }
+        record: { type: string, description: "The v=spf1 record as published, when found." }
+    DmarcStatus:
+      type: object
+      required: [found]
+      properties:
+        found: { type: boolean }
+        policy:
+          type: string
+          description: >-
+            The p= tag. "none" is monitoring only, not enforcement, and should be
+            surfaced differently from quarantine/reject.
+          enum: ["", none, quarantine, reject]
+    DkimStatus:
+      type: object
+      description: >-
+        Advisory only. Selectors cannot be enumerated from DNS, so this reports
+        which probed selector matched, and a false "found" never makes a domain
+        fail.
+      required: [found]
+      properties:
+        found: { type: boolean }
+        selector: { type: string, description: "The selector that matched, when one did." }
+    SendingDomain:
+      type: object
+      required: [domain, state, spf, dmarc, dkim, mailbox_count]
+      properties:
+        domain: { type: string, example: acme.com }
+        state: { $ref: '#/components/schemas/DomainAuthState' }
+        spf: { $ref: '#/components/schemas/SpfStatus' }
+        dmarc: { $ref: '#/components/schemas/DmarcStatus' }
+        dkim: { $ref: '#/components/schemas/DkimStatus' }
+        mailbox_count: { type: integer, description: "How many of this workspace's mailboxes send from this domain." }
+        checked_at: { type: string, format: date-time, nullable: true, description: "null when never checked." }
     ContactSort:
       type: string
       description: >-

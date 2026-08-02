@@ -381,6 +381,21 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    listSendingDomains: build.query<
+      ListSendingDomainsApiResponse,
+      ListSendingDomainsApiArg
+    >({
+      query: () => ({ url: `/sending-domains` }),
+    }),
+    checkSendingDomain: build.mutation<
+      CheckSendingDomainApiResponse,
+      CheckSendingDomainApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/sending-domains/${queryArg.domain}/check`,
+        method: "POST",
+      }),
+    }),
     listCampaigns: build.query<ListCampaignsApiResponse, ListCampaignsApiArg>({
       query: () => ({ url: `/campaigns` }),
     }),
@@ -806,6 +821,14 @@ export type ListContactsApiArg = {
   /** Opaque cursor from a previous page's next_cursor/prev_cursor. Omit for the first page. Must match the current sort. */
   cursor?: string;
   limit?: number;
+};
+export type ListSendingDomainsApiResponse =
+  /** status 200 One row per sending domain */ SendingDomain[];
+export type ListSendingDomainsApiArg = void;
+export type CheckSendingDomainApiResponse =
+  /** status 200 Updated status */ SendingDomain;
+export type CheckSendingDomainApiArg = {
+  domain: string;
 };
 export type ListCampaignsApiResponse = /** status 200 Campaigns */ Campaign[];
 export type ListCampaignsApiArg = void;
@@ -1266,6 +1289,33 @@ export type ContactPage = {
   total_is_capped: boolean;
 };
 export type ContactSort = "newest" | "oldest" | "email";
+export type DomainAuthState = "unknown" | "passing" | "failing";
+export type SpfStatus = {
+  found: boolean;
+  /** The v=spf1 record as published, when found. */
+  record?: string;
+};
+export type DmarcStatus = {
+  found: boolean;
+  /** The p= tag. "none" is monitoring only, not enforcement, and should be surfaced differently from quarantine/reject. */
+  policy?: "" | "none" | "quarantine" | "reject";
+};
+export type DkimStatus = {
+  found: boolean;
+  /** The selector that matched, when one did. */
+  selector?: string;
+};
+export type SendingDomain = {
+  domain: string;
+  state: DomainAuthState;
+  spf: SpfStatus;
+  dmarc: DmarcStatus;
+  dkim: DkimStatus;
+  /** How many of this workspace's mailboxes send from this domain. */
+  mailbox_count: number;
+  /** null when never checked. */
+  checked_at?: string | null;
+};
 export type Campaign = {
   id?: string;
   name?: string;
@@ -1570,6 +1620,8 @@ export const {
   useCreateListMutation,
   useImportContactsMutation,
   useListContactsQuery,
+  useListSendingDomainsQuery,
+  useCheckSendingDomainMutation,
   useListCampaignsQuery,
   useCreateCampaignMutation,
   useGetCampaignQuery,
