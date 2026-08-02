@@ -4,21 +4,14 @@ package sequencestep
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 // seedThreeSteps creates a workspace + mailbox + list + draft campaign and three
 // steps (orders 1,2,3), returning the workspace, campaign id, and step ids in
@@ -77,10 +70,10 @@ func orderedIDs(steps []gen.SequenceStep) []uuid.UUID {
 // returned + persisted rows must reflect the new order.
 func TestReorderPersistsNewOrder(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -120,10 +113,10 @@ func TestReorderPersistsNewOrder(t *testing.T) {
 // owning workspace's step_order untouched.
 func TestReorderIsWorkspaceScoped(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

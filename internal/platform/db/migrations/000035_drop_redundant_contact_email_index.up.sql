@@ -1,0 +1,13 @@
+-- idx_contacts_ws_email_id (workspace_id, lower(email), id) duplicates the leading
+-- columns of idx_contacts_ws_email, which has been UNIQUE (workspace_id,
+-- lower(email)) since 000003. That uniqueness makes an email tie impossible, so
+-- the trailing id can never break one and the index earns nothing the existing
+-- one does not already provide.
+--
+-- Measured on 200,000 contacts before removing it, rather than argued: dropping
+-- it inside a rolled-back transaction and re-running EXPLAIN left the email-sort
+-- deep page index-backed at 0.25 ms (Incremental Sort over the unique index, 6
+-- buffers) against 0.08 ms with it. That is 0.17 ms on a query already far under
+-- a millisecond, paid for by a third index maintained on every insert — including
+-- bulk CSV imports, where write amplification is the cost that actually shows up.
+DROP INDEX IF EXISTS idx_contacts_ws_email_id;

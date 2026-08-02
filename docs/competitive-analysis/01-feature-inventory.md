@@ -14,19 +14,23 @@ product). "Inroad:" notes map to our codebase.
 
 ## 1. Campaigns
 
+> **Last reconciled against the code:** 2026-08-02, after the cadence, sender-pool,
+> health-gating and contact-search cycles. Rows below marked ✅ were verified against
+> the implementation on that date; anything added since may not be reflected.
+
 | Feature | Status | Notes |
 |---|---|---|
 | Campaign lifecycle (draft → active → paused/finished), start/stop | ✅ have | Inroad has draft → running → done + launch. We lack the paused *variants* (`paused_no_accounts`, `paused_trial_expired`) and auto-pause triggers. |
 | Campaign wizard (Basics / Schedule / Sender pool / First email) | ⚠️ partial | Inroad has a create form; no multi-step wizard, no schedule/sender-pool steps. |
 | Self-healing reconciler (re-seed stalled campaigns) | ✅ have | Inroad's enrollment sweeper is the equivalent. |
-| **Sender pool selection** (by tag / explicit list / all active) | ❌ missing | Inroad assigns exactly one mailbox per campaign. Reference UNIONs tag-based + explicit pools with per-sender weight/enabled. |
-| **Rotation modes** (least-recently-used / round-robin / weighted) | ❌ missing | Weighted base = `remaining × (1 + log2(warmupAgeDays+1))`, ties broken by UUID for determinism. |
+| **Sender pool selection** (by tag / explicit list / all active) | ✅ have | `campaign_senders` with per-sender weight + enabled, plus an all-contacts fallback to `campaigns.mailbox_id`. Explicit membership only — we have no mailbox tags, so tag-based selection is deferred rather than invented. |
+| **Rotation modes** (least-recently-used / round-robin / weighted) | ✅ have | All three in `platform/rotation` (pure, no clock/rand). Weighted = `weight × remaining × (1 + log2(age+1))`, ties broken by mailbox id. Rotation assigns a mailbox per ENROLLMENT, not per send: a follow-up must come from the mailbox that started the thread. |
 | **ESP / provider matching** (off / prefer / strict; Gmail→Gmail) | ❌ missing | Recipient provider resolved from cached `esp_provider` or a domain→provider string map; never dials MX on the hot path. |
-| **Stacked sending limits** (mailbox cap ∧ campaign limit ∧ ramp) | ⚠️ partial | Inroad enforces a per-mailbox daily cap. Reference stacks three limits with `min()` (mailbox-first safety), campaign limit can only *lower* the cap. |
+| **Stacked sending limits** (mailbox cap ∧ campaign limit ∧ ramp) | ✅ have | `campaigns.daily_limit` is a campaign-wide UTC-day ceiling across the pool, stacked with the mailbox's ramped, health-scaled cap. Mailbox-first: the campaign limit can only lower throughput. |
 | **Daily campaign ramp-up** (ramp_start/increment/ceiling, per UTC day) | ⚠️ partial | Inroad has a warmup ramp on the cap; no separate *campaign-level* ramp. |
 | **Lead-flow throttle** (max new leads/day, prioritize-new toggle) | ❌ missing | Caps brand-new contacts/day while follow-ups keep flowing. |
 | Lead statuses (Queued/Processing/Done/Replied/Bounced/Unsub) | ✅ have | Inroad tracks enrollment status equivalently. |
-| **Scheduling windows** (weekly, per-day, multi-interval, tz-aware) | ❌ missing | 7-element per-weekday window array; even intra-window distribution + jitter; respects each mailbox's local business hours. |
+| **Scheduling windows** (weekly, per-day, multi-interval, tz-aware) | ✅ have | Per-weekday intervals in the campaign's IANA zone; overlaps are unrepresentable (GiST exclusion constraint). Windows are the campaign's, not the recipient's — the contact table has no timezone. |
 | Advanced-outreach override block (bounce pipeline, DLQ, A/B, intent, send-time opt) | ❌ missing | Per-campaign + org-level tunables. |
 | **Preflight validation** (scored readiness report, no send) | ❌ missing | Checks tracking domain, unsub header, daily limit, schedule window, A/B config; returns score + per-check remediation. |
 | Test email / template preview (rendered, no side effects) | ⚠️ partial | Inroad renders in the sequence-step UI; no dedicated test-send endpoint. |
@@ -52,7 +56,7 @@ product). "Inroad:" notes map to our codebase.
 | **Instant vs at-next-step branches** | ❌ missing | Reply-intent/open/click branches can fire the instant the event lands. |
 | Reply branches & routing (reply triggers the path of the *specific* email answered) | ⚠️ partial | Inroad stops the enrollment on reply; no reply *branch* routing. |
 | Stop-on-reply (route-aware) | ✅ have | Inroad stops on human reply. |
-| **Reply classification** (positive/negative/neutral/auto_reply/OOO/unsubscribe/unknown) | ❌ missing | Layered: RFC 3834 headers → keyword lexicon → optional model. This is high value and mostly deterministic — see doc 03. |
+| **Reply classification** (positive/negative/neutral/auto_reply/OOO/unsubscribe/unknown) | ✅ have | `platform/replyclassify`: RFC 3834 headers → keyword lexicon, fully deterministic with no AI dependency and no network calls. |
 | **Reply templates** (org-shared snippets, `{{.Key}}`, content score) | ❌ missing | |
 
 ---
@@ -63,8 +67,8 @@ product). "Inroad:" notes map to our codebase.
 |---|---|---|
 | Per-mailbox daily-cap enforcement + idempotent sends | ✅ have | Inroad enforces caps and dedupes sends. |
 | Stuck-send / stuck-enrollment sweepers | ✅ have | Inroad has both. |
-| **Natural-cadence scheduler** (multiplicative pace variation, non-grid jitter, morning/afternoon distribution curve, sub-minute humanization so sends never land on `:00`) | ❌ missing | This is the anti-fingerprint engine. Inroad sends on cap + simple spacing. High deliverability value — see doc 03. |
-| Health-gated cold sending (watch ×0.7, throttled ×0.5, quarantined/blocked = stop) | ❌ missing | Shares the exact warmup health state so cold + warmup schedulers can't drift. |
+| **Natural-cadence scheduler** (multiplicative pace variation, non-grid jitter, morning/afternoon distribution curve, sub-minute humanization so sends never land on `:00`) | ✅ have | `platform/cadence`: front-weighted distribution curve, multiplicative jitter, humanization off the clock grid. Every jitter is a seeded hash of stable ids, so a retried task recomputes the identical instant instead of drifting from its cursor. |
+| Health-gated cold sending (watch ×0.7, throttled ×0.5, quarantined/blocked = stop) | ✅ have | `platform/sendcap` scales the ramped cap by warmup health; `paused` is excluded outright. Applies to threads already in flight, not just new assignments. |
 | Compose/one-off send with mailbox scoring picker | ⚠️ partial | Inroad sends per-campaign; no ad-hoc compose. |
 | **Send modes** (instant / smart / scheduled) + **undo-send window** | ❌ missing | Instant sends parked briefly (5–120s) so they're cancelable. |
 | Daily-throttle abuse guard (per-(scope,resource,UTC-day) Redis INCR) | ❌ missing | Caps creation rate on "unlimited" resources. |
@@ -126,7 +130,7 @@ product). "Inroad:" notes map to our codebase.
 | Fleet autoscaler + auto-provisioning (Hetzner) | ❌ missing | Note: real provisioning is force-dry-run even in the Reference platform. |
 | SSH-driven worker lifecycle (install/update/rotate keys, TOFU pinning) | ❌ missing | |
 | Worker auto-update (GitHub release webhook, channels) | ❌ missing | |
-| Mailbox connection: **OAuth (Gmail API / MS Graph)** | ❌ missing | Inroad supports **generic SMTP/IMAP only**. |
+| Mailbox connection: **OAuth (Gmail API / MS Graph)** | ✅ have | Gmail API and Microsoft Graph alongside SMTP/IMAP, behind one `MultiSender` seam; refresh tokens sealed under the per-workspace DEK. |
 | Mailbox connection: SMTP/IMAP with live validation | ✅ have | Inroad live-tests SMTP + IMAP before persisting. |
 
 ---
@@ -143,7 +147,7 @@ first-class Company object, **no** custom objects, **no** saved views/view build
 |---|---|---|
 | Contacts + custom fields (string k/v) | ✅ have | Inroad has contacts + lists; custom fields via JSONB. |
 | Contact 360 (engagement summary + suppression state) | ⚠️ partial | Inroad has per-contact data; no hydrated 360 view. |
-| Faceted contact search (custom-field ops, campaign membership, ranges, facet counts) | ❌ missing | Inroad has basic list-scoped listing. |
+| Faceted contact search (custom-field ops, campaign membership, ranges, facet counts) | ⚠️ partial | Server-side substring search over email/name/company via a trigram index, keyset pagination, and a bounded exact-or-capped total. Facets, custom-field operators and range filters are still missing — this is their foundation, not their equal. |
 | Import wizard (preview → map → commit, dedup strategy, CSV/TSV/XLSX) | ⚠️ partial | Inroad has CSV import; no preview/mapping wizard, CSV only. |
 | Export (CSV/XLSX/JSON, scoped, custom columns) | ❌ missing | |
 | Categories / tags (colored, reused as inbox labels) | ❌ missing | |
@@ -228,11 +232,11 @@ mask, over a provider abstraction (OpenAI/Anthropic/OpenRouter/Groq/Ollama/custo
 | Email + password sign-in | ✅ have | Reference adds a two-step emailed-code confirm + Turnstile captcha. |
 | JWT access + rotating refresh tokens, reuse detection, session mgmt | ✅ have | Inroad has rotation + reuse detection + family revocation. Reference adds device/location session listing + new-device alerts. |
 | Email verification, password reset, invites | ✅ have | Both. |
-| **2FA (TOTP)** with recovery codes | ❌ missing | |
-| **Passkeys / WebAuthn** | ❌ missing | |
+| **2FA (TOTP)** with recovery codes | ✅ have | TOTP enrolment with recovery codes and a challenge step at login. |
+| **Passkeys / WebAuthn** | ✅ have | WebAuthn registration and login, credentials stored per user. |
 | **OAuth social sign-in** (Google, Apple) | ❌ missing | |
 | Granular permission model (org roles vs API scopes vs admin perms — 3 systems) | ⚠️ partial | Inroad has 3 coarse roles. |
-| API keys with scopes | ❌ missing | See §10. |
+| API keys with scopes | ✅ have | Scoped keys (`campaigns:read` / `:write` / `:send`, etc.) attenuating a machine principal to a subset of a session's authority. |
 | Account/org danger zone (delayed hard-delete + grace window) | ❌ missing | |
 
 ---

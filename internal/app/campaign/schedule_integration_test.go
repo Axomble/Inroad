@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -18,10 +19,10 @@ import (
 // returning the live store and ids. Mirrors the other integration fixtures here.
 func scheduleFixture(t *testing.T, ctx context.Context, contacts int) (*PgStore, *gen.Queries, *pgxpool.Pool, uuid.UUID, gen.Campaign) {
 	t.Helper()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

@@ -6,31 +6,24 @@ import (
 	"context"
 	"errors"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
 )
-
-func dsn() string {
-	if v := os.Getenv("INROAD_DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://inroad:inroad@localhost:5433/inroad?sslmode=disable"
-}
 
 // itSetup migrates + connects a real Postgres and returns a Service over the PgStore
 // plus a helper to mint a fresh (workspace, user) pair.
 func itSetup(t *testing.T) (*Service, *PgStore, func() (uuid.UUID, uuid.UUID)) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrate(dsn()); err != nil {
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := db.Connect(ctx, dsn())
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

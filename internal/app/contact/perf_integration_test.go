@@ -326,15 +326,17 @@ func TestSearchPerformance(t *testing.T) {
 		cur := cursor.NewEmail(cursor.After, fmt.Sprintf("big%06d@mail%02d.example", 150000, 150000%97), uuid.New())
 		sql, args := searchSQL(f.ws, SearchFilter{}, cursor.SortEmail, &cur, DefaultLimit+1)
 		plan := explain(t, ctx, f, "deep keyset page, email sort", sql, args)
-		assertIndexBacked(t, "email deep page", plan, "idx_contacts_ws_email_id", "idx_contacts_ws_email")
+		assertIndexBacked(t, "email deep page", plan, "idx_contacts_ws_email")
 		t.Logf("email deep page execution time: %.2f ms", execTime(t, plan))
 	})
 
-	// idx_contacts_ws_email_id duplicates the leading columns of the pre-existing
-	// UNIQUE index idx_contacts_ws_email (workspace_id, lower(email)). Because
-	// that uniqueness makes an email tie impossible, the id column may be dead
-	// weight — a third index on 200,000 rows costs storage and write latency on
-	// every insert. This measures the counterfactual rather than arguing it.
+	// The counterfactual that used to live here — dropping idx_contacts_ws_email_id
+	// inside a rolled-back transaction to see whether it was load-bearing — is now
+	// the default: 000035 removed that index because the measurement said it bought
+	// 0.17 ms on a sub-millisecond query for a third index maintained on every
+	// insert. The "email sort deep page" case above is the surviving assertion: it
+	// must stay index-backed on the UNIQUE idx_contacts_ws_email alone.
+
 	t.Run("email sort without the dedicated index", func(t *testing.T) {
 		tx, err := f.pool.Begin(ctx)
 		if err != nil {
