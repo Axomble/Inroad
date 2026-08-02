@@ -59,6 +59,7 @@ import { GoogleIcon } from './google-icon'
 import { MicrosoftIcon } from './microsoft-icon'
 import { mailboxProviderLabel } from './provider'
 import { BannerShell, OauthCallbackBanner } from './oauth-callback-banner'
+import { DomainAuthPanel } from './domain-auth-panel'
 import {
   startErrorCopy,
   startErrorKind,
@@ -189,6 +190,11 @@ export function MailboxesPage() {
       {showConnect && (
         <ConnectMailboxForm onDone={() => setShowConnect(false)} onCancel={() => setShowConnect(false)} />
       )}
+
+      {/* Above the list: the domain is the layer everything below it assumes.
+          Warmup and rotation don't help a domain with no SPF record. */}
+      <DomainAuthPanel />
+
 
       {!isEmpty && (
         <SectionBar
