@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -320,5 +321,56 @@ func TestEmptyDomainIsUnknownAndLooksUpNothing(t *testing.T) {
 	}
 	if len(res.calls) != 0 {
 		t.Fatalf("lookups performed for an empty domain: %v", res.calls)
+	}
+}
+
+// A domain that cannot be a hostname must normalize to "", which every caller
+// already treats as "not ours". Before this, a path parameter carrying a control
+// character reached Postgres, which rejected it as an invalid text literal — an
+// error class the handler does not map, so bad input became a 500. QA found it
+// with %00; the shape check closes the whole class at the single choke point.
+func TestNormalizeRejectsAnythingThatCannotBeAHostname(t *testing.T) {
+	cases := []struct {
+		name, in string
+	}{
+		{"embedded NUL", "acme.test\x00.google.com"},
+		{"leading NUL", "\x00acme.test"},
+		{"newline inside", "acme\n.test"},
+		{"tab inside", "acme\t.test"},
+		{"bell", "acme.test\a"},
+		{"path traversal", "acme.test/../google.com"},
+		{"backslash", `acme.test\google.com`},
+		{"space inside", "acme test"},
+		{"raw non-ascii", "acme.tést"},
+		{"fullwidth stop", "acme。test"},
+		{"empty", ""},
+		{"only a dot", "."},
+		{"only whitespace", "   "},
+		{"over the DNS length limit", strings.Repeat("a", 254)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Normalize(tc.in); got != "" {
+				t.Errorf("Normalize(%q) = %q, want \"\" — a caller must never pass this on to a query or a resolver", tc.in, got)
+			}
+		})
+	}
+}
+
+// The shape check must not reject names people legitimately send from.
+func TestNormalizeKeepsRealDomains(t *testing.T) {
+	cases := map[string]string{
+		"ACME.com.":               "acme.com",
+		"  mail.acme.co.uk  ":     "mail.acme.co.uk",
+		"xn--80ak6aa92e.com":      "xn--80ak6aa92e.com", // punycode IDN
+		"my-domain.example":       "my-domain.example",
+		"_dmarc.acme.com":         "_dmarc.acme.com",
+		"a.b.c.d.e.f.g.h.example": "a.b.c.d.e.f.g.h.example",
+		strings.Repeat("a", 253):  strings.Repeat("a", 253), // exactly at the limit
+	}
+	for in, want := range cases {
+		if got := Normalize(in); got != want {
+			t.Errorf("Normalize(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

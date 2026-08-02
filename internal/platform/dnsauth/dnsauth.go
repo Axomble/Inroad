@@ -162,8 +162,44 @@ func Check(ctx context.Context, res Resolver, domain string, selectors []string)
 // surrounding space, no trailing root dot. The persisted domain, the API path
 // parameter, and the name handed to the resolver all pass through here, so
 // "ACME.com." and "acme.com" can never become two rows or two lookups.
+//
+// A string that cannot be a hostname normalizes to "", which every caller
+// already treats as "not a domain this workspace sends from". That is stricter
+// than it looks: a path parameter carrying a control character (a %00 is the easy
+// one) used to reach Postgres, which rejects it as an invalid text literal — an
+// error class that is neither ErrNoRows nor anything the handler maps, so a
+// caller could turn bad input into a 500. Rejecting it at the one place every
+// caller passes through closes that for all of them, rather than teaching each
+// store method to recognise a malformed-input error from the driver.
 func Normalize(domain string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if d == "" || !isHostnameShaped(d) {
+		return ""
+	}
+	return d
+}
+
+// maxDomainLength is the DNS limit on a presentation-format name (RFC 1035 §2.3.4).
+const maxDomainLength = 253
+
+// isHostnameShaped reports whether s could be a DNS name at all. It is a shape
+// check, not a validity check — resolving is what decides whether a well-formed
+// name exists. Anything outside printable ASCII is rejected: an internationalised
+// domain reaches us already punycoded, so a raw non-ASCII byte here is malformed
+// input rather than a legitimate name we would be refusing.
+func isHostnameShaped(s string) bool {
+	if len(s) > maxDomainLength {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // probeDKIM walks the selectors in order and stops at the first hit — the point
