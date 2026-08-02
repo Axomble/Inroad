@@ -62,6 +62,10 @@ const TaskWarmupSweep = "warmup:sweep"
 // artifacts (sessions, challenges, one-time codes, and OAuth credentials).
 const TaskMaintenanceCleanup = "maintenance:cleanup"
 
+// TaskDomainAuthSweep re-checks the SPF/DKIM/DMARC records of every sending
+// domain whose last completed check is older than the staleness window.
+const TaskDomainAuthSweep = "domainauth:sweep"
+
 const TaskSendEmail = "send:email"
 
 // SendEmailPayload is the body of a send:email task. WorkspaceID is
@@ -381,6 +385,16 @@ func RegisterWarmupSweep(sch *asynq.Scheduler) error {
 // handler is idempotent, so scheduler restarts and retries are safe.
 func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 24h", asynq.NewTask(TaskMaintenanceCleanup, nil))
+	return err
+}
+
+// RegisterDomainAuthSweep registers the periodic domain-authentication sweep.
+// It ticks hourly against a 24-hour staleness window: the tick rate is what
+// bounds how long a NEWLY connected mailbox's domain sits unchecked, and how
+// soon a domain whose lookup failed is retried, while the window is what stops
+// it from re-resolving the same records twelve times a day.
+func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 1h", asynq.NewTask(TaskDomainAuthSweep, nil))
 	return err
 }
 

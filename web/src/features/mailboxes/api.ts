@@ -14,8 +14,12 @@ export type StartOauthResponse = { auth_url: string }
 /** @deprecated Alias kept for existing imports; use StartOauthResponse. */
 export type StartGoogleOauthResponse = StartOauthResponse
 
+// Domain-authentication shapes come from the contract; re-export so the panel
+// derives its types from the generated definition rather than restating it.
+export type { SendingDomain, DomainAuthState, SpfStatus, DmarcStatus, DkimStatus } from '@/store/api'
+
 const mailboxApi = api.enhanceEndpoints({
-  addTagTypes: ['Mailbox'],
+  addTagTypes: ['Mailbox', 'SendingDomain'],
   endpoints: {
     listMailboxes: {
       providesTags: (result) =>
@@ -29,8 +33,13 @@ const mailboxApi = api.enhanceEndpoints({
     getMailbox: {
       providesTags: (_result, _error, arg) => [{ type: 'Mailbox', id: arg.id }],
     },
+    // Sending domains are derived from the workspace's mailboxes, so connecting
+    // or deleting one can add or remove a domain row.
     connectMailbox: {
-      invalidatesTags: [{ type: 'Mailbox', id: 'LIST' }],
+      invalidatesTags: [
+        { type: 'Mailbox', id: 'LIST' },
+        { type: 'SendingDomain', id: 'LIST' },
+      ],
     },
     pauseMailbox: {
       invalidatesTags: (_result, _error, arg) => [
@@ -48,6 +57,24 @@ const mailboxApi = api.enhanceEndpoints({
       invalidatesTags: (_result, _error, arg) => [
         { type: 'Mailbox', id: arg.id },
         { type: 'Mailbox', id: 'LIST' },
+        { type: 'SendingDomain', id: 'LIST' },
+      ],
+    },
+    listSendingDomains: {
+      providesTags: (result) =>
+        result
+          ? [
+              ...result.map((d) => ({ type: 'SendingDomain' as const, id: d.domain })),
+              { type: 'SendingDomain' as const, id: 'LIST' },
+            ]
+          : [{ type: 'SendingDomain' as const, id: 'LIST' }],
+    },
+    // A recheck returns the updated row, but the list is what's on screen —
+    // invalidate it so the row the operator just rechecked actually updates.
+    checkSendingDomain: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'SendingDomain', id: arg.domain },
+        { type: 'SendingDomain', id: 'LIST' },
       ],
     },
   },
@@ -71,4 +98,6 @@ export const {
   useDeleteMailboxMutation,
   useStartGoogleOauthMutation,
   useStartMicrosoftOauthMutation,
+  useListSendingDomainsQuery,
+  useCheckSendingDomainMutation,
 } = mailboxApi

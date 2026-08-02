@@ -34,6 +34,22 @@ async function mockApi(page: Page) {
         { id: 'mb-2', email: 'growth@atlas.test', display_name: 'Atlas Growth', provider: 'microsoft', status: 'active', daily_cap: 50 },
       ]))
     }
+    // The Mailboxes page's domain-authentication panel. `p=none` + undetected
+    // DKIM is the shape most at risk of being mis-worded, so that's what the
+    // browser test renders.
+    if (path.includes('/sending-domains')) {
+      return route.fulfill(json([
+        {
+          domain: 'atlas.test',
+          state: 'passing',
+          spf: { found: true, record: 'v=spf1 include:_spf.google.com ~all' },
+          dmarc: { found: true, policy: 'none' },
+          dkim: { found: false },
+          mailbox_count: 2,
+          checked_at: new Date(Date.now() - 3_600_000).toISOString(),
+        },
+      ]))
+    }
     if (path.endsWith('/warmup/overview')) {
       return route.fulfill(json({
         pool_size: 2,
@@ -96,6 +112,14 @@ test('mobile navigation and core screens stay within the viewport', async ({ pag
   await expect(drawer).toBeVisible()
   await drawer.getByRole('link', { name: /Mailboxes/ }).click()
   await expect(page.getByText('founder@atlas.test')).toBeVisible()
+
+  // Domain authentication renders on the narrow viewport with its nuances
+  // intact: DMARC published but not enforcing, DKIM undetected rather than
+  // broken. Long DNS guidance is the most likely thing to blow the layout out.
+  const domainAuth = page.getByRole('region', { name: 'Domain authentication' })
+  await expect(domainAuth.getByText('DMARC Monitoring only')).toBeVisible()
+  await expect(domainAuth.getByText('DKIM Not detected')).toBeVisible()
+  await expect(domainAuth.getByRole('button', { name: 'Recheck DNS for atlas.test' })).toBeVisible()
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false)
   await page.screenshot({ path: testInfo.outputPath('overview-mobile.png'), fullPage: true })
