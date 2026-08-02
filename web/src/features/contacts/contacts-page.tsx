@@ -198,7 +198,17 @@ function ContactsPane({
     isLoading,
     isFetching,
     error,
-  } = useListContactsQuery({ list: listId, q: appliedQuery, sort, cursor, limit })
+  } = useListContactsQuery(
+    { list: listId, q: appliedQuery, sort, cursor, limit },
+    // Contacts change underneath this view constantly — a CSV import, a teammate,
+    // a worker suppressing a bounce — and none of that goes through a client
+    // mutation, so no cache tag can ever invalidate it. Without this, returning to
+    // a page size (or query, or cursor) visited earlier in the session replays the
+    // cached response, showing a stale row set AND a stale `total`: 24 contacts
+    // beside a pager that knows there are 154. Same reasoning, same fix as the
+    // campaign enrollments list.
+    { refetchOnMountOrArgChange: true },
+  )
 
   // `data` is RTK Query's last successful result for this hook regardless of the
   // current args, `currentData` only the one matching them. Rendering `data`

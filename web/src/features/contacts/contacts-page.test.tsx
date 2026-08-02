@@ -283,3 +283,24 @@ test('changing the page size restarts at the first page', async () => {
   expect(lastRequest().searchParams.get('cursor')).toBeNull()
   expect(router.search.limit).toBe(100)
 })
+
+// Contacts change outside this view (imports, teammates, the bounce worker) with
+// no client mutation to invalidate a cache tag. Returning to a page size seen
+// earlier must therefore re-ask the server rather than replay a cached page —
+// otherwise the row set AND the total are frozen at whatever they were the first
+// time, which reads as "154 contacts at 25/page, 24 at 50/page".
+test('returning to a page size already visited re-asks the server', async () => {
+  renderWithProviders(<ContactsPage />)
+  await waitFor(() => expect(contactRequests.length).toBe(1))
+
+  fireEvent.change(screen.getByRole('combobox', { name: /contacts per page/i }), {
+    target: { value: '25' },
+  })
+  await waitFor(() => expect(contactRequests.length).toBe(2))
+
+  fireEvent.change(screen.getByRole('combobox', { name: /contacts per page/i }), {
+    target: { value: '50' },
+  })
+  await waitFor(() => expect(contactRequests.length).toBe(3))
+  expect(lastRequest().searchParams.get('limit')).toBe('50')
+})
