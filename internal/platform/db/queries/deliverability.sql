@@ -16,6 +16,7 @@
 SELECT auto_pause_enabled,
        bounce_pause_pct::float8    AS bounce_pause_pct,
        complaint_pause_pct::float8 AS complaint_pause_pct,
+       guardrails_enabled_at,
        status
 FROM campaigns
 WHERE id = @campaign_id AND workspace_id = @workspace_id;
@@ -24,10 +25,21 @@ WHERE id = @campaign_id AND workspace_id = @workspace_id;
 -- Zero affected rows means the campaign is not this workspace's — the 404. The
 -- percentages are validated in the service (422) and CHECK-constrained here, so a
 -- caller bypassing Go still cannot store a threshold of 0.
+--
+-- guardrails_enabled_at is re-stamped ONLY on an off→on transition, which closes
+-- the same trap the migration's DEFAULT now() closes: an operator who switches the
+-- breaker on today must not have it act on bounces from while it was off. The CASE
+-- reads the OLD row value (a Postgres UPDATE's SET expressions see the pre-update
+-- row), so turning it on twice does not keep pushing the floor forward and turning
+-- it OFF does not move the floor at all.
 UPDATE campaigns
-SET auto_pause_enabled  = @auto_pause_enabled,
-    bounce_pause_pct    = sqlc.arg(bounce_pause_pct)::float8::numeric,
-    complaint_pause_pct = sqlc.arg(complaint_pause_pct)::float8::numeric
+SET auto_pause_enabled    = @auto_pause_enabled,
+    bounce_pause_pct      = sqlc.arg(bounce_pause_pct)::float8::numeric,
+    complaint_pause_pct   = sqlc.arg(complaint_pause_pct)::float8::numeric,
+    guardrails_enabled_at = CASE
+        WHEN auto_pause_enabled = FALSE AND @auto_pause_enabled = TRUE THEN now()
+        ELSE guardrails_enabled_at
+    END
 WHERE id = @campaign_id AND workspace_id = @workspace_id;
 
 -- name: PauseCampaignForBreach :execrows

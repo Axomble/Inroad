@@ -137,7 +137,11 @@ func (f *fakeStore) Suppress(_ context.Context, _ uuid.UUID, email, reason strin
 	return nil
 }
 
-// runningCampaign is a campaign with the on-by-default guardrails.
+// runningCampaign is a campaign with the on-by-default guardrails, supervised long
+// enough that guardrails_enabled_at no longer binds the window. EnabledAt is set
+// explicitly and never left zero: the column is NOT NULL DEFAULT now(), so a zero
+// value is a shape production cannot produce, and a fake that used it would silently
+// disable the floor in every test.
 func runningCampaign() CampaignConfig {
 	return CampaignConfig{
 		Guardrails: Guardrails{
@@ -145,7 +149,8 @@ func runningCampaign() CampaignConfig {
 			BouncePausePct:    deliverability.DefaultBouncePausePct,
 			ComplaintPausePct: deliverability.DefaultComplaintPausePct,
 		},
-		Status: campaignStatusRunning,
+		Status:    campaignStatusRunning,
+		EnabledAt: fixedNow.AddDate(0, 0, -60),
 	}
 }
 
@@ -296,15 +301,22 @@ func TestRollingWindowIsPreferredWhenItHasEnoughSample(t *testing.T) {
 	}
 }
 
-func TestCumulativeFallbackWhenTheRollingWindowIsTooSmall(t *testing.T) {
+// The fallback: a campaign too slow to fill the 7-day window is judged on
+// everything SINCE SUPERVISION BEGAN. Not on its lifetime — the floor is what the
+// fallback reaches back to, never the zero time.
+func TestFallbackReachesBackToTheSupervisionFloor(t *testing.T) {
 	rolling := fixedNow.AddDate(0, 0, -deliverability.WindowDays)
+	cfg := runningCampaign()
 	store := &fakeStore{
-		config: runningCampaign(),
+		config: cfg,
 		countsFor: map[time.Time]Counts{
 			// A slow campaign: not enough recent mail to judge on...
 			rolling: {Delivered: 5, Bounced: 5},
-			// ...but plenty cumulatively, and it is badly broken.
-			{}: {Delivered: 500, Bounced: 100},
+			// ...but plenty since supervision began, and it is badly broken.
+			cfg.EnabledAt: {Delivered: 500, Bounced: 100},
+			// A lifetime sample must never be reached; if it were, the assertion on
+			// Verdict.Delivered below would see 9000.
+			{}: {Delivered: 9000, Bounced: 8000},
 		},
 		pauseWins: true,
 	}
@@ -317,6 +329,11 @@ func TestCumulativeFallbackWhenTheRollingWindowIsTooSmall(t *testing.T) {
 	}
 	if len(store.askedSince) != 2 {
 		t.Fatalf("asked for %d windows, want 2 (rolling then the fallback)", len(store.askedSince))
+	}
+	for _, since := range store.askedSince {
+		if since.Before(cfg.EnabledAt) {
+			t.Errorf("read evidence from %v, before supervision began at %v", since, cfg.EnabledAt)
+		}
 	}
 }
 
@@ -380,6 +397,115 @@ func TestRestartedCampaignPausesOnFreshEvidence(t *testing.T) {
 	}
 	if out := evaluate(t, store); !out.Paused {
 		t.Fatal("a restarted campaign bouncing 30% over 100 fresh sends was not stopped")
+	}
+}
+
+// The migration-day case. auto_pause_enabled defaults TRUE, so applying 000037
+// arms every campaign that already exists; guardrails_enabled_at defaults to now(),
+// so on the first tick afterwards the widest sample the breaker can reach is
+// "since the migration" — NOT the campaign's lifetime.
+//
+// Without this floor, a slow campaign (under the minimum for the 7-day window, so
+// it falls back) would be judged on bounces predating the feature, which nobody
+// opted into and no dashboard ever showed, and would stop itself on deploy day.
+func TestBreakerIgnoresEvidenceFromBeforeSupervisionBegan(t *testing.T) {
+	enabledAt := fixedNow.Add(-time.Hour) // the migration ran an hour ago
+	rolling := fixedNow.AddDate(0, 0, -deliverability.WindowDays)
+	store := &fakeStore{
+		config: runningCampaign(),
+		countsFor: map[time.Time]Counts{
+			// Since supervision began: a handful of clean sends, too few to judge.
+			enabledAt: {Delivered: 5, Bounced: 0},
+			// The last 7 days, and all time, are both disasters — and both predate
+			// supervision, so neither may be reached.
+			rolling: {Delivered: 4000, Bounced: 3000},
+			{}:      {Delivered: 9000, Bounced: 8000},
+		},
+		pauseWins: true,
+	}
+	store.config.EnabledAt = enabledAt
+
+	out := evaluate(t, store)
+	if out.Paused {
+		t.Fatalf("paused on pre-supervision evidence (verdict %+v)", out.Verdict)
+	}
+	if len(store.pauseCalls) != 0 {
+		t.Errorf("%d pause writes on deploy day", len(store.pauseCalls))
+	}
+	// Nothing older than the floor may even be READ, or the score would report a
+	// rate the breaker refuses to act on.
+	for _, since := range store.askedSince {
+		if since.Before(enabledAt) {
+			t.Errorf("read evidence from %v, before supervision began at %v", since, enabledAt)
+		}
+	}
+}
+
+// ...and bounces AFTER supervision began do stop it, so the floor is a floor and
+// not a mute.
+func TestBreakerActsOnEvidenceFromAfterSupervisionBegan(t *testing.T) {
+	enabledAt := fixedNow.Add(-time.Hour)
+	store := &fakeStore{
+		config: runningCampaign(),
+		countsFor: map[time.Time]Counts{
+			enabledAt: {Delivered: deliverability.MinDelivered, Bounced: 20},
+		},
+		pauseWins: true,
+	}
+	store.config.EnabledAt = enabledAt
+
+	if out := evaluate(t, store); !out.Paused {
+		t.Fatal("fresh post-supervision bounces did not stop the campaign")
+	}
+}
+
+// The two floors compose: whichever is LATER wins, so a campaign restarted after an
+// auto-pause is judged from the restart even though supervision began earlier.
+func TestTheLaterOfTheTwoFloorsWins(t *testing.T) {
+	enabledAt := fixedNow.AddDate(0, 0, -30)
+	lastPause := fixedNow.Add(-time.Hour)
+	store := &fakeStore{
+		config:    runningCampaign(),
+		lastPause: lastPause,
+		countsFor: map[time.Time]Counts{
+			lastPause: {Delivered: 5, Bounced: 0},
+			enabledAt: {Delivered: 5000, Bounced: 4000},
+		},
+		pauseWins: true,
+	}
+	store.config.EnabledAt = enabledAt
+
+	if out := evaluate(t, store); out.Paused {
+		t.Fatalf("paused on evidence older than the restart (verdict %+v)", out.Verdict)
+	}
+	for _, since := range store.askedSince {
+		if since.Before(lastPause) {
+			t.Errorf("read evidence from %v, before the later floor at %v", since, lastPause)
+		}
+	}
+}
+
+// The supervision floor applies whatever the status, unlike the last-pause floor:
+// a campaign that has never been supervised has no supervised evidence to REPORT
+// either, so the dashboard must not show a rate the breaker would refuse to act on.
+func TestSupervisionFloorAppliesToAPausedCampaignToo(t *testing.T) {
+	enabledAt := fixedNow.Add(-time.Hour)
+	store := &fakeStore{
+		config: runningCampaign(),
+		countsFor: map[time.Time]Counts{
+			enabledAt: {Delivered: 5},
+			fixedNow.AddDate(0, 0, -deliverability.WindowDays): {Delivered: 4000, Bounced: 3000},
+		},
+	}
+	store.config.Status = "paused"
+	store.config.EnabledAt = enabledAt
+
+	rep, err := newService(store).CampaignReport(context.Background(), testWS, testCampaign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Score.Delivered != 5 {
+		t.Errorf("score sample = %d, want the 5 delivered since supervision began", rep.Score.Delivered)
 	}
 }
 
@@ -772,11 +898,12 @@ func TestWorkspaceReportUsesThePlainRollingWindow(t *testing.T) {
 // paths over the same store and checking they agree about the sample.
 func TestReportAndBreakerJudgeTheSameEvidence(t *testing.T) {
 	rolling := fixedNow.AddDate(0, 0, -deliverability.WindowDays)
+	cfg := runningCampaign()
 	store := &fakeStore{
-		config: runningCampaign(),
+		config: cfg,
 		countsFor: map[time.Time]Counts{
-			rolling: {Delivered: 10, Bounced: 10},
-			{}:      {Delivered: 400, Bounced: 40}, // 10% over the fallback sample
+			rolling:       {Delivered: 10, Bounced: 10},
+			cfg.EnabledAt: {Delivered: 400, Bounced: 40}, // 10% over the fallback sample
 		},
 		pauseWins: true,
 	}

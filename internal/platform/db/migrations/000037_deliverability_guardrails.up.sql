@@ -100,12 +100,33 @@ ALTER TABLE suppression ADD CONSTRAINT suppression_reason_check
 -- DefaultComplaintPausePct; the CHECK bounds mirror ThresholdMin/ThresholdMax and
 -- the CampaignGuardrails schema. The floor is 0.1 rather than 0 because a
 -- threshold of 0 means "pause at any rate at all".
+-- guardrails_enabled_at is when this campaign came under automatic supervision,
+-- and it is what makes on-by-default safe to MIGRATE rather than merely safe to
+-- run.
+--
+-- auto_pause_enabled defaults TRUE, so this ALTER arms every campaign that already
+-- exists, including every one currently running. Without a floor, the first worker
+-- tick after the migration judges a slow campaign (under the 50-delivered minimum
+-- for the 7-day window, so it falls back to a wider sample) on its ENTIRE
+-- lifetime — bounces from before this feature existed, which no operator could
+-- have seen a dashboard for and none of them opted into. A months-old campaign
+-- with one early bad patch would stop itself on deploy day.
+--
+-- DEFAULT now() means an existing campaign's guardrail history starts at migration
+-- time: protected from here on, never retroactively. The alternative, flooring by
+-- campaigns.launched_at, is just as retroactive — a campaign launched in March has
+-- a March floor — so it fixes nothing.
+--
+-- The rule this encodes, applied to BOTH evaluation windows in assessCampaign:
+-- evidence from before the operator could have seen it is never grounds for an
+-- automatic stop.
 ALTER TABLE campaigns
-    ADD COLUMN auto_pause_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
-    ADD COLUMN bounce_pause_pct    NUMERIC NOT NULL DEFAULT 8.0
+    ADD COLUMN auto_pause_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN bounce_pause_pct      NUMERIC NOT NULL DEFAULT 8.0
                  CHECK (bounce_pause_pct BETWEEN 0.1 AND 100),
-    ADD COLUMN complaint_pause_pct NUMERIC NOT NULL DEFAULT 1.5
-                 CHECK (complaint_pause_pct BETWEEN 0.1 AND 100);
+    ADD COLUMN complaint_pause_pct   NUMERIC NOT NULL DEFAULT 1.5
+                 CHECK (complaint_pause_pct BETWEEN 0.1 AND 100),
+    ADD COLUMN guardrails_enabled_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 -- The breaker counts a campaign's bounced enrollments over a rolling window on
 -- every evaluation. idx_enrollments_workspace_status seeks by workspace and would

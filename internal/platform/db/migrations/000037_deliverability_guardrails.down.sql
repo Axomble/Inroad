@@ -1,7 +1,12 @@
 DROP INDEX IF EXISTS idx_enrollments_campaign_bounced;
 
--- Dropping the three columns drops their CHECK constraints with them.
+-- Dropping the four columns drops their CHECK constraints with them. Rolling back
+-- loses guardrails_enabled_at, so a re-applied 000037 re-stamps it at the SECOND
+-- migration time — which is the correct answer either way: after a rollback the
+-- campaign was unsupervised for that gap, and evidence from an unsupervised period
+-- must not be grounds for an automatic stop.
 ALTER TABLE campaigns
+    DROP COLUMN IF EXISTS guardrails_enabled_at,
     DROP COLUMN IF EXISTS complaint_pause_pct,
     DROP COLUMN IF EXISTS bounce_pause_pct,
     DROP COLUMN IF EXISTS auto_pause_enabled;

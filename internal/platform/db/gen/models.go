@@ -200,24 +200,25 @@ type ApiKey struct {
 }
 
 type Campaign struct {
-	ID                uuid.UUID          `json:"id"`
-	WorkspaceID       uuid.UUID          `json:"workspace_id"`
-	Name              string             `json:"name"`
-	MailboxID         uuid.UUID          `json:"mailbox_id"`
-	ListID            uuid.UUID          `json:"list_id"`
-	Subject           string             `json:"subject"`
-	BodyText          string             `json:"body_text"`
-	BodyHtml          string             `json:"body_html"`
-	Status            string             `json:"status"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	LaunchedAt        pgtype.Timestamptz `json:"launched_at"`
-	TrackingEnabled   bool               `json:"tracking_enabled"`
-	Timezone          string             `json:"timezone"`
-	RotationMode      string             `json:"rotation_mode"`
-	DailyLimit        *int32             `json:"daily_limit"`
-	AutoPauseEnabled  bool               `json:"auto_pause_enabled"`
-	BouncePausePct    pgtype.Numeric     `json:"bounce_pause_pct"`
-	ComplaintPausePct pgtype.Numeric     `json:"complaint_pause_pct"`
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	Name                string             `json:"name"`
+	MailboxID           uuid.UUID          `json:"mailbox_id"`
+	ListID              uuid.UUID          `json:"list_id"`
+	Subject             string             `json:"subject"`
+	BodyText            string             `json:"body_text"`
+	BodyHtml            string             `json:"body_html"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	LaunchedAt          pgtype.Timestamptz `json:"launched_at"`
+	TrackingEnabled     bool               `json:"tracking_enabled"`
+	Timezone            string             `json:"timezone"`
+	RotationMode        string             `json:"rotation_mode"`
+	DailyLimit          *int32             `json:"daily_limit"`
+	AutoPauseEnabled    bool               `json:"auto_pause_enabled"`
+	BouncePausePct      pgtype.Numeric     `json:"bounce_pause_pct"`
+	ComplaintPausePct   pgtype.Numeric     `json:"complaint_pause_pct"`
+	GuardrailsEnabledAt pgtype.Timestamptz `json:"guardrails_enabled_at"`
 }
 
 type CampaignPauseEvent struct {

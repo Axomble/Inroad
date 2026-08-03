@@ -121,47 +121,71 @@ func (s *Service) EvaluateBreaker(ctx context.Context, ws, campaignID uuid.UUID)
 // a slow campaign can go a whole week without accumulating the minimum sample,
 // and refusing to judge it at all would leave the safeguard permanently disarmed.
 //
-// For a RUNNING campaign, both windows are bounded below by the last automatic
-// pause. That bound is what stops the fallback from being a trap: without it, a
-// campaign with a bad history that an operator has restarted would be re-judged on
-// the very evidence they just overrode, pause again immediately, and loop — the
-// fallback would have turned "judge recent behaviour" into "judge all behaviour,
-// forever". Evidence already acted on is spent; only what happened since the
-// restart can stop it again.
+// BOTH windows are floored, by two separate bounds, and the rule behind both is
+// the same one: evidence from before the operator could have acted on it is never
+// grounds for an automatic stop.
 //
-// The bound does NOT apply while the campaign is still paused. There is no human
-// decision to respect yet, and a report that answered "score 100 over 0 delivered"
-// for a campaign the breaker just stopped would hide the very evidence the
-// operator opened the page to see.
+//  1. guardrails_enabled_at — when this campaign came under supervision. Without
+//     it the feature is safe to run and unsafe to MIGRATE: auto_pause_enabled
+//     defaults TRUE, so the migration arms every existing campaign, and the first
+//     tick afterwards would judge a slow one (under the minimum for the 7-day
+//     window, so it falls back to a wider sample) on its entire lifetime — bounces
+//     predating the feature, which nobody opted into and no dashboard ever showed.
+//     Applies whatever the campaign's status, because a campaign that has never
+//     been supervised has no supervised evidence to report either.
+//
+//  2. The last automatic pause, for a RUNNING campaign. This is what stops the
+//     fallback from being a trap: without it, a campaign with a bad history that an
+//     operator has restarted would be re-judged on the very evidence they just
+//     overrode, pause again immediately, and loop — the fallback would have turned
+//     "judge recent behaviour" into "judge all behaviour, forever". Evidence
+//     already acted on is spent. It does NOT apply while the campaign is still
+//     paused: there is no human decision to respect yet, and a report answering
+//     "100 over 0 delivered" for a campaign the breaker just stopped would hide the
+//     very evidence the operator opened the page to see.
+//
+// One window serves both the score and the verdict (invariant 2). Reporting an
+// unfloored score next to a floored verdict was the tempting alternative — the
+// dashboard would show pre-supervision bounces the breaker declines to act on —
+// but the card derives its ok/warn from that same verdict, so the two halves of one
+// response would then describe different periods. The floor is self-healing
+// instead: it stops binding once it is older than the window, so it costs at most
+// one week of narrower history, and Confidence plus the reported sample say so out
+// loud for that week.
 func (s *Service) assessCampaign(ctx context.Context, ws, campaignID uuid.UUID) (Assessment, error) {
 	cfg, err := s.store.CampaignConfig(ctx, ws, campaignID)
 	if err != nil {
 		return Assessment{}, err
 	}
-	var lastPause time.Time
+	floor := cfg.EnabledAt
 	if cfg.Status == campaignStatusRunning {
-		lastPause, err = s.store.LastPausedAt(ctx, ws, campaignID)
-		if err != nil {
-			return Assessment{}, err
+		lastPause, perr := s.store.LastPausedAt(ctx, ws, campaignID)
+		if perr != nil {
+			return Assessment{}, perr
 		}
+		floor = later(floor, lastPause)
 	}
 	now := s.now()
-	rollingSince := later(now.AddDate(0, 0, -deliverability.WindowDays), lastPause)
+	rollingSince := later(now.AddDate(0, 0, -deliverability.WindowDays), floor)
 	counts, err := s.store.CampaignCounts(ctx, ws, campaignID, rollingSince)
 	if err != nil {
 		return Assessment{}, err
 	}
 	since := rollingSince
-	if counts.Delivered < deliverability.MinDelivered && lastPause.Before(rollingSince) {
-		wider, err := s.store.CampaignCounts(ctx, ws, campaignID, lastPause)
-		if err != nil {
-			return Assessment{}, err
+	// The fallback reaches back only as far as the floor — never to the beginning of
+	// time. That is the whole safeguard: the widest sample the breaker can ever act
+	// on is "everything since this campaign came under supervision, or since the
+	// operator last overrode a pause", whichever is later.
+	if counts.Delivered < deliverability.MinDelivered && floor.Before(rollingSince) {
+		wider, werr := s.store.CampaignCounts(ctx, ws, campaignID, floor)
+		if werr != nil {
+			return Assessment{}, werr
 		}
 		// Only take the wider sample if it IS wider. Equal counts mean the rolling
 		// window already holds everything there is, and swapping in a window that
 		// starts earlier would only make the reported period misleading.
 		if wider.Delivered > counts.Delivered {
-			counts, since = wider, lastPause
+			counts, since = wider, floor
 		}
 	}
 	mailboxes, err := s.store.CampaignSenderMailboxes(ctx, ws, campaignID)

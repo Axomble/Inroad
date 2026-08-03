@@ -78,8 +78,17 @@ func seedTenant(t *testing.T, ctx context.Context, q *gen.Queries, pool *pgxpool
 	if err != nil {
 		t.Fatalf("campaign: %v", err)
 	}
+	// Running, and supervised since well before anything these tests seed.
+	//
+	// guardrails_enabled_at defaults to now() (campaign creation), and the floor
+	// excludes evidence from before it — so a fixture that back-dates its sends, as
+	// most of these do, would be judged on a sample of one. Backdating the floor
+	// models the ordinary case: a campaign created a while ago, supervised the whole
+	// time, sending ever since. The migration-day tests override it explicitly, which
+	// is the only place the floor is the subject rather than the setting.
 	if _, err := pool.Exec(ctx,
-		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		`UPDATE campaigns SET status = 'running', guardrails_enabled_at = now() - interval '90 days'
+		 WHERE id = $1 AND workspace_id = $2`,
 		c.ID, w.ID); err != nil {
 		t.Fatalf("running: %v", err)
 	}
@@ -192,8 +201,11 @@ func (f *fixture) seedBouncedEnrollment(t *testing.T, ctx context.Context, conta
 	}
 }
 
-// seedCampaignAt builds a campaign with `delivered` sends of which `bounced`
-// bounced, all inside the rolling window.
+// seedCampaign builds a campaign with `delivered` sends of which `bounced` bounced,
+// all inside the rolling window.
+//
+// The sends are back-dated (now - i minutes); seedTenant has already put the
+// supervision floor 90 days back so they all count.
 func (f *fixture) seedCampaign(t *testing.T, ctx context.Context, delivered, bounced int) {
 	t.Helper()
 	now := time.Now()
@@ -409,6 +421,232 @@ func TestGuardrailDefaultsAreOnAtTheDocumentedThresholds(t *testing.T) {
 	}
 	if cfg.ComplaintPausePct != deliverability.DefaultComplaintPausePct {
 		t.Errorf("complaint_pause_pct = %v, want %v", cfg.ComplaintPausePct, deliverability.DefaultComplaintPausePct)
+	}
+}
+
+// setGuardrailsEnabledAt backdates the supervision floor, standing in for a
+// campaign that came under supervision at some earlier moment — which after
+// migration 000037 is every campaign that already existed.
+func (f *fixture) setGuardrailsEnabledAt(t *testing.T, ctx context.Context, at time.Time) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE campaigns SET guardrails_enabled_at = $3 WHERE id = $1 AND workspace_id = $2`,
+		f.campaign, f.ws, at); err != nil {
+		t.Fatalf("set guardrails_enabled_at: %v", err)
+	}
+}
+
+func (f *fixture) guardrailsEnabledAt(t *testing.T, ctx context.Context) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := f.pool.QueryRow(ctx,
+		`SELECT guardrails_enabled_at FROM campaigns WHERE id = $1 AND workspace_id = $2`,
+		f.campaign, f.ws).Scan(&at); err != nil {
+		t.Fatalf("guardrails_enabled_at: %v", err)
+	}
+	return at
+}
+
+// The migration-day hazard, against a real database.
+//
+// 000037 adds auto_pause_enabled DEFAULT TRUE, so applying it ARMS every campaign
+// that already exists — nobody opted in. guardrails_enabled_at DEFAULT now() is what
+// makes that safe: the widest sample the breaker can reach is "since the migration",
+// so bounces from before the feature existed cannot stop anything.
+//
+// The campaign here is the worst case: slow enough to fall back (under the minimum
+// in the 7-day window) and terrible over its lifetime.
+func TestPreSupervisionBouncesCannotPauseACampaign(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	now := time.Now()
+
+	// Supervision began an hour ago, as it would for an existing campaign on the
+	// deploy that runs 000037.
+	enabledAt := now.Add(-time.Hour)
+	f.setGuardrailsEnabledAt(t, ctx, enabledAt)
+
+	// A lifetime of disaster, all of it BEFORE supervision: 200 delivered, all
+	// bounced, spread over the days leading up to the migration. Inside the 7-day
+	// rolling window, so only the floor excludes it.
+	for i := range 200 {
+		at := enabledAt.Add(-time.Duration(i+1) * time.Minute)
+		_, contactID := f.seedSend(t, ctx, at)
+		f.seedBouncedEnrollment(t, ctx, contactID, at)
+	}
+	// And a handful of clean sends since, too few to judge on.
+	for i := range 5 {
+		f.seedSend(t, ctx, enabledAt.Add(time.Duration(i+1)*time.Minute))
+	}
+
+	out, err := f.service().EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused {
+		t.Fatalf("paused on pre-supervision bounces (verdict %+v)", out.Verdict)
+	}
+	if got := f.status(t, ctx); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+	events, err := f.store.PauseEvents(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("PauseEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("%d pause events on deploy day", len(events))
+	}
+
+	// The converse: bounces AFTER supervision began DO stop it, so the floor is a
+	// floor and not a mute.
+	for i := range deliverability.MinDelivered {
+		at := enabledAt.Add(time.Duration(i+10) * time.Minute)
+		_, contactID := f.seedSend(t, ctx, at)
+		if i < 20 {
+			f.seedBouncedEnrollment(t, ctx, contactID, at)
+		}
+	}
+	after, err := f.service().EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if !after.Paused {
+		t.Fatalf("post-supervision bounces did not stop the campaign (verdict %+v)", after.Verdict)
+	}
+	// And the recorded sample excludes the pre-supervision 200: it was judged on
+	// what happened under supervision, not on the lifetime.
+	events, err = f.store.PauseEvents(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("PauseEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("%d pause events, want 1", len(events))
+	}
+	if events[0].Delivered > deliverability.MinDelivered+5 {
+		t.Errorf("judged on %d delivered, which reaches past the supervision floor "+
+			"(only %d sends exist under supervision)", events[0].Delivered, deliverability.MinDelivered+5)
+	}
+}
+
+// A new campaign is supervised from creation, so the column is never zero and the
+// floor never has to be defended against a NULL.
+func TestNewCampaignIsSupervisedFromCreation(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	// A campaign created through the ordinary path, NOT the fixture's (which
+	// backdates the floor on purpose) — so this asserts the column DEFAULT.
+	fresh, err := f.q.CreateCampaign(ctx, gen.CreateCampaignParams{
+		WorkspaceID: f.ws, Name: "fresh", MailboxID: f.mailbox, ListID: f.list,
+		Subject: "Hi", BodyText: "b",
+	})
+	if err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	var at time.Time
+	if err := f.pool.QueryRow(ctx,
+		`SELECT guardrails_enabled_at FROM campaigns WHERE id = $1`, fresh.ID).Scan(&at); err != nil {
+		t.Fatalf("guardrails_enabled_at: %v", err)
+	}
+	if at.IsZero() {
+		t.Fatal("guardrails_enabled_at is zero on a new campaign")
+	}
+	if time.Since(at) > time.Minute {
+		t.Errorf("guardrails_enabled_at = %v, want ~now for a campaign just created", at)
+	}
+	cfg, err := f.store.CampaignConfig(ctx, f.ws, fresh.ID)
+	if err != nil {
+		t.Fatalf("CampaignConfig: %v", err)
+	}
+	if !cfg.EnabledAt.Equal(at) {
+		t.Errorf("CampaignConfig.EnabledAt = %v, want the stored %v", cfg.EnabledAt, at)
+	}
+}
+
+// Switching auto-pause back ON re-stamps the floor, or the same trap reopens for
+// anyone who enables it later: the breaker would act on bounces from while it was
+// off. Switching it off, or saving with it already on, must NOT move the floor.
+func TestEnablingAutoPauseRestampsTheSupervisionFloor(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	svc := f.service()
+
+	// Truncated to microseconds because that is timestamptz's resolution: an
+	// untruncated Go instant does not survive the round trip, and the assertions
+	// below are about whether the floor MOVED, not about clock precision.
+	old := time.Now().AddDate(0, 0, -30).Truncate(time.Microsecond)
+	f.setGuardrailsEnabledAt(t, ctx, old)
+
+	// Saving with auto-pause already ON leaves the floor alone: an operator editing a
+	// threshold has not started a new supervision period.
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, Guardrails{
+		AutoPauseEnabled: true, BouncePausePct: 9, ComplaintPausePct: 1.5,
+	}); err != nil {
+		t.Fatalf("SetGuardrails (on -> on): %v", err)
+	}
+	if got := f.guardrailsEnabledAt(t, ctx); !got.Equal(old) {
+		t.Errorf("on->on moved the floor to %v, want the original %v", got, old)
+	}
+
+	// Turning it OFF does not move it either.
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, Guardrails{
+		AutoPauseEnabled: false, BouncePausePct: 9, ComplaintPausePct: 1.5,
+	}); err != nil {
+		t.Fatalf("SetGuardrails (on -> off): %v", err)
+	}
+	if got := f.guardrailsEnabledAt(t, ctx); !got.Equal(old) {
+		t.Errorf("on->off moved the floor to %v, want the original %v", got, old)
+	}
+
+	// Turning it back ON starts a fresh supervision period.
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, Guardrails{
+		AutoPauseEnabled: true, BouncePausePct: 9, ComplaintPausePct: 1.5,
+	}); err != nil {
+		t.Fatalf("SetGuardrails (off -> on): %v", err)
+	}
+	restamped := f.guardrailsEnabledAt(t, ctx)
+	if !restamped.After(old) {
+		t.Fatalf("off->on left the floor at %v; bounces from while it was off remain actionable", restamped)
+	}
+	if time.Since(restamped) > time.Minute {
+		t.Errorf("re-stamped floor = %v, want ~now", restamped)
+	}
+}
+
+// End to end: an operator turns the breaker off, the campaign bounces badly, they
+// turn it back on. The bounces from the unsupervised period must not stop it.
+func TestBouncesFromWhileDisabledCannotPauseAfterReEnabling(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	svc := f.service()
+
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, Guardrails{
+		AutoPauseEnabled: false, BouncePausePct: 8, ComplaintPausePct: 1.5,
+	}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	// A disaster while unsupervised.
+	now := time.Now()
+	for i := range 200 {
+		at := now.Add(-time.Duration(i+1) * time.Minute)
+		_, contactID := f.seedSend(t, ctx, at)
+		f.seedBouncedEnrollment(t, ctx, contactID, at)
+	}
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, Guardrails{
+		AutoPauseEnabled: true, BouncePausePct: 8, ComplaintPausePct: 1.5,
+	}); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+
+	out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused {
+		t.Fatalf("paused on bounces from while the breaker was OFF (verdict %+v)", out.Verdict)
+	}
+	if got := f.status(t, ctx); got != "running" {
+		t.Errorf("status = %q, want running", got)
 	}
 }
 

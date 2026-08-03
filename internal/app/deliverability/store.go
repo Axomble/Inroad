@@ -75,6 +75,13 @@ type Guardrails struct {
 type CampaignConfig struct {
 	Guardrails
 	Status string
+	// EnabledAt is when this campaign came under automatic supervision
+	// (campaigns.guardrails_enabled_at): migration time for a campaign that already
+	// existed, creation time for a new one, re-stamped when an operator switches
+	// auto-pause back on. It is the lower bound on evidence the breaker may act on,
+	// so bounces from before the operator could have seen them can never stop a
+	// campaign. Never zero — the column is NOT NULL DEFAULT now().
+	EnabledAt time.Time
 }
 
 // PauseEvent is one recorded automatic pause. Value and Threshold are
@@ -313,7 +320,8 @@ func (s *PgStore) CampaignConfig(ctx context.Context, ws, campaignID uuid.UUID) 
 			BouncePausePct:    r.BouncePausePct,
 			ComplaintPausePct: r.ComplaintPausePct,
 		},
-		Status: r.Status,
+		Status:    r.Status,
+		EnabledAt: r.GuardrailsEnabledAt.Time,
 	}, nil
 }
 
