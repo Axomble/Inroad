@@ -5,6 +5,7 @@ package deliverability
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func seedTenant(t *testing.T, ctx context.Context, q *gen.Queries, pool *pgxpool
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	email := uuid.NewString()[:8] + "@sender.test"
+	email := uuid.NewString()[:8] + "@" + senderDomain
 	mb, err := q.CreateMailbox(ctx, gen.CreateMailboxParams{
 		WorkspaceID: w.ID, Provider: "smtp", Email: email, DisplayName: "IT",
 		SmtpHost: "smtp.example.test", SmtpPort: 587, SmtpUsername: email,
@@ -82,6 +83,67 @@ func seedTenant(t *testing.T, ctx context.Context, q *gen.Queries, pool *pgxpool
 		t.Fatalf("running: %v", err)
 	}
 	return w.ID, mb.ID, l.ID, c.ID
+}
+
+// seedMailbox adds a SECOND mailbox to the workspace, one that is NOT in the
+// campaign's sender pool. It is how the tests tell the campaign-scoped signals
+// query apart from the workspace-scoped one: a signal on this mailbox must reach
+// the workspace rollup and must not reach the campaign's score.
+func (f *fixture) seedMailbox(t *testing.T, ctx context.Context, domain string) uuid.UUID {
+	t.Helper()
+	email := uuid.NewString()[:8] + "@" + domain
+	mb, err := f.q.CreateMailbox(ctx, gen.CreateMailboxParams{
+		WorkspaceID: f.ws, Provider: "smtp", Email: email, DisplayName: "IT2",
+		SmtpHost: "smtp.example.test", SmtpPort: 587, SmtpUsername: email,
+		ImapHost: "imap.example.test", ImapPort: 993, ImapUsername: email,
+		SecretCiphertext: "ct", DailyCap: 500, MinIntervalSeconds: 0,
+		RampEnabled: false, RampStartCap: 5, RampDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("second mailbox: %v", err)
+	}
+	return mb.ID
+}
+
+// seedWarmupParticipant opts a mailbox into warmup at a given health state — the
+// verdict the warmup engine has already reached, which the score inherits rather
+// than re-deriving.
+func (f *fixture) seedWarmupParticipant(t *testing.T, ctx context.Context, mailbox uuid.UUID, state, reason string) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO warmup_participants (mailbox_id, workspace_id, health_state, health_reason)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (mailbox_id) DO UPDATE SET health_state = EXCLUDED.health_state,
+		                                        health_reason = EXCLUDED.health_reason`,
+		mailbox, f.ws, state, reason); err != nil {
+		t.Fatalf("warmup participant %s: %v", state, err)
+	}
+}
+
+// seedPlacement records SENDER-attributed inbox-vs-spam placement for one UTC day,
+// the shape RecordWarmupSenderPlacementStat writes.
+func (f *fixture) seedPlacement(t *testing.T, ctx context.Context, mailbox uuid.UUID, day time.Time, inbox, spam int) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, inbox, spam)
+		 VALUES ($1,$2,$3::date,$4,$5)
+		 ON CONFLICT (mailbox_id, day) DO UPDATE SET inbox = EXCLUDED.inbox, spam = EXCLUDED.spam`,
+		mailbox, f.ws, day.UTC().Format(time.DateOnly), inbox, spam); err != nil {
+		t.Fatalf("placement: %v", err)
+	}
+}
+
+// seedSendingDomain caches a DNS verdict for a domain, as the domainauth sweep does.
+func (f *fixture) seedSendingDomain(t *testing.T, ctx context.Context, ws uuid.UUID, domain, state string, spf, dmarc bool) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO sending_domains (workspace_id, domain, state, spf_found, dmarc_found, checked_at)
+		 VALUES ($1,$2,$3,$4,$5,now())
+		 ON CONFLICT (workspace_id, domain) DO UPDATE SET state = EXCLUDED.state,
+		     spf_found = EXCLUDED.spf_found, dmarc_found = EXCLUDED.dmarc_found`,
+		ws, domain, state, spf, dmarc); err != nil {
+		t.Fatalf("sending domain: %v", err)
+	}
 }
 
 // seedSend inserts one 'sent' send for a fresh contact and returns both ids. The
@@ -153,6 +215,180 @@ func (f *fixture) status(t *testing.T, ctx context.Context) string {
 }
 
 func (f *fixture) service() *Service { return NewService(f.store) }
+
+// senderDomain is the domain every seeded mailbox sends from — shared across the
+// tenants a test creates, deliberately: two workspaces sending from one domain must
+// keep separate verdicts, and sharing it here is what proves they do.
+const senderDomain = "sender.test"
+
+// component finds one score component by key.
+func component(t *testing.T, s deliverability.Score, key string) deliverability.Component {
+	t.Helper()
+	for _, c := range s.Components {
+		if c.Key == key {
+			return c
+		}
+	}
+	t.Fatalf("score has no %q component", key)
+	return deliverability.Component{}
+}
+
+// The non-rate signals, end to end against Postgres. Every other integration test
+// leaves warmup_participants, warmup_daily_stats and sending_domains EMPTY, so the
+// signals query only ever returns its COALESCE defaults — which means the SUM
+// scoping, the worst-state CASE ordering, and the domain-from-mailbox-email
+// subquery would all be unproven. sqlc vet cannot catch a query that PREPAREs and
+// still answers the wrong thing.
+//
+// It also pins the dual scope: a signal on a mailbox OUTSIDE the campaign's sender
+// pool must reach the workspace rollup and must NOT reach the campaign's score.
+func TestWarmupAndDomainSignalsReachTheScore(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	today := time.Now().UTC()
+
+	// The campaign's own sender: healthy, with 10% of its warmup mail in spam.
+	f.seedWarmupParticipant(t, ctx, f.mailbox, "healthy", "")
+	f.seedPlacement(t, ctx, f.mailbox, today, 90, 10)
+	// A mailbox the campaign does NOT send from: paused, and all its mail spammed.
+	outsider := f.seedMailbox(t, ctx, senderDomain)
+	f.seedWarmupParticipant(t, ctx, outsider, "paused", "spam placement 61% over 7 days")
+	f.seedPlacement(t, ctx, outsider, today, 0, 50)
+	// And the domain both send from is failing authentication.
+	f.seedSendingDomain(t, ctx, f.ws, senderDomain, "failing", false, false)
+
+	// --- campaign scope: only the campaign's own sender counts ---
+	rep, err := f.service().CampaignReport(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("CampaignReport: %v", err)
+	}
+	warmup := component(t, rep.Score, deliverability.KeyWarmup)
+	if !warmup.Measured || warmup.Penalty != 0 || warmup.Detail != "healthy" {
+		t.Errorf("campaign warmup component = %+v, want measured, unpenalised, healthy — the "+
+			"paused OUTSIDER is not in this campaign's pool", warmup)
+	}
+	spam := component(t, rep.Score, deliverability.KeySpamPlacement)
+	if !spam.Measured || spam.Rate == nil || *spam.Rate != 10 {
+		t.Errorf("campaign spam placement = %+v, want a measured 10%% (10 of 100 observed)", spam)
+	}
+	// 10% of the 40% saturation point costs a quarter of the ceiling.
+	if want := deliverability.SpamPlacementPenalty / 4; spam.Penalty != want {
+		t.Errorf("campaign spam penalty = %d, want %d", spam.Penalty, want)
+	}
+	domain := component(t, rep.Score, deliverability.KeyDomainAuth)
+	if !domain.Measured || domain.Penalty != deliverability.DomainAuthPenalty {
+		t.Errorf("campaign domain component = %+v, want a failing verdict penalised %d",
+			domain, deliverability.DomainAuthPenalty)
+	}
+	if wantScore := 100 - deliverability.SpamPlacementPenalty/4 - deliverability.DomainAuthPenalty; rep.Score.Value != wantScore {
+		t.Errorf("campaign score = %d, want %d", rep.Score.Value, wantScore)
+	}
+
+	// --- workspace scope: every mailbox counts, worst health wins ---
+	roll, err := f.service().Report(ctx, f.ws)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	wsWarmup := component(t, roll.Score, deliverability.KeyWarmup)
+	if wsWarmup.Detail != deliverability.WarmupPaused || wsWarmup.Penalty != deliverability.WarmupPausedPenalty {
+		t.Errorf("workspace warmup component = %+v, want the WORST state (paused) penalised %d — "+
+			"averaging a degraded sender away is how it stays invisible",
+			wsWarmup, deliverability.WarmupPausedPenalty)
+	}
+	// 60 spam of 150 observed = 40%, exactly the saturation point.
+	wsSpam := component(t, roll.Score, deliverability.KeySpamPlacement)
+	if wsSpam.Rate == nil || *wsSpam.Rate != 40 || wsSpam.Penalty != deliverability.SpamPlacementPenalty {
+		t.Errorf("workspace spam placement = %+v, want 40%% at the full ceiling", wsSpam)
+	}
+	// 50 + 40 + 20 = 110 of penalty against 100, so the score floors at 0 rather
+	// than going negative.
+	if roll.Score.Value != 0 {
+		t.Errorf("workspace score = %d, want 0 (the floor)", roll.Score.Value)
+	}
+
+	// --- the at-risk lists, whose row mapping nothing else exercises ---
+	if len(roll.AtRiskMailboxes) != 1 {
+		t.Fatalf("at-risk mailboxes = %+v, want only the paused outsider (a healthy "+
+			"participant is not at risk)", roll.AtRiskMailboxes)
+	}
+	risk := roll.AtRiskMailboxes[0]
+	if risk.Label == "" || !strings.HasPrefix(risk.Reason, "paused: ") {
+		t.Errorf("at-risk mailbox = %+v, want the engine's own recorded reason", risk)
+	}
+	if len(roll.AtRiskDomains) != 1 || roll.AtRiskDomains[0].Label != senderDomain {
+		t.Fatalf("at-risk domains = %+v, want %q", roll.AtRiskDomains, senderDomain)
+	}
+	// The reason names the missing records, because publishing one is the next
+	// action. DKIM is deliberately absent: not-found means "no probed selector
+	// matched", not "unsigned".
+	if got := roll.AtRiskDomains[0].Reason; got != "no SPF or DMARC record" {
+		t.Errorf("at-risk domain reason = %q, want %q", got, "no SPF or DMARC record")
+	}
+}
+
+// An 'unknown' domain verdict is a lookup that did not complete, not a
+// misconfiguration: it must be neither penalised nor listed as at risk, or
+// operators get sent editing DNS that was already correct.
+func TestUnknownDomainVerdictIsNotPenalisedOrListed(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedSendingDomain(t, ctx, f.ws, senderDomain, "unknown", false, false)
+
+	roll, err := f.service().Report(ctx, f.ws)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if c := component(t, roll.Score, deliverability.KeyDomainAuth); c.Penalty != 0 {
+		t.Errorf("domain component = %+v, want no penalty for an incomplete lookup", c)
+	}
+	if len(roll.AtRiskDomains) != 0 {
+		t.Errorf("at-risk domains = %+v, want none for an 'unknown' verdict", roll.AtRiskDomains)
+	}
+}
+
+// Two workspaces sending from the SAME domain keep separate verdicts, and a
+// disabled participant stops contributing health at all — nothing would ever clear
+// a frozen 'paused'.
+func TestDomainVerdictsAndHealthAreWorkspaceScoped(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	foreignWS, _, _, _ := seedTenant(t, ctx, f.q, f.pool)
+
+	// The foreign tenant's copy of the shared domain is failing; ours is not checked.
+	f.seedSendingDomain(t, ctx, foreignWS, senderDomain, "failing", false, false)
+	f.seedWarmupParticipant(t, ctx, f.mailbox, "throttled", "spam placement 24%")
+
+	roll, err := f.service().Report(ctx, f.ws)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if c := component(t, roll.Score, deliverability.KeyDomainAuth); c.Measured || c.Penalty != 0 {
+		t.Errorf("domain component = %+v, want unmeasured — the failing verdict is another "+
+			"tenant's row for the same domain name", c)
+	}
+	if len(roll.AtRiskDomains) != 0 {
+		t.Errorf("at-risk domains = %+v, want none (the failing row is the foreign tenant's)", roll.AtRiskDomains)
+	}
+	if c := component(t, roll.Score, deliverability.KeyWarmup); c.Penalty != deliverability.WarmupThrottledPenalty {
+		t.Errorf("warmup component = %+v, want throttled penalised %d", c, deliverability.WarmupThrottledPenalty)
+	}
+
+	// Warmup switched off means no live health signal.
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE warmup_participants SET enabled = false WHERE mailbox_id = $1`, f.mailbox); err != nil {
+		t.Fatalf("disable warmup: %v", err)
+	}
+	off, err := f.service().Report(ctx, f.ws)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if c := component(t, off.Score, deliverability.KeyWarmup); c.Measured || c.Penalty != 0 {
+		t.Errorf("warmup component = %+v, want unmeasured once the participant is disabled", c)
+	}
+	if len(off.AtRiskMailboxes) != 0 {
+		t.Errorf("at-risk mailboxes = %+v, want none once the participant is disabled", off.AtRiskMailboxes)
+	}
+}
 
 // A brand-new campaign has the breaker ON at the documented defaults. That is the
 // column defaults from migration 000037, read back through the real query.

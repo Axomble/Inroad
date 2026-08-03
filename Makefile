@@ -1,4 +1,4 @@
-.PHONY: help dev db-wait run-web seed db-up db-down migrate-up migrate-down sqlc run-api run-worker build test test-integration tidy lint lint-go lint-web
+.PHONY: help dev db-wait run-web seed db-up db-down migrate-up migrate-down sqlc sqlc-diff sqlc-vet run-api run-worker build test test-integration tidy lint lint-go lint-web
 
 # .env is loaded here rather than by the binaries: nothing in the Go code reads a
 # dotenv file, so the documented `cp .env.example .env && make run-api` failed with
@@ -24,6 +24,12 @@ migrate-down: ## Roll back one migration
 
 sqlc: ## Regenerate sqlc code
 	sqlc generate
+
+sqlc-diff: ## Fail if the generated sqlc code is stale (no writes)
+	sqlc diff
+
+sqlc-vet: ## PREPARE every query against the TEST database (needs make db-up + migrate)
+	sqlc vet
 
 run-api: ## Run the API server
 	go run ./cmd/inroad
