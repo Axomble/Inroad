@@ -407,19 +407,34 @@ func TestDeliverabilityPerformance(t *testing.T) {
 
 	// The end-to-end read an operator's page actually performs, at volume.
 	t.Run("full breaker evaluation", func(t *testing.T) {
+		// The service's clock is pinned to the SAME instant the fixture seeded
+		// against. Seeding 220,000 rows takes ~35s of wall clock, so a service using
+		// time.Now() would evaluate a window that has drifted ~35s past the one the
+		// data was laid out for — which moves the window boundary across rows and
+		// makes both the sample and the rate depend on how fast the machine seeded.
+		// This subtest was observed failing once and passing twice for exactly that
+		// reason before the clock was pinned.
+		svc := NewService(p.store)
+		svc.now = func() time.Time { return p.now }
+
 		start := time.Now()
-		out, err := p.service().EvaluateBreaker(ctx, p.ws, p.campaign)
+		out, err := svc.EvaluateBreaker(ctx, p.ws, p.campaign)
 		took := time.Since(start)
 		if err != nil {
 			t.Fatalf("EvaluateBreaker: %v", err)
 		}
-		t.Logf("EvaluateBreaker over ~%d in-window delivered / ~%d bounced took %s",
-			perfWindowSends, perfWindowBounced, took.Round(time.Millisecond))
+		t.Logf("EvaluateBreaker over %d in-window delivered / %d bounced took %s",
+			out.Verdict.Delivered, perfWindowBounced, took.Round(time.Millisecond))
 		// 10% bounce over 25k in-window delivered: the case the breaker exists for.
 		if !out.Paused {
-			t.Errorf("a 10%% bounce rate over ~%d delivered did not pause (verdict %+v)",
-				perfWindowSends, out.Verdict)
+			t.Errorf("a 10%% bounce rate over %d delivered did not pause (verdict %+v)",
+				out.Verdict.Delivered, out.Verdict)
 		}
+		if out.Verdict.Delivered != perfWindowSends {
+			t.Errorf("judged on %d delivered, want exactly %d — the window has drifted",
+				out.Verdict.Delivered, perfWindowSends)
+		}
+		assertWithinBudget(t, "EvaluateBreaker", took)
 	})
 }
 
