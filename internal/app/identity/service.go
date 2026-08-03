@@ -58,6 +58,11 @@ type Session struct {
 	SessionID   uuid.UUID
 	RawRefresh  string
 	Memberships []Membership
+	// Email rides on the session so the SPA can show who is signed in after a
+	// silent refresh — the httpOnly-cookie bootstrap is the only identity
+	// source on a hard reload (users have no display name column; email IS the
+	// identity).
+	Email string
 }
 
 // RegisterInput carries the fields needed to create a brand-new workspace,
@@ -71,6 +76,7 @@ type RegisterInput struct {
 type storeIface interface {
 	RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterTxResult, error)
 	GetUserByEmail(ctx context.Context, email string) (gen.User, error)
+	GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error)
 	ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]gen.ListMembersByUserRow, error)
 	GetMember(ctx context.Context, wsID, userID uuid.UUID) (gen.WorkspaceMember, error)
 	TouchMemberLastSeen(ctx context.Context, wsID, userID uuid.UUID) error
@@ -201,6 +207,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (Session, erro
 	return Session{
 		UserID: res.UserID, WorkspaceID: res.WorkspaceID, Role: "owner",
 		SessionID: res.SessionID, RawRefresh: raw, Memberships: mems,
+		Email: in.Email,
 	}, nil
 }
 
@@ -389,6 +396,10 @@ func (s *Service) StartSessionForUser(ctx context.Context, userID uuid.UUID, ua,
 	if err != nil || len(mems) == 0 {
 		return Session{}, ErrNoWorkspace
 	}
+	user, err := s.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return Session{}, err
+	}
 	active := mems[0] // ListMembersByUser orders by last_seen desc, created asc
 	_ = s.store.TouchMemberLastSeen(ctx, active.WorkspaceID, userID)
 	fam := uuid.New()
@@ -396,7 +407,7 @@ func (s *Service) StartSessionForUser(ctx context.Context, userID uuid.UUID, ua,
 	if err != nil {
 		return Session{}, err
 	}
-	return Session{UserID: userID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid, RawRefresh: raw, Memberships: mems}, nil
+	return Session{UserID: userID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid, RawRefresh: raw, Memberships: mems, Email: user.Email}, nil
 }
 
 // Refresh rotates a refresh token: the presented token is looked up by
@@ -442,7 +453,11 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 		return Session{}, err
 	}
 	mems, _ := s.memberships(ctx, row.UserID)
-	return Session{UserID: row.UserID, WorkspaceID: row.WorkspaceID, Role: string(member.Role), SessionID: sid, RawRefresh: newRaw, Memberships: mems}, nil
+	user, err := s.store.GetUserByID(ctx, row.UserID)
+	if err != nil {
+		return Session{}, err
+	}
+	return Session{UserID: row.UserID, WorkspaceID: row.WorkspaceID, Role: string(member.Role), SessionID: sid, RawRefresh: newRaw, Memberships: mems, Email: user.Email}, nil
 }
 
 // Logout revokes the entire refresh-token family for the presented token,
@@ -530,6 +545,16 @@ func (s *Service) Memberships(ctx context.Context, userID uuid.UUID) ([]Membersh
 // state RequireVerified gates on (see identity.Store.IsEmailVerified).
 func (s *Service) IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error) {
 	return s.store.IsEmailVerified(ctx, userID)
+}
+
+// UserIdentity returns the email and verification state /auth/me surfaces,
+// from one user lookup instead of two.
+func (s *Service) UserIdentity(ctx context.Context, userID uuid.UUID) (email string, verified bool, err error) {
+	u, err := s.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return "", false, err
+	}
+	return u.Email, u.EmailVerifiedAt.Valid, nil
 }
 
 func (s *Service) memberships(ctx context.Context, userID uuid.UUID) ([]Membership, error) {

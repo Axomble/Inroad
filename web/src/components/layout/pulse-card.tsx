@@ -32,11 +32,14 @@ const SEVERITY_SR: Record<PulseSeverity, string> = { danger: 'Critical:', warn: 
  * Copy for known attention kinds; unknown kinds (a newer server) fall back to
  * the humanized identifier so new producers render without a frontend change.
  */
+// Keys mirror the server's kind constants (internal/app/pulse/service.go);
+// pulse-card.test.tsx asserts every known kind maps here so a renamed
+// producer can't silently fall through to the humanized fallback again.
 const ATTENTION_LABELS: Record<string, (count: number) => string> = {
   mailbox_error: (n) => (n === 1 ? 'mailbox needs attention' : 'mailboxes need attention'),
-  sender_gated: (n) => (n === 1 ? 'sender gated' : 'senders gated'),
-  campaign_guardrail_paused: (n) => (n === 1 ? 'campaign paused by guardrail' : 'campaigns paused by guardrail'),
-  domain_auth_failing: (n) => (n === 1 ? 'domain failing auth' : 'domains failing auth'),
+  senders_gated: (n) => (n === 1 ? 'sender gated' : 'senders gated'),
+  dmarc_failing: (n) => (n === 1 ? 'domain failing DMARC' : 'domains failing DMARC'),
+  cap_consumed: (n) => (n === 1 ? 'sending pool near daily cap' : 'sending pools near daily cap'),
 }
 
 function attentionLabel(kind: string, count: number): string {

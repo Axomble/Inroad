@@ -61,11 +61,13 @@ test('quiet when healthy: zero attention rows collapse to the two-line form', as
 
 test('attention rows render worst-first (danger > warn > info), each linking to its href', async () => {
   const payload = healthyPulse()
-  // Deliberately shuffled so the sort is what orders them.
+  // Deliberately shuffled so the sort is what orders them. `daily_cap_near`
+  // is intentionally NOT a known kind — it exercises the humanized fallback
+  // for producers newer than this frontend.
   payload.attention = [
     { kind: 'daily_cap_near', severity: 'info', count: 1, reason: '90% consumed', href: '/app/campaigns' },
     { kind: 'mailbox_error', severity: 'danger', count: 2, reason: 'auth failed', href: '/app/mailboxes?status=error' },
-    { kind: 'sender_gated', severity: 'warn', count: 3, reason: 'warming', href: '/app/warmup' },
+    { kind: 'senders_gated', severity: 'warn', count: 3, reason: 'warming', href: '/app/warmup' },
   ]
   pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
 
@@ -84,6 +86,30 @@ test('attention rows render worst-first (danger > warn > info), each linking to 
   // The warmup line appears in the attention form (pool > 0), warm-only.
   const warmupLine = screen.getByText(/warming · all healthy/i).closest('a')
   expect(warmupLine).toHaveAttribute('href', '/app/warmup')
+})
+
+// Every kind the server actually emits (internal/app/pulse/service.go) must
+// map to operator copy — a renamed producer once fell through to the
+// humanized-identifier fallback for 3 of 4 kinds without any test noticing.
+test('every server attention kind renders its operator label, not the fallback', async () => {
+  const payload = healthyPulse()
+  payload.attention = [
+    { kind: 'mailbox_error', severity: 'danger', count: 2, reason: 'auth failed', href: '/app/mailboxes?status=error' },
+    { kind: 'senders_gated', severity: 'warn', count: 3, reason: '2 throttled, 1 paused', href: '/app/mailboxes' },
+    { kind: 'dmarc_failing', severity: 'warn', count: 1, reason: 'no DMARC record', href: '/app/mailboxes' },
+    { kind: 'cap_consumed', severity: 'info', count: 1, reason: 'daily cap 92% used', href: '/app/campaigns' },
+  ]
+  pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<PulseCard />, { preloadedState: authed })
+
+  expect(await screen.findByText(/mailboxes need attention/i)).toBeInTheDocument()
+  expect(screen.getByText(/senders gated/i)).toBeInTheDocument()
+  expect(screen.getByText(/domain failing DMARC/i)).toBeInTheDocument()
+  expect(screen.getByText(/sending pool near daily cap/i)).toBeInTheDocument()
+  // None fell through to the humanized `kind.replace` fallback.
+  expect(screen.queryByText(/dmarc failing/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/cap consumed/i)).not.toBeInTheDocument()
 })
 
 test('query error shows the danger body instead of stale-looking numbers', async () => {
