@@ -141,6 +141,16 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 			t.Fatalf("step %d: %v", i+1, err)
 		}
 	}
+	// Launch is what moves a campaign to 'running', and the send path now refuses to
+	// send from anything else. These fixtures enroll with EnrollListMembers directly
+	// rather than through the campaign store's EnrollTx (which flips the status in
+	// the same transaction), so they have to set it by hand. A draft campaign with an
+	// active enrollment is a state production cannot produce.
+	if _, err := pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		cam.ID, ws.ID); err != nil {
+		t.Fatalf("running: %v", err)
+	}
 	sealerKey := []byte("0123456789abcdef0123456789abcdef")
 	return itFixture{
 		q: q, core: inprocess.New(pool, itKeyring(t, q), sealerKey, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, sealerKey, warmup.NewStaticLibrary()),

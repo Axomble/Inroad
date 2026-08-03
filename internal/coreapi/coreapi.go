@@ -406,8 +406,20 @@ type StepSendJob struct {
 	// SentToday >= EffectiveDailyCap: those two numbers reach the logs and describe
 	// the mailbox, so a campaign-wide limit or a health pause must not masquerade as
 	// a mailbox that has used up its cap.
-	CampaignLimited    bool
-	HealthPaused       bool
+	CampaignLimited bool
+	HealthPaused    bool
+	// CampaignPaused means the campaign is not 'running' — paused (by hand or by the
+	// deliverability circuit breaker), or still draft, or done. It gates the send
+	// itself: without it a breaker-paused campaign kept sending, because every
+	// mid-sequence enrollment is 'active' at the moment of the pause and each
+	// successful send re-enqueues the next advance, so the chain is
+	// self-perpetuating.
+	//
+	// Carried EXPLICITLY, like the two flags above, rather than expressed as Skip:
+	// Skip means "nothing to do here ever" and leaves the enrollment where it is,
+	// whereas a pause is a condition that CLEARS. The enrollment has to wait and
+	// resume, so the worker defers it (see the blocked branch in advance.go).
+	CampaignPaused     bool
 	EffectiveDailyCap  int
 	SentToday          int
 	MinIntervalSeconds int

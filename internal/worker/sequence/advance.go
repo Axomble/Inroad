@@ -55,7 +55,9 @@ const minBlockedBackoff = time.Minute
 //   - a campaign at its daily_limit clears at the next UTC midnight, when the
 //     allowance resets — retrying sooner just burns a task to learn nothing;
 //   - a warmup-paused mailbox clears whenever the health sweep steps it back down,
-//     which is not on a schedule this worker can predict, so it reuses capBackoff.
+//     which is not on a schedule this worker can predict, so it reuses capBackoff;
+//   - a campaign that is not running clears when an operator relaunches it, which
+//     is likewise unpredictable, so it is poll-shaped too.
 //
 // A campaign that is BOTH limited and paused takes the shorter wait: the sooner
 // signal is the one worth re-checking.
@@ -67,7 +69,8 @@ const minBlockedBackoff = time.Minute
 // job with no usable schedule (an older enqueued task, a campaign whose windows
 // cannot be compiled) keeps the raw instant rather than refusing to retry.
 func blockedBackoff(job coreapi.StepSendJob, now time.Time) time.Duration {
-	return nextAttemptIn(job.Schedule, job.EnrollmentID, job.CampaignLimited, job.HealthPaused, now)
+	poll := job.HealthPaused || job.CampaignPaused
+	return nextAttemptIn(job.Schedule, job.EnrollmentID, job.CampaignLimited, poll, now)
 }
 
 // nextAttemptIn is when a step blocked by a SELF-CLEARING condition should be
@@ -194,7 +197,16 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// budget would mark ~99% of them 'failed' for working as instructed. A
 		// warmup pause is timed and self-clearing. So these wait indefinitely,
 		// staying 'active' and visible in the UI, which is the honest state.
-		if job.CampaignLimited || job.HealthPaused {
+		//
+		// CampaignPaused joins them, and is the one that makes the deliverability
+		// circuit breaker actually stop anything: without this gate the breaker set
+		// campaigns.status='paused', recorded its reason, and the campaign kept
+		// sending, because every mid-sequence enrollment is 'active' at the moment of
+		// the pause and the success path below re-enqueues the next advance. It
+		// belongs in THIS branch rather than as a stop for the same reason as the
+		// other two — an operator clears a pause by relaunching, and the enrollments
+		// must resume, not have been marked 'failed' while they waited.
+		if job.CampaignLimited || job.HealthPaused || job.CampaignPaused {
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now()))
 		}
 		if job.EffectiveDailyCap <= 0 {

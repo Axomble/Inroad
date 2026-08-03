@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -599,6 +600,102 @@ func TestReplayedIngestDoesNotInflateTheRate(t *testing.T) {
 	// would have been ~19.8% and stopped the campaign.
 	if f.status(t, ctx) != "running" {
 		t.Errorf("status = %q; a replayed webhook stopped the campaign", f.status(t, ctx))
+	}
+}
+
+// The idempotency guarantee has to hold under a genuine RACE, not just under
+// sequential replay. A webhook pipeline retrying in parallel — several deliveries
+// of one event arriving at once across processes — is the realistic shape, and
+// ON CONFLICT DO NOTHING is what makes it safe: exactly one insert wins, so the
+// rate the breaker reads cannot be inflated by concurrency either.
+//
+// Run under -race as part of the integration suite. What it proves that
+// TestReplayedIngestDoesNotInflateTheRate cannot: that no read-then-write window
+// exists in the service between "is this new?" and "record it".
+func TestConcurrentIngestOfOneEventRecordsItOnce(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	// A big clean sample, so a duplicated complaint would move the rate measurably
+	// without tripping the breaker on the legitimate single one.
+	f.seedCampaign(t, ctx, 200, 0)
+	sendID, _ := f.seedSend(t, ctx, time.Now())
+	svc := f.service()
+
+	const goroutines = 16
+	event := EventInput{
+		Kind: "complaint", Email: "racer@recipient.test",
+		ProviderEventID: "ses-race-1", SendID: &sendID,
+	}
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		accepted int
+		dupes    int
+		errs     []error
+		start    = make(chan struct{})
+	)
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release them together, so they actually contend
+			res, err := svc.Ingest(ctx, f.ws, event)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil:
+				errs = append(errs, err)
+			case res.Duplicate:
+				dupes++
+			default:
+				accepted++
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if len(errs) != 0 {
+		t.Fatalf("concurrent ingest errored: %v", errs)
+	}
+	// EXACTLY one caller may be told it accepted a new event; the rest must see a
+	// duplicate. Two "accepted" would mean two rows, or a lost update.
+	if accepted != 1 || dupes != goroutines-1 {
+		t.Errorf("accepted=%d duplicate=%d, want 1 and %d", accepted, dupes, goroutines-1)
+	}
+	var rows int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM deliverability_events WHERE workspace_id = $1 AND provider_event_id = $2`,
+		f.ws, event.ProviderEventID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("%d event rows from %d concurrent deliveries, want 1", rows, goroutines)
+	}
+	// The rate is unmoved: one complaint, not sixteen.
+	counts, err := f.store.CampaignCounts(ctx, f.ws, f.campaign, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CampaignCounts: %v", err)
+	}
+	if counts.Complained != 1 {
+		t.Errorf("complained = %d, want 1", counts.Complained)
+	}
+	// And the suppression is single too (it is idempotent, so this is about the
+	// address being suppressed exactly once, not about a constraint violation).
+	var suppressions int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM suppression WHERE workspace_id = $1 AND lower(email) = lower($2)`,
+		f.ws, event.Email).Scan(&suppressions); err != nil {
+		t.Fatalf("suppressions: %v", err)
+	}
+	if suppressions != 1 {
+		t.Errorf("%d suppression rows, want 1", suppressions)
+	}
+	// 1 complaint over 201 delivered is ~0.5%, under the 1.5% default. Sixteen
+	// would have been ~8% and stopped the campaign.
+	if got := f.status(t, ctx); got != "running" {
+		t.Errorf("status = %q; concurrent replays stopped the campaign", got)
 	}
 }
 

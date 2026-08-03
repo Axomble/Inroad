@@ -67,7 +67,7 @@ const getStepEnrollmentBundle = `-- name: GetStepEnrollmentBundle :one
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        e.status, e.thread_root_id, e.mailbox_id AS enrollment_mailbox_id,
        cam.id AS campaign_id, cam.rotation_mode, cam.tracking_enabled, cam.timezone,
-       cam.daily_limit,
+       cam.daily_limit, cam.status AS campaign_status,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
        m.id AS mailbox_id, m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
@@ -98,6 +98,7 @@ type GetStepEnrollmentBundleRow struct {
 	TrackingEnabled     bool               `json:"tracking_enabled"`
 	Timezone            string             `json:"timezone"`
 	DailyLimit          *int32             `json:"daily_limit"`
+	CampaignStatus      string             `json:"campaign_status"`
 	ToEmail             string             `json:"to_email"`
 	FirstName           string             `json:"first_name"`
 	LastName            string             `json:"last_name"`
@@ -130,6 +131,13 @@ type GetStepEnrollmentBundleRow struct {
 // a pool assigns the mailbox at the first send and pins it here, so a follow-up
 // step never changes mailbox mid-thread. enrollment_mailbox_id is returned
 // separately so the caller can tell "already pinned" from "resolve the pool now".
+//
+// campaign_status is aliased (e.status is the ENROLLMENT's) and is load-bearing on
+// the send path, not informational: the deliverability circuit breaker sets
+// campaigns.status='paused', and until this column travelled, nothing downstream
+// read it — a stopped campaign kept sending, because every mid-sequence enrollment
+// is still 'active' at the moment of the pause and each successful send re-enqueues
+// the next advance.
 func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnrollmentBundleParams) (GetStepEnrollmentBundleRow, error) {
 	row := q.db.QueryRow(ctx, getStepEnrollmentBundle, arg.ID, arg.WorkspaceID)
 	var i GetStepEnrollmentBundleRow
@@ -146,6 +154,7 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 		&i.TrackingEnabled,
 		&i.Timezone,
 		&i.DailyLimit,
+		&i.CampaignStatus,
 		&i.ToEmail,
 		&i.FirstName,
 		&i.LastName,
