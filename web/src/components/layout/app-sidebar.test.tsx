@@ -41,6 +41,17 @@ test('shows the API keys nav item for an owner', () => {
   expect(screen.getByRole('link', { name: /api keys/i })).toBeInTheDocument()
 })
 
+test('the Deliverability screen is reachable from the nav, with no invented count', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'member', status: 'authed' } },
+  })
+  const link = screen.getByRole('link', { name: /deliverability/i })
+  expect(link).toHaveAttribute('href', '/app/deliverability')
+  // The score is not a count, and there is no cheap workspace-wide number to
+  // put here — so the row carries none rather than a made-up one.
+  expect(link).toHaveTextContent(/^Deliverability$/)
+})
+
 test('hides the API keys nav item from a non-admin member', () => {
   renderWithProviders(<AppSidebar />, {
     preloadedState: { auth: { role: 'member', status: 'authed' } },

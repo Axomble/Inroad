@@ -12,6 +12,7 @@ import { CampaignEnrollmentsList } from './campaign-enrollments-list'
 import { SequenceEditor } from './sequence-editor'
 import { SchedulePanel } from './schedule-panel'
 import { SendersPanel } from './senders-panel'
+import { GuardrailsCard } from './guardrails-card'
 
 const routeApi = getRouteApi('/app/campaigns/$id')
 
@@ -83,6 +84,11 @@ export function CampaignDetailPage() {
         {/* Who it sends as belongs with when it sends: both shape every future
             send without touching threads already in flight. */}
         <SendersPanel campaignId={id} />
+
+        {/* What will stop it. Sits directly under who/when it sends as, because a
+            campaign that paused itself is answered here and nowhere else. Owns its
+            own loading/error states. */}
+        <GuardrailsCard campaignId={id} />
 
         {!isLoading && !error && (
           <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />

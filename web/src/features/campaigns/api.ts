@@ -34,8 +34,14 @@ export type {
   RotationMode,
 } from '@/store/api'
 
+// The campaign-scoped deliverability shapes. The workspace rollup lives in
+// `features/deliverability/`, but these two endpoints are `/campaigns/{id}/…` and
+// their tags belong with the rest of this campaign's, so the guardrails card is
+// wired here rather than reaching across features.
+export type { CampaignDeliverability, CampaignGuardrails, CampaignPauseEvent } from '@/store/api'
+
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign', 'Step', 'Schedule', 'SenderPool'],
+  addTagTypes: ['Campaign', 'Step', 'Schedule', 'SenderPool', 'Guardrails'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -102,6 +108,15 @@ const campaignApi = api.enhanceEndpoints({
     updateCampaignSenders: {
       invalidatesTags: (_result, _error, arg) => [{ type: 'SenderPool', id: arg.id }],
     },
+    // Deliverability and guardrails share one tag: saving a threshold can change
+    // the verdict the same response carries, so the card refetches as a whole
+    // rather than trusting the mutation's echo of the settings alone.
+    getCampaignDeliverability: {
+      providesTags: (_result, _error, arg) => [{ type: 'Guardrails', id: arg.id }],
+    },
+    updateCampaignGuardrails: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Guardrails', id: arg.id }],
+    },
   },
 })
 
@@ -121,4 +136,6 @@ export const {
   useUpdateCampaignScheduleMutation,
   useGetCampaignSendersQuery,
   useUpdateCampaignSendersMutation,
+  useGetCampaignDeliverabilityQuery,
+  useUpdateCampaignGuardrailsMutation,
 } = campaignApi

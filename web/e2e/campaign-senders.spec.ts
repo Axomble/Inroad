@@ -121,6 +121,16 @@ async function mockApi(page: Page): Promise<{ puts: SenderPayload[] }> {
       return route.fulfill(json(pool))
     }
 
+    // The campaign detail also mounts the guardrails card; answer it so the page
+    // under test isn't rendering an error banner next to the pool.
+    if (path.endsWith(`/campaigns/${CAMPAIGN_ID}/deliverability`)) {
+      return route.fulfill(json({
+        verdict: 'ok',
+        guardrails: { auto_pause_enabled: true, bounce_pause_pct: 8, complaint_pause_pct: 1.5 },
+        pause_events: [],
+        score: { value: 91, confidence: 'high', delivered: 2400, components: [] },
+      }))
+    }
     if (path.endsWith(`/campaigns/${CAMPAIGN_ID}/schedule`)) {
       return route.fulfill(json({
         timezone: 'UTC',

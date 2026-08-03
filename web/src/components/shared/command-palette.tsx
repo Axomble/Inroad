@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, CornerDownLeft } from 'lucide-react'
+import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, CornerDownLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface Command {
@@ -18,6 +18,7 @@ const COMMANDS: readonly Command[] = [
   { id: 'overview', label: 'Overview', group: 'Workspace', icon: LayoutDashboard, to: '/app', keywords: 'home dashboard health activity' },
   { id: 'mailboxes', label: 'Mailboxes', group: 'Sending', icon: Mail, to: '/app/mailboxes', keywords: 'smtp gmail microsoft connect accounts' },
   { id: 'warmup', label: 'Warmup', group: 'Sending', icon: Flame, to: '/app/warmup', keywords: 'reputation ramp health pool deliverability' },
+  { id: 'deliverability', label: 'Deliverability', group: 'Sending', icon: Gauge, to: '/app/deliverability', keywords: 'score bounce complaint spam placement guardrail reputation' },
   { id: 'campaigns', label: 'Campaigns', group: 'Outreach', icon: Megaphone, to: '/app/campaigns', keywords: 'sequence steps send launch' },
   { id: 'contacts', label: 'Contacts', group: 'Outreach', icon: Users, to: '/app/contacts', keywords: 'lists import csv leads' },
   { id: 'team', label: 'Team', group: 'Workspace', icon: Settings, to: '/app/settings/team', keywords: 'invites members roles settings' },
@@ -27,7 +28,7 @@ const COMMANDS: readonly Command[] = [
  * ⌘K navigation.
  *
  * Deliberately built on the app's own primitives instead of adding a `cmdk`
- * dependency: the command set is five routes, and hand-rolling the list keeps the
+ * dependency: the command set is a handful of routes, and hand-rolling it keeps the
  * lazy chunk tiny and the styling consistent with the rest of the menus.
  *
  * Rendered only while open (the parent lazy-loads this module on first ⌘K), so

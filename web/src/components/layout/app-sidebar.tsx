@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
+import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { useNavCounts } from './use-nav-counts'
@@ -46,6 +46,9 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Mailboxes', to: '/app/mailboxes', icon: Mail },
       { label: 'Warmup', to: '/app/warmup', icon: Flame },
+      // Sits with the sending mailboxes rather than under Outreach: the score is
+      // about the health of what sends, not about any one campaign.
+      { label: 'Deliverability', to: '/app/deliverability', icon: Gauge },
     ],
   },
   {
