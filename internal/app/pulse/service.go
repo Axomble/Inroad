@@ -116,8 +116,11 @@ func (c capacity) gated() int64 { return c.watch + c.throttled + c.paused }
 // and the meter must not promise capacity the sender will not honour.
 func (s *Service) capacityOf(rows []gen.ListPulseSenderCapacityRow) capacity {
 	var c capacity
+	// One instant for every row: cheaper than a clock read per mailbox, and the
+	// whole meter is computed against the same "now".
+	now := s.now()
 	for _, r := range rows {
-		ageDays := int(s.now().Sub(r.CreatedAt.Time).Hours() / 24)
+		ageDays := int(now.Sub(r.CreatedAt.Time).Hours() / 24)
 		effective := sendcap.Effective(int(r.DailyCap), int(r.RampStartCap), int(r.RampDays), r.RampEnabled, ageDays)
 		c.dailyCap += int64(sendcap.Cold(effective, r.HealthState))
 		switch r.HealthState {
