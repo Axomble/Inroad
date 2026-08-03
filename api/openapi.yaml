@@ -845,6 +845,69 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: "This workspace has no mailbox on that domain" }
         '500': { description: "Lookup could not be performed" }
+  /deliverability:
+    get:
+      operationId: getWorkspaceDeliverability
+      tags: [deliverability]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Workspace deliverability rollup over the scoring window. Every component
+        carries `measured`: a signal with no feed is absent, NOT
+        zero-and-therefore-perfect, so the UI can say "not measured" rather than
+        imply a clean rate nobody observed.
+      responses:
+        '200': { description: "Score, components, series and at-risk lists", content: { application/json: { schema: { $ref: '#/components/schemas/DeliverabilityReport' } } } }
+        '401': { description: Unauthorized }
+        '500': { description: "Could not compute" }
+  /campaigns/{id}/deliverability:
+    get:
+      operationId: getCampaignDeliverability
+      tags: [deliverability]
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: "Score for one campaign, plus any automatic pauses", content: { application/json: { schema: { $ref: '#/components/schemas/CampaignDeliverability' } } } }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+  /campaigns/{id}/guardrails:
+    put:
+      operationId: updateCampaignGuardrails
+      tags: [deliverability]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Circuit-breaker settings. On by default: a safeguard nobody enables
+        protects nobody, and the minimum-sample rule is what makes on-by-default
+        safe.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CampaignGuardrails' } } }
+      responses:
+        '200': { description: "Updated", content: { application/json: { schema: { $ref: '#/components/schemas/CampaignGuardrails' } } } }
+        '400': { description: "Invalid JSON or campaign id" }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '422': { description: "A threshold outside 0.1..100" }
+  /deliverability/events:
+    post:
+      operationId: ingestDeliverabilityEvent
+      tags: [deliverability]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Machine endpoint for an external pipeline (an SES SNS subscriber, a
+        provider webhook) to report a complaint or bounce. Idempotent on
+        provider_event_id: a retried delivery must not inflate the rate a circuit
+        breaker reads. A complaint also suppresses the address workspace-wide,
+        being the strongest opt-out signal there is.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/DeliverabilityEvent' } } }
+      responses:
+        '202': { description: "Accepted" }
+        '200': { description: "Duplicate replay, already recorded" }
+        '400': { description: "Invalid JSON" }
+        '401': { description: Unauthorized }
+        '422': { description: "Unknown kind, or a missing email or provider_event_id" }
   /campaigns:
     get:
       operationId: listCampaigns
@@ -1869,6 +1932,96 @@ components:
         dkim: { $ref: '#/components/schemas/DkimStatus' }
         mailbox_count: { type: integer, description: "How many of this workspace's mailboxes send from this domain." }
         checked_at: { type: string, format: date-time, nullable: true, description: "null when never checked." }
+    ScoreConfidence:
+      type: string
+      description: >-
+        How far the score should be trusted: driven by sample size and by how many
+        inputs were actually measured. A high score at low confidence is not a
+        clean bill of health.
+      enum: [low, medium, high]
+    ScoreComponent:
+      type: object
+      required: [key, label, penalty, measured]
+      properties:
+        key: { type: string, enum: [bounce, complaint, spam_placement, warmup, domain_auth] }
+        label: { type: string }
+        penalty: { type: integer, description: "Points subtracted from 100 by this component." }
+        rate: { type: number, nullable: true, description: "Observed rate as a percentage, when measured." }
+        measured:
+          type: boolean
+          description: >-
+            False when no feed exists for this signal. False means ABSENT, not
+            clean: render it as "not measured", never as 0%.
+        detail: { type: string, description: "Human explanation, e.g. the warmup state driving the penalty." }
+    DeliverabilityScore:
+      type: object
+      required: [value, confidence, components, delivered]
+      properties:
+        value: { type: integer, minimum: 0, maximum: 100 }
+        confidence: { $ref: '#/components/schemas/ScoreConfidence' }
+        delivered: { type: integer, description: "Sample the score was computed over." }
+        components: { type: array, items: { $ref: '#/components/schemas/ScoreComponent' } }
+    DeliverabilityPoint:
+      type: object
+      required: [date, delivered, bounced]
+      properties:
+        date: { type: string, format: date }
+        delivered: { type: integer }
+        bounced: { type: integer }
+        complained: { type: integer, nullable: true }
+        spam_placed: { type: integer, nullable: true }
+    AtRiskItem:
+      type: object
+      required: [label, reason]
+      properties:
+        label: { type: string, description: "Mailbox address or domain." }
+        reason: { type: string }
+    DeliverabilityReport:
+      type: object
+      required: [score, series, at_risk_mailboxes, at_risk_domains]
+      properties:
+        score: { $ref: '#/components/schemas/DeliverabilityScore' }
+        series: { type: array, items: { $ref: '#/components/schemas/DeliverabilityPoint' } }
+        at_risk_mailboxes: { type: array, items: { $ref: '#/components/schemas/AtRiskItem' } }
+        at_risk_domains: { type: array, items: { $ref: '#/components/schemas/AtRiskItem' } }
+    CampaignPauseEvent:
+      type: object
+      required: [reason, metric, value, threshold, delivered, created_at]
+      properties:
+        reason: { type: string, enum: [bounce_spike, complaint_spike] }
+        metric: { type: string, enum: [bounce_rate, complaint_rate] }
+        value: { type: number, description: "The observed rate that tripped it." }
+        threshold: { type: number }
+        delivered: { type: integer, description: "Sample it was judged on, always at or above the minimum." }
+        created_at: { type: string, format: date-time }
+    CampaignDeliverability:
+      type: object
+      required: [score, guardrails, pause_events, verdict]
+      properties:
+        score: { $ref: '#/components/schemas/DeliverabilityScore' }
+        guardrails: { $ref: '#/components/schemas/CampaignGuardrails' }
+        pause_events: { type: array, items: { $ref: '#/components/schemas/CampaignPauseEvent' } }
+        verdict:
+          type: string
+          description: >-
+            ok; warn when a rate sits in the band below its pause threshold; paused
+            when the breaker has fired.
+          enum: [ok, warn, paused]
+    CampaignGuardrails:
+      type: object
+      required: [auto_pause_enabled, bounce_pause_pct, complaint_pause_pct]
+      properties:
+        auto_pause_enabled: { type: boolean }
+        bounce_pause_pct: { type: number, minimum: 0.1, maximum: 100 }
+        complaint_pause_pct: { type: number, minimum: 0.1, maximum: 100 }
+    DeliverabilityEvent:
+      type: object
+      required: [kind, email, provider_event_id]
+      properties:
+        kind: { type: string, enum: [complaint, bounce] }
+        email: { type: string }
+        provider_event_id: { type: string, description: "The provider's own id; the idempotency key." }
+        send_id: { type: string, format: uuid, nullable: true }
     ContactSort:
       type: string
       description: >-

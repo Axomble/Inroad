@@ -1,4 +1,4 @@
-.PHONY: help dev db-wait run-web seed db-up db-down migrate-up migrate-down sqlc run-api run-worker build test test-integration tidy lint lint-go lint-web
+.PHONY: help dev db-wait run-web seed db-up db-down migrate-up migrate-down sqlc sqlc-diff sqlc-vet run-api run-worker build test test-integration tidy lint lint-go lint-web
 
 # .env is loaded here rather than by the binaries: nothing in the Go code reads a
 # dotenv file, so the documented `cp .env.example .env && make run-api` failed with
@@ -25,6 +25,12 @@ migrate-down: ## Roll back one migration
 sqlc: ## Regenerate sqlc code
 	sqlc generate
 
+sqlc-diff: ## Fail if the generated sqlc code is stale (no writes)
+	sqlc diff
+
+sqlc-vet: ## PREPARE every query against the TEST database (needs make db-up + migrate)
+	sqlc vet
+
 run-api: ## Run the API server
 	go run ./cmd/inroad
 
@@ -50,7 +56,12 @@ test: ## Run unit tests
 # demand — see internal/platform/db/dbtest. They used to default to the dev
 # database and bury the demo data under thousands of fixture rows.
 test-integration: ## Run integration tests against inroad_test (needs make db-up)
-	go test -tags=integration ./...
+	# -p 4 bounds how many packages run at once. db.Connect raises an unpinned pool
+	# to 25 connections, which is right for a server and wrong here: unbounded, the
+	# suite exceeds a stock max_connections=100 and fails with "sorry, too many
+	# clients already" in whichever package asked last -- reading as a defect in
+	# code nobody touched.
+	go test -p 4 -tags=integration ./...
 
 tidy: ## Tidy go.mod
 	go mod tidy

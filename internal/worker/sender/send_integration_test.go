@@ -123,6 +123,15 @@ func TestSendPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("campaign: %v", err)
 	}
 
+	// CreateCampaign leaves status='draft', and the send path now refuses to send
+	// from anything but 'running' — launch is what sets it in production. This
+	// fixture calls EnqueueSends directly, so it sets the status by hand too.
+	if _, err := pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		cam.ID, ws.ID); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+
 	sendIDs, err := q.EnqueueSends(ctx, gen.EnqueueSendsParams{ID: cam.ID, WorkspaceID: ws.ID})
 	if err != nil {
 		t.Fatalf("enqueue sends: %v", err)

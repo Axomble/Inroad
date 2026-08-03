@@ -1,0 +1,17 @@
+-- The deliverability series counts sends per day for a WORKSPACE, but every
+-- existing sends index leads on something else: idx_sends_workspace_created is
+-- keyed on created_at (not sent_at), idx_sends_campaign_sent on campaign_id, and
+-- idx_sends_mailbox_sent on mailbox_id. With no index leading on
+-- (workspace_id, sent_at), each of the 30 days in the window scanned the whole
+-- campaign index for its one-day range.
+--
+-- Measured on 200,000 sends before adding it: the delivered series alone ran in
+-- 244 ms across 30 correlated subqueries (Index Scan on idx_sends_campaign_sent,
+-- 6,635 rows per loop). With this index it is 20 ms and becomes an INDEX ONLY
+-- scan — no heap access — because workspace_id and sent_at are the only columns
+-- the count needs. Twelve times faster on the query behind the dashboard chart.
+--
+-- Partial on status='sent' for the same reason idx_sends_campaign_sent is: the
+-- series only ever counts delivered mail, so queued/failed rows are dead weight
+-- in the index.
+CREATE INDEX idx_sends_ws_sent ON sends (workspace_id, sent_at) WHERE status = 'sent';

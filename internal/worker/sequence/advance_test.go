@@ -116,6 +116,10 @@ type fakeEnq struct {
 	at       time.Time
 	inCalled bool
 	in       time.Duration
+	// evaluated collects the campaign ids a breaker evaluation was enqueued for,
+	// so a test can assert a finalised send triggers exactly one.
+	evaluated   []string
+	evaluateErr error
 }
 
 func (f *fakeEnq) EnqueueAdvanceAt(_, _ string, t time.Time) error {
@@ -124,6 +128,13 @@ func (f *fakeEnq) EnqueueAdvanceAt(_, _ string, t time.Time) error {
 }
 func (f *fakeEnq) EnqueueAdvanceIn(_, _ string, d time.Duration) error {
 	f.inCalled, f.in = true, d
+	return nil
+}
+func (f *fakeEnq) EnqueueDeliverabilityEvaluate(campaignID, _ string) error {
+	if f.evaluateErr != nil {
+		return f.evaluateErr
+	}
+	f.evaluated = append(f.evaluated, campaignID)
 	return nil
 }
 
@@ -408,6 +419,66 @@ func TestAdvanceSendsAndSchedulesNext(t *testing.T) {
 	}
 	if !enq.atCalled || !enq.at.Equal(next) {
 		t.Fatalf("next advance not scheduled at NextDueAt: called=%v at=%v", enq.atCalled, enq.at)
+	}
+}
+
+// A newly delivered send triggers a circuit-breaker evaluation, because the send
+// changes the sample the breaker judges on - and crossing the minimum-delivered
+// floor is itself the trigger for a campaign whose early sends all bounced.
+//
+// It is enqueued as a task, not called inline: the evaluation must read committed
+// state from outside the send path, so a scoring bug cannot fail a delivery.
+func TestAdvanceEnqueuesABreakerEvaluationAfterDelivery(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.StepSendJob{
+			CampaignID: "camp-1", EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo",
+		},
+		claimOK: true,
+		adv:     coreapi.Advance{Completed: true},
+	}
+	snd, enq := &fakeSender{id: "<mid@x>"}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if len(enq.evaluated) != 1 || enq.evaluated[0] != "camp-1" {
+		t.Fatalf("breaker evaluations enqueued = %v, want [camp-1]", enq.evaluated)
+	}
+}
+
+// A failed enqueue must not fail the delivery: the send is already durable, and
+// the next finalised send in the campaign enqueues another evaluation anyway.
+func TestAdvanceSucceedsWhenTheBreakerEnqueueFails(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.StepSendJob{
+			CampaignID: "camp-1", EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo",
+		},
+		claimOK: true,
+		adv:     coreapi.Advance{Completed: true},
+	}
+	snd, enq := &fakeSender{id: "<mid@x>"}, &fakeEnq{evaluateErr: errors.New("redis down")}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatalf("a delivered send failed because the breaker enqueue did: %v", err)
+	}
+	if core.delivered == nil {
+		t.Fatal("the delivery was not recorded")
+	}
+}
+
+// A send that FAILED changes neither the delivered nor the bounced count, so it
+// triggers no evaluation - the breaker has nothing new to judge.
+func TestAdvanceDoesNotEvaluateAfterAPermanentFailure(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.StepSendJob{
+			CampaignID: "camp-1", EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo",
+		},
+		claimOK: true,
+	}
+	snd, enq := &fakeSender{err: errors.New("550 no such user")}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if len(enq.evaluated) != 0 {
+		t.Errorf("a failed send enqueued %v", enq.evaluated)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 
+	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -44,6 +45,11 @@ type client struct {
 	// produces the synthetic conversations warmup sends carry. The static library is
 	// the v1 impl; an AI generator drops in behind the same interface.
 	warmupContent warmup.ContentGenerator
+	// breaker owns the campaign circuit breaker (score + verdict + the pause
+	// transition). Composed here for the same reason as enroll: the worker reaches
+	// it through EvaluateCampaignBreaker, so there is exactly one implementation and
+	// the API and the execution plane cannot disagree about when a campaign stops.
+	breaker *deliverability.Service
 }
 
 // New returns the in-process coreapi client backed by the given connection
@@ -64,6 +70,7 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		googleOAuth:   googleOAuth,
 		msOAuth:       msOAuth,
 		enroll:        enrollment.NewService(enrollment.NewPgStore(q)),
+		breaker:       deliverability.NewService(deliverability.NewPgStore(pool)),
 		warmupSecret:  warmupSecret,
 		warmupContent: warmupContent,
 	}

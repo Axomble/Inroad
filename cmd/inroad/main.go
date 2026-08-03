@@ -26,6 +26,7 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
+	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
@@ -245,6 +246,12 @@ func run() error {
 		sequencestep.NewService(sequencestep.NewPgStore(pool), campaignStatusChecker{campaigns: campaignStore}),
 		cfg.JWTSecret,
 	)
+	// Deliverability guardrails. One service backs BOTH the API endpoints and the
+	// worker's circuit breaker (through coreapi), so the number an operator reads
+	// and the verdict that stops a campaign come from one computation.
+	deliverabilityHandler := deliverability.NewHandler(
+		deliverability.NewService(deliverability.NewPgStore(pool)),
+	)
 	suppStore := suppression.NewStore(queries)
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
@@ -308,11 +315,18 @@ func run() error {
 		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
 		// Routes(identStore) additionally applies RequireVerified to /launch
 		// (email-gated sending).
-		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler).Routes(identStore)},
+		// The deliverability sub-router registers /campaigns/{id}/deliverability and
+		// /campaigns/{id}/guardrails here rather than on its own mount, so they live
+		// under the campaigns prefix (chi cannot mount two routers on one prefix).
+		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler, deliverabilityHandler).Routes(identStore)},
 		// Sending-domain authentication (SPF/DKIM/DMARC). Read-only status plus an
 		// on-demand recheck; the domain list is derived from this workspace's
 		// mailboxes, and the recheck resolves a domain ONLY after confirming the
 		// workspace sends from it (404 otherwise), so it is not a resolver proxy.
+		// Deliverability rollup + the MACHINE event-ingest endpoint. Mounted on the
+		// data plane because ingest is api-key authenticated: an external bounce/
+		// complaint pipeline is exactly the caller this group exists for.
+		{pattern: "/api/v1/deliverability", handler: deliverabilityHandler.Routes()},
 		{pattern: "/api/v1/sending-domains", handler: sendingdomain.NewHandler(
 			sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver()),
 		).Routes()},

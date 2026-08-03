@@ -12,7 +12,16 @@ RETURNING id;
 -- practice), pinning workspace_id in the WHERE clause forces a not-found
 -- verdict if a worker somehow processes a send id from another tenant.
 -- Defense in depth on top of the queue-side ownership.
+--
+-- campaign_status gates the send: only a 'running' campaign may send. This path is
+-- DORMANT (EnqueueSends, the only writer of 'queued' campaign sends, has no
+-- production callers — the live sender is the step path), so the gate is not
+-- currently load-bearing. It exists so the invariant "a campaign that is not
+-- running does not send" is a property of the CODEBASE rather than of one path:
+-- whoever revives this path will not remember that the step path grew the check
+-- separately.
 SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
+       cam.status AS campaign_status,
        ct.first_name, cam.subject, cam.body_text, cam.body_html, cam.tracking_enabled,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,

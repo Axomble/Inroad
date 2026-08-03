@@ -19,6 +19,12 @@ const (
 	ScopeListsRead      = "lists:read"
 	ScopeListsWrite     = "lists:write"
 	ScopeCampaignsSend  = "campaigns:send"
+	// ScopeDeliverabilityWrite authorizes POST /deliverability/events — an
+	// external pipeline (an SES SNS subscriber, a provider webhook) reporting a
+	// complaint or bounce. It is its own scope rather than campaigns:write
+	// because that is the whole of what such a pipeline needs: an ingest
+	// credential must not also carry the authority to mutate campaigns.
+	ScopeDeliverabilityWrite = "deliverability:write"
 )
 
 // AllScopes is every scope the server currently understands. A grant carrying
@@ -34,6 +40,7 @@ var AllScopes = []string{
 	ScopeContactsWrite,
 	ScopeListsRead,
 	ScopeListsWrite,
+	ScopeDeliverabilityWrite,
 }
 
 // IsKnownScope reports whether scope is part of the server's vocabulary.
@@ -62,6 +69,10 @@ func IsKnownScope(scope string) bool {
 //     sends and can destructively alter a live campaign.
 //   - ScopeMailboxesWrite — mutates mailbox connections/credentials, which is
 //     security-sensitive infrastructure, not third-party data access.
+//   - ScopeDeliverabilityWrite — an ingested event suppresses an address
+//     workspace-wide and can trip a campaign's circuit breaker. A third party that
+//     could forge complaints could suppress a workspace's contacts and stop its
+//     campaigns; that belongs to a workspace-minted key, not a delegated grant.
 //
 // Admin and API-key management are NOT scopes at all (they are session + admin-role
 // gated, never scope-gated — see RequireRole), so they are structurally unreachable

@@ -3,6 +3,7 @@ package sender
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/hibiken/asynq"
 
@@ -15,6 +16,15 @@ import (
 // carry the pin the worker will use in its DB lookups.
 type SendEnqueuer interface {
 	EnqueueSend(sendID, workspaceID string) error
+}
+
+// DelayedSendEnqueuer is the subset Handler needs: the deferral paths (over the
+// daily cap, or a campaign that is not running) re-enqueue for later rather than
+// finalizing. Defined at the consumer for the same reason as SendEnqueuer — Handler
+// used to take the concrete *queue.Client, which left both deferral branches
+// unreachable from a unit test, because a test could only pass nil.
+type DelayedSendEnqueuer interface {
+	EnqueueSendIn(sendID, workspaceID string, d time.Duration) error
 }
 
 // SweepStuckHandler returns an asynq handler that re-enqueues sends stuck in

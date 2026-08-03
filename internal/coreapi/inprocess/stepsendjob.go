@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/cadence"
@@ -221,6 +222,33 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{}, err
 	}
 	nextOrder := int(step.StepOrder)
+
+	// The campaign is not running: paused (by hand or by the deliverability circuit
+	// breaker), still draft, or done. Nothing may go out.
+	//
+	// Gated on != running rather than == paused so a draft or completed campaign
+	// cannot send either — an allowlist of the one state that may send, not a
+	// denylist of the states that may not.
+	//
+	// Checked at the same point as the daily limit below, and for the same reason:
+	// after a step is known due, but BEFORE a mailbox is pinned or a credential is
+	// unsealed, so a stopped campaign neither decrypts secrets it will not use nor
+	// bumps a pool member's rotation counters for a send that does not happen. It
+	// comes FIRST because it is already in the bundle, so it costs no query, while
+	// campaignLimitReached runs a COUNT.
+	if b.CampaignStatus != string(campaign.StatusRunning) {
+		// The schedule travels for the same reason as the daily-limit branch: a
+		// deferred retry SENDS as soon as it runs, so the worker has to wake inside
+		// the campaign's window.
+		sched, serr := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
+		if serr != nil {
+			return coreapi.StepSendJob{}, serr
+		}
+		return coreapi.StepSendJob{
+			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), CampaignPaused: true,
+			Schedule: sched,
+		}, nil
+	}
 
 	// The campaign-wide daily limit, stacked on top of the per-mailbox caps: the
 	// mailbox gate protects the mailbox, this one protects the campaign, and neither

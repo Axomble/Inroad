@@ -18,6 +18,7 @@ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
+import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
@@ -71,6 +72,11 @@ const AppIndexRoute = AppIndexRouteImport.update({
 const AppContactsRoute = AppContactsRouteImport.update({
   id: '/contacts',
   path: '/contacts',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppDeliverabilityRoute = AppDeliverabilityRouteImport.update({
+  id: '/deliverability',
+  path: '/deliverability',
   getParentRoute: () => AppRoute,
 } as any)
 const AppMailboxesRoute = AppMailboxesRouteImport.update({
@@ -128,6 +134,7 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/contacts': typeof AppContactsRoute
+  '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -147,6 +154,7 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/contacts': typeof AppContactsRoute
+  '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -168,6 +176,7 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/contacts': typeof AppContactsRoute
+  '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -190,6 +199,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/verify-email'
     | '/app/contacts'
+    | '/app/deliverability'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
@@ -209,6 +219,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/verify-email'
     | '/app/contacts'
+    | '/app/deliverability'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
@@ -229,6 +240,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/verify-email'
     | '/app/contacts'
+    | '/app/deliverability'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
@@ -317,6 +329,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppContactsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/deliverability': {
+      id: '/app/deliverability'
+      path: '/deliverability'
+      fullPath: '/app/deliverability'
+      preLoaderRoute: typeof AppDeliverabilityRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/mailboxes': {
       id: '/app/mailboxes'
       path: '/mailboxes'
@@ -385,6 +404,7 @@ declare module '@tanstack/react-router' {
 
 interface AppRouteChildren {
   AppContactsRoute: typeof AppContactsRoute
+  AppDeliverabilityRoute: typeof AppDeliverabilityRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -398,6 +418,7 @@ interface AppRouteChildren {
 
 const AppRouteChildren: AppRouteChildren = {
   AppContactsRoute: AppContactsRoute,
+  AppDeliverabilityRoute: AppDeliverabilityRoute,
   AppMailboxesRoute: AppMailboxesRoute,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,

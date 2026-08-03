@@ -113,6 +113,31 @@ type InboxPollPayload struct {
 // for every active mailbox.
 const TaskInboxSweep = "inbox:sweep"
 
+// TaskDeliverabilityEvaluate re-evaluates one campaign's circuit breaker. It is
+// enqueued AFTER a send is finalised, never inside the send transaction, so a
+// scoring bug cannot fail a delivery.
+const TaskDeliverabilityEvaluate = "deliverability:evaluate"
+
+// DeliverabilityEvaluatePayload is the body of a deliverability:evaluate task.
+// WorkspaceID travels alongside CampaignID so every query the evaluation runs is
+// workspace-pinned (defense in depth on the unguessable campaign UUID).
+type DeliverabilityEvaluatePayload struct {
+	CampaignID  string `json:"campaign_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// evaluateDedupWindow collapses the per-send fan-out. One evaluation per campaign
+// per window is enough: the breaker reads committed state, so a slightly later
+// evaluation sees strictly more evidence than the one it replaced, and without
+// this a 10,000-contact launch would enqueue 10,000 identical evaluations.
+//
+// The delay is what makes the collapse effective rather than theoretical — a
+// TaskID conflict only dedups while the earlier task is still PENDING, so an
+// immediate task would be consumed before the next send finalised and dedup
+// nothing. A minute of latency on a safeguard that acts over a 7-day window costs
+// nothing.
+const evaluateDedupWindow = time.Minute
+
 // Client enqueues tasks onto Redis.
 type Client struct {
 	inner *asynq.Client
@@ -270,6 +295,24 @@ func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time,
 		asynq.Retention(taskRetention),
 	)
 	return c.enqueue(asynq.NewTask(TaskSequenceAdvance, b), opts...)
+}
+
+// EnqueueDeliverabilityEvaluate schedules a breaker evaluation for one campaign.
+// Keyed on (campaign, dedup bucket) so the many sends finalising inside one
+// window collapse to a single evaluation; a TaskID conflict is success (see
+// enqueue), so a collapsed duplicate is not an error the caller has to handle.
+func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) error {
+	b, err := json.Marshal(DeliverabilityEvaluatePayload{CampaignID: campaignID, WorkspaceID: workspaceID})
+	if err != nil {
+		return err
+	}
+	bucket := time.Now().Add(evaluateDedupWindow).Truncate(evaluateDedupWindow)
+	return c.enqueue(asynq.NewTask(TaskDeliverabilityEvaluate, b),
+		asynq.TaskID(fmt.Sprintf("deliverability:%s:%d", campaignID, bucket.Unix())),
+		asynq.ProcessAt(bucket),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Retention(taskRetention),
+	)
 }
 
 // EnqueueInboxPoll enqueues an inbox:poll task for immediate processing.

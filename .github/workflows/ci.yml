@@ -40,6 +40,14 @@ jobs:
       # even for a migrate-only step. Throwaway CI values, never real secrets.
       INROAD_JWT_SECRET: ci-jwt-secret-not-a-real-secret
       INROAD_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      # The TEST database, shared by two consumers that must agree on it:
+      # sqlc.yaml reads it for `sqlc vet` (db-prepare needs a live schema), and
+      # internal/platform/db/dbtest uses it verbatim as the database the
+      # integration suite runs against. It must therefore be the _test database and
+      # not the app's own -- pointing it at `inroad` would silently move the whole
+      # integration suite onto the database the app migrates, defeating the
+      # isolation dbtest exists to enforce.
+      INROAD_TEST_DATABASE_URL: postgres://inroad:inroad@localhost:5432/inroad_test?sslmode=disable
 
     steps:
       - uses: actions/checkout@v7
@@ -66,14 +74,37 @@ jobs:
         with:
           version: v2.1.6
           install-mode: goinstall
+      # Pinned to the version `make sqlc` runs locally: sqlc's generated output is
+      # version-dependent, so an unpinned CI would fail `sqlc diff` on a release
+      # bump with no source change — and a newer sqlc silently regenerating
+      # different code is exactly what `diff` exists to catch.
+      - name: Install sqlc
+        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
       - name: Verify backend
         run: |
           go vet ./...
-          go test ./...
+          sqlc diff
+          # -race here and on the integration run: this is the only place it can
+          # run at all. It needs cgo, and the Windows dev machines have no C
+          # compiler (CGO_ENABLED=0), so a data race in the worker pool or the
+          # queue is undetectable locally and CI is the sole line of defence.
+          go test -race ./...
       - name: Verify database behavior
         run: |
           go run ./cmd/migrate up
-          go test -tags=integration ./...
+          # sqlc vet reads INROAD_TEST_DATABASE_URL, so that database needs the
+          # schema too. dbtest creates it on demand once the suite runs, but vet
+          # runs first, so create and migrate it here.
+          psql "$INROAD_TEST_DATABASE_URL" -c '\q' 2>/dev/null \
+            || psql "${INROAD_TEST_DATABASE_URL%/*}/postgres" -c 'CREATE DATABASE inroad_test'
+          INROAD_DATABASE_URL="$INROAD_TEST_DATABASE_URL" go run ./cmd/migrate up
+          # After migrate, never before: db-prepare PREPAREs every query against the
+          # live schema, so on an unmigrated database it fails on every query that
+          # touches a new table rather than on the one that is actually wrong.
+          sqlc vet
+          # -p 4 matches make test-integration: unbounded package parallelism
+          # exhausts max_connections, since each package's pool floor is 25.
+          go test -race -p 4 -tags=integration ./...
       - name: Verify API contract
         working-directory: web
         run: npm run lint:api

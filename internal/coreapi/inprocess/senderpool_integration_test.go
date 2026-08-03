@@ -106,6 +106,17 @@ func setupPool(t *testing.T) (context.Context, poolFixture) {
 	// CreateCampaign does not go through the campaign store, so no pool rows and
 	// no send windows exist — which is exactly the unconfigured shape these tests
 	// want to start from.
+	//
+	// It also leaves status='draft', which the send path now refuses to send from
+	// (only 'running' may send). Launch is what sets 'running' in production, and
+	// enrollments cannot exist before it, so a draft campaign with an active
+	// enrollment is a state production never produces — these fixtures build the
+	// enrollment by hand and so have to set the status by hand too.
+	if _, err := pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		cam.ID, ws.ID); err != nil {
+		t.Fatalf("running: %v", err)
+	}
 	core := New(pool, itKeyring(t, q), []byte("0123456789abcdef0123456789abcdef"),
 		"https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{},
 		[]byte("warmup-secret-0123456789abcdef"), warmup.NewStaticLibrary())

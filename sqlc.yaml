@@ -3,6 +3,20 @@ sql:
   - engine: "postgresql"
     schema: "internal/platform/db/migrations"
     queries: "internal/platform/db/queries"
+    # `sqlc vet` needs a live database for the built-in sqlc/db-prepare rule,
+    # which PREPAREs every query and so catches what sqlc's own parser accepts
+    # but PostgreSQL rejects. Read from the env so no connection string is
+    # committed; point it at the TEST database, never the dev one.
+    database:
+      uri: "${INROAD_TEST_DATABASE_URL}"
+    # ...but code generation stays on the built-in parser. Letting the analyzer
+    # use the database would make generated output depend on whatever schema
+    # happens to be migrated locally, so `sqlc generate` would stop being
+    # reproducible from the migrations alone.
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
     gen:
       go:
         package: "gen"

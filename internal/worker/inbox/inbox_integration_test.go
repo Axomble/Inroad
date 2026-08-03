@@ -145,6 +145,17 @@ func seedActiveEnrollment(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 		t.Fatalf("step 2: %v", err)
 	}
 
+	// EnrollListMembers does not flip the campaign to 'running' (only the campaign
+	// store's EnrollTx does, in one transaction with the enrollment insert), and the
+	// send path now refuses to send from a campaign that is not running. Set it
+	// here: a draft campaign with an active enrollment is a state production cannot
+	// produce, and these tests need a sendable one to have a step to reply to.
+	if _, err := pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		cam.ID, ws.ID); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+
 	ids, err := q.EnrollListMembers(ctx, gen.EnrollListMembersParams{ID: cam.ID, WorkspaceID: ws.ID})
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("enroll: %v ids=%d", err, len(ids))

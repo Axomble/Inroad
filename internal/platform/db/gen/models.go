@@ -200,21 +200,37 @@ type ApiKey struct {
 }
 
 type Campaign struct {
-	ID              uuid.UUID          `json:"id"`
-	WorkspaceID     uuid.UUID          `json:"workspace_id"`
-	Name            string             `json:"name"`
-	MailboxID       uuid.UUID          `json:"mailbox_id"`
-	ListID          uuid.UUID          `json:"list_id"`
-	Subject         string             `json:"subject"`
-	BodyText        string             `json:"body_text"`
-	BodyHtml        string             `json:"body_html"`
-	Status          string             `json:"status"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	LaunchedAt      pgtype.Timestamptz `json:"launched_at"`
-	TrackingEnabled bool               `json:"tracking_enabled"`
-	Timezone        string             `json:"timezone"`
-	RotationMode    string             `json:"rotation_mode"`
-	DailyLimit      *int32             `json:"daily_limit"`
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	Name                string             `json:"name"`
+	MailboxID           uuid.UUID          `json:"mailbox_id"`
+	ListID              uuid.UUID          `json:"list_id"`
+	Subject             string             `json:"subject"`
+	BodyText            string             `json:"body_text"`
+	BodyHtml            string             `json:"body_html"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	LaunchedAt          pgtype.Timestamptz `json:"launched_at"`
+	TrackingEnabled     bool               `json:"tracking_enabled"`
+	Timezone            string             `json:"timezone"`
+	RotationMode        string             `json:"rotation_mode"`
+	DailyLimit          *int32             `json:"daily_limit"`
+	AutoPauseEnabled    bool               `json:"auto_pause_enabled"`
+	BouncePausePct      pgtype.Numeric     `json:"bounce_pause_pct"`
+	ComplaintPausePct   pgtype.Numeric     `json:"complaint_pause_pct"`
+	GuardrailsEnabledAt pgtype.Timestamptz `json:"guardrails_enabled_at"`
+}
+
+type CampaignPauseEvent struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	Reason      string             `json:"reason"`
+	Metric      string             `json:"metric"`
+	Value       pgtype.Numeric     `json:"value"`
+	Threshold   pgtype.Numeric     `json:"threshold"`
+	Delivered   int32              `json:"delivered"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type CampaignSendWindow struct {
@@ -249,6 +265,16 @@ type Contact struct {
 	CustomFields []byte             `json:"custom_fields"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	SearchText   *string            `json:"search_text"`
+}
+
+type DeliverabilityEvent struct {
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	Kind            string             `json:"kind"`
+	Email           string             `json:"email"`
+	SendID          pgtype.UUID        `json:"send_id"`
+	ProviderEventID string             `json:"provider_event_id"`
+	ReceivedAt      pgtype.Timestamptz `json:"received_at"`
 }
 
 type EmailOtpCode struct {

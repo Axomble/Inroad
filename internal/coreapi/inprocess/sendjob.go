@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/sendcap"
@@ -37,6 +38,18 @@ func (c client) GetSendJob(ctx context.Context, sendID, workspaceID string) (cor
 	// closed instead of leaking another tenant's row.
 	if b.WorkspaceID != ws {
 		return coreapi.SendJob{}, coreapi.ErrCrossTenant
+	}
+	// The campaign is not running — paused (by hand or by the deliverability circuit
+	// breaker), still draft, or done. Returned BEFORE any credential is unsealed, so
+	// a stopped campaign never decrypts a secret it will not use, exactly as on the
+	// step path (GetStepSendJob).
+	//
+	// This path is DORMANT: EnqueueSends, the only writer of 'queued' campaign sends,
+	// has no production callers. The gate is here so the invariant holds of the
+	// codebase and not merely of the live path — an invariant that is true of one
+	// call site rots the moment someone adds a second.
+	if b.CampaignStatus != string(campaign.StatusRunning) {
+		return coreapi.SendJob{CampaignPaused: true}, nil
 	}
 	// Transport dispatch on the mailbox provider. API providers (gmail, m365):
 	// refresh+return a short-lived access token (reseal handled in coreapi), no

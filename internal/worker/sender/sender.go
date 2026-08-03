@@ -29,11 +29,16 @@ type Sender interface {
 // stuck sent-today counter) doesn't cycle forever.
 const maxSendAttempts = 30
 
+// campaignPausedBackoff is how long a send waits while its campaign is not
+// running. A relaunch happens on no schedule the worker can predict, so it polls
+// on the same 6h interval the cap-exceeded path uses.
+const campaignPausedBackoff = 6 * time.Hour
+
 // Handler returns an asynq handler for send:email tasks. publicURL and
 // trackingSecret are the base URL and HMAC secret used to build/sign open and
 // click tracking links (internal/worker/track) when the job's campaign has
 // tracking enabled.
-func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL string, trackingSecret []byte) func(context.Context, *asynq.Task) error {
+func Handler(core coreapi.Client, sender Sender, enq DelayedSendEnqueuer, publicURL string, trackingSecret []byte) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.SendEmailPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -56,6 +61,20 @@ func Handler(core coreapi.Client, sender Sender, enq *queue.Client, publicURL st
 
 		if job.Suppressed {
 			return core.MarkSend(ctx, p.SendID, p.WorkspaceID, coreapi.SendResult{Status: "skipped"})
+		}
+		// The campaign is not running: paused (by hand or by the deliverability
+		// circuit breaker), draft, or done. Deferred rather than finalized, matching
+		// the step path — a pause is a condition that CLEARS, and the row must
+		// survive to be sent when an operator relaunches. Attempts is deliberately
+		// NOT bumped: maxSendAttempts exists to kill a ceiling that can never clear,
+		// and charging a paused campaign against it would fail the send after ~7.5
+		// days of a pause the operator chose.
+		//
+		// This path is DORMANT (nothing in production creates 'queued' campaign
+		// sends); the gate is here so the invariant is a property of the codebase
+		// rather than of the one live path.
+		if job.CampaignPaused {
+			return enq.EnqueueSendIn(p.SendID, p.WorkspaceID, campaignPausedBackoff)
 		}
 		if job.SentToday >= job.EffectiveDailyCap {
 			// Over today's cap. Bump attempts and re-enqueue for the next

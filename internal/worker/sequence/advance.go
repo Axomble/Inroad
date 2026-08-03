@@ -28,10 +28,16 @@ type Sender interface {
 	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
 }
 
-// Enqueuer schedules the next advance. Satisfied by *queue.Client.
+// Enqueuer schedules the next advance and the post-send breaker evaluation.
+// Satisfied by *queue.Client.
 type Enqueuer interface {
 	EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error
 	EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error
+	// EnqueueDeliverabilityEvaluate asks the control plane to re-score this
+	// campaign's circuit breaker. Deliberately a task rather than an inline call:
+	// the evaluation must read COMMITTED state and sit outside the send path
+	// entirely, so a scoring bug cannot fail a delivery (invariant 5).
+	EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) error
 }
 
 // capBackoff is how long to wait before retrying an enrollment blocked by the
@@ -49,7 +55,9 @@ const minBlockedBackoff = time.Minute
 //   - a campaign at its daily_limit clears at the next UTC midnight, when the
 //     allowance resets — retrying sooner just burns a task to learn nothing;
 //   - a warmup-paused mailbox clears whenever the health sweep steps it back down,
-//     which is not on a schedule this worker can predict, so it reuses capBackoff.
+//     which is not on a schedule this worker can predict, so it reuses capBackoff;
+//   - a campaign that is not running clears when an operator relaunches it, which
+//     is likewise unpredictable, so it is poll-shaped too.
 //
 // A campaign that is BOTH limited and paused takes the shorter wait: the sooner
 // signal is the one worth re-checking.
@@ -61,7 +69,8 @@ const minBlockedBackoff = time.Minute
 // job with no usable schedule (an older enqueued task, a campaign whose windows
 // cannot be compiled) keeps the raw instant rather than refusing to retry.
 func blockedBackoff(job coreapi.StepSendJob, now time.Time) time.Duration {
-	return nextAttemptIn(job.Schedule, job.EnrollmentID, job.CampaignLimited, job.HealthPaused, now)
+	poll := job.HealthPaused || job.CampaignPaused
+	return nextAttemptIn(job.Schedule, job.EnrollmentID, job.CampaignLimited, poll, now)
 }
 
 // nextAttemptIn is when a step blocked by a SELF-CLEARING condition should be
@@ -188,7 +197,16 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// budget would mark ~99% of them 'failed' for working as instructed. A
 		// warmup pause is timed and self-clearing. So these wait indefinitely,
 		// staying 'active' and visible in the UI, which is the honest state.
-		if job.CampaignLimited || job.HealthPaused {
+		//
+		// CampaignPaused joins them, and is the one that makes the deliverability
+		// circuit breaker actually stop anything: without this gate the breaker set
+		// campaigns.status='paused', recorded its reason, and the campaign kept
+		// sending, because every mid-sequence enrollment is 'active' at the moment of
+		// the pause and the success path below re-enqueues the next advance. It
+		// belongs in THIS branch rather than as a stop for the same reason as the
+		// other two — an operator clears a pause by relaunching, and the enrollments
+		// must resume, not have been marked 'failed' while they waited.
+		if job.CampaignLimited || job.HealthPaused || job.CampaignPaused {
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now()))
 		}
 		if job.EffectiveDailyCap <= 0 {
@@ -219,6 +237,18 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				return err
 			}
 			return schedule(adv)
+		}
+		// evaluateBreaker asks for a circuit-breaker re-score now that this send is
+		// finalised. It runs AFTER the delivery is durable and its failure is LOGGED,
+		// never returned: a campaign that could not be re-scored must not turn a
+		// successful delivery into a retried task, and the next finalised send in the
+		// campaign enqueues another evaluation anyway. The enqueue itself dedups
+		// per-campaign, so a 10,000-contact launch does not become 10,000 evaluations.
+		evaluateBreaker := func() {
+			if err := enq.EnqueueDeliverabilityEvaluate(job.CampaignID, p.WorkspaceID); err != nil {
+				slog.WarnContext(ctx, "deliverability_evaluate_enqueue_failed",
+					"campaign_id", job.CampaignID, "err", err)
+			}
 		}
 
 		// Claim-before-send: the sends row is the delivery claim.
@@ -287,6 +317,10 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				// one-UPDATE + hard-crash window documented on MarkStepDelivered.
 				return fmt.Errorf("mark step delivered: %w", err)
 			}
+			// A newly delivered send changes the sample the breaker judges on — and
+			// crossing the minimum-delivered floor is itself a trigger, since a
+			// campaign whose first 49 sends all bounced becomes actionable on its 50th.
+			evaluateBreaker()
 			return advanceCursor()
 		case mail.Retryable(sendErr):
 			// Transient failure (nothing delivered): release the claim so the

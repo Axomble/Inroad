@@ -285,6 +285,29 @@ type Client interface {
 	RecordSendingDomainAuth(ctx context.Context, in SendingDomainAuth) error
 }
 
+// BreakerResult is the outcome of one campaign circuit-breaker evaluation.
+//
+// It is a seam TYPE here but the method that returns it is deliberately NOT on
+// Client: the breaker is consumed through a one-method interface defined by the
+// worker package that needs it (worker/deliverability.Breaker), satisfied by the
+// in-process client via type assertion at the composition root — the same shape
+// as maintenance.Cleaner. Client already carries 40 methods that 13 test fakes
+// implement in full, so adding a 41st to serve one call site would break every
+// one of them for no gain in the seam's expressiveness.
+//
+// Paused is true only for the evaluation that ACTUALLY stopped the campaign, so
+// exactly one caller ever reports the pause. The remaining fields explain why it
+// fired: which rate, its observed value, the threshold it crossed, and the sample
+// it was judged on.
+type BreakerResult struct {
+	Paused    bool
+	Reason    string
+	Metric    string
+	Value     float64
+	Threshold float64
+	Delivered int
+}
+
 // SendingDomainRef is a (workspace id, domain) pair from the staleness scan.
 // Strings at the seam, like every other coreapi id; the implementation parses
 // and pins them.
@@ -383,8 +406,20 @@ type StepSendJob struct {
 	// SentToday >= EffectiveDailyCap: those two numbers reach the logs and describe
 	// the mailbox, so a campaign-wide limit or a health pause must not masquerade as
 	// a mailbox that has used up its cap.
-	CampaignLimited    bool
-	HealthPaused       bool
+	CampaignLimited bool
+	HealthPaused    bool
+	// CampaignPaused means the campaign is not 'running' — paused (by hand or by the
+	// deliverability circuit breaker), or still draft, or done. It gates the send
+	// itself: without it a breaker-paused campaign kept sending, because every
+	// mid-sequence enrollment is 'active' at the moment of the pause and each
+	// successful send re-enqueues the next advance, so the chain is
+	// self-perpetuating.
+	//
+	// Carried EXPLICITLY, like the two flags above, rather than expressed as Skip:
+	// Skip means "nothing to do here ever" and leaves the enrollment where it is,
+	// whereas a pause is a condition that CLEARS. The enrollment has to wait and
+	// resume, so the worker defers it (see the blocked branch in advance.go).
+	CampaignPaused     bool
 	EffectiveDailyCap  int
 	SentToday          int
 	MinIntervalSeconds int
@@ -492,10 +527,15 @@ type SendRef struct {
 // a []byte so the worker can zeroize it after use; a Go string would be
 // immutable and hang around in memory until GC.
 type SendJob struct {
-	SendID            string
-	WorkspaceID       string
-	Attempts          int
-	Suppressed        bool
+	SendID      string
+	WorkspaceID string
+	Attempts    int
+	Suppressed  bool
+	// CampaignPaused means the campaign is not 'running'. Same gate as
+	// StepSendJob.CampaignPaused; see there for why it is not expressed as Skip.
+	// This (direct) path is dormant, so the flag is insurance for whoever revives
+	// it rather than a live guard.
+	CampaignPaused    bool
 	EffectiveDailyCap int
 	SentToday         int
 	ToEmail           string
