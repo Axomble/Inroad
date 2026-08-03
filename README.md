@@ -58,6 +58,8 @@ infrastructure than rent it.
 | **Bounce handling** | DSN parsing on inbound mail; hard bounces mark the send and stop the enrollment before the next step fires. |
 | **Suppression & one-click unsubscribe** | Workspace-wide suppression list, signed unsubscribe tokens, opt-outs enforced at send time. |
 | **Open / click tracking** | Signed, per-send tracking tokens, toggleable per campaign, with opens honestly labelled *indicative* and clicks *reliable*. |
+| **Domain authentication checks** | SPF, DKIM, and DMARC verified per sending domain, so a missing or broken record is a visible state on the mailboxes you send from instead of silent spam-foldering. |
+| **Live console pulse** | One O(1) aggregate read-model drives the whole chrome: a sidebar pulse card that stays quiet when healthy and promotes the worst problem first (with its reason and a link to the fix), live nav counts, and a today's-sends meter. Polls; no websockets to run. |
 | **Contacts at scale** | Server-side search across email, name and company via a trigram index, and keyset pagination that seeks by cursor instead of `OFFSET` — a page 200k rows in costs the same as the first. CSV import with skip/duplicate reporting. |
 | **Multi-workspace teams** | One account, many workspaces. Owner / admin / member roles, email invites, workspace switcher. |
 | **Envelope-encrypted secrets** | Per-workspace data-encryption keys wrapped by a key-encryption key. Deleting a workspace crypto-shreds its secrets. |
@@ -65,6 +67,10 @@ infrastructure than rent it.
 ---
 
 ## A look inside
+
+The chrome keeps score everywhere: the sidebar's **pulse card** answers "is everything okay?" from
+any page — quiet two lines when it is, severity-sorted problems with reasons and fix links when it
+isn't — beside live nav counts, a `⌘K` palette, and keyboard list navigation with a visible hint bar.
 
 ### Run campaigns
 
@@ -89,7 +95,8 @@ Send counts, engagement rates, and every enrollment with the reply class that st
 ### Connect the mailboxes you already own
 
 Gmail and Microsoft 365 connect over OAuth; anything else connects over SMTP/IMAP. Credentials are
-verified with a live connection test before they're saved, then sealed.
+verified with a live connection test before they're saved, then sealed. The same page checks SPF,
+DKIM, and DMARC per sending domain — with honest caveats where DNS can't prove a negative.
 
 ![Mailbox list with provider picker](docs/images/mailboxes.png)
 
@@ -308,9 +315,10 @@ health-gated cold sending and campaign-wide daily limits · the warmup pool end-
 threaded replies, rescue-from-spam, mark-read, measured placement health, per-IP worker routing) ·
 reply and bounce polling across all three transports · deterministic reply classification ·
 suppression and one-click unsubscribe · open/click tracking · server-side contact search with keyset
-pagination.
+pagination · SPF/DKIM/DMARC domain authentication checks · the console pulse read-model behind the
+live sidebar.
 
-**On the roadmap:** a unified cross-mailbox inbox UI · SPF/DKIM/DMARC domain authentication checks ·
+**On the roadmap:** a unified cross-mailbox inbox UI ·
 lead-flow throttling, so a launch spreads across as many days as the pool's capacity actually needs
 rather than queueing behind a daily cap · outbound webhooks and a public API · cloud KMS as a second
 `KeyProvider` · rate limiting and an audit log on auth, connect, and reply-driven suppression · a
