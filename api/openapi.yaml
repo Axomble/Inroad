@@ -720,6 +720,24 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/WarmupOverview' }
         '401': { description: Unauthorized }
+  /pulse:
+    get:
+      operationId: getPulse
+      tags: [pulse]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace-wide aggregate read-model behind the console chrome
+        (pulse card, nav counts, overview tiles): mailbox/warmup/campaign/contact
+        counts, today's sending meter, and severity-sorted attention rows.
+        One O(1)-size payload for the caller's active workspace; poll it
+        rather than fetching lists to count them.
+      responses:
+        '200':
+          description: Workspace pulse
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pulse' }
+        '401': { description: Unauthorized }
   /lists:
     get:
       operationId: listLists
@@ -2069,6 +2087,74 @@ components:
           type: array
           description: daily stats, oldest first, up to 30 days
           items: { $ref: '#/components/schemas/WarmupDayStat' }
+    Pulse:
+      type: object
+      description: >-
+        Workspace-wide aggregates in one payload. attention is severity-sorted
+        worst-first (danger > warn > info); an all-clear workspace has an empty
+        array. inbox is literal zeros until the inbox read-model ships.
+      required: [mailboxes, warmup, campaigns, contacts, sending, inbox, attention]
+      properties:
+        mailboxes:
+          type: object
+          required: [total, active, paused, error]
+          properties:
+            total: { type: integer }
+            active: { type: integer }
+            paused: { type: integer }
+            error: { type: integer }
+        warmup:
+          type: object
+          description: enabled warmup participants bucketed by live health; at_risk = throttled + paused
+          required: [pool, healthy, watch, at_risk]
+          properties:
+            pool: { type: integer }
+            healthy: { type: integer }
+            watch: { type: integer }
+            at_risk: { type: integer }
+        campaigns:
+          type: object
+          required: [total, running, draft, paused]
+          properties:
+            total: { type: integer }
+            running: { type: integer }
+            draft: { type: integer }
+            paused: { type: integer }
+        contacts:
+          type: object
+          required: [total]
+          properties:
+            total: { type: integer }
+        sending:
+          type: object
+          required: [sent_today, daily_cap]
+          properties:
+            sent_today: { type: integer, description: cold sends completed this UTC day (same boundary the caps enforce) }
+            daily_cap: { type: integer, description: "today's workspace capacity: each active mailbox's ramped cap scaled by its warmup health" }
+        inbox:
+          type: object
+          required: [unread, interested]
+          properties:
+            unread: { type: integer, description: always 0 until the inbox ships }
+            interested: { type: integer, description: always 0 until the inbox ships }
+        attention:
+          type: array
+          items: { $ref: '#/components/schemas/PulseAttention' }
+    PulseAttention:
+      type: object
+      description: >-
+        One server-defined "needs attention" row. Clients render whatever
+        appears here, so new producers require no client changes; unknown
+        kinds must render generically.
+      required: [kind, severity, count, reason, href]
+      properties:
+        kind:
+          type: string
+          description: "stable machine identifier; current producers: mailbox_error, senders_gated, dmarc_failing, cap_consumed"
+        severity: { type: string, enum: [danger, warn, info] }
+        count: { type: integer }
+        reason: { type: string, description: human-readable explanation derived from real data }
+        href: { type: string, description: console destination that shows/fixes the condition }
     OAuth2RegisterRequest:
       type: object
       required: [client_name, redirect_uris]
