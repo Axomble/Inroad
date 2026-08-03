@@ -78,8 +78,20 @@ jobs:
       # version-dependent, so an unpinned CI would fail `sqlc diff` on a release
       # bump with no source change — and a newer sqlc silently regenerating
       # different code is exactly what `diff` exists to catch.
+      # The published binary, not `go install`: sqlc v1.31.1's module declares
+      # `go >= 1.26.0`, and actions/setup-go pins GOTOOLCHAIN=local, so building it
+      # from source fails outright on the Go version this repo targets. The release
+      # tarball carries no toolchain constraint and is the same pinned version
+      # `make sqlc` runs locally.
       - name: Install sqlc
-        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+        run: |
+          mkdir -p "$RUNNER_TEMP/sqlc-bin"
+          curl -fsSL "https://downloads.sqlc.dev/sqlc_${SQLC_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/sqlc-bin" sqlc
+          echo "$RUNNER_TEMP/sqlc-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/sqlc-bin/sqlc" version
+        env:
+          SQLC_VERSION: 1.31.1
       - name: Verify backend
         run: |
           go vet ./...
