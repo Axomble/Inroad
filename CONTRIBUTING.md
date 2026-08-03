@@ -26,6 +26,35 @@ Equivalent raw commands if you don't use make: `go test ./...` and
 > If `go`/`sqlc` aren't on PATH (Windows), prefix commands with:
 > `export PATH="$PATH:/c/Program Files/Go/bin:$HOME/go/bin"`.
 
+### Tests that pass but assert nothing
+
+**The tell: a test that passes when you expected it to fail.** That is the only
+reliable signal, so when you add a check, first break it on purpose and watch the
+test go red. A test that was already green cannot tell you whether it covers the
+thing you just wrote — and review will not catch this, because the test reads
+correctly. Both examples below were found this way and neither was visible on the
+page.
+
+Two shapes recur:
+
+**A fixture that builds rows by hand skips the state machine, and hides every check
+on the state it skipped.** Several fixtures created `sequence_enrollments` with a
+direct `INSERT` (or `q.EnrollListMembers`), neither of which sets
+`campaigns.status = 'running'` — only the campaign store's `EnrollTx` does, in the
+same transaction as the enrollment. So the whole suite exercised the send path
+against a `draft` campaign, a state production cannot produce, and a missing
+campaign-status gate stayed invisible in four tests across three packages. If a
+fixture writes a table that a service method normally owns, it has opted out of
+that method's invariants: either go through the service, or set the state by hand
+*and say why in a comment*.
+
+**A concrete dependency that tests satisfy with `nil` makes every branch behind it
+unreachable.** `sender.Handler` took a `*queue.Client`; every unit test passed
+`nil`, so both of its deferral branches were untestable and one had been that way
+since it was written. Depend on a small consumer-defined interface (`Enqueuer`,
+`Store`, `Sender`) so a fake can assert the branch — the same dependency-inversion
+rule the domains follow, applied to workers.
+
 ## Conventions (summary — full list in CLAUDE.md)
 - File names: kebab-case (frontend), lowercase (Go). Identifiers: language-idiomatic
   (Go `MixedCaps`, TS `camelCase`/`PascalCase`). snake_case only at boundaries
@@ -64,6 +93,8 @@ domain `X` (e.g. `contact`), follow the same shape:
 ### Definition of done for a domain
 - [ ] `go build ./...` and `go vet ./...` clean; `gofmt -l` empty.
 - [ ] Unit tests pass; integration test passes against `make db-up`.
+- [ ] Every new check was watched failing before it was watched passing (see
+      "Tests that pass but assert nothing").
 - [ ] No secret fields in any response DTO; outbound dials use the SSRF guard.
 - [ ] All queries scoped by `workspace_id`.
 - [ ] OpenAPI updated; `npm run gen:api` regenerates cleanly.
