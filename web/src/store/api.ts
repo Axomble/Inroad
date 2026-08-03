@@ -396,6 +396,40 @@ const injectedRtkApi = api.injectEndpoints({
         method: "POST",
       }),
     }),
+    getWorkspaceDeliverability: build.query<
+      GetWorkspaceDeliverabilityApiResponse,
+      GetWorkspaceDeliverabilityApiArg
+    >({
+      query: () => ({ url: `/deliverability` }),
+    }),
+    getCampaignDeliverability: build.query<
+      GetCampaignDeliverabilityApiResponse,
+      GetCampaignDeliverabilityApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/deliverability`,
+      }),
+    }),
+    updateCampaignGuardrails: build.mutation<
+      UpdateCampaignGuardrailsApiResponse,
+      UpdateCampaignGuardrailsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/guardrails`,
+        method: "PUT",
+        body: queryArg.campaignGuardrails,
+      }),
+    }),
+    ingestDeliverabilityEvent: build.mutation<
+      IngestDeliverabilityEventApiResponse,
+      IngestDeliverabilityEventApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/deliverability/events`,
+        method: "POST",
+        body: queryArg.deliverabilityEvent,
+      }),
+    }),
     listCampaigns: build.query<ListCampaignsApiResponse, ListCampaignsApiArg>({
       query: () => ({ url: `/campaigns` }),
     }),
@@ -829,6 +863,24 @@ export type CheckSendingDomainApiResponse =
   /** status 200 Updated status */ SendingDomain;
 export type CheckSendingDomainApiArg = {
   domain: string;
+};
+export type GetWorkspaceDeliverabilityApiResponse =
+  /** status 200 Score, components, series and at-risk lists */ DeliverabilityReport;
+export type GetWorkspaceDeliverabilityApiArg = void;
+export type GetCampaignDeliverabilityApiResponse =
+  /** status 200 Score for one campaign, plus any automatic pauses */ CampaignDeliverability;
+export type GetCampaignDeliverabilityApiArg = {
+  id: string;
+};
+export type UpdateCampaignGuardrailsApiResponse =
+  /** status 200 Updated */ CampaignGuardrails;
+export type UpdateCampaignGuardrailsApiArg = {
+  id: string;
+  campaignGuardrails: CampaignGuardrails;
+};
+export type IngestDeliverabilityEventApiResponse = unknown;
+export type IngestDeliverabilityEventApiArg = {
+  deliverabilityEvent: DeliverabilityEvent;
 };
 export type ListCampaignsApiResponse = /** status 200 Campaigns */ Campaign[];
 export type ListCampaignsApiArg = void;
@@ -1316,6 +1368,73 @@ export type SendingDomain = {
   /** null when never checked. */
   checked_at?: string | null;
 };
+export type ScoreConfidence = "low" | "medium" | "high";
+export type ScoreComponent = {
+  key: "bounce" | "complaint" | "spam_placement" | "warmup" | "domain_auth";
+  label: string;
+  /** Points subtracted from 100 by this component. */
+  penalty: number;
+  /** Observed rate as a percentage, when measured. */
+  rate?: number | null;
+  /** False when no feed exists for this signal. False means ABSENT, not clean: render it as "not measured", never as 0%. */
+  measured: boolean;
+  /** Human explanation, e.g. the warmup state driving the penalty. */
+  detail?: string;
+};
+export type DeliverabilityScore = {
+  value: number;
+  confidence: ScoreConfidence;
+  /** Sample the score was computed over. */
+  delivered: number;
+  components: ScoreComponent[];
+};
+export type DeliverabilityPoint = {
+  date: string;
+  delivered: number;
+  bounced: number;
+  complained?: number | null;
+  spam_placed?: number | null;
+};
+export type AtRiskItem = {
+  /** Mailbox address or domain. */
+  label: string;
+  reason: string;
+};
+export type DeliverabilityReport = {
+  score: DeliverabilityScore;
+  series: DeliverabilityPoint[];
+  at_risk_mailboxes: AtRiskItem[];
+  at_risk_domains: AtRiskItem[];
+};
+export type CampaignGuardrails = {
+  auto_pause_enabled: boolean;
+  bounce_pause_pct: number;
+  complaint_pause_pct: number;
+};
+export type CampaignPauseEvent = {
+  reason: "bounce_spike" | "complaint_spike";
+  metric: "bounce_rate" | "complaint_rate";
+  /** The observed rate that tripped it. */
+  value: number;
+  threshold: number;
+  /** Sample it was judged on, always at or above the minimum. */
+  delivered: number;
+  created_at: string;
+};
+export type CampaignDeliverability = {
+  score: DeliverabilityScore;
+  guardrails: CampaignGuardrails;
+  pause_events: CampaignPauseEvent[];
+  /** ok; warn when a rate sits in the band below its pause threshold; paused when the breaker has fired. */
+  verdict: "ok" | "warn" | "paused";
+};
+export type DeliverabilityEvent = {
+  kind: "complaint" | "bounce";
+  email: string;
+  /** The provider's own id; the idempotency key. */
+  provider_event_id: string;
+  send_id?: string | null;
+};
 export type Campaign = {
   id?: string;
   name?: string;
@@ -1622,6 +1741,10 @@ export const {
   useListContactsQuery,
   useListSendingDomainsQuery,
   useCheckSendingDomainMutation,
+  useGetWorkspaceDeliverabilityQuery,
+  useGetCampaignDeliverabilityQuery,
+  useUpdateCampaignGuardrailsMutation,
+  useIngestDeliverabilityEventMutation,
   useListCampaignsQuery,
   useCreateCampaignMutation,
   useGetCampaignQuery,
