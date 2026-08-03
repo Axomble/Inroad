@@ -28,10 +28,16 @@ type Sender interface {
 	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
 }
 
-// Enqueuer schedules the next advance. Satisfied by *queue.Client.
+// Enqueuer schedules the next advance and the post-send breaker evaluation.
+// Satisfied by *queue.Client.
 type Enqueuer interface {
 	EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error
 	EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error
+	// EnqueueDeliverabilityEvaluate asks the control plane to re-score this
+	// campaign's circuit breaker. Deliberately a task rather than an inline call:
+	// the evaluation must read COMMITTED state and sit outside the send path
+	// entirely, so a scoring bug cannot fail a delivery (invariant 5).
+	EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) error
 }
 
 // capBackoff is how long to wait before retrying an enrollment blocked by the
@@ -220,6 +226,18 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			}
 			return schedule(adv)
 		}
+		// evaluateBreaker asks for a circuit-breaker re-score now that this send is
+		// finalised. It runs AFTER the delivery is durable and its failure is LOGGED,
+		// never returned: a campaign that could not be re-scored must not turn a
+		// successful delivery into a retried task, and the next finalised send in the
+		// campaign enqueues another evaluation anyway. The enqueue itself dedups
+		// per-campaign, so a 10,000-contact launch does not become 10,000 evaluations.
+		evaluateBreaker := func() {
+			if err := enq.EnqueueDeliverabilityEvaluate(job.CampaignID, p.WorkspaceID); err != nil {
+				slog.WarnContext(ctx, "deliverability_evaluate_enqueue_failed",
+					"campaign_id", job.CampaignID, "err", err)
+			}
+		}
 
 		// Claim-before-send: the sends row is the delivery claim.
 		//   - ClaimSkip: another worker owns a fresh 'sending' lease, or the row is
@@ -287,6 +305,10 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				// one-UPDATE + hard-crash window documented on MarkStepDelivered.
 				return fmt.Errorf("mark step delivered: %w", err)
 			}
+			// A newly delivered send changes the sample the breaker judges on — and
+			// crossing the minimum-delivered floor is itself a trigger, since a
+			// campaign whose first 49 sends all bounced becomes actionable on its 50th.
+			evaluateBreaker()
 			return advanceCursor()
 		case mail.Retryable(sendErr):
 			// Transient failure (nothing delivered): release the claim so the

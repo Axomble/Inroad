@@ -63,6 +63,8 @@ func (s *itSender) Send(_ context.Context, _ mail.OutboundJob, m mail.Message) (
 type itEnq struct {
 	at map[string]time.Time
 	in map[string]time.Duration
+	// evaluated records the campaign ids a breaker evaluation was enqueued for.
+	evaluated []string
 }
 
 func newITEnq() *itEnq {
@@ -70,6 +72,10 @@ func newITEnq() *itEnq {
 }
 func (e *itEnq) EnqueueAdvanceAt(id, _ string, t time.Time) error     { e.at[id] = t; return nil }
 func (e *itEnq) EnqueueAdvanceIn(id, _ string, d time.Duration) error { e.in[id] = d; return nil }
+func (e *itEnq) EnqueueDeliverabilityEvaluate(id, _ string) error {
+	e.evaluated = append(e.evaluated, id)
+	return nil
+}
 
 type itFixture struct {
 	q          *gen.Queries

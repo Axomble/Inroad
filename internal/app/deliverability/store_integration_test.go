@@ -1,0 +1,775 @@
+//go:build integration
+
+package deliverability
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/db/dbtest"
+	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/deliverability"
+)
+
+// fixture is one workspace with a mailbox, a list, a contact-producing helper and
+// a RUNNING campaign — the minimum needed for the breaker to have something to
+// stop.
+type fixture struct {
+	pool     *pgxpool.Pool
+	q        *gen.Queries
+	store    *PgStore
+	ws       uuid.UUID
+	mailbox  uuid.UUID
+	list     uuid.UUID
+	campaign uuid.UUID
+}
+
+func newFixture(t *testing.T, ctx context.Context) *fixture {
+	t.Helper()
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	f := &fixture{pool: pool, q: gen.New(pool), store: NewPgStore(pool)}
+	f.ws, f.mailbox, f.list, f.campaign = seedTenant(t, ctx, f.q, f.pool)
+	return f
+}
+
+// seedTenant creates an isolated workspace with one mailbox, one list and one
+// RUNNING campaign, and returns their ids. Used for the primary tenant and again
+// for the foreign tenant in the cross-tenant tests.
+func seedTenant(t *testing.T, ctx context.Context, q *gen.Queries, pool *pgxpool.Pool) (ws, mailbox, list, campaign uuid.UUID) {
+	t.Helper()
+	w, err := q.CreateWorkspace(ctx, "Deliverability IT "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	email := uuid.NewString()[:8] + "@sender.test"
+	mb, err := q.CreateMailbox(ctx, gen.CreateMailboxParams{
+		WorkspaceID: w.ID, Provider: "smtp", Email: email, DisplayName: "IT",
+		SmtpHost: "smtp.example.test", SmtpPort: 587, SmtpUsername: email,
+		ImapHost: "imap.example.test", ImapPort: 993, ImapUsername: email,
+		SecretCiphertext: "ct", DailyCap: 500, MinIntervalSeconds: 0,
+		RampEnabled: false, RampStartCap: 5, RampDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("mailbox: %v", err)
+	}
+	l, err := q.CreateList(ctx, gen.CreateListParams{WorkspaceID: w.ID, Name: "L"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	c, err := q.CreateCampaign(ctx, gen.CreateCampaignParams{
+		WorkspaceID: w.ID, Name: "C", MailboxID: mb.ID, ListID: l.ID,
+		Subject: "Hi", BodyText: "b", BodyHtml: "",
+	})
+	if err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		c.ID, w.ID); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	return w.ID, mb.ID, l.ID, c.ID
+}
+
+// seedSend inserts one 'sent' send for a fresh contact and returns both ids. The
+// send is what `delivered` counts; sentAt places it inside or outside the window.
+func (f *fixture) seedSend(t *testing.T, ctx context.Context, sentAt time.Time) (sendID, contactID uuid.UUID) {
+	t.Helper()
+	return seedSendFor(t, ctx, f.q, f.pool, f.ws, f.campaign, f.mailbox, f.list, sentAt)
+}
+
+func seedSendFor(
+	t *testing.T, ctx context.Context, q *gen.Queries, pool *pgxpool.Pool,
+	ws, campaign, mailbox, list uuid.UUID, sentAt time.Time,
+) (sendID, contactID uuid.UUID) {
+	t.Helper()
+	email := uuid.NewString() + "@recipient.test"
+	c, err := q.UpsertContact(ctx, gen.UpsertContactParams{
+		WorkspaceID: ws, Email: email, FirstName: "C",
+	})
+	if err != nil {
+		t.Fatalf("contact: %v", err)
+	}
+	if err := q.AddListMember(ctx, gen.AddListMemberParams{ListID: list, ContactID: c.ID}); err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	var id uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email, status, sent_at)
+		 VALUES ($1,$2,$3,$4,$5,'sent',$6) RETURNING id`,
+		ws, campaign, c.ID, mailbox, email, sentAt).Scan(&id); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	return id, c.ID
+}
+
+// seedBouncedEnrollment records the internal hard-bounce signal: an enrollment
+// stopped 'bounced'. This is what the inbox poller produces, and the primary
+// bounce source the breaker reads.
+func (f *fixture) seedBouncedEnrollment(t *testing.T, ctx context.Context, contactID uuid.UUID, at time.Time) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO sequence_enrollments (workspace_id, campaign_id, contact_id, status, stop_reason, stopped_at)
+		 VALUES ($1,$2,$3,'stopped','bounced',$4)`,
+		f.ws, f.campaign, contactID, at); err != nil {
+		t.Fatalf("bounced enrollment: %v", err)
+	}
+}
+
+// seedCampaignAt builds a campaign with `delivered` sends of which `bounced`
+// bounced, all inside the rolling window.
+func (f *fixture) seedCampaign(t *testing.T, ctx context.Context, delivered, bounced int) {
+	t.Helper()
+	now := time.Now()
+	for i := range delivered {
+		_, contactID := f.seedSend(t, ctx, now.Add(-time.Duration(i)*time.Minute))
+		if i < bounced {
+			f.seedBouncedEnrollment(t, ctx, contactID, now)
+		}
+	}
+}
+
+func (f *fixture) status(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	var status string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT status FROM campaigns WHERE id = $1 AND workspace_id = $2`, f.campaign, f.ws).Scan(&status); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	return status
+}
+
+func (f *fixture) service() *Service { return NewService(f.store) }
+
+// A brand-new campaign has the breaker ON at the documented defaults. That is the
+// column defaults from migration 000037, read back through the real query.
+func TestGuardrailDefaultsAreOnAtTheDocumentedThresholds(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	cfg, err := f.store.CampaignConfig(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("CampaignConfig: %v", err)
+	}
+	if !cfg.AutoPauseEnabled {
+		t.Error("auto-pause is off by default; a safeguard nobody enables protects nobody")
+	}
+	if cfg.BouncePausePct != deliverability.DefaultBouncePausePct {
+		t.Errorf("bounce_pause_pct = %v, want %v", cfg.BouncePausePct, deliverability.DefaultBouncePausePct)
+	}
+	if cfg.ComplaintPausePct != deliverability.DefaultComplaintPausePct {
+		t.Errorf("complaint_pause_pct = %v, want %v", cfg.ComplaintPausePct, deliverability.DefaultComplaintPausePct)
+	}
+}
+
+func TestGuardrailsRoundTripThroughPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	svc := f.service()
+
+	want := Guardrails{AutoPauseEnabled: false, BouncePausePct: 12.5, ComplaintPausePct: 0.25}
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, want); err != nil {
+		t.Fatalf("SetGuardrails: %v", err)
+	}
+	got, err := svc.Guardrails(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("Guardrails: %v", err)
+	}
+	if got != want {
+		t.Errorf("round-trip = %+v, want %+v", got, want)
+	}
+}
+
+// A threshold the service rejects must also be unrepresentable in the column, so
+// no code path (or hand-written SQL) can persist one.
+func TestDatabaseRejectsAnOutOfRangeThreshold(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	for _, bad := range []float64{0, -1, 100.5} {
+		if _, err := f.pool.Exec(ctx,
+			`UPDATE campaigns SET bounce_pause_pct = $3 WHERE id = $1 AND workspace_id = $2`,
+			f.campaign, f.ws, bad); err == nil {
+			t.Errorf("the database accepted bounce_pause_pct = %v", bad)
+		}
+	}
+}
+
+// Invariant 1 against a real database: 49 delivered, ALL of them bounced, and the
+// campaign keeps running with no pause event. This is the case that would make
+// on-by-default worse than nothing.
+func TestCampaignUnderTheMinimumSampleStaysRunning(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	under := deliverability.MinDelivered - 1
+	f.seedCampaign(t, ctx, under, under)
+
+	out, err := f.service().EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused {
+		t.Fatalf("a campaign with %d delivered at 100%% bounce was paused", under)
+	}
+	if got := f.status(t, ctx); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+	events, err := f.store.PauseEvents(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("PauseEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("%d pause events recorded below the sample floor", len(events))
+	}
+}
+
+// The auto-pause: status flips, the reason is recorded, and repeated evaluation
+// changes nothing (the status='running' guard is the exactly-once mechanism).
+func TestAutoPauseFlipsStatusAndRecordsTheReasonExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	// 50 delivered, 10 bounced = 20%, comfortably over the 8% default.
+	f.seedCampaign(t, ctx, deliverability.MinDelivered, 10)
+	svc := f.service()
+
+	first, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if !first.Paused {
+		t.Fatalf("a 20%% bounce rate over %d delivered did not pause the campaign (verdict %+v)",
+			deliverability.MinDelivered, first.Verdict)
+	}
+	if got := f.status(t, ctx); got != "paused" {
+		t.Fatalf("status = %q, want paused", got)
+	}
+
+	// Three more evaluations. None may flip anything or add an event.
+	for i := range 3 {
+		out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+		if err != nil {
+			t.Fatalf("re-evaluation %d: %v", i, err)
+		}
+		if out.Paused {
+			t.Fatalf("re-evaluation %d claimed a second pause", i)
+		}
+	}
+	events, err := f.store.PauseEvents(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("PauseEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("%d pause events after four evaluations, want 1", len(events))
+	}
+	ev := events[0]
+	if ev.Reason != deliverability.ReasonBounceSpike || ev.Metric != deliverability.MetricBounceRate {
+		t.Errorf("event reason/metric = %q/%q", ev.Reason, ev.Metric)
+	}
+	if ev.Threshold != deliverability.DefaultBouncePausePct {
+		t.Errorf("threshold = %v, want %v", ev.Threshold, deliverability.DefaultBouncePausePct)
+	}
+	if ev.Delivered < deliverability.MinDelivered {
+		t.Errorf("delivered = %d, below the minimum sample the breaker may act on", ev.Delivered)
+	}
+	if ev.Value < deliverability.DefaultBouncePausePct {
+		t.Errorf("recorded value %v is below the threshold it supposedly crossed", ev.Value)
+	}
+	// The stored NUMERICs survive the float8 round trip: 10/50 is exactly 20%.
+	if ev.Value != 20 {
+		t.Errorf("value = %v, want 20", ev.Value)
+	}
+}
+
+// A campaign with auto-pause turned off keeps running however bad its rates, and
+// records nothing — the operator turned off the ACTION, not the measurement.
+func TestDisabledGuardrailLeavesTheCampaignRunning(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedCampaign(t, ctx, deliverability.MinDelivered, deliverability.MinDelivered)
+	svc := f.service()
+	if _, err := svc.SetGuardrails(ctx, f.ws, f.campaign, Guardrails{
+		AutoPauseEnabled: false, BouncePausePct: 8, ComplaintPausePct: 1.5,
+	}); err != nil {
+		t.Fatalf("SetGuardrails: %v", err)
+	}
+
+	out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused || f.status(t, ctx) != "running" {
+		t.Fatalf("paused=%v status=%q with auto-pause disabled", out.Paused, f.status(t, ctx))
+	}
+	// The verdict is still computed and reported.
+	if out.Verdict.State != deliverability.VerdictPause {
+		t.Errorf("verdict = %q, want the breach still reported", out.Verdict.State)
+	}
+}
+
+// A replayed webhook must not inflate the rate. Delivering the SAME
+// provider_event_id twenty times leaves one row, so the complaint count the
+// breaker reads is 1 — and the campaign that would pause on 20 does not.
+func TestReplayedIngestDoesNotInflateTheRate(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedCampaign(t, ctx, 100, 0)
+	sendID, _ := f.seedSend(t, ctx, time.Now())
+	svc := f.service()
+
+	event := EventInput{
+		Kind: "complaint", Email: "reporter@recipient.test",
+		ProviderEventID: "ses-replay-1", SendID: &sendID,
+	}
+	first, err := svc.Ingest(ctx, f.ws, event)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if first.Duplicate {
+		t.Error("the first delivery was reported as a duplicate")
+	}
+	for i := range 19 {
+		res, err := svc.Ingest(ctx, f.ws, event)
+		if err != nil {
+			t.Fatalf("replay %d: %v", i, err)
+		}
+		if !res.Duplicate {
+			t.Fatalf("replay %d was accepted as new", i)
+		}
+	}
+
+	var rows int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM deliverability_events WHERE workspace_id = $1 AND provider_event_id = $2`,
+		f.ws, event.ProviderEventID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("%d event rows after 20 deliveries, want 1", rows)
+	}
+	// One complaint over 101 delivered is ~0.99%, below the 1.5% threshold. Twenty
+	// would have been ~19.8% and stopped the campaign.
+	if f.status(t, ctx) != "running" {
+		t.Errorf("status = %q; a replayed webhook stopped the campaign", f.status(t, ctx))
+	}
+}
+
+// A complaint suppresses the address workspace-wide, through the existing
+// suppression table, so no future campaign in this workspace emails it again.
+func TestComplaintSuppressesTheAddress(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	email := "complainer-" + uuid.NewString()[:8] + "@recipient.test"
+
+	if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+		Kind: "complaint", Email: email, ProviderEventID: "ses-supp-1",
+	}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	suppressed, err := f.q.IsSuppressed(ctx, gen.IsSuppressedParams{WorkspaceID: f.ws, Lower: email})
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if !suppressed {
+		t.Fatal("a complaint did not suppress the address")
+	}
+	// Under its own reason, not folded into 'unsubscribe': "they reported us as
+	// spam" and "they asked to stop" are different things to see in a list.
+	var reason string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT reason FROM suppression WHERE workspace_id = $1 AND lower(email) = lower($2)`,
+		f.ws, email).Scan(&reason); err != nil {
+		t.Fatalf("reason: %v", err)
+	}
+	if reason != suppressionReasonComplaint {
+		t.Errorf("reason = %q, want %q", reason, suppressionReasonComplaint)
+	}
+	// And it is idempotent: a second complaint from the same address is not a
+	// constraint violation.
+	if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+		Kind: "complaint", Email: email, ProviderEventID: "ses-supp-2",
+	}); err != nil {
+		t.Fatalf("second complaint: %v", err)
+	}
+}
+
+// An ingested BOUNCE counts toward the rate but does not suppress: provider bounce
+// feeds include soft bounces, and suppressing forever on a temporary failure is
+// not something an operator can undo.
+func TestIngestedBounceCountsButDoesNotSuppress(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	sendID, _ := f.seedSend(t, ctx, time.Now())
+	email := "full-" + uuid.NewString()[:8] + "@recipient.test"
+
+	if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+		Kind: "bounce", Email: email, ProviderEventID: "ses-soft-1", SendID: &sendID,
+	}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	suppressed, err := f.q.IsSuppressed(ctx, gen.IsSuppressedParams{WorkspaceID: f.ws, Lower: email})
+	if err != nil {
+		t.Fatalf("IsSuppressed: %v", err)
+	}
+	if suppressed {
+		t.Error("an ingested bounce suppressed the address")
+	}
+	counts, err := f.store.CampaignCounts(ctx, f.ws, f.campaign, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CampaignCounts: %v", err)
+	}
+	if counts.Bounced != 1 {
+		t.Errorf("bounced = %d, want the ingested bounce counted", counts.Bounced)
+	}
+}
+
+// The two bounce feeds must not double-count. A contact whose enrollment the inbox
+// poller stopped 'bounced' AND whose send the provider also reported is ONE bounce,
+// not two — otherwise the rate the breaker acts on is twice the real one.
+func TestBothBounceFeedsForOneContactCountOnce(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	now := time.Now()
+	sendID, contactID := f.seedSend(t, ctx, now)
+	f.seedBouncedEnrollment(t, ctx, contactID, now)
+	if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+		Kind: "bounce", Email: "dup@recipient.test", ProviderEventID: "ses-dup-1", SendID: &sendID,
+	}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	counts, err := f.store.CampaignCounts(ctx, f.ws, f.campaign, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CampaignCounts: %v", err)
+	}
+	if counts.Bounced != 1 {
+		t.Errorf("bounced = %d, want 1 (both feeds reporting the same contact)", counts.Bounced)
+	}
+}
+
+// Only the rolling window is counted: evidence older than it does not reach the
+// breaker, so a campaign that bounced badly and was then fixed is not judged on
+// its history.
+func TestRollingWindowExcludesOlderEvidence(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	now := time.Now()
+	stale := now.AddDate(0, 0, -(deliverability.WindowDays + 2))
+
+	// Ancient disaster: 60 delivered, all bounced.
+	for range 60 {
+		_, contactID := f.seedSend(t, ctx, stale)
+		f.seedBouncedEnrollment(t, ctx, contactID, stale)
+	}
+	// Recent, clean, and big enough to judge on.
+	for i := range deliverability.MinDelivered + 10 {
+		f.seedSend(t, ctx, now.Add(-time.Duration(i)*time.Minute))
+	}
+
+	out, err := f.service().EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused {
+		t.Fatalf("paused on evidence outside the %d-day window (verdict %+v)",
+			deliverability.WindowDays, out.Verdict)
+	}
+	if f.status(t, ctx) != "running" {
+		t.Errorf("status = %q, want running", f.status(t, ctx))
+	}
+}
+
+// A campaign an operator restarted must not be re-paused on the evidence they
+// already overrode. Both windows are bounded below by the last pause, so a
+// restart with no NEW bad sends leaves it running.
+func TestRestartedCampaignIsNotRePausedOnTheSameEvidence(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedCampaign(t, ctx, deliverability.MinDelivered, deliverability.MinDelivered)
+	svc := f.service()
+
+	if out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign); err != nil || !out.Paused {
+		t.Fatalf("setup: paused=%v err=%v, want an auto-pause", out.Paused, err)
+	}
+	// The operator looks at it and restarts it by hand.
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running' WHERE id = $1 AND workspace_id = $2`,
+		f.campaign, f.ws); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+
+	out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused {
+		t.Fatal("the campaign was re-paused on evidence the operator had already acted on")
+	}
+	if f.status(t, ctx) != "running" {
+		t.Errorf("status = %q, want running", f.status(t, ctx))
+	}
+
+	// New bad evidence after the restart DOES stop it again.
+	now := time.Now()
+	for range deliverability.MinDelivered {
+		_, contactID := f.seedSend(t, ctx, now)
+		f.seedBouncedEnrollment(t, ctx, contactID, now)
+	}
+	again, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if !again.Paused {
+		t.Fatal("fresh bad evidence after a restart did not stop the campaign")
+	}
+	events, err := f.store.PauseEvents(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("PauseEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Errorf("%d pause events, want 2 (the original and the re-pause)", len(events))
+	}
+}
+
+// Cross-tenant isolation: one workspace's sends, bounces and ingested events never
+// reach another's counts, scores, pause history or guardrails.
+func TestScoresAndEventsAreWorkspacePinned(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	foreignWS, foreignMailbox, foreignList, foreignCampaign := seedTenant(t, ctx, f.q, f.pool)
+	now := time.Now()
+
+	// The foreign tenant is a disaster: 60 delivered, all bounced, plus complaints.
+	for range 60 {
+		sendID, contactID := seedSendFor(t, ctx, f.q, f.pool, foreignWS, foreignCampaign, foreignMailbox, foreignList, now)
+		if _, err := f.pool.Exec(ctx,
+			`INSERT INTO sequence_enrollments (workspace_id, campaign_id, contact_id, status, stop_reason, stopped_at)
+			 VALUES ($1,$2,$3,'stopped','bounced',$4)`,
+			foreignWS, foreignCampaign, contactID, now); err != nil {
+			t.Fatalf("foreign bounce: %v", err)
+		}
+		if _, err := f.pool.Exec(ctx,
+			`INSERT INTO deliverability_events (workspace_id, kind, email, send_id, provider_event_id)
+			 VALUES ($1,'complaint','x@y.test',$2,$3)`,
+			foreignWS, sendID, uuid.NewString()); err != nil {
+			t.Fatalf("foreign complaint: %v", err)
+		}
+	}
+	// Our tenant is clean, with enough sample to be judged.
+	for i := range deliverability.MinDelivered + 10 {
+		f.seedSend(t, ctx, now.Add(-time.Duration(i)*time.Minute))
+	}
+	svc := f.service()
+
+	counts, err := f.store.CampaignCounts(ctx, f.ws, f.campaign, now.AddDate(0, 0, -deliverability.WindowDays))
+	if err != nil {
+		t.Fatalf("CampaignCounts: %v", err)
+	}
+	if counts.Bounced != 0 || counts.Complained != 0 {
+		t.Errorf("our counts = %+v; the foreign tenant's events leaked in", counts)
+	}
+	// And the complaint FEED flag is per-workspace too: the foreign tenant has one,
+	// we do not, so our complaint component stays unmeasured rather than borrowing
+	// theirs.
+	if counts.ComplaintFeed {
+		t.Error("our workspace reports a complaint feed it never received an event on")
+	}
+
+	out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("EvaluateBreaker: %v", err)
+	}
+	if out.Paused {
+		t.Fatal("our clean campaign was paused by another tenant's bounces")
+	}
+
+	// A foreign campaign id is a 404, not another tenant's data.
+	if _, err := svc.CampaignReport(ctx, f.ws, foreignCampaign); !errors.Is(err, ErrNotFound) {
+		t.Errorf("CampaignReport(foreign campaign) error = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.Guardrails(ctx, f.ws, foreignCampaign); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Guardrails(foreign campaign) error = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.SetGuardrails(ctx, f.ws, foreignCampaign, Guardrails{
+		AutoPauseEnabled: false, BouncePausePct: 99, ComplaintPausePct: 99,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetGuardrails(foreign campaign) error = %v, want ErrNotFound", err)
+	}
+	// The foreign campaign's settings survived the attempt untouched.
+	var enabled bool
+	if err := f.pool.QueryRow(ctx,
+		`SELECT auto_pause_enabled FROM campaigns WHERE id = $1`, foreignCampaign).Scan(&enabled); err != nil {
+		t.Fatalf("foreign settings: %v", err)
+	}
+	if !enabled {
+		t.Error("a cross-tenant SetGuardrails disabled another workspace's breaker")
+	}
+	// The foreign workspace's own report still sees its own disaster, so the
+	// isolation is a filter and not an accident of empty data.
+	foreignScore, err := svc.Report(ctx, foreignWS)
+	if err != nil {
+		t.Fatalf("Report(foreign): %v", err)
+	}
+	if foreignScore.Score.Value >= 100 {
+		t.Errorf("foreign workspace scores %d despite 100%% bounces", foreignScore.Score.Value)
+	}
+}
+
+// An ingest naming ANOTHER tenant's send stores no send_id rather than failing or
+// attributing to their campaign: the send is resolved by a workspace-pinned
+// SELECT, so a foreign id simply resolves to nothing.
+func TestIngestWithAForeignSendIDAttributesToNoCampaign(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	foreignWS, foreignMailbox, foreignList, foreignCampaign := seedTenant(t, ctx, f.q, f.pool)
+	foreignSend, _ := seedSendFor(t, ctx, f.q, f.pool, foreignWS, foreignCampaign, foreignMailbox, foreignList, time.Now())
+
+	if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+		Kind: "complaint", Email: "a@b.test", ProviderEventID: "cross-1", SendID: &foreignSend,
+	}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	var stored *uuid.UUID
+	if err := f.pool.QueryRow(ctx,
+		`SELECT send_id FROM deliverability_events WHERE workspace_id = $1 AND provider_event_id = 'cross-1'`,
+		f.ws).Scan(&stored); err != nil {
+		t.Fatalf("stored event: %v", err)
+	}
+	if stored != nil {
+		t.Errorf("send_id = %v, want NULL for a foreign send", stored)
+	}
+	// The foreign campaign's counts are untouched.
+	counts, err := f.store.CampaignCounts(ctx, foreignWS, foreignCampaign, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CampaignCounts(foreign): %v", err)
+	}
+	if counts.Complained != 0 {
+		t.Errorf("foreign complained = %d; a cross-tenant ingest attributed to their campaign", counts.Complained)
+	}
+}
+
+// A complaint arriving with no new sends must be able to stop a campaign on its
+// own: the ingest path triggers its own evaluation.
+func TestIngestedComplaintSpikePausesTheCampaign(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedCampaign(t, ctx, deliverability.MinDelivered, 0)
+	svc := f.service()
+
+	// Each complaint needs its own send so it attributes to the campaign. One
+	// complaint over 51 delivered is already 1.96%, over the 1.5% default, so the
+	// FIRST ingest stops it and the remaining four find it already paused.
+	for i := range 5 {
+		sendID, _ := f.seedSend(t, ctx, time.Now())
+		if _, err := svc.Ingest(ctx, f.ws, EventInput{
+			Kind: "complaint", Email: uuid.NewString() + "@recipient.test",
+			ProviderEventID: "spike-" + uuid.NewString(), SendID: &sendID,
+		}); err != nil {
+			t.Fatalf("Ingest %d: %v", i, err)
+		}
+	}
+
+	if got := f.status(t, ctx); got != "paused" {
+		t.Fatalf("status = %q, want paused by the complaint spike", got)
+	}
+	events, err := f.store.PauseEvents(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("PauseEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("%d pause events, want 1", len(events))
+	}
+	if events[0].Reason != deliverability.ReasonComplaintSpike ||
+		events[0].Metric != deliverability.MetricComplaintRate {
+		t.Errorf("event = %+v, want a complaint_spike / complaint_rate", events[0])
+	}
+}
+
+// The workspace rollup and the per-day series come back coherently from real SQL:
+// the series covers every UTC day in the window, and its delivered counts sum to
+// the score's sample.
+func TestWorkspaceReportSeriesCoversTheWindow(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	now := time.Now().UTC()
+	// One send today, one two days ago.
+	f.seedSend(t, ctx, now.Add(-2*time.Hour))
+	f.seedSend(t, ctx, now.AddDate(0, 0, -2))
+
+	rep, err := f.service().Report(ctx, f.ws)
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	// generate_series from (today - 7) to today inclusive.
+	if len(rep.Series) != deliverability.WindowDays+1 {
+		t.Errorf("%d series points, want %d", len(rep.Series), deliverability.WindowDays+1)
+	}
+	total := 0
+	for _, p := range rep.Series {
+		total += p.Delivered
+		if p.ComplaintMeasured {
+			t.Errorf("series claims a complaint count with no feed: %+v", p)
+		}
+	}
+	if total != rep.Score.Delivered {
+		t.Errorf("series sums to %d delivered, score says %d", total, rep.Score.Delivered)
+	}
+	if rep.Score.Delivered != 2 {
+		t.Errorf("delivered = %d, want 2", rep.Score.Delivered)
+	}
+}
+
+// A campaign report's score and its verdict describe the same evidence, and the
+// pause event carries everything the UI needs to explain the stop.
+func TestCampaignReportExplainsAnAutoPause(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedCampaign(t, ctx, deliverability.MinDelivered, 10)
+	svc := f.service()
+	if out, err := svc.EvaluateBreaker(ctx, f.ws, f.campaign); err != nil || !out.Paused {
+		t.Fatalf("setup: paused=%v err=%v", out.Paused, err)
+	}
+
+	rep, err := svc.CampaignReport(ctx, f.ws, f.campaign)
+	if err != nil {
+		t.Fatalf("CampaignReport: %v", err)
+	}
+	if rep.Verdict != verdictPaused {
+		t.Errorf("verdict = %q, want %q", rep.Verdict, verdictPaused)
+	}
+	if len(rep.PauseEvents) != 1 {
+		t.Fatalf("%d pause events, want 1", len(rep.PauseEvents))
+	}
+	ev := rep.PauseEvents[0]
+	if ev.Value <= ev.Threshold-0.0001 || ev.Delivered < deliverability.MinDelivered || ev.CreatedAt.IsZero() {
+		t.Errorf("pause event = %+v, want a value at/over the threshold on a valid sample", ev)
+	}
+	if !rep.Guardrails.AutoPauseEnabled {
+		t.Error("guardrails report auto-pause off on a campaign the breaker just stopped")
+	}
+	// The report on a PAUSED campaign shows the evidence that stopped it, not an
+	// empty since-the-restart window: the last-pause bound applies only while the
+	// campaign is running, so an operator opening the page sees the real numbers.
+	if rep.Score.Delivered != deliverability.MinDelivered {
+		t.Errorf("score sample = %d, want the %d delivered that were judged",
+			rep.Score.Delivered, deliverability.MinDelivered)
+	}
+	// 20% bounce is past the 10% saturation point, so the bounce component costs
+	// its full ceiling.
+	if rep.Score.Value != 100-deliverability.BouncePenalty {
+		t.Errorf("score = %d, want %d", rep.Score.Value, 100-deliverability.BouncePenalty)
+	}
+}

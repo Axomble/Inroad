@@ -8,6 +8,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/dnsauth"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/worker/deliverability"
 	"github.com/inroad/inroad/internal/worker/domainauth"
 	"github.com/inroad/inroad/internal/worker/inbox"
 	"github.com/inroad/inroad/internal/worker/maintenance"
@@ -25,6 +26,14 @@ import (
 func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, resolver dnsauth.Resolver, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte) {
 	if cleaner, ok := core.(maintenance.Cleaner); ok {
 		mux.HandleFunc(queue.TaskMaintenanceCleanup, maintenance.CleanupHandler(cleaner))
+	}
+	// Campaign circuit breaker. Registered by type assertion for the same reason
+	// as the cleaner above: the capability is consumed through a one-method
+	// interface rather than widening coreapi.Client (and its 13 test fakes) to
+	// carry it. A Client that does not implement it simply has no breaker, which
+	// is what a future HTTP coreapi would report until it grows the endpoint.
+	if breaker, ok := core.(deliverability.Breaker); ok {
+		mux.HandleFunc(queue.TaskDeliverabilityEvaluate, deliverability.EvaluateHandler(breaker))
 	}
 	// Domain authentication: re-check stale sending domains' SPF/DKIM/DMARC.
 	// Informational only — nothing on the send path reads the result.

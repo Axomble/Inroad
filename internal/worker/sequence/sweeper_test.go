@@ -23,7 +23,8 @@ func (s *sweepCore) ListDueEnrollments(context.Context) ([]coreapi.DueEnrollment
 
 type countEnq struct{ ids []string }
 
-func (c *countEnq) EnqueueAdvanceAt(string, string, time.Time) error { return nil }
+func (c *countEnq) EnqueueAdvanceAt(string, string, time.Time) error   { return nil }
+func (c *countEnq) EnqueueDeliverabilityEvaluate(string, string) error { return nil }
 func (c *countEnq) EnqueueAdvanceIn(id, _ string, _ time.Duration) error {
 	c.ids = append(c.ids, id)
 	return nil

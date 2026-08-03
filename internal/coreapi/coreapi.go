@@ -285,6 +285,29 @@ type Client interface {
 	RecordSendingDomainAuth(ctx context.Context, in SendingDomainAuth) error
 }
 
+// BreakerResult is the outcome of one campaign circuit-breaker evaluation.
+//
+// It is a seam TYPE here but the method that returns it is deliberately NOT on
+// Client: the breaker is consumed through a one-method interface defined by the
+// worker package that needs it (worker/deliverability.Breaker), satisfied by the
+// in-process client via type assertion at the composition root — the same shape
+// as maintenance.Cleaner. Client already carries 40 methods that 13 test fakes
+// implement in full, so adding a 41st to serve one call site would break every
+// one of them for no gain in the seam's expressiveness.
+//
+// Paused is true only for the evaluation that ACTUALLY stopped the campaign, so
+// exactly one caller ever reports the pause. The remaining fields explain why it
+// fired: which rate, its observed value, the threshold it crossed, and the sample
+// it was judged on.
+type BreakerResult struct {
+	Paused    bool
+	Reason    string
+	Metric    string
+	Value     float64
+	Threshold float64
+	Delivered int
+}
+
 // SendingDomainRef is a (workspace id, domain) pair from the staleness scan.
 // Strings at the seam, like every other coreapi id; the implementation parses
 // and pins them.

@@ -356,6 +356,55 @@ limit / abuse control here is tracked in the Deferred list below.
     carries only public DNS data (records already published to the world), and no
     credential or ciphertext field exists on it by construction.
 
+## Deliverability guardrails (circuit breaker + event ingest)
+40. **The event-ingest endpoint derives its tenant from the credential, never the
+    body, and carries its own least-privilege scope.** `POST /deliverability/events`
+    is a MACHINE endpoint on the api-key-accepting data plane; the workspace comes
+    from `auth.WorkspaceID` (the authenticated principal — invariant 4) and the
+    request has no workspace field to send, so an event can only ever be recorded
+    against the tenant whose credential presented it. It requires
+    `deliverability:write` rather than `campaigns:write`: an external bounce
+    pipeline needs to report events and nothing else, so an ingest credential does
+    not also carry the authority to mutate campaigns. The scope is deliberately
+    ABSENT from `OAuthGrantableScopes` — an ingested complaint suppresses an
+    address workspace-wide and can trip a campaign's breaker, so a third party who
+    could forge complaints could suppress a workspace's contacts and stop its
+    campaigns.
+41. **A caller-supplied `send_id` is resolved by a workspace-pinned SELECT, not
+    trusted.** `InsertDeliverabilityEvent` inserts
+    `(SELECT s.id FROM sends s WHERE s.id = $send_id AND s.workspace_id = $ws)`, so
+    a send id belonging to another tenant (or to nothing) stores NULL rather than
+    failing the FK or attributing to the foreign campaign: the event still counts
+    at workspace scope but reaches no other tenant's breaker
+    (`TestIngestWithAForeignSendIDAttributesToNoCampaign`). Ingest is idempotent on
+    `(workspace_id, provider_event_id)` — a redelivered webhook writes nothing and
+    therefore causes nothing: no second suppression, no second evaluation, so a
+    replay cannot inflate the rate a breaker acts on
+    (`TestReplayedIngestDoesNotInflateTheRate`).
+42. **A complaint suppresses through the existing suppression path; an ingested
+    bounce does not suppress at all.** A complaint calls the SAME workspace-scoped,
+    `ON CONFLICT DO NOTHING` suppression insert `MarkBounced` and `MarkUnsubscribed`
+    use, under its own reason literal `complaint` (migration 000037 widens the
+    CHECK). The suppression is the load-bearing write and runs BEFORE any scoring,
+    so a failure to score can never skip honouring the opt-out — the same ordering
+    as invariant 20. An ingested `bounce` is counted but NOT suppressed: provider
+    bounce feeds include soft bounces (full mailbox, greylisting), and suppressing
+    an address forever on a temporary failure is not recoverable by the operator;
+    hard bounces are still suppressed where they are actually classified, in the
+    inbox poller.
+43. **The breaker runs outside the send transaction and can only ever pause, never
+    fail a delivery.** Evaluation is a separate `deliverability:evaluate` task
+    enqueued AFTER `MarkStepDelivered` commits, so it reads committed state only;
+    the enqueue's failure is logged, not returned, so a scoring or Redis fault
+    cannot turn a delivered send into a retried task. The pause itself is
+    `UPDATE campaigns SET status='paused' … AND status='running'` plus the pause
+    event in ONE transaction, so a paused campaign always has its recorded reason
+    and repeated evaluation flips nothing twice. Every guardrail query is
+    `workspace_id`-pinned and the campaign id is paired with the workspace from the
+    JWT or the task payload, so a foreign campaign id reads, scores and pauses zero
+    rows (`TestScoresAndEventsAreWorkspacePinned`). The breaker cannot fire below
+    50 delivered at any ratio, which is what makes it safe to ship on by default.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

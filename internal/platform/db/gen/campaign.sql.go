@@ -53,7 +53,7 @@ func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatus
 
 const createCampaign = `-- name: CreateCampaign :one
 INSERT INTO campaigns (workspace_id, name, mailbox_id, list_id, subject, body_text, body_html)
-VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit
+VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct
 `
 
 type CreateCampaignParams struct {
@@ -93,6 +93,9 @@ func (q *Queries) CreateCampaign(ctx context.Context, arg CreateCampaignParams) 
 		&i.Timezone,
 		&i.RotationMode,
 		&i.DailyLimit,
+		&i.AutoPauseEnabled,
+		&i.BouncePausePct,
+		&i.ComplaintPausePct,
 	)
 	return i, err
 }
@@ -115,7 +118,7 @@ func (q *Queries) DeleteSendWindows(ctx context.Context, arg DeleteSendWindowsPa
 }
 
 const getCampaign = `-- name: GetCampaign :one
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit FROM campaigns WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct FROM campaigns WHERE id = $1 AND workspace_id = $2
 `
 
 type GetCampaignParams struct {
@@ -142,12 +145,15 @@ func (q *Queries) GetCampaign(ctx context.Context, arg GetCampaignParams) (Campa
 		&i.Timezone,
 		&i.RotationMode,
 		&i.DailyLimit,
+		&i.AutoPauseEnabled,
+		&i.BouncePausePct,
+		&i.ComplaintPausePct,
 	)
 	return i, err
 }
 
 const listCampaigns = `-- name: ListCampaigns :many
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]Campaign, error) {
@@ -175,6 +181,9 @@ func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]C
 			&i.Timezone,
 			&i.RotationMode,
 			&i.DailyLimit,
+			&i.AutoPauseEnabled,
+			&i.BouncePausePct,
+			&i.ComplaintPausePct,
 		); err != nil {
 			return nil, err
 		}
