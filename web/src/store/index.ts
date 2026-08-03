@@ -1,4 +1,5 @@
 import { configureStore, combineReducers } from '@reduxjs/toolkit'
+import { setupListeners } from '@reduxjs/toolkit/query'
 import { persistReducer, persistStore } from 'redux-persist'
 import { storage } from './storage'
 import { PERSIST_KEY } from './persist-key'
@@ -26,6 +27,13 @@ export const store = configureStore({
       .concat(api.middleware),
 })
 export const persistor = persistStore(store)
+
+// Without this, RTK Query never learns about focus/visibility changes, so
+// `skipPollingIfUnfocused` (the pulse poll) silently does nothing and
+// background tabs keep polling forever. `refetchOnFocus`/`refetchOnReconnect`
+// stay off — they're not set on createApi — so focus tracking for polling is
+// the only behavior this enables.
+setupListeners(store.dispatch)
 
 export type RootState = ReturnType<typeof store.getState>
 export type AppDispatch = typeof store.dispatch

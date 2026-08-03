@@ -1,6 +1,7 @@
 import { Menu, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { usePulse } from './use-pulse'
+import type { WorkspacePulse } from '@/features/pulse/api'
+import { usePulseSelect } from './use-pulse'
 
 /**
  * App shell header. Deliberately feature-agnostic — the workspace switcher and
@@ -9,6 +10,10 @@ import { usePulse } from './use-pulse'
  * is the direction the layering rule mandates; the pulse read here goes
  * through the `usePulse` hook seam (the `useNavCounts` doctrine).
  */
+const selectNeedsAttention = (data: WorkspacePulse | undefined) => ({
+  needsAttention: data?.attention.some((row) => row.severity === 'danger') ?? false,
+})
+
 export function AppHeader({
   navOpen,
   onToggleNav,
@@ -23,8 +28,7 @@ export function AppHeader({
   // Below md the pulse card lives inside the closed drawer, so a danger row
   // would be invisible — the menu button carries a small danger dot (and says
   // so in its accessible name) to surface it.
-  const { data: pulse } = usePulse()
-  const needsAttention = pulse?.attention.some((row) => row.severity === 'danger') ?? false
+  const { needsAttention } = usePulseSelect(selectNeedsAttention)
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-chrome-border bg-chrome px-3 text-chrome-text sm:px-4">

@@ -346,6 +346,9 @@ const injectedRtkApi = api.injectEndpoints({
     >({
       query: () => ({ url: `/warmup/overview` }),
     }),
+    getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
+      query: () => ({ url: `/pulse` }),
+    }),
     listLists: build.query<ListListsApiResponse, ListListsApiArg>({
       query: () => ({ url: `/lists` }),
     }),
@@ -794,6 +797,8 @@ export type DisableMailboxWarmupApiArg = {
 export type GetWarmupOverviewApiResponse =
   /** status 200 Warmup overview */ WarmupOverview;
 export type GetWarmupOverviewApiArg = void;
+export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
+export type GetPulseApiArg = void;
 export type ListListsApiResponse = /** status 200 Lists */ List[];
 export type ListListsApiArg = void;
 export type CreateListApiResponse = /** status 200 Created list */ List;
@@ -991,6 +996,8 @@ export type SessionResponse = {
   active_workspace_id: string;
   role: string;
   memberships: Membership[];
+  /** The signed-in user's email — the SPA's identity source after a silent refresh. */
+  email: string;
 };
 export type RegisterRequest = {
   workspace_name: string;
@@ -1012,6 +1019,8 @@ export type MeResponse = {
   active_workspace_id: string;
   role: string;
   memberships: Membership[];
+  /** The caller's email address. */
+  email: string;
   /** Whether the caller has confirmed their email address. */
   email_verified: boolean;
 };
@@ -1262,6 +1271,53 @@ export type WarmupOverview = {
   pool_size: number;
   active: boolean;
   mailboxes: WarmupMailbox[];
+};
+export type PulseAttention = {
+  /** stable machine identifier; current producers: mailbox_error, senders_gated, dmarc_failing, cap_consumed */
+  kind: string;
+  severity: "danger" | "warn" | "info";
+  count: number;
+  /** human-readable explanation derived from real data */
+  reason: string;
+  /** console destination that shows/fixes the condition */
+  href: string;
+};
+export type Pulse = {
+  mailboxes: {
+    total: number;
+    active: number;
+    paused: number;
+    error: number;
+  };
+  /** enabled warmup participants bucketed by live health; at_risk = throttled + paused */
+  warmup: {
+    pool: number;
+    healthy: number;
+    watch: number;
+    at_risk: number;
+  };
+  campaigns: {
+    total: number;
+    running: number;
+    draft: number;
+    paused: number;
+  };
+  contacts: {
+    total: number;
+  };
+  sending: {
+    /** cold sends completed this UTC day (same boundary the caps enforce) */
+    sent_today: number;
+    /** today's workspace capacity: each active mailbox's ramped cap scaled by its warmup health */
+    daily_cap: number;
+  };
+  inbox: {
+    /** always 0 until the inbox ships */
+    unread: number;
+    /** always 0 until the inbox ships */
+    interested: number;
+  };
+  attention: PulseAttention[];
 };
 export type List = {
   id?: string;
@@ -1616,6 +1672,7 @@ export const {
   useEnableMailboxWarmupMutation,
   useDisableMailboxWarmupMutation,
   useGetWarmupOverviewQuery,
+  useGetPulseQuery,
   useListListsQuery,
   useCreateListMutation,
   useImportContactsMutation,
