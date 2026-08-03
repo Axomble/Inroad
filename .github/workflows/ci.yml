@@ -82,7 +82,11 @@ jobs:
         run: |
           go vet ./...
           sqlc diff
-          go test ./...
+          # -race here and on the integration run: this is the only place it can
+          # run at all. It needs cgo, and the Windows dev machines have no C
+          # compiler (CGO_ENABLED=0), so a data race in the worker pool or the
+          # queue is undetectable locally and CI is the sole line of defence.
+          go test -race ./...
       - name: Verify database behavior
         run: |
           go run ./cmd/migrate up
@@ -90,7 +94,7 @@ jobs:
           # live schema, so on an unmigrated database it fails on every query that
           # touches a new table rather than on the one that is actually wrong.
           sqlc vet
-          go test -tags=integration ./...
+          go test -race -tags=integration ./...
       - name: Verify API contract
         working-directory: web
         run: npm run lint:api
