@@ -2,6 +2,8 @@ import { Link } from '@tanstack/react-router'
 import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
+import { PulseCard } from './pulse-card'
+import { SidebarFooter } from './sidebar-footer'
 import { useNavCounts } from './use-nav-counts'
 
 /**
@@ -94,23 +96,27 @@ export function AppSidebar() {
   const isAdmin = role === 'owner' || role === 'admin'
 
   return (
-    <nav aria-label="Primary" className="flex h-full w-64 flex-col gap-5 overflow-y-auto bg-chrome px-3 py-4">
-      {NAV.map((group, index) => {
-        const items = group.items.filter((item) => !item.adminOnly || isAdmin)
-        if (items.length === 0) return null
-        return (
-          <div key={group.label ?? index} className="flex flex-col gap-0.5">
-            {group.label && (
-              <div className="px-2.5 pb-1 font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-chrome-muted/70">
-                {group.label}
-              </div>
-            )}
-            {items.map((item) => (
-              <NavRow key={item.to} item={item} count={counts[item.to]} />
-            ))}
-          </div>
-        )
-      })}
-    </nav>
+    <div className="flex h-full w-64 flex-col overflow-y-auto bg-chrome px-3 pb-3 pt-4">
+      <PulseCard />
+      <nav aria-label="Primary" className="flex flex-col gap-5">
+        {NAV.map((group, index) => {
+          const items = group.items.filter((item) => !item.adminOnly || isAdmin)
+          if (items.length === 0) return null
+          return (
+            <div key={group.label ?? index} className="flex flex-col gap-0.5">
+              {group.label && (
+                <div className="px-2.5 pb-1 font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-chrome-muted/70">
+                  {group.label}
+                </div>
+              )}
+              {items.map((item) => (
+                <NavRow key={item.to} item={item} count={counts[item.to]} />
+              ))}
+            </div>
+          )
+        })}
+      </nav>
+      <SidebarFooter />
+    </div>
   )
 }

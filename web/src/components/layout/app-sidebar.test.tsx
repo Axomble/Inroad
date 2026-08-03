@@ -14,8 +14,9 @@ vi.mock('@tanstack/react-router', () => ({
 }))
 
 beforeEach(() => {
-  // useNavCounts fires the mailbox/campaign/warmup list queries; answer them
-  // with empty payloads so no count renders and nothing rejects.
+  // No activeWorkspaceId is preloaded, so the pulse query is skipped and no
+  // counts render; the stub is a safety net so nothing rejects if a request
+  // does fire.
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } })),
