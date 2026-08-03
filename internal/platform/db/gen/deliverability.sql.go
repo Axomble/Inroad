@@ -328,7 +328,7 @@ type InsertDeliverabilityEventParams struct {
 // The send is resolved by a workspace-pinned SELECT rather than trusted from the
 // request: a caller-supplied send_id belonging to another tenant (or to nothing)
 // stores NULL instead of failing the FK, so the event is still recorded and
-// counted at workspace scope — it simply attributes to no campaign.
+// counted at workspace scope -- it simply attributes to no campaign.
 func (q *Queries) InsertDeliverabilityEvent(ctx context.Context, arg InsertDeliverabilityEventParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertDeliverabilityEvent,
 		arg.WorkspaceID,
@@ -532,41 +532,59 @@ func (q *Queries) ListCampaignSenderMailboxes(ctx context.Context, arg ListCampa
 
 const listDeliverabilitySeries = `-- name: ListDeliverabilitySeries :many
 WITH days AS (
-    SELECT generate_series($2::date, CURRENT_DATE, INTERVAL '1 day')::date AS day
+    SELECT generate_series($1::date, CURRENT_DATE, INTERVAL '1 day')::date AS day
 ),
-spans AS (
-    SELECT day,
-           (day::timestamp       AT TIME ZONE 'UTC') AS from_ts,
-           ((day + 1)::timestamp AT TIME ZONE 'UTC') AS to_ts
-    FROM days
+sent AS (
+    SELECT (s.sent_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS n
+    FROM sends s
+    WHERE s.workspace_id = $2 AND s.status = 'sent'
+      AND s.sent_at >= (($1::date)::timestamp AT TIME ZONE 'UTC')
+    GROUP BY 1
+),
+bounced AS (
+    SELECT day, COUNT(*) AS n FROM (
+        SELECT (e.stopped_at AT TIME ZONE 'UTC')::date AS day, e.contact_id
+        FROM sequence_enrollments e
+        WHERE e.workspace_id = $2 AND e.stop_reason = 'bounced'
+          AND e.stopped_at >= (($1::date)::timestamp AT TIME ZONE 'UTC')
+        UNION
+        SELECT (ev.received_at AT TIME ZONE 'UTC')::date AS day, s.contact_id
+        FROM deliverability_events ev
+          JOIN sends s ON s.id = ev.send_id AND s.workspace_id = ev.workspace_id
+        WHERE ev.workspace_id = $2 AND ev.kind = 'bounce'
+          AND ev.received_at >= (($1::date)::timestamp AT TIME ZONE 'UTC')
+    ) u GROUP BY day
+),
+complained AS (
+    SELECT (ev.received_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS n
+    FROM deliverability_events ev
+    WHERE ev.workspace_id = $2 AND ev.kind = 'complaint'
+      AND ev.received_at >= (($1::date)::timestamp AT TIME ZONE 'UTC')
+    GROUP BY 1
+),
+placed AS (
+    SELECT w.day, SUM(w.spam) AS n
+    FROM warmup_daily_stats w
+    WHERE w.workspace_id = $2 AND w.day >= $1::date
+    GROUP BY 1
 )
 SELECT
     d.day,
-    (SELECT COUNT(*) FROM sends s
-      WHERE s.workspace_id = $1 AND s.status = 'sent'
-        AND s.sent_at >= d.from_ts AND s.sent_at < d.to_ts)::bigint AS delivered,
-    (SELECT COUNT(*) FROM (
-        SELECT e.contact_id FROM sequence_enrollments e
-         WHERE e.workspace_id = $1 AND e.stop_reason = 'bounced'
-           AND e.stopped_at >= d.from_ts AND e.stopped_at < d.to_ts
-        UNION
-        SELECT s.contact_id FROM deliverability_events ev
-          JOIN sends s ON s.id = ev.send_id AND s.workspace_id = ev.workspace_id
-         WHERE ev.workspace_id = $1 AND ev.kind = 'bounce'
-           AND ev.received_at >= d.from_ts AND ev.received_at < d.to_ts
-    ) b)::bigint AS bounced,
-    (SELECT COUNT(*) FROM deliverability_events ev
-      WHERE ev.workspace_id = $1 AND ev.kind = 'complaint'
-        AND ev.received_at >= d.from_ts AND ev.received_at < d.to_ts)::bigint AS complained,
-    COALESCE((SELECT SUM(w.spam) FROM warmup_daily_stats w
-               WHERE w.workspace_id = $1 AND w.day = d.day), 0)::bigint AS spam_placed
-FROM spans d
+    COALESCE(sent.n, 0)::bigint       AS delivered,
+    COALESCE(bounced.n, 0)::bigint    AS bounced,
+    COALESCE(complained.n, 0)::bigint AS complained,
+    COALESCE(placed.n, 0)::bigint     AS spam_placed
+FROM days d
+LEFT JOIN sent       ON sent.day = d.day
+LEFT JOIN bounced    ON bounced.day = d.day
+LEFT JOIN complained ON complained.day = d.day
+LEFT JOIN placed     ON placed.day = d.day
 ORDER BY d.day
 `
 
 type ListDeliverabilitySeriesParams struct {
-	WorkspaceID uuid.UUID   `json:"workspace_id"`
 	Since       pgtype.Date `json:"since"`
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
 }
 
 type ListDeliverabilitySeriesRow struct {
@@ -588,14 +606,39 @@ type ListDeliverabilitySeriesRow struct {
 // nils them out when the corresponding score component was NOT MEASURED, so the
 // series can never imply a rate the score itself declined to claim.
 //
-// Each day's bounds are half-open and stated in UTC EXPLICITLY (`AT TIME ZONE
-// 'UTC'`) rather than by letting Postgres widen a DATE with the session time zone:
-// the whole product counts days in UTC (warmup_daily_stats.day, the daily caps,
-// the campaign limit), and a server whose session TZ was not UTC would otherwise
-// silently shift every bucket. Both bounds stay plain comparisons against the bare
-// column, so the existing sent_at indexes are still usable.
+// Each source is aggregated ONCE for the whole window and LEFT JOINed onto the day
+// spine, rather than counted by a correlated subquery per day.
+//
+// The per-day shape was measurably wrong, and not for the reason it looks like.
+// Its index use was fine; the problem was the COST ESTIMATE. generate_series has a
+// hard-coded estimate of 1000 rows, so the planner believed it would run four
+// subqueries a thousand times and costed the statement at 4.3 MILLION. That is far
+// above jit_above_cost (100,000), so PostgreSQL JIT-compiled 47 functions to serve
+// 7 days of work: measured on 200k sends, 252 ms of JIT to wrap 26 ms of query.
+// Aggregating up front keeps the estimate small, so no JIT fires, and each table is
+// range-scanned once instead of once per day.
+//
+// UTC is stated EXPLICITLY on every day boundary (`AT TIME ZONE 'UTC'`) rather than
+// letting Postgres widen a DATE with the session time zone: the whole product counts
+// days in UTC (warmup_daily_stats.day, the daily caps, the campaign limit), and a
+// server whose session TZ was not UTC would otherwise silently shift every bucket.
+// The lower bounds stay plain comparisons against the bare column, so the
+// (workspace_id, sent_at) and (campaign_id, stopped_at) indexes still range-seek.
+//
+// On the `bounced` CTE: the UNION already yields DISTINCT (day, contact) pairs, so
+// COUNT(*) per day IS the distinct-contact count -- the two bounce feeds reporting
+// one contact on one day collapse to one row. A contact that bounced via the poller
+// on one day and via an ingested event on another counts once per day, which is
+// what a per-day series means.
+//
+// NOTE: the parentheses around (@since::date)::timestamp are load-bearing. sqlc
+// v1.31 mis-rewrites a bare @param with a CHAINED cast (@since::date::timestamp):
+// it emits corrupt SQL -- observed eating the "GR" off a later GROUP BY -- and then
+// reports the syntax error against an unrelated line in the file, which sends you
+// looking in the wrong place. Parenthesising the first cast, or using
+// sqlc.arg(since)::date::timestamp, both generate correctly. Bisected in isolation.
 func (q *Queries) ListDeliverabilitySeries(ctx context.Context, arg ListDeliverabilitySeriesParams) ([]ListDeliverabilitySeriesRow, error) {
-	rows, err := q.db.Query(ctx, listDeliverabilitySeries, arg.WorkspaceID, arg.Since)
+	rows, err := q.db.Query(ctx, listDeliverabilitySeries, arg.Since, arg.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
