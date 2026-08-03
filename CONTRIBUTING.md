@@ -32,10 +32,10 @@ Equivalent raw commands if you don't use make: `go test ./...` and
 reliable signal, so when you add a check, first break it on purpose and watch the
 test go red. A test that was already green cannot tell you whether it covers the
 thing you just wrote — and review will not catch this, because the test reads
-correctly. Both examples below were found this way and neither was visible on the
+correctly. All three examples below were found this way and none was visible on the
 page.
 
-Two shapes recur:
+Three shapes recur:
 
 **A fixture that builds rows by hand skips the state machine, and hides every check
 on the state it skipped.** Several fixtures created `sequence_enrollments` with a
@@ -54,6 +54,16 @@ unreachable.** `sender.Handler` took a `*queue.Client`; every unit test passed
 since it was written. Depend on a small consumer-defined interface (`Enqueuer`,
 `Store`, `Sender`) so a fake can assert the branch — the same dependency-inversion
 rule the domains follow, applied to workers.
+
+**A fixture and its assertion reading two different clocks makes the result depend
+on how fast the machine ran.** A perf fixture laid 220,000 rows out relative to an
+instant captured before seeding, then evaluated through a service calling
+`time.Now()`; the ~35s of seeding drifted a 7-day window boundary across rows, and
+the test failed once and passed twice. Inject the clock (`Service.now`) and pin it
+to the instant the fixture seeded against, then assert the sample exactly rather
+than approximately, so drift fails loudly instead of intermittently. Anywhere a
+time-windowed query is tested, the fixture and the code under test have to agree on
+what "now" is.
 
 ## Conventions (summary — full list in CLAUDE.md)
 - File names: kebab-case (frontend), lowercase (Go). Identifiers: language-idiomatic
