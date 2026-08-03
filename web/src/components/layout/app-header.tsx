@@ -1,11 +1,13 @@
 import { Menu, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { usePulse } from './use-pulse'
 
 /**
  * App shell header. Deliberately feature-agnostic — the workspace switcher and
  * account menu live in `features/auth/auth-header.tsx` and are passed in via
- * the `rightSlot` prop. Layout components must not import from features/*,
- * which is the direction the layering rule mandates.
+ * the `rightSlot` prop. Layout components must not import feature *UI*, which
+ * is the direction the layering rule mandates; the pulse read here goes
+ * through the `usePulse` hook seam (the `useNavCounts` doctrine).
  */
 export function AppHeader({
   navOpen,
@@ -18,18 +20,27 @@ export function AppHeader({
   navOpen: boolean
   rightSlot?: React.ReactNode
 }) {
+  // Below md the pulse card lives inside the closed drawer, so a danger row
+  // would be invisible — the menu button carries a small danger dot (and says
+  // so in its accessible name) to surface it.
+  const { data: pulse } = usePulse()
+  const needsAttention = pulse?.attention.some((row) => row.severity === 'danger') ?? false
+
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-chrome-border bg-chrome px-3 text-chrome-text sm:px-4">
       <Button
         variant="ghost"
         size="icon-sm"
-        className="text-chrome-muted hover:bg-chrome-hover hover:text-chrome-text md:hidden"
+        className="relative text-chrome-muted hover:bg-chrome-hover hover:text-chrome-text md:hidden"
         onClick={onToggleNav}
-        aria-label="Toggle navigation"
+        aria-label={needsAttention ? 'Toggle navigation — attention needed' : 'Toggle navigation'}
         aria-expanded={navOpen}
         aria-controls="mobile-navigation"
       >
         <Menu />
+        {needsAttention && (
+          <span className="absolute right-1 top-1 size-1.5 rounded-full bg-danger" aria-hidden="true" />
+        )}
       </Button>
 
       <div className="flex items-center gap-2.5">

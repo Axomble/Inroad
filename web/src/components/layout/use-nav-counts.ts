@@ -1,37 +1,29 @@
-import { useListMailboxesQuery } from '@/features/mailboxes/api'
-import { useListCampaignsQuery } from '@/features/campaigns/api'
-import { useGetWarmupOverviewQuery } from '@/features/warmup/api'
+import { usePulse } from './use-pulse'
 
 /**
  * Live counts for the sidebar, keyed by nav route.
  *
- * The one place in `components/` that reads across features, and deliberately
- * isolated here so `AppSidebar` itself stays presentational. This follows the
- * codebase's existing rule: read-only reuse of another feature's *query hook* is
- * allowed (see `features/warmup/warmup-page.tsx` pulling the mailbox list),
- * cross-feature *UI* imports are not.
+ * All four numbers come from the one workspace pulse subscription
+ * (`usePulse`) — a single O(1) aggregate payload — replacing the old
+ * full-list fetches that downloaded every mailbox/campaign just to print a
+ * length. Contacts finally gets a real count because the pulse read-model
+ * reports a workspace-wide total; previously no such aggregate existed.
  *
- * Every number is real. The sidebar previously shipped no counts at all because
- * the design-spec era's placeholders were invented (`Deals 18`) — a wrong count
- * is worse than none, so a value only appears here if an endpoint actually
- * reports it, cheaply, for every user. Two rows therefore have no count:
- *
- * - **Contacts** — contacts are queried per list, so there is no workspace-wide
- *   total to show without inventing one or fanning out a query per list.
- * - **Team** — the only meaningful number is pending invites, and that endpoint
- *   is admin-only and needs the active workspace id. A nav count isn't worth a
- *   role-gated request that 403s for ordinary members.
+ * The doctrine stands: every number is real, and a value only appears here if
+ * an endpoint actually reports it, cheaply, for every user. Team still has no
+ * count — the only meaningful number is pending invites, and that endpoint is
+ * admin-only; a nav count isn't worth a role-gated request that 403s for
+ * ordinary members.
  */
 export function useNavCounts(): Record<string, number | undefined> {
-  const { data: mailboxes } = useListMailboxesQuery()
-  const { data: campaigns } = useListCampaignsQuery()
-  const { data: warmup } = useGetWarmupOverviewQuery()
+  const { data } = usePulse()
 
   return {
-    '/app/mailboxes': mailboxes?.length,
+    '/app/mailboxes': data?.mailboxes.total,
     // Pool size, not "mailboxes eligible for warmup" — the count answers "how
     // many are actually exchanging mail".
-    '/app/warmup': warmup?.pool_size,
-    '/app/campaigns': campaigns?.length,
+    '/app/warmup': data?.warmup.pool,
+    '/app/campaigns': data?.campaigns.total,
+    '/app/contacts': data?.contacts.total,
   }
 }

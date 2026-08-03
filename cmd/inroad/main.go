@@ -32,6 +32,7 @@ import (
 	"github.com/inroad/inroad/internal/app/mailbox"
 	"github.com/inroad/inroad/internal/app/oauthprovider"
 	"github.com/inroad/inroad/internal/app/passkey"
+	"github.com/inroad/inroad/internal/app/pulse"
 	"github.com/inroad/inroad/internal/app/sendingdomain"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
@@ -325,6 +326,10 @@ func run() error {
 		// (/mailboxes/{id}/warmup) are registered as a sub-router of the mailbox
 		// mount above, not here.
 		{pattern: "/api/v1/warmup", handler: warmupHandler.Routes()},
+		// The console's aggregate read-model (pulse card / nav counts /
+		// overview tiles). Read-only, workspace-pinned, chrome-only — not part
+		// of the api-key contract.
+		{pattern: "/api/v1/pulse", handler: pulse.NewHandler(pulse.NewService(pulse.NewPgStore(queries))).Routes()},
 	}
 	router := buildRouter(logger, public, []protectedGroup{
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
