@@ -1407,7 +1407,7 @@ components:
         password: { type: string }
     SessionResponse:
       type: object
-      required: [access_token, expires_in, user_id, active_workspace_id, role, memberships]
+      required: [access_token, expires_in, user_id, active_workspace_id, role, memberships, email]
       properties:
         access_token: { type: string }
         expires_in: { type: integer }
@@ -1417,6 +1417,7 @@ components:
         memberships:
           type: array
           items: { $ref: '#/components/schemas/Membership' }
+        email: { type: string, description: The signed-in user's email — the SPA's identity source after a silent refresh. }
     Membership:
       type: object
       required: [workspace_id, workspace_name, role]
@@ -1426,7 +1427,7 @@ components:
         role: { type: string }
     MeResponse:
       type: object
-      required: [user_id, active_workspace_id, role, memberships, email_verified]
+      required: [user_id, active_workspace_id, role, memberships, email, email_verified]
       properties:
         user_id: { type: string }
         active_workspace_id: { type: string }
@@ -1434,6 +1435,7 @@ components:
         memberships:
           type: array
           items: { $ref: '#/components/schemas/Membership' }
+        email: { type: string, description: The caller's email address. }
         email_verified: { type: boolean, description: Whether the caller has confirmed their email address. }
     SwitchWorkspaceRequest:
       type: object

@@ -115,6 +115,16 @@ func (f *fakeStore) GetUserByEmail(ctx context.Context, email string) (gen.User,
 	return u, nil
 }
 
+// GetUserByID mirrors GetUserByEmail's miss behavior (pgx.ErrNoRows) so
+// callers see the same error shape the real store passes through.
+func (f *fakeStore) GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error) {
+	u, ok := f.usersByID[id]
+	if !ok {
+		return gen.User{}, pgx.ErrNoRows
+	}
+	return u, nil
+}
+
 func (f *fakeStore) ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]gen.ListMembersByUserRow, error) {
 	return f.members[userID], nil
 }
@@ -362,6 +372,15 @@ func TestRefreshRotatesAndRevokesOld(t *testing.T) {
 	}
 	if refreshed.SessionID == oldSessionID {
 		t.Fatal("expected new session id to differ from old")
+	}
+	// The refreshed session must carry the user's email: on a hard reload the
+	// silent refresh is the SPA's ONLY identity source, and a session without
+	// it leaves the identity footer skeleton-stuck forever (the bug QA found).
+	if refreshed.Email != "owner@acme.test" {
+		t.Fatalf("expected refreshed session to carry the user email, got %q", refreshed.Email)
+	}
+	if reg.Email != "owner@acme.test" {
+		t.Fatalf("expected registration session to carry the user email, got %q", reg.Email)
 	}
 
 	oldRow, ok := store.sessions[oldSessionID]

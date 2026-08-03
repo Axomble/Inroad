@@ -93,6 +93,9 @@ type sessionResponse struct {
 	ActiveWorkspaceID string          `json:"active_workspace_id"`
 	Role              string          `json:"role"`
 	Memberships       []membershipDTO `json:"memberships"`
+	// Email lets the SPA render identity after a silent refresh — on a hard
+	// reload the refresh response is the only identity source it has.
+	Email string `json:"email"`
 }
 
 // clientMeta extracts the user-agent and bare client IP from the request. The IP
@@ -159,6 +162,7 @@ func (h *Handler) issueSession(w http.ResponseWriter, sess Session) {
 		AccessToken: access, ExpiresIn: int(h.accessTTL.Seconds()),
 		UserID: sess.UserID.String(), ActiveWorkspaceID: sess.WorkspaceID.String(),
 		Role: sess.Role, Memberships: toMembershipDTOs(sess.Memberships),
+		Email: sess.Email,
 	})
 }
 
@@ -327,14 +331,15 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "could not load memberships")
 		return
 	}
-	verified, err := h.svc.IsEmailVerified(r.Context(), uid)
+	email, verified, err := h.svc.UserIdentity(r.Context(), uid)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not load verification status")
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"user_id": claims.UserID, "active_workspace_id": claims.WorkspaceID,
-		"role": claims.Role, "memberships": toMembershipDTOs(mems), "email_verified": verified,
+		"role": claims.Role, "memberships": toMembershipDTOs(mems),
+		"email": email, "email_verified": verified,
 	})
 }
 
