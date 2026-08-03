@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hibiken/asynq"
 
@@ -231,3 +232,79 @@ type timeoutStub struct{}
 func (timeoutStub) Error() string   { return "i/o timeout" }
 func (timeoutStub) Timeout() bool   { return true }
 func (timeoutStub) Temporary() bool { return true }
+
+// deferEnq records the deferral the handler asked for. Handler takes the
+// DelayedSendEnqueuer seam precisely so this is possible: it used to take the
+// concrete *queue.Client, and every test passed nil, which left both deferral
+// branches unreachable.
+type deferEnq struct {
+	calls int
+	delay time.Duration
+}
+
+func (d *deferEnq) EnqueueSendIn(_, _ string, delay time.Duration) error {
+	d.calls++
+	d.delay = delay
+	return nil
+}
+
+// Only a 'running' campaign may send, on the direct path as well as the step path.
+//
+// This path is DORMANT — EnqueueSends, the only writer of 'queued' campaign sends,
+// has no production callers — so the gate is insurance rather than a live guard.
+// It is here so "a campaign that is not running does not send" is a property of the
+// codebase and not of one call site: an invariant that holds on only the live path
+// rots the moment someone revives this one.
+//
+// The campaign status itself is resolved in GetSendJob (which also returns before
+// unsealing any credential); the handler's job is to DEFER rather than finalize, so
+// the row survives to be sent when an operator relaunches.
+func TestPausedCampaignDefersOnTheDirectPath(t *testing.T) {
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
+		CampaignPaused: true,
+		// Deliberately also over cap and suppressible-looking: the pause branch must
+		// win before the cap branch bumps attempts.
+		EffectiveDailyCap: 0, SentToday: 5,
+		ToEmail: "a@b.test", Subject: "Hi", BodyText: "yo",
+	}}
+	snd, enq := &stubSender{}, &deferEnq{}
+
+	if err := Handler(core, snd, enq, testBaseURL, testTrackingSecret)(context.Background(), sendTask(t)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if snd.calls != 0 {
+		t.Errorf("a paused campaign sent %d messages", snd.calls)
+	}
+	if core.claimCalls != 0 {
+		t.Errorf("a paused campaign claimed the send row (%d claims)", core.claimCalls)
+	}
+	// Deferred, not finalized: the row must still be sendable after a relaunch.
+	if core.marked != nil {
+		t.Errorf("a paused campaign finalized the send as %q", core.marked.Status)
+	}
+	if enq.calls != 1 || enq.delay != campaignPausedBackoff {
+		t.Errorf("deferrals = %d at %v, want 1 at %v", enq.calls, enq.delay, campaignPausedBackoff)
+	}
+}
+
+// The converse: a running campaign still sends, so the gate is not stuck closed.
+func TestRunningCampaignStillSendsOnTheDirectPath(t *testing.T) {
+	core := &stubCore{claimOK: true, job: coreapi.SendJob{
+		EffectiveDailyCap: 100, SentToday: 0,
+		ToEmail: "a@b.test", Subject: "Hi", BodyText: "yo",
+	}}
+	snd, enq := &stubSender{}, &deferEnq{}
+
+	if err := Handler(core, snd, enq, testBaseURL, testTrackingSecret)(context.Background(), sendTask(t)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if snd.calls != 1 {
+		t.Fatalf("a running campaign sent %d messages, want 1", snd.calls)
+	}
+	if enq.calls != 0 {
+		t.Errorf("a running campaign was deferred %d times", enq.calls)
+	}
+	if core.marked == nil || core.marked.Status != "sent" {
+		t.Errorf("send not finalized 'sent': %+v", core.marked)
+	}
+}

@@ -527,10 +527,15 @@ type SendRef struct {
 // a []byte so the worker can zeroize it after use; a Go string would be
 // immutable and hang around in memory until GC.
 type SendJob struct {
-	SendID            string
-	WorkspaceID       string
-	Attempts          int
-	Suppressed        bool
+	SendID      string
+	WorkspaceID string
+	Attempts    int
+	Suppressed  bool
+	// CampaignPaused means the campaign is not 'running'. Same gate as
+	// StepSendJob.CampaignPaused; see there for why it is not expressed as Skip.
+	// This (direct) path is dormant, so the flag is insurance for whoever revives
+	// it rather than a live guard.
+	CampaignPaused    bool
 	EffectiveDailyCap int
 	SentToday         int
 	ToEmail           string
