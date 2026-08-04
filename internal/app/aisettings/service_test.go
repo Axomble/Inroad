@@ -100,33 +100,24 @@ func (f *fakeStore) ListProviders(_ context.Context, ws uuid.UUID) ([]gen.ListAI
 	return out, nil
 }
 
-func (f *fakeStore) UpdateProviderConfig(_ context.Context, arg gen.UpdateAIProviderConfigParams) (gen.UpdateAIProviderConfigRow, error) {
+func (f *fakeStore) UpdateProvider(_ context.Context, arg gen.UpdateAIProviderParams) (gen.UpdateAIProviderRow, error) {
 	p, ok := f.providers[arg.ID]
 	if !ok || p.WorkspaceID != arg.WorkspaceID {
-		return gen.UpdateAIProviderConfigRow{}, pgx.ErrNoRows
+		return gen.UpdateAIProviderRow{}, pgx.ErrNoRows
 	}
 	key := targetKey(arg.WorkspaceID, p.Kind, arg.Config)
 	for _, other := range f.providers {
 		if other.ID != p.ID && targetKey(other.WorkspaceID, other.Kind, other.Config) == key {
-			return gen.UpdateAIProviderConfigRow{}, ErrDuplicateTarget
+			return gen.UpdateAIProviderRow{}, ErrDuplicateTarget
 		}
 	}
 	p.DisplayName, p.Config = arg.DisplayName, arg.Config
+	p.SecretCiphertext, p.KeyPrefix = arg.SecretCiphertext, arg.KeyPrefix
 	f.providers[p.ID] = p
-	return gen.UpdateAIProviderConfigRow{
+	return gen.UpdateAIProviderRow{
 		ID: p.ID, WorkspaceID: p.WorkspaceID, Kind: p.Kind, Config: p.Config,
 		KeyPrefix: p.KeyPrefix, DisplayName: p.DisplayName,
 	}, nil
-}
-
-func (f *fakeStore) UpdateProviderSecret(_ context.Context, arg gen.UpdateAIProviderSecretParams) (int64, error) {
-	p, ok := f.providers[arg.ID]
-	if !ok || p.WorkspaceID != arg.WorkspaceID {
-		return 0, nil
-	}
-	p.SecretCiphertext, p.KeyPrefix = arg.SecretCiphertext, arg.KeyPrefix
-	f.providers[p.ID] = p
-	return 1, nil
 }
 
 func (f *fakeStore) DeleteProvider(_ context.Context, ws, id uuid.UUID) (int64, error) {
@@ -339,6 +330,35 @@ func TestUpdateSettingsValidatesAgainstAvailableSet(t *testing.T) {
 	badList := []string{sonnetID, "nope"}
 	if _, err := svc.UpdateSettings(context.Background(), ws, SettingsUpdate{EnabledModelIDs: &badList}); !errors.Is(err, ErrValidation) {
 		t.Fatalf("unavailable enabled id must be ErrValidation, got %v", err)
+	}
+}
+
+func TestUpdateSettingsRejectsDisabledDefaultsAndDuplicates(t *testing.T) {
+	store := newFakeStore()
+	svc := newTestService(t, store, svcOpts{})
+	ws := uuid.New()
+	provider := mustCreateProvider(t, svc, ws, ProviderCreateInput{
+		Kind: ai.KindAnthropic, Credentials: ai.Credentials{APIKey: testKey},
+	})
+	modelID := provider.ID + "/claude-sonnet-5"
+	duplicate := []string{modelID, modelID}
+	if _, err := svc.UpdateSettings(context.Background(), ws, SettingsUpdate{EnabledModelIDs: &duplicate}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("duplicate enabled ids must be rejected, got %v", err)
+	}
+
+	empty := []string{}
+	if _, err := svc.UpdateSettings(context.Background(), ws, SettingsUpdate{
+		DefaultSmartModel: &modelID, EnabledModelIDs: &empty,
+	}); err != nil {
+		t.Fatalf("empty enabled list means all models and must accept an explicit default: %v", err)
+	}
+
+	other := mustCreateProvider(t, svc, ws, ProviderCreateInput{
+		Kind: ai.KindOpenAI, Credentials: ai.Credentials{APIKey: testKey},
+	})
+	onlyGPT := []string{other.ID + "/gpt-5.2"}
+	if _, err := svc.UpdateSettings(context.Background(), ws, SettingsUpdate{EnabledModelIDs: &onlyGPT}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("an explicit default excluded by enabled_model_ids must be rejected, got %v", err)
 	}
 }
 
@@ -580,6 +600,34 @@ func TestUpdateProviderKeepsCredentialsWhenAbsent(t *testing.T) {
 	// Unknown / foreign ids 404.
 	if _, err := svc.UpdateProvider(context.Background(), uuid.New(), id, ProviderUpdateInput{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign workspace must be ErrNotFound, got %v", err)
+	}
+}
+
+func TestUpdateProviderDuplicateTargetDoesNotPartiallyReplaceCredentials(t *testing.T) {
+	store := newFakeStore()
+	svc := newTestService(t, store, svcOpts{})
+	ws := uuid.New()
+	first := mustCreateProvider(t, svc, ws, ProviderCreateInput{
+		Kind: ai.KindOpenAICompatible, Credentials: ai.Credentials{APIKey: testKey},
+		Config: map[string]string{"base_url": "https://first.example/v1"},
+	})
+	mustCreateProvider(t, svc, ws, ProviderCreateInput{
+		Kind: ai.KindOpenAICompatible, Credentials: ai.Credentials{APIKey: testKey},
+		Config: map[string]string{"base_url": "https://second.example/v1"},
+	})
+	id := uuid.MustParse(first.ID)
+	before := store.providers[id]
+	newCredentials := ai.Credentials{APIKey: "sk-replacement-123456789"}
+	_, err := svc.UpdateProvider(context.Background(), ws, id, ProviderUpdateInput{
+		Credentials: &newCredentials,
+		Config:      map[string]string{"base_url": "https://second.example/v1"},
+	})
+	if !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate target must be ErrDuplicate, got %v", err)
+	}
+	after := store.providers[id]
+	if after.SecretCiphertext != before.SecretCiphertext || after.KeyPrefix != before.KeyPrefix {
+		t.Fatal("failed config update must not partially replace credentials")
 	}
 }
 

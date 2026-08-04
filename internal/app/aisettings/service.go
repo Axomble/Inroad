@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,8 +41,14 @@ var (
 // stored prefix a strict prefix — a shorter secret stores an empty prefix
 // rather than revealing itself.
 const (
-	keyPrefixLen = 8
-	minKeyLen    = 12
+	keyPrefixLen              = 8
+	minKeyLen                 = 12
+	maxDisplayNameLen         = 120
+	maxAdditionalInstructions = 20_000
+	maxEnabledModels          = 1_000
+	maxModelNameLen           = 512
+	maxModelLabelLen          = 255
+	maxConfigValueLen         = 2_048
 )
 
 // HostClassifier is the SSRF-vetting seam for user-supplied base-URL/endpoint
@@ -208,6 +216,12 @@ func (s *Service) UpdateSettings(ctx context.Context, ws uuid.UUID, req Settings
 	if base.EnabledModelIDs == nil {
 		base.EnabledModelIDs = []string{}
 	}
+	if len(base.AdditionalInstructions) > maxAdditionalInstructions {
+		return SettingsDTO{}, fmt.Errorf("%w: additional_instructions must be at most %d characters", ErrValidation, maxAdditionalInstructions)
+	}
+	if len(base.EnabledModelIDs) > maxEnabledModels {
+		return SettingsDTO{}, fmt.Errorf("%w: enabled_model_ids must contain at most %d models", ErrValidation, maxEnabledModels)
+	}
 
 	available, err := s.availableModels(ctx, ws)
 	if err != nil {
@@ -223,9 +237,22 @@ func (s *Service) UpdateSettings(ctx context.Context, ws uuid.UUID, req Settings
 	if err := validateModelRef(base.DefaultFastModel, ai.SentinelFastModel, "default_fast_model", availableIDs); err != nil {
 		return SettingsDTO{}, err
 	}
+	enabledIDs := make(map[string]bool, len(base.EnabledModelIDs))
 	for _, id := range base.EnabledModelIDs {
 		if !availableIDs[id] {
 			return SettingsDTO{}, fmt.Errorf("%w: enabled_model_ids contains unavailable model %q", ErrValidation, id)
+		}
+		if enabledIDs[id] {
+			return SettingsDTO{}, fmt.Errorf("%w: enabled_model_ids contains duplicate model %q", ErrValidation, id)
+		}
+		enabledIDs[id] = true
+	}
+	if len(enabledIDs) > 0 {
+		if base.DefaultSmartModel != ai.SentinelSmartModel && !enabledIDs[base.DefaultSmartModel] {
+			return SettingsDTO{}, fmt.Errorf("%w: default_smart_model must be enabled", ErrValidation)
+		}
+		if base.DefaultFastModel != ai.SentinelFastModel && !enabledIDs[base.DefaultFastModel] {
+			return SettingsDTO{}, fmt.Errorf("%w: default_fast_model must be enabled", ErrValidation)
 		}
 	}
 
@@ -271,6 +298,10 @@ func (s *Service) CreateProvider(ctx context.Context, ws uuid.UUID, in ProviderC
 	if !ai.Kinds[in.Kind] {
 		return ProviderDTO{}, fmt.Errorf("%w: unknown kind %q", ErrValidation, in.Kind)
 	}
+	in.DisplayName = strings.TrimSpace(in.DisplayName)
+	if len(in.DisplayName) > maxDisplayNameLen {
+		return ProviderDTO{}, fmt.Errorf("%w: display_name must be at most %d characters", ErrValidation, maxDisplayNameLen)
+	}
 	cfg := normalizeConfig(in.Config)
 	if err := s.validateConfig(ctx, in.Kind, cfg); err != nil {
 		return ProviderDTO{}, err
@@ -301,7 +332,7 @@ func (s *Service) CreateProvider(ctx context.Context, ws uuid.UUID, in ProviderC
 	case err != nil:
 		return ProviderDTO{}, err
 	}
-	return providerDTO(row.ID, row.Kind, row.DisplayName, row.Config, row.KeyPrefix, row.CreatedAt, row.UpdatedAt), nil
+	return providerDTO(row.ID, row.Kind, row.DisplayName, row.Config, row.KeyPrefix, row.CreatedAt, row.UpdatedAt)
 }
 
 // ProviderUpdateInput is the PUT /ai/providers/{id} request. Credentials nil
@@ -324,7 +355,10 @@ func (s *Service) UpdateProvider(ctx context.Context, ws, id uuid.UUID, in Provi
 		return ProviderDTO{}, err
 	}
 
-	cfg := configMap(existing.Config)
+	cfg, err := decodeConfig(existing.Config)
+	if err != nil {
+		return ProviderDTO{}, err
+	}
 	if in.Config != nil {
 		cfg = normalizeConfig(in.Config)
 	}
@@ -333,22 +367,21 @@ func (s *Service) UpdateProvider(ctx context.Context, ws, id uuid.UUID, in Provi
 	}
 	displayName := existing.DisplayName
 	if in.DisplayName != nil {
-		displayName = *in.DisplayName
+		displayName = strings.TrimSpace(*in.DisplayName)
+	}
+	if len(displayName) > maxDisplayNameLen {
+		return ProviderDTO{}, fmt.Errorf("%w: display_name must be at most %d characters", ErrValidation, maxDisplayNameLen)
 	}
 
-	// Replace the credential blob FIRST so the masked row the config update
-	// returns already carries the new key_prefix.
+	// Carry existing credentials through the single UPDATE when no replacement
+	// was supplied. This keeps credential and config changes atomic.
+	ciphertext, prefix := existing.SecretCiphertext, existing.KeyPrefix
 	if in.Credentials != nil {
 		if err := validateCredentials(existing.Kind, *in.Credentials); err != nil {
 			return ProviderDTO{}, err
 		}
-		ciphertext, prefix, err := s.sealCredentials(ctx, ws, existing.Kind, *in.Credentials)
+		ciphertext, prefix, err = s.sealCredentials(ctx, ws, existing.Kind, *in.Credentials)
 		if err != nil {
-			return ProviderDTO{}, err
-		}
-		if _, err := s.store.UpdateProviderSecret(ctx, gen.UpdateAIProviderSecretParams{
-			ID: id, WorkspaceID: ws, SecretCiphertext: ciphertext, KeyPrefix: prefix,
-		}); err != nil {
 			return ProviderDTO{}, err
 		}
 	}
@@ -357,8 +390,9 @@ func (s *Service) UpdateProvider(ctx context.Context, ws, id uuid.UUID, in Provi
 	if err != nil {
 		return ProviderDTO{}, err
 	}
-	row, err := s.store.UpdateProviderConfig(ctx, gen.UpdateAIProviderConfigParams{
+	row, err := s.store.UpdateProvider(ctx, gen.UpdateAIProviderParams{
 		ID: id, WorkspaceID: ws, DisplayName: displayName, Config: cfgJSON,
+		SecretCiphertext: ciphertext, KeyPrefix: prefix,
 	})
 	switch {
 	case errors.Is(err, ErrDuplicateTarget):
@@ -366,7 +400,7 @@ func (s *Service) UpdateProvider(ctx context.Context, ws, id uuid.UUID, in Provi
 	case err != nil:
 		return ProviderDTO{}, err
 	}
-	return providerDTO(row.ID, row.Kind, row.DisplayName, row.Config, row.KeyPrefix, row.CreatedAt, row.UpdatedAt), nil
+	return providerDTO(row.ID, row.Kind, row.DisplayName, row.Config, row.KeyPrefix, row.CreatedAt, row.UpdatedAt)
 }
 
 // ListProviders returns the workspace's provider doors, masked.
@@ -377,7 +411,11 @@ func (s *Service) ListProviders(ctx context.Context, ws uuid.UUID) ([]ProviderDT
 	}
 	out := make([]ProviderDTO, len(rows))
 	for i, r := range rows {
-		out[i] = providerDTO(r.ID, r.Kind, r.DisplayName, r.Config, r.KeyPrefix, r.CreatedAt, r.UpdatedAt)
+		dto, err := providerDTO(r.ID, r.Kind, r.DisplayName, r.Config, r.KeyPrefix, r.CreatedAt, r.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = dto
 	}
 	return out, nil
 }
@@ -410,9 +448,13 @@ func (s *Service) Discover(ctx context.Context, ws, id uuid.UUID) (DiscoveryDTO,
 	if err != nil {
 		return DiscoveryDTO{}, err
 	}
+	cfg, err := decodeConfig(row.Config)
+	if err != nil {
+		return DiscoveryDTO{}, err
+	}
 	res, err := s.discoverer.Discover(ctx, ai.DiscoverRequest{
 		Kind:        row.Kind,
-		Config:      configMap(row.Config),
+		Config:      cfg,
 		Credentials: creds,
 	})
 	if err != nil {
@@ -446,6 +488,8 @@ type ModelCreateInput struct {
 // catalog entry of the same door — two entries answering to one id would make
 // settings ambiguous.
 func (s *Service) CreateModel(ctx context.Context, ws uuid.UUID, in ModelCreateInput) (ModelDTO, error) {
+	in.Name = strings.TrimSpace(in.Name)
+	in.Label = strings.TrimSpace(in.Label)
 	switch {
 	case in.Name == "":
 		return ModelDTO{}, fmt.Errorf("%w: name is required", ErrValidation)
@@ -455,6 +499,18 @@ func (s *Service) CreateModel(ctx context.Context, ws uuid.UUID, in ModelCreateI
 		return ModelDTO{}, fmt.Errorf("%w: context_window_tokens must be positive", ErrValidation)
 	case in.MaxOutputTokens <= 0:
 		return ModelDTO{}, fmt.Errorf("%w: max_output_tokens must be positive", ErrValidation)
+	case len(in.Name) > maxModelNameLen:
+		return ModelDTO{}, fmt.Errorf("%w: name must be at most %d characters", ErrValidation, maxModelNameLen)
+	case len(in.Label) > maxModelLabelLen:
+		return ModelDTO{}, fmt.Errorf("%w: label must be at most %d characters", ErrValidation, maxModelLabelLen)
+	case in.ContextWindowTokens > math.MaxInt32:
+		return ModelDTO{}, fmt.Errorf("%w: context_window_tokens is too large", ErrValidation)
+	case in.MaxOutputTokens > math.MaxInt32:
+		return ModelDTO{}, fmt.Errorf("%w: max_output_tokens is too large", ErrValidation)
+	case invalidCost(in.InputCostPerMTok):
+		return ModelDTO{}, fmt.Errorf("%w: input_cost_per_mtok must be a finite non-negative number", ErrValidation)
+	case invalidCost(in.OutputCostPerMTok):
+		return ModelDTO{}, fmt.Errorf("%w: output_cost_per_mtok must be a finite non-negative number", ErrValidation)
 	}
 
 	available, err := s.availableModels(ctx, ws)
@@ -655,6 +711,9 @@ func (s *Service) validateConfig(ctx context.Context, kind string, cfg map[strin
 		if !allowed[k] {
 			return fmt.Errorf("%w: config key %q is not valid for kind %q", ErrValidation, k, kind)
 		}
+		if len(cfg[k]) > maxConfigValueLen {
+			return fmt.Errorf("%w: config.%s must be at most %d characters", ErrValidation, k, maxConfigValueLen)
+		}
 	}
 	switch kind {
 	case ai.KindOpenAICompatible:
@@ -813,6 +872,9 @@ func (s *Service) vetUserURL(ctx context.Context, field, raw string) error {
 	if u.User != nil {
 		return fmt.Errorf("%w: %s must not contain credentials", ErrValidation, field)
 	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%w: %s must not contain a query string or fragment", ErrValidation, field)
+	}
 	private, err := s.classify(ctx, u.Hostname())
 	if err != nil {
 		return fmt.Errorf("%w: %s host not permitted: %w", ErrValidation, field, err)
@@ -833,6 +895,7 @@ func (s *Service) vetUserURL(ctx context.Context, field, raw string) error {
 func normalizeConfig(cfg map[string]string) map[string]string {
 	out := make(map[string]string, len(cfg))
 	for k, v := range cfg {
+		v = strings.TrimSpace(v)
 		if v != "" {
 			out[k] = v
 		}
@@ -840,27 +903,37 @@ func normalizeConfig(cfg map[string]string) map[string]string {
 	return out
 }
 
-// configMap decodes the stored config JSONB; a corrupt blob yields an empty
-// map rather than a 500 (the config is re-writable via PUT).
-func configMap(raw []byte) map[string]string {
+// decodeConfig fails loud on corrupt persisted config. Treating corruption as
+// an empty object could silently dial a different endpoint than configured.
+func decodeConfig(raw []byte) (map[string]string, error) {
 	out := map[string]string{}
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &out)
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, fmt.Errorf("aisettings: decode provider config: %w", err)
+		}
 	}
-	return out
+	return out, nil
 }
 
-func providerDTO(id uuid.UUID, kind, displayName string, config []byte, keyPrefix string, createdAt, updatedAt pgtype.Timestamptz) ProviderDTO {
+func providerDTO(id uuid.UUID, kind, displayName string, config []byte, keyPrefix string, createdAt, updatedAt pgtype.Timestamptz) (ProviderDTO, error) {
+	cfg, err := decodeConfig(config)
+	if err != nil {
+		return ProviderDTO{}, err
+	}
 	return ProviderDTO{
 		ID:          id.String(),
 		Kind:        kind,
 		DisplayName: displayName,
-		Config:      configMap(config),
+		Config:      cfg,
 		Configured:  true,
 		KeyPrefix:   keyPrefix,
 		CreatedAt:   rfc3339(createdAt),
 		UpdatedAt:   rfc3339(updatedAt),
-	}
+	}, nil
+}
+
+func invalidCost(cost *float64) bool {
+	return cost != nil && (math.IsNaN(*cost) || math.IsInf(*cost, 0) || *cost < 0)
 }
 
 func customModelDTO(row gen.WorkspaceAiModel, kind string) ModelDTO {

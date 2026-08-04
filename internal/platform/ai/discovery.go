@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -72,6 +73,11 @@ func NewHTTPDiscoverer(allowPrivate bool, timeout time.Duration) *HTTPDiscoverer
 	return &HTTPDiscoverer{client: &http.Client{
 		Timeout:   timeout,
 		Transport: &http.Transport{DialContext: mail.GuardedDialContext(allowPrivate)},
+		// Never forward provider credentials through a redirect. Operators must
+		// configure the canonical endpoint explicitly.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}}
 }
 
@@ -138,9 +144,12 @@ func (d *HTTPDiscoverer) getJSON(ctx context.Context, rawURL string, headers []h
 		// (could reflect the URL/key context) — the status is the diagnosis.
 		return fmt.Errorf("ai: discover: endpoint returned %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, discoverMaxBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, discoverMaxBytes+1))
 	if err != nil {
 		return fmt.Errorf("ai: discover: read response: %w", err)
+	}
+	if len(body) > discoverMaxBytes {
+		return fmt.Errorf("ai: discover: response exceeds %d bytes", discoverMaxBytes)
 	}
 	if err := json.Unmarshal(body, v); err != nil {
 		return fmt.Errorf("ai: discover: endpoint did not return a model list: %w", err)
@@ -197,7 +206,7 @@ func perTokenToPerMTok(s string) *float64 {
 		return nil
 	}
 	perToken, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(perToken) || math.IsInf(perToken, 0) || perToken < 0 {
 		return nil
 	}
 	v := perToken * 1_000_000

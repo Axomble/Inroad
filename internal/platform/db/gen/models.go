@@ -183,6 +183,61 @@ func (ns NullUserTokenKind) Value() (driver.Value, error) {
 	return string(ns.UserTokenKind), nil
 }
 
+type AgentMessage struct {
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	ThreadID        uuid.UUID          `json:"thread_id"`
+	TurnID          uuid.UUID          `json:"turn_id"`
+	Role            string             `json:"role"`
+	Status          string             `json:"status"`
+	ModelSelector   string             `json:"model_selector"`
+	BrowsingContext []byte             `json:"browsing_context"`
+	ProcessedAt     pgtype.Timestamptz `json:"processed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type AgentMessagePart struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	MessageID        uuid.UUID          `json:"message_id"`
+	OrderIndex       int32              `json:"order_index"`
+	Type             string             `json:"type"`
+	TextContent      string             `json:"text_content"`
+	ReasoningContent string             `json:"reasoning_content"`
+	ToolName         string             `json:"tool_name"`
+	ToolCallID       string             `json:"tool_call_id"`
+	ToolInput        []byte             `json:"tool_input"`
+	ToolOutput       []byte             `json:"tool_output"`
+	State            string             `json:"state"`
+	ErrorMessage     string             `json:"error_message"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type AgentRun struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	Status      string             `json:"status"`
+	ModelID     string             `json:"model_id"`
+	Error       string             `json:"error"`
+	StartedAt   pgtype.Timestamptz `json:"started_at"`
+	FinishedAt  pgtype.Timestamptz `json:"finished_at"`
+}
+
+type AgentThread struct {
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	CreatedByUserID     uuid.UUID          `json:"created_by_user_id"`
+	Title               string             `json:"title"`
+	TotalInputTokens    int64              `json:"total_input_tokens"`
+	TotalOutputTokens   int64              `json:"total_output_tokens"`
+	ContextWindowTokens int32              `json:"context_window_tokens"`
+	ActiveRunID         pgtype.UUID        `json:"active_run_id"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt           pgtype.Timestamptz `json:"deleted_at"`
+}
+
 type AiCatalogCache struct {
 	ID        bool               `json:"id"`
 	Payload   []byte             `json:"payload"`

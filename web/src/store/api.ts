@@ -428,6 +428,94 @@ const injectedRtkApi = api.injectEndpoints({
         method: "DELETE",
       }),
     }),
+    listAgentThreads: build.query<
+      ListAgentThreadsApiResponse,
+      ListAgentThreadsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads`,
+        params: {
+          offset: queryArg.offset,
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    createAgentThread: build.mutation<
+      CreateAgentThreadApiResponse,
+      CreateAgentThreadApiArg
+    >({
+      query: () => ({ url: `/agent/threads`, method: "POST" }),
+    }),
+    getAgentThread: build.query<
+      GetAgentThreadApiResponse,
+      GetAgentThreadApiArg
+    >({
+      query: (queryArg) => ({ url: `/agent/threads/${queryArg.id}` }),
+    }),
+    renameAgentThread: build.mutation<
+      RenameAgentThreadApiResponse,
+      RenameAgentThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}`,
+        method: "PATCH",
+        body: queryArg.body,
+      }),
+    }),
+    deleteAgentThread: build.mutation<
+      DeleteAgentThreadApiResponse,
+      DeleteAgentThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    sendAgentMessage: build.mutation<
+      SendAgentMessageApiResponse,
+      SendAgentMessageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/messages`,
+        method: "POST",
+        body: queryArg.agentSendRequest,
+      }),
+    }),
+    listAgentQueue: build.query<
+      ListAgentQueueApiResponse,
+      ListAgentQueueApiArg
+    >({
+      query: (queryArg) => ({ url: `/agent/threads/${queryArg.id}/queue` }),
+    }),
+    deleteAgentQueuedMessage: build.mutation<
+      DeleteAgentQueuedMessageApiResponse,
+      DeleteAgentQueuedMessageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/queue/${queryArg.messageId}`,
+        method: "DELETE",
+      }),
+    }),
+    stopAgentRun: build.mutation<StopAgentRunApiResponse, StopAgentRunApiArg>({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/stop`,
+        method: "POST",
+      }),
+    }),
+    streamAgentThread: build.query<
+      StreamAgentThreadApiResponse,
+      StreamAgentThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/stream`,
+        headers: {
+          "Last-Event-ID": queryArg["Last-Event-ID"],
+        },
+        params: {
+          after_seq: queryArg.afterSeq,
+        },
+      }),
+    }),
     listLists: build.query<ListListsApiResponse, ListListsApiArg>({
       query: () => ({ url: `/lists` }),
     }),
@@ -952,6 +1040,58 @@ export type CreateAiModelApiArg = {
 export type DeleteAiModelApiResponse = unknown;
 export type DeleteAiModelApiArg = {
   id: string;
+};
+export type ListAgentThreadsApiResponse =
+  /** status 200 Owner-scoped threads */ AgentThreadList;
+export type ListAgentThreadsApiArg = {
+  offset?: number;
+  limit?: number;
+};
+export type CreateAgentThreadApiResponse =
+  /** status 201 Empty thread */ AgentThread;
+export type CreateAgentThreadApiArg = void;
+export type GetAgentThreadApiResponse =
+  /** status 200 Thread and transcript */ AgentThread;
+export type GetAgentThreadApiArg = {
+  id: string;
+};
+export type RenameAgentThreadApiResponse =
+  /** status 200 Renamed thread */ AgentThread;
+export type RenameAgentThreadApiArg = {
+  id: string;
+  body: {
+    title: string;
+  };
+};
+export type DeleteAgentThreadApiResponse = unknown;
+export type DeleteAgentThreadApiArg = {
+  id: string;
+};
+export type SendAgentMessageApiResponse =
+  /** status 202 Run started or message queued */ AgentSendResult;
+export type SendAgentMessageApiArg = {
+  id: string;
+  agentSendRequest: AgentSendRequest;
+};
+export type ListAgentQueueApiResponse =
+  /** status 200 Pending messages */ AgentQueue;
+export type ListAgentQueueApiArg = {
+  id: string;
+};
+export type DeleteAgentQueuedMessageApiResponse = unknown;
+export type DeleteAgentQueuedMessageApiArg = {
+  id: string;
+  messageId: string;
+};
+export type StopAgentRunApiResponse = unknown;
+export type StopAgentRunApiArg = {
+  id: string;
+};
+export type StreamAgentThreadApiResponse = unknown;
+export type StreamAgentThreadApiArg = {
+  id: string;
+  afterSeq?: number;
+  "Last-Event-ID"?: string;
 };
 export type ListListsApiResponse = /** status 200 Lists */ List[];
 export type ListListsApiArg = void;
@@ -1599,6 +1739,74 @@ export type AiModelCreateRequest = {
   input_cost_per_mtok?: number | null;
   output_cost_per_mtok?: number | null;
 };
+export type AgentPart = {
+  id: string;
+  order_index: number;
+  type:
+    "text" | "reasoning" | "tool_call" | "tool_result" | "compaction_notice";
+  text?: string;
+  reasoning?: string;
+  tool_name?: string;
+  tool_call_id?: string;
+  tool_input?: {
+    [key: string]: any;
+  };
+  tool_output?: any;
+  state?: "" | "running" | "done" | "error" | "awaiting_approval";
+  error?: string;
+};
+export type AgentMessage = {
+  id: string;
+  turn_id: string;
+  role: "user" | "assistant";
+  status: "sent" | "queued" | "processing";
+  created_at: string;
+  parts: AgentPart[];
+};
+export type AgentThread = {
+  id: string;
+  title: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  context_window_tokens: number;
+  active_run_id: string | null;
+  created_at: string;
+  updated_at: string;
+  messages?: AgentMessage[];
+};
+export type AgentThreadList = {
+  threads: AgentThread[];
+};
+export type AgentSendResult = {
+  message_id: string;
+  run_id: string | null;
+  queued: boolean;
+};
+export type AgentBrowsingContext = {
+  type: "record_page" | "list_view";
+  object?: string;
+  record_id?: string;
+  url?: string;
+  view?: string;
+  filters?: {
+    [key: string]: string;
+  };
+};
+export type AgentSendRequest = {
+  text: string;
+  /** composite model id or default-smart-model */
+  model?: string;
+  browsing_context?: AgentBrowsingContext;
+};
+export type AgentQueuedMessage = {
+  id: string;
+  text: string;
+  model: string;
+  created_at: string;
+};
+export type AgentQueue = {
+  queued: AgentQueuedMessage[];
+};
 export type List = {
   id?: string;
   name?: string;
@@ -2030,6 +2238,16 @@ export const {
   useListAiModelsQuery,
   useCreateAiModelMutation,
   useDeleteAiModelMutation,
+  useListAgentThreadsQuery,
+  useCreateAgentThreadMutation,
+  useGetAgentThreadQuery,
+  useRenameAgentThreadMutation,
+  useDeleteAgentThreadMutation,
+  useSendAgentMessageMutation,
+  useListAgentQueueQuery,
+  useDeleteAgentQueuedMessageMutation,
+  useStopAgentRunMutation,
+  useStreamAgentThreadQuery,
   useListListsQuery,
   useCreateListMutation,
   useImportContactsMutation,
