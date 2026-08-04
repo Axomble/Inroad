@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/aisettings"
 	"github.com/inroad/inroad/internal/app/apikey"
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
@@ -40,6 +41,7 @@ import (
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
+	"github.com/inroad/inroad/internal/platform/ai"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -252,6 +254,20 @@ func run() error {
 	deliverabilityHandler := deliverability.NewHandler(
 		deliverability.NewService(deliverability.NewPgStore(pool)),
 	)
+	// AI settings (agent platform PR A1). No shipped model catalog: native
+	// model metadata comes from models.dev at runtime, cached in Postgres with
+	// serve-stale-on-failure. Provider credentials seal under the same
+	// per-workspace DEK keyring as mailbox credentials; user-supplied
+	// base_url/endpoint hosts vet through the mail package's SSRF classifier
+	// at write time AND through the guarded transport at discovery-dial time.
+	aiHandler := aisettings.NewHandler(aisettings.NewService(aisettings.ServiceDeps{
+		Store:               aisettings.NewPgStore(queries),
+		Keyring:             keyring,
+		Catalog:             ai.NewCatalogSource(ai.NewPgCatalogCache(queries), ""),
+		Discoverer:          ai.NewHTTPDiscoverer(cfg.AIAllowPrivateBaseURL, 0),
+		ClassifyHost:        mail.ClassifyHost,
+		AllowPrivateBaseURL: cfg.AIAllowPrivateBaseURL,
+	}))
 	suppStore := suppression.NewStore(queries)
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
@@ -344,6 +360,10 @@ func run() error {
 		// overview tiles). Read-only, workspace-pinned, chrome-only — not part
 		// of the api-key contract.
 		{pattern: "/api/v1/pulse", handler: pulse.NewHandler(pulse.NewService(pulse.NewPgStore(queries))).Routes()},
+		// Workspace AI configuration (model defaults, sealed provider keys).
+		// Session-only: writes are further gated to admins/owners inside
+		// Routes(), and provider keys are never part of the api-key contract.
+		{pattern: "/api/v1/ai", handler: aiHandler.Routes()},
 	}
 	router := buildRouter(logger, public, []protectedGroup{
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},

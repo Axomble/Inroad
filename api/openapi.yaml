@@ -738,6 +738,209 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Pulse' }
         '401': { description: Unauthorized }
+  /ai/settings:
+    get:
+      operationId: getAISettings
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Workspace AI settings (model defaults, enabled models, additional
+        instructions). Returns the sentinel defaults when the workspace has
+        never saved settings.
+      responses:
+        '200':
+          description: AI settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AISettings' }
+        '401': { description: Unauthorized }
+    put:
+      operationId: updateAISettings
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Update workspace AI settings. Omitted fields keep their current (or
+        default) value. Model references must be ids from GET /ai/models
+        ("<provider_id>/<name>") or the field's own sentinel. Requires
+        workspace admin/owner role.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AISettingsUpdate' }
+      responses:
+        '200':
+          description: Updated AI settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AISettings' }
+        '400': { description: Validation error (unavailable model id or wrong sentinel) }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+  /ai/providers:
+    get:
+      operationId: listAIProviders
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: The workspace's configured provider doors, masked (key prefix only).
+      responses:
+        '200':
+          description: Configured providers
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIProviderList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createAIProvider
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Configure a provider door. The credential object is sealed WHOLE under
+        the workspace's encryption key and never returned; responses carry only
+        configured=true and a display prefix (first 8 chars of the api key /
+        access key id, or the service account's client_email). config holds
+        non-secret connection settings and is validated per kind (see
+        AIProviderCreateRequest). User-supplied base_url/endpoint hosts must be
+        https for public hosts; private/loopback hosts are rejected unless the
+        operator set INROAD_AI_ALLOW_PRIVATE_BASE_URL=true. Requires workspace
+        admin/owner role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AIProviderCreateRequest' }
+      responses:
+        '201':
+          description: Provider configured (masked)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIProvider' }
+        '400': { description: 'Validation error (unknown kind, missing kind-required credentials/config, URL policy violation)' }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '409': { description: 'A provider with this (kind, target) already exists' }
+  /ai/providers/{id}:
+    put:
+      operationId: updateAIProvider
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Update a provider door. credentials absent = keep the sealed
+        credential; config absent = keep; display_name absent = keep. kind is
+        immutable.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AIProviderUpdateRequest' }
+      responses:
+        '200':
+          description: Updated provider (masked)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIProvider' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+        '409': { description: 'A provider with this (kind, target) already exists' }
+    delete:
+      operationId: deleteAIProvider
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: Remove a provider door; its custom models cascade with it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Provider removed }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+  /ai/providers/{id}/discover:
+    post:
+      operationId: discoverAIProviderModels
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Best-effort model-list discovery against the provider's own endpoint
+        (OpenAI-compatible GET /models, Anthropic/Google list endpoints, Azure
+        deployments list). Returns CANDIDATES only — nothing is persisted;
+        create chosen ones via POST /ai/models. supported=false means the kind
+        has no discovery path yet (bedrock, vertex_*) and manual entry is the
+        way. The dial goes through the SSRF-guarded client with the same
+        private-host gating as config validation. Requires workspace
+        admin/owner role.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Discovery result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIDiscoveryResult' }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+        '502': { description: 'The provider endpoint could not be listed (dial refused, auth rejected, not a model list)' }
+  /ai/models:
+    get:
+      operationId: listAIModels
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace's merged model list: models.dev catalog entries for
+        native-kind doors (anthropic/openai/google) plus user-defined custom
+        models on any door. Every entry's id is the stable composite
+        "<provider_id>/<name>" — settings reference exactly these ids. When
+        models.dev is unreachable and no cached snapshot exists, catalog
+        entries are absent (custom models still listed).
+      responses:
+        '200':
+          description: Merged model list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIModelList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createAIModel
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Register a user-defined model under a provider door (from discovery
+        candidates or manual entry). Requires workspace admin/owner role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AIModelCreateRequest' }
+      responses:
+        '201':
+          description: Created model
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIModel' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+        '409': { description: A model with this name already exists on this provider }
+  /ai/models/{id}:
+    delete:
+      operationId: deleteAIModel
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Delete a user-defined model by its custom_model_id (catalog entries
+        are not deletable — disable them via settings.enabled_model_ids).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Model removed }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Model not found }
   /lists:
     get:
       operationId: listLists
@@ -2310,6 +2513,177 @@ components:
         count: { type: integer }
         reason: { type: string, description: human-readable explanation derived from real data }
         href: { type: string, description: console destination that shows/fixes the condition }
+    AISettings:
+      type: object
+      description: >-
+        Workspace AI settings. Model references are ids from GET /ai/models
+        ("<provider_id>/<name>") or the sentinels "default-smart-model" /
+        "default-fast-model", which resolve at run time against the
+        workspace's enabled models.
+      required: [default_smart_model, default_fast_model, enabled_model_ids, additional_instructions]
+      properties:
+        default_smart_model: { type: string, example: default-smart-model }
+        default_fast_model: { type: string, example: default-fast-model }
+        enabled_model_ids:
+          type: array
+          items: { type: string }
+          description: empty array = every listed model is enabled
+        additional_instructions: { type: string, description: workspace-specific instructions appended to the agent system prompt }
+    AISettingsUpdate:
+      type: object
+      description: >-
+        Partial update — omitted fields keep their current (or default) value.
+        default_smart_model / default_fast_model accept a model id or the
+        field's own sentinel; enabled_model_ids entries must be ids from
+        GET /ai/models.
+      properties:
+        default_smart_model: { type: string }
+        default_fast_model: { type: string }
+        enabled_model_ids: { type: array, items: { type: string } }
+        additional_instructions: { type: string }
+    AIProviderKind:
+      type: string
+      enum: [anthropic, bedrock, vertex_anthropic, openai, azure_openai, openai_compatible, google, vertex_google]
+      description: >-
+        One kind per DOOR to a vendor — the same model may be reachable
+        natively, via Bedrock, and via Vertex as three separate providers.
+    AIProviderConfig:
+      type: object
+      description: >-
+        Non-secret connection settings; the valid keys depend on kind —
+        openai_compatible: base_url (required); azure_openai: endpoint +
+        api_version (required); bedrock: region (required); vertex_anthropic /
+        vertex_google: project_id + region (required); anthropic / openai /
+        google: none.
+      properties:
+        base_url: { type: string }
+        endpoint: { type: string }
+        api_version: { type: string }
+        region: { type: string }
+        project_id: { type: string }
+    AIProviderCredentials:
+      type: object
+      description: >-
+        Kind-variant secret object, sealed whole at rest and never returned.
+        anthropic / openai / google / azure_openai: api_key (required);
+        openai_compatible: api_key (optional — a local Ollama has none);
+        bedrock: access_key_id + secret_access_key; vertex_anthropic /
+        vertex_google: service_account_json (a service-account key file's
+        JSON content).
+      properties:
+        api_key: { type: string }
+        access_key_id: { type: string }
+        secret_access_key: { type: string }
+        service_account_json: { type: string }
+    AIProvider:
+      type: object
+      description: >-
+        A configured provider door, masked: credentials are sealed at rest and
+        never returned — key_prefix carries the first 8 characters of the api
+        key / access key id, or the service account's client_email. No
+        secret/ciphertext field exists on this shape by construction.
+      required: [id, kind, display_name, config, configured, key_prefix, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/AIProviderKind' }
+        display_name: { type: string }
+        config: { $ref: '#/components/schemas/AIProviderConfig' }
+        configured: { type: boolean, description: always true for a stored row }
+        key_prefix: { type: string, description: masked credential identifier for display }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AIProviderList:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items: { $ref: '#/components/schemas/AIProvider' }
+    AIProviderCreateRequest:
+      type: object
+      required: [kind, credentials]
+      properties:
+        kind: { $ref: '#/components/schemas/AIProviderKind' }
+        display_name: { type: string }
+        credentials: { $ref: '#/components/schemas/AIProviderCredentials' }
+        config: { $ref: '#/components/schemas/AIProviderConfig' }
+    AIProviderUpdateRequest:
+      type: object
+      description: >-
+        Partial update. credentials absent = keep the sealed credential;
+        config absent = keep current config (when present it REPLACES the
+        config object whole); display_name absent = keep. kind is immutable.
+      properties:
+        display_name: { type: string }
+        credentials: { $ref: '#/components/schemas/AIProviderCredentials' }
+        config: { $ref: '#/components/schemas/AIProviderConfig' }
+    AIModel:
+      type: object
+      description: >-
+        One entry of the merged model list. id is the stable composite
+        "<provider_id>/<name>" — the same model name via two doors never
+        collides, and settings store exactly these ids. source=catalog entries
+        come from models.dev (native kinds); source=custom entries are
+        workspace_ai_models rows.
+      required: [id, provider_id, kind, name, label, context_window_tokens, max_output_tokens, supports_reasoning, source, custom_model_id, input_cost_per_mtok, output_cost_per_mtok, enabled]
+      properties:
+        id: { type: string, description: composite "<provider_id>/<name>" }
+        provider_id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/AIProviderKind' }
+        name: { type: string, description: the bare model id the provider SDK receives }
+        label: { type: string }
+        context_window_tokens: { type: integer }
+        max_output_tokens: { type: integer }
+        supports_reasoning: { type: boolean }
+        source: { type: string, enum: [catalog, custom] }
+        custom_model_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: the deletable row id behind a source=custom entry (DELETE /ai/models/{id}); null for catalog entries
+        input_cost_per_mtok: { type: number, nullable: true, description: informational USD per million input tokens }
+        output_cost_per_mtok: { type: number, nullable: true }
+        enabled: { type: boolean, description: "enabled_model_ids is empty OR contains this id" }
+    AIModelList:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items: { $ref: '#/components/schemas/AIModel' }
+    AIModelCreateRequest:
+      type: object
+      required: [provider_id, name, label, context_window_tokens, max_output_tokens]
+      properties:
+        provider_id: { type: string, format: uuid }
+        name: { type: string }
+        label: { type: string }
+        context_window_tokens: { type: integer, minimum: 1 }
+        max_output_tokens: { type: integer, minimum: 1 }
+        supports_reasoning: { type: boolean }
+        input_cost_per_mtok: { type: number, nullable: true }
+        output_cost_per_mtok: { type: number, nullable: true }
+    AIDiscoveredModel:
+      type: object
+      description: >-
+        One discovery candidate. Only name is guaranteed; the rest is
+        best-effort (bare-id endpoints yield name-only entries).
+      required: [name]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        context_window_tokens: { type: integer }
+        max_output_tokens: { type: integer }
+        input_cost_per_mtok: { type: number, nullable: true }
+        output_cost_per_mtok: { type: number, nullable: true }
+    AIDiscoveryResult:
+      type: object
+      required: [supported, models]
+      properties:
+        supported: { type: boolean, description: false = this kind has no discovery path yet; add models manually }
+        models:
+          type: array
+          items: { $ref: '#/components/schemas/AIDiscoveredModel' }
     OAuth2RegisterRequest:
       type: object
       required: [client_name, redirect_uris]

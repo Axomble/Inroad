@@ -65,3 +65,49 @@ func TestVetAddrLiteralIPPath(t *testing.T) {
 		t.Fatalf("expected ip:port, got %q", addr)
 	}
 }
+
+// TestClassifyHostLiteralIPs drives ClassifyHost (the AI base-URL vetting
+// seam) through literal IPs: loopback/RFC1918 classify as private rather than
+// erroring (the operator opt-in decides), public is non-private, and
+// link-local (cloud metadata) / multicast / unspecified are hard errors that
+// no flag can allow.
+func TestClassifyHostLiteralIPs(t *testing.T) {
+	ctx := context.Background()
+
+	private, err := ClassifyHost(ctx, "127.0.0.1")
+	if err != nil || !private {
+		t.Fatalf("loopback: want private=true err=nil, got %v %v", private, err)
+	}
+	private, err = ClassifyHost(ctx, "10.1.2.3")
+	if err != nil || !private {
+		t.Fatalf("rfc1918: want private=true err=nil, got %v %v", private, err)
+	}
+	private, err = ClassifyHost(ctx, "8.8.8.8")
+	if err != nil || private {
+		t.Fatalf("public: want private=false err=nil, got %v %v", private, err)
+	}
+	if _, err := ClassifyHost(ctx, "169.254.169.254"); !errors.Is(err, ErrHostNotPermitted) {
+		t.Fatalf("metadata endpoint must be ErrHostNotPermitted, got %v", err)
+	}
+	if _, err := ClassifyHost(ctx, "224.0.0.1"); !errors.Is(err, ErrHostNotPermitted) {
+		t.Fatalf("multicast must be ErrHostNotPermitted, got %v", err)
+	}
+	if _, err := ClassifyHost(ctx, "0.0.0.0"); !errors.Is(err, ErrHostNotPermitted) {
+		t.Fatalf("unspecified must be ErrHostNotPermitted, got %v", err)
+	}
+}
+
+// TestClassifyHostResolverFailureFailsClosed proves an unresolvable host is
+// an error, never silently "public".
+func TestClassifyHostResolverFailureFailsClosed(t *testing.T) {
+	restore := setResolver(&net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return nil, errors.New("no dns")
+		},
+	})
+	defer restore()
+	if _, err := ClassifyHost(context.Background(), "example.invalid"); err == nil {
+		t.Fatal("expected resolver error, got nil")
+	}
+}

@@ -42,6 +42,12 @@ type Config struct {
 	// (incl. cloud metadata), and multicast are always blocked regardless.
 	MailAllowPrivateHosts bool
 
+	// AIAllowPrivateBaseURL permits openai_compatible AI-provider base URLs on
+	// private/loopback hosts (a localhost Ollama/vLLM). Default false — self-host
+	// convenience is an explicit opt-in, not a default hole (agent-platform spec
+	// §3). Link-local (incl. cloud metadata) and multicast stay blocked always.
+	AIAllowPrivateBaseURL bool
+
 	// PublicURL is the externally-reachable base URL used to build links
 	// (e.g. unsubscribe) embedded in outbound email.
 	PublicURL string
@@ -199,6 +205,7 @@ func Load() (*Config, error) {
 
 	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
+	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 
 	// Derive the WebAuthn Relying Party from the public URL by default: RPID is the
