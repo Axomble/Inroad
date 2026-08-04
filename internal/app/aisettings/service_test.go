@@ -620,7 +620,7 @@ func TestUpdateProviderDuplicateTargetDoesNotPartiallyReplaceCredentials(t *test
 	newCredentials := ai.Credentials{APIKey: "sk-replacement-123456789"}
 	_, err := svc.UpdateProvider(context.Background(), ws, id, ProviderUpdateInput{
 		Credentials: &newCredentials,
-		Config: map[string]string{"base_url": "https://second.example/v1"},
+		Config:      map[string]string{"base_url": "https://second.example/v1"},
 	})
 	if !errors.Is(err, ErrDuplicate) {
 		t.Fatalf("duplicate target must be ErrDuplicate, got %v", err)

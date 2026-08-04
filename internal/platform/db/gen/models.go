@@ -190,6 +190,7 @@ type AgentMessage struct {
 	TurnID          uuid.UUID          `json:"turn_id"`
 	Role            string             `json:"role"`
 	Status          string             `json:"status"`
+	ModelSelector   string             `json:"model_selector"`
 	BrowsingContext []byte             `json:"browsing_context"`
 	ProcessedAt     pgtype.Timestamptz `json:"processed_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`

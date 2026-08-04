@@ -54,6 +54,7 @@ type MessageInput struct {
 	TurnID          uuid.UUID
 	Role            string
 	Status          string
+	ModelSelector   string
 	BrowsingContext []byte
 	Parts           []PartInput
 }
@@ -81,7 +82,7 @@ type Store interface {
 	SoftDeleteThread(ctx context.Context, workspaceID, userID, id uuid.UUID) error
 	// SetThreadTitle writes a GENERATED title. It is a no-op once the thread
 	// has a title, so a user rename always wins over a late model answer.
-	SetThreadTitle(ctx context.Context, workspaceID, id uuid.UUID, title string) error
+	SetThreadTitle(ctx context.Context, workspaceID, id uuid.UUID, title string) (bool, error)
 	AddThreadUsage(ctx context.Context, workspaceID, id uuid.UUID, inputTokens, outputTokens int64, contextWindow int32) error
 	// SetThreadActiveRun points the thread at its live run; uuid.Nil clears it.
 	SetThreadActiveRun(ctx context.Context, workspaceID, id, runID uuid.UUID) error
@@ -176,13 +177,13 @@ func (s *PgStore) SoftDeleteThread(ctx context.Context, workspaceID, userID, id 
 	return nil
 }
 
-func (s *PgStore) SetThreadTitle(ctx context.Context, workspaceID, id uuid.UUID, title string) error {
+func (s *PgStore) SetThreadTitle(ctx context.Context, workspaceID, id uuid.UUID, title string) (bool, error) {
 	// Zero rows means the thread already had a title (a user rename won the
 	// race) — the intended no-op, not an error.
-	_, err := s.q.SetAgentThreadTitle(ctx, gen.SetAgentThreadTitleParams{
+	rows, err := s.q.SetAgentThreadTitle(ctx, gen.SetAgentThreadTitleParams{
 		WorkspaceID: workspaceID, ID: id, Title: title,
 	})
-	return err
+	return rows > 0, err
 }
 
 func (s *PgStore) AddThreadUsage(ctx context.Context, workspaceID, id uuid.UUID, inputTokens, outputTokens int64, contextWindow int32) error {
@@ -219,6 +220,7 @@ func (s *PgStore) PersistMessage(ctx context.Context, in MessageInput) (Message,
 		TurnID:          in.TurnID,
 		Role:            in.Role,
 		Status:          in.Status,
+		ModelSelector:   in.ModelSelector,
 		BrowsingContext: in.BrowsingContext,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -364,10 +366,23 @@ func (s *PgStore) SetRunModel(ctx context.Context, workspaceID, id uuid.UUID, mo
 func (s *PgStore) FinishRun(ctx context.Context, workspaceID, id uuid.UUID, status, errMsg string) error {
 	// Zero rows means the run already reached a terminal state (a stop racing
 	// a natural completion) — first writer wins, and that is not an error.
-	_, err := s.q.FinishAgentRun(ctx, gen.FinishAgentRunParams{
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := s.q.WithTx(tx)
+	if _, err := qtx.FinishAgentRun(ctx, gen.FinishAgentRunParams{
 		WorkspaceID: workspaceID, ID: id, Status: status, Error: errMsg,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	if err := qtx.ClearAgentThreadActiveRun(ctx, gen.ClearAgentThreadActiveRunParams{
+		WorkspaceID: workspaceID, ActiveRunID: pgtype.UUID{Bytes: id, Valid: true},
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PgStore) PauseRunForApproval(ctx context.Context, workspaceID, id uuid.UUID) error {
@@ -381,6 +396,9 @@ func (s *PgStore) RecoverStuckRuns(ctx context.Context, reason string) (int64, e
 		return 0, err
 	}
 	if _, err := s.q.ResetStuckAgentMessages(ctx); err != nil {
+		return runs, err
+	}
+	if _, err := s.q.ClearStuckAgentThreadActiveRuns(ctx); err != nil {
 		return runs, err
 	}
 	return runs, nil

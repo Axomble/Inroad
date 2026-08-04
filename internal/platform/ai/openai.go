@@ -102,7 +102,7 @@ func (s *openAIStreamer) StreamChat(ctx context.Context, req ChatRequest) (ChatS
 // accepts reasoning text back as input.
 func openAIParams(req ChatRequest, legacyMaxTokens bool) (openai.ChatCompletionNewParams, error) {
 	params := openai.ChatCompletionNewParams{
-		Model:         shared.ChatModel(req.Model),
+		Model:         req.Model,
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{IncludeUsage: param.NewOpt(true)},
 	}
 	if legacyMaxTokens {

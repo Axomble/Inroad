@@ -69,7 +69,7 @@ func listReadTool(r ListReader) Tool {
 			fmt.Sprintf("Results are capped at %d by default (maximum %d). ", defaultLimit, maxLimit) +
 			"To see who is on a list, call inroad_contact_read with method=list and that list_id.",
 		InputSchema: mustSchema(
-			enumField("method", "Which read to perform.", methods, true),
+			methodField("Which read to perform.", methods),
 			strField("list_id", "The list's id, from a previous list result or inroad_search. Required for get.", false),
 			limitField(),
 		),

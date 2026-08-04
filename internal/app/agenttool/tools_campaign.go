@@ -117,7 +117,7 @@ func campaignReadTool(deps Deps) Tool {
 			fmt.Sprintf("List results are capped at %d by default (maximum %d); page with offset. ", defaultLimit, maxLimit) +
 			"Use this before any campaign question — never guess a campaign's status or audience.",
 		InputSchema: mustSchema(
-			enumField("method", "Which read to perform.", methods, true),
+			methodField("Which read to perform.", methods),
 			strField("campaign_id", "The campaign's id, from a previous list result or inroad_search. Required for get, stats and enrollments.", false),
 			limitField(),
 			offsetField(),
@@ -290,7 +290,7 @@ func campaignControlTool(ctrl CampaignController, reader CampaignReader) Tool {
 			"Use this when the user asks to stop or restart sending, or when deliverability has degraded and sending should stop. " +
 			"This changes live sending behaviour and is submitted for human approval before it takes effect.",
 		InputSchema: mustSchema(
-			enumField("method", "pause stops new sends; resume restarts them.", methods, true),
+			methodField("pause stops new sends; resume restarts them.", methods),
 			strField("campaign_id", "The campaign's id, from inroad_campaign_read or inroad_search.", true),
 		),
 		Risk:    RiskConsequential,

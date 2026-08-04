@@ -64,6 +64,7 @@ CREATE TABLE agent_messages (
     turn_id          UUID NOT NULL,
     role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     status           TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'queued', 'processing')),
+    model_selector   TEXT NOT NULL DEFAULT '',
     browsing_context JSONB,
     processed_at     TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),

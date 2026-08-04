@@ -79,7 +79,7 @@ func mailboxReadTool(r MailboxReader) Tool {
 			fmt.Sprintf("Results are capped at %d by default (maximum %d). ", defaultLimit, maxLimit) +
 			"For warmup progress and inbox placement use inroad_warmup_read instead. This tool never exposes mailbox credentials.",
 		InputSchema: mustSchema(
-			enumField("method", "Which read to perform.", methods, true),
+			methodField("Which read to perform.", methods),
 			strField("mailbox_id", "The mailbox's id, from a previous list result. Required for get.", false),
 			limitField(),
 		),

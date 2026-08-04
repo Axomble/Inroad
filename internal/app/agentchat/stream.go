@@ -259,6 +259,9 @@ func (s *RedisStream) RegisterCancel(runID uuid.UUID, cancel context.CancelFunc)
 // the one actually running the goroutine cancels its context, the rest ignore
 // it. This is why stopping a run works from any node behind a load balancer.
 func (s *RedisStream) RequestCancel(ctx context.Context, runID uuid.UUID) error {
+	// Cancel immediately when this node owns the run. Redis still broadcasts
+	// the request so a different API node can cancel it when ownership is remote.
+	s.cancelLocal(runID)
 	if err := s.rdb.Publish(ctx, cancelChannel, runID.String()).Err(); err != nil {
 		return fmt.Errorf("agentchat: request cancel: %w", err)
 	}

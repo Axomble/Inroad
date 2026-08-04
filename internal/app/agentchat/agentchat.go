@@ -136,24 +136,24 @@ const (
 
 // Tool-call part states.
 const (
-	PartStateRunning           = "running"
-	PartStateDone              = "done"
-	PartStateError             = "error"
-	PartStateAwaitingApproval  = "awaiting_approval"
+	PartStateRunning          = "running"
+	PartStateDone             = "done"
+	PartStateError            = "error"
+	PartStateAwaitingApproval = "awaiting_approval"
 )
 
 // ThreadDTO is the wire shape of a thread. Messages is populated only by the
 // single-thread read; the list omits it.
 type ThreadDTO struct {
-	ID                  string        `json:"id"`
-	Title               string        `json:"title"`
-	TotalInputTokens    int64         `json:"total_input_tokens"`
-	TotalOutputTokens   int64         `json:"total_output_tokens"`
-	ContextWindowTokens int           `json:"context_window_tokens"`
-	ActiveRunID         *string       `json:"active_run_id"`
-	CreatedAt           string        `json:"created_at"`
-	UpdatedAt           string        `json:"updated_at"`
-	Messages            []MessageDTO  `json:"messages,omitempty"`
+	ID                  string       `json:"id"`
+	Title               string       `json:"title"`
+	TotalInputTokens    int64        `json:"total_input_tokens"`
+	TotalOutputTokens   int64        `json:"total_output_tokens"`
+	ContextWindowTokens int          `json:"context_window_tokens"`
+	ActiveRunID         *string      `json:"active_run_id"`
+	CreatedAt           string       `json:"created_at"`
+	UpdatedAt           string       `json:"updated_at"`
+	Messages            []MessageDTO `json:"messages,omitempty"`
 }
 
 // MessageDTO is one persisted turn with its normalized parts.
@@ -186,6 +186,7 @@ type PartDTO struct {
 type QueuedMessageDTO struct {
 	ID        string `json:"id"`
 	Text      string `json:"text"`
+	Model     string `json:"model"`
 	CreatedAt string `json:"created_at"`
 }
 

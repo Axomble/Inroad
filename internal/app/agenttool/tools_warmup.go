@@ -95,7 +95,7 @@ func warmupReadTool(r WarmupReader) Tool {
 			fmt.Sprintf("(the most recent %d days, oldest first). ", maxWarmupSeries) +
 			"A pool that reports active=false is too small to warm anything up — that alone explains zero warmup volume.",
 		InputSchema: mustSchema(
-			enumField("method", "overview reads the whole pool; get reads one mailbox in detail.", methods, true),
+			methodField("overview reads the whole pool; get reads one mailbox in detail.", methods),
 			strField("mailbox_id", "The mailbox's id, from inroad_mailbox_read. Required for get.", false),
 			limitField(),
 		),

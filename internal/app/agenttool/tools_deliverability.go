@@ -114,7 +114,7 @@ func renderRisks(in []HealthRisk, limit int) []riskView {
 	}
 	out := make([]riskView, 0, len(in))
 	for _, r := range in {
-		out = append(out, riskView{Label: r.Label, Reason: r.Reason})
+		out = append(out, riskView(r))
 	}
 	return out
 }
@@ -143,7 +143,7 @@ func deliverabilityReadTool(r DeliverabilityReader) Tool {
 			"A component marked measured=false means there is no signal for it — report that as unknown, never as zero. " +
 			"Use this before advising on bounce rates, spam placement or why a campaign stopped.",
 		InputSchema: mustSchema(
-			enumField("method", "Which health read to perform.", methods, true),
+			methodField("Which health read to perform.", methods),
 			strField("campaign_id", "The campaign's id, from inroad_campaign_read. Required for method=campaign.", false),
 			limitField(),
 		),

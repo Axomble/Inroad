@@ -32,7 +32,7 @@ Boundaries:
 // systemPrompt assembles the stable base with the workspace's own additional
 // instructions, which are appended (never interleaved) so the cached prefix
 // stays identical for every workspace.
-func systemPrompt(additionalInstructions string) string {
+func SystemPrompt(additionalInstructions string) string {
 	extra := strings.TrimSpace(additionalInstructions)
 	if extra == "" {
 		return basePrompt
@@ -45,7 +45,7 @@ func systemPrompt(additionalInstructions string) string {
 // to fetch details if it needs them costs a tool call when it matters and zero
 // tokens when it does not, whereas inlining a record the user never asks about
 // wastes context on every single message.
-func browsingContextText(raw []byte) string {
+func BrowsingContextText(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -80,7 +80,7 @@ func browsingContextText(raw []byte) string {
 // place. Never to the system prompt: the system block is the cached prefix, and
 // a context line that changes as the user navigates would invalidate the cache
 // on every message.
-func appendBrowsingContext(msgs []ai.ChatMessage, text string) {
+func AppendBrowsingContext(msgs []ai.ChatMessage, text string) {
 	if text == "" {
 		return
 	}
@@ -118,7 +118,7 @@ var prunedToolOutput = json.RawMessage(`{"pruned":true,"note":"This tool result 
 // compactionNotice is persisted as a part so the transcript records that the
 // conversation was trimmed — a user who wonders why the agent "forgot" gets an
 // answer instead of a mystery.
-const compactionNotice = "Earlier reasoning and tool results were dropped from this conversation to stay within the model's context window."
+const CompactionNotice = "Earlier reasoning and tool results were dropped from this conversation to stay within the model's context window."
 
 // estimateTokens approximates the size of one provider request.
 func estimateTokens(system string, tools []ai.ToolDef, msgs []ai.ChatMessage) int {
@@ -142,7 +142,7 @@ func estimateTokens(system string, tools []ai.ToolDef, msgs []ai.ChatMessage) in
 //
 // It reports whether anything was dropped, so the caller can record the
 // compaction notice exactly once.
-func prune(system string, tools []ai.ToolDef, msgs []ai.ChatMessage, contextWindow int) (bool, error) {
+func Prune(system string, tools []ai.ToolDef, msgs []ai.ChatMessage, contextWindow int) (bool, error) {
 	if contextWindow <= 0 {
 		return false, nil
 	}

@@ -59,12 +59,17 @@ UPDATE agent_threads
 SET active_run_id = $3, updated_at = now()
 WHERE workspace_id = $1 AND id = $2;
 
+-- name: ClearAgentThreadActiveRun :exec
+UPDATE agent_threads
+SET active_run_id = NULL, updated_at = now()
+WHERE workspace_id = $1 AND active_run_id = $2;
+
 -- name: InsertAgentMessage :one
 -- The thread reference is self-enforcing: the INSERT ... SELECT emits zero
 -- rows (pgx.ErrNoRows) when the thread is not this user's within this
 -- workspace, so a foreign thread id can never grow a message.
-INSERT INTO agent_messages (workspace_id, thread_id, turn_id, role, status, browsing_context)
-SELECT $1, t.id, $3, $4, $5, $6
+INSERT INTO agent_messages (workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context)
+SELECT $1, t.id, $3, $4, $5, $6, $7
 FROM agent_threads t
 WHERE t.id = $2 AND t.workspace_id = $1 AND t.deleted_at IS NULL
 RETURNING *;
@@ -165,6 +170,17 @@ UPDATE agent_runs SET model_id = $3 WHERE workspace_id = $1 AND id = $2;
 UPDATE agent_runs
 SET status = $3, error = $4, finished_at = now()
 WHERE workspace_id = $1 AND id = $2 AND status IN ('running', 'paused_approval');
+
+-- name: ClearStuckAgentThreadActiveRuns :execrows
+UPDATE agent_threads t
+SET active_run_id = NULL, updated_at = now()
+WHERE active_run_id IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_runs r
+      WHERE r.id = t.active_run_id
+        AND r.workspace_id = t.workspace_id
+        AND r.status IN ('running', 'paused_approval')
+  );
 
 -- name: PauseAgentRunForApproval :execrows
 -- The A4 seam's persistence half: the run stays LIVE (the partial unique index

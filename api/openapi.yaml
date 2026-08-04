@@ -941,6 +941,107 @@ paths:
         '401': { description: Unauthorized }
         '403': { description: Insufficient role (admin/owner required) }
         '404': { description: Model not found }
+  /agent/threads:
+    get:
+      operationId: listAgentThreads
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200': { description: Owner-scoped threads, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThreadList' } } } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Empty thread, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThread' } } } }
+        '401': { description: Unauthorized }
+  /agent/threads/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Thread and transcript, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThread' } } } }
+        '404': { description: Thread not found }
+    patch:
+      operationId: renameAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [title], properties: { title: { type: string, minLength: 1, maxLength: 120 } } } } }
+      responses:
+        '200': { description: Renamed thread, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThread' } } } }
+        '404': { description: Thread not found }
+    delete:
+      operationId: deleteAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Thread archived }
+        '404': { description: Thread not found }
+  /agent/threads/{id}/messages:
+    post:
+      operationId: sendAgentMessage
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AgentSendRequest' } } }
+      responses:
+        '202': { description: Run started or message queued, content: { application/json: { schema: { $ref: '#/components/schemas/AgentSendResult' } } } }
+        '404': { description: Thread not found }
+  /agent/threads/{id}/queue:
+    get:
+      operationId: listAgentQueue
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Pending messages, content: { application/json: { schema: { $ref: '#/components/schemas/AgentQueue' } } } }
+  /agent/threads/{id}/queue/{messageID}:
+    delete:
+      operationId: deleteAgentQueuedMessage
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: messageID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Queued message removed }
+        '404': { description: Thread or queued message not found }
+  /agent/threads/{id}/stop:
+    post:
+      operationId: stopAgentRun
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '202': { description: Cancellation requested }
+        '409': { description: Thread has no active run }
+  /agent/threads/{id}/stream:
+    get:
+      operationId: streamAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      description: Fetch-based SSE stream. Reconnect with Last-Event-ID or after_seq.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: after_seq, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: Last-Event-ID, in: header, schema: { type: string } }
+      responses:
+        '200': { description: Agent event stream, content: { text/event-stream: { schema: { type: string } } } }
+        '404': { description: Thread not found }
   /lists:
     get:
       operationId: listLists
@@ -2529,6 +2630,86 @@ components:
           items: { type: string }
           description: empty array = every listed model is enabled
         additional_instructions: { type: string, description: workspace-specific instructions appended to the agent system prompt }
+    AgentThread:
+      type: object
+      required: [id, title, total_input_tokens, total_output_tokens, context_window_tokens, active_run_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        total_input_tokens: { type: integer, format: int64 }
+        total_output_tokens: { type: integer, format: int64 }
+        context_window_tokens: { type: integer }
+        active_run_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        messages: { type: array, items: { $ref: '#/components/schemas/AgentMessage' } }
+    AgentThreadList:
+      type: object
+      required: [threads]
+      properties:
+        threads: { type: array, items: { $ref: '#/components/schemas/AgentThread' } }
+    AgentMessage:
+      type: object
+      required: [id, turn_id, role, status, created_at, parts]
+      properties:
+        id: { type: string, format: uuid }
+        turn_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        status: { type: string, enum: [sent, queued, processing] }
+        created_at: { type: string, format: date-time }
+        parts: { type: array, items: { $ref: '#/components/schemas/AgentPart' } }
+    AgentPart:
+      type: object
+      required: [id, order_index, type]
+      properties:
+        id: { type: string, format: uuid }
+        order_index: { type: integer }
+        type: { type: string, enum: [text, reasoning, tool_call, tool_result, compaction_notice] }
+        text: { type: string }
+        reasoning: { type: string }
+        tool_name: { type: string }
+        tool_call_id: { type: string }
+        tool_input: { type: object, additionalProperties: true }
+        tool_output: {}
+        state: { type: string, enum: ['', running, done, error, awaiting_approval] }
+        error: { type: string }
+    AgentBrowsingContext:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [record_page, list_view] }
+        object: { type: string }
+        record_id: { type: string }
+        url: { type: string }
+        view: { type: string }
+        filters: { type: object, additionalProperties: { type: string } }
+    AgentSendRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 20000 }
+        model: { type: string, description: composite model id or default-smart-model }
+        browsing_context: { $ref: '#/components/schemas/AgentBrowsingContext' }
+    AgentSendResult:
+      type: object
+      required: [message_id, run_id, queued]
+      properties:
+        message_id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid, nullable: true }
+        queued: { type: boolean }
+    AgentQueuedMessage:
+      type: object
+      required: [id, text, model, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string }
+        model: { type: string }
+        created_at: { type: string, format: date-time }
+    AgentQueue:
+      type: object
+      required: [queued]
+      properties:
+        queued: { type: array, items: { $ref: '#/components/schemas/AgentQueuedMessage' } }
     AISettingsUpdate:
       type: object
       description: >-

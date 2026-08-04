@@ -90,7 +90,12 @@ func anthropicOptions(kind string, creds Credentials, config map[string]string, 
 			return nil, err
 		}
 		authCtx := context.WithValue(context.Background(), oauth2.HTTPClient, hc)
-		gcreds, err := google.CredentialsFromJSON(authCtx, []byte(creds.ServiceAccountJSON), vertexScope)
+		gcreds, err := google.CredentialsFromJSONWithType(
+			authCtx,
+			[]byte(creds.ServiceAccountJSON),
+			google.ServiceAccount,
+			vertexScope,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("%w: kind %q service account was rejected", ErrBadProviderConfig, kind)
 		}
@@ -125,7 +130,7 @@ func (s *anthropicStreamer) StreamChat(ctx context.Context, req ChatRequest) (Ch
 // not carry, and an unsigned block is rejected outright.
 func anthropicParams(req ChatRequest) (anthropic.MessageNewParams, error) {
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(req.Model),
+		Model:     req.Model,
 		MaxTokens: int64(req.MaxTokens),
 	}
 	if req.System != "" {

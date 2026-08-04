@@ -97,7 +97,7 @@ func contactReadTool(r ContactReader) Tool {
 			fmt.Sprintf("Results are capped at %d by default (maximum %d) and the total is reported separately, so ask for a count rather than paging to find one. ", defaultLimit, maxLimit) +
 			fmt.Sprintf("A search query must be at least %d characters.", minContactQuery),
 		InputSchema: mustSchema(
-			enumField("method", "search filters by a text fragment; list browses without one.", methods, true),
+			methodField("search filters by a text fragment; list browses without one.", methods),
 			strField("query", fmt.Sprintf("Text to match against contact email and name; at least %d characters. Required for search.", minContactQuery), false),
 			strField("list_id", "Restrict to one contact list, from inroad_list_read. Optional.", false),
 			limitField(),
@@ -174,7 +174,7 @@ func contactWriteTool(w ContactWriter) Tool {
 			"Use method=add_to_list with contact_id and list_id — adding a contact that is already a member is a no-op. " +
 			"This writes data but sends nothing; enrolling a list in a campaign is a separate, approved action.",
 		InputSchema: mustSchema(
-			enumField("method", "create adds a contact; add_to_list puts an existing contact on a list.", methods, true),
+			methodField("create adds a contact; add_to_list puts an existing contact on a list.", methods),
 			strField("email", "The contact's email address. Required for create.", false),
 			strField("first_name", "The contact's first name. Optional.", false),
 			strField("last_name", "The contact's last name. Optional.", false),
@@ -202,7 +202,7 @@ func contactWriteTool(w ContactWriter) Tool {
 
 func contactCreate(ctx context.Context, w ContactWriter, ws uuid.UUID, a contactWriteArgs) (Result, error) {
 	email := strings.TrimSpace(a.Email)
-	if _, err := mail.ParseAddress(email); err != nil {
+	if !isBareEmailAddress(email) {
 		return Fail("email must be a single valid address like name@example.com; call again with a corrected email"), nil
 	}
 	id, created, err := w.Create(ctx, ws, ContactInput{
@@ -215,6 +215,11 @@ func contactCreate(ctx context.Context, w ContactWriter, ws uuid.UUID, a contact
 		return Result{}, fmt.Errorf("create contact: %w", err)
 	}
 	return Ok(map[string]any{"id": id.String(), "email": email, "created": created}), nil
+}
+
+func isBareEmailAddress(value string) bool {
+	parsed, err := mail.ParseAddress(value)
+	return err == nil && parsed.Name == "" && parsed.Address == value
 }
 
 func contactAddToList(ctx context.Context, w ContactWriter, ws uuid.UUID, a contactWriteArgs) (Result, error) {

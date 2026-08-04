@@ -63,14 +63,10 @@ func strField(name, desc string, required bool) field {
 	return field{name: name, schema: jsonObject{{"type", "string"}, {"description", desc}}, required: required}
 }
 
-func enumField(name, desc string, values []string, required bool) field {
-	return field{name: name, schema: jsonObject{
+func methodField(desc string, values []string) field {
+	return field{name: "method", schema: jsonObject{
 		{"type", "string"}, {"description", desc}, {"enum", values},
-	}, required: required}
-}
-
-func boolField(name, desc string, required bool) field {
-	return field{name: name, schema: jsonObject{{"type", "boolean"}, {"description", desc}}, required: required}
+	}, required: true}
 }
 
 // limitField is the page-size property every list-shaped tool exposes.

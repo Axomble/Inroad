@@ -43,6 +43,42 @@ func (q *Queries) AddAgentThreadUsage(ctx context.Context, arg AddAgentThreadUsa
 	return err
 }
 
+const clearAgentThreadActiveRun = `-- name: ClearAgentThreadActiveRun :exec
+UPDATE agent_threads
+SET active_run_id = NULL, updated_at = now()
+WHERE workspace_id = $1 AND active_run_id = $2
+`
+
+type ClearAgentThreadActiveRunParams struct {
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	ActiveRunID pgtype.UUID `json:"active_run_id"`
+}
+
+func (q *Queries) ClearAgentThreadActiveRun(ctx context.Context, arg ClearAgentThreadActiveRunParams) error {
+	_, err := q.db.Exec(ctx, clearAgentThreadActiveRun, arg.WorkspaceID, arg.ActiveRunID)
+	return err
+}
+
+const clearStuckAgentThreadActiveRuns = `-- name: ClearStuckAgentThreadActiveRuns :execrows
+UPDATE agent_threads t
+SET active_run_id = NULL, updated_at = now()
+WHERE active_run_id IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_runs r
+      WHERE r.id = t.active_run_id
+        AND r.workspace_id = t.workspace_id
+        AND r.status IN ('running', 'paused_approval')
+  )
+`
+
+func (q *Queries) ClearStuckAgentThreadActiveRuns(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, clearStuckAgentThreadActiveRuns)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteQueuedAgentMessage = `-- name: DeleteQueuedAgentMessage :execrows
 DELETE FROM agent_messages
 WHERE workspace_id = $1 AND thread_id = $2 AND id = $3 AND status = 'queued'
@@ -219,11 +255,11 @@ func (q *Queries) GetAgentThread(ctx context.Context, arg GetAgentThreadParams) 
 }
 
 const insertAgentMessage = `-- name: InsertAgentMessage :one
-INSERT INTO agent_messages (workspace_id, thread_id, turn_id, role, status, browsing_context)
-SELECT $1, t.id, $3, $4, $5, $6
+INSERT INTO agent_messages (workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context)
+SELECT $1, t.id, $3, $4, $5, $6, $7
 FROM agent_threads t
 WHERE t.id = $2 AND t.workspace_id = $1 AND t.deleted_at IS NULL
-RETURNING id, workspace_id, thread_id, turn_id, role, status, browsing_context, processed_at, created_at
+RETURNING id, workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context, processed_at, created_at
 `
 
 type InsertAgentMessageParams struct {
@@ -232,6 +268,7 @@ type InsertAgentMessageParams struct {
 	TurnID          uuid.UUID `json:"turn_id"`
 	Role            string    `json:"role"`
 	Status          string    `json:"status"`
+	ModelSelector   string    `json:"model_selector"`
 	BrowsingContext []byte    `json:"browsing_context"`
 }
 
@@ -245,6 +282,7 @@ func (q *Queries) InsertAgentMessage(ctx context.Context, arg InsertAgentMessage
 		arg.TurnID,
 		arg.Role,
 		arg.Status,
+		arg.ModelSelector,
 		arg.BrowsingContext,
 	)
 	var i AgentMessage
@@ -255,6 +293,7 @@ func (q *Queries) InsertAgentMessage(ctx context.Context, arg InsertAgentMessage
 		&i.TurnID,
 		&i.Role,
 		&i.Status,
+		&i.ModelSelector,
 		&i.BrowsingContext,
 		&i.ProcessedAt,
 		&i.CreatedAt,
@@ -445,7 +484,7 @@ func (q *Queries) ListAgentMessagePartsByThread(ctx context.Context, arg ListAge
 }
 
 const listAgentMessages = `-- name: ListAgentMessages :many
-SELECT id, workspace_id, thread_id, turn_id, role, status, browsing_context, processed_at, created_at FROM agent_messages
+SELECT id, workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context, processed_at, created_at FROM agent_messages
 WHERE workspace_id = $1 AND thread_id = $2
 ORDER BY created_at, id
 `
@@ -471,6 +510,7 @@ func (q *Queries) ListAgentMessages(ctx context.Context, arg ListAgentMessagesPa
 			&i.TurnID,
 			&i.Role,
 			&i.Status,
+			&i.ModelSelector,
 			&i.BrowsingContext,
 			&i.ProcessedAt,
 			&i.CreatedAt,
@@ -539,7 +579,7 @@ func (q *Queries) ListAgentThreads(ctx context.Context, arg ListAgentThreadsPara
 }
 
 const listAgentTranscriptMessages = `-- name: ListAgentTranscriptMessages :many
-SELECT id, workspace_id, thread_id, turn_id, role, status, browsing_context, processed_at, created_at FROM agent_messages
+SELECT id, workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context, processed_at, created_at FROM agent_messages
 WHERE workspace_id = $1 AND thread_id = $2 AND status <> 'queued'
 ORDER BY created_at, id
 `
@@ -568,6 +608,7 @@ func (q *Queries) ListAgentTranscriptMessages(ctx context.Context, arg ListAgent
 			&i.TurnID,
 			&i.Role,
 			&i.Status,
+			&i.ModelSelector,
 			&i.BrowsingContext,
 			&i.ProcessedAt,
 			&i.CreatedAt,
@@ -583,7 +624,7 @@ func (q *Queries) ListAgentTranscriptMessages(ctx context.Context, arg ListAgent
 }
 
 const listQueuedAgentMessages = `-- name: ListQueuedAgentMessages :many
-SELECT id, workspace_id, thread_id, turn_id, role, status, browsing_context, processed_at, created_at FROM agent_messages
+SELECT id, workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context, processed_at, created_at FROM agent_messages
 WHERE workspace_id = $1 AND thread_id = $2 AND status = 'queued'
 ORDER BY created_at, id
 `
@@ -609,6 +650,7 @@ func (q *Queries) ListQueuedAgentMessages(ctx context.Context, arg ListQueuedAge
 			&i.TurnID,
 			&i.Role,
 			&i.Status,
+			&i.ModelSelector,
 			&i.BrowsingContext,
 			&i.ProcessedAt,
 			&i.CreatedAt,
@@ -653,7 +695,7 @@ WHERE m.workspace_id = $1 AND m.thread_id = $2 AND m.id = (
     ORDER BY oldest.created_at, oldest.id
     LIMIT 1
 )
-RETURNING id, workspace_id, thread_id, turn_id, role, status, browsing_context, processed_at, created_at
+RETURNING id, workspace_id, thread_id, turn_id, role, status, model_selector, browsing_context, processed_at, created_at
 `
 
 type PromoteOldestQueuedAgentMessageParams struct {
@@ -674,6 +716,7 @@ func (q *Queries) PromoteOldestQueuedAgentMessage(ctx context.Context, arg Promo
 		&i.TurnID,
 		&i.Role,
 		&i.Status,
+		&i.ModelSelector,
 		&i.BrowsingContext,
 		&i.ProcessedAt,
 		&i.CreatedAt,
