@@ -35,7 +35,16 @@ export function CampaignDetailPage() {
     <Page>
       <PageTopbar
         eyebrow="Campaign"
-        title={isLoading ? undefined : data?.name}
+        back={
+          <Button variant="ghost" size="icon-sm" asChild className="shrink-0">
+            <Link to="/app/campaigns" aria-label="Back to all campaigns">
+              <ArrowLeft className="size-4" />
+            </Link>
+          </Button>
+        }
+        // A skeleton, not the eyebrow word promoted to a title: "Campaign" as
+        // the page name reads like a fetch that never happened.
+        title={isLoading ? <Skeleton className="h-5 w-48" /> : data?.name}
         subtitle={data?.subject}
         actions={
           data?.status ? (
@@ -44,14 +53,7 @@ export function CampaignDetailPage() {
         }
       />
 
-      <SectionBar label="Sends">
-        <Button variant="ghost" size="xs" asChild>
-          <Link to="/app/campaigns">
-            <ArrowLeft className="size-3.5" />
-            All campaigns
-          </Link>
-        </Button>
-      </SectionBar>
+      <SectionBar label="Sends" />
 
       {isLoading ? (
         <div className="px-5 py-4">

@@ -20,6 +20,7 @@ const DRAFT_ONLY_HINT = 'Structural changes are draft-only'
 export function StepCardBody({
   step,
   position,
+  threadSubject,
   canModifyStructure,
   onEdit,
   onDelete,
@@ -29,6 +30,12 @@ export function StepCardBody({
   step: StepWithId
   /** 1-based display order. */
   position: number
+  /**
+   * The first step's subject. A follow-up with an empty subject sends inside
+   * the same thread as "Re: <this>", so the card shows that real subject line
+   * instead of a "(no subject)" that reads like an authoring mistake.
+   */
+  threadSubject?: string
   canModifyStructure: boolean
   onEdit: () => void
   onDelete: () => void
@@ -36,6 +43,7 @@ export function StepCardBody({
   className?: string
 }) {
   const bodyPreview = step.body_text?.trim().replace(/\s+/g, ' ') ?? ''
+  const sameThread = !step.subject && position > 1
   return (
     <li
       className={cn(
@@ -57,7 +65,20 @@ export function StepCardBody({
           <span className="text-faint">·</span>
           <span className="text-[11.5px] text-muted-foreground">{humanizeDelay(step.delay_seconds)}</span>
         </div>
-        <div className="mt-1 truncate text-[13.5px] font-medium text-foreground">{step.subject || '(no subject)'}</div>
+        {sameThread ? (
+          <div className="mt-1 flex min-w-0 items-center gap-2">
+            <span className="truncate text-[13.5px] font-medium text-muted-foreground">
+              Re: {threadSubject || 'the previous email'}
+            </span>
+            <span className="shrink-0 rounded border border-border bg-surface-2 px-1.5 py-px font-mono text-[9.5px] uppercase tracking-[0.12em] text-faint">
+              Same thread
+            </span>
+          </div>
+        ) : (
+          <div className="mt-1 truncate text-[13.5px] font-medium text-foreground">
+            {step.subject || 'No subject yet'}
+          </div>
+        )}
         {bodyPreview && <div className="mt-0.5 truncate text-[12px] text-muted-foreground">{bodyPreview}</div>}
       </div>
 
@@ -106,6 +127,7 @@ export function StepCardBody({
 export function StepCard(props: {
   step: StepWithId
   position: number
+  threadSubject?: string
   onEdit: () => void
   onDelete: () => void
 }) {
