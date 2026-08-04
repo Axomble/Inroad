@@ -56,7 +56,10 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
         <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">Connect a mailbox</span>
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} noValidate className="grid gap-4 p-5">
+      {/* Capped width: at full bleed these inputs stretch past 1100px, which
+          reads as a settings dump rather than a form. ~48rem keeps label,
+          value, and helper in one eye span. */}
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="grid max-w-3xl gap-5 p-5">
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="Email" error={errors.email?.message}>
             {(id) => (
@@ -75,7 +78,8 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
           </Field>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-3">
+        <FieldGroup label="Outgoing mail · SMTP">
+          <div className="grid gap-4 md:grid-cols-3">
           <Field label="SMTP host" error={errors.smtp_host?.message} className="md:col-span-2">
             {(id) => (
               <Input
@@ -102,9 +106,11 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
               <Input id={id} placeholder="sender@company.com" {...register('smtp_username')} />
             )}
           </Field>
-        </div>
+          </div>
+        </FieldGroup>
 
-        <div className="grid gap-4 md:grid-cols-3">
+        <FieldGroup label="Incoming mail · IMAP">
+          <div className="grid gap-4 md:grid-cols-3">
           <Field label="IMAP host" error={errors.imap_host?.message} className="md:col-span-2">
             {(id) => (
               <Input
@@ -131,36 +137,39 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
               <Input id={id} placeholder="sender@company.com" {...register('imap_username')} />
             )}
           </Field>
-        </div>
+          </div>
+        </FieldGroup>
 
-        <Field label="Password / app password" error={errors.secret?.message}>
-          {(id) => (
-            <Input
-              id={id}
-              type="password"
-              autoComplete="off"
-              placeholder="••••••••"
-              aria-invalid={!!errors.secret}
-              {...register('secret')}
-            />
-          )}
-        </Field>
+        <FieldGroup label="Credentials">
+          <Field label="Password / app password" error={errors.secret?.message}>
+            {(id) => (
+              <Input
+                id={id}
+                type="password"
+                autoComplete="off"
+                placeholder="••••••••"
+                aria-invalid={!!errors.secret}
+                {...register('secret')}
+              />
+            )}
+          </Field>
 
-        <div>
-          <label htmlFor={plaintextId} className="flex items-center gap-2 text-[13px] text-muted-foreground">
-            <input
-              id={plaintextId}
-              type="checkbox"
-              className="size-4 accent-primary"
-              {...register('allow_plaintext')}
-            />
-            Allow plaintext (no TLS)
-          </label>
-          <p className="mt-1 pl-6 text-xs text-faint">
-            TLS is used by default. Only check this for a local or self-hosted relay with no TLS — credentials will
-            be sent without encryption.
-          </p>
-        </div>
+          <div>
+            <label htmlFor={plaintextId} className="flex items-center gap-2 text-[13px] text-muted-foreground">
+              <input
+                id={plaintextId}
+                type="checkbox"
+                className="size-4 accent-primary"
+                {...register('allow_plaintext')}
+              />
+              Allow plaintext (no TLS)
+            </label>
+            <p className="mt-1 pl-6 text-xs text-faint">
+              TLS is used by default. Only check this for a local or self-hosted relay with no TLS — credentials will
+              be sent without encryption.
+            </p>
+          </div>
+        </FieldGroup>
 
         {error && (
           <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
@@ -179,6 +188,21 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
         </div>
       </form>
     </div>
+  )
+}
+
+/**
+ * A named group of related fields. `fieldset`/`legend` rather than a styled
+ * div so the grouping is announced to screen readers, not just drawn — the
+ * SMTP and IMAP blocks repeat the same field names (host, port, username) and
+ * the group name is what disambiguates them.
+ */
+function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <fieldset className="min-w-0 rounded-lg border border-border p-4">
+      <legend className="px-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">{label}</legend>
+      <div className="grid gap-4">{children}</div>
+    </fieldset>
   )
 }
 

@@ -20,12 +20,19 @@ export function PageTopbar({
   title,
   subtitle,
   actions,
+  back,
   className,
 }: {
   eyebrow: string
   title?: React.ReactNode
   subtitle?: React.ReactNode
   actions?: React.ReactNode
+  /**
+   * A back affordance rendered before the title, where a reader expects it —
+   * detail pages pass a link to their parent list so "up" is always top-left,
+   * never an action buried in a section toolbar.
+   */
+  back?: React.ReactNode
   className?: string
 }) {
   return (
@@ -36,6 +43,7 @@ export function PageTopbar({
         className,
       )}
     >
+      {back}
       <div className="min-w-0">
         {title && <span className="block font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-faint">{eyebrow}</span>}
         <span className="block truncate text-[17px] font-semibold tracking-[-0.02em] text-foreground">{title ?? eyebrow}</span>

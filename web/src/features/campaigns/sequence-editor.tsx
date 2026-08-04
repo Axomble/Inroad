@@ -108,7 +108,12 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
       )}
 
       {isDraft && adding && (
-        <StepForm campaignId={campaignId} onDone={() => setAdding(false)} onCancel={() => setAdding(false)} />
+        <StepForm
+          campaignId={campaignId}
+          isFirstStep={serverSteps.length === 0}
+          onDone={() => setAdding(false)}
+          onCancel={() => setAdding(false)}
+        />
       )}
 
       {isLoading ? (
@@ -220,13 +225,20 @@ function StaticStepList({
       {steps.map((step, i) =>
         editingId === step.id ? (
           <li key={step.id} className="border-b border-border last:border-b-0">
-            <StepForm campaignId={campaignId} step={step} onDone={onEditDone} onCancel={onEditDone} />
+            <StepForm
+              campaignId={campaignId}
+              step={step}
+              isFirstStep={i === 0}
+              onDone={onEditDone}
+              onCancel={onEditDone}
+            />
           </li>
         ) : (
           <StepCard
             key={step.id}
             step={step}
             position={i + 1}
+            threadSubject={steps[0]?.subject}
             onEdit={() => onEdit(step.id)}
             onDelete={() => onDelete(step)}
           />

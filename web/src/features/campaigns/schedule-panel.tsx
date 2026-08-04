@@ -148,34 +148,67 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
       </SectionBar>
 
       <div className="space-y-4 px-5 py-4">
-        <div className="max-w-xs space-y-1.5">
-          <Label htmlFor="schedule-timezone">Timezone</Label>
-          <Select
-            id="schedule-timezone"
-            value={timezone}
-            onChange={(e) => {
-              setTimezone(e.target.value)
-              setDirty(true)
-              setProblem(null)
-            }}
-          >
-            {/* The current value is always present, even if the browser doesn't
-                enumerate that zone, so a server-set zone is never silently lost. */}
-            {!zones.includes(timezone) && timezone !== '' && <option value={timezone}>{timezone}</option>}
-            {zones.map((zone) => (
-              <option key={zone} value={zone}>
-                {zone}
-              </option>
-            ))}
-          </Select>
-          <p className="text-xs text-muted-foreground">Windows below are in this timezone.</p>
-        </div>
+        {/* The week beside the knobs, not under them: seven day rows stacked
+            below two short fields made this panel scroll for no reason on any
+            screen wide enough to show both at once. */}
+        <div className="grid items-start gap-x-8 gap-y-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="schedule-timezone">Timezone</Label>
+              <Select
+                id="schedule-timezone"
+                value={timezone}
+                onChange={(e) => {
+                  setTimezone(e.target.value)
+                  setDirty(true)
+                  setProblem(null)
+                }}
+              >
+                {/* The current value is always present, even if the browser doesn't
+                    enumerate that zone, so a server-set zone is never silently lost. */}
+                {!zones.includes(timezone) && timezone !== '' && <option value={timezone}>{timezone}</option>}
+                {zones.map((zone) => (
+                  <option key={zone} value={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </Select>
+              <p className="text-xs text-muted-foreground">Sending windows are in this timezone.</p>
+            </div>
 
-        <ul className="divide-y divide-border rounded-md border border-border">
-          {WEEKDAY_SHORT.map((label, weekday) => {
-            const intervals = week[weekday] ?? []
-            return (
-              <li key={label} className="flex flex-wrap items-center gap-2 px-3 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="schedule-daily-limit">Daily limit</Label>
+              <Input
+                id="schedule-daily-limit"
+                type="number"
+                min={1}
+                max={MAX_DAILY_LIMIT}
+                inputMode="numeric"
+                placeholder="No limit"
+                value={dailyLimit}
+                onChange={(e) => {
+                  setDailyLimit(e.target.value)
+                  setDirty(true)
+                  setProblem(null)
+                }}
+              />
+              {/* Spelled out because "daily limit" reads as per-mailbox: an operator
+                  who assumes that under-configures the campaign by the size of the
+                  pool. The per-mailbox ceiling is the mailbox's own daily cap. */}
+              <p className="text-xs text-muted-foreground">
+                The most this campaign sends per day in total, added up across{' '}
+                <strong className="font-medium">every sender in its pool</strong> — not per mailbox. Leave it
+                empty for no campaign limit. Each mailbox still keeps its own daily cap, so this can only lower
+                volume, never raise it.
+              </p>
+            </div>
+          </div>
+
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {WEEKDAY_SHORT.map((label, weekday) => {
+              const intervals = week[weekday] ?? []
+              return (
+                <li key={label} className="flex flex-wrap items-center gap-2 px-3 py-1.5">
                 <span
                   className={cn(
                     'w-10 shrink-0 text-xs font-medium',
@@ -228,35 +261,9 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
                   Add
                 </Button>
               </li>
-            )
-          })}
-        </ul>
-
-        <div className="max-w-xs space-y-1.5">
-          <Label htmlFor="schedule-daily-limit">Daily limit</Label>
-          <Input
-            id="schedule-daily-limit"
-            type="number"
-            min={1}
-            max={MAX_DAILY_LIMIT}
-            inputMode="numeric"
-            placeholder="No limit"
-            value={dailyLimit}
-            onChange={(e) => {
-              setDailyLimit(e.target.value)
-              setDirty(true)
-              setProblem(null)
-            }}
-          />
-          {/* Spelled out because "daily limit" reads as per-mailbox: an operator
-              who assumes that under-configures the campaign by the size of the
-              pool. The per-mailbox ceiling is the mailbox's own daily cap. */}
-          <p className="text-xs text-muted-foreground">
-            The most this campaign sends per day in total, added up across{' '}
-            <strong className="font-medium">every sender in its pool</strong> — not per mailbox. Leave it
-            empty for no campaign limit. Each mailbox still keeps its own daily cap, so this can only lower
-            volume, never raise it.
-          </p>
+              )
+            })}
+          </ul>
         </div>
 
         {problem && (

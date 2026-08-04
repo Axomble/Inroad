@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react'
 import { useSearch } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Page,
@@ -69,15 +70,28 @@ export function ContactsPage() {
       />
 
       {/*
-        The last three read as unknown ("—") until an import runs in this
-        session, so their captions say what they'll describe rather than
-        implying a zero.
+        Import counts exist only after an import runs in this session. Before
+        one, a single labelled cell says so — three bare "—" stats read as a
+        load failure, not as "nothing has happened yet".
       */}
       <StatStrip>
         <Stat label="Lists" value={lists.length} sub="in this workspace" />
-        <Stat label="Imported" value={lastImport?.imported ?? '—'} sub="last import" />
-        <Stat label="Skipped" value={lastImport?.skipped ?? '—'} sub="invalid rows" />
-        <Stat label="Duplicates" value={lastImport?.duplicates ?? '—'} sub="already in list" />
+        {lastImport ? (
+          <>
+            <Stat label="Imported" value={lastImport.imported ?? 0} sub="last import" />
+            <Stat label="Skipped" value={lastImport.skipped ?? 0} sub="invalid rows" />
+            <Stat label="Duplicates" value={lastImport.duplicates ?? 0} sub="already in list" />
+          </>
+        ) : (
+          <Stat
+            // Spans the three import columns; the border override beats the
+            // strip's nth-child seam rule via tailwind-merge, not the cascade.
+            className="md:col-span-3 md:[&:nth-child(2)]:border-r-0"
+            label="Last import"
+            value="—"
+            sub="counts land here after your next CSV import"
+          />
+        )}
       </StatStrip>
 
       <PageBody className="flex flex-col overflow-hidden md:flex-row">
@@ -275,16 +289,14 @@ function ContactsPane({
         />
         <SortMenu options={CONTACT_SORTS} value={sort} onChange={(id) => applySearch({ sort: id })} />
         {/*
-          Native, like the campaign panels' selects: a three-item list gets the
-          platform keyboard model, typeahead, and the mobile picker for free.
-          Sized to the 40px SectionBar rather than the taller form control.
+          The shared Select, compacted to the 40px SectionBar: same native
+          control underneath (keyboard model, typeahead, mobile picker), same
+          themed chevron as every other select in the app.
         */}
-        <select
+        <Select
           aria-label="Contacts per page"
-          className={cn(
-            'h-7 rounded-md border border-border bg-surface px-2 text-[12.5px] text-foreground',
-            'outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/40',
-          )}
+          wrapperClassName="w-auto"
+          className="h-7 w-auto border-border bg-surface py-0 pl-2 pr-7 text-[12.5px] shadow-none"
           value={limit}
           onChange={(e) => applySearch({ limit: Number(e.target.value) })}
         >
@@ -293,7 +305,7 @@ function ContactsPane({
               {size} / page
             </option>
           ))}
-        </select>
+        </Select>
         {listId && <ImportCsvForm listId={listId} onImported={onImported} />}
       </SectionBar>
 

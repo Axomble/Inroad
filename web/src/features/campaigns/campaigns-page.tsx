@@ -162,8 +162,11 @@ export function CampaignsPage() {
         <>
           <ListHeader>
             <ListHeaderCell className="min-w-0 flex-1">Campaign</ListHeaderCell>
-            <ListHeaderCell className="w-20 text-right">Status</ListHeaderCell>
-            <ListHeaderCell className="w-24 text-right">Actions</ListHeaderCell>
+            <ListHeaderCell className="hidden w-16 text-right md:block">Sent</ListHeaderCell>
+            <ListHeaderCell className="w-24 text-right">Status</ListHeaderCell>
+            {/* Wide enough for Launch + the overflow menu side by side — a
+                narrower track pushed the buttons over the status column. */}
+            <ListHeaderCell className="w-36 text-right">Actions</ListHeaderCell>
           </ListHeader>
 
           <PageBody ref={nav.containerRef}>
@@ -246,11 +249,17 @@ function CampaignRow({
         </div>
       </div>
 
-      <div className="flex w-20 justify-end">
+      <div className="hidden w-16 justify-end md:flex">
+        <span className="font-mono text-xs tabular-nums text-muted-foreground">
+          {(campaign.stats?.sent ?? 0).toLocaleString()}
+        </span>
+      </div>
+
+      <div className="flex w-24 shrink-0 justify-end">
         <StatusPill tone={campaignTone(campaign.status)}>{campaignLabel(campaign.status)}</StatusPill>
       </div>
 
-      <div className="flex w-24 items-center justify-end gap-1">
+      <div className="flex w-36 shrink-0 items-center justify-end gap-1">
         {campaign.status === 'draft' && (
           <Button
             variant="secondary"

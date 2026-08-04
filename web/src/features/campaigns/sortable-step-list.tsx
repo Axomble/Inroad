@@ -105,13 +105,20 @@ export default function SortableStepList({
           {orderedSteps.map((step, i) =>
             editingId === step.id ? (
               <li key={step.id} className="border-b border-border last:border-b-0">
-                <StepForm campaignId={campaignId} step={step} onDone={onEditDone} onCancel={onEditDone} />
+                <StepForm
+                  campaignId={campaignId}
+                  step={step}
+                  isFirstStep={i === 0}
+                  onDone={onEditDone}
+                  onCancel={onEditDone}
+                />
               </li>
             ) : (
               <SortableStepCard
                 key={step.id}
                 step={step}
                 position={i + 1}
+                threadSubject={orderedSteps[0]?.subject}
                 onEdit={() => onEdit(step.id)}
                 onDelete={() => onDelete(step)}
               />
@@ -131,11 +138,13 @@ export default function SortableStepList({
 function SortableStepCard({
   step,
   position,
+  threadSubject,
   onEdit,
   onDelete,
 }: {
   step: StepWithId
   position: number
+  threadSubject?: string
   onEdit: () => void
   onDelete: () => void
 }) {
@@ -151,6 +160,7 @@ function SortableStepCard({
       <StepCardBody
         step={step}
         position={position}
+        threadSubject={threadSubject}
         canModifyStructure
         onEdit={onEdit}
         onDelete={onDelete}

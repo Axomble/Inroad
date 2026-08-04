@@ -20,8 +20,22 @@ const OK = 'rgba(23,184,119,0.85)' // inbox arrival flash
 function palette() {
   const dark = document.documentElement.classList.contains('dark')
   return dark
-    ? { top: '#0f130a', bot: '#0b0e0a', grid: 'rgba(234,240,222,0.05)', zone: 'rgba(195,245,60,0.5)', accent: '#c3f53c' }
-    : { top: '#ffffff', bot: '#eef2e2', grid: 'rgba(18,22,11,0.05)', zone: 'rgba(139,190,0,0.55)', accent: '#8bbe00' }
+    ? {
+        top: '#0f130a',
+        bot: '#0b0e0a',
+        grid: 'rgba(234,240,222,0.05)',
+        zone: 'rgba(195,245,60,0.5)',
+        accent: '#c3f53c',
+        caption: 'rgba(234,240,222,0.4)',
+      }
+    : {
+        top: '#ffffff',
+        bot: '#eef2e2',
+        grid: 'rgba(18,22,11,0.05)',
+        zone: 'rgba(139,190,0,0.55)',
+        accent: '#8bbe00',
+        caption: 'rgba(17,21,13,0.4)',
+      }
 }
 
 interface Particle {
@@ -91,6 +105,22 @@ export function AuthShowcase() {
       return mt * mt * p0 + 2 * mt * t * p1 + t * t * p2
     }
 
+    /**
+     * A tracked-uppercase mono caption, the canvas echo of the app's eyebrow
+     * labels. `letterSpacing` is newer canvas API — where absent the caption
+     * just renders untracked, which is fine.
+     */
+    function caption(text: string, x: number, y: number, color: string) {
+      const c = ctx as CanvasRenderingContext2D & { letterSpacing?: string }
+      ctx!.save()
+      ctx!.font = '600 9px "Geist Mono Variable", ui-monospace, Menlo, monospace'
+      if ('letterSpacing' in c) c.letterSpacing = '2px'
+      ctx!.textAlign = 'center'
+      ctx!.fillStyle = color
+      ctx!.fillText(text, x, y)
+      ctx!.restore()
+    }
+
     function drawGrid(grid: string) {
       ctx!.save()
       ctx!.globalAlpha = 0.5
@@ -121,14 +151,36 @@ export function AuthShowcase() {
 
       const target = inbox()
 
-      // inbox landing zone
+      // Inbox landing zone. Filled and furnished — a bare stroked rectangle
+      // reads as an unfinished element in the reduced-motion still frame, so
+      // it gets a faint fill, stacked "message" rows, and a caption that name
+      // what the arcs are flying into.
+      const zone = { x: target.x - 30, y: target.y - 34, w: 60, h: 68 }
       ctx!.save()
+      ctx!.fillStyle = pal.accent
+      ctx!.globalAlpha = 0.07
+      ctx!.beginPath()
+      ctx!.roundRect(zone.x, zone.y, zone.w, zone.h, 10)
+      ctx!.fill()
+      ctx!.globalAlpha = 1
       ctx!.strokeStyle = pal.zone
       ctx!.lineWidth = 1.5
       ctx!.beginPath()
-      ctx!.roundRect(target.x - 30, target.y - 34, 60, 68, 10)
+      ctx!.roundRect(zone.x, zone.y, zone.w, zone.h, 10)
       ctx!.stroke()
+      ctx!.globalAlpha = 0.45
+      ctx!.lineWidth = 1
+      for (let row = 0; row < 3; row++) {
+        const rowY = zone.y + 16 + row * 13
+        ctx!.beginPath()
+        ctx!.moveTo(zone.x + 11, rowY)
+        ctx!.lineTo(zone.x + zone.w - 11, rowY)
+        ctx!.stroke()
+      }
       ctx!.restore()
+
+      caption('INBOX', target.x, zone.y + zone.h + 18, pal.caption)
+      caption('SENDERS', width * 0.16, height * 0.24 + height * 0.52 + 26, pal.caption)
 
       // connections + particles
       for (let i = particles.length - 1; i >= 0; i--) {

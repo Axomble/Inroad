@@ -11,13 +11,22 @@ import { useCreateStepMutation, useUpdateStepMutation, type SequenceStep } from 
 import { delayToSeconds, secondsToDelay } from './step-delay'
 import { stepErrorMessage } from './step-error'
 
-const schema = z.object({
+/**
+ * Two schemas, not one: the first step's subject opens the thread, so it is
+ * required; a follow-up may leave it blank, which the sender turns into a
+ * same-thread reply ("Re: <step 1 subject>"). The blank is a feature, not a
+ * validation gap.
+ */
+const followUpSchema = z.object({
   days: z.number({ message: 'Number' }).int().min(0, '0+').max(365, 'Max 365'),
   hours: z.number({ message: 'Number' }).int().min(0, '0+').max(23, 'Max 23'),
-  subject: z.string().min(1, 'Required'),
+  subject: z.string().max(500, 'Max 500 characters'),
   body_text: z.string().optional(),
 })
-type Values = z.infer<typeof schema>
+const firstStepSchema = followUpSchema.extend({
+  subject: z.string().min(1, 'Required').max(500, 'Max 500 characters'),
+})
+type Values = z.infer<typeof followUpSchema>
 
 /**
  * Inline add/edit form for a sequence step. Collects the delay as whole
@@ -29,12 +38,15 @@ type Values = z.infer<typeof schema>
 export function StepForm({
   campaignId,
   step,
+  isFirstStep,
   onDone,
   onCancel,
 }: {
   campaignId: string
   /** Present in edit mode; absent when adding a new step. */
   step?: SequenceStep
+  /** First step opens the thread, so its subject is required. */
+  isFirstStep: boolean
   onDone: () => void
   onCancel: () => void
 }) {
@@ -56,7 +68,7 @@ export function StepForm({
     handleSubmit,
     formState: { errors },
   } = useForm<Values>({
-    resolver: zodResolver(schema),
+    resolver: zodResolver(isFirstStep ? firstStepSchema : followUpSchema),
     defaultValues: {
       days: initialDelay.days,
       hours: initialDelay.hours,
@@ -123,14 +135,28 @@ export function StepForm({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor={subjectId}>Subject</Label>
+        <div className="flex items-center gap-2">
+          <Label htmlFor={subjectId}>Subject</Label>
+          {!isFirstStep && (
+            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">optional</span>
+          )}
+        </div>
         <Input
           id={subjectId}
-          placeholder="Quick question, {{first_name}}"
+          placeholder={isFirstStep ? 'Quick question, {{first_name}}' : 'Leave blank to stay in the thread'}
           aria-invalid={!!errors.subject}
           {...register('subject')}
         />
-        {errors.subject && <span className="text-xs text-danger">{errors.subject.message}</span>}
+        {errors.subject ? (
+          <span className="text-xs text-danger">{errors.subject.message}</span>
+        ) : (
+          !isFirstStep && (
+            <span className="text-xs text-muted-foreground">
+              Blank sends this step as a reply in the same thread — the subject becomes “Re:” the first
+              step's subject.
+            </span>
+          )
+        )}
       </div>
 
       <div className="flex flex-col gap-1.5">
