@@ -31,7 +31,10 @@ type CountFirstStepSendsTodayParams struct {
 // CountCampaignSentToday's status='sent': ClaimStepSend's INSERT is the moment a
 // contact is actually STARTED, and that is what this throttle limits, so a
 // claimed-but-not-yet-finalized 'sending' row (or one that later fails) still
-// consumes today's allowance. Workspace-pinned like every new query.
+// consumes today's allowance. This is a chosen divergence, not an oversight: the
+// field's own contract is "brand-new contacts started per day", not "contacts
+// successfully delivered to", so a started contact that later hard-fails has
+// still used one of today's slots. Workspace-pinned like every new query.
 func (q *Queries) CountFirstStepSendsToday(ctx context.Context, arg CountFirstStepSendsTodayParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countFirstStepSendsToday, arg.CampaignID, arg.WorkspaceID)
 	var count int64

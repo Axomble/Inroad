@@ -71,7 +71,10 @@ UPDATE campaigns SET max_new_leads_per_day = $3 WHERE id = $1 AND workspace_id =
 -- CountCampaignSentToday's status='sent': ClaimStepSend's INSERT is the moment a
 -- contact is actually STARTED, and that is what this throttle limits, so a
 -- claimed-but-not-yet-finalized 'sending' row (or one that later fails) still
--- consumes today's allowance. Workspace-pinned like every new query.
+-- consumes today's allowance. This is a chosen divergence, not an oversight: the
+-- field's own contract is "brand-new contacts started per day", not "contacts
+-- successfully delivered to", so a started contact that later hard-fails has
+-- still used one of today's slots. Workspace-pinned like every new query.
 SELECT count(*) FROM sends
 WHERE campaign_id = $1 AND workspace_id = $2
   AND step_order = 1
