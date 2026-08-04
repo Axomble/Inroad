@@ -84,6 +84,16 @@ type fakeStore struct {
 	setStatusCalls   int
 	renameCalls      int
 	deleteDraftCalls int
+
+	// preflight/test-send fixtures. See CountUnsuppressedAudience/
+	// FirstListContact below — full coverage lives in preflight_test.go/
+	// testsend_test.go's own black-box fakes.
+	audienceCount       int64
+	audienceCountErr    error
+	firstContactName    string
+	firstContactCompany string
+	firstContactFound   bool
+	firstContactErr     error
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
@@ -224,6 +234,19 @@ func (f *fakeStore) DeleteDraft(_ context.Context, ws, id uuid.UUID) error {
 		delete(f.campaigns, [2]uuid.UUID{ws, id})
 	}
 	return nil
+}
+
+// audienceCount/firstContact* back CountUnsuppressedAudience/FirstListContact.
+// Preflight/test-send are exercised in their own black-box test files
+// (preflight_test.go, testsend_test.go); these exist here only so this
+// white-box fakeStore keeps satisfying the Store interface for the rest of
+// this package's tests.
+func (f *fakeStore) CountUnsuppressedAudience(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
+	return f.audienceCount, f.audienceCountErr
+}
+
+func (f *fakeStore) FirstListContact(context.Context, uuid.UUID, uuid.UUID) (string, string, bool, error) {
+	return f.firstContactName, f.firstContactCompany, f.firstContactFound, f.firstContactErr
 }
 
 // errNotFound is what the sqlc-backed Get returns when the row isn't in the

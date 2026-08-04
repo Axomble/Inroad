@@ -297,6 +297,70 @@ func (h *Handler) deleteDraft(w http.ResponseWriter, r *http.Request) {
 		ErrNotDraft, "campaign is not a draft", h.svc.DeleteDraft)
 }
 
+// preflight handles GET /campaigns/{id}/preflight.
+func (h *Handler) preflight(w http.ResponseWriter, r *http.Request) {
+	serveCampaignChild(w, r, "could not compute preflight",
+		func(ctx context.Context, ws, id uuid.UUID) (preflightResponse, error) {
+			rep, err := h.svc.Preflight(ctx, ws, id)
+			if err != nil {
+				return preflightResponse{}, err
+			}
+			return toPreflightResponse(rep), nil
+		})
+}
+
+type testSendRequest struct {
+	StepID string `json:"step_id" validate:"required,uuid"`
+	To     string `json:"to" validate:"required,email"`
+}
+
+type testSendResponse struct {
+	Sent bool `json:"sent"`
+}
+
+// testSend handles POST /campaigns/{id}/test-send: renders one sequence step
+// for a preview recipient and sends it immediately through the campaign's
+// first enabled+active pool mailbox. Nothing is persisted to sends.
+func (h *Handler) testSend(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var req testSendRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	stepID, err := uuid.Parse(req.StepID)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad step_id")
+		return
+	}
+	switch err := h.svc.TestSend(r.Context(), ws, id, stepID, req.To); {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrStepNotFound):
+		httpx.Error(w, http.StatusNotFound, "step not found")
+	case errors.Is(err, ErrNoEligibleSender):
+		httpx.Error(w, http.StatusUnprocessableEntity, "no enabled sender with an active mailbox")
+	case errors.Is(err, ErrTestSendRateLimited):
+		httpx.Error(w, http.StatusTooManyRequests, "too many test sends; try again shortly")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not send test email")
+	default:
+		httpx.JSON(w, http.StatusAccepted, testSendResponse{Sent: true})
+	}
+}
+
 // launch transitions a draft campaign to running: it materializes sends for
 // every list member and enqueues a send:email task for each.
 func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {

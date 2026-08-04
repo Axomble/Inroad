@@ -579,6 +579,22 @@ const injectedRtkApi = api.injectEndpoints({
         method: "POST",
       }),
     }),
+    getCampaignPreflight: build.query<
+      GetCampaignPreflightApiResponse,
+      GetCampaignPreflightApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/preflight` }),
+    }),
+    testSendCampaign: build.mutation<
+      TestSendCampaignApiResponse,
+      TestSendCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/test-send`,
+        method: "POST",
+        body: queryArg.testSendRequest,
+      }),
+    }),
     unsubscribeConfirmPage: build.query<
       UnsubscribeConfirmPageApiResponse,
       UnsubscribeConfirmPageApiArg
@@ -1028,6 +1044,17 @@ export type LaunchCampaignApiResponse =
   };
 export type LaunchCampaignApiArg = {
   id: string;
+};
+export type GetCampaignPreflightApiResponse =
+  /** status 200 Readiness report */ CampaignPreflight;
+export type GetCampaignPreflightApiArg = {
+  id: string;
+};
+export type TestSendCampaignApiResponse =
+  /** status 202 Sent */ TestSendResponse;
+export type TestSendCampaignApiArg = {
+  id: string;
+  testSendRequest: TestSendRequest;
 };
 export type UnsubscribeConfirmPageApiResponse = unknown;
 export type UnsubscribeConfirmPageApiArg = {
@@ -1700,6 +1727,34 @@ export type ReorderStepsRequest = {
   /** the FULL ordered list of the campaign's step ids, in the desired order */
   step_ids: string[];
 };
+export type CampaignPreflightCheck = {
+  id:
+    | "sequence_steps"
+    | "empty_bodies"
+    | "schedule_windows"
+    | "sender_pool"
+    | "audience"
+    | "domain_auth"
+    | "tracking"
+    | "daily_limit"
+    | "warmup_health";
+  severity: "pass" | "warn" | "fail";
+  title: string;
+  detail: string;
+  /** Empty string for a passing check. */
+  remedy: string;
+};
+export type CampaignPreflight = {
+  ready: boolean;
+  checks: CampaignPreflightCheck[];
+};
+export type TestSendResponse = {
+  sent: boolean;
+};
+export type TestSendRequest = {
+  step_id: string;
+  to: string;
+};
 export type OAuth2Client = {
   client_id: string;
   /** Present ONLY on a confidential client's registration response, shown exactly once. Never on a list. */
@@ -1879,6 +1934,8 @@ export const {
   useDeleteStepMutation,
   useReorderStepsMutation,
   useLaunchCampaignMutation,
+  useGetCampaignPreflightQuery,
+  useTestSendCampaignMutation,
   useUnsubscribeConfirmPageQuery,
   useUnsubscribeMutation,
   useTrackOpenQuery,

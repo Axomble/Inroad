@@ -34,14 +34,49 @@ type Enqueuer interface {
 // Service implements campaign use cases. It depends on the Store and
 // Checker interfaces, not on the sqlc-backed struct or other domains'
 // concrete stores -- dependency inversion.
+//
+// domainAuth/sender/mailer/limiter back the preflight report's domain_auth
+// check and test-send respectively. They are all OPTIONAL (nil-safe: see
+// Service.readDomainAuth, TestSend's own nil checks, and
+// checkTestSendRateLimit) and injected via ServiceOption rather than added as
+// NewService parameters, so every existing caller of NewService(store,
+// checker) -- and every existing unit test -- keeps compiling unchanged.
 type Service struct {
-	store   Store
-	checker Checker
-	metrics *metricsCache
+	store      Store
+	checker    Checker
+	metrics    *metricsCache
+	domainAuth DomainAuthReader
+	sender     SenderResolver
+	mailer     Mailer
+	limiter    RateLimiter
 }
 
-func NewService(store Store, checker Checker) *Service {
-	return &Service{store: store, checker: checker, metrics: newMetricsCache(metricsCacheTTL)}
+// ServiceOption configures an optional Service dependency. See the Service
+// doc comment for why these are options rather than NewService parameters.
+type ServiceOption func(*Service)
+
+// WithDomainAuth wires the preflight domain_auth check's evidence source.
+// Without it, every sender domain reports as "not checked" (see
+// Service.readDomainAuth) rather than the loader failing.
+func WithDomainAuth(r DomainAuthReader) ServiceOption { return func(s *Service) { s.domainAuth = r } }
+
+// WithSenderResolver wires test-send's credential resolver.
+func WithSenderResolver(r SenderResolver) ServiceOption { return func(s *Service) { s.sender = r } }
+
+// WithMailer wires test-send's mail transport.
+func WithMailer(m Mailer) ServiceOption { return func(s *Service) { s.mailer = m } }
+
+// WithRateLimiter wires test-send's abuse guard. Without it, test-send is
+// unlimited (see Service.checkTestSendRateLimit) -- a deployment choice made
+// once at wiring time, not a silent bypass.
+func WithRateLimiter(l RateLimiter) ServiceOption { return func(s *Service) { s.limiter = l } }
+
+func NewService(store Store, checker Checker, opts ...ServiceOption) *Service {
+	s := &Service{store: store, checker: checker, metrics: newMetricsCache(metricsCacheTTL)}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Create verifies the mailbox is active and the list exists in the

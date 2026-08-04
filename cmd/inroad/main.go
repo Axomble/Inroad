@@ -40,6 +40,7 @@ import (
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
+	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -237,9 +238,34 @@ func run() error {
 	// service) so the contact package doesn't have to import app/list —
 	// keeps the "app packages don't import each other" invariant intact.
 	contactSvc := contact.NewService(contact.NewPgStore(pool), listCheckerAdapter{lists: listSvc})
+	// Sending-domain authentication (SPF/DKIM/DMARC). Built here (not inline at
+	// its mount below) because campaign preflight's domain_auth check also
+	// reads it, through the narrow domainAuthAdapter — the domain list is
+	// derived from this workspace's mailboxes, so nothing here reaches DNS.
+	sendingdomainSvc := sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver())
+	// Test-send (POST /campaigns/{id}/test-send) reuses the SAME coreapi
+	// in-process seam every worker send job resolves credentials through
+	// (ResolveSenderTransport, added in internal/coreapi/inprocess), so
+	// decrypting a mailbox secret — or refreshing a gmail/m365 OAuth token —
+	// has exactly one implementation rather than a second copy in the API
+	// process. warmupSecret/ContentGenerator are irrelevant to this call path
+	// (nil is safe: nothing here ever calls a warmup coreapi method).
+	testSendCore := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, nil)
+	senderResolver, _ := testSendCore.(campaign.SenderResolver)
+	// MultiSender dispatches SMTP vs Gmail vs Graph on the resolved mailbox's
+	// provider, identically to the worker's sender (internal/worker/sender):
+	// the SMTP leg is SSRF-vetted, the Gmail/Graph legs use their fixed hosts.
+	testSendMailer := mail.NewMultiSender(mail.NewNetSender(cfg.MailAllowPrivateHosts), mail.NewGmailSender(), mail.NewGraphSender())
 	// checker adapts the mailbox and list stores for campaign ownership checks.
 	campaignStore := campaign.NewPgStore(pool)
-	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
+	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc},
+		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
+		campaign.WithSenderResolver(senderResolver),
+		campaign.WithMailer(testSendMailer),
+		// Reuses the same Redis-backed limiter the auth throttles use, so the
+		// 5/min test-send cap holds across every API server instance.
+		campaign.WithRateLimiter(redisLimiter),
+	)
 	// Sequence steps live under /campaigns/{id}/steps; the step service checks
 	// campaign status (draft-gating) via an adapter over the campaign store.
 	stepHandler := sequencestep.NewHandler(
@@ -327,9 +353,7 @@ func run() error {
 		// data plane because ingest is api-key authenticated: an external bounce/
 		// complaint pipeline is exactly the caller this group exists for.
 		{pattern: "/api/v1/deliverability", handler: deliverabilityHandler.Routes()},
-		{pattern: "/api/v1/sending-domains", handler: sendingdomain.NewHandler(
-			sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver()),
-		).Routes()},
+		{pattern: "/api/v1/sending-domains", handler: sendingdomain.NewHandler(sendingdomainSvc).Routes()},
 	}
 	// Session-only surface: workspace administration and the warmup overview are not
 	// part of the api-key contract, so they authenticate with the session verifier
@@ -445,6 +469,26 @@ func (o ownershipChecker) ListExists(ctx context.Context, ws, listID uuid.UUID) 
 		return false, err
 	}
 	return true, nil
+}
+
+// domainAuthAdapter satisfies campaign.DomainAuthReader over the sendingdomain
+// service, so the preflight domain_auth check reads real SPF/DMARC verdicts
+// without the campaign package importing sendingdomain (app/* packages never
+// import each other).
+type domainAuthAdapter struct{ domains *sendingdomain.Service }
+
+func (a domainAuthAdapter) DomainAuth(ctx context.Context, ws uuid.UUID) (map[string]campaign.DomainAuthVerdict, error) {
+	rows, err := a.domains.List(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]campaign.DomainAuthVerdict, len(rows))
+	for _, d := range rows {
+		out[d.Domain] = campaign.DomainAuthVerdict{
+			Checked: d.CheckedAt != nil, SPFFound: d.SPFFound, DMARCFound: d.DMARCFound,
+		}
+	}
+	return out, nil
 }
 
 // campaignStatusChecker adapts the campaign store to sequencestep.CampaignChecker

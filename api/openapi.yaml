@@ -1182,6 +1182,46 @@ paths:
         '404': { description: Not found }
         '409': { description: Already launched }
         '422': { description: Target list empty or campaign has no steps }
+  /campaigns/{id}/preflight:
+    get:
+      operationId: getCampaignPreflight
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Launch-readiness report: nine independent checks (sequence steps,
+        empty bodies, schedule windows, sender pool, audience, sending-domain
+        authentication, tracking, daily limit, warmup health). ready is true
+        iff no check is severity fail — a warn is informational and never
+        blocks a launch.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Readiness report, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignPreflight' } } } }
+        '400': { description: Invalid campaign id }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+  /campaigns/{id}/test-send:
+    post:
+      operationId: testSendCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Renders one sequence step for a preview recipient and sends it
+        immediately through the campaign's first enabled+active pool mailbox.
+        Personalization uses the campaign list's first contact where one
+        exists, otherwise synthetic first_name=Alex, company=Acme. Nothing is
+        persisted to sends; tracking links are never rewritten and no
+        List-Unsubscribe header is set. Rate-limited (5/workspace/minute).
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TestSendRequest' } } }
+      responses:
+        '202': { description: Sent, content: { application/json: { schema: { $ref: '#/components/schemas/TestSendResponse' } } } }
+        '400': { description: "Invalid JSON, campaign id, step_id, or to address" }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign or step not found }
+        '422': { description: No enabled sender with an active mailbox }
+        '429': { description: Too many test sends; try again shortly }
   # The unsubscribe endpoint is served outside the /api/v1 base — it is
   # public and browser-facing (no auth, returns HTML). RFC 8058 requires the
   # state change to live on POST so email preview scanners auto-following
@@ -2223,6 +2263,40 @@ components:
           maximum: 1000000
           nullable: true
           description: "Campaign-wide sends per UTC day; null or omitted clears the limit."
+
+    CampaignPreflightCheck:
+      type: object
+      description: One readiness check's verdict.
+      required: [id, severity, title, detail, remedy]
+      properties:
+        id:
+          type: string
+          enum: [sequence_steps, empty_bodies, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+        severity: { type: string, enum: [pass, warn, fail] }
+        title: { type: string }
+        detail: { type: string }
+        remedy: { type: string, description: "Empty string for a passing check." }
+    CampaignPreflight:
+      type: object
+      description: >-
+        GET /campaigns/{id}/preflight's launch-readiness report. ready is true
+        iff no check below is severity fail — a warn is informational and
+        never blocks a launch.
+      required: [ready, checks]
+      properties:
+        ready: { type: boolean }
+        checks: { type: array, items: { $ref: '#/components/schemas/CampaignPreflightCheck' } }
+    TestSendRequest:
+      type: object
+      required: [step_id, to]
+      properties:
+        step_id: { type: string, format: uuid }
+        to: { type: string, format: email }
+    TestSendResponse:
+      type: object
+      required: [sent]
+      properties:
+        sent: { type: boolean }
 
     WarmupSettings:
       type: object

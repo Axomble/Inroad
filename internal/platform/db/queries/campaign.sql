@@ -86,3 +86,30 @@ DELETE FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2;
 -- draft can carry enrollment rows left over from build tooling or a future
 -- re-draft path; deleted explicitly rather than assumed empty.
 DELETE FROM sequence_enrollments WHERE campaign_id = $1 AND workspace_id = $2;
+
+-- name: CountUnsuppressedAudience :one
+-- The preflight "audience" check's evidence: how many of the campaign's list
+-- members are NOT on the workspace suppression list. Workspace-pinned on the
+-- campaign, so a cross-tenant id counts zero rather than leaking another
+-- tenant's list size.
+SELECT count(*)::bigint AS n
+FROM campaigns cam
+JOIN list_members lm ON lm.list_id = cam.list_id
+JOIN contacts ct ON ct.id = lm.contact_id
+LEFT JOIN suppression s ON s.workspace_id = cam.workspace_id AND lower(s.email) = lower(ct.email)
+WHERE cam.id = $1 AND cam.workspace_id = $2
+  AND s.email IS NULL;
+
+-- name: GetCampaignFirstContact :one
+-- The campaign list's earliest-added member, for test-send's real-contact
+-- preview (spec: "renders the step for the first contact of the campaign's
+-- list"). Zero rows means an empty list; the service substitutes the
+-- synthetic fallback vars (first_name=Alex, company=Acme). Workspace-pinned
+-- on the campaign.
+SELECT ct.first_name, ct.company
+FROM campaigns cam
+JOIN list_members lm ON lm.list_id = cam.list_id
+JOIN contacts ct ON ct.id = lm.contact_id
+WHERE cam.id = $1 AND cam.workspace_id = $2
+ORDER BY lm.added_at ASC, ct.id ASC
+LIMIT 1;

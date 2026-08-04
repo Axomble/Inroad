@@ -51,6 +51,32 @@ func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatus
 	return items, nil
 }
 
+const countUnsuppressedAudience = `-- name: CountUnsuppressedAudience :one
+SELECT count(*)::bigint AS n
+FROM campaigns cam
+JOIN list_members lm ON lm.list_id = cam.list_id
+JOIN contacts ct ON ct.id = lm.contact_id
+LEFT JOIN suppression s ON s.workspace_id = cam.workspace_id AND lower(s.email) = lower(ct.email)
+WHERE cam.id = $1 AND cam.workspace_id = $2
+  AND s.email IS NULL
+`
+
+type CountUnsuppressedAudienceParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// The preflight "audience" check's evidence: how many of the campaign's list
+// members are NOT on the workspace suppression list. Workspace-pinned on the
+// campaign, so a cross-tenant id counts zero rather than leaking another
+// tenant's list size.
+func (q *Queries) CountUnsuppressedAudience(ctx context.Context, arg CountUnsuppressedAudienceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnsuppressedAudience, arg.ID, arg.WorkspaceID)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
 const createCampaign = `-- name: CreateCampaign :one
 INSERT INTO campaigns (workspace_id, name, mailbox_id, list_id, subject, body_text, body_html)
 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at
@@ -224,6 +250,38 @@ func (q *Queries) GetCampaign(ctx context.Context, arg GetCampaignParams) (Campa
 		&i.ComplaintPausePct,
 		&i.GuardrailsEnabledAt,
 	)
+	return i, err
+}
+
+const getCampaignFirstContact = `-- name: GetCampaignFirstContact :one
+SELECT ct.first_name, ct.company
+FROM campaigns cam
+JOIN list_members lm ON lm.list_id = cam.list_id
+JOIN contacts ct ON ct.id = lm.contact_id
+WHERE cam.id = $1 AND cam.workspace_id = $2
+ORDER BY lm.added_at ASC, ct.id ASC
+LIMIT 1
+`
+
+type GetCampaignFirstContactParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetCampaignFirstContactRow struct {
+	FirstName string `json:"first_name"`
+	Company   string `json:"company"`
+}
+
+// The campaign list's earliest-added member, for test-send's real-contact
+// preview (spec: "renders the step for the first contact of the campaign's
+// list"). Zero rows means an empty list; the service substitutes the
+// synthetic fallback vars (first_name=Alex, company=Acme). Workspace-pinned
+// on the campaign.
+func (q *Queries) GetCampaignFirstContact(ctx context.Context, arg GetCampaignFirstContactParams) (GetCampaignFirstContactRow, error) {
+	row := q.db.QueryRow(ctx, getCampaignFirstContact, arg.ID, arg.WorkspaceID)
+	var i GetCampaignFirstContactRow
+	err := row.Scan(&i.FirstName, &i.Company)
 	return i, err
 }
 
