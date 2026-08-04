@@ -2,6 +2,8 @@ import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useHotkey } from '@/hooks/use-hotkey'
+import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { setAgentPanelOpen, toggleAgentPanel } from '@/store/slices/ui'
 import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
 
@@ -11,6 +13,10 @@ import { AppSidebar } from './app-sidebar'
 // appearing, and the chunk is a few KB.
 const CommandPalette = lazy(() =>
   import('@/components/shared/command-palette').then((m) => ({ default: m.CommandPalette })),
+)
+
+const AgentPanel = lazy(() =>
+  import('@/features/agent/panel').then((module) => ({ default: module.AgentPanel })),
 )
 
 /**
@@ -32,6 +38,13 @@ export function AppShell({
   rightSlot?: React.ReactNode
 }) {
   const [navOpen, setNavOpen] = useState(false)
+  const dispatch = useAppDispatch()
+  const agentOpen = useAppSelector((state) => state.ui.agentPanelOpen)
+  const [agentLoaded, setAgentLoaded] = useState(
+    () => agentOpen || new URL(window.location.href).searchParams.has('thread'),
+  )
+  const agentOpenerRef = useRef<HTMLElement | null>(null)
+  const agentWasOpenRef = useRef(agentOpen)
   const close = () => {
     setNavOpen(false)
   }
@@ -55,6 +68,32 @@ export function AppShell({
   }, [navOpen])
 
   useHotkey({ key: 'k', mod: true, whileTyping: true }, () => setPaletteOpen(true))
+  const toggleAgent = () => {
+    if (!agentOpen) agentOpenerRef.current = document.activeElement as HTMLElement | null
+    setAgentLoaded(true)
+    dispatch(toggleAgentPanel())
+  }
+
+  useHotkey({ key: '@', shift: true }, toggleAgent)
+  useHotkey(
+    { key: 'Escape', whileTyping: true },
+    () => dispatch(setAgentPanelOpen(false)),
+    agentOpen,
+  )
+
+  const openAgent = () => {
+    if (!agentOpen) agentOpenerRef.current = document.activeElement as HTMLElement | null
+    setAgentLoaded(true)
+    dispatch(setAgentPanelOpen(true))
+  }
+
+  useEffect(() => {
+    if (!agentOpen && agentWasOpenRef.current) {
+      agentOpenerRef.current?.focus()
+      agentOpenerRef.current = null
+    }
+    agentWasOpenRef.current = agentOpen
+  }, [agentOpen])
 
   return (
     <TooltipProvider>
@@ -63,13 +102,15 @@ export function AppShell({
           navOpen={navOpen}
           onToggleNav={() => setNavOpen((value) => !value)}
           onOpenPalette={() => setPaletteOpen(true)}
+          agentOpen={agentOpen}
+          onToggleAgent={toggleAgent}
           rightSlot={rightSlot}
         />
 
         <div className="flex min-h-0 flex-1">
           {/* Desktop sidebar */}
           <div className="hidden shrink-0 md:block">
-            <AppSidebar />
+            <AppSidebar onOpenAgent={openAgent} />
           </div>
 
           {/* Mobile drawer */}
@@ -100,17 +141,25 @@ export function AppShell({
               if ((event.target as HTMLElement).closest('a')) close()
             }}
           >
-            <AppSidebar />
+            <AppSidebar onOpenAgent={() => {
+              close()
+              openAgent()
+            }} />
           </div>
 
           <main className="workspace-grid min-w-0 flex-1 overflow-hidden bg-background md:rounded-tl-[22px] md:border-l md:border-t md:border-chrome-border">
             {children}
           </main>
+          {agentLoaded && (
+            <Suspense fallback={null}>
+              <AgentPanel />
+            </Suspense>
+          )}
         </div>
 
         {paletteOpen && (
           <Suspense fallback={null}>
-            <CommandPalette onClose={() => setPaletteOpen(false)} />
+            <CommandPalette onClose={() => setPaletteOpen(false)} onOpenAgent={openAgent} />
           </Suspense>
         )}
       </div>

@@ -72,6 +72,8 @@ const NAV: NavGroup[] = [
   },
 ]
 
+const noop = () => undefined
+
 function NavRow({ item, count }: { item: NavItem; count?: number }) {
   const Icon = item.icon
   return (
@@ -94,7 +96,7 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
   )
 }
 
-export function AppSidebar() {
+export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void }) {
   const counts = useNavCounts()
   const role = useAppSelector((s) => s.auth.role)
   const isAdmin = role === 'owner' || role === 'admin'
@@ -102,6 +104,15 @@ export function AppSidebar() {
   return (
     <div className="flex h-full w-64 flex-col overflow-y-auto bg-chrome px-3 pb-3 pt-4">
       <PulseCard />
+      <button
+        type="button"
+        onClick={onOpenAgent}
+        className="mb-4 flex h-9 items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/10 px-2.5 text-[13px] font-medium text-chrome-text transition-colors hover:border-primary/45 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      >
+        <Sparkles className="size-4 shrink-0 text-primary" strokeWidth={1.75} aria-hidden="true" />
+        <span>Ask Inroad</span>
+        <kbd className="ml-auto rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">@</kbd>
+      </button>
       <nav aria-label="Primary" className="flex flex-col gap-5">
         {NAV.map((group, index) => {
           const items = group.items.filter((item) => !item.adminOnly || isAdmin)

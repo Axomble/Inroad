@@ -1,4 +1,4 @@
-import { Menu, Search } from 'lucide-react'
+import { Menu, Search, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { WorkspacePulse } from '@/features/pulse/api'
 import { usePulseSelect } from './use-pulse'
@@ -14,14 +14,20 @@ const selectNeedsAttention = (data: WorkspacePulse | undefined) => ({
   needsAttention: data?.attention.some((row) => row.severity === 'danger') ?? false,
 })
 
+const noop = () => undefined
+
 export function AppHeader({
   navOpen,
   onToggleNav,
   onOpenPalette,
+  agentOpen = false,
+  onToggleAgent = noop,
   rightSlot,
 }: {
   onToggleNav: () => void
   onOpenPalette: () => void
+  agentOpen?: boolean
+  onToggleAgent?: () => void
   navOpen: boolean
   rightSlot?: React.ReactNode
 }) {
@@ -68,6 +74,19 @@ export function AppHeader({
         <span className="flex-1">Jump to anything</span>
         <kbd className="rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">⌘ K</kbd>
       </button>
+
+      <Button
+        variant="ghost"
+        size="sm"
+        className="ml-auto text-chrome-muted hover:bg-chrome-hover hover:text-chrome-text"
+        onClick={onToggleAgent}
+        aria-label={agentOpen ? 'Close Inroad assistant' : 'Open Inroad assistant'}
+        aria-expanded={agentOpen}
+      >
+        <Sparkles className="size-4 text-primary" aria-hidden="true" />
+        <span className="hidden lg:inline">Assistant</span>
+        <kbd className="hidden rounded border border-chrome-border px-1 py-0.5 font-mono text-[8px] text-chrome-muted sm:inline">@</kbd>
+      </Button>
 
       {rightSlot}
     </header>

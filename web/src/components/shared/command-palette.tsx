@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, CornerDownLeft } from 'lucide-react'
+import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, CornerDownLeft, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface Command {
@@ -9,12 +9,13 @@ interface Command {
   /** The nav group this belongs to, shown as a trailing hint. */
   group: string
   icon: typeof Mail
-  to: string
+  to?: string
   /** Extra words that should match this command but aren't in the label. */
   keywords?: string
 }
 
 const COMMANDS: readonly Command[] = [
+  { id: 'assistant', label: 'Ask Inroad assistant', group: 'Assistant', icon: Sparkles, keywords: 'ai agent help ask chat' },
   { id: 'overview', label: 'Overview', group: 'Workspace', icon: LayoutDashboard, to: '/app', keywords: 'home dashboard health activity' },
   { id: 'mailboxes', label: 'Mailboxes', group: 'Sending', icon: Mail, to: '/app/mailboxes', keywords: 'smtp gmail microsoft connect accounts' },
   { id: 'warmup', label: 'Warmup', group: 'Sending', icon: Flame, to: '/app/warmup', keywords: 'reputation ramp health pool deliverability' },
@@ -23,6 +24,8 @@ const COMMANDS: readonly Command[] = [
   { id: 'contacts', label: 'Contacts', group: 'Outreach', icon: Users, to: '/app/contacts', keywords: 'lists import csv leads' },
   { id: 'team', label: 'Team', group: 'Workspace', icon: Settings, to: '/app/settings/team', keywords: 'invites members roles settings' },
 ]
+
+const noop = () => undefined
 
 /**
  * ⌘K navigation.
@@ -40,7 +43,7 @@ const COMMANDS: readonly Command[] = [
  * would otherwise fire behind the dialog. `useHotkey` already declines to fire
  * inside `[role="dialog"]`, which is what makes that separation work.
  */
-export function CommandPalette({ onClose }: { onClose: () => void }) {
+export function CommandPalette({ onClose, onOpenAgent = noop }: { onClose: () => void; onOpenAgent?: () => void }) {
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const navigate = useNavigate()
@@ -65,7 +68,8 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   const run = (command: Command | undefined) => {
     if (!command) return
-    void navigate({ to: command.to })
+    if (command.id === 'assistant') onOpenAgent()
+    else if (command.to) void navigate({ to: command.to })
     onClose()
   }
 
