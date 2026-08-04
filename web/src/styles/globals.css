@@ -260,6 +260,52 @@ body {
   background-position: -1px -1px;
 }
 
+@keyframes agent-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes agent-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.agent-pulse {
+  animation: agent-pulse 1.15s ease-in-out infinite;
+}
+
+.agent-shimmer {
+  background-image: linear-gradient(90deg, var(--surface-2) 25%, var(--border-strong) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: agent-shimmer 1.4s linear infinite;
+}
+
+.agent-markdown :where(ul, ol) {
+  margin-left: 1.15rem;
+}
+
+.agent-markdown ul { list-style: disc; }
+.agent-markdown ol { list-style: decimal; }
+.agent-markdown blockquote {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 0.75rem;
+  color: var(--muted-foreground);
+}
+.agent-markdown pre {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-2);
+  padding: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-pulse,
+  .agent-shimmer {
+    animation: none;
+  }
+}
+
 @keyframes live-ping {
   75%, 100% { transform: scale(2.1); opacity: 0; }
 }
