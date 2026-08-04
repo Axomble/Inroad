@@ -28,6 +28,7 @@ import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
 import { LifecycleMenu, PauseResumeDialog } from './lifecycle-menu'
 import { usePauseResume } from './lifecycle-actions'
+import { PreflightDialog } from './preflight-dialog'
 
 /**
  * Module scope, not inline: `useListControls` memoises on the active
@@ -214,6 +215,7 @@ function CampaignRow({
 }) {
   const [launch, { isLoading }] = useLaunchCampaignMutation()
   const [error, setError] = useState<string | null>(null)
+  const [preflightOpen, setPreflightOpen] = useState(false)
   // One instance per row, shared by LifecycleMenu's menu item and the
   // PauseResumeDialog it opens — this row has only the one trigger today, but
   // sharing keeps the row's wiring identical to the detail topbar's (which has
@@ -262,18 +264,24 @@ function CampaignRow({
 
       <div className="flex w-36 shrink-0 items-center justify-end gap-1">
         {campaign.status === 'draft' && (
-          <Button
-            variant="secondary"
-            size="xs"
-            disabled={isLoading}
-            onClick={(e) => {
-              e.stopPropagation()
-              void onLaunch()
-            }}
-          >
-            <Rocket className="size-3.5" />
-            Launch
-          </Button>
+          // Stops a click anywhere in the preflight dialog (portalled, but
+          // still bubbling through the *React* tree per LifecycleMenu's own
+          // note above) from reaching this row's onClick and navigating away
+          // right as the operator confirms a launch.
+          <div className="relative inline-flex" onClick={(e) => e.stopPropagation()}>
+            <Button variant="secondary" size="xs" disabled={isLoading} onClick={() => setPreflightOpen(true)}>
+              <Rocket className="size-3.5" />
+              Launch
+            </Button>
+            <PreflightDialog
+              open={preflightOpen}
+              onOpenChange={setPreflightOpen}
+              campaignId={id}
+              campaignName={campaign.name}
+              onConfirm={() => void onLaunch()}
+              isLaunching={isLoading}
+            />
+          </div>
         )}
 
         {/* Pause/resume/rename/delete, status-appropriate. "Open campaign" isn't

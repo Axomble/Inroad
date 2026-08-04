@@ -36,6 +36,7 @@ type CapturedRequest = { method: string; url: string }
 
 let campaigns: Array<{ id: string; name: string; subject: string; status: string }>
 let launchResponder: () => Response
+let preflightResponder: () => Response
 let requests: CapturedRequest[]
 
 function jsonResponse(data: unknown, status = 200): Response {
@@ -48,6 +49,14 @@ beforeEach(() => {
   campaigns = [{ id: 'c-1', name: 'Q3 Outbound', subject: 'Quick question', status: 'draft' }]
   // A successful launch echoes queue counts; overridden per-test for error paths.
   launchResponder = () => jsonResponse({ queued: 3, total_enrolled: 3, failed_enqueue_count: 0 })
+  // The preflight gate the Launch button now opens through — all-pass by
+  // default so these tests exercise the same launch-mutation branches they
+  // did before the dialog existed.
+  preflightResponder = () =>
+    jsonResponse({
+      ready: true,
+      checks: [{ id: 'sequence_steps', severity: 'pass', title: 'Sequence has steps', detail: '1 step.', remedy: '' }],
+    })
 
   vi.stubGlobal(
     'fetch',
@@ -60,6 +69,7 @@ beforeEach(() => {
       const method = (isRequest ? input.method : init?.method ?? 'GET').toUpperCase()
       requests.push({ method, url })
 
+      if (url.endsWith('/preflight')) return preflightResponder()
       if (url.endsWith('/launch') && method === 'POST') return launchResponder()
       if (method === 'DELETE') return new Response(null, { status: 204 })
       return jsonResponse(campaigns)
@@ -72,10 +82,56 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+/** Opens the row's Launch button, waits for the preflight dialog's checks to
+ * load, then confirms — the row's `Launch` control now gates through that
+ * dialog rather than firing the launch mutation directly. */
 async function clickLaunch() {
   const launch = await screen.findByRole('button', { name: /^launch$/i })
   fireEvent.click(launch)
+
+  const dialog = await screen.findByRole('alertdialog')
+  const confirm = await within(dialog).findByRole('button', { name: /^launch campaign$/i })
+  await waitFor(() => expect(confirm).toBeEnabled())
+  fireEvent.click(confirm)
 }
+
+test('clicking Launch opens the preflight dialog instead of firing the launch mutation immediately', async () => {
+  renderWithProviders(<CampaignsPage />)
+
+  const launch = await screen.findByRole('button', { name: /^launch$/i })
+  fireEvent.click(launch)
+
+  expect(await screen.findByRole('alertdialog', { name: /launch.*q3 outbound/i })).toBeInTheDocument()
+  expect(requests.some((r) => r.method === 'POST' && r.url.endsWith('/launch'))).toBe(false)
+  expect(requests.some((r) => r.url.endsWith('/preflight'))).toBe(true)
+})
+
+test('a fail check in the preflight report blocks the row Launch confirm, and Cancel closes without launching', async () => {
+  preflightResponder = () =>
+    jsonResponse({
+      ready: false,
+      checks: [
+        {
+          id: 'sender_pool',
+          severity: 'fail',
+          title: 'No eligible sender',
+          detail: 'No enabled sender has an active mailbox.',
+          remedy: 'Add a connected mailbox to the sender pool.',
+        },
+      ],
+    })
+
+  renderWithProviders(<CampaignsPage />)
+  fireEvent.click(await screen.findByRole('button', { name: /^launch$/i }))
+
+  const dialog = await screen.findByRole('alertdialog')
+  const confirm = await within(dialog).findByRole('button', { name: /^launch campaign$/i })
+  await waitFor(() => expect(confirm).toBeDisabled())
+
+  fireEvent.click(within(dialog).getByRole('button', { name: /cancel/i }))
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+  expect(requests.some((r) => r.method === 'POST' && r.url.endsWith('/launch'))).toBe(false)
+})
 
 test('a 409 launch surfaces "Already launched." (guards against double-sends)', async () => {
   launchResponder = () => jsonResponse({ error: 'already launched' }, 409)
