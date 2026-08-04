@@ -2249,6 +2249,17 @@ components:
             1000000 because the column is a 32-bit integer — an unbounded value would
             reach Postgres out of range and surface as a 500 instead of a validation
             error.
+        max_new_leads_per_day:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          nullable: true
+          description: >-
+            Narrower than daily_limit: caps how many BRAND-NEW contacts this campaign
+            starts per UTC day. null means no limit. Counts only step-1 sends, so a
+            sequence already in flight keeps sending its follow-ups on schedule
+            regardless of how many new contacts started today. Bounded at 1000000 for
+            the same 32-bit-integer reason as daily_limit.
         preview:
           type: array
           description: "Human-readable preview of the next few send instants this schedule produces, in its own timezone."
@@ -2266,6 +2277,15 @@ components:
           maximum: 1000000
           nullable: true
           description: "Campaign-wide sends per UTC day; null or omitted clears the limit."
+        max_new_leads_per_day:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          nullable: true
+          description: >-
+            Brand-new contacts started per UTC day; null or omitted clears the limit.
+            This is a full-replace PUT, so an omitted field clears it exactly like an
+            explicit null.
 
     CampaignPreflightCheck:
       type: object

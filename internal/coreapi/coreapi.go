@@ -407,7 +407,14 @@ type StepSendJob struct {
 	// the mailbox, so a campaign-wide limit or a health pause must not masquerade as
 	// a mailbox that has used up its cap.
 	CampaignLimited bool
-	HealthPaused    bool
+	// NewLeadLimited means the campaign has reached campaigns.max_new_leads_per_day
+	// for the UTC day and THIS job is a step-1 send (a brand-new contact starting
+	// the sequence). It is narrower than CampaignLimited: a follow-up step (step
+	// 2+) is never gated by it, so a sequence already in flight keeps replying on
+	// schedule while the campaign is closed to new contacts. Deferred exactly like
+	// CampaignLimited (backoff snapped into the send window, never a failure).
+	NewLeadLimited bool
+	HealthPaused   bool
 	// CampaignPaused means the campaign is not 'running' — paused (by hand or by the
 	// deliverability circuit breaker), or still draft, or done. It gates the send
 	// itself: without it a breaker-paused campaign kept sending, because every

@@ -16,6 +16,9 @@ import {
   dailyLimitFromDraft,
   dailyLimitToDraft,
   MAX_DAILY_LIMIT,
+  MAX_NEW_LEADS_PER_DAY,
+  maxNewLeadsFromDraft,
+  maxNewLeadsToDraft,
   fromDraft,
   newInterval,
   scheduleErrorMessage,
@@ -39,6 +42,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
   const [timezone, setTimezone] = useState('')
   const [week, setWeek] = useState<DraftWeek>(EMPTY_WEEK)
   const [dailyLimit, setDailyLimit] = useState('')
+  const [maxNewLeads, setMaxNewLeads] = useState('')
   const [problem, setProblem] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
 
@@ -50,6 +54,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
     setTimezone(data.timezone)
     setWeek(toDraft(data.days))
     setDailyLimit(dailyLimitToDraft(data.daily_limit))
+    setMaxNewLeads(maxNewLeadsToDraft(data.max_new_leads_per_day))
   }, [data, dirty])
 
   const zones = useMemo(supportedTimezones, [])
@@ -94,6 +99,11 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
       setProblem(limit.problem)
       return
     }
+    const newLeadLimit = maxNewLeadsFromDraft(maxNewLeads)
+    if ('problem' in newLeadLimit) {
+      setProblem(newLeadLimit.problem)
+      return
+    }
     try {
       await save({
         id: campaignId,
@@ -104,6 +114,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
           // an omitted field would leave a previously set limit in place and the
           // cleared field would silently not take effect.
           daily_limit: limit.dailyLimit,
+          max_new_leads_per_day: newLeadLimit.maxNewLeads,
         },
       }).unwrap()
       setDirty(false)
@@ -200,6 +211,27 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
                 <strong className="font-medium">every sender in its pool</strong> — not per mailbox. Leave it
                 empty for no campaign limit. Each mailbox still keeps its own daily cap, so this can only lower
                 volume, never raise it.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="schedule-max-new-leads">New leads per day</Label>
+              <Input
+                id="schedule-max-new-leads"
+                type="number"
+                min={1}
+                max={MAX_NEW_LEADS_PER_DAY}
+                inputMode="numeric"
+                placeholder="No limit"
+                value={maxNewLeads}
+                onChange={(e) => {
+                  setMaxNewLeads(e.target.value)
+                  setDirty(true)
+                  setProblem(null)
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Caps brand-new contacts started per day; follow-ups keep flowing.
               </p>
             </div>
           </div>

@@ -1650,6 +1650,8 @@ export type CampaignSchedule = {
   days: SendWindowDay[];
   /** Campaign-wide cap on sends per UTC day, across every mailbox in the pool. null means no campaign limit. It can only lower throughput: a mailbox is never raised above its own ramped, health-scaled daily cap. Bounded at 1000000 because the column is a 32-bit integer — an unbounded value would reach Postgres out of range and surface as a 500 instead of a validation error. */
   daily_limit?: number | null;
+  /** Narrower than daily_limit: caps how many BRAND-NEW contacts this campaign starts per UTC day. null means no limit. Counts only step-1 sends, so a sequence already in flight keeps sending its follow-ups on schedule regardless of how many new contacts started today. Bounded at 1000000 for the same 32-bit-integer reason as daily_limit. */
+  max_new_leads_per_day?: number | null;
   /** Human-readable preview of the next few send instants this schedule produces, in its own timezone. */
   preview?: string[];
 };
@@ -1658,6 +1660,8 @@ export type CampaignScheduleRequest = {
   days: SendWindowDay[];
   /** Campaign-wide sends per UTC day; null or omitted clears the limit. */
   daily_limit?: number | null;
+  /** Brand-new contacts started per UTC day; null or omitted clears the limit. This is a full-replace PUT, so an omitted field clears it exactly like an explicit null. */
+  max_new_leads_per_day?: number | null;
 };
 export type RotationMode = "round_robin" | "least_recently_used" | "weighted";
 export type CampaignSender = {

@@ -13,6 +13,7 @@ const SCHEDULE = {
     { weekday: 3, intervals: [{ start_minute: 600, end_minute: 780 }] },
   ],
   daily_limit: 250,
+  max_new_leads_per_day: 25,
   preview: ['Mon 09:14:37', 'Mon 10:02:11', 'Mon 11:47:03'],
 }
 
@@ -45,7 +46,12 @@ async function readPut(fetchMock: ReturnType<typeof stubSchedule>) {
     expect(fetchMock.mock.calls.some((c) => (c[0] as Request).method === 'PUT')).toBe(true)
   })
   const put = fetchMock.mock.calls.find((c) => (c[0] as Request).method === 'PUT')?.[0] as Request
-  return (await put.json()) as { timezone: string; days: { weekday: number }[]; daily_limit: number | null }
+  return (await put.json()) as {
+    timezone: string
+    days: { weekday: number }[]
+    daily_limit: number | null
+    max_new_leads_per_day: number | null
+  }
 }
 
 describe('SchedulePanel', () => {
@@ -247,5 +253,80 @@ describe('SchedulePanel', () => {
     // cadence that isn't in effect.
     expect(screen.queryByText(/Mon 09:14:37/)).not.toBeInTheDocument()
     expect(screen.getByText(/Save to see the send times/)).toBeInTheDocument()
+  })
+
+  test('renders the saved new-leads-per-day limit and explains follow-ups keep flowing', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('New leads per day')).toHaveValue(25))
+    expect(screen.getByText(/follow-ups keep flowing/)).toBeInTheDocument()
+  })
+
+  test('no new-leads limit shows as an empty field, not as a zero', async () => {
+    stubSchedule({ schedule: { ...SCHEDULE, max_new_leads_per_day: null } })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
+    expect(screen.getByLabelText('New leads per day')).toHaveValue(null)
+  })
+
+  test('a new-leads field the server omitted entirely still renders empty', async () => {
+    const { max_new_leads_per_day: _omitted, ...withoutLimit } = SCHEDULE
+    stubSchedule({ schedule: withoutLimit })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
+    expect(screen.getByLabelText('New leads per day')).toHaveValue(null)
+  })
+
+  test('a typed new-leads limit is sent as a number, independent of the daily limit', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('New leads per day')).toHaveValue(25))
+    fireEvent.change(screen.getByLabelText('New leads per day'), { target: { value: '10' } })
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    const body = await readPut(fetchMock)
+    expect(body.max_new_leads_per_day).toBe(10)
+    expect(body.daily_limit).toBe(250)
+  })
+
+  test('clearing the new-leads limit sends null, which is how the limit is removed', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('New leads per day')).toHaveValue(25))
+    fireEvent.change(screen.getByLabelText('New leads per day'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    // Omitting the field would leave the old limit in place on a full-replace PUT.
+    const body = await readPut(fetchMock)
+    expect(body.max_new_leads_per_day).toBeNull()
+    expect('max_new_leads_per_day' in body).toBe(true)
+  })
+
+  test('a new-leads limit below 1 is refused client-side with no request', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('New leads per day')).toHaveValue(25))
+    fireEvent.change(screen.getByLabelText('New leads per day'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/1 or more/)
+    expect(fetchMock.mock.calls.some((c) => (c[0] as Request).method === 'PUT')).toBe(false)
+  })
+
+  test('editing only the new-leads limit is enough to enable the save', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    await waitFor(() => expect(screen.getByLabelText('New leads per day')).toHaveValue(25))
+    expect(screen.queryByRole('button', { name: /save schedule/i })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('New leads per day'), { target: { value: '5' } })
+    expect(screen.getByRole('button', { name: /save schedule/i })).toBeInTheDocument()
   })
 })

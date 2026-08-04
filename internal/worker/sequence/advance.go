@@ -71,18 +71,22 @@ const minBlockedBackoff = time.Minute
 // cannot be compiled) keeps the raw instant rather than refusing to retry.
 func blockedBackoff(job coreapi.StepSendJob, now time.Time) time.Duration {
 	poll := job.HealthPaused || job.CampaignPaused
-	return nextAttemptIn(job.Schedule, job.EnrollmentID, job.CampaignLimited, poll, now)
+	// NewLeadLimited resets at the same UTC midnight as CampaignLimited (both count
+	// over the UTC calendar day), so it shares the day-boundary branch.
+	dayBoundary := job.CampaignLimited || job.NewLeadLimited
+	return nextAttemptIn(job.Schedule, job.EnrollmentID, dayBoundary, poll, now)
 }
 
 // nextAttemptIn is when a step blocked by a SELF-CLEARING condition should be
 // re-attempted, snapped into the campaign's send window.
 //
 // dayBoundary: the block lifts at the next UTC midnight. True for a campaign daily
-// limit and for a mailbox's own daily cap — sent_today is counted over the UTC day,
-// so both allowances reset then, and re-checking earlier burns a task to learn
-// nothing. poll: the block lifts on no schedule this worker can predict (a warmup
-// pause clears whenever the health sweep steps it down), so it retries on capBackoff.
-// Both true takes the sooner of the two.
+// limit, the new-lead-per-day throttle, and for a mailbox's own daily cap —
+// sent_today is counted over the UTC day, so all three allowances reset then, and
+// re-checking earlier burns a task to learn nothing. poll: the block lifts on no
+// schedule this worker can predict (a warmup pause clears whenever the health
+// sweep steps it down), so it retries on capBackoff. Both true takes the sooner of
+// the two.
 func nextAttemptIn(sched cadence.Schedule, key string, dayBoundary, poll bool, now time.Time) time.Duration {
 	target := now.Add(capBackoff)
 	if dayBoundary {
@@ -181,8 +185,9 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				nextAttemptIn(job.Schedule, p.EnrollmentID, true, false, time.Now()))
 		}
 		// Blocked by something that is NOT this mailbox's own cap: the campaign has
-		// hit its campaign-wide daily limit, or the warmup engine has paused the
-		// mailbox this thread must send from.
+		// hit its campaign-wide daily limit or its narrower new-lead-per-day
+		// throttle, or the warmup engine has paused the mailbox this thread must
+		// send from.
 		//
 		// Checked BEFORE the degenerate-cap branch below, which STOPS an enrollment:
 		// an unhealthy mailbox may recover and a limited campaign gets a fresh
@@ -191,13 +196,16 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// the thread.
 		//
 		// Deliberately NOT deferForCapacity: that budget exists to kill a ceiling
-		// that can never clear (a mis-set cap, a stuck counter), and neither of
-		// these is one. A campaign daily_limit is a setting the operator chose —
-		// daily_limit 10 over 1000 contacts is a correctly configured 100-day
-		// campaign, and charging its waiting enrollments against a 30 × 6h ≈ 7.5-day
-		// budget would mark ~99% of them 'failed' for working as instructed. A
-		// warmup pause is timed and self-clearing. So these wait indefinitely,
-		// staying 'active' and visible in the UI, which is the honest state.
+		// that can never clear (a mis-set cap, a stuck counter), and none of these
+		// are one. A campaign daily_limit (or max_new_leads_per_day) is a setting the
+		// operator chose — daily_limit 10 over 1000 contacts is a correctly
+		// configured 100-day campaign, and charging its waiting enrollments against a
+		// 30 × 6h ≈ 7.5-day budget would mark ~99% of them 'failed' for working as
+		// instructed. A warmup pause is timed and self-clearing. So these wait
+		// indefinitely, staying 'active' and visible in the UI, which is the honest
+		// state. NewLeadLimited never even reaches here for a follow-up step: coreapi
+		// only sets it on a step-1 job, so an in-flight sequence's replies are
+		// unaffected by the campaign being closed to new contacts.
 		//
 		// CampaignPaused joins them, and is the one that makes the deliverability
 		// circuit breaker actually stop anything: without this gate the breaker set
@@ -207,7 +215,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// belongs in THIS branch rather than as a stop for the same reason as the
 		// other two — an operator clears a pause by relaunching, and the enrollments
 		// must resume, not have been marked 'failed' while they waited.
-		if job.CampaignLimited || job.HealthPaused || job.CampaignPaused {
+		if job.CampaignLimited || job.NewLeadLimited || job.HealthPaused || job.CampaignPaused {
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now()))
 		}
 		if job.EffectiveDailyCap <= 0 {

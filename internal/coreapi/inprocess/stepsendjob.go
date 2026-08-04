@@ -173,6 +173,25 @@ func (c client) campaignLimitReached(ctx context.Context, ws, campaignID uuid.UU
 	return sent >= int64(*limit), nil
 }
 
+// newLeadLimitReached reports whether the campaign has already used up
+// campaigns.max_new_leads_per_day for the UTC day. Mirrors campaignLimitReached
+// exactly (nil/non-positive limit = unset, skips the count entirely), narrowed to
+// step-1 sends only: the caller must check the job's step is step 1 before
+// calling this, since a follow-up step never consumes or contends for this
+// allowance.
+func (c client) newLeadLimitReached(ctx context.Context, ws, campaignID uuid.UUID, limit *int32) (bool, error) {
+	if limit == nil || *limit <= 0 {
+		return false, nil
+	}
+	started, err := c.q.CountFirstStepSendsToday(ctx, gen.CountFirstStepSendsTodayParams{
+		CampaignID: campaignID, WorkspaceID: ws,
+	})
+	if err != nil {
+		return false, err
+	}
+	return started >= int64(*limit), nil
+}
+
 // GetStepSendJob resolves the enrollment's next due step and builds the send
 // job. Read-only: creates no rows. workspaceID is pinned in the SQL WHERE
 // (defense in depth on the unguessable enrollment UUID).
@@ -273,6 +292,29 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), CampaignLimited: true,
 			Schedule: sched,
 		}, nil
+	}
+
+	// The new-lead throttle: narrower than the daily limit above, and gated on
+	// nextOrder == 1 so a follow-up step for a contact already mid-sequence is
+	// NEVER counted against it or blocked by it — only a brand-new contact
+	// starting the sequence competes for this allowance. Checked at the same point
+	// as the daily limit, for the same reason (a step known due, before any
+	// mailbox is pinned or credential unsealed).
+	if nextOrder == 1 {
+		newLeadLimited, err := c.newLeadLimitReached(ctx, ws, b.CampaignID, b.MaxNewLeadsPerDay)
+		if err != nil {
+			return coreapi.StepSendJob{}, err
+		}
+		if newLeadLimited {
+			sched, serr := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
+			if serr != nil {
+				return coreapi.StepSendJob{}, serr
+			}
+			return coreapi.StepSendJob{
+				EnrollmentID: enrollmentID, WorkspaceID: ws.String(), NewLeadLimited: true,
+				Schedule: sched,
+			}, nil
+		}
 	}
 
 	// Is there a step after this one? Its existence decides last-step; its delay

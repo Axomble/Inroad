@@ -243,6 +243,28 @@ func TestAdvanceCampaignLimitedDefers(t *testing.T) {
 	}
 }
 
+// The campaign has hit campaigns.max_new_leads_per_day. coreapi only ever sets
+// this flag on a step-1 job (never a follow-up), so the handler doesn't
+// re-check StepOrder here — it just has to defer exactly like CampaignLimited.
+func TestAdvanceNewLeadLimitedDefers(t *testing.T) {
+	core := &stubCore{job: coreapi.StepSendJob{NewLeadLimited: true}}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if snd.called() || core.claimCalls != 0 {
+		t.Fatal("a campaign at its new-lead limit must not claim or send")
+	}
+	if core.stopped != "" {
+		t.Fatalf("a new-lead limit must not stop the enrollment, got stop reason %q", core.stopped)
+	}
+	// The wait targets the UTC day rollover, same as CampaignLimited.
+	if !enq.inCalled || enq.in <= 0 || enq.in > 24*time.Hour {
+		t.Fatalf("re-enqueue delay = %v (called=%v), want a positive wait within the day",
+			enq.in, enq.inCalled)
+	}
+}
+
 // Invariant 3: the warmup engine has paused the mailbox this thread must send from.
 // The job carries no capacity of its own (the mailbox has plenty), so without the
 // flag being checked BEFORE the degenerate-cap branch this enrollment would be
@@ -736,6 +758,7 @@ func TestCampaignLimitedDeferralNeverConsumesTheFailBudget(t *testing.T) {
 		job  coreapi.StepSendJob
 	}{
 		{"campaign at its daily limit", coreapi.StepSendJob{CampaignLimited: true}},
+		{"campaign at its new-lead-per-day limit", coreapi.StepSendJob{NewLeadLimited: true}},
 		{"mailbox paused by warmup", coreapi.StepSendJob{HealthPaused: true, EffectiveDailyCap: 50}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -776,6 +799,15 @@ func TestBlockedBackoffWaitsForTheMomentTheBlockCanClear(t *testing.T) {
 		{
 			name: "campaign limit waits for the UTC day to roll over",
 			job:  coreapi.StepSendJob{CampaignLimited: true},
+			now:  evening,
+			want: 90 * time.Minute,
+		},
+		{
+			// The new-lead throttle resets on the same UTC boundary as the daily
+			// limit — CountFirstStepSendsToday is counted over the identical UTC
+			// calendar day.
+			name: "new-lead limit waits for the same UTC day rollover",
+			job:  coreapi.StepSendJob{NewLeadLimited: true},
 			now:  evening,
 			want: 90 * time.Minute,
 		},

@@ -227,12 +227,12 @@ func (s *PgStore) ListWindows(ctx context.Context, ws, campaignID uuid.UUID) ([]
 	return out, nil
 }
 
-// ReplaceSchedule swaps the timezone, the whole window set and the daily limit in
-// one transaction: delete-then-insert would otherwise leave a window between the
-// two statements where the campaign has no schedule at all, which the cadence
-// engine reads as "no valid send instant exists". The limit rides along because it
-// is saved by the same panel: committing the windows without it would leave the
-// plan half-applied.
+// ReplaceSchedule swaps the timezone, the whole window set and both daily
+// ceilings in one transaction: delete-then-insert would otherwise leave a window
+// between the two statements where the campaign has no schedule at all, which the
+// cadence engine reads as "no valid send instant exists". The limits ride along
+// because they are saved by the same panel: committing the windows without them
+// would leave the plan half-applied.
 func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID, plan Plan) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -247,7 +247,12 @@ func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID,
 		return err
 	}
 	if err := qtx.SetCampaignDailyLimit(ctx, gen.SetCampaignDailyLimitParams{
-		ID: campaignID, WorkspaceID: ws, DailyLimit: storedDailyLimit(plan.DailyLimit),
+		ID: campaignID, WorkspaceID: ws, DailyLimit: storedOptionalInt(plan.DailyLimit),
+	}); err != nil {
+		return err
+	}
+	if err := qtx.SetCampaignMaxNewLeads(ctx, gen.SetCampaignMaxNewLeadsParams{
+		ID: campaignID, WorkspaceID: ws, MaxNewLeadsPerDay: storedOptionalInt(plan.MaxNewLeadsPerDay),
 	}); err != nil {
 		return err
 	}
@@ -262,12 +267,14 @@ func (s *PgStore) ReplaceSchedule(ctx context.Context, ws, campaignID uuid.UUID,
 	return tx.Commit(ctx)
 }
 
-// storedDailyLimit narrows the validated limit to the column's type; nil clears it.
-func storedDailyLimit(limit *int) *int32 {
+// storedOptionalInt narrows a validated *int limit to the column's *int32 type;
+// nil clears it. Shared by every nullable per-UTC-day campaign ceiling
+// (daily_limit, max_new_leads_per_day) ReplaceSchedule writes.
+func storedOptionalInt(limit *int) *int32 {
 	if limit == nil {
 		return nil
 	}
-	n := int32(*limit) //nolint:gosec // SetSchedule bounds it to [1, maxDailyLimit], well inside int32
+	n := int32(*limit) //nolint:gosec // SetSchedule bounds every caller to [1, 1_000_000], well inside int32
 	return &n
 }
 

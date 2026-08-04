@@ -56,6 +56,27 @@ GROUP BY status;
 -- rejected value is a 422 rather than a constraint violation surfacing as a 500.
 UPDATE campaigns SET daily_limit = $3 WHERE id = $1 AND workspace_id = $2;
 
+-- name: SetCampaignMaxNewLeads :exec
+-- The max BRAND-NEW contacts (step-1 sends) this campaign may start per UTC day;
+-- NULL clears it. Validated at the boundary (>= 1) the same way SetCampaignDailyLimit
+-- is. Distinct from daily_limit: this counts only step-1 sends, so an in-flight
+-- sequence's follow-ups never consume or contend for this allowance.
+UPDATE campaigns SET max_new_leads_per_day = $3 WHERE id = $1 AND workspace_id = $2;
+
+-- name: CountFirstStepSendsToday :one
+-- "New lead" = a step-1 send: the consumption side of max_new_leads_per_day.
+-- sends.step_order already carries the step number directly (added by 000007),
+-- so no join to sequence_steps is needed to find "the first step". Counts
+-- today's rows (UTC) regardless of status -- deliberately unlike
+-- CountCampaignSentToday's status='sent': ClaimStepSend's INSERT is the moment a
+-- contact is actually STARTED, and that is what this throttle limits, so a
+-- claimed-but-not-yet-finalized 'sending' row (or one that later fails) still
+-- consumes today's allowance. Workspace-pinned like every new query.
+SELECT count(*) FROM sends
+WHERE campaign_id = $1 AND workspace_id = $2
+  AND step_order = 1
+  AND created_at >= date_trunc('day', now() AT TIME ZONE 'utc');
+
 -- name: RenameCampaign :one
 -- Rename is allowed at any lifecycle status; the service validates the name
 -- (min=1,max=200, mirroring Create) before this runs.

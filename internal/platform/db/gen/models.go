@@ -219,6 +219,7 @@ type Campaign struct {
 	BouncePausePct      pgtype.Numeric     `json:"bounce_pause_pct"`
 	ComplaintPausePct   pgtype.Numeric     `json:"complaint_pause_pct"`
 	GuardrailsEnabledAt pgtype.Timestamptz `json:"guardrails_enabled_at"`
+	MaxNewLeadsPerDay   *int32             `json:"max_new_leads_per_day"`
 }
 
 type CampaignPauseEvent struct {

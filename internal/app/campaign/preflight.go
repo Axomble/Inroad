@@ -400,7 +400,7 @@ func (s *Service) Preflight(ctx context.Context, ws, campaignID uuid.UUID) (Pref
 	return ComputePreflight(PreflightInput{
 		Steps: toPreflightSteps(steps), Windows: windows, Senders: senders,
 		AudienceCount: audience, DomainAuth: domainAuth,
-		TrackingEnabled: c.TrackingEnabled, DailyLimit: dailyLimit(c.DailyLimit),
+		TrackingEnabled: c.TrackingEnabled, DailyLimit: optionalInt(c.DailyLimit),
 	}), nil
 }
 
