@@ -939,6 +939,60 @@ paths:
         '200': { description: Campaign with steps + enrollment counts, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignDetail' } } } }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+    put:
+      operationId: renameCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: Renames the campaign. Allowed at any lifecycle status.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RenameCampaignRequest' } } }
+      responses:
+        '200': { description: Renamed campaign, content: { application/json: { schema: { $ref: '#/components/schemas/Campaign' } } } }
+        '400': { description: "Invalid JSON, or name is missing/too long" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+    delete:
+      operationId: deleteCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Deletes a campaign that has never been launched, along with its send
+        windows, sender pool and sequence steps. Draft only.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Campaign is not a draft }
+  /campaigns/{id}/pause:
+    post:
+      operationId: pauseCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: Stops a running campaign from dispatching further step advances. Allowed only from running.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Paused }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Campaign is not running }
+  /campaigns/{id}/resume:
+    post:
+      operationId: resumeCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Restarts a paused campaign. Allowed only from paused; works
+        identically whether the pause was set by an operator or by the
+        deliverability circuit breaker.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Resumed }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Campaign is not paused }
   /campaigns/{id}/tracking:
     put:
       operationId: updateCampaignTracking
@@ -1885,6 +1939,11 @@ components:
       type: object
       properties:
         enabled: { type: boolean }
+    RenameCampaignRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
     DomainAuthState:
       type: string
       description: >-

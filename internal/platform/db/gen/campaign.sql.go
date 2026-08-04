@@ -101,6 +101,62 @@ func (q *Queries) CreateCampaign(ctx context.Context, arg CreateCampaignParams) 
 	return i, err
 }
 
+const deleteCampaignSendersByCampaign = `-- name: DeleteCampaignSendersByCampaign :exec
+DELETE FROM campaign_senders WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteCampaignSendersByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Unconditional delete of every pool member, for DeleteDraftCampaign's
+// transaction. Distinct from DeleteCampaignSendersExcept (sender.sql), which
+// keeps a caller-supplied subset for a pool replace.
+func (q *Queries) DeleteCampaignSendersByCampaign(ctx context.Context, arg DeleteCampaignSendersByCampaignParams) error {
+	_, err := q.db.Exec(ctx, deleteCampaignSendersByCampaign, arg.CampaignID, arg.WorkspaceID)
+	return err
+}
+
+const deleteDraftCampaign = `-- name: DeleteDraftCampaign :execrows
+DELETE FROM campaigns WHERE id = $1 AND workspace_id = $2 AND status = 'draft'
+`
+
+type DeleteDraftCampaignParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Guarded on status='draft' in SQL as defense in depth; the service re-checks
+// first for a typed 409 (ErrNotDraft). Run only after the caller has deleted
+// the draft's dependents (send windows, campaign_senders, sequence_steps,
+// sequence_enrollments) in the same transaction -- this does NOT rely on FK
+// cascade, even though every one of those FKs is ON DELETE CASCADE.
+func (q *Queries) DeleteDraftCampaign(ctx context.Context, arg DeleteDraftCampaignParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDraftCampaign, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteEnrollmentsByCampaign = `-- name: DeleteEnrollmentsByCampaign :exec
+DELETE FROM sequence_enrollments WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteEnrollmentsByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// A draft campaign has never been launched so this is normally a no-op, but a
+// draft can carry enrollment rows left over from build tooling or a future
+// re-draft path; deleted explicitly rather than assumed empty.
+func (q *Queries) DeleteEnrollmentsByCampaign(ctx context.Context, arg DeleteEnrollmentsByCampaignParams) error {
+	_, err := q.db.Exec(ctx, deleteEnrollmentsByCampaign, arg.CampaignID, arg.WorkspaceID)
+	return err
+}
+
 const deleteSendWindows = `-- name: DeleteSendWindows :exec
 DELETE FROM campaign_send_windows WHERE campaign_id = $1 AND workspace_id = $2
 `
@@ -115,6 +171,23 @@ type DeleteSendWindowsParams struct {
 // means "no valid send instant exists" to the engine).
 func (q *Queries) DeleteSendWindows(ctx context.Context, arg DeleteSendWindowsParams) error {
 	_, err := q.db.Exec(ctx, deleteSendWindows, arg.CampaignID, arg.WorkspaceID)
+	return err
+}
+
+const deleteStepsByCampaign = `-- name: DeleteStepsByCampaign :exec
+DELETE FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteStepsByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Unconditional delete of every sequence step, for DeleteDraftCampaign's
+// transaction. Distinct from DeleteStep (sequencestep.sql), which removes one
+// step by id.
+func (q *Queries) DeleteStepsByCampaign(ctx context.Context, arg DeleteStepsByCampaignParams) error {
+	_, err := q.db.Exec(ctx, deleteStepsByCampaign, arg.CampaignID, arg.WorkspaceID)
 	return err
 }
 
@@ -235,6 +308,45 @@ func (q *Queries) ListSendWindows(ctx context.Context, arg ListSendWindowsParams
 		return nil, err
 	}
 	return items, nil
+}
+
+const renameCampaign = `-- name: RenameCampaign :one
+UPDATE campaigns SET name = $3 WHERE id = $1 AND workspace_id = $2 RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at
+`
+
+type RenameCampaignParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+}
+
+// Rename is allowed at any lifecycle status; the service validates the name
+// (min=1,max=200, mirroring Create) before this runs.
+func (q *Queries) RenameCampaign(ctx context.Context, arg RenameCampaignParams) (Campaign, error) {
+	row := q.db.QueryRow(ctx, renameCampaign, arg.ID, arg.WorkspaceID, arg.Name)
+	var i Campaign
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.MailboxID,
+		&i.ListID,
+		&i.Subject,
+		&i.BodyText,
+		&i.BodyHtml,
+		&i.Status,
+		&i.CreatedAt,
+		&i.LaunchedAt,
+		&i.TrackingEnabled,
+		&i.Timezone,
+		&i.RotationMode,
+		&i.DailyLimit,
+		&i.AutoPauseEnabled,
+		&i.BouncePausePct,
+		&i.ComplaintPausePct,
+		&i.GuardrailsEnabledAt,
+	)
+	return i, err
 }
 
 const setCampaignDailyLimit = `-- name: SetCampaignDailyLimit :exec

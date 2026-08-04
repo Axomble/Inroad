@@ -449,6 +449,43 @@ const injectedRtkApi = api.injectEndpoints({
     getCampaign: build.query<GetCampaignApiResponse, GetCampaignApiArg>({
       query: (queryArg) => ({ url: `/campaigns/${queryArg.id}` }),
     }),
+    renameCampaign: build.mutation<
+      RenameCampaignApiResponse,
+      RenameCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.renameCampaignRequest,
+      }),
+    }),
+    deleteCampaign: build.mutation<
+      DeleteCampaignApiResponse,
+      DeleteCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    pauseCampaign: build.mutation<
+      PauseCampaignApiResponse,
+      PauseCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/pause`,
+        method: "POST",
+      }),
+    }),
+    resumeCampaign: build.mutation<
+      ResumeCampaignApiResponse,
+      ResumeCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/resume`,
+        method: "POST",
+      }),
+    }),
     updateCampaignTracking: build.mutation<
       UpdateCampaignTrackingApiResponse,
       UpdateCampaignTrackingApiArg
@@ -897,6 +934,24 @@ export type CreateCampaignApiArg = {
 export type GetCampaignApiResponse =
   /** status 200 Campaign with steps + enrollment counts */ CampaignDetail;
 export type GetCampaignApiArg = {
+  id: string;
+};
+export type RenameCampaignApiResponse =
+  /** status 200 Renamed campaign */ Campaign;
+export type RenameCampaignApiArg = {
+  id: string;
+  renameCampaignRequest: RenameCampaignRequest;
+};
+export type DeleteCampaignApiResponse = unknown;
+export type DeleteCampaignApiArg = {
+  id: string;
+};
+export type PauseCampaignApiResponse = unknown;
+export type PauseCampaignApiArg = {
+  id: string;
+};
+export type ResumeCampaignApiResponse = unknown;
+export type ResumeCampaignApiArg = {
   id: string;
 };
 export type UpdateCampaignTrackingApiResponse =
@@ -1548,6 +1603,9 @@ export type CampaignDetail = {
   steps?: SequenceStep[];
   metrics?: Metrics;
 };
+export type RenameCampaignRequest = {
+  name: string;
+};
 export type UpdateCampaignTrackingRequest = {
   enabled?: boolean;
 };
@@ -1805,6 +1863,10 @@ export const {
   useListCampaignsQuery,
   useCreateCampaignMutation,
   useGetCampaignQuery,
+  useRenameCampaignMutation,
+  useDeleteCampaignMutation,
+  usePauseCampaignMutation,
+  useResumeCampaignMutation,
   useUpdateCampaignTrackingMutation,
   useGetCampaignScheduleQuery,
   useUpdateCampaignScheduleMutation,

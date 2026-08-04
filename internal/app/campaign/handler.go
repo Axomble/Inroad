@@ -211,6 +211,92 @@ func (h *Handler) toggleTracking(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// serveLifecycleAction handles a campaign lifecycle action that takes no
+// request body and returns 204 on success: pull the workspace from the JWT,
+// parse {id}, run fn, and map its outcome to 204/404/409/500. Pause, Resume
+// and DeleteDraft share this whole shape and differ only in which transition
+// is illegal (conflictErr/conflictMsg) and the fallback failure message.
+func serveLifecycleAction(
+	w http.ResponseWriter, r *http.Request, failure string,
+	conflictErr error, conflictMsg string,
+	fn func(ctx context.Context, ws, id uuid.UUID) error,
+) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	switch err := fn(r.Context(), ws, id); {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case errors.Is(err, conflictErr):
+		httpx.Error(w, http.StatusConflict, conflictMsg)
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, failure)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// pause handles POST /campaigns/{id}/pause.
+func (h *Handler) pause(w http.ResponseWriter, r *http.Request) {
+	serveLifecycleAction(w, r, "could not pause campaign",
+		ErrNotPausable, "campaign is not running and cannot be paused", h.svc.Pause)
+}
+
+// resume handles POST /campaigns/{id}/resume.
+func (h *Handler) resume(w http.ResponseWriter, r *http.Request) {
+	serveLifecycleAction(w, r, "could not resume campaign",
+		ErrNotResumable, "campaign is not paused and cannot be resumed", h.svc.Resume)
+}
+
+type renameRequest struct {
+	Name string `json:"name" validate:"required,min=1,max=200"`
+}
+
+// rename handles PUT /campaigns/{id}.
+func (h *Handler) rename(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var req renameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	c, err := h.svc.Rename(r.Context(), ws, id, req.Name)
+	switch {
+	case errors.Is(err, ErrValidation):
+		httpx.Error(w, http.StatusBadRequest, "invalid name")
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not rename campaign")
+	default:
+		httpx.JSON(w, http.StatusOK, toResponse(c, nil))
+	}
+}
+
+// deleteDraft handles DELETE /campaigns/{id}.
+func (h *Handler) deleteDraft(w http.ResponseWriter, r *http.Request) {
+	serveLifecycleAction(w, r, "could not delete campaign",
+		ErrNotDraft, "campaign is not a draft", h.svc.DeleteDraft)
+}
+
 // launch transitions a draft campaign to running: it materializes sends for
 // every list member and enqueues a send:email task for each.
 func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {

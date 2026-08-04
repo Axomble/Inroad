@@ -55,3 +55,34 @@ GROUP BY status;
 -- the boundary (>= 1) against the same rule the column's CHECK enforces, so a
 -- rejected value is a 422 rather than a constraint violation surfacing as a 500.
 UPDATE campaigns SET daily_limit = $3 WHERE id = $1 AND workspace_id = $2;
+
+-- name: RenameCampaign :one
+-- Rename is allowed at any lifecycle status; the service validates the name
+-- (min=1,max=200, mirroring Create) before this runs.
+UPDATE campaigns SET name = $3 WHERE id = $1 AND workspace_id = $2 RETURNING *;
+
+-- name: DeleteDraftCampaign :execrows
+-- Guarded on status='draft' in SQL as defense in depth; the service re-checks
+-- first for a typed 409 (ErrNotDraft). Run only after the caller has deleted
+-- the draft's dependents (send windows, campaign_senders, sequence_steps,
+-- sequence_enrollments) in the same transaction -- this does NOT rely on FK
+-- cascade, even though every one of those FKs is ON DELETE CASCADE.
+DELETE FROM campaigns WHERE id = $1 AND workspace_id = $2 AND status = 'draft';
+
+-- name: DeleteCampaignSendersByCampaign :exec
+-- Unconditional delete of every pool member, for DeleteDraftCampaign's
+-- transaction. Distinct from DeleteCampaignSendersExcept (sender.sql), which
+-- keeps a caller-supplied subset for a pool replace.
+DELETE FROM campaign_senders WHERE campaign_id = $1 AND workspace_id = $2;
+
+-- name: DeleteStepsByCampaign :exec
+-- Unconditional delete of every sequence step, for DeleteDraftCampaign's
+-- transaction. Distinct from DeleteStep (sequencestep.sql), which removes one
+-- step by id.
+DELETE FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2;
+
+-- name: DeleteEnrollmentsByCampaign :exec
+-- A draft campaign has never been launched so this is normally a no-op, but a
+-- draft can carry enrollment rows left over from build tooling or a future
+-- re-draft path; deleted explicitly rather than assumed empty.
+DELETE FROM sequence_enrollments WHERE campaign_id = $1 AND workspace_id = $2;

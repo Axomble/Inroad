@@ -89,6 +89,18 @@ type Store interface {
 	// enrollments (contact email/name plus reply class/source/replied_at),
 	// workspace-pinned, most-recently-replied first, paginated by limit/offset.
 	ListEnrollments(ctx context.Context, ws, campaignID uuid.UUID, limit, offset int32) ([]gen.ListCampaignEnrollmentsRow, error)
+	// SetStatus updates the campaign's lifecycle status (Pause/Resume). It never
+	// touches launched_at -- SetCampaignStatus's COALESCE keeps whatever EnrollTx
+	// already stamped there at launch.
+	SetStatus(ctx context.Context, ws, id uuid.UUID, status CampaignStatus) error
+	// Rename replaces the campaign's name, workspace-scoped, and returns the
+	// updated row.
+	Rename(ctx context.Context, ws, id uuid.UUID, name string) (gen.Campaign, error)
+	// DeleteDraft removes a draft campaign and its dependents (send windows,
+	// campaign_senders, sequence_steps, sequence_enrollments) in one
+	// transaction. Guarded on status='draft' in SQL as defense in depth on top
+	// of the service's own check.
+	DeleteDraft(ctx context.Context, ws, id uuid.UUID) error
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -540,4 +552,68 @@ func (s *PgStore) EnrollTx(ctx context.Context, ws, campaignID uuid.UUID) ([]Enr
 		enrollments[i] = Enrollment{ID: r.ID, NextDueAt: r.NextDueAt.Time}
 	}
 	return enrollments, nil
+}
+
+// SetStatus flips the campaign's lifecycle status for Pause/Resume. The
+// LaunchedAt argument is left zero-valued (Valid: false): SetCampaignStatus's
+// COALESCE(launched_at, $4) then keeps whatever value is already stored,
+// since pause/resume never launches a campaign.
+func (s *PgStore) SetStatus(ctx context.Context, ws, id uuid.UUID, status CampaignStatus) error {
+	return s.q.SetCampaignStatus(ctx, gen.SetCampaignStatusParams{
+		ID: id, WorkspaceID: ws, Status: string(status),
+	})
+}
+
+func (s *PgStore) Rename(ctx context.Context, ws, id uuid.UUID, name string) (gen.Campaign, error) {
+	return s.q.RenameCampaign(ctx, gen.RenameCampaignParams{ID: id, WorkspaceID: ws, Name: name})
+}
+
+// DeleteDraft removes a draft campaign and its dependents in one transaction:
+// sequence_enrollments, sequence_steps and campaign_senders, then the send
+// windows, then the campaign row itself. Every one of those FKs is already
+// ON DELETE CASCADE, but the deletes are explicit here rather than relied on,
+// per this task's brief -- and it lets the final DeleteDraftCampaign guard
+// re-check status='draft' in SQL (defense in depth) without also depending on
+// cascade ordering.
+//
+// If DeleteDraftCampaign matches zero rows (the status changed between the
+// service's check and this transaction -- a concurrent launch, say), the
+// transaction rolls back and ErrNotDraft is returned so the caller sees the
+// same typed 409 the pre-check would have given a moment earlier.
+func (s *PgStore) DeleteDraft(ctx context.Context, ws, id uuid.UUID) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.DeleteEnrollmentsByCampaign(ctx, gen.DeleteEnrollmentsByCampaignParams{
+		CampaignID: id, WorkspaceID: ws,
+	}); err != nil {
+		return err
+	}
+	if err := qtx.DeleteStepsByCampaign(ctx, gen.DeleteStepsByCampaignParams{
+		CampaignID: id, WorkspaceID: ws,
+	}); err != nil {
+		return err
+	}
+	if err := qtx.DeleteCampaignSendersByCampaign(ctx, gen.DeleteCampaignSendersByCampaignParams{
+		CampaignID: id, WorkspaceID: ws,
+	}); err != nil {
+		return err
+	}
+	if err := qtx.DeleteSendWindows(ctx, gen.DeleteSendWindowsParams{
+		CampaignID: id, WorkspaceID: ws,
+	}); err != nil {
+		return err
+	}
+	n, err := qtx.DeleteDraftCampaign(ctx, gen.DeleteDraftCampaignParams{ID: id, WorkspaceID: ws})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotDraft
+	}
+	return tx.Commit(ctx)
 }
