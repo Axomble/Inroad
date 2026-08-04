@@ -70,7 +70,10 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer, mtx *metrics.
 		// Nothing to do: mailbox paused / over today's target / disabled / no
 		// eligible partner. The lazy chain is intentionally NOT continued here —
 		// the sweep re-seeds this mailbox once it is due again.
-		// result=skipped: nothing was actionable — same bucket as ClaimSkip below.
+		// result=skipped: nothing was actionable — same bucket as ClaimSkip
+		// below. Caveat for dashboard authors: the 4-value enum has no fifth
+		// bucket for "genuinely inert tick" vs. a deliberate policy stop, so
+		// "skipped" here just means no send was attempted, for any reason.
 		if job.Skip {
 			mtx.SendFinalized(sendKind, "skipped")
 			return nil
@@ -108,7 +111,10 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer, mtx *metrics.
 		switch outcome {
 		case coreapi.ClaimSkip:
 			// result=skipped: another worker already owns this row, or it's
-			// terminal — same "nothing to attempt" bucket as job.Skip above.
+			// terminal — same "nothing to attempt" bucket as job.Skip above
+			// (see that comment's caveat on the 4-value enum). No reorder
+			// needed: ClaimWarmupSend already committed above, so there is no
+			// further fallible side effect this call reports.
 			mtx.SendFinalized(sendKind, "skipped")
 			return nil
 		case coreapi.ClaimAlreadySent:
@@ -149,24 +155,32 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer, mtx *metrics.
 			mtx.SendFinalized(sendKind, "sent")
 			return scheduleNext()
 		case mail.Retryable(sendErr):
-			// result=failed: this attempt failed, even though asynq will retry
-			// the task — inroad_sends_total counts attempts, not final outcomes
-			// across retries, matching the permanent-failure branch below.
-			mtx.SendFinalized(sendKind, "failed")
 			// Transient failure (nothing delivered): release the claim so the asynq
-			// retry reclaims it, and return the error so asynq retries.
+			// retry reclaims it, and return the error so asynq retries. Metric
+			// AFTER the release succeeds, not before — mirrors
+			// sequence.AdvanceHandler's identical branch.
 			if rerr := core.ReleaseWarmupSend(ctx, job); rerr != nil {
 				return fmt.Errorf("release warmup send after transient failure: %w", rerr)
 			}
+			// result=deferred, not "failed": nothing was delivered and asynq
+			// WILL retry this task — a self-clearing wait, not a terminal
+			// outcome. "failed" is reserved for the branch below, which stops
+			// trying.
+			mtx.SendFinalized(sendKind, "deferred")
 			return sendErr
 		default:
-			// result=failed.
-			mtx.SendFinalized(sendKind, "failed")
 			// Permanent failure: finalize 'failed' (no thread advance) then keep the
 			// mailbox's chain alive so one bad send doesn't wedge its warmup.
 			if ferr := core.FailWarmupSend(ctx, job, sendErr.Error()); ferr != nil {
+				// No metric: the failure is not yet durable, so this attempt
+				// isn't "failed" yet — the retry that eventually commits
+				// FailWarmupSend records it instead.
 				return ferr
 			}
+			// result=failed, recorded now (after FailWarmupSend, not before)
+			// so a crash before this line leaves the retry to record it
+			// instead of double-counting — same discipline as "sent".
+			mtx.SendFinalized(sendKind, "failed")
 			return scheduleNext()
 		}
 	}

@@ -1,76 +1,18 @@
 package metrics_test
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	dto "github.com/prometheus/client_model/go"
-	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
 
 	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 )
-
-// scrape serves m.Handler() and parses the Prometheus exposition text into
-// metric families, so a black-box test can assert on recorded values without
-// reaching into Metrics' private fields.
-func scrape(t *testing.T, m *metrics.Metrics) map[string]*dto.MetricFamily {
-	t.Helper()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
-	w := httptest.NewRecorder()
-	m.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("metrics handler status = %d, want 200", w.Code)
-	}
-	// LegacyValidation matches every metric/label name this package emits
-	// (snake_case, ASCII) — the exposition format's UTF-8 name scheme is
-	// prometheus/common's newer default but has no bearing on names this
-	// simple.
-	parser := expfmt.NewTextParser(model.LegacyValidation)
-	families, err := parser.TextToMetricFamilies(w.Body)
-	if err != nil {
-		t.Fatalf("parse exposition text: %v", err)
-	}
-	return families
-}
-
-func findSample(t *testing.T, families map[string]*dto.MetricFamily, name string, labels map[string]string) *dto.Metric {
-	t.Helper()
-	fam, ok := families[name]
-	if !ok {
-		t.Fatalf("metric family %q not found; have %v", name, familyNames(families))
-	}
-	for _, metric := range fam.GetMetric() {
-		if labelsMatch(metric, labels) {
-			return metric
-		}
-	}
-	t.Fatalf("no sample of %q with labels %v; got %v", name, labels, fam.GetMetric())
-	return nil
-}
-
-func labelsMatch(metric *dto.Metric, want map[string]string) bool {
-	if len(metric.GetLabel()) != len(want) {
-		return false
-	}
-	for _, lp := range metric.GetLabel() {
-		if want[lp.GetName()] != lp.GetValue() {
-			return false
-		}
-	}
-	return true
-}
-
-func familyNames(families map[string]*dto.MetricFamily) []string {
-	names := make([]string, 0, len(families))
-	for name := range families {
-		names = append(names, name)
-	}
-	return names
-}
 
 func TestHTTPMiddlewareRecordsRoutePatternMethodAndCode(t *testing.T) {
 	m := metrics.New()
@@ -88,11 +30,11 @@ func TestHTTPMiddlewareRecordsRoutePatternMethodAndCode(t *testing.T) {
 		t.Fatalf("status = %d, want 201", w.Code)
 	}
 
-	families := scrape(t, m)
-	sample := findSample(t, families, "inroad_http_requests_total", map[string]string{
+	families := metricstest.Scrape(t, m)
+	got := metricstest.CounterValue(families, "inroad_http_requests_total", map[string]string{
 		"route": "/widgets/{id}", "method": "GET", "code": "201",
 	})
-	if got := sample.GetCounter().GetValue(); got != 1 {
+	if got != 1 {
 		t.Fatalf("counter value = %v, want 1", got)
 	}
 }
@@ -111,11 +53,11 @@ func TestHTTPMiddlewareObservesDuration(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/widgets/123", http.NoBody)
 	r.ServeHTTP(httptest.NewRecorder(), req)
 
-	families := scrape(t, m)
-	sample := findSample(t, families, "inroad_http_request_seconds", map[string]string{
+	families := metricstest.Scrape(t, m)
+	got := metricstest.HistogramSampleCount(families, "inroad_http_request_seconds", map[string]string{
 		"route": "/widgets/{id}", "method": "GET",
 	})
-	if got := sample.GetHistogram().GetSampleCount(); got != 1 {
+	if got != 1 {
 		t.Fatalf("histogram sample count = %d, want 1", got)
 	}
 }
@@ -136,22 +78,22 @@ func TestHTTPMiddlewareCollapsesUnmatchedRoutes(t *testing.T) {
 		r.ServeHTTP(httptest.NewRecorder(), req)
 	}
 
-	families := scrape(t, m)
+	families := metricstest.Scrape(t, m)
 	fam, ok := families["inroad_http_requests_total"]
 	if !ok {
 		t.Fatal("inroad_http_requests_total not found")
 	}
-	for _, metric := range fam.GetMetric() {
-		for _, lp := range metric.GetLabel() {
+	for _, sample := range fam.GetMetric() {
+		for _, lp := range sample.GetLabel() {
 			if lp.GetName() == "route" && (lp.GetValue() == "/does-not-exist/1" || lp.GetValue() == "/does-not-exist/2") {
-				t.Fatalf("route label leaked the raw request path: %v", metric)
+				t.Fatalf("route label leaked the raw request path: %v", sample)
 			}
 		}
 	}
-	sample := findSample(t, families, "inroad_http_requests_total", map[string]string{
+	got := metricstest.CounterValue(families, "inroad_http_requests_total", map[string]string{
 		"route": "unmatched", "method": "GET", "code": "404",
 	})
-	if got := sample.GetCounter().GetValue(); got != 2 {
+	if got != 2 {
 		t.Fatalf("unmatched counter = %v, want 2 (both fuzzed paths collapse onto one series)", got)
 	}
 }
@@ -162,13 +104,11 @@ func TestSendFinalizedIncrementsWithLabels(t *testing.T) {
 	m.SendFinalized("campaign", "sent")
 	m.SendFinalized("warmup", "failed")
 
-	families := scrape(t, m)
-	sent := findSample(t, families, "inroad_sends_total", map[string]string{"kind": "campaign", "result": "sent"})
-	if got := sent.GetCounter().GetValue(); got != 2 {
+	families := metricstest.Scrape(t, m)
+	if got := metricstest.CounterValue(families, "inroad_sends_total", map[string]string{"kind": "campaign", "result": "sent"}); got != 2 {
 		t.Fatalf("campaign/sent = %v, want 2", got)
 	}
-	failed := findSample(t, families, "inroad_sends_total", map[string]string{"kind": "warmup", "result": "failed"})
-	if got := failed.GetCounter().GetValue(); got != 1 {
+	if got := metricstest.CounterValue(families, "inroad_sends_total", map[string]string{"kind": "warmup", "result": "failed"}); got != 1 {
 		t.Fatalf("warmup/failed = %v, want 1", got)
 	}
 }
@@ -197,5 +137,99 @@ func TestNilMetricsNoOps(t *testing.T) {
 	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)) // must not panic
 	if rec.Code == http.StatusOK {
 		t.Fatalf("nil Metrics has no registry to serve; want a non-200, got %d with body %q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHTTPMiddlewareForwardsFlush proves the middleware's response wrapper
+// forwards Flush to the underlying http.Flusher (httptest.ResponseRecorder
+// implements one, tracked via its own Flushed field) rather than silently
+// downgrading a streaming/SSE handler wrapped behind it.
+func TestHTTPMiddlewareForwardsFlush(t *testing.T) {
+	m := metrics.New()
+	r := chi.NewRouter()
+	r.Use(m.HTTPMiddleware())
+	var sawFlusher bool
+	r.Get("/stream", func(w http.ResponseWriter, _ *http.Request) {
+		f, ok := w.(http.Flusher)
+		sawFlusher = ok
+		if ok {
+			f.Flush()
+		}
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/stream", http.NoBody)
+	r.ServeHTTP(rec, req)
+
+	if !sawFlusher {
+		t.Fatal("handler did not see an http.Flusher through the metrics middleware")
+	}
+	if !rec.Flushed {
+		t.Fatal("Flush() was not forwarded to the underlying ResponseWriter")
+	}
+}
+
+// hijackRecorder is an httptest.ResponseRecorder that also implements
+// http.Hijacker, so TestHTTPMiddlewareForwardsHijack can prove the
+// middleware's statusRecorder passes Hijack through.
+type hijackRecorder struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (h *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	return nil, nil, nil
+}
+
+// TestHTTPMiddlewareForwardsHijack proves the middleware's response wrapper
+// forwards Hijack to an underlying http.Hijacker rather than silently
+// downgrading a protocol-upgrade endpoint wrapped behind it.
+func TestHTTPMiddlewareForwardsHijack(t *testing.T) {
+	m := metrics.New()
+	r := chi.NewRouter()
+	r.Use(m.HTTPMiddleware())
+	var sawHijacker bool
+	r.Get("/upgrade", func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		sawHijacker = ok
+		if ok {
+			_, _, _ = hj.Hijack()
+		}
+	})
+
+	hr := &hijackRecorder{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/upgrade", http.NoBody)
+	r.ServeHTTP(hr, req)
+
+	if !sawHijacker {
+		t.Fatal("handler did not see an http.Hijacker through the metrics middleware")
+	}
+	if !hr.hijacked {
+		t.Fatal("Hijack() was not forwarded to the underlying ResponseWriter")
+	}
+}
+
+// TestHTTPMiddlewareHijackErrorsWhenUnsupported proves Hijack() returns an
+// error (never panics) when the underlying ResponseWriter doesn't implement
+// http.Hijacker — httptest.ResponseRecorder is exactly such a writer.
+func TestHTTPMiddlewareHijackErrorsWhenUnsupported(t *testing.T) {
+	m := metrics.New()
+	r := chi.NewRouter()
+	r.Use(m.HTTPMiddleware())
+	var hijackErr error
+	r.Get("/upgrade", func(w http.ResponseWriter, _ *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("statusRecorder must always implement http.Hijacker (even if it errors)")
+		}
+		_, _, hijackErr = hj.Hijack()
+	})
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/upgrade", http.NoBody)
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	if hijackErr == nil {
+		t.Fatal("expected an error hijacking a non-Hijacker ResponseWriter, got nil")
 	}
 }

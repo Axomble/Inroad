@@ -8,6 +8,9 @@
 package metrics
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -122,7 +125,18 @@ func (m *Metrics) SendFinalized(kind, result string) {
 
 // statusRecorder captures the status code the wrapped handler actually wrote,
 // defaulting to 200 like http.ResponseWriter itself does for a handler that
-// never calls WriteHeader explicitly.
+// never calls WriteHeader explicitly. Embedding http.ResponseWriter already
+// forwards every OTHER method the concrete writer might have — except the
+// two optional capability interfaces net/http callers commonly type-assert
+// for (http.Flusher for streaming/SSE responses, http.Hijacker for
+// WebSocket-style protocol upgrades), which Go does NOT forward through an
+// embedded interface automatically: a type assertion on *statusRecorder
+// itself only succeeds if *statusRecorder declares the method. Without the
+// explicit passthroughs below, wrapping ANY handler in this middleware would
+// silently downgrade it to "no Flush, no Hijack" the moment
+// http.ResponseWriter is embedded rather than the concrete writer used
+// directly — a future SSE or upgrade endpoint would misbehave with no
+// compile-time signal.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -143,4 +157,27 @@ func (rec *statusRecorder) Write(p []byte) (int, error) {
 		rec.WriteHeader(http.StatusOK)
 	}
 	return rec.ResponseWriter.Write(p)
+}
+
+// Flush forwards to the underlying writer's http.Flusher when it implements
+// one (e.g. for a streaming/SSE response); otherwise it is a silent no-op,
+// matching how http.Flusher already documents "the caller may ignore
+// whether Flush is a no-op".
+func (rec *statusRecorder) Flush() {
+	if f, ok := rec.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack forwards to the underlying writer's http.Hijacker when it
+// implements one, so a protocol-upgrade endpoint mounted behind this
+// middleware keeps working. Returns an error (never panics) when the
+// underlying writer doesn't support it, matching http.Hijacker's own
+// documented contract.
+func (rec *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := rec.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("metrics: underlying ResponseWriter (%T) does not support http.Hijacker", rec.ResponseWriter)
+	}
+	return hj.Hijack()
 }

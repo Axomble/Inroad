@@ -9,10 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/model"
-
 	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 )
 
 func TestHealthz(t *testing.T) {
@@ -44,34 +42,12 @@ func TestNewRouterWiresMetricsMiddleware(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	r.ServeHTTP(httptest.NewRecorder(), req)
 
-	scrapeReq := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
-	scrapeW := httptest.NewRecorder()
-	mtx.Handler().ServeHTTP(scrapeW, scrapeReq)
-
-	parser := expfmt.NewTextParser(model.LegacyValidation)
-	families, err := parser.TextToMetricFamilies(scrapeW.Body)
-	if err != nil {
-		t.Fatalf("parse exposition text: %v", err)
-	}
-	fam, ok := families["inroad_http_requests_total"]
-	if !ok {
-		t.Fatal("inroad_http_requests_total not recorded by NewRouter's middleware chain")
-	}
-	found := false
-	for _, m := range fam.GetMetric() {
-		labels := map[string]string{}
-		for _, lp := range m.GetLabel() {
-			labels[lp.GetName()] = lp.GetValue()
-		}
-		if labels["route"] == "/healthz" && labels["method"] == http.MethodGet && labels["code"] == "200" {
-			found = true
-			if got := m.GetCounter().GetValue(); got != 1 {
-				t.Fatalf("counter = %v, want 1", got)
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("no sample for route=/healthz method=GET code=200; got %v", fam.GetMetric())
+	families := metricstest.Scrape(t, mtx)
+	got := metricstest.CounterValue(families, "inroad_http_requests_total", map[string]string{
+		"route": "/healthz", "method": http.MethodGet, "code": "200",
+	})
+	if got != 1 {
+		t.Fatalf("counter = %v, want 1", got)
 	}
 }
 

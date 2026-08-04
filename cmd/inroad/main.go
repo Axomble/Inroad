@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,16 +85,35 @@ func run() error {
 	// Always constructed (never nil): the API router's metrics middleware
 	// records into it unconditionally, and the dedicated /metrics listener
 	// below is the only piece that's actually optional (INROAD_METRICS_ADDR).
+	//
+	// metricsCtx is a CHILD of ctx (not ctx itself): an OS-signal shutdown
+	// cancels it automatically alongside the main server below, but run()
+	// can also return earlier on a plain error (e.g. db.Connect failing),
+	// which never cancels ctx at all — the explicit cancelMetrics() in the
+	// deferred cleanup covers that path too, so this can never deadlock
+	// waiting on a listener nothing told to stop. The wait itself matters
+	// just as much as the cancel: a bare deferred cancel with nothing
+	// awaiting the goroutine lets run() (and the process) return before the
+	// listener's own graceful srv.Shutdown finishes, which defeats the
+	// point of a graceful shutdown.
 	mtx := metrics.New()
+	metricsCtx, cancelMetrics := context.WithCancel(ctx)
+	var metricsWG sync.WaitGroup
 	if cfg.MetricsAddr != "" {
 		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		metricsWG.Add(1)
 		go func() {
-			if err := httpx.Run(ctx, metricsSrv); err != nil {
+			defer metricsWG.Done()
+			if err := httpx.Run(metricsCtx, metricsSrv); err != nil {
 				logger.Error("metrics server error", "err", err)
 			}
 		}()
 		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
 	}
+	defer func() {
+		cancelMetrics()
+		metricsWG.Wait()
+	}()
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
