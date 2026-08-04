@@ -68,14 +68,23 @@ function Harness({
 }) {
   const [open, setOpen] = useState(initialOpen)
   return (
-    <PreflightDialog
-      open={open}
-      onOpenChange={setOpen}
-      campaignId="c-1"
-      campaignName="Q3 Outbound"
-      onConfirm={onConfirm}
-      isLaunching={false}
-    />
+    <>
+      {/* A caller-side reopen trigger distinct from the dialog's own Cancel —
+          lets a test close and reopen within the SAME component instance and
+          SAME store, which is exactly the "cached, unstale-looking, but
+          actually stale" window the reopen-refetch regression test exercises. */}
+      <button type="button" onClick={() => setOpen((o) => !o)}>
+        Toggle dialog
+      </button>
+      <PreflightDialog
+        open={open}
+        onOpenChange={setOpen}
+        campaignId="c-1"
+        campaignName="Q3 Outbound"
+        onConfirm={onConfirm}
+        isLaunching={false}
+      />
+    </>
   )
 }
 
@@ -196,4 +205,33 @@ test('a failed preflight fetch shows a retryable error and keeps the primary act
   preflightResponder = () => jsonResponse({ ready: true, checks: [check()] })
   fireEvent.click(within(dialog).getByRole('button', { name: /try again/i }))
   await waitFor(() => expect(within(dialog).getByRole('button', { name: /^launch campaign$/i })).toBeEnabled())
+})
+
+// Regression (review finding 1): `useGetCampaignPreflightQuery` used to skip
+// while closed with no `refetchOnMountOrArgChange`, so reopening within RTK
+// Query's 60s `keepUnusedDataFor` window silently re-served the LAST report
+// with no network request and `isFetching: false` — this dialog is the ONLY
+// gate on sender-pool/domain-auth/tracking/daily-limit/warmup (the server's
+// own `launch` handler only re-validates status/steps/list-emptiness), so a
+// stale "ready" from before a real regression (e.g. a sender disconnected in
+// the interim) could wave a launch through. Reopening must always re-fetch.
+// Uses the SAME store/component instance across close→reopen — a fresh store
+// per render (what every other test here does) would never exercise the
+// cache-hit path this bug lived in.
+test('reopening the dialog re-fetches the preflight report even when a cached response already exists (regression: a stale report must never gate a real launch)', async () => {
+  renderWithProviders(<Harness />)
+
+  await screen.findByRole('alertdialog')
+  await waitFor(() => expect(requests.filter((r) => r.url.endsWith('/preflight')).length).toBe(1))
+
+  // Close via the dialog's own Cancel, then reopen from the caller side —
+  // the query unsubscribes and resubscribes, but the cache entry from the
+  // first open is still warm.
+  fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+
+  fireEvent.click(screen.getByRole('button', { name: /toggle dialog/i }))
+  await screen.findByRole('alertdialog')
+
+  await waitFor(() => expect(requests.filter((r) => r.url.endsWith('/preflight')).length).toBe(2))
 })

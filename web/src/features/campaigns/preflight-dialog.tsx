@@ -39,9 +39,19 @@ const SEVERITY_LABEL: Record<CampaignPreflightCheck['severity'], string> = {
 /**
  * Gate a launch behind the campaign's readiness report. Fetches lazily — only
  * while `open` is true — so opening the campaigns list or a campaign's own
- * page never fires a preflight request nobody asked for; every open re-fetches
- * so a check fixed since the last look (e.g. a sender just connected) shows
- * as fixed, not stale.
+ * page never fires a preflight request nobody asked for.
+ *
+ * `refetchOnMountOrArgChange: true` is load-bearing, not decoration: the
+ * server's own `launch` handler only re-validates status/steps/list-emptiness
+ * on the way in, so THIS report is the only place sender-pool/domain-auth/
+ * tracking/daily-limit/warmup ever get checked before a send starts. Without
+ * forcing a fresh fetch, reopening the dialog within RTK Query's 60s
+ * `keepUnusedDataFor` window (e.g. cancel, fix a sender, reopen seconds
+ * later) would silently re-serve the stale cached report — `isFetching`
+ * would read `false` and the primary action could enable on data that no
+ * longer describes the campaign. Same reasoning, same fix as
+ * `contacts-page.tsx`'s `useListContactsQuery` (nothing here goes through a
+ * cache tag either, so no mutation can invalidate it for us).
  *
  * Deliberately does not own the launch mutation itself: `onConfirm` is the
  * caller's existing launch handler (already wired to its own inline error
@@ -67,7 +77,7 @@ export function PreflightDialog({
 }) {
   const { data, isFetching, error, refetch } = useGetCampaignPreflightQuery(
     { id: campaignId },
-    { skip: !open },
+    { skip: !open, refetchOnMountOrArgChange: true },
   )
   const name = campaignName ?? 'this campaign'
   const checks = data?.checks ?? []

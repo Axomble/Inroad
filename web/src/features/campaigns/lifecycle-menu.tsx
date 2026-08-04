@@ -27,6 +27,7 @@ import { httpStatus, isFetchBaseQueryError } from '@/lib/rtk-error'
 import type { Campaign } from '@/store/api'
 import { useDeleteCampaignMutation, useRenameCampaignMutation } from './api'
 import { lifecycleErrorMessage, type PauseResumeController } from './lifecycle-actions'
+import { StopClickBubble } from './stop-click-bubble'
 
 const renameSchema = z.object({
   name: z
@@ -82,7 +83,7 @@ export function PauseResumeDialog({
 }) {
   const name = campaign.name ?? 'this campaign'
   return (
-    <div className="relative inline-flex" onClick={(e) => e.stopPropagation()}>
+    <StopClickBubble>
       {pauseResume.error && <InlineErrorBanner message={pauseResume.error} />}
       <AlertDialog open={pauseResume.confirmPause} onOpenChange={pauseResume.setConfirmPause}>
         <AlertDialogContent>
@@ -108,7 +109,7 @@ export function PauseResumeDialog({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </StopClickBubble>
   )
 }
 
@@ -219,12 +220,7 @@ export function LifecycleMenu({
   }
 
   return (
-    // Stops a click anywhere in this menu (including portalled dropdown/dialog
-    // content, which React still bubbles through this component's tree) from
-    // reaching a row's own onClick — e.g. campaigns-page.tsx's row navigates on
-    // click, and without this a confirmed delete would immediately navigate to
-    // the campaign it just deleted.
-    <div className="relative inline-flex" onClick={(e) => e.stopPropagation()}>
+    <StopClickBubble>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${name}`} disabled={busy}>
@@ -300,7 +296,7 @@ export function LifecycleMenu({
         onOpenChange={setRenameOpen}
         campaign={campaign}
       />
-    </div>
+    </StopClickBubble>
   )
 }
 

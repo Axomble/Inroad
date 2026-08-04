@@ -29,6 +29,7 @@ import { CampaignForm } from './campaign-form'
 import { LifecycleMenu, PauseResumeDialog } from './lifecycle-menu'
 import { usePauseResume } from './lifecycle-actions'
 import { PreflightDialog } from './preflight-dialog'
+import { StopClickBubble } from './stop-click-bubble'
 
 /**
  * Module scope, not inline: `useListControls` memoises on the active
@@ -264,11 +265,7 @@ function CampaignRow({
 
       <div className="flex w-36 shrink-0 items-center justify-end gap-1">
         {campaign.status === 'draft' && (
-          // Stops a click anywhere in the preflight dialog (portalled, but
-          // still bubbling through the *React* tree per LifecycleMenu's own
-          // note above) from reaching this row's onClick and navigating away
-          // right as the operator confirms a launch.
-          <div className="relative inline-flex" onClick={(e) => e.stopPropagation()}>
+          <StopClickBubble>
             <Button variant="secondary" size="xs" disabled={isLoading} onClick={() => setPreflightOpen(true)}>
               <Rocket className="size-3.5" />
               Launch
@@ -281,7 +278,7 @@ function CampaignRow({
               onConfirm={() => void onLaunch()}
               isLaunching={isLoading}
             />
-          </div>
+          </StopClickBubble>
         )}
 
         {/* Pause/resume/rename/delete, status-appropriate. "Open campaign" isn't
