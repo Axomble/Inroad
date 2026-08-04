@@ -7,7 +7,8 @@ import { Page, PageTopbar, StatStrip, Stat, SectionBar, PageBody } from '@/compo
 import { httpStatus } from '@/lib/rtk-error'
 import { useGetCampaignQuery } from './api'
 import { campaignTone, campaignLabel } from './status'
-import { LifecycleMenu, CampaignStatusButton } from './lifecycle-menu'
+import { LifecycleMenu, CampaignStatusButton, PauseResumeDialog } from './lifecycle-menu'
+import { usePauseResume } from './lifecycle-actions'
 import { MetricsPanel } from './metrics-panel'
 import { CampaignEnrollmentsList } from './campaign-enrollments-list'
 import { SequenceEditor } from './sequence-editor'
@@ -31,6 +32,11 @@ export function CampaignDetailPage() {
   const { data, isLoading, error } = useGetCampaignQuery({ id })
   const stats = data?.stats ?? {}
   const n = (key: string) => stats[key] ?? 0
+  // One shared controller for both pause/resume controls below — called
+  // unconditionally (Rules of Hooks) even before `data` resolves; `data ?? {}`
+  // is a valid (if id/status-less) Campaign in the meantime. See
+  // `usePauseResume`'s doc comment for why this must not be two instances.
+  const pauseResume = usePauseResume(data ?? {})
 
   return (
     <Page>
@@ -53,9 +59,12 @@ export function CampaignDetailPage() {
               <StatusPill tone={campaignTone(data.status)}>{campaignLabel(data.status)}</StatusPill>
               {/* Pause/resume gets its own visible button — the one action an
                   operator looking at this campaign is most likely to take —
-                  while rename/delete stay in the overflow menu. */}
-              <CampaignStatusButton campaign={data} />
-              <LifecycleMenu campaign={data} />
+                  while rename/delete stay in the overflow menu. Both share
+                  `pauseResume` and the one `PauseResumeDialog` below, so they
+                  can't stack a second confirm dialog or double-fire. */}
+              <CampaignStatusButton campaign={data} pauseResume={pauseResume} />
+              <LifecycleMenu campaign={data} pauseResume={pauseResume} />
+              <PauseResumeDialog campaign={data} pauseResume={pauseResume} />
             </div>
           ) : undefined
         }

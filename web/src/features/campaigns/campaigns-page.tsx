@@ -26,7 +26,8 @@ import type { Campaign } from '@/store/api'
 import { useListCampaignsQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
-import { LifecycleMenu } from './lifecycle-menu'
+import { LifecycleMenu, PauseResumeDialog } from './lifecycle-menu'
+import { usePauseResume } from './lifecycle-actions'
 
 /**
  * Module scope, not inline: `useListControls` memoises on the active
@@ -213,6 +214,11 @@ function CampaignRow({
 }) {
   const [launch, { isLoading }] = useLaunchCampaignMutation()
   const [error, setError] = useState<string | null>(null)
+  // One instance per row, shared by LifecycleMenu's menu item and the
+  // PauseResumeDialog it opens — this row has only the one trigger today, but
+  // sharing keeps the row's wiring identical to the detail topbar's (which has
+  // two triggers) rather than two different patterns for the same hook.
+  const pauseResume = usePauseResume(campaign)
   const id = campaign.id ?? ''
 
   async function onLaunch() {
@@ -274,7 +280,8 @@ function CampaignRow({
             duplicated here — clicking anywhere else on the row (or the
             keyboard nav's ↵) already opens it, and LifecycleMenu stops its own
             clicks from also bubbling into the row's onClick. */}
-        <LifecycleMenu campaign={campaign} />
+        <LifecycleMenu campaign={campaign} pauseResume={pauseResume} />
+        <PauseResumeDialog campaign={campaign} pauseResume={pauseResume} />
       </div>
     </li>
   )

@@ -25,12 +25,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { httpStatus, isFetchBaseQueryError } from '@/lib/rtk-error'
 import type { Campaign } from '@/store/api'
-import {
-  useDeleteCampaignMutation,
-  usePauseCampaignMutation,
-  useRenameCampaignMutation,
-  useResumeCampaignMutation,
-} from './api'
+import { useDeleteCampaignMutation, useRenameCampaignMutation } from './api'
+import { lifecycleErrorMessage, type PauseResumeController } from './lifecycle-actions'
 
 const renameSchema = z.object({
   name: z
@@ -46,26 +42,6 @@ function serverReason(error: unknown): string | undefined {
   if (!isFetchBaseQueryError(error)) return undefined
   const reason = (error.data as { error?: string } | undefined)?.error
   return typeof reason === 'string' && reason.trim() !== '' ? reason : undefined
-}
-
-/**
- * Copy for a failed pause/resume/delete. A 409 here is a lifecycle-guard
- * rejection ("campaign is not running") that only the API can phrase
- * correctly for the status it actually saw, so its own reason wins over a
- * guess at the exact wording.
- */
-function lifecycleErrorMessage(action: 'pause' | 'resume' | 'delete', error: unknown): string {
-  const status = httpStatus(error)
-  const reason = serverReason(error)
-  if (status === 409) return reason ?? `This campaign can't be ${pastTense(action)} from its current status.`
-  if (status === 404) return 'This campaign no longer exists — refresh the page.'
-  return `Couldn't ${action} this campaign. Please try again.`
-}
-
-function pastTense(action: 'pause' | 'resume' | 'delete'): string {
-  if (action === 'pause') return 'paused'
-  if (action === 'resume') return 'resumed'
-  return 'deleted'
 }
 
 function renameErrorMessage(error: unknown): string {
@@ -88,80 +64,51 @@ function InlineErrorBanner({ message }: { message: string }) {
 }
 
 /**
- * Shared pause/resume behaviour: the mutation triggers, the confirm gate that
- * pause (but not resume) requires, and the resulting inline error. Reused by
- * the row/topbar overflow menu and the detail page's dedicated button so the
- * copy and the confirmation gate live in exactly one place.
+ * The confirm-pause `AlertDialog` and its inline error banner for one shared
+ * `usePauseResume` instance (see `./lifecycle-actions`). Rendered exactly once
+ * by whichever page/row owns that instance — even when it's driven by two
+ * separate trigger controls (the detail page's dedicated
+ * `CampaignStatusButton` and `LifecycleMenu`'s own "Pause campaign" item) — so
+ * there is structurally only ever one dialog that can open and one mutation
+ * trigger that can fire, never two independent ones that can stack or
+ * double-fire.
  */
-function usePauseResume(campaign: Campaign) {
-  const id = campaign.id ?? ''
-  const [pause, pauseState] = usePauseCampaignMutation()
-  const [resume, resumeState] = useResumeCampaignMutation()
-  const [confirmPause, setConfirmPause] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function onPause() {
-    setError(null)
-    const res = await pause({ id })
-    setConfirmPause(false)
-    if ('error' in res) setError(lifecycleErrorMessage('pause', res.error))
-  }
-
-  async function onResume() {
-    setError(null)
-    const res = await resume({ id })
-    if ('error' in res) setError(lifecycleErrorMessage('resume', res.error))
-  }
-
-  return {
-    confirmPause,
-    setConfirmPause,
-    onPause,
-    onResume,
-    isPausing: pauseState.isLoading,
-    isResuming: resumeState.isLoading,
-    error,
-  }
-}
-
-function PauseConfirmDialog({
-  open,
-  onOpenChange,
-  name,
-  busy,
-  onConfirm,
+export function PauseResumeDialog({
+  campaign,
+  pauseResume,
 }: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  name: string
-  busy: boolean
-  onConfirm: () => void
+  campaign: Campaign
+  pauseResume: PauseResumeController
 }) {
+  const name = campaign.name ?? 'this campaign'
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Pause &ldquo;{name}&rdquo;?</AlertDialogTitle>
-          <AlertDialogDescription>
-            Pausing stops new sends immediately. Threads already in flight resume where they left off when
-            you resume the campaign.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            disabled={busy}
-            onClick={(e) => {
-              e.preventDefault()
-              onConfirm()
-            }}
-          >
-            {busy && <Loader2 className="size-4 animate-spin" />}
-            Pause campaign
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <div className="relative inline-flex" onClick={(e) => e.stopPropagation()}>
+      {pauseResume.error && <InlineErrorBanner message={pauseResume.error} />}
+      <AlertDialog open={pauseResume.confirmPause} onOpenChange={pauseResume.setConfirmPause}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Pause &ldquo;{name}&rdquo;?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Pausing stops new sends immediately. Threads already in flight resume where they left off
+              when you resume the campaign.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={pauseResume.isPausing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={pauseResume.isPausing}
+              onClick={(e) => {
+                e.preventDefault()
+                void pauseResume.onPause()
+              }}
+            >
+              {pauseResume.isPausing && <Loader2 className="size-4 animate-spin" />}
+              Pause campaign
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
   )
 }
 
@@ -180,7 +127,6 @@ function RenameDialog({
   const {
     register,
     handleSubmit,
-    reset,
     formState: { errors },
   } = useForm<RenameValues>({
     resolver: zodResolver(renameSchema),
@@ -194,16 +140,7 @@ function RenameDialog({
   }
 
   return (
-    <AlertDialog
-      open={open}
-      onOpenChange={(next) => {
-        // Re-seed the input from the latest name every time the dialog opens,
-        // so a stale draft from a previous open (or a rename elsewhere) never
-        // shows through.
-        if (next) reset({ name: campaign.name ?? '' })
-        onOpenChange(next)
-      }}
-    >
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         {/* `contents` keeps the header/body/footer as direct children of the
             AlertDialogContent grid, so wrapping them in a form doesn't collapse
@@ -250,19 +187,28 @@ function RenameDialog({
  * immediately), resume (paused, no confirm — resuming is always safe), delete
  * (draft only, destructive, behind a confirm naming the campaign), and rename
  * (every status).
+ *
+ * `pauseResume` is caller-owned (`usePauseResume` in `./lifecycle-actions`),
+ * not created here — see `PauseResumeDialog`'s doc comment for why: it may be
+ * shared with a sibling `CampaignStatusButton`, and each must drive the same
+ * mutation trigger and the same confirm-dialog state.
  */
-export function LifecycleMenu({ campaign }: { campaign: Campaign }) {
+export function LifecycleMenu({
+  campaign,
+  pauseResume,
+}: {
+  campaign: Campaign
+  pauseResume: PauseResumeController
+}) {
   const id = campaign.id ?? ''
   const name = campaign.name ?? 'this campaign'
   const status = campaign.status
 
-  const pauseResume = usePauseResume(campaign)
   const [remove, removeState] = useDeleteCampaignMutation()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
 
-  const actionError = pauseResume.error ?? deleteError
   const busy = pauseResume.isPausing || pauseResume.isResuming || removeState.isLoading
 
   async function onDelete() {
@@ -287,13 +233,7 @@ export function LifecycleMenu({ campaign }: { campaign: Campaign }) {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           {status === 'running' && (
-            <DropdownMenuItem
-              disabled={busy}
-              onSelect={(e) => {
-                e.preventDefault()
-                pauseResume.setConfirmPause(true)
-              }}
-            >
+            <DropdownMenuItem disabled={busy} onSelect={() => pauseResume.setConfirmPause(true)}>
               Pause campaign
             </DropdownMenuItem>
           )}
@@ -307,26 +247,12 @@ export function LifecycleMenu({ campaign }: { campaign: Campaign }) {
             </DropdownMenuItem>
           )}
 
-          <DropdownMenuItem
-            onSelect={(e) => {
-              e.preventDefault()
-              setRenameOpen(true)
-            }}
-          >
-            Rename…
-          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setRenameOpen(true)}>Rename…</DropdownMenuItem>
 
           {status === 'draft' && (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuItem
-                variant="destructive"
-                disabled={busy}
-                onSelect={(e) => {
-                  e.preventDefault()
-                  setConfirmDelete(true)
-                }}
-              >
+              <DropdownMenuItem variant="destructive" disabled={busy} onSelect={() => setConfirmDelete(true)}>
                 Delete campaign
               </DropdownMenuItem>
             </>
@@ -334,15 +260,7 @@ export function LifecycleMenu({ campaign }: { campaign: Campaign }) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {actionError && <InlineErrorBanner message={actionError} />}
-
-      <PauseConfirmDialog
-        open={pauseResume.confirmPause}
-        onOpenChange={pauseResume.setConfirmPause}
-        name={name}
-        busy={pauseResume.isPausing}
-        onConfirm={() => void pauseResume.onPause()}
-      />
+      {deleteError && <InlineErrorBanner message={deleteError} />}
 
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
@@ -370,7 +288,18 @@ export function LifecycleMenu({ campaign }: { campaign: Campaign }) {
         </AlertDialogContent>
       </AlertDialog>
 
-      <RenameDialog open={renameOpen} onOpenChange={setRenameOpen} campaign={campaign} />
+      {/* `key` forces a fresh mount every time the dialog opens (Radix does not
+          call `onOpenChange` for an externally-driven open, only for its own
+          close requests, so there is no reliable "just opened" event to hook a
+          manual reset into) — a remount gives fresh `useForm`/mutation state
+          for free, so a rename that failed and was cancelled never shows last
+          time's error banner on reopen. */}
+      <RenameDialog
+        key={renameOpen ? 'open' : 'closed'}
+        open={renameOpen}
+        onOpenChange={setRenameOpen}
+        campaign={campaign}
+      />
     </div>
   )
 }
@@ -380,48 +309,40 @@ export function LifecycleMenu({ campaign }: { campaign: Campaign }) {
  * not buried in `LifecycleMenu`'s overflow menu, since pausing or resuming is
  * the single most consequential action available while looking at one
  * campaign. Renders nothing outside running/paused (draft has nothing to
- * pause; done has nothing to resume).
+ * pause; done has nothing to resume). Shares its confirm dialog and mutation
+ * trigger with `LifecycleMenu` via the caller-owned `pauseResume` controller —
+ * render `PauseResumeDialog` once, alongside both, never one per control.
  */
-export function CampaignStatusButton({ campaign }: { campaign: Campaign }) {
-  const name = campaign.name ?? 'this campaign'
+export function CampaignStatusButton({
+  campaign,
+  pauseResume,
+}: {
+  campaign: Campaign
+  pauseResume: PauseResumeController
+}) {
   const status = campaign.status
-  const pauseResume = usePauseResume(campaign)
 
   if (status !== 'running' && status !== 'paused') return null
 
-  return (
-    <div className="relative inline-flex">
-      {status === 'running' ? (
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={pauseResume.isPausing}
-          onClick={() => pauseResume.setConfirmPause(true)}
-        >
-          {pauseResume.isPausing && <Loader2 className="size-4 animate-spin" />}
-          Pause
-        </Button>
-      ) : (
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={pauseResume.isResuming}
-          onClick={() => void pauseResume.onResume()}
-        >
-          {pauseResume.isResuming && <Loader2 className="size-4 animate-spin" />}
-          Resume
-        </Button>
-      )}
-
-      {pauseResume.error && <InlineErrorBanner message={pauseResume.error} />}
-
-      <PauseConfirmDialog
-        open={pauseResume.confirmPause}
-        onOpenChange={pauseResume.setConfirmPause}
-        name={name}
-        busy={pauseResume.isPausing}
-        onConfirm={() => void pauseResume.onPause()}
-      />
-    </div>
+  return status === 'running' ? (
+    <Button
+      variant="secondary"
+      size="sm"
+      disabled={pauseResume.isPausing}
+      onClick={() => pauseResume.setConfirmPause(true)}
+    >
+      {pauseResume.isPausing && <Loader2 className="size-4 animate-spin" />}
+      Pause
+    </Button>
+  ) : (
+    <Button
+      variant="secondary"
+      size="sm"
+      disabled={pauseResume.isResuming}
+      onClick={() => void pauseResume.onResume()}
+    >
+      {pauseResume.isResuming && <Loader2 className="size-4 animate-spin" />}
+      Resume
+    </Button>
   )
 }
