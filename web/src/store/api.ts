@@ -349,6 +349,85 @@ const injectedRtkApi = api.injectEndpoints({
     getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
       query: () => ({ url: `/pulse` }),
     }),
+    getAiSettings: build.query<GetAiSettingsApiResponse, GetAiSettingsApiArg>({
+      query: () => ({ url: `/ai/settings` }),
+    }),
+    updateAiSettings: build.mutation<
+      UpdateAiSettingsApiResponse,
+      UpdateAiSettingsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/settings`,
+        method: "PUT",
+        body: queryArg.aiSettingsUpdate,
+      }),
+    }),
+    listAiProviders: build.query<
+      ListAiProvidersApiResponse,
+      ListAiProvidersApiArg
+    >({
+      query: () => ({ url: `/ai/providers` }),
+    }),
+    createAiProvider: build.mutation<
+      CreateAiProviderApiResponse,
+      CreateAiProviderApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers`,
+        method: "POST",
+        body: queryArg.aiProviderCreateRequest,
+      }),
+    }),
+    updateAiProvider: build.mutation<
+      UpdateAiProviderApiResponse,
+      UpdateAiProviderApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.aiProviderUpdateRequest,
+      }),
+    }),
+    deleteAiProvider: build.mutation<
+      DeleteAiProviderApiResponse,
+      DeleteAiProviderApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    discoverAiProviderModels: build.mutation<
+      DiscoverAiProviderModelsApiResponse,
+      DiscoverAiProviderModelsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers/${queryArg.id}/discover`,
+        method: "POST",
+      }),
+    }),
+    listAiModels: build.query<ListAiModelsApiResponse, ListAiModelsApiArg>({
+      query: () => ({ url: `/ai/models` }),
+    }),
+    createAiModel: build.mutation<
+      CreateAiModelApiResponse,
+      CreateAiModelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/models`,
+        method: "POST",
+        body: queryArg.aiModelCreateRequest,
+      }),
+    }),
+    deleteAiModel: build.mutation<
+      DeleteAiModelApiResponse,
+      DeleteAiModelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/models/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
     listLists: build.query<ListListsApiResponse, ListListsApiArg>({
       query: () => ({ url: `/lists` }),
     }),
@@ -833,6 +912,47 @@ export type GetWarmupOverviewApiResponse =
 export type GetWarmupOverviewApiArg = void;
 export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
 export type GetPulseApiArg = void;
+export type GetAiSettingsApiResponse = /** status 200 AI settings */ AiSettings;
+export type GetAiSettingsApiArg = void;
+export type UpdateAiSettingsApiResponse =
+  /** status 200 Updated AI settings */ AiSettings;
+export type UpdateAiSettingsApiArg = {
+  aiSettingsUpdate: AiSettingsUpdate;
+};
+export type ListAiProvidersApiResponse =
+  /** status 200 Configured providers */ AiProviderList;
+export type ListAiProvidersApiArg = void;
+export type CreateAiProviderApiResponse =
+  /** status 201 Provider configured (masked) */ AiProvider;
+export type CreateAiProviderApiArg = {
+  aiProviderCreateRequest: AiProviderCreateRequest;
+};
+export type UpdateAiProviderApiResponse =
+  /** status 200 Updated provider (masked) */ AiProvider;
+export type UpdateAiProviderApiArg = {
+  id: string;
+  aiProviderUpdateRequest: AiProviderUpdateRequest;
+};
+export type DeleteAiProviderApiResponse = unknown;
+export type DeleteAiProviderApiArg = {
+  id: string;
+};
+export type DiscoverAiProviderModelsApiResponse =
+  /** status 200 Discovery result */ AiDiscoveryResult;
+export type DiscoverAiProviderModelsApiArg = {
+  id: string;
+};
+export type ListAiModelsApiResponse =
+  /** status 200 Merged model list */ AiModelList;
+export type ListAiModelsApiArg = void;
+export type CreateAiModelApiResponse = /** status 201 Created model */ AiModel;
+export type CreateAiModelApiArg = {
+  aiModelCreateRequest: AiModelCreateRequest;
+};
+export type DeleteAiModelApiResponse = unknown;
+export type DeleteAiModelApiArg = {
+  id: string;
+};
 export type ListListsApiResponse = /** status 200 Lists */ List[];
 export type ListListsApiArg = void;
 export type CreateListApiResponse = /** status 200 Created list */ List;
@@ -1371,6 +1491,114 @@ export type Pulse = {
   };
   attention: PulseAttention[];
 };
+export type AiSettings = {
+  default_smart_model: string;
+  default_fast_model: string;
+  /** empty array = every listed model is enabled */
+  enabled_model_ids: string[];
+  /** workspace-specific instructions appended to the agent system prompt */
+  additional_instructions: string;
+};
+export type AiSettingsUpdate = {
+  default_smart_model?: string;
+  default_fast_model?: string;
+  enabled_model_ids?: string[];
+  additional_instructions?: string;
+};
+export type AiProviderKind =
+  | "anthropic"
+  | "bedrock"
+  | "vertex_anthropic"
+  | "openai"
+  | "azure_openai"
+  | "openai_compatible"
+  | "google"
+  | "vertex_google";
+export type AiProviderConfig = {
+  base_url?: string;
+  endpoint?: string;
+  api_version?: string;
+  region?: string;
+  project_id?: string;
+};
+export type AiProvider = {
+  id: string;
+  kind: AiProviderKind;
+  display_name: string;
+  config: AiProviderConfig;
+  /** always true for a stored row */
+  configured: boolean;
+  /** masked credential identifier for display */
+  key_prefix: string;
+  created_at: string;
+  updated_at: string;
+};
+export type AiProviderList = {
+  providers: AiProvider[];
+};
+export type AiProviderCredentials = {
+  api_key?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  service_account_json?: string;
+};
+export type AiProviderCreateRequest = {
+  kind: AiProviderKind;
+  display_name?: string;
+  credentials: AiProviderCredentials;
+  config?: AiProviderConfig;
+};
+export type AiProviderUpdateRequest = {
+  display_name?: string;
+  credentials?: AiProviderCredentials;
+  config?: AiProviderConfig;
+};
+export type AiDiscoveredModel = {
+  name: string;
+  label?: string;
+  context_window_tokens?: number;
+  max_output_tokens?: number;
+  input_cost_per_mtok?: number | null;
+  output_cost_per_mtok?: number | null;
+};
+export type AiDiscoveryResult = {
+  /** false = this kind has no discovery path yet; add models manually */
+  supported: boolean;
+  models: AiDiscoveredModel[];
+};
+export type AiModel = {
+  /** composite "<provider_id>/<name>" */
+  id: string;
+  provider_id: string;
+  kind: AiProviderKind;
+  /** the bare model id the provider SDK receives */
+  name: string;
+  label: string;
+  context_window_tokens: number;
+  max_output_tokens: number;
+  supports_reasoning: boolean;
+  source: "catalog" | "custom";
+  /** the deletable row id behind a source=custom entry (DELETE /ai/models/{id}); null for catalog entries */
+  custom_model_id: string | null;
+  /** informational USD per million input tokens */
+  input_cost_per_mtok: number | null;
+  output_cost_per_mtok: number | null;
+  /** enabled_model_ids is empty OR contains this id */
+  enabled: boolean;
+};
+export type AiModelList = {
+  models: AiModel[];
+};
+export type AiModelCreateRequest = {
+  provider_id: string;
+  name: string;
+  label: string;
+  context_window_tokens: number;
+  max_output_tokens: number;
+  supports_reasoning?: boolean;
+  input_cost_per_mtok?: number | null;
+  output_cost_per_mtok?: number | null;
+};
 export type List = {
   id?: string;
   name?: string;
@@ -1792,6 +2020,16 @@ export const {
   useDisableMailboxWarmupMutation,
   useGetWarmupOverviewQuery,
   useGetPulseQuery,
+  useGetAiSettingsQuery,
+  useUpdateAiSettingsMutation,
+  useListAiProvidersQuery,
+  useCreateAiProviderMutation,
+  useUpdateAiProviderMutation,
+  useDeleteAiProviderMutation,
+  useDiscoverAiProviderModelsMutation,
+  useListAiModelsQuery,
+  useCreateAiModelMutation,
+  useDeleteAiModelMutation,
   useListListsQuery,
   useCreateListMutation,
   useImportContactsMutation,

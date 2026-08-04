@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
+import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { PulseCard } from './pulse-card'
@@ -67,6 +67,7 @@ const NAV: NavGroup[] = [
       { label: 'Security', to: '/app/settings/security', icon: ShieldCheck },
       { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound, adminOnly: true },
       { label: 'Connected apps', to: '/app/settings/oauth-apps', icon: Plug, adminOnly: true },
+      { label: 'AI', to: '/app/settings/ai', icon: Sparkles, adminOnly: true },
     ],
   },
 ]

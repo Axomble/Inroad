@@ -24,6 +24,7 @@ import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
 import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
 import { Route as AppCampaignsIdRouteImport } from './routes/app.campaigns.$id'
+import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
 import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.oauth-apps'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
@@ -104,6 +105,11 @@ const AppCampaignsIdRoute = AppCampaignsIdRouteImport.update({
   path: '/campaigns/$id',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsAiRoute = AppSettingsAiRouteImport.update({
+  id: '/settings/ai',
+  path: '/settings/ai',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsApiKeysRoute = AppSettingsApiKeysRouteImport.update({
   id: '/settings/api-keys',
   path: '/settings/api-keys',
@@ -140,6 +146,7 @@ export interface FileRoutesByFullPath {
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -160,6 +167,7 @@ export interface FileRoutesByTo {
   '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -182,6 +190,7 @@ export interface FileRoutesById {
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -205,6 +214,7 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
     | '/app/settings/security'
@@ -225,6 +235,7 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/app'
     | '/app/campaigns/$id'
+    | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
     | '/app/settings/security'
@@ -246,6 +257,7 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
     | '/app/settings/security'
@@ -371,6 +383,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCampaignsIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/ai': {
+      id: '/app/settings/ai'
+      path: '/settings/ai'
+      fullPath: '/app/settings/ai'
+      preLoaderRoute: typeof AppSettingsAiRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/api-keys': {
       id: '/app/settings/api-keys'
       path: '/settings/api-keys'
@@ -409,6 +428,7 @@ interface AppRouteChildren {
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppSettingsAiRoute: typeof AppSettingsAiRoute
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
   AppSettingsOauthAppsRoute: typeof AppSettingsOauthAppsRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
@@ -423,6 +443,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
   AppCampaignsIdRoute: AppCampaignsIdRoute,
+  AppSettingsAiRoute: AppSettingsAiRoute,
   AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
   AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,

@@ -56,6 +56,81 @@ func vetAddr(host string, port int, allowedPorts map[int]bool, allowPrivate bool
 	return net.JoinHostPort(ips[0].IP.String(), strconv.Itoa(port)), nil
 }
 
+// ClassifyHost resolves a user-supplied HTTP(S) host and classifies it for
+// SSRF policy, sharing this package's resolver and address taxonomy with the
+// mail dials. It is the vetting seam behind AI-provider base URLs
+// (agent-platform spec §3), where the policy differs from mail in one way:
+// loopback is not always-blocked but treated as PRIVATE, because the entire
+// point of the operator opt-in (AI_ALLOW_PRIVATE_BASE_URL) is a localhost
+// Ollama/vLLM. Link-local (incl. the cloud metadata endpoint), unspecified,
+// and multicast remain unconditionally hostile and return an error.
+//
+// The caller decides what "private" means for its context (reject unless the
+// operator flag is set). Like vetAddr, every resolved IP is checked and a
+// single hostile record fails the whole classification.
+func ClassifyHost(ctx context.Context, host string) (private bool, err error) {
+	ips, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return false, fmt.Errorf("resolve host: %w", err)
+	}
+	private, err = classifyIPs(ips)
+	return private, err
+}
+
+// classifyIPs applies the HTTP-host taxonomy to a resolved answer set: any
+// unconditionally hostile record (link-local incl. cloud metadata, multicast,
+// unspecified, or an empty answer) fails the whole set; loopback/private
+// records mark the host private.
+func classifyIPs(ips []net.IPAddr) (private bool, err error) {
+	if len(ips) == 0 {
+		return false, ErrHostNotPermitted
+	}
+	for _, ipAddr := range ips {
+		ip := ipAddr.IP
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return false, ErrHostNotPermitted
+		}
+		if ip.IsLoopback() || ip.IsPrivate() {
+			private = true
+		}
+	}
+	return private, nil
+}
+
+// GuardedDialContext returns a net DialContext that enforces the ClassifyHost
+// policy at DIAL time and connects to the vetted IP directly (closing the
+// DNS-rebinding window between validation and connection, like vetAddr): the
+// destination host is resolved, every record is checked — link-local (incl.
+// cloud metadata), multicast, and unspecified are always rejected; loopback
+// and private ranges are rejected unless allowPrivate — and the first allowed
+// IP is dialed. TLS verification still uses the request's original hostname
+// (http.Transport keeps it as the ServerName). This is the transport seam
+// behind AI-provider discovery/calls to user-supplied endpoints.
+func GuardedDialContext(allowPrivate bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("split host/port: %w", err)
+		}
+		// ONE resolution feeds both the policy check and the dial target, so a
+		// rebinding DNS server cannot answer differently between them.
+		ips, err := resolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve host: %w", err)
+		}
+		private, err := classifyIPs(ips)
+		if err != nil {
+			return nil, err
+		}
+		if private && !allowPrivate {
+			return nil, fmt.Errorf("%w: private host %q", ErrHostNotPermitted, host)
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+	}
+}
+
 // ipAllowed reports whether ip is permitted by the SSRF policy: loopback,
 // link-local (incl. cloud metadata), unspecified, multicast are always
 // blocked; RFC1918/ULA is blocked unless allowPrivate is set.

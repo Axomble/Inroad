@@ -183,6 +183,12 @@ func (ns NullUserTokenKind) Value() (driver.Value, error) {
 	return string(ns.UserTokenKind), nil
 }
 
+type AiCatalogCache struct {
+	ID        bool               `json:"id"`
+	Payload   []byte             `json:"payload"`
+	FetchedAt pgtype.Timestamptz `json:"fetched_at"`
+}
+
 type ApiKey struct {
 	ID              uuid.UUID          `json:"id"`
 	WorkspaceID     uuid.UUID          `json:"workspace_id"`
@@ -673,6 +679,41 @@ type Workspace struct {
 	ID        uuid.UUID          `json:"id"`
 	Name      string             `json:"name"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkspaceAiModel struct {
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ProviderID          uuid.UUID          `json:"provider_id"`
+	Name                string             `json:"name"`
+	Label               string             `json:"label"`
+	ContextWindowTokens int32              `json:"context_window_tokens"`
+	MaxOutputTokens     int32              `json:"max_output_tokens"`
+	SupportsReasoning   bool               `json:"supports_reasoning"`
+	InputCostPerMtok    *float64           `json:"input_cost_per_mtok"`
+	OutputCostPerMtok   *float64           `json:"output_cost_per_mtok"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkspaceAiProvider struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	Kind             string             `json:"kind"`
+	Config           []byte             `json:"config"`
+	SecretCiphertext string             `json:"secret_ciphertext"`
+	KeyPrefix        string             `json:"key_prefix"`
+	DisplayName      string             `json:"display_name"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkspaceAiSetting struct {
+	WorkspaceID            uuid.UUID          `json:"workspace_id"`
+	DefaultSmartModel      string             `json:"default_smart_model"`
+	DefaultFastModel       string             `json:"default_fast_model"`
+	EnabledModelIds        []string           `json:"enabled_model_ids"`
+	AdditionalInstructions string             `json:"additional_instructions"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
 }
 
 type WorkspaceDek struct {
