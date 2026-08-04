@@ -422,12 +422,6 @@ func TestAdvanceSendsAndSchedulesNext(t *testing.T) {
 	}
 }
 
-// A newly delivered send triggers a circuit-breaker evaluation, because the send
-// changes the sample the breaker judges on - and crossing the minimum-delivered
-// floor is itself the trigger for a campaign whose early sends all bounced.
-//
-// It is enqueued as a task, not called inline: the evaluation must read committed
-// state from outside the send path, so a scoring bug cannot fail a delivery.
 // TestAdvanceSpintaxIsByteIdenticalOnRetry proves the retry-safety property
 // spintax.Seed(job.SendID, ...) exists for: a "retried" job -- rebuilt fresh
 // from the same immutable DB row, so it carries the identical SendID and raw
@@ -471,6 +465,12 @@ func TestAdvanceSpintaxIsByteIdenticalOnRetry(t *testing.T) {
 	}
 }
 
+// A newly delivered send triggers a circuit-breaker evaluation, because the send
+// changes the sample the breaker judges on - and crossing the minimum-delivered
+// floor is itself the trigger for a campaign whose early sends all bounced.
+//
+// It is enqueued as a task, not called inline: the evaluation must read committed
+// state from outside the send path, so a scoring bug cannot fail a delivery.
 func TestAdvanceEnqueuesABreakerEvaluationAfterDelivery(t *testing.T) {
 	core := &stubCore{
 		job: coreapi.StepSendJob{

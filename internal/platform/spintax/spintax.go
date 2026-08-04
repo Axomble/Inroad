@@ -31,6 +31,20 @@ const maxIterations = 10000
 // same way elsewhere in the codebase.
 const pcgSalt = 0xda7a
 
+// frame tracks one currently-open '{' during Expand's single pass: start is
+// where it was written into the output buffer, and tainted records whether a
+// nested REAL group inside it was left with its own braces literally present
+// (because it had no '|', or was itself tainted) — which disqualifies THIS
+// frame from spin-resolution too, and propagates further outward if this
+// frame also ends up unresolved. A doubled merge field ("{{...}}") never
+// creates a frame at all (see mergeFieldSpan) and so never taints anything:
+// its braces are invisible to spin-group nesting, even though they remain
+// literally present in the output.
+type frame struct {
+	start   int
+	tainted bool
+}
+
 // Expand resolves every "{option-a|option-b|...}" spin group in s to ONE
 // selected option, chosen deterministically from seed (see Seed). Groups
 // resolve innermost-first, in a single left-to-right pass: a '{' opens a
@@ -39,54 +53,99 @@ const pcgSalt = 0xda7a
 // outer, so by the time the outer '}' is reached its content is already
 // brace-free and it resolves too, on the SAME pass — no rescanning.
 //
-// A brace group with no '|' — including the inner span of a doubled merge
-// field like "{{first_name}}" — is not spin syntax: it is left byte-for-byte
-// untouched, braces included. Because those braces then remain literally in
-// the output, an ENCLOSING group that contains one (a spin option directly
-// wrapping a "{{merge_field}}" with no separating text) is never judged
-// "innermost" either, by the same brace-free-content rule, and so is left
-// untouched in turn — a known boundary of this brace-counting algorithm, not
-// a bug: it only ever resolves a group whose content is itself free of any
-// unresolved nested braces.
+// A doubled merge field like "{{first_name}}" is recognized up front (see
+// mergeFieldSpan) and copied through as one ATOMIC token: its braces never
+// open or close a spin group, so a spin option that directly wraps one —
+// "{Hi {{first_name}}|Hey {{first_name}}}" — still resolves normally, with
+// the chosen option's merge field surviving intact for personalize to
+// substitute afterward. That is the whole point of spinning BEFORE
+// personalizing.
+//
+// A brace group with no '|' that is NOT a doubled merge field — a bare
+// "{literal}" — is different: it is left byte-for-byte untouched (braces
+// included), and because those braces then remain literally in the output,
+// an ENCLOSING group that contains one is never judged resolvable either
+// (tracked via frame.tainted, not by re-scanning output bytes). That is a
+// narrower, deliberate boundary: single-brace literals aren't reserved
+// template syntax in this codebase (internal/worker/personalize only ever
+// substitutes "{{...}}"), so there is no real-world case this needs to see
+// through.
 //
 // Bounded at maxIterations resolutions total (see its doc) so pathological
 // input cannot cost more than a small constant multiple of len(s); the pass
 // itself is always a single O(len(s)) scan regardless of nesting depth or
-// group count, so Expand's cost never multiplies with the number of groups.
+// group count (mergeFieldSpan's look-ahead included — see its doc), so
+// Expand's cost never multiplies with the number of groups.
 func Expand(s string, seed uint64) string {
 	rng := rand.New(rand.NewPCG(seed, pcgSalt))
 
 	out := make([]byte, 0, len(s))
-	// starts holds, for each '{' currently open, the index into out where it
-	// was written. Popping the top on '}' is exactly "the innermost group
-	// still open" — LIFO order matches brace nesting order.
-	var starts []int
+	var stack []frame
 	resolved := 0
 
 	for i := 0; i < len(s); i++ {
+		if s[i] == '{' && i+1 < len(s) && s[i+1] == '{' {
+			if end, ok := mergeFieldSpan(s, i); ok {
+				out = append(out, s[i:end]...)
+				i = end - 1
+				continue
+			}
+		}
 		c := s[i]
 		switch {
 		case c == '{':
-			starts = append(starts, len(out))
+			stack = append(stack, frame{start: len(out)})
 			out = append(out, '{')
-		case c == '}' && len(starts) > 0:
-			start := starts[len(starts)-1]
-			starts = starts[:len(starts)-1]
-			inner := out[start+1:]
-			if resolved < maxIterations && !bytes.ContainsAny(inner, "{}") {
+		case c == '}' && len(stack) > 0:
+			f := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			inner := out[f.start+1:]
+			if !f.tainted && resolved < maxIterations {
 				if options := bytes.Split(inner, []byte("|")); len(options) > 1 {
 					choice := options[rng.IntN(len(options))]
-					out = append(out[:start], choice...)
+					out = append(out[:f.start], choice...)
 					resolved++
 					continue
 				}
 			}
+			// Left unresolved (no pipe, tainted, or cap reached): this
+			// group's braces stay literally in out, so whatever still
+			// encloses it now contains a real, unresolved nested group.
 			out = append(out, '}')
+			if len(stack) > 0 {
+				stack[len(stack)-1].tainted = true
+			}
 		default:
 			out = append(out, c)
 		}
 	}
 	return string(out)
+}
+
+// mergeFieldSpan looks for the doubled-brace merge-field token starting at
+// s[i:i+2]=="{{": the nearest subsequent "}}", provided nothing that looks
+// like the start of ANOTHER group ('{') appears first. That keeps the match
+// to a flat "{{...}}" shape — exactly what internal/worker/personalize
+// substitutes ({{first_name}}, {{custom.key}}, ...) — without trying to parse
+// anything more exotic between the braces. ok is false for a dangling/
+// unclosed "{{" or one that runs into a nested '{' first; the caller then
+// falls back to ordinary single-brace handling for both braces of the pair.
+//
+// Each call either returns in O(1) (the very next character is itself '{',
+// the common case inside a long run of genuine nested groups) or scans a
+// span it will not be asked to re-scan from this same starting shape, so
+// Expand's total cost stays O(len(s)) even under adversarial input built
+// from repeated "{{" runs.
+func mergeFieldSpan(s string, i int) (end int, ok bool) {
+	for j := i + 2; j+1 < len(s); j++ {
+		switch {
+		case s[j] == '{':
+			return 0, false
+		case s[j] == '}' && s[j+1] == '}':
+			return j + 2, true
+		}
+	}
+	return 0, false
 }
 
 // Seed derives a deterministic uint64 from parts via FNV-1a, for Expand.
@@ -98,16 +157,19 @@ func Expand(s string, seed uint64) string {
 // field its own independent draw: resolving the subject's option does not
 // determine the body's.
 //
-// FNV-1a is applied over the parts with no separator between them, so two
-// different part splits that happen to concatenate to the same bytes (e.g.
-// ("ab","c") vs ("a","bc")) would collide. This is safe for every actual call
-// site in this codebase: the first part is always a fixed-format UUID
-// (SendID or a step id), so no other real part sequence can concatenate to
-// the same bytes.
+// A NUL byte separates consecutive parts in the fold, so ("ab","c") and
+// ("a","bc") no longer hash to the same value. This changes Seed's output
+// for any multi-part input versus an earlier version of this function — that
+// is fine: no seed is ever persisted, and determinism only matters WITHIN a
+// retry, which recomputes the seed from the same parts every time regardless
+// of how the fold itself is defined.
 func Seed(parts ...string) uint64 {
 	h := fnv.New64a()
-	for _, p := range parts {
-		_, _ = h.Write([]byte(p)) // hash.Hash.Write never returns an error.
+	for i, p := range parts {
+		if i > 0 {
+			_, _ = h.Write([]byte{0}) // hash.Hash.Write never returns an error.
+		}
+		_, _ = h.Write([]byte(p))
 	}
 	return h.Sum64()
 }

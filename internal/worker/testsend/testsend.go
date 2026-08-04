@@ -91,7 +91,13 @@ func Handler(core Core, sender Mailer) func(context.Context, *asynq.Task) error 
 		// representative of what a real send of this step would produce.
 		subject := spintax.Expand(content.Subject, spintax.Seed(p.StepID, "subject"))
 		bodyText := spintax.Expand(content.BodyText, spintax.Seed(p.StepID, "body_text"))
-		bodyHTML := spintax.Expand(content.BodyHTML, spintax.Seed(p.StepID, "body_html"))
+		// Guarded like internal/worker/sequence.advance's identical check: an
+		// empty body has no HTML part to spin, and Expand's cost (a full
+		// scan of s) isn't worth paying on an empty string either.
+		bodyHTML := content.BodyHTML
+		if bodyHTML != "" {
+			bodyHTML = spintax.Expand(bodyHTML, spintax.Seed(p.StepID, "body_html"))
+		}
 		_, err = sender.Send(ctx,
 			mail.OutboundJob{
 				Provider: transport.Provider, Host: transport.SMTPHost, Port: transport.SMTPPort,
