@@ -289,6 +289,16 @@ type EmailOtpCode struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type IdempotencyKey struct {
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	Key          string             `json:"key"`
+	RequestHash  []byte             `json:"request_hash"`
+	StatusCode   *int32             `json:"status_code"`
+	ResponseBody []byte             `json:"response_body"`
+	ContentType  *string            `json:"content_type"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
 type List struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`

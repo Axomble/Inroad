@@ -28,6 +28,7 @@ import (
 	"github.com/inroad/inroad/internal/app/contact"
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
+	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
@@ -360,10 +361,27 @@ func run() error {
 		// of the api-key contract.
 		{pattern: "/api/v1/pulse", handler: pulse.NewHandler(pulse.NewService(pulse.NewPgStore(queries))).Routes()},
 	}
+	// Idempotency-Key replay cache: generic cross-cutting middleware, mounted
+	// inside every authenticated group (after RequireAuth resolves the
+	// principal) and before the domain routers. The workspace-id accessor is a
+	// small function seam rather than an import of app/auth — platform/*
+	// must never import app/* — using the non-writing UserFromContext (this
+	// middleware only ever runs inside an already-authenticated group, so a
+	// missing principal here is a programming error the middleware itself
+	// fails closed on, rather than the request-writing auth.WorkspaceID).
+	idempotencyStore := idempotency.NewPgStore(pool)
+	idempotencyMW := httpx.Idempotency(idempotencyStore, func(r *http.Request) (string, bool) {
+		p, ok := auth.UserFromContext(r.Context())
+		if !ok {
+			return "", false
+		}
+		return p.WorkspaceID, true
+	})
+
 	router := buildRouter(logger, public, []protectedGroup{
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
 		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
-	})
+	}, idempotencyMW)
 	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -409,7 +427,13 @@ type protectedGroup struct {
 // root, by auth.RequireAuth(verifiers...). A route added under a protected group
 // is therefore authenticated whether or not it wires up any middleware of its
 // own -- forgetting a per-domain guard can no longer expose a route.
-func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup) *chi.Mux {
+//
+// groupMiddleware applies to every protected group, AFTER RequireAuth (so it
+// can read the authenticated principal) and BEFORE the group's own domain
+// routers mount -- currently just the Idempotency-Key replay cache, which
+// needs an authenticated workspace and must run ahead of every handler it
+// might short-circuit a replay for.
+func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup, groupMiddleware ...func(http.Handler) http.Handler) *chi.Mux {
 	r := httpx.NewRouter(logger)
 	for _, m := range public {
 		r.Mount(m.pattern, m.handler)
@@ -417,6 +441,9 @@ func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup) *
 	for _, g := range groups {
 		r.Group(func(pr chi.Router) {
 			pr.Use(auth.RequireAuth(g.verifiers...))
+			for _, mw := range groupMiddleware {
+				pr.Use(mw)
+			}
 			for _, m := range g.mounts {
 				pr.Mount(m.pattern, m.handler)
 			}

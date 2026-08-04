@@ -9,6 +9,36 @@ import (
 	"context"
 )
 
+const purgeExpiredIdempotencyKeys = `-- name: PurgeExpiredIdempotencyKeys :one
+WITH deleted_idempotency_keys AS (
+    DELETE FROM idempotency_keys
+    WHERE (workspace_id, key) IN (
+        SELECT workspace_id, key FROM idempotency_keys
+        WHERE created_at < now() - interval '24 hours'
+        ORDER BY created_at LIMIT 5000
+    )
+    RETURNING 1
+)
+SELECT count(*)::bigint AS deleted_rows FROM deleted_idempotency_keys
+`
+
+// The Idempotency-Key replay cache (migration 000040) has its own fixed 24h
+// retention window, independent of the security-artifact purge above: once a
+// key falls out of window, a client retrying it is simply treated as a brand
+// new request, and the row is free to be reclaimed. Kept as a SEPARATE query
+// (not folded into PurgeExpiredSecurityArtifacts) because that query's own
+// doc deliberately scopes it to authentication/authorization artifacts; the
+// idempotency cache is an HTTP-layer concern, not a security artifact.
+// Batched at 5000 rows, same bound as the query above, to cap one sweep's
+// lock/IO footprint. The primary key is (workspace_id, key) rather than a
+// single id column, so the batching subquery selects that pair.
+func (q *Queries) PurgeExpiredIdempotencyKeys(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, purgeExpiredIdempotencyKeys)
+	var deleted_rows int64
+	err := row.Scan(&deleted_rows)
+	return deleted_rows, err
+}
+
 const purgeExpiredSecurityArtifacts = `-- name: PurgeExpiredSecurityArtifacts :one
 WITH
 deleted_sessions AS (

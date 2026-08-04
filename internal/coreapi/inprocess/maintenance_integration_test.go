@@ -60,3 +60,38 @@ func TestCleanupExpiredPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 		t.Fatalf("cleanup result: expired_exists=%t fresh_exists=%t", expiredExists, freshExists)
 	}
 }
+
+func TestPurgeIdempotencyKeysPurgesOnlyOutsideRetentionWindow(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+
+	ws := uuid.New() // idempotency_keys carries no FK to workspaces; any uuid pins tenancy here.
+	expiredKey, freshKey := "expired-"+uuid.NewString(), "fresh-"+uuid.NewString()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO idempotency_keys (workspace_id, key, request_hash, created_at)
+		VALUES
+			($1, $2, $3, now() - interval '25 hours'),
+			($1, $4, $3, now() - interval '1 hour')`,
+		ws, expiredKey, []byte("hash"), freshKey); err != nil {
+		t.Fatalf("seed idempotency_keys: %v", err)
+	}
+
+	deleted, err := (client{q: q}).PurgeIdempotencyKeys(ctx)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted < 1 {
+		t.Fatalf("deleted rows = %d, want at least 1", deleted)
+	}
+
+	var expiredExists, freshExists bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM idempotency_keys WHERE workspace_id = $1 AND key = $2),
+		       EXISTS(SELECT 1 FROM idempotency_keys WHERE workspace_id = $1 AND key = $3)`,
+		ws, expiredKey, freshKey).Scan(&expiredExists, &freshExists); err != nil {
+		t.Fatalf("verify idempotency_keys: %v", err)
+	}
+	if expiredExists || !freshExists {
+		t.Fatalf("purge result: expired_exists=%t fresh_exists=%t", expiredExists, freshExists)
+	}
+}
