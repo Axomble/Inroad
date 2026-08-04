@@ -428,6 +428,49 @@ func TestAdvanceSendsAndSchedulesNext(t *testing.T) {
 //
 // It is enqueued as a task, not called inline: the evaluation must read committed
 // state from outside the send path, so a scoring bug cannot fail a delivery.
+// TestAdvanceSpintaxIsByteIdenticalOnRetry proves the retry-safety property
+// spintax.Seed(job.SendID, ...) exists for: a "retried" job -- rebuilt fresh
+// from the same immutable DB row, so it carries the identical SendID and raw
+// spin content -- resolves the SAME variant both times, rather than rolling
+// a different one on each attempt. Modeled here as two entirely independent
+// handler invocations sharing one job value (standing in for two asynq
+// attempts of the same task, or a crash-and-reclaim): if the build path drew
+// fresh randomness instead of seeding on SendID, the two sends below would
+// disagree.
+func TestAdvanceSpintaxIsByteIdenticalOnRetry(t *testing.T) {
+	job := coreapi.StepSendJob{
+		EffectiveDailyCap: 100, ToEmail: "a@b.io",
+		SendID:   "22222222-2222-4222-8222-222222222222",
+		Subject:  "Hi {there|friend}",
+		BodyText: "{Thanks|Cheers} for reading",
+		BodyHTML: "<p>{Hello|Hi} world</p>",
+	}
+
+	first := &fakeSender{id: "<mid@x>"}
+	if err := run(t, &stubCore{job: job, claimOK: true}, first, &fakeEnq{}); err != nil {
+		t.Fatal(err)
+	}
+	second := &fakeSender{id: "<mid@x>"}
+	if err := run(t, &stubCore{job: job, claimOK: true}, second, &fakeEnq{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if first.sent.Subject != second.sent.Subject {
+		t.Fatalf("subject drifted across a retry: %q vs %q", first.sent.Subject, second.sent.Subject)
+	}
+	if first.sent.BodyText != second.sent.BodyText {
+		t.Fatalf("body text drifted across a retry: %q vs %q", first.sent.BodyText, second.sent.BodyText)
+	}
+	if first.sent.BodyHTML != second.sent.BodyHTML {
+		t.Fatalf("body html drifted across a retry: %q vs %q", first.sent.BodyHTML, second.sent.BodyHTML)
+	}
+	// Sanity: the spin groups actually resolved to a concrete option rather
+	// than passing through as literal, unresolved syntax.
+	if strings.Contains(first.sent.Subject, "|") || strings.Contains(first.sent.BodyText, "|") || strings.Contains(first.sent.BodyHTML, "|") {
+		t.Fatalf("spintax was not resolved: subject=%q body_text=%q body_html=%q", first.sent.Subject, first.sent.BodyText, first.sent.BodyHTML)
+	}
+}
+
 func TestAdvanceEnqueuesABreakerEvaluationAfterDelivery(t *testing.T) {
 	core := &stubCore{
 		job: coreapi.StepSendJob{

@@ -229,6 +229,38 @@ func TestHandlerZeroizesTheCredentialAfterSend(t *testing.T) {
 	}
 }
 
+// TestHandlerResolvesSpintaxByStepID proves the preview resolves
+// "{option|option}" spin syntax through the same Expand-then-personalize
+// pipeline the real send path uses (internal/worker/sequence.advance),
+// keyed on the step id -- the stable id available here, since a preview has
+// no sends row and therefore no SendID. Two previews of the SAME step must
+// pick the SAME option: that determinism is the point of seeding on an id
+// rather than drawing fresh randomness per call.
+func TestHandlerResolvesSpintaxByStepID(t *testing.T) {
+	core := &stubCore{
+		content: coreapi.TestSendContent{
+			Subject: "Hi {{first_name}}, {this|that}", BodyText: "T", BodyHTML: "<p>H</p>",
+			FirstName: "Alex", Company: "Acme",
+		},
+		transport: coreapi.SenderTransport{Provider: "smtp"},
+	}
+	mailer1, mailer2 := &stubMailer{}, &stubMailer{}
+
+	if err := Handler(core, mailer1)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	if err := Handler(core, mailer2)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	if mailer1.msg.Subject != mailer2.msg.Subject {
+		t.Fatalf("spin pick drifted across two previews of the same step: %q vs %q", mailer1.msg.Subject, mailer2.msg.Subject)
+	}
+	if mailer1.msg.Subject != "[Test] Hi Alex, this" && mailer1.msg.Subject != "[Test] Hi Alex, that" {
+		t.Fatalf("subject = %q, want the spin group resolved to one concrete option", mailer1.msg.Subject)
+	}
+}
+
 func TestHandlerRejectsMalformedPayload(t *testing.T) {
 	task := asynq.NewTask(queue.TaskTestSend, []byte("not json"))
 	if err := Handler(&stubCore{}, &stubMailer{})(context.Background(), task); err == nil {

@@ -191,7 +191,8 @@ export function StepForm({
           {...register('body_text')}
         />
         <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">
-          {'{{first_name}}'} and {'{{email}}'} are personalized per contact
+          {'{{first_name}}'} and {'{{email}}'} are personalized per contact — {'{option a|option b}'}{' '}
+          spins a random variant per send
         </span>
       </div>
 

@@ -22,6 +22,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/spintax"
 	"github.com/inroad/inroad/internal/worker/personalize"
 )
 
@@ -80,6 +81,17 @@ func Handler(core Core, sender Mailer) func(context.Context, *asynq.Task) error 
 		// production sends use: HTML-escaped in the HTML body, raw in text/subject
 		// (personalize.Text vs personalize.HTML — see personalize.go).
 		vars := personalize.Vars{FirstName: content.FirstName, Company: content.Company}
+		// Spin BEFORE personalize (an option's text may itself contain a
+		// merge field), matching the real send path in
+		// internal/worker/sequence.advance. Seeded on the step id — the
+		// stable id available here, since a preview has no sends row and
+		// therefore no SendID — rather than a contact-specific send id: a
+		// test-send isn't any one contact's send, but resolving the SAME
+		// way for the SAME step makes the preview structurally
+		// representative of what a real send of this step would produce.
+		subject := spintax.Expand(content.Subject, spintax.Seed(p.StepID, "subject"))
+		bodyText := spintax.Expand(content.BodyText, spintax.Seed(p.StepID, "body_text"))
+		bodyHTML := spintax.Expand(content.BodyHTML, spintax.Seed(p.StepID, "body_html"))
 		_, err = sender.Send(ctx,
 			mail.OutboundJob{
 				Provider: transport.Provider, Host: transport.SMTPHost, Port: transport.SMTPPort,
@@ -88,9 +100,9 @@ func Handler(core Core, sender Mailer) func(context.Context, *asynq.Task) error 
 			},
 			mail.Message{
 				FromEmail: transport.FromEmail, FromName: transport.FromName, To: p.To,
-				Subject:  testSendSubjectPrefix + personalize.Text(content.Subject, vars),
-				BodyText: personalize.Text(content.BodyText, vars),
-				BodyHTML: personalize.HTML(content.BodyHTML, vars),
+				Subject:  testSendSubjectPrefix + personalize.Text(subject, vars),
+				BodyText: personalize.Text(bodyText, vars),
+				BodyHTML: personalize.HTML(bodyHTML, vars),
 				// ListUnsubscribe / InReplyTo / References deliberately left empty:
 				// a test-send is never subject to the real unsubscribe/suppression/
 				// threading machinery, and nothing is persisted to sends.

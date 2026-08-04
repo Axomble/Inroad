@@ -17,6 +17,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/spintax"
 	"github.com/inroad/inroad/internal/worker/personalize"
 	"github.com/inroad/inroad/internal/worker/track"
 )
@@ -279,11 +280,18 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			FirstName: job.Vars.FirstName, LastName: job.Vars.LastName,
 			Email: job.Vars.Email, Company: job.Vars.Company, Custom: job.Vars.Custom,
 		}
-		subject := personalize.Text(job.Subject, vars)
-		bodyText := withUnsubText(personalize.Text(job.BodyText, vars), job.UnsubURL)
+		// Spin BEFORE personalize: an option's text may itself contain a
+		// merge field ({{first_name}}), so it must still be substituted
+		// after the pick is made. Seeded on the job's deterministic SendID
+		// (not a fresh random draw) so a retried job — reclaimed after a
+		// crash, or replayed by asynq — resolves the SAME variant it would
+		// have sent the first time, one independent draw per field so the
+		// subject's pick never determines the body's.
+		subject := personalize.Text(spintax.Expand(job.Subject, spintax.Seed(job.SendID, "subject")), vars)
+		bodyText := withUnsubText(personalize.Text(spintax.Expand(job.BodyText, spintax.Seed(job.SendID, "body_text")), vars), job.UnsubURL)
 		bodyHTML := ""
 		if job.BodyHTML != "" {
-			bodyHTML = withUnsubHTML(personalize.HTML(job.BodyHTML, vars), job.UnsubURL)
+			bodyHTML = withUnsubHTML(personalize.HTML(spintax.Expand(job.BodyHTML, spintax.Seed(job.SendID, "body_html")), vars), job.UnsubURL)
 			// Tracking rewrite runs AFTER the unsub footer so the unsubscribe
 			// link is present in the body when RewriteHTML skips it (never
 			// click-tracked). Uses the pre-derived SendID (== the claimed row id).

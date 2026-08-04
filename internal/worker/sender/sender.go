@@ -113,6 +113,14 @@ func Handler(core coreapi.Client, sender Sender, enq DelayedSendEnqueuer, public
 		}
 
 		// Subject is a header, treated as text: no HTML escape.
+		//
+		// Deliberately NOT spintax-expanded (see internal/platform/spintax,
+		// wired into internal/worker/sequence.advance and
+		// internal/worker/testsend): this handler builds SendJob from its OWN
+		// query (internal/coreapi/inprocess/sendjob.go), separate from the
+		// step path's StepSendJob builder, and this whole handler is dormant
+		// (EnqueueSends has no production caller — see the ClaimSend comment
+		// above). Wire spintax here too if this path is ever revived.
 		vars := personalize.Vars{FirstName: job.FirstName, Email: job.ToEmail}
 		subject := personalize.Text(job.Subject, vars)
 		bodyText := withUnsubText(personalize.Text(job.BodyText, vars), job.UnsubURL)
