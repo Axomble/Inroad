@@ -15,6 +15,14 @@ import (
 // truncated.
 const idempotencyMaxBody = 64 * 1024
 
+// idempotencyMaxRequestBody caps how much of the REQUEST body this middleware
+// itself buffers to compute the request hash. A body larger than this is not
+// a reason to reject or delay a legitimate large upload: the guard is simply
+// skipped for that one request (Idempotency-Skipped: request-too-large),
+// while the wrapped handler still sees the full, original body byte for
+// byte.
+const idempotencyMaxRequestBody = 1 << 20 // 1 MiB
+
 // idempotencyHeader is the client-supplied replay key.
 const idempotencyHeader = "Idempotency-Key"
 
@@ -43,21 +51,26 @@ type IdempotencyRecord struct {
 // app/idempotency package's PgStore satisfies it structurally; cmd/inroad
 // wires that concrete store in here.
 type IdempotencyStore interface {
-	// TryInsert attempts to claim a fresh row for (workspaceID, key) with the
-	// given request hash. inserted=true means this call WON the race and owns
-	// running the handler + recording its response; inserted=false means a
-	// row already existed and the caller must Get it to resolve the conflict.
+	// TryInsert attempts to claim (workspaceID, key) with the given request
+	// hash. inserted=true means this call WON the race and owns running the
+	// handler + recording its response — either a fresh row, or an EXPIRED
+	// conflicting row reclaimed atomically (rule 6: a matched-but-expired row
+	// is treated as absent, regardless of whether its old hash matches this
+	// request). inserted=false means a row still inside its retention window
+	// already exists and the caller must Get it to resolve the conflict.
 	TryInsert(ctx context.Context, workspaceID, key string, requestHash []byte) (inserted bool, err error)
-	// Get loads the existing row for (workspaceID, key). found=false means no
-	// row exists at all. The read path is deliberately pure: it does not
-	// filter by age — only the maintenance sweep purges rows past their 24h
-	// retention window (rule 6).
+	// Get loads the existing (non-expired) row for (workspaceID, key).
+	// found=false means no live row exists.
 	Get(ctx context.Context, workspaceID, key string) (IdempotencyRecord, bool, error)
 	// SetResponse persists the wrapped handler's outcome for (workspaceID,
 	// key): its real status/body/content-type, or the uncacheable sentinel
 	// (statusCode=0, body=nil, contentType="") when the response exceeded the
-	// cache cap.
+	// cache cap. Never called for a >= 500 response — see Delete.
 	SetResponse(ctx context.Context, workspaceID, key string, statusCode int, body []byte, contentType string) error
+	// Delete releases the claim row after a >= 500 response, so a same-key
+	// retry re-executes rather than replaying (or being permanently blocked
+	// behind) a transient server error.
+	Delete(ctx context.Context, workspaceID, key string) error
 }
 
 // WorkspaceIDFunc resolves the authenticated caller's workspace id from the
@@ -84,8 +97,16 @@ type WorkspaceIDFunc func(r *http.Request) (workspaceID string, ok bool)
 //  4. Conflicting row, same hash, no response yet (concurrent in-flight):
 //     409 idempotency_in_flight.
 //  5. Conflicting row, different hash: 422 idempotency_key_reuse.
-//  6. Rows older than 24h are purged by the maintenance sweep, not filtered
-//     here — the read path stays pure.
+//  6. A matched-but-expired (> 24h) row is treated as absent: TryInsert
+//     atomically reclaims it (any hash), so the request runs as if it were
+//     fresh. The maintenance sweep is the physical storage reclaimer for a
+//     key that is never reused.
+//  7. A request body over 1 MiB is not hashed/guarded at all — pass through
+//     untouched (Idempotency-Skipped: request-too-large) rather than reject a
+//     legitimate large upload or buffer it unbounded.
+//  8. A >= 500 response is never cached: the claim row is deleted so a
+//     same-key retry re-executes (transient server errors must not be locked
+//     in for 24h).
 func Idempotency(store IdempotencyStore, workspaceID WorkspaceIDFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,12 +123,18 @@ func Idempotency(store IdempotencyStore, workspaceID WorkspaceIDFunc) func(http.
 				return
 			}
 
-			body, err := io.ReadAll(r.Body)
+			body, tooLarge, err := readCappedBody(r, idempotencyMaxRequestBody)
 			if err != nil {
 				Error(w, http.StatusBadRequest, "invalid body")
 				return
 			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
+			if tooLarge {
+				slog.WarnContext(r.Context(), "idempotency: request body exceeds guard cap; skipping",
+					"workspace_id", ws, "key", key, "cap_bytes", idempotencyMaxRequestBody)
+				w.Header().Set("Idempotency-Skipped", "request-too-large")
+				next.ServeHTTP(w, r)
+				return
+			}
 
 			hash := idempotencyRequestHash(r.Method, r.URL.Path, body)
 
@@ -130,9 +157,13 @@ func Idempotency(store IdempotencyStore, workspaceID WorkspaceIDFunc) func(http.
 			}
 			if !found {
 				// TryInsert reported a conflict but the row can't be found: an
-				// invariant violation (never happens against Postgres under
-				// ON CONFLICT DO NOTHING RETURNING + a same-key Get). Fail
-				// closed rather than silently treat this as a fresh request.
+				// invariant violation. It is NOT the normal expiry path (that is
+				// TryInsert's own atomic reclaim, which never reaches this
+				// branch) — this only fires if the row aged out or was purged in
+				// the few-nanosecond gap between that INSERT and this SELECT.
+				// Fail closed rather than silently treat this as a fresh
+				// request, which would risk a double-run against a concurrent
+				// racer that observes the same gap.
 				slog.ErrorContext(r.Context(), "idempotency: conflicting row not found; store inconsistency", "workspace_id", ws, "key", key)
 				Error(w, http.StatusInternalServerError, "idempotency check failed")
 				return
@@ -162,12 +193,31 @@ func Idempotency(store IdempotencyStore, workspaceID WorkspaceIDFunc) func(http.
 // runAndRecordIdempotent runs the wrapped handler behind a capped response
 // recorder and persists its outcome. Called only after this request has WON
 // the TryInsert race for (workspaceID, key), so it is solely responsible for
-// eventually giving the row a response (or the uncacheable sentinel).
+// eventually giving the row a response (or releasing the claim).
 func runAndRecordIdempotent(store IdempotencyStore, workspaceID, key string, next http.Handler, w http.ResponseWriter, r *http.Request) {
 	rec := &idempotencyRecorder{ResponseWriter: w, status: http.StatusOK}
 	next.ServeHTTP(rec, r)
 
 	ctx := r.Context()
+
+	// A transient server error must not be locked in for 24h — neither
+	// replayed as a cached failure nor (worse) turned into a permanent
+	// idempotency_uncacheable 409 by the tooLarge branch below. Checked FIRST
+	// so it takes priority over tooLarge: a huge 5xx body is released, not
+	// marked uncacheable. Mirrors common public-API idempotency practice
+	// (e.g. Stripe): only 2xx/3xx/4xx outcomes are cached.
+	if rec.status >= http.StatusInternalServerError {
+		if err := store.Delete(ctx, workspaceID, key); err != nil {
+			// The claim row is left in place until it is next reclaimed (rule
+			// 6, on any future request for this key) or physically purged by
+			// the maintenance sweep — bounded at 24h either way, never
+			// permanent, so a failure here degrades to "this key stays
+			// blocked for at most a day" rather than a stuck lock.
+			slog.ErrorContext(ctx, "idempotency: failed to release claim after server error", "err", err)
+		}
+		return
+	}
+
 	if rec.tooLarge {
 		slog.WarnContext(ctx, "idempotency: response exceeds cache cap; not recorded",
 			"workspace_id", workspaceID, "key", key, "bytes", rec.size, "cap_bytes", idempotencyMaxBody)
@@ -177,6 +227,9 @@ func runAndRecordIdempotent(store IdempotencyStore, workspaceID, key string, nex
 		return
 	}
 	if err := store.SetResponse(ctx, workspaceID, key, rec.status, rec.buf.Bytes(), rec.Header().Get("Content-Type")); err != nil {
+		// Same bounded-degradation note as above: a failed write leaves the
+		// row claimed-but-unset (reads as in-flight) until it is reclaimed or
+		// purged, at most 24h later — never indefinitely.
 		slog.ErrorContext(ctx, "idempotency: failed to persist response", "err", err)
 	}
 }
@@ -217,6 +270,27 @@ func (rec *idempotencyRecorder) Write(p []byte) (int, error) {
 		}
 	}
 	return rec.ResponseWriter.Write(p)
+}
+
+// readCappedBody reads up to capBytes+1 bytes of r.Body to decide whether the
+// body fits the cap, and ALWAYS restores r.Body so the wrapped handler sees
+// the exact original stream byte for byte:
+//   - within the cap: body holds the (now fully buffered) content, and r.Body
+//     is reset to replay it.
+//   - over the cap: tooLarge=true, body is nil, and r.Body is reset to the
+//     already-read prefix followed by whatever remains unread on the
+//     original body — i.e. the untouched, full original stream.
+func readCappedBody(r *http.Request, capBytes int64) (body []byte, tooLarge bool, err error) {
+	prefix, err := io.ReadAll(io.LimitReader(r.Body, capBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(prefix)) > capBytes {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), r.Body))
+		return nil, true, nil
+	}
+	r.Body = io.NopCloser(bytes.NewReader(prefix))
+	return prefix, false, nil
 }
 
 // idempotencyRequestHash pins the exact request an Idempotency-Key was first

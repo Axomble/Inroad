@@ -30,10 +30,13 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 	return &PgStore{q: gen.New(pool)}
 }
 
-// TryInsert attempts to claim (workspaceID, key) with requestHash. A losing
-// INSERT ... ON CONFLICT DO NOTHING RETURNING returns pgx.ErrNoRows, which
-// this maps to inserted=false (a genuine conflict, not a failure) rather than
-// propagating the sentinel error to the caller.
+// TryInsert attempts to claim (workspaceID, key) with requestHash, atomically
+// reclaiming an EXPIRED conflicting row (see InsertIdempotencyKey's query
+// comment) rather than requiring a separate purge first. A conflict against
+// a row still inside its window makes the underlying
+// ON CONFLICT ... DO UPDATE ... WHERE not fire, so RETURNING yields no row
+// (pgx.ErrNoRows), which this maps to inserted=false (a genuine conflict, not
+// a failure) rather than propagating the sentinel error to the caller.
 func (s *PgStore) TryInsert(ctx context.Context, workspaceID, key string, requestHash []byte) (bool, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
@@ -96,4 +99,15 @@ func (s *PgStore) SetResponse(ctx context.Context, workspaceID, key string, stat
 		WorkspaceID:  ws,
 		Key:          key,
 	})
+}
+
+// Delete releases the claim row for (workspaceID, key). Called only after a
+// >= 500 response, so a same-key retry re-executes rather than replaying (or
+// being permanently blocked behind) a transient server error.
+func (s *PgStore) Delete(ctx context.Context, workspaceID, key string) error {
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
+	return s.q.DeleteIdempotencyKey(ctx, gen.DeleteIdempotencyKeyParams{WorkspaceID: ws, Key: key})
 }

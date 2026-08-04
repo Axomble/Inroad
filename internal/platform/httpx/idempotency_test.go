@@ -1,16 +1,24 @@
 package httpx_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
+
+// fakeStoreRetention mirrors the 24h retention window baked into the real
+// SQL (InsertIdempotencyKey's ON CONFLICT ... WHERE, GetIdempotencyKey's age
+// filter), so the fake models the SAME expiry semantics without a live DB.
+const fakeStoreRetention = 24 * time.Hour
 
 // fakeRow mirrors the persisted idempotency_keys row shape.
 type fakeRow struct {
@@ -18,7 +26,10 @@ type fakeRow struct {
 	statusCode  *int32
 	body        []byte
 	contentType string
+	createdAt   time.Time
 }
+
+func (r fakeRow) expired() bool { return time.Since(r.createdAt) >= fakeStoreRetention }
 
 // fakeIdempotencyStore is an in-memory httpx.IdempotencyStore fake — no DB, safe
 // for concurrent use so the concurrent in-flight test (rule 4) exercises a real
@@ -34,22 +45,29 @@ func newFakeStore() *fakeIdempotencyStore {
 
 func rowKey(workspaceID, key string) string { return workspaceID + "|" + key }
 
+// TryInsert mirrors InsertIdempotencyKey's ON CONFLICT (workspace_id, key) DO
+// UPDATE ... WHERE created_at < now() - interval '24 hours': a conflict
+// against a row still inside its window is left untouched (inserted=false,
+// same as ON CONFLICT DO NOTHING); a conflict against an EXPIRED row is
+// reclaimed unconditionally — regardless of its old hash — exactly as if it
+// had never existed.
 func (f *fakeIdempotencyStore) TryInsert(_ context.Context, workspaceID, key string, requestHash []byte) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := rowKey(workspaceID, key)
-	if _, exists := f.rows[k]; exists {
+	if existing, exists := f.rows[k]; exists && !existing.expired() {
 		return false, nil
 	}
-	f.rows[k] = fakeRow{requestHash: requestHash}
+	f.rows[k] = fakeRow{requestHash: requestHash, createdAt: time.Now()}
 	return true, nil
 }
 
+// Get mirrors GetIdempotencyKey's age filter: an expired row reads as absent.
 func (f *fakeIdempotencyStore) Get(_ context.Context, workspaceID, key string) (httpx.IdempotencyRecord, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	row, ok := f.rows[rowKey(workspaceID, key)]
-	if !ok {
+	if !ok || row.expired() {
 		return httpx.IdempotencyRecord{}, false, nil
 	}
 	return httpx.IdempotencyRecord{
@@ -73,10 +91,31 @@ func (f *fakeIdempotencyStore) SetResponse(_ context.Context, workspaceID, key s
 	return nil
 }
 
+// Delete mirrors DeleteIdempotencyKey: releases the claim row entirely.
+func (f *fakeIdempotencyStore) Delete(_ context.Context, workspaceID, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.rows, rowKey(workspaceID, key))
+	return nil
+}
+
 func (f *fakeIdempotencyStore) rowCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.rows)
+}
+
+// ageRow rewrites an EXISTING row's createdAt to simulate it having been
+// created `age` ago — the only way to exercise the 24h-expiry branches
+// against a row a real request already produced, without waiting 24h in a
+// unit test.
+func (f *fakeIdempotencyStore) ageRow(workspaceID, key string, age time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := rowKey(workspaceID, key)
+	row := f.rows[k]
+	row.createdAt = time.Now().Add(-age)
+	f.rows[k] = row
 }
 
 func fixedWorkspace(workspaceID string) httpx.WorkspaceIDFunc {
@@ -120,6 +159,10 @@ func (alwaysConflictNeverFoundStore) Get(context.Context, string, string) (httpx
 }
 
 func (alwaysConflictNeverFoundStore) SetResponse(context.Context, string, string, int, []byte, string) error {
+	return nil
+}
+
+func (alwaysConflictNeverFoundStore) Delete(context.Context, string, string) error {
 	return nil
 }
 
@@ -439,5 +482,183 @@ func TestConflictRowMissingFailsClosed(t *testing.T) {
 	}
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (a conflict row must exist; a miss is a store inconsistency)", rec.Code)
+	}
+}
+
+// Rule 6: a matched-but-expired (> 24h) row is treated as absent — reclaimed
+// atomically by TryInsert rather than requiring the maintenance sweep to
+// physically delete it first. Same hash as the expired row: the request
+// still runs fresh, not a replay.
+func TestExpiredSameHashRunsFresh(t *testing.T) {
+	store := newFakeStore()
+	var calls int32
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
+
+	body := `{"a":1}`
+	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
+	first.Header.Set("Idempotency-Key", "k1")
+	mw.ServeHTTP(httptest.NewRecorder(), first)
+	if calls != 1 {
+		t.Fatalf("setup: handler calls = %d, want 1", calls)
+	}
+
+	store.ageRow("ws-1", "k1", fakeStoreRetention+time.Minute) // push the row past its 24h window
+
+	second := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
+	second.Header.Set("Idempotency-Key", "k1")
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, second)
+
+	if calls != 2 {
+		t.Fatalf("handler calls = %d, want 2 (an expired row — even with the SAME hash — must run fresh, not replay)", calls)
+	}
+	if rec.Header().Get("Idempotency-Replayed") == "true" {
+		t.Fatal("an expired row must never be replayed")
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+}
+
+// Rule 6, different-hash variant: an expired row is reclaimed for ANY new
+// request under that key, not just a retry of the request that created it —
+// no idempotency_key_reuse, and no replay.
+func TestExpiredDifferentHashRunsFreshWithoutKeyReuseError(t *testing.T) {
+	store := newFakeStore()
+	var calls int32
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, `{"id":2}`))
+
+	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
+	first.Header.Set("Idempotency-Key", "k1")
+	mw.ServeHTTP(httptest.NewRecorder(), first)
+	if calls != 1 {
+		t.Fatalf("setup: handler calls = %d, want 1", calls)
+	}
+
+	store.ageRow("ws-1", "k1", fakeStoreRetention+time.Minute)
+
+	second := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":2}`)) // DIFFERENT body -> different hash
+	second.Header.Set("Idempotency-Key", "k1")
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, second)
+
+	if calls != 2 {
+		t.Fatalf("handler calls = %d, want 2 (an expired row must be reclaimed for ANY new request, regardless of its old hash)", calls)
+	}
+	if rec.Code == http.StatusUnprocessableEntity {
+		t.Fatal("an expired row must never produce idempotency_key_reuse")
+	}
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+}
+
+// The 1 MiB request-body guard cap: a request body larger than the cap is
+// passed through UNCHANGED — the handler still sees the full, original body
+// byte for byte — rather than rejected or partially buffered, and the
+// idempotency guard is skipped entirely for that request (nothing persisted).
+func TestOverCapRequestBodyPassesThroughUnrecorded(t *testing.T) {
+	store := newFakeStore()
+	big := bytes.Repeat([]byte("y"), 1<<20+100) // 100 bytes over the 1 MiB request-body guard cap
+	var got []byte
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		got, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("handler body read: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(handler)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", bytes.NewReader(big))
+	req.Header.Set("Idempotency-Key", "k1")
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, req)
+
+	if !bytes.Equal(got, big) {
+		t.Fatalf("handler body = %d bytes, want %d bytes matching the original exactly", len(got), len(big))
+	}
+	if rec.Header().Get("Idempotency-Skipped") != "request-too-large" {
+		t.Fatalf("Idempotency-Skipped header = %q, want request-too-large", rec.Header().Get("Idempotency-Skipped"))
+	}
+	if n := store.rowCount(); n != 0 {
+		t.Fatalf("store rows = %d, want 0 (an over-cap request body must never be guarded)", n)
+	}
+}
+
+// A >= 500 response is never cached: the claim row is released so a same-key
+// retry re-executes the handler rather than being blocked or replaying the
+// failure.
+func TestServerErrorReleasesClaimAndRetryReRuns(t *testing.T) {
+	store := newFakeStore()
+	var calls int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(handler)
+
+	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
+	first.Header.Set("Idempotency-Key", "k1")
+	rec1 := httptest.NewRecorder()
+	mw.ServeHTTP(rec1, first)
+
+	if rec1.Code != http.StatusInternalServerError {
+		t.Fatalf("first status = %d, want 500", rec1.Code)
+	}
+	if n := store.rowCount(); n != 0 {
+		t.Fatalf("store rows = %d, want 0 (a >= 500 response must release the claim immediately)", n)
+	}
+
+	second := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
+	second.Header.Set("Idempotency-Key", "k1")
+	rec2 := httptest.NewRecorder()
+	mw.ServeHTTP(rec2, second)
+
+	if calls != 2 {
+		t.Fatalf("handler calls = %d, want 2 (a retry after a 500 must re-run the handler, not be blocked or replayed)", calls)
+	}
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200", rec2.Code)
+	}
+}
+
+// A 4xx (client error) response, unlike a 5xx, IS cached and replayed like
+// any other outcome.
+func TestClientErrorIsCachedAndReplayed(t *testing.T) {
+	store := newFakeStore()
+	var calls int32
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusUnprocessableEntity, `{"error":"bad"}`))
+
+	body := `{"a":1}`
+	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
+	first.Header.Set("Idempotency-Key", "k1")
+	rec1 := httptest.NewRecorder()
+	mw.ServeHTTP(rec1, first)
+
+	if rec1.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("first status = %d, want 422", rec1.Code)
+	}
+
+	second := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
+	second.Header.Set("Idempotency-Key", "k1")
+	rec2 := httptest.NewRecorder()
+	mw.ServeHTTP(rec2, second)
+
+	if calls != 1 {
+		t.Fatalf("handler calls = %d, want 1 (a cached 4xx must be replayed, not re-run)", calls)
+	}
+	if rec2.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("replayed status = %d, want 422", rec2.Code)
+	}
+	if rec2.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatal(`expected "Idempotency-Replayed: true" header on replay of a cached 4xx`)
 	}
 }
