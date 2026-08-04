@@ -196,6 +196,41 @@ func TestComputePreflightDomainAuthUncheckedWarnsWithRecheckRemedy(t *testing.T)
 	}
 }
 
+// When a campaign's pool spans domains in BOTH states at once (one failing
+// SPF/DMARC, another never checked), the single domain_auth row must name
+// both -- not silently drop one in favor of the other.
+func TestComputePreflightDomainAuthMentionsBothFailingAndUncheckedWhenBothExist(t *testing.T) {
+	in := healthyInput()
+	in.Senders = []campaign.Sender{
+		{Email: "a@failing.test", Enabled: true, Status: "active", CapToday: 10},
+		{Email: "b@unchecked.test", Enabled: true, Status: "active", CapToday: 10},
+	}
+	in.DomainAuth = map[string]campaign.DomainAuthVerdict{
+		"failing.test": {Checked: true, SPFFound: false, DMARCFound: true},
+		// "unchecked.test" deliberately absent from the map.
+	}
+	report := campaign.ComputePreflight(in)
+	if !report.Ready {
+		t.Error("domain_auth is informational -- it must never fail preflight")
+	}
+	c := findCheck(t, report, campaign.CheckDomainAuth)
+	if c.Severity != campaign.SeverityWarn {
+		t.Errorf("domain_auth severity = %q, want warn", c.Severity)
+	}
+	if !strings.Contains(c.Detail, "failing.test") {
+		t.Errorf("detail = %q, want it to name the failing domain", c.Detail)
+	}
+	if !strings.Contains(c.Detail, "unchecked.test") {
+		t.Errorf("detail = %q, want it to ALSO name the unchecked domain, not just the failing one", c.Detail)
+	}
+	if !strings.Contains(strings.ToLower(c.Remedy), "recheck") {
+		t.Errorf("remedy = %q, want it to still mention rechecking for the unchecked domain", c.Remedy)
+	}
+	if !strings.Contains(strings.ToLower(c.Remedy), "publish") {
+		t.Errorf("remedy = %q, want it to still mention publishing records for the failing domain", c.Remedy)
+	}
+}
+
 func TestComputePreflightNoSenderDomainsSkipsDomainAuthCleanly(t *testing.T) {
 	in := healthyInput()
 	in.Senders = []campaign.Sender{{Email: "not-an-email", Enabled: true, Status: "active"}}
@@ -336,10 +371,6 @@ type fakeCampaignStore struct {
 	audience    int64
 	audienceErr error
 
-	firstName, firstCompany string
-	firstFound              bool
-	firstErr                error
-
 	stepsErr, windowsErr error
 }
 
@@ -364,9 +395,6 @@ func (f *fakeCampaignStore) FallbackSender(context.Context, uuid.UUID, uuid.UUID
 }
 func (f *fakeCampaignStore) CountUnsuppressedAudience(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
 	return f.audience, f.audienceErr
-}
-func (f *fakeCampaignStore) FirstListContact(context.Context, uuid.UUID, uuid.UUID) (string, string, bool, error) {
-	return f.firstName, f.firstCompany, f.firstFound, f.firstErr
 }
 
 // Every remaining Store method is unused by these tests.

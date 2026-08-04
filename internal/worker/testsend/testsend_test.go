@@ -1,0 +1,237 @@
+package testsend
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/hibiken/asynq"
+
+	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/queue"
+)
+
+// stubCore is the mocked testsend.Core: it never touches a Keyring, an OAuth
+// token, or Postgres -- it just records the ids it was asked about and hands
+// back fixed content/transport.
+type stubCore struct {
+	content      coreapi.TestSendContent
+	contentErr   error
+	transport    coreapi.SenderTransport
+	transportErr error
+
+	contentCalls   [][3]string // {workspaceID, campaignID, stepID}
+	transportCalls [][2]string // {workspaceID, mailboxID}
+}
+
+func (s *stubCore) GetTestSendContent(_ context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error) {
+	s.contentCalls = append(s.contentCalls, [3]string{workspaceID, campaignID, stepID})
+	return s.content, s.contentErr
+}
+
+func (s *stubCore) ResolveSenderTransport(_ context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error) {
+	s.transportCalls = append(s.transportCalls, [2]string{workspaceID, mailboxID})
+	return s.transport, s.transportErr
+}
+
+// stubMailer is the mocked mail sender seam: it never dials out, it just
+// records the last message it was asked to send.
+type stubMailer struct {
+	calls int
+	tj    mail.OutboundJob
+	msg   mail.Message
+	err   error
+}
+
+func (m *stubMailer) Send(_ context.Context, tj mail.OutboundJob, msg mail.Message) (string, error) {
+	m.calls++
+	m.tj, m.msg = tj, msg
+	if m.err != nil {
+		return "", m.err
+	}
+	return "test-message-id", nil
+}
+
+func testSendTask(t *testing.T, p queue.TestSendPayload) *asynq.Task {
+	t.Helper()
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return asynq.NewTask(queue.TaskTestSend, b)
+}
+
+func defaultPayload() queue.TestSendPayload {
+	return queue.TestSendPayload{
+		CampaignID: "camp-1", StepID: "step-1", MailboxID: "mbox-1",
+		To: "preview@example.com", WorkspaceID: "ws-1",
+	}
+}
+
+// TestHandlerEscapesHTMLButLeavesTextAndSubjectRaw is the parity finding:
+// personalize.HTML html.EscapeString's every substituted value, personalize.
+// Text does not -- the SAME rule production sends apply (personalize.go).
+func TestHandlerEscapesHTMLButLeavesTextAndSubjectRaw(t *testing.T) {
+	core := &stubCore{
+		content: coreapi.TestSendContent{
+			Subject: "Hi {{first_name}}", BodyText: "Hi {{first_name}}", BodyHTML: "<p>Hi {{first_name}}</p>",
+			FirstName: "<b>Ada</b>", Company: "Ex & Co",
+		},
+		transport: coreapi.SenderTransport{FromEmail: "a@x.test", FromName: "Sender", Provider: "smtp"},
+	}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	if mailer.calls != 1 {
+		t.Fatalf("mailer calls = %d, want 1", mailer.calls)
+	}
+	if mailer.msg.Subject != "[Test] Hi <b>Ada</b>" {
+		t.Errorf("subject = %q, want the [Test] prefix and RAW (unescaped) first_name", mailer.msg.Subject)
+	}
+	if mailer.msg.BodyText != "Hi <b>Ada</b>" {
+		t.Errorf("body_text = %q, want RAW (unescaped) first_name", mailer.msg.BodyText)
+	}
+	if mailer.msg.BodyHTML != "<p>Hi &lt;b&gt;Ada&lt;/b&gt;</p>" {
+		t.Errorf("body_html = %q, want first_name HTML-escaped", mailer.msg.BodyHTML)
+	}
+}
+
+// TestHandlerFallsBackToSyntheticVarsWhenTheLoaderReportsThem proves the
+// worker renders whatever GetTestSendContent returns -- the fallback
+// substitution policy lives in the loader (coreapi), not here.
+func TestHandlerFallsBackToSyntheticVarsWhenTheLoaderReportsThem(t *testing.T) {
+	core := &stubCore{
+		content:   coreapi.TestSendContent{Subject: "Hi {{first_name}} from {{company}}", FirstName: "Alex", Company: "Acme"},
+		transport: coreapi.SenderTransport{Provider: "smtp"},
+	}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	if mailer.msg.Subject != "[Test] Hi Alex from Acme" {
+		t.Errorf("subject = %q", mailer.msg.Subject)
+	}
+}
+
+func TestHandlerSendsToTheRequestedRecipientWithNoTrackingOrThreadingHeaders(t *testing.T) {
+	core := &stubCore{
+		content: coreapi.TestSendContent{Subject: "S", BodyText: "T", BodyHTML: "<p>H</p>", FirstName: "Alex", Company: "Acme"},
+		transport: coreapi.SenderTransport{
+			FromEmail: "from@x.test", FromName: "From Name", Provider: "smtp",
+			SMTPHost: "smtp.x.test", SMTPPort: 587, SMTPUsername: "u", SMTPPassword: []byte("secret"),
+		},
+	}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	if mailer.msg.To != "preview@example.com" {
+		t.Errorf("To = %q, want the requested preview recipient", mailer.msg.To)
+	}
+	if mailer.msg.FromEmail != "from@x.test" || mailer.msg.FromName != "From Name" {
+		t.Errorf("from = %q/%q, want the resolved sender identity", mailer.msg.FromEmail, mailer.msg.FromName)
+	}
+	if mailer.msg.ListUnsubscribe != "" || mailer.msg.InReplyTo != "" || mailer.msg.References != "" {
+		t.Errorf("msg = %+v, want no unsubscribe/threading headers -- a test-send is never subject to that machinery", mailer.msg)
+	}
+	if mailer.tj.Provider != "smtp" || mailer.tj.Host != "smtp.x.test" || mailer.tj.Port != 587 ||
+		mailer.tj.Username != "u" || mailer.tj.Password != "secret" {
+		t.Errorf("outbound job = %+v, want the resolved transport", mailer.tj)
+	}
+}
+
+func TestHandlerPassesWorkspacePinnedIDsToCore(t *testing.T) {
+	core := &stubCore{transport: coreapi.SenderTransport{Provider: "smtp"}}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	if len(core.contentCalls) != 1 || core.contentCalls[0] != [3]string{"ws-1", "camp-1", "step-1"} {
+		t.Errorf("content calls = %+v, want [{ws-1 camp-1 step-1}]", core.contentCalls)
+	}
+	if len(core.transportCalls) != 1 || core.transportCalls[0] != [2]string{"ws-1", "mbox-1"} {
+		t.Errorf("transport calls = %+v, want [{ws-1 mbox-1}]", core.transportCalls)
+	}
+}
+
+func TestHandlerPropagatesContentLoadError(t *testing.T) {
+	boom := errors.New("db down")
+	core := &stubCore{contentErr: boom}
+	mailer := &stubMailer{}
+
+	err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated content-load error", err)
+	}
+	if mailer.calls != 0 {
+		t.Error("a content-load failure must not send anything")
+	}
+}
+
+func TestHandlerPropagatesTransportResolveError(t *testing.T) {
+	boom := errors.New("keyring unavailable")
+	core := &stubCore{transportErr: boom}
+	mailer := &stubMailer{}
+
+	err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated transport-resolve error", err)
+	}
+	if mailer.calls != 0 {
+		t.Error("a transport-resolve failure must not send anything")
+	}
+}
+
+func TestHandlerPropagatesTheSendError(t *testing.T) {
+	boom := errors.New("smtp: connection refused")
+	core := &stubCore{transport: coreapi.SenderTransport{Provider: "smtp"}}
+	mailer := &stubMailer{err: boom}
+
+	err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated send error", err)
+	}
+}
+
+// TestHandlerZeroizesTheCredentialAfterSend proves the decrypted secret is
+// wiped after use, mirroring internal/worker/sender's identical defer.
+func TestHandlerZeroizesTheCredentialAfterSend(t *testing.T) {
+	password := []byte("supersecret")
+	token := []byte("oauth-token")
+	core := &stubCore{transport: coreapi.SenderTransport{Provider: "smtp", SMTPPassword: password, AccessToken: token}}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	for _, b := range password {
+		if b != 0 {
+			t.Fatalf("SMTPPassword not zeroized: %v", password)
+		}
+	}
+	for _, b := range token {
+		if b != 0 {
+			t.Fatalf("AccessToken not zeroized: %v", token)
+		}
+	}
+	// The Mailer's own copy (a string, taken before the deferred zeroize runs)
+	// must be unaffected -- the same "string copy is immutable, only our buffer
+	// is wiped" rationale as internal/worker/sender.Handler.
+	if mailer.tj.Password != "supersecret" {
+		t.Errorf("mailer's password copy = %q, want it unaffected by the later zeroize", mailer.tj.Password)
+	}
+}
+
+func TestHandlerRejectsMalformedPayload(t *testing.T) {
+	task := asynq.NewTask(queue.TaskTestSend, []byte("not json"))
+	if err := Handler(&stubCore{}, &stubMailer{})(context.Background(), task); err == nil {
+		t.Fatal("err = nil, want an error for a malformed payload")
+	}
+}

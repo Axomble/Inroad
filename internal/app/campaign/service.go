@@ -35,20 +35,25 @@ type Enqueuer interface {
 // Checker interfaces, not on the sqlc-backed struct or other domains'
 // concrete stores -- dependency inversion.
 //
-// domainAuth/sender/mailer/limiter back the preflight report's domain_auth
+// domainAuth/testSendEnq/limiter back the preflight report's domain_auth
 // check and test-send respectively. They are all OPTIONAL (nil-safe: see
-// Service.readDomainAuth, TestSend's own nil checks, and
+// Service.readDomainAuth, TestSend's own nil check, and
 // checkTestSendRateLimit) and injected via ServiceOption rather than added as
 // NewService parameters, so every existing caller of NewService(store,
 // checker) -- and every existing unit test -- keeps compiling unchanged.
+//
+// Neither TestSend nor anything else in this package ever decrypts a mailbox
+// credential or dials a provider (docs/security.md invariant 1): test-send's
+// actual render+send is a testsend:send task, executed by
+// internal/worker/testsend in the execution plane. testSendEnq only enqueues
+// that task.
 type Service struct {
-	store      Store
-	checker    Checker
-	metrics    *metricsCache
-	domainAuth DomainAuthReader
-	sender     SenderResolver
-	mailer     Mailer
-	limiter    RateLimiter
+	store       Store
+	checker     Checker
+	metrics     *metricsCache
+	domainAuth  DomainAuthReader
+	testSendEnq TestSendEnqueuer
+	limiter     RateLimiter
 }
 
 // ServiceOption configures an optional Service dependency. See the Service
@@ -60,11 +65,10 @@ type ServiceOption func(*Service)
 // Service.readDomainAuth) rather than the loader failing.
 func WithDomainAuth(r DomainAuthReader) ServiceOption { return func(s *Service) { s.domainAuth = r } }
 
-// WithSenderResolver wires test-send's credential resolver.
-func WithSenderResolver(r SenderResolver) ServiceOption { return func(s *Service) { s.sender = r } }
-
-// WithMailer wires test-send's mail transport.
-func WithMailer(m Mailer) ServiceOption { return func(s *Service) { s.mailer = m } }
+// WithTestSendEnqueuer wires test-send's testsend:send task enqueue.
+func WithTestSendEnqueuer(e TestSendEnqueuer) ServiceOption {
+	return func(s *Service) { s.testSendEnq = e }
+}
 
 // WithRateLimiter wires test-send's abuse guard. Without it, test-send is
 // unlimited (see Service.checkTestSendRateLimit) -- a deployment choice made

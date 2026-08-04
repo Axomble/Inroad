@@ -218,8 +218,8 @@ func checkAudience(in PreflightInput) PreflightCheck {
 
 // checkDomainAuth warns (never fails -- it is informational, invariant 39)
 // when any sender domain is failing SPF or DMARC, or has never completed a
-// check. A failing verdict takes priority over an unchecked one in the
-// reported detail; both are severity warn.
+// check. When BOTH kinds of domain are present, the detail/remedy name both
+// sets rather than only the failing one.
 func checkDomainAuth(in PreflightInput) PreflightCheck {
 	var failing, unchecked []string
 	for _, d := range senderDomains(in.Senders) {
@@ -232,6 +232,14 @@ func checkDomainAuth(in PreflightInput) PreflightCheck {
 		}
 	}
 	switch {
+	case len(failing) > 0 && len(unchecked) > 0:
+		return PreflightCheck{
+			ID: CheckDomainAuth, Severity: SeverityWarn,
+			Title: "Sending domain authentication needs attention",
+			Detail: fmt.Sprintf("SPF or DMARC is missing for: %s. No completed check yet for: %s.",
+				strings.Join(failing, ", "), strings.Join(unchecked, ", ")),
+			Remedy: "Publish the missing SPF/DMARC records for the failing domain(s), and recheck domain authentication for the unchecked ones.",
+		}
 	case len(failing) > 0:
 		return PreflightCheck{
 			ID: CheckDomainAuth, Severity: SeverityWarn,
@@ -377,7 +385,7 @@ func (s *Service) Preflight(ctx context.Context, ws, campaignID uuid.UUID) (Pref
 	if err != nil {
 		return PreflightReport{}, err
 	}
-	senders, err := s.pool(ctx, ws, campaignID)
+	senders, err := s.loadSenderPool(ctx, ws, campaignID)
 	if err != nil {
 		return PreflightReport{}, err
 	}
@@ -394,24 +402,6 @@ func (s *Service) Preflight(ctx context.Context, ws, campaignID uuid.UUID) (Pref
 		AudienceCount: audience, DomainAuth: domainAuth,
 		TrackingEnabled: c.TrackingEnabled, DailyLimit: dailyLimit(c.DailyLimit),
 	}), nil
-}
-
-// pool loads the campaign's sender pool, falling back to the implicit
-// one-mailbox pool (campaigns.mailbox_id) when no campaign_senders rows exist
-// -- the same "never configured, not broken" projection GetSenders uses.
-func (s *Service) pool(ctx context.Context, ws, campaignID uuid.UUID) ([]Sender, error) {
-	senders, err := s.store.ListSenders(ctx, ws, campaignID)
-	if err != nil {
-		return nil, err
-	}
-	if len(senders) > 0 {
-		return senders, nil
-	}
-	fallback, err := s.store.FallbackSender(ctx, ws, campaignID)
-	if err != nil {
-		return nil, err
-	}
-	return []Sender{fallback}, nil
 }
 
 // readDomainAuth returns the workspace's domain-auth verdicts, or an empty

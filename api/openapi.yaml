@@ -1205,18 +1205,21 @@ paths:
       tags: [campaigns]
       security: [{ bearerAuth: [] }]
       description: >-
-        Renders one sequence step for a preview recipient and sends it
-        immediately through the campaign's first enabled+active pool mailbox.
-        Personalization uses the campaign list's first contact where one
-        exists, otherwise synthetic first_name=Alex, company=Acme. Nothing is
-        persisted to sends; tracking links are never rewritten and no
-        List-Unsubscribe header is set. Rate-limited (5/workspace/minute).
+        Validates the request (campaign/step ownership, an eligible sender
+        exists, rate limit) and enqueues an execution-plane task that renders
+        the step for a preview recipient and sends it through the campaign's
+        first enabled+active pool mailbox. Personalization uses the campaign
+        list's first contact where one exists, otherwise synthetic
+        first_name=Alex, company=Acme. Nothing is persisted to sends; tracking
+        links are never rewritten and no List-Unsubscribe header is set.
+        Rate-limited (5/workspace/minute). The send itself is asynchronous —
+        a 202 means the task was queued, not that delivery has completed.
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/TestSendRequest' } } }
       responses:
-        '202': { description: Sent, content: { application/json: { schema: { $ref: '#/components/schemas/TestSendResponse' } } } }
+        '202': { description: Queued, content: { application/json: { schema: { $ref: '#/components/schemas/TestSendResponse' } } } }
         '400': { description: "Invalid JSON, campaign id, step_id, or to address" }
         '401': { description: Unauthorized }
         '404': { description: Campaign or step not found }
@@ -2294,9 +2297,9 @@ components:
         to: { type: string, format: email }
     TestSendResponse:
       type: object
-      required: [sent]
+      required: [queued]
       properties:
-        sent: { type: boolean }
+        queued: { type: boolean }
 
     WarmupSettings:
       type: object

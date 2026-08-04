@@ -2,11 +2,9 @@ package campaign
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -107,11 +105,6 @@ type Store interface {
 	// are NOT on the workspace suppression list -- the preflight "audience"
 	// check's evidence (0 = fail).
 	CountUnsuppressedAudience(ctx context.Context, ws, campaignID uuid.UUID) (int64, error)
-	// FirstListContact returns the campaign list's earliest-added contact's
-	// personalization values, for test-send's real-contact preview. found is
-	// false for an empty list, where the caller substitutes the synthetic
-	// fallback vars.
-	FirstListContact(ctx context.Context, ws, campaignID uuid.UUID) (firstName, company string, found bool, err error)
 }
 
 // Checker validates cross-domain references belong to the workspace.
@@ -631,18 +624,4 @@ func (s *PgStore) DeleteDraft(ctx context.Context, ws, id uuid.UUID) error {
 
 func (s *PgStore) CountUnsuppressedAudience(ctx context.Context, ws, campaignID uuid.UUID) (int64, error) {
 	return s.q.CountUnsuppressedAudience(ctx, gen.CountUnsuppressedAudienceParams{ID: campaignID, WorkspaceID: ws})
-}
-
-// FirstListContact reads the campaign list's earliest-added contact. A
-// pgx.ErrNoRows (empty list) is (found=false, nil error) -- a legitimate "no
-// contact yet" answer the service falls back on, not a failure.
-func (s *PgStore) FirstListContact(ctx context.Context, ws, campaignID uuid.UUID) (string, string, bool, error) {
-	r, err := s.q.GetCampaignFirstContact(ctx, gen.GetCampaignFirstContactParams{ID: campaignID, WorkspaceID: ws})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", "", false, nil
-		}
-		return "", "", false, err
-	}
-	return r.FirstName, r.Company, true, nil
 }

@@ -123,9 +123,6 @@ func (f *fakeStore) ListEnrollments(context.Context, uuid.UUID, uuid.UUID, int32
 func (f *fakeStore) CountUnsuppressedAudience(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
 	return 0, nil
 }
-func (f *fakeStore) FirstListContact(context.Context, uuid.UUID, uuid.UUID) (string, string, bool, error) {
-	return "", "", false, nil
-}
 
 // noopChecker satisfies campaign.Checker; the lifecycle service methods never
 // consult it, but NewService requires one.

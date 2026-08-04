@@ -315,12 +315,14 @@ type testSendRequest struct {
 }
 
 type testSendResponse struct {
-	Sent bool `json:"sent"`
+	Queued bool `json:"queued"`
 }
 
-// testSend handles POST /campaigns/{id}/test-send: renders one sequence step
-// for a preview recipient and sends it immediately through the campaign's
-// first enabled+active pool mailbox. Nothing is persisted to sends.
+// testSend handles POST /campaigns/{id}/test-send: validates the request
+// (campaign/step ownership, rate limit, an eligible sender exists) and
+// enqueues a testsend:send task. Rendering and the actual send happen in the
+// execution plane (internal/worker/testsend) -- nothing here decrypts a
+// credential or dials a provider (docs/security.md invariant 1).
 func (h *Handler) testSend(w http.ResponseWriter, r *http.Request) {
 	ws, ok := auth.WorkspaceID(w, r)
 	if !ok {
@@ -357,7 +359,7 @@ func (h *Handler) testSend(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not send test email")
 	default:
-		httpx.JSON(w, http.StatusAccepted, testSendResponse{Sent: true})
+		httpx.JSON(w, http.StatusAccepted, testSendResponse{Queued: true})
 	}
 }
 

@@ -15,45 +15,33 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/platform/db/gen"
-	"github.com/inroad/inroad/internal/platform/mail"
 )
 
-// --- fakes: the mail sender seam, the credential resolver, the limiter -----
+// --- fakes: the enqueue seam, the limiter -----------------------------------
+//
+// ARCHITECTURE (docs/security.md invariant 1): cmd/inroad never decrypts a
+// mailbox credential or dials a provider. There is therefore no Mailer/
+// SenderResolver seam left in this package to mock -- TestSend's only
+// side effect is enqueuing a testsend:send task, which
+// internal/worker/testsend (a different process) renders and sends. Every
+// test below that asserts "err == nil" is implicitly also proving no send
+// happened API-side, because nothing capable of sending exists in this
+// package at all.
 
-type mailCall struct {
-	job mail.OutboundJob
-	msg mail.Message
+type testSendCall struct {
+	campaignID, stepID, mailboxID, to, workspaceID string
 }
 
-// fakeMailer is TestSend's mocked mail sender seam: it never dials out, it
-// just records what it was asked to send.
-type fakeMailer struct {
-	calls []mailCall
+// fakeTestSendEnqueuer is TestSend's mocked enqueue seam: it never touches
+// Redis, it just records the payload it was asked to enqueue.
+type fakeTestSendEnqueuer struct {
+	calls []testSendCall
 	err   error
 }
 
-func (f *fakeMailer) Send(_ context.Context, tj mail.OutboundJob, msg mail.Message) (string, error) {
-	f.calls = append(f.calls, mailCall{tj, msg})
-	if f.err != nil {
-		return "", f.err
-	}
-	return "test-message-id", nil
-}
-
-type resolveCall struct{ ws, mailboxID uuid.UUID }
-
-// fakeSenderResolver is the mocked credential resolver: it never touches a
-// Keyring or an OAuth token, it just hands back a fixed transport and records
-// which mailbox it was asked to resolve.
-type fakeSenderResolver struct {
-	transport campaign.SenderTransport
-	err       error
-	calls     []resolveCall
-}
-
-func (f *fakeSenderResolver) ResolveSenderTransport(_ context.Context, ws, mailboxID uuid.UUID) (campaign.SenderTransport, error) {
-	f.calls = append(f.calls, resolveCall{ws, mailboxID})
-	return f.transport, f.err
+func (f *fakeTestSendEnqueuer) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID string) error {
+	f.calls = append(f.calls, testSendCall{campaignID, stepID, mailboxID, to, workspaceID})
+	return f.err
 }
 
 // fakeRateLimiter is the mocked RateLimiter: allow/err are set per test,
@@ -72,55 +60,41 @@ func (f *fakeRateLimiter) Allow(_ context.Context, key string, _ int, _ time.Dur
 // --- Service.TestSend --------------------------------------------------------
 
 // testSendFixture bundles a ready-to-use campaign/step/store so most tests
-// only need to override what they're actually exercising.
+// only need to override what they're actually exercising. The step content
+// is irrelevant now (rendering moved to internal/worker/testsend) -- only its
+// id and campaign ownership matter here.
 func testSendFixture(ws, id, stepID uuid.UUID) *fakeCampaignStore {
 	return &fakeCampaignStore{
 		campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws}},
-		steps: []gen.SequenceStep{
-			{ID: stepID, Subject: "Hi {{first_name}} from {{company}}", BodyText: "text {{first_name}}", BodyHtml: "<p>{{company}}</p>"},
-		},
-		senders: []campaign.Sender{{MailboxID: uuid.New(), Email: "ok@x.test", Enabled: true, Status: "active"}},
+		steps:     []gen.SequenceStep{{ID: stepID}},
+		senders:   []campaign.Sender{{MailboxID: uuid.New(), Email: "ok@x.test", Enabled: true, Status: "active"}},
 	}
 }
 
-func TestTestSendPrefixesSubjectAndSkipsTrackingAndUnsub(t *testing.T) {
+func TestTestSendEnqueuesWithTheResolvedMailboxAndRequestFields(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
+	mailboxID := uuid.New()
 	store := testSendFixture(ws, id, stepID)
-	store.firstName, store.firstCompany, store.firstFound = "Ada", "Analytical Engines", true
+	store.senders = []campaign.Sender{{MailboxID: mailboxID, Email: "ok@x.test", Enabled: true, Status: "active"}}
 
-	mailer := &fakeMailer{}
-	resolver := &fakeSenderResolver{transport: campaign.SenderTransport{
-		FromEmail: "ok@x.test", FromName: "Ok Sender",
-		OutboundJob: mail.OutboundJob{Provider: "smtp"},
-	}}
+	enq := &fakeTestSendEnqueuer{}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(resolver), campaign.WithMailer(mailer), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
 
 	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err != nil {
 		t.Fatalf("TestSend: %v", err)
 	}
-	if len(mailer.calls) != 1 {
-		t.Fatalf("mailer calls = %d, want 1", len(mailer.calls))
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueue calls = %d, want 1", len(enq.calls))
 	}
-	got := mailer.calls[0].msg
-	if got.Subject != "[Test] Hi Ada from Analytical Engines" {
-		t.Errorf("subject = %q, want the [Test] prefix over the rendered subject", got.Subject)
+	got := enq.calls[0]
+	want := testSendCall{
+		campaignID: id.String(), stepID: stepID.String(), mailboxID: mailboxID.String(),
+		to: "preview@example.com", workspaceID: ws.String(),
 	}
-	if got.BodyText != "text Ada" {
-		t.Errorf("body_text = %q", got.BodyText)
-	}
-	if got.BodyHTML != "<p>Analytical Engines</p>" {
-		t.Errorf("body_html = %q, want the rendered template with no tracking rewrite", got.BodyHTML)
-	}
-	if got.ListUnsubscribe != "" {
-		t.Errorf("ListUnsubscribe = %q, want empty -- a test-send is never subject to suppression/unsubscribe", got.ListUnsubscribe)
-	}
-	if got.To != "preview@example.com" {
-		t.Errorf("To = %q, want the requested preview recipient (not the sample contact's own email)", got.To)
-	}
-	if got.FromEmail != "ok@x.test" || got.FromName != "Ok Sender" {
-		t.Errorf("from = %q/%q, want the resolved sender's identity", got.FromEmail, got.FromName)
+	if got != want {
+		t.Errorf("enqueued payload = %+v, want %+v", got, want)
 	}
 }
 
@@ -134,31 +108,15 @@ func TestTestSendSelectsTheFirstEnabledAndActiveMailbox(t *testing.T) {
 		{MailboxID: paused, Email: "paused@x.test", Enabled: true, Status: "paused"},
 		{MailboxID: eligible, Email: "eligible@x.test", Enabled: true, Status: "active"},
 	}
-	resolver := &fakeSenderResolver{}
+	enq := &fakeTestSendEnqueuer{}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(resolver), campaign.WithMailer(&fakeMailer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
 
 	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err != nil {
 		t.Fatalf("TestSend: %v", err)
 	}
-	if len(resolver.calls) != 1 || resolver.calls[0].mailboxID != eligible {
-		t.Errorf("resolver calls = %+v, want exactly the eligible mailbox %s", resolver.calls, eligible)
-	}
-}
-
-func TestTestSendFallsBackToSyntheticVarsWhenTheListIsEmpty(t *testing.T) {
-	ctx := context.Background()
-	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
-	store := testSendFixture(ws, id, stepID) // firstFound left false: no contact
-	mailer := &fakeMailer{}
-	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
-
-	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err != nil {
-		t.Fatalf("TestSend: %v", err)
-	}
-	if got := mailer.calls[0].msg.Subject; got != "[Test] Hi Alex from Acme" {
-		t.Errorf("subject = %q, want the synthetic fallback vars (first_name=Alex, company=Acme)", got)
+	if len(enq.calls) != 1 || enq.calls[0].mailboxID != eligible.String() {
+		t.Errorf("enqueue calls = %+v, want exactly the eligible mailbox %s", enq.calls, eligible)
 	}
 }
 
@@ -167,16 +125,16 @@ func TestTestSendReturns422WhenNoEligibleSender(t *testing.T) {
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
 	store.senders = []campaign.Sender{{MailboxID: uuid.New(), Email: "x@x.test", Enabled: false, Status: "active"}}
-	mailer := &fakeMailer{}
+	enq := &fakeTestSendEnqueuer{}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
 
 	err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com")
 	if !errors.Is(err, campaign.ErrNoEligibleSender) {
 		t.Fatalf("err = %v, want ErrNoEligibleSender", err)
 	}
-	if len(mailer.calls) != 0 {
-		t.Error("no eligible sender must not send anything")
+	if len(enq.calls) != 0 {
+		t.Error("no eligible sender must not enqueue anything")
 	}
 }
 
@@ -184,16 +142,16 @@ func TestTestSendCrossTenantIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	owner, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(owner, id, stepID)
-	mailer := &fakeMailer{}
+	enq := &fakeTestSendEnqueuer{}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
 
 	err := svc.TestSend(ctx, uuid.New(), id, stepID, "preview@example.com")
 	if !errors.Is(err, campaign.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	if len(mailer.calls) != 0 {
-		t.Error("a cross-tenant campaign id must not send anything")
+	if len(enq.calls) != 0 {
+		t.Error("a cross-tenant campaign id must not enqueue anything")
 	}
 }
 
@@ -201,16 +159,16 @@ func TestTestSendUnknownStepIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
-	mailer := &fakeMailer{}
+	enq := &fakeTestSendEnqueuer{}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
 
 	err := svc.TestSend(ctx, ws, id, uuid.New() /* not the fixture's step */, "preview@example.com")
 	if !errors.Is(err, campaign.ErrStepNotFound) {
 		t.Fatalf("err = %v, want ErrStepNotFound", err)
 	}
-	if len(mailer.calls) != 0 {
-		t.Error("an unknown step id must not send anything")
+	if len(enq.calls) != 0 {
+		t.Error("an unknown step id must not enqueue anything")
 	}
 }
 
@@ -218,17 +176,17 @@ func TestTestSendRateLimited(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
-	mailer := &fakeMailer{}
+	enq := &fakeTestSendEnqueuer{}
 	limiter := &fakeRateLimiter{allow: false}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer), campaign.WithRateLimiter(limiter))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(limiter))
 
 	err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com")
 	if !errors.Is(err, campaign.ErrTestSendRateLimited) {
 		t.Fatalf("err = %v, want ErrTestSendRateLimited", err)
 	}
-	if len(mailer.calls) != 0 {
-		t.Error("a rate-limited request must not send anything")
+	if len(enq.calls) != 0 {
+		t.Error("a rate-limited request must not enqueue anything")
 	}
 	if len(limiter.calls) != 1 || !strings.Contains(limiter.calls[0], ws.String()) {
 		t.Errorf("limiter key = %v, want it scoped to the workspace", limiter.calls)
@@ -241,17 +199,17 @@ func TestTestSendRateLimiterErrorFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
-	mailer := &fakeMailer{}
+	enq := &fakeTestSendEnqueuer{}
 	limiter := &fakeRateLimiter{allow: true, err: errors.New("redis unreachable")}
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer), campaign.WithRateLimiter(limiter))
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(limiter))
 
 	err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com")
 	if !errors.Is(err, campaign.ErrTestSendRateLimited) {
 		t.Fatalf("err = %v, want ErrTestSendRateLimited (fail closed on a limiter error)", err)
 	}
-	if len(mailer.calls) != 0 {
-		t.Error("a limiter error must not send anything")
+	if len(enq.calls) != 0 {
+		t.Error("a limiter error must not enqueue anything")
 	}
 }
 
@@ -261,39 +219,38 @@ func TestTestSendWithoutARateLimiterIsUnlimited(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
-	mailer := &fakeMailer{}
-	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(mailer))
+	enq := &fakeTestSendEnqueuer{}
+	svc := campaign.NewService(store, noopChecker{}, campaign.WithTestSendEnqueuer(enq))
 
 	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err != nil {
 		t.Fatalf("TestSend: %v", err)
 	}
-	if len(mailer.calls) != 1 {
-		t.Errorf("mailer calls = %d, want 1", len(mailer.calls))
+	if len(enq.calls) != 1 {
+		t.Errorf("enqueue calls = %d, want 1", len(enq.calls))
 	}
 }
 
-func TestTestSendWithoutSenderOrMailerConfiguredErrorsRatherThanPanics(t *testing.T) {
+func TestTestSendWithoutAnEnqueuerConfiguredErrorsRatherThanPanics(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
 	svc := campaign.NewService(store, noopChecker{}) // no test-send deps wired at all
 
 	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err == nil {
-		t.Fatal("err = nil, want an error when test-send has no resolver/mailer wired")
+		t.Fatal("err = nil, want an error when test-send has no enqueuer wired")
 	}
 }
 
-func TestTestSendPropagatesTheResolverError(t *testing.T) {
+func TestTestSendPropagatesTheEnqueueError(t *testing.T) {
 	ctx := context.Background()
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
-	boom := errors.New("keyring unavailable")
+	boom := errors.New("redis unavailable")
 	svc := campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{err: boom}), campaign.WithMailer(&fakeMailer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+		campaign.WithTestSendEnqueuer(&fakeTestSendEnqueuer{err: boom}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
 
 	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the propagated resolver error", err)
+		t.Fatalf("err = %v, want the propagated enqueue error", err)
 	}
 }
 
@@ -316,7 +273,8 @@ func serveTestSend(t *testing.T, h *campaign.Handler, secret []byte, ws, campaig
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/campaigns/"+campaignID.String()+"/test-send", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		"/campaigns/"+campaignID.String()+"/test-send", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 
 	root := chi.NewRouter()
@@ -327,12 +285,13 @@ func serveTestSend(t *testing.T, h *campaign.Handler, secret []byte, ws, campaig
 	return w
 }
 
-func TestTestSendHandlerReturns202AndSentTrue(t *testing.T) {
+func TestTestSendHandlerReturns202AndQueuedTrue(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(ws, id, stepID)
+	enq := &fakeTestSendEnqueuer{}
 	h := campaign.NewHandler(campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(&fakeMailer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
 		noopEnqueuer{})
 
 	body := `{"step_id":"` + stepID.String() + `","to":"preview@example.com"}`
@@ -341,8 +300,14 @@ func TestTestSendHandlerReturns202AndSentTrue(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("code = %d, want 202: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"sent":true`) {
-		t.Errorf("body = %s, want {\"sent\":true}", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"queued":true`) {
+		t.Errorf("body = %s, want {\"queued\":true}", w.Body.String())
+	}
+	// The request reached the enqueue seam -- and, by construction (there is no
+	// Mailer/SenderResolver left in this package, see the file-level comment),
+	// nothing was decrypted or dialed to produce this response.
+	if len(enq.calls) != 1 {
+		t.Fatalf("enqueue calls = %d, want 1", len(enq.calls))
 	}
 }
 
@@ -364,7 +329,7 @@ func TestTestSendHandlerRejectsInvalidBody(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := testSendFixture(ws, id, stepID)
 			h := campaign.NewHandler(campaign.NewService(store, noopChecker{},
-				campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(&fakeMailer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
+				campaign.WithTestSendEnqueuer(&fakeTestSendEnqueuer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
 				noopEnqueuer{})
 
 			w := serveTestSend(t, h, secret, ws, id, tc.body)
@@ -382,7 +347,7 @@ func TestTestSendHandlerReturns422ForNoEligibleSender(t *testing.T) {
 	store := testSendFixture(ws, id, stepID)
 	store.senders = []campaign.Sender{{MailboxID: uuid.New(), Email: "x@x.test", Enabled: false, Status: "active"}}
 	h := campaign.NewHandler(campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(&fakeMailer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
+		campaign.WithTestSendEnqueuer(&fakeTestSendEnqueuer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
 		noopEnqueuer{})
 
 	body := `{"step_id":"` + stepID.String() + `","to":"preview@example.com"}`
@@ -398,7 +363,7 @@ func TestTestSendHandlerCrossTenantIsNotFound(t *testing.T) {
 	owner, id, stepID := uuid.New(), uuid.New(), uuid.New()
 	store := testSendFixture(owner, id, stepID)
 	h := campaign.NewHandler(campaign.NewService(store, noopChecker{},
-		campaign.WithSenderResolver(&fakeSenderResolver{}), campaign.WithMailer(&fakeMailer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
+		campaign.WithTestSendEnqueuer(&fakeTestSendEnqueuer{}), campaign.WithRateLimiter(&fakeRateLimiter{allow: true})),
 		noopEnqueuer{})
 
 	intruder := uuid.New()

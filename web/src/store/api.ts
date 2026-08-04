@@ -1051,7 +1051,7 @@ export type GetCampaignPreflightApiArg = {
   id: string;
 };
 export type TestSendCampaignApiResponse =
-  /** status 202 Sent */ TestSendResponse;
+  /** status 202 Queued */ TestSendResponse;
 export type TestSendCampaignApiArg = {
   id: string;
   testSendRequest: TestSendRequest;
@@ -1749,7 +1749,7 @@ export type CampaignPreflight = {
   checks: CampaignPreflightCheck[];
 };
 export type TestSendResponse = {
-  sent: boolean;
+  queued: boolean;
 };
 export type TestSendRequest = {
   step_id: string;

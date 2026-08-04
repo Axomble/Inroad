@@ -91,18 +91,33 @@ func (s *Service) GetSenders(ctx context.Context, ws, campaignID uuid.UUID) (Sen
 	if err != nil {
 		return SenderPool{}, ErrNotFound
 	}
-	senders, err := s.store.ListSenders(ctx, ws, campaignID)
+	senders, err := s.loadSenderPool(ctx, ws, campaignID)
 	if err != nil {
 		return SenderPool{}, err
 	}
-	if len(senders) == 0 {
-		fallback, err := s.store.FallbackSender(ctx, ws, campaignID)
-		if err != nil {
-			return SenderPool{}, err
-		}
-		senders = []Sender{fallback}
-	}
 	return SenderPool{RotationMode: normalizeRotationMode(c.RotationMode), Senders: senders}, nil
+}
+
+// loadSenderPool returns the campaign's sender pool, falling back to the
+// implicit one-mailbox pool (campaigns.mailbox_id) when no campaign_senders
+// rows exist -- the "never configured, not broken" projection every reader of
+// the pool shares (GetSenders' response, the preflight loader's sender_pool/
+// daily_limit/warmup_health evidence, and test-send's eligible-sender pick).
+// One implementation means all three can never disagree about which mailboxes
+// a campaign actually sends from.
+func (s *Service) loadSenderPool(ctx context.Context, ws, campaignID uuid.UUID) ([]Sender, error) {
+	senders, err := s.store.ListSenders(ctx, ws, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if len(senders) > 0 {
+		return senders, nil
+	}
+	fallback, err := s.store.FallbackSender(ctx, ws, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	return []Sender{fallback}, nil
 }
 
 // SetSenders replaces the pool and rotation mode wholesale. Every check runs

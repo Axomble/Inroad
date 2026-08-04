@@ -40,7 +40,6 @@ import (
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
-	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -243,25 +242,17 @@ func run() error {
 	// reads it, through the narrow domainAuthAdapter — the domain list is
 	// derived from this workspace's mailboxes, so nothing here reaches DNS.
 	sendingdomainSvc := sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver())
-	// Test-send (POST /campaigns/{id}/test-send) reuses the SAME coreapi
-	// in-process seam every worker send job resolves credentials through
-	// (ResolveSenderTransport, added in internal/coreapi/inprocess), so
-	// decrypting a mailbox secret — or refreshing a gmail/m365 OAuth token —
-	// has exactly one implementation rather than a second copy in the API
-	// process. warmupSecret/ContentGenerator are irrelevant to this call path
-	// (nil is safe: nothing here ever calls a warmup coreapi method).
-	testSendCore := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, nil)
-	senderResolver, _ := testSendCore.(campaign.SenderResolver)
-	// MultiSender dispatches SMTP vs Gmail vs Graph on the resolved mailbox's
-	// provider, identically to the worker's sender (internal/worker/sender):
-	// the SMTP leg is SSRF-vetted, the Gmail/Graph legs use their fixed hosts.
-	testSendMailer := mail.NewMultiSender(mail.NewNetSender(cfg.MailAllowPrivateHosts), mail.NewGmailSender(), mail.NewGraphSender())
 	// checker adapts the mailbox and list stores for campaign ownership checks.
 	campaignStore := campaign.NewPgStore(pool)
 	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc},
 		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
-		campaign.WithSenderResolver(senderResolver),
-		campaign.WithMailer(testSendMailer),
+		// Test-send (POST /campaigns/{id}/test-send) only ENQUEUES a
+		// testsend:send task here: cmd/inroad must never decrypt a mailbox
+		// credential or dial a provider (docs/security.md invariant 1). The
+		// actual render+send happens in the execution plane
+		// (internal/worker/testsend), which resolves the mailbox transport
+		// through the same coreapi credential path every real send uses.
+		campaign.WithTestSendEnqueuer(enq),
 		// Reuses the same Redis-backed limiter the auth throttles use, so the
 		// 5/min test-send cap holds across every API server instance.
 		campaign.WithRateLimiter(redisLimiter),

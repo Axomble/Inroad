@@ -14,6 +14,7 @@ import (
 	"github.com/inroad/inroad/internal/worker/maintenance"
 	"github.com/inroad/inroad/internal/worker/sender"
 	"github.com/inroad/inroad/internal/worker/sequence"
+	"github.com/inroad/inroad/internal/worker/testsend"
 	"github.com/inroad/inroad/internal/worker/warmup"
 )
 
@@ -45,6 +46,15 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	mux.HandleFunc(queue.TaskWarmupEngage, warmup.EngageHandler(core, engager, sndr))
 	mux.HandleFunc(queue.TaskSendEmail, sender.Handler(core, sndr, enq, publicURL, trackingSecret))
 	mux.HandleFunc(queue.TaskSweepStuck, sender.SweepStuckHandler(core, enq))
+	// Test-send preview (POST /campaigns/{id}/test-send): registered by type
+	// assertion for the same reason as the cleaner/breaker above -- the
+	// capability (load raw step content + resolve a mailbox's decrypted
+	// transport) is consumed through testsend.Core rather than widening
+	// coreapi.Client. This is the ONLY place a mailbox credential is decrypted
+	// or a provider is dialed for a test-send (docs/security.md invariant 1).
+	if c, ok := core.(testsend.Core); ok {
+		mux.HandleFunc(queue.TaskTestSend, testsend.Handler(c, sndr))
+	}
 	// Multi-step sequencing: advance one step per task (lazy chain) + reconcile.
 	mux.HandleFunc(queue.TaskSequenceAdvance, sequence.AdvanceHandler(core, sndr, enq, publicURL, trackingSecret))
 	mux.HandleFunc(queue.TaskSweepEnrollments, sequence.SweepHandler(core, enq))

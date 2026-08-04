@@ -571,6 +571,48 @@ type SendResult struct {
 	Err       string
 }
 
+// SenderTransport is one resolved mailbox's send identity plus its decrypted
+// credential, for a control-plane-triggered ad hoc send with no existing
+// sends/enrollment row (currently: the testsend:send task only). Mirrors the
+// transport fields on SendJob/StepSendJob/WarmupSendJob rather than embedding
+// platform/mail's OutboundJob, so this package stays free of that dependency
+// like every other job type here; the worker maps it onto mail.OutboundJob.
+//
+// It is NOT a coreapi.Client method: resolving it is consumed through the
+// narrow, consumer-defined internal/worker/testsend.Core interface (the same
+// "avoid widening Client's ~40-method surface for one call site" trade as
+// BreakerResult), satisfied by the in-process client via type assertion.
+type SenderTransport struct {
+	FromEmail string
+	FromName  string
+	// Provider selects the send transport ("smtp" | "gmail" | "m365").
+	// AccessToken is the decrypted OAuth bearer for gmail/m365 (nil for smtp);
+	// the worker zeroizes it after use, like every other job's credential.
+	Provider       string
+	AccessToken    []byte
+	SMTPHost       string
+	SMTPPort       int
+	SMTPUsername   string
+	SMTPPassword   []byte
+	AllowPlaintext bool
+}
+
+// TestSendContent is one test-send's raw (unrendered) step content plus the
+// preview personalization vars: the campaign list's first contact's
+// first_name/company, or the synthetic fallback (first_name=Alex,
+// company=Acme) substituted by the loader when the list has no contact yet --
+// so the worker never has to know that policy. Rendering ({{first_name}}/
+// {{company}} substitution, HTML-escaped in the HTML body) happens in
+// internal/worker/testsend, through the SAME personalize package every real
+// send renders through.
+type TestSendContent struct {
+	Subject   string
+	BodyText  string
+	BodyHTML  string
+	FirstName string
+	Company   string
+}
+
 // WarmupSendJob is everything the warmup:tick worker needs to send one warmup
 // email (a new-thread opener or a reply), mirroring StepSendJob. Skip is true when
 // GetWarmupSendJob found nothing to do (mailbox paused/over-target/disabled, or no
