@@ -45,8 +45,7 @@ type Store interface {
 	InsertProvider(ctx context.Context, arg gen.InsertAIProviderParams) (gen.InsertAIProviderRow, error)
 	GetProvider(ctx context.Context, workspaceID, id uuid.UUID) (gen.WorkspaceAiProvider, error)
 	ListProviders(ctx context.Context, workspaceID uuid.UUID) ([]gen.ListAIProvidersRow, error)
-	UpdateProviderConfig(ctx context.Context, arg gen.UpdateAIProviderConfigParams) (gen.UpdateAIProviderConfigRow, error)
-	UpdateProviderSecret(ctx context.Context, arg gen.UpdateAIProviderSecretParams) (int64, error)
+	UpdateProvider(ctx context.Context, arg gen.UpdateAIProviderParams) (gen.UpdateAIProviderRow, error)
 	DeleteProvider(ctx context.Context, workspaceID, id uuid.UUID) (int64, error)
 
 	InsertModel(ctx context.Context, arg gen.InsertAIModelParams) (gen.WorkspaceAiModel, error)
@@ -86,16 +85,12 @@ func (s *PgStore) ListProviders(ctx context.Context, workspaceID uuid.UUID) ([]g
 	return s.q.ListAIProviders(ctx, workspaceID)
 }
 
-func (s *PgStore) UpdateProviderConfig(ctx context.Context, arg gen.UpdateAIProviderConfigParams) (gen.UpdateAIProviderConfigRow, error) {
-	row, err := s.q.UpdateAIProviderConfig(ctx, arg)
+func (s *PgStore) UpdateProvider(ctx context.Context, arg gen.UpdateAIProviderParams) (gen.UpdateAIProviderRow, error) {
+	row, err := s.q.UpdateAIProvider(ctx, arg)
 	if isUniqueViolation(err) {
-		return gen.UpdateAIProviderConfigRow{}, ErrDuplicateTarget
+		return gen.UpdateAIProviderRow{}, ErrDuplicateTarget
 	}
 	return row, err
-}
-
-func (s *PgStore) UpdateProviderSecret(ctx context.Context, arg gen.UpdateAIProviderSecretParams) (int64, error) {
-	return s.q.UpdateAIProviderSecret(ctx, arg)
 }
 
 func (s *PgStore) DeleteProvider(ctx context.Context, workspaceID, id uuid.UUID) (int64, error) {

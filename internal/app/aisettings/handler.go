@@ -24,6 +24,25 @@ type Handler struct {
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
+// decodeJSON enforces one object and rejects unknown fields. Silently
+// accepting typos in credential/config requests can make callers believe an
+// endpoint or secret was updated when it was ignored.
+func decodeJSON(r *http.Request, dst any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var trailing struct{}
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple json values")
+		}
+		return err
+	}
+	return nil
+}
+
 // settingsRequest is the wire shape for PUT /ai/settings. Every field is a
 // pointer so an omitted key keeps the current (or default) value; it maps 1:1
 // onto SettingsUpdate.
@@ -125,7 +144,7 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req settingsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeJSON(r, &req); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -158,7 +177,7 @@ func (h *Handler) createProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req providerCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -186,7 +205,7 @@ func (h *Handler) updateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req providerUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -259,7 +278,7 @@ func (h *Handler) createModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req modelCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}

@@ -99,6 +99,23 @@ func TestUnauthenticatedIs401(t *testing.T) {
 	}
 }
 
+func TestMutationBodiesRejectUnknownFieldsAndTrailingJSON(t *testing.T) {
+	h, _ := newTestHandler(t, svcOpts{})
+	router := authedRouter(h)
+	authz := bearer(t, uuid.New(), "owner")
+	for name, body := range map[string]string{
+		"unknown field": `{"kind":"anthropic","credentials":{"api_key":"` + testKey + `"},"typo":true}`,
+		"trailing json": anthropicBody + ` {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := do(t, router, http.MethodPost, "/ai/providers", authz, body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 // TestWritesRequireAdminRole proves a member can read but every write —
 // including discovery, which unseals a credential — is 403.
 func TestWritesRequireAdminRole(t *testing.T) {

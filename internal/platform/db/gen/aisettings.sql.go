@@ -12,9 +12,28 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const deleteAIModel = `-- name: DeleteAIModel :execrows
-DELETE FROM workspace_ai_models
-WHERE id = $1 AND workspace_id = $2
+const deleteAIModel = `-- name: DeleteAIModel :one
+WITH target AS (
+    SELECT m.id
+    FROM workspace_ai_models m
+    WHERE m.id = $1 AND m.workspace_id = $2
+), deleted AS (
+    DELETE FROM workspace_ai_models m USING target t
+    WHERE m.id = t.id
+    RETURNING m.provider_id::text || '/' || m.name AS model_id
+), cleaned_settings AS (
+    UPDATE workspace_ai_settings s
+    SET default_smart_model = CASE WHEN s.default_smart_model = d.model_id
+            THEN 'default-smart-model' ELSE s.default_smart_model END,
+        default_fast_model = CASE WHEN s.default_fast_model = d.model_id
+            THEN 'default-fast-model' ELSE s.default_fast_model END,
+        enabled_model_ids = array_remove(s.enabled_model_ids, d.model_id),
+        updated_at = now()
+    FROM deleted d
+    WHERE s.workspace_id = $2
+    RETURNING 1
+)
+SELECT count(*) FROM deleted
 `
 
 type DeleteAIModelParams struct {
@@ -22,17 +41,35 @@ type DeleteAIModelParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
+// Delete one custom model and atomically remove its composite id from settings.
 func (q *Queries) DeleteAIModel(ctx context.Context, arg DeleteAIModelParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteAIModel, arg.ID, arg.WorkspaceID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, deleteAIModel, arg.ID, arg.WorkspaceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
-const deleteAIProvider = `-- name: DeleteAIProvider :execrows
-DELETE FROM workspace_ai_providers
-WHERE id = $1 AND workspace_id = $2
+const deleteAIProvider = `-- name: DeleteAIProvider :one
+WITH deleted AS (
+    DELETE FROM workspace_ai_providers p
+    WHERE p.id = $1 AND p.workspace_id = $2
+    RETURNING p.id::text AS provider_prefix
+), cleaned_settings AS (
+    UPDATE workspace_ai_settings s
+    SET default_smart_model = CASE WHEN s.default_smart_model LIKE d.provider_prefix || '/%'
+            THEN 'default-smart-model' ELSE s.default_smart_model END,
+        default_fast_model = CASE WHEN s.default_fast_model LIKE d.provider_prefix || '/%'
+            THEN 'default-fast-model' ELSE s.default_fast_model END,
+        enabled_model_ids = ARRAY(
+            SELECT model_id FROM unnest(s.enabled_model_ids) AS model_id
+            WHERE model_id NOT LIKE d.provider_prefix || '/%'
+        ),
+        updated_at = now()
+    FROM deleted d
+    WHERE s.workspace_id = $2
+    RETURNING 1
+)
+SELECT count(*) FROM deleted
 `
 
 type DeleteAIProviderParams struct {
@@ -40,13 +77,12 @@ type DeleteAIProviderParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-// Cascades to the door's workspace_ai_models rows.
+// Cascade models and atomically remove every model reference for this door.
 func (q *Queries) DeleteAIProvider(ctx context.Context, arg DeleteAIProviderParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteAIProvider, arg.ID, arg.WorkspaceID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+	row := q.db.QueryRow(ctx, deleteAIProvider, arg.ID, arg.WorkspaceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const getAICatalogCache = `-- name: GetAICatalogCache :one
@@ -345,22 +381,25 @@ func (q *Queries) ListAIProviders(ctx context.Context, workspaceID uuid.UUID) ([
 	return items, nil
 }
 
-const updateAIProviderConfig = `-- name: UpdateAIProviderConfig :one
+const updateAIProvider = `-- name: UpdateAIProvider :one
 UPDATE workspace_ai_providers
-SET display_name = $3, config = $4, updated_at = now()
+SET display_name = $3, config = $4, secret_ciphertext = $5,
+    key_prefix = $6, updated_at = now()
 WHERE id = $1 AND workspace_id = $2
 RETURNING id, workspace_id, kind, config, key_prefix, display_name,
           created_at, updated_at
 `
 
-type UpdateAIProviderConfigParams struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	DisplayName string    `json:"display_name"`
-	Config      []byte    `json:"config"`
+type UpdateAIProviderParams struct {
+	ID               uuid.UUID `json:"id"`
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
+	DisplayName      string    `json:"display_name"`
+	Config           []byte    `json:"config"`
+	SecretCiphertext string    `json:"secret_ciphertext"`
+	KeyPrefix        string    `json:"key_prefix"`
 }
 
-type UpdateAIProviderConfigRow struct {
+type UpdateAIProviderRow struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	Kind        string             `json:"kind"`
@@ -371,17 +410,18 @@ type UpdateAIProviderConfigRow struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
-// Update the non-secret half (display name + connection config). Masked
-// RETURNING; run AFTER UpdateAIProviderSecret so the returned key_prefix
-// reflects a same-request credential replacement.
-func (q *Queries) UpdateAIProviderConfig(ctx context.Context, arg UpdateAIProviderConfigParams) (UpdateAIProviderConfigRow, error) {
-	row := q.db.QueryRow(ctx, updateAIProviderConfig,
+// Update config and credentials in ONE statement. A target-uniqueness failure
+// cannot leave a newly sealed credential paired with the old config.
+func (q *Queries) UpdateAIProvider(ctx context.Context, arg UpdateAIProviderParams) (UpdateAIProviderRow, error) {
+	row := q.db.QueryRow(ctx, updateAIProvider,
 		arg.ID,
 		arg.WorkspaceID,
 		arg.DisplayName,
 		arg.Config,
+		arg.SecretCiphertext,
+		arg.KeyPrefix,
 	)
-	var i UpdateAIProviderConfigRow
+	var i UpdateAIProviderRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkspaceID,
@@ -393,33 +433,6 @@ func (q *Queries) UpdateAIProviderConfig(ctx context.Context, arg UpdateAIProvid
 		&i.UpdatedAt,
 	)
 	return i, err
-}
-
-const updateAIProviderSecret = `-- name: UpdateAIProviderSecret :execrows
-UPDATE workspace_ai_providers
-SET secret_ciphertext = $3, key_prefix = $4, updated_at = now()
-WHERE id = $1 AND workspace_id = $2
-`
-
-type UpdateAIProviderSecretParams struct {
-	ID               uuid.UUID `json:"id"`
-	WorkspaceID      uuid.UUID `json:"workspace_id"`
-	SecretCiphertext string    `json:"secret_ciphertext"`
-	KeyPrefix        string    `json:"key_prefix"`
-}
-
-// Replace the sealed credential blob + its display prefix.
-func (q *Queries) UpdateAIProviderSecret(ctx context.Context, arg UpdateAIProviderSecretParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateAIProviderSecret,
-		arg.ID,
-		arg.WorkspaceID,
-		arg.SecretCiphertext,
-		arg.KeyPrefix,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
 }
 
 const upsertAICatalogCache = `-- name: UpsertAICatalogCache :exec

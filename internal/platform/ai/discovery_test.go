@@ -151,6 +151,43 @@ func TestDiscoverErrorStatusNeverEchoesBody(t *testing.T) {
 	}
 }
 
+func TestDiscoverDoesNotFollowRedirectsWithCredentials(t *testing.T) {
+	var redirected bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/target" {
+			redirected = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/target", http.StatusFound)
+	}))
+	defer ts.Close()
+
+	d := NewHTTPDiscoverer(true, 0)
+	_, err := d.Discover(context.Background(), DiscoverRequest{
+		Kind: KindOpenAICompatible, Config: map[string]string{"base_url": ts.URL + "/v1"},
+		Credentials: Credentials{APIKey: "sk-secret-123456"},
+	})
+	if err == nil || redirected {
+		t.Fatalf("redirect must fail without reaching its target: redirected=%v err=%v", redirected, err)
+	}
+}
+
+func TestDiscoverRejectsOversizedResponses(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", discoverMaxBytes+1)))
+	}))
+	defer ts.Close()
+
+	d := NewHTTPDiscoverer(true, 0)
+	_, err := d.Discover(context.Background(), DiscoverRequest{
+		Kind: KindOpenAICompatible, Config: map[string]string{"base_url": ts.URL + "/v1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized response must be rejected, got %v", err)
+	}
+}
+
 // TestDiscoverUnsupportedKinds proves the A1 posture for cloud kinds: a clean
 // supported=false, never an error.
 func TestDiscoverUnsupportedKinds(t *testing.T) {

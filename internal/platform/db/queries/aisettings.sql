@@ -50,26 +50,38 @@ FROM workspace_ai_providers
 WHERE workspace_id = $1
 ORDER BY created_at, id;
 
--- name: UpdateAIProviderConfig :one
--- Update the non-secret half (display name + connection config). Masked
--- RETURNING; run AFTER UpdateAIProviderSecret so the returned key_prefix
--- reflects a same-request credential replacement.
+-- name: UpdateAIProvider :one
+-- Update config and credentials in ONE statement. A target-uniqueness failure
+-- cannot leave a newly sealed credential paired with the old config.
 UPDATE workspace_ai_providers
-SET display_name = $3, config = $4, updated_at = now()
+SET display_name = $3, config = $4, secret_ciphertext = $5,
+    key_prefix = $6, updated_at = now()
 WHERE id = $1 AND workspace_id = $2
 RETURNING id, workspace_id, kind, config, key_prefix, display_name,
           created_at, updated_at;
 
--- name: UpdateAIProviderSecret :execrows
--- Replace the sealed credential blob + its display prefix.
-UPDATE workspace_ai_providers
-SET secret_ciphertext = $3, key_prefix = $4, updated_at = now()
-WHERE id = $1 AND workspace_id = $2;
-
--- name: DeleteAIProvider :execrows
--- Cascades to the door's workspace_ai_models rows.
-DELETE FROM workspace_ai_providers
-WHERE id = $1 AND workspace_id = $2;
+-- name: DeleteAIProvider :one
+-- Cascade models and atomically remove every model reference for this door.
+WITH deleted AS (
+    DELETE FROM workspace_ai_providers p
+    WHERE p.id = $1 AND p.workspace_id = $2
+    RETURNING p.id::text AS provider_prefix
+), cleaned_settings AS (
+    UPDATE workspace_ai_settings s
+    SET default_smart_model = CASE WHEN s.default_smart_model LIKE d.provider_prefix || '/%'
+            THEN 'default-smart-model' ELSE s.default_smart_model END,
+        default_fast_model = CASE WHEN s.default_fast_model LIKE d.provider_prefix || '/%'
+            THEN 'default-fast-model' ELSE s.default_fast_model END,
+        enabled_model_ids = ARRAY(
+            SELECT model_id FROM unnest(s.enabled_model_ids) AS model_id
+            WHERE model_id NOT LIKE d.provider_prefix || '/%'
+        ),
+        updated_at = now()
+    FROM deleted d
+    WHERE s.workspace_id = $2
+    RETURNING 1
+)
+SELECT count(*) FROM deleted;
 
 -- name: InsertAIModel :one
 -- Create a user-defined model under a provider door. SELF-ENFORCING tenancy:
@@ -100,9 +112,29 @@ JOIN workspace_ai_providers p
 WHERE m.workspace_id = $1
 ORDER BY m.created_at, m.id;
 
--- name: DeleteAIModel :execrows
-DELETE FROM workspace_ai_models
-WHERE id = $1 AND workspace_id = $2;
+-- name: DeleteAIModel :one
+-- Delete one custom model and atomically remove its composite id from settings.
+WITH target AS (
+    SELECT m.id
+    FROM workspace_ai_models m
+    WHERE m.id = $1 AND m.workspace_id = $2
+), deleted AS (
+    DELETE FROM workspace_ai_models m USING target t
+    WHERE m.id = t.id
+    RETURNING m.provider_id::text || '/' || m.name AS model_id
+), cleaned_settings AS (
+    UPDATE workspace_ai_settings s
+    SET default_smart_model = CASE WHEN s.default_smart_model = d.model_id
+            THEN 'default-smart-model' ELSE s.default_smart_model END,
+        default_fast_model = CASE WHEN s.default_fast_model = d.model_id
+            THEN 'default-fast-model' ELSE s.default_fast_model END,
+        enabled_model_ids = array_remove(s.enabled_model_ids, d.model_id),
+        updated_at = now()
+    FROM deleted d
+    WHERE s.workspace_id = $2
+    RETURNING 1
+)
+SELECT count(*) FROM deleted;
 
 -- name: GetAICatalogCache :one
 -- The models.dev snapshot (deployment-global, not tenant data).
