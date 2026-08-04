@@ -69,6 +69,33 @@ const campaignApi = api.enhanceEndpoints({
         { type: 'Campaign', id: 'LIST' },
       ],
     },
+    // Lifecycle transitions (rename/delete/pause/resume) all change what the
+    // list row and the detail page show, so each mirrors launch's tag wiring:
+    // invalidate both the specific campaign and the list.
+    renameCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    deleteCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    pauseCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    resumeCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
     // No `providesTags` for enrollments: replies are classified server-side by
     // the worker, so no client mutation can ever invalidate an `Enrollment`
     // tag — it would be a dead tag that never refreshes. The component instead
@@ -125,6 +152,10 @@ export const {
   useGetCampaignQuery,
   useCreateCampaignMutation,
   useLaunchCampaignMutation,
+  useRenameCampaignMutation,
+  useDeleteCampaignMutation,
+  usePauseCampaignMutation,
+  useResumeCampaignMutation,
   useUpdateCampaignTrackingMutation,
   useListCampaignEnrollmentsQuery,
   useListStepsQuery,

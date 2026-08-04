@@ -7,6 +7,7 @@ import { Page, PageTopbar, StatStrip, Stat, SectionBar, PageBody } from '@/compo
 import { httpStatus } from '@/lib/rtk-error'
 import { useGetCampaignQuery } from './api'
 import { campaignTone, campaignLabel } from './status'
+import { LifecycleMenu, CampaignStatusButton } from './lifecycle-menu'
 import { MetricsPanel } from './metrics-panel'
 import { CampaignEnrollmentsList } from './campaign-enrollments-list'
 import { SequenceEditor } from './sequence-editor'
@@ -48,7 +49,14 @@ export function CampaignDetailPage() {
         subtitle={data?.subject}
         actions={
           data?.status ? (
-            <StatusPill tone={campaignTone(data.status)}>{campaignLabel(data.status)}</StatusPill>
+            <div className="flex items-center gap-2">
+              <StatusPill tone={campaignTone(data.status)}>{campaignLabel(data.status)}</StatusPill>
+              {/* Pause/resume gets its own visible button — the one action an
+                  operator looking at this campaign is most likely to take —
+                  while rename/delete stay in the overflow menu. */}
+              <CampaignStatusButton campaign={data} />
+              <LifecycleMenu campaign={data} />
+            </div>
           ) : undefined
         }
       />

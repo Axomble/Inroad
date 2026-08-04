@@ -1,14 +1,8 @@
 import { useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { MoreVertical, Plus, Rocket } from 'lucide-react'
+import { Plus, Rocket } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { StatusPill, StatusDot } from '@/components/shared/status-pill'
 import { ListSearchInput } from '@/components/shared/list-search-input'
 import { SortMenu } from '@/components/shared/sort-menu'
@@ -32,6 +26,7 @@ import type { Campaign } from '@/store/api'
 import { useListCampaignsQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
+import { LifecycleMenu } from './lifecycle-menu'
 
 /**
  * Module scope, not inline: `useListControls` memoises on the active
@@ -275,23 +270,11 @@ function CampaignRow({
           </Button>
         )}
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Actions for ${campaign.name}`}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <MoreVertical className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {/* Same name as the row click's destination — the menu item and the
-                row now do, and say, the same thing. */}
-            <DropdownMenuItem onSelect={() => onOpen(campaign)}>Open campaign</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* Pause/resume/rename/delete, status-appropriate. "Open campaign" isn't
+            duplicated here — clicking anywhere else on the row (or the
+            keyboard nav's ↵) already opens it, and LifecycleMenu stops its own
+            clicks from also bubbling into the row's onClick. */}
+        <LifecycleMenu campaign={campaign} />
       </div>
     </li>
   )
