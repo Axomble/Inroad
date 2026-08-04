@@ -16,11 +16,17 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/spintax"
 	"github.com/inroad/inroad/internal/worker/personalize"
 	"github.com/inroad/inroad/internal/worker/track"
 )
+
+// sendKind labels every metric this handler emits — kind="campaign", the
+// other half of inroad_sends_total's kind label (warmup.SendHandler emits
+// "warmup").
+const sendKind = "campaign"
 
 // Sender sends one email through the transport the job's Provider selects (same
 // contract as the direct sender). Defined here so tests inject a fake and
@@ -125,7 +131,10 @@ const (
 // (lazy chain) schedule the next step — or stop. publicURL and trackingSecret
 // are the base URL and HMAC secret used to build/sign open and click tracking
 // links (internal/worker/track) when the step's campaign has tracking enabled.
-func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL string, trackingSecret []byte) func(context.Context, *asynq.Task) error {
+// mtx records inroad_sends_total at every point this invocation's outcome is
+// decided (see the result= comment at each call site below); a nil mtx
+// (metrics disabled, or a test that doesn't need one) no-ops.
+func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL string, trackingSecret []byte, mtx *metrics.Metrics) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.AdvancePayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -140,10 +149,18 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		defer zeroize(job.AccessToken)
 
 		// Enrollment no longer active (stopped/completed) or no next step.
+		// result=skipped: nothing was ever actionable — same bucket as a
+		// racing worker's already-claimed row below (ClaimSkip), never
+		// "failed" or "sent" since no attempt was made.
 		if job.Skip {
+			mtx.SendFinalized(sendKind, "skipped")
 			return nil
 		}
 		if job.Suppressed {
+			// result=skipped: a compliance stop (opted-out/bounced contact), not
+			// a delivery error — grouped with the other "nothing to attempt"
+			// cases rather than "failed".
+			mtx.SendFinalized(sendKind, "skipped")
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonSuppressed)
 		}
 		if job.MailboxRemoved {
@@ -151,6 +168,9 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			// has no identity to continue: any follow-up would come from a stranger
 			// referencing a Message-ID it never sent. Stop through the same single
 			// entry point as every other halt; nothing is sent.
+			// result=failed: the thread died from a broken precondition, not a
+			// policy pause — same bucket as the degenerate-cap stop below.
+			mtx.SendFinalized(sendKind, "failed")
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonMailboxRemoved)
 		}
 		// deferForCapacity retries a step blocked by this mailbox's own daily cap,
@@ -216,17 +236,22 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// other two — an operator clears a pause by relaunching, and the enrollments
 		// must resume, not have been marked 'failed' while they waited.
 		if job.CampaignLimited || job.NewLeadLimited || job.HealthPaused || job.CampaignPaused {
+			// result=deferred: a self-clearing wait, not an error.
+			mtx.SendFinalized(sendKind, "deferred")
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now()))
 		}
 		if job.EffectiveDailyCap <= 0 {
 			// Degenerate cap (daily_cap=0, or ramp_start_cap=0 on a brand-new
 			// mailbox): this enrollment can never send. Stop it 'failed' rather
 			// than deferring forever.
+			mtx.SendFinalized(sendKind, "failed")
 			return core.MarkStepStopped(ctx, p.EnrollmentID, p.WorkspaceID, stopReasonFailed)
 		}
 		if job.SentToday >= job.EffectiveDailyCap {
 			// Over today's cap — including a cap the mailbox's warmup health has
 			// scaled down, which is enforced here without a branch of its own.
+			// result=deferred: self-clearing at the next UTC midnight.
+			mtx.SendFinalized(sendKind, "deferred")
 			return deferForCapacity()
 		}
 
@@ -273,14 +298,23 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		}
 		switch outcome {
 		case coreapi.ClaimSkip:
+			// result=skipped: another worker already owns this row, or it's
+			// terminal — the same "nothing to attempt" bucket as job.Skip above.
+			mtx.SendFinalized(sendKind, "skipped")
 			return nil
 		case coreapi.ClaimDeferred:
+			// result=deferred: waiting out this mailbox's own min-interval
+			// spacing, not this thread's daily cap (deferForCapacity above).
+			mtx.SendFinalized(sendKind, "deferred")
 			delay := time.Duration(job.MinIntervalSeconds) * time.Second
 			if delay < time.Second {
 				delay = time.Second
 			}
 			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, delay)
 		case coreapi.ClaimAlreadySent:
+			// No metric here: this recovers a delivery that was ALREADY counted
+			// "sent" on the run that actually sent it (see the sendErr == nil
+			// case below) — advancing the cursor now must not double-count it.
 			return advanceCursor()
 		}
 
@@ -331,14 +365,24 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 				// The status='sent' UPDATE failed: the row is still 'sending', so
 				// returning the error lets asynq retry. This is the irreducible
 				// one-UPDATE + hard-crash window documented on MarkStepDelivered.
+				// No metric: the delivery is not yet durable, so this attempt is
+				// not "sent" — the retry that eventually commits records it.
 				return fmt.Errorf("mark step delivered: %w", err)
 			}
+			// result=sent, recorded now (not before MarkStepDelivered) so a
+			// crash before this line leaves the retry to record it instead of
+			// double-counting.
+			mtx.SendFinalized(sendKind, "sent")
 			// A newly delivered send changes the sample the breaker judges on — and
 			// crossing the minimum-delivered floor is itself a trigger, since a
 			// campaign whose first 49 sends all bounced becomes actionable on its 50th.
 			evaluateBreaker()
 			return advanceCursor()
 		case mail.Retryable(sendErr):
+			// result=failed: this attempt failed, even though asynq will retry
+			// the task — inroad_sends_total counts attempts, not final outcomes
+			// across retries, matching the permanent-failure branch below.
+			mtx.SendFinalized(sendKind, "failed")
 			// Transient failure (nothing delivered): release the claim so the
 			// asynq retry reclaims it, and return the error so asynq retries.
 			if rerr := core.ReleaseStepSend(ctx, job); rerr != nil {
@@ -346,6 +390,8 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			}
 			return sendErr
 		default:
+			// result=failed.
+			mtx.SendFinalized(sendKind, "failed")
 			// Permanent failure: fail-forward — finalize 'failed' and advance the
 			// cursor in one tx so a single bad step doesn't wedge the enrollment.
 			adv, ferr := core.FinalizeStepSend(ctx, job, coreapi.StepResult{Status: "failed", Err: sendErr.Error()})

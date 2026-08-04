@@ -17,8 +17,14 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
+
+// sendKind labels every metric this handler emits — kind="warmup", the other
+// half of inroad_sends_total's kind label (sequence.AdvanceHandler emits
+// "campaign").
+const sendKind = "warmup"
 
 // warmupHeader is the custom MIME header carrying the signed receipt token
 // (spec §7). The recipient's inbox poller verifies it to recognize warmup mail;
@@ -44,8 +50,10 @@ type Enqueuer interface {
 // idempotency), build the threaded MIME message with the signed X-Inroad-Warmup
 // receipt header, send over the shared SSRF-guarded transport, finalize, and
 // (lazy chain) schedule the mailbox's next tick — exactly one live tick per
-// mailbox. Mirrors sequence.AdvanceHandler.
-func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.Context, *asynq.Task) error {
+// mailbox. Mirrors sequence.AdvanceHandler. mtx records inroad_sends_total at
+// each finalize point (see the result= comment at each call site below); a
+// nil mtx (metrics disabled, or a test that doesn't need one) no-ops.
+func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer, mtx *metrics.Metrics) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.WarmupTickPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -62,7 +70,9 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.
 		// Nothing to do: mailbox paused / over today's target / disabled / no
 		// eligible partner. The lazy chain is intentionally NOT continued here —
 		// the sweep re-seeds this mailbox once it is due again.
+		// result=skipped: nothing was actionable — same bucket as ClaimSkip below.
 		if job.Skip {
+			mtx.SendFinalized(sendKind, "skipped")
 			return nil
 		}
 
@@ -97,8 +107,14 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.
 		}
 		switch outcome {
 		case coreapi.ClaimSkip:
+			// result=skipped: another worker already owns this row, or it's
+			// terminal — same "nothing to attempt" bucket as job.Skip above.
+			mtx.SendFinalized(sendKind, "skipped")
 			return nil
 		case coreapi.ClaimAlreadySent:
+			// No metric here: this recovers a delivery ALREADY counted "sent"
+			// on the run that actually sent it (see sendErr == nil below) —
+			// scheduling the next tick now must not double-count it.
 			return scheduleNext()
 		}
 
@@ -123,10 +139,20 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.
 			// schedule fails, the asynq retry's claim sees the 'sent' row
 			// (ClaimAlreadySent) and schedules without re-sending.
 			if err := core.MarkWarmupSent(ctx, job, msgID); err != nil {
+				// No metric: the delivery is not yet durable (still 'sending'),
+				// so this attempt is not "sent" — the retry that eventually
+				// commits records it instead.
 				return fmt.Errorf("mark warmup sent: %w", err)
 			}
+			// result=sent, recorded now (not before MarkWarmupSent) so a crash
+			// before this line leaves the retry to record it, never twice.
+			mtx.SendFinalized(sendKind, "sent")
 			return scheduleNext()
 		case mail.Retryable(sendErr):
+			// result=failed: this attempt failed, even though asynq will retry
+			// the task — inroad_sends_total counts attempts, not final outcomes
+			// across retries, matching the permanent-failure branch below.
+			mtx.SendFinalized(sendKind, "failed")
 			// Transient failure (nothing delivered): release the claim so the asynq
 			// retry reclaims it, and return the error so asynq retries.
 			if rerr := core.ReleaseWarmupSend(ctx, job); rerr != nil {
@@ -134,6 +160,8 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer) func(context.
 			}
 			return sendErr
 		default:
+			// result=failed.
+			mtx.SendFinalized(sendKind, "failed")
 			// Permanent failure: finalize 'failed' (no thread advance) then keep the
 			// mailbox's chain alive so one bad send doesn't wedge its warmup.
 			if ferr := core.FailWarmupSend(ctx, job, sendErr.Error()); ferr != nil {

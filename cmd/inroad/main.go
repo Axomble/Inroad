@@ -51,6 +51,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/ratelimit"
@@ -79,6 +80,20 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Always constructed (never nil): the API router's metrics middleware
+	// records into it unconditionally, and the dedicated /metrics listener
+	// below is the only piece that's actually optional (INROAD_METRICS_ADDR).
+	mtx := metrics.New()
+	if cfg.MetricsAddr != "" {
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		go func() {
+			if err := httpx.Run(ctx, metricsSrv); err != nil {
+				logger.Error("metrics server error", "err", err)
+			}
+		}()
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+	}
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -378,7 +393,7 @@ func run() error {
 		return p.WorkspaceID, true
 	})
 
-	router := buildRouter(logger, public, []protectedGroup{
+	router := buildRouter(logger, mtx, public, []protectedGroup{
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
 		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
 	}, idempotencyMW)
@@ -433,8 +448,8 @@ type protectedGroup struct {
 // routers mount -- currently just the Idempotency-Key replay cache, which
 // needs an authenticated workspace and must run ahead of every handler it
 // might short-circuit a replay for.
-func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup, groupMiddleware ...func(http.Handler) http.Handler) *chi.Mux {
-	r := httpx.NewRouter(logger)
+func buildRouter(logger *slog.Logger, mtx *metrics.Metrics, public []mount, groups []protectedGroup, groupMiddleware ...func(http.Handler) http.Handler) *chi.Mux {
+	r := httpx.NewRouter(logger, mtx)
 	for _, m := range public {
 		r.Mount(m.pattern, m.handler)
 	}

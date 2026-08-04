@@ -5,15 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
@@ -151,9 +156,19 @@ const testBaseURL = "https://app.test"
 
 var testTrackingSecret = []byte("0123456789abcdef0123456789abcdef")
 
+// run drives one advance with no Metrics injected (nil) — every existing
+// case in this file exercises AdvanceHandler's nil-safety for free: none of
+// them need their own "metrics == nil" branch.
 func run(t *testing.T, core coreapi.Client, s Sender, enq Enqueuer) error {
 	t.Helper()
-	return AdvanceHandler(core, s, enq, testBaseURL, testTrackingSecret)(context.Background(), advanceTask(t))
+	return AdvanceHandler(core, s, enq, testBaseURL, testTrackingSecret, nil)(context.Background(), advanceTask(t))
+}
+
+// runWithMetrics is like run but injects a real *metrics.Metrics, for tests
+// that assert on inroad_sends_total.
+func runWithMetrics(t *testing.T, core coreapi.Client, s Sender, enq Enqueuer, mtx *metrics.Metrics) error {
+	t.Helper()
+	return AdvanceHandler(core, s, enq, testBaseURL, testTrackingSecret, mtx)(context.Background(), advanceTask(t))
 }
 
 func TestAdvanceSkipIsNoOp(t *testing.T) {
@@ -909,5 +924,147 @@ func TestBlockedBackoffWithoutAScheduleKeepsTheRawInstant(t *testing.T) {
 	job := coreapi.StepSendJob{EnrollmentID: "e", CampaignLimited: true} // no Schedule
 	if got := blockedBackoff(job, now); got != 90*time.Minute {
 		t.Errorf("blockedBackoff = %s, want 1h30m (the raw UTC rollover)", got)
+	}
+}
+
+// sendsCount scrapes mtx's real Prometheus registry and returns the current
+// inroad_sends_total value for kind="campaign" + result, or 0 if that series
+// doesn't exist yet (a bucket AdvanceHandler never hit in this test).
+func sendsCount(t *testing.T, mtx *metrics.Metrics, result string) float64 {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
+	w := httptest.NewRecorder()
+	mtx.Handler().ServeHTTP(w, req)
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(w.Body)
+	if err != nil {
+		t.Fatalf("parse exposition text: %v", err)
+	}
+	fam, ok := families["inroad_sends_total"]
+	if !ok {
+		return 0
+	}
+	for _, m := range fam.GetMetric() {
+		labels := map[string]string{}
+		for _, lp := range m.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["kind"] == "campaign" && labels["result"] == result {
+			return m.GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+// TestAdvanceRecordsSendFinalizedMetrics proves each of the finalize points
+// AdvanceHandler passes through increments inroad_sends_total{kind="campaign"}
+// with the outcome bucket it actually belongs to.
+func TestAdvanceRecordsSendFinalizedMetrics(t *testing.T) {
+	cases := []struct {
+		name string
+		core *stubCore
+		snd  *fakeSender
+		enq  *fakeEnq
+		want string // the one bucket that must have incremented by 1
+	}{
+		{
+			name: "already-inactive enrollment is skipped",
+			core: &stubCore{job: coreapi.StepSendJob{Skip: true}},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "skipped",
+		},
+		{
+			name: "suppressed contact is skipped",
+			core: &stubCore{job: coreapi.StepSendJob{Suppressed: true, EffectiveDailyCap: 100}},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "skipped",
+		},
+		{
+			name: "another worker's live claim is skipped",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 100}}, // claimOK unset -> ClaimSkip
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "skipped",
+		},
+		{
+			name: "mailbox removed is failed",
+			core: &stubCore{job: coreapi.StepSendJob{MailboxRemoved: true}},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "failed",
+		},
+		{
+			name: "degenerate zero cap is failed",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 0}},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "failed",
+		},
+		{
+			name: "over mailbox cap is deferred",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 50, SentToday: 50}},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "deferred",
+		},
+		{
+			name: "campaign-limited is deferred",
+			core: &stubCore{job: coreapi.StepSendJob{CampaignLimited: true}},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "deferred",
+		},
+		{
+			name: "mailbox spacing (ClaimDeferred) is deferred",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 100, MinIntervalSeconds: 90}, claimDeferred: true},
+			snd:  &fakeSender{}, enq: &fakeEnq{}, want: "deferred",
+		},
+		{
+			name: "successful send is sent",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo"}, claimOK: true, adv: coreapi.Advance{Completed: true}},
+			snd:  &fakeSender{id: "<mid@x>"}, enq: &fakeEnq{}, want: "sent",
+		},
+		{
+			name: "transient send failure is failed",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo"}, claimOK: true},
+			snd:  &fakeSender{err: &net.OpError{Op: "dial", Err: timeoutStub{}}}, enq: &fakeEnq{}, want: "failed",
+		},
+		{
+			name: "permanent send failure is failed",
+			core: &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo"}, claimOK: true, adv: coreapi.Advance{Completed: true}},
+			snd:  &fakeSender{err: errors.New("550 no such user")}, enq: &fakeEnq{}, want: "failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mtx := metrics.New()
+			// Errors are expected/ignored here: the transient case returns one
+			// so asynq retries, which is proven separately above.
+			_ = runWithMetrics(t, tc.core, tc.snd, tc.enq, mtx)
+
+			for _, result := range []string{"sent", "failed", "skipped", "deferred"} {
+				got := sendsCount(t, mtx, result)
+				want := 0.0
+				if result == tc.want {
+					want = 1
+				}
+				if got != want {
+					t.Errorf("inroad_sends_total{kind=campaign,result=%s} = %v, want %v", result, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestAdvanceRecoverForwardDoesNotDoubleCountSent proves the ClaimAlreadySent
+// recovery path (cursor advance retried after a crash between MarkStepDelivered
+// and the cursor commit) does NOT emit a second "sent" — the delivery was
+// already counted on the run that actually sent it.
+func TestAdvanceRecoverForwardDoesNotDoubleCountSent(t *testing.T) {
+	mtx := metrics.New()
+	core := &stubCore{
+		claimOK:     true,
+		advanceFail: 1, // first AdvanceStepCursor call errors -> forces a retry
+		job:         coreapi.StepSendJob{EffectiveDailyCap: 100, ToEmail: "a@b.io", Subject: "Hi", BodyText: "yo"},
+		adv:         coreapi.Advance{Completed: true},
+	}
+	snd, enq := &fakeSender{id: "<mid@x>"}, &fakeEnq{}
+
+	if err := runWithMetrics(t, core, snd, enq, mtx); err == nil {
+		t.Fatal("first run: expected the cursor-advance failure to surface")
+	}
+	if err := runWithMetrics(t, core, snd, enq, mtx); err != nil {
+		t.Fatalf("second run (recover-forward): %v", err)
+	}
+	if got := sendsCount(t, mtx, "sent"); got != 1 {
+		t.Fatalf("inroad_sends_total{result=sent} = %v, want 1 (not double-counted on recover-forward)", got)
 	}
 }

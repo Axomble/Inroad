@@ -70,7 +70,7 @@ func TestRegisterWiresTheDeliverabilityBreaker(t *testing.T) {
 	// The real registration. If the breaker's type assertion stops matching, no
 	// handler is registered and ProcessTask returns "handler not found".
 	mux := queue.NewMux()
-	Register(mux, core, &mail.MultiSender{}, nil, nil, nil, nil, "https://app.test", secret, secret)
+	Register(mux, core, &mail.MultiSender{}, nil, nil, nil, nil, "https://app.test", secret, secret, nil)
 
 	payload, err := json.Marshal(queue.DeliverabilityEvaluatePayload{
 		CampaignID: campaignID.String(), WorkspaceID: ws.String(),

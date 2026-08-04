@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
@@ -89,7 +94,7 @@ func TestSendHappyPathSendsSetsHeaderMarksAndSchedules(t *testing.T) {
 	snd := &fakeSender{msgID: "<mid-1@x.com>"}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 
@@ -133,7 +138,7 @@ func TestSendZeroizesSecretsAfterSend(t *testing.T) {
 	core := &sendCore{job: job, claim: coreapi.ClaimWon, assigned: ""}
 	snd := &fakeSender{msgID: "<m@x>"}
 
-	if err := SendHandler(core, snd, &fakeEnq{})(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, &fakeEnq{}, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	// The handler holds the SAME backing slices the job exposed; after the deferred
@@ -156,7 +161,7 @@ func TestSendRetryableReleasesAndReturnsError(t *testing.T) {
 	snd := &fakeSender{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}
 	enq := &fakeEnq{}
 
-	err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1"))
+	err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1"))
 	if !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("handler err = %v, want the transient send error (asynq retry)", err)
 	}
@@ -178,7 +183,7 @@ func TestSendPermanentFailsAndSchedulesNext(t *testing.T) {
 	snd := &fakeSender{err: errors.New("550 mailbox unavailable")}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("permanent failure should be swallowed (fail-forward), got %v", err)
 	}
 	if !core.failed || core.failedMsg == "" {
@@ -198,7 +203,7 @@ func TestSendSkipsWhenJobSkip(t *testing.T) {
 	snd := &fakeSender{}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if snd.calls != 0 {
@@ -214,7 +219,7 @@ func TestSendClaimSkipDoesNothing(t *testing.T) {
 	snd := &fakeSender{}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if snd.calls != 0 || len(enq.calls) != 0 {
@@ -228,7 +233,7 @@ func TestSendClaimAlreadySentSchedulesWithoutSending(t *testing.T) {
 	snd := &fakeSender{}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if snd.calls != 0 {
@@ -248,7 +253,7 @@ func TestSendUsesNowWhenNextDueIsSendNow(t *testing.T) {
 	enq := &fakeEnq{}
 
 	before := time.Now()
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if len(enq.calls) != 1 {
@@ -257,5 +262,108 @@ func TestSendUsesNowWhenNextDueIsSendNow(t *testing.T) {
 	// sendNow overrides the (zero) due time with ~now.
 	if enq.calls[0].at.Before(before) {
 		t.Fatalf("sendNow tick scheduled at %v, want >= %v", enq.calls[0].at, before)
+	}
+}
+
+// sendsCount scrapes mtx's real Prometheus registry and returns the current
+// inroad_sends_total value for kind="warmup" + result, or 0 if that series
+// doesn't exist yet.
+func sendsCount(t *testing.T, mtx *metrics.Metrics, result string) float64 {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
+	w := httptest.NewRecorder()
+	mtx.Handler().ServeHTTP(w, req)
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(w.Body)
+	if err != nil {
+		t.Fatalf("parse exposition text: %v", err)
+	}
+	fam, ok := families["inroad_sends_total"]
+	if !ok {
+		return 0
+	}
+	for _, m := range fam.GetMetric() {
+		labels := map[string]string{}
+		for _, lp := range m.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["kind"] == "warmup" && labels["result"] == result {
+			return m.GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+// TestSendRecordsSendFinalizedMetrics proves each finalize point SendHandler
+// passes through increments inroad_sends_total{kind="warmup"} with the
+// outcome bucket it belongs to, and that ClaimAlreadySent's recover-forward
+// does not double-count a delivery already recorded on the run that sent it.
+func TestSendRecordsSendFinalizedMetrics(t *testing.T) {
+	cases := []struct {
+		name string
+		core *sendCore
+		snd  *fakeSender
+		want string
+	}{
+		{
+			name: "job.Skip is skipped",
+			core: &sendCore{job: coreapi.WarmupSendJob{Skip: true}, claim: coreapi.ClaimWon},
+			snd:  &fakeSender{}, want: "skipped",
+		},
+		{
+			name: "ClaimSkip is skipped",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimSkip},
+			snd:  &fakeSender{}, want: "skipped",
+		},
+		{
+			name: "successful send is sent",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimWon, assigned: "w:node-a"},
+			snd:  &fakeSender{msgID: "<m@x>"}, want: "sent",
+		},
+		{
+			name: "transient send failure is failed",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimWon},
+			snd:  &fakeSender{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}, want: "failed",
+		},
+		{
+			name: "permanent send failure is failed",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimWon, assigned: "w:node-b"},
+			snd:  &fakeSender{err: errors.New("550 mailbox unavailable")}, want: "failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mtx := metrics.New()
+			_ = SendHandler(tc.core, tc.snd, &fakeEnq{}, mtx)(context.Background(), tickTask(t, "mb-1", "ws-1"))
+
+			for _, result := range []string{"sent", "failed", "skipped"} {
+				got := sendsCount(t, mtx, result)
+				want := 0.0
+				if result == tc.want {
+					want = 1
+				}
+				if got != want {
+					t.Errorf("inroad_sends_total{kind=warmup,result=%s} = %v, want %v", result, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSendClaimAlreadySentDoesNotDoubleCountSent proves the recover-forward
+// path (schedule the next tick without re-sending) emits no metric of its
+// own — the delivery it's recovering was already counted "sent" by the run
+// that actually sent it.
+func TestSendClaimAlreadySentDoesNotDoubleCountSent(t *testing.T) {
+	mtx := metrics.New()
+	due := time.Now().Add(15 * time.Minute).Truncate(time.Second)
+	core := &sendCore{job: wonJob(), claim: coreapi.ClaimAlreadySent, dueAt: due, assigned: "w:node-c"}
+	snd := &fakeSender{}
+
+	if err := SendHandler(core, snd, &fakeEnq{}, mtx)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if got := sendsCount(t, mtx, "sent"); got != 0 {
+		t.Fatalf("inroad_sends_total{result=sent} = %v, want 0 (recover-forward must not record a fresh send)", got)
 	}
 }

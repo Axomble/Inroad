@@ -20,9 +20,11 @@ import (
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/dnsauth"
+	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
@@ -53,6 +55,25 @@ func run() error {
 		return err
 	}
 	logger := log.New(cfg.Env)
+
+	// Prometheus /metrics listener. mtx is always constructed (never nil): the
+	// campaign/warmup send handlers' finalize points record into it
+	// unconditionally below; INROAD_METRICS_ADDR only controls whether the
+	// dedicated listener actually opens a port. metricsCtx is cancelled when
+	// run() returns (worker shutting down) — same pattern as the heartbeat's
+	// hbCtx further down.
+	mtx := metrics.New()
+	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
+	defer cancelMetrics()
+	if cfg.MetricsAddr != "" {
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		go func() {
+			if err := httpx.Run(metricsCtx, metricsSrv); err != nil {
+				logger.Error("metrics server error", "err", err)
+			}
+		}()
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+	}
 
 	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
 	if err != nil {
@@ -158,7 +179,7 @@ func run() error {
 	// The DNS resolver for the domain-authentication sweep. It resolves only
 	// domains derived from connected mailboxes (coreapi supplies the list), and
 	// a TXT lookup dials no user-supplied host, so it needs no SSRF vet.
-	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
+	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret, mtx)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
