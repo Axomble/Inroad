@@ -1,4 +1,5 @@
-import { Menu, Search, Sparkles } from 'lucide-react'
+import { Link } from '@tanstack/react-router'
+import { BookOpen, Menu, Search, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { WorkspacePulse } from '@/features/pulse/api'
 import { usePulseSelect } from './use-pulse'
@@ -75,10 +76,18 @@ export function AppHeader({
         <kbd className="rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">⌘ K</kbd>
       </button>
 
+      <Link
+        to="/app/docs"
+        className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs text-chrome-muted transition-colors hover:bg-chrome-hover hover:text-chrome-text"
+      >
+        <BookOpen className="size-3.5 text-primary" aria-hidden="true" />
+        <span className="hidden sm:inline">Docs & MCP</span>
+      </Link>
+
       <Button
         variant="ghost"
         size="sm"
-        className="ml-auto text-chrome-muted hover:bg-chrome-hover hover:text-chrome-text"
+        className="text-chrome-muted hover:bg-chrome-hover hover:text-chrome-text"
         onClick={onToggleAgent}
         aria-label={agentOpen ? 'Close Inroad assistant' : 'Open Inroad assistant'}
         aria-expanded={agentOpen}
