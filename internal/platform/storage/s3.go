@@ -193,7 +193,7 @@ func (p *S3Provider) PresignGet(ctx context.Context, key string, expires time.Du
 }
 
 // PresignPut generates a presigned URL for uploading an object.
-func (p *S3Provider) PresignPut(ctx context.Context, key string, contentType string, expires time.Duration) (string, error) {
+func (p *S3Provider) PresignPut(ctx context.Context, key, contentType string, expires time.Duration) (string, error) {
 	if p.presignClient == nil {
 		return "", errors.New("s3 presign client is not configured")
 	}
