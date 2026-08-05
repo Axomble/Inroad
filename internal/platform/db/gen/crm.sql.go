@@ -202,6 +202,7 @@ SELECT d.id, d.workspace_id, d.pipeline_id, d.stage_id, d.company_id, d.primary_
        s.color AS stage_color,
        s.is_won AS stage_is_won,
        s.is_lost AS stage_is_lost,
+       d.position::text AS position_key,
        COALESCE(c.name, '') AS company_name,
        COALESCE(ct.email, '') AS contact_email
 FROM deals d
@@ -242,6 +243,7 @@ type GetDealRow struct {
 	StageColor       string             `json:"stage_color"`
 	StageIsWon       bool               `json:"stage_is_won"`
 	StageIsLost      bool               `json:"stage_is_lost"`
+	PositionKey      string             `json:"position_key"`
 	CompanyName      string             `json:"company_name"`
 	ContactEmail     string             `json:"contact_email"`
 }
@@ -274,6 +276,7 @@ func (q *Queries) GetDeal(ctx context.Context, arg GetDealParams) (GetDealRow, e
 		&i.StageColor,
 		&i.StageIsWon,
 		&i.StageIsLost,
+		&i.PositionKey,
 		&i.CompanyName,
 		&i.ContactEmail,
 	)
@@ -686,7 +689,7 @@ func (q *Queries) InsertTaskTarget(ctx context.Context, arg InsertTaskTargetPara
 
 const listCompanies = `-- name: ListCompanies :many
 
-SELECT c.id, c.workspace_id, c.name, c.domain, c.owner_user_id, c.annual_revenue_micros, c.currency, c.created_at, c.updated_at, count(d.id)::bigint AS deal_count
+SELECT c.id, c.workspace_id, c.name, c.domain, c.owner_user_id, c.annual_revenue_micros, c.currency, c.created_at, c.updated_at, count(d.id)::bigint AS deal_count, lower(c.name) AS name_key
 FROM companies c
 LEFT JOIN deals d ON d.workspace_id = c.workspace_id AND d.company_id = c.id
 WHERE c.workspace_id = $1
@@ -716,6 +719,7 @@ type ListCompaniesRow struct {
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
 	DealCount           int64              `json:"deal_count"`
+	NameKey             string             `json:"name_key"`
 }
 
 // Every list query below is keyset-paginated: `seek = false` fetches the first
@@ -748,6 +752,7 @@ func (q *Queries) ListCompanies(ctx context.Context, arg ListCompaniesParams) ([
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DealCount,
+			&i.NameKey,
 		); err != nil {
 			return nil, err
 		}
@@ -805,6 +810,7 @@ SELECT d.id, d.workspace_id, d.pipeline_id, d.stage_id, d.company_id, d.primary_
        s.is_won AS stage_is_won,
        s.is_lost AS stage_is_lost,
        s.position AS stage_position,
+       d.position::text AS position_key,
        COALESCE(c.name, '') AS company_name,
        COALESCE(ct.email, '') AS contact_email
 FROM deals d
@@ -815,19 +821,19 @@ LEFT JOIN contacts ct ON ct.workspace_id = d.workspace_id AND ct.id = d.primary_
 WHERE d.workspace_id = $1
   AND ($2::bool = false
        OR (s.position, d.position, d.id) > ($3::int,
-                                            $4::numeric,
+                                            ($4::text)::numeric,
                                             $5::uuid))
 ORDER BY s.position, d.position, d.id
 LIMIT $6
 `
 
 type ListDealsParams struct {
-	WorkspaceID         uuid.UUID      `json:"workspace_id"`
-	Seek                bool           `json:"seek"`
-	CursorStagePosition int32          `json:"cursor_stage_position"`
-	CursorPosition      pgtype.Numeric `json:"cursor_position"`
-	CursorID            uuid.UUID      `json:"cursor_id"`
-	PageLimit           int32          `json:"page_limit"`
+	WorkspaceID         uuid.UUID `json:"workspace_id"`
+	Seek                bool      `json:"seek"`
+	CursorStagePosition int32     `json:"cursor_stage_position"`
+	CursorPosition      string    `json:"cursor_position"`
+	CursorID            uuid.UUID `json:"cursor_id"`
+	PageLimit           int32     `json:"page_limit"`
 }
 
 type ListDealsRow struct {
@@ -856,6 +862,7 @@ type ListDealsRow struct {
 	StageIsWon       bool               `json:"stage_is_won"`
 	StageIsLost      bool               `json:"stage_is_lost"`
 	StagePosition    int32              `json:"stage_position"`
+	PositionKey      string             `json:"position_key"`
 	CompanyName      string             `json:"company_name"`
 	ContactEmail     string             `json:"contact_email"`
 }
@@ -902,6 +909,7 @@ func (q *Queries) ListDeals(ctx context.Context, arg ListDealsParams) ([]ListDea
 			&i.StageIsWon,
 			&i.StageIsLost,
 			&i.StagePosition,
+			&i.PositionKey,
 			&i.CompanyName,
 			&i.ContactEmail,
 		); err != nil {

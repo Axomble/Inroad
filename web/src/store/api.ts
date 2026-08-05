@@ -838,7 +838,13 @@ const injectedRtkApi = api.injectEndpoints({
       CrmListCompaniesApiResponse,
       CrmListCompaniesApiArg
     >({
-      query: () => ({ url: `/crm/companies` }),
+      query: (queryArg) => ({
+        url: `/crm/companies`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
     }),
     crmCreateCompany: build.mutation<
       CrmCreateCompanyApiResponse,
@@ -943,7 +949,13 @@ const injectedRtkApi = api.injectEndpoints({
       }),
     }),
     crmListDeals: build.query<CrmListDealsApiResponse, CrmListDealsApiArg>({
-      query: () => ({ url: `/crm/deals` }),
+      query: (queryArg) => ({
+        url: `/crm/deals`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
     }),
     crmCreateDeal: build.mutation<
       CrmCreateDealApiResponse,
@@ -1029,6 +1041,8 @@ const injectedRtkApi = api.injectEndpoints({
         params: {
           target_type: queryArg.targetType,
           target_id: queryArg.targetId,
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
         },
       }),
     }),
@@ -1067,6 +1081,8 @@ const injectedRtkApi = api.injectEndpoints({
         params: {
           target_type: queryArg.targetType,
           target_id: queryArg.targetId,
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
         },
       }),
     }),
@@ -1633,7 +1649,12 @@ export type Oauth2RevokeApiArg = {
 };
 export type CrmListCompaniesApiResponse =
   /** status 200 Workspace companies */ CrmCompanyList;
-export type CrmListCompaniesApiArg = void;
+export type CrmListCompaniesApiArg = {
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
 export type CrmCreateCompanyApiResponse =
   /** status 201 Created company */ CrmCompany;
 export type CrmCreateCompanyApiArg = {
@@ -1695,7 +1716,12 @@ export type CrmDeleteStageApiArg = {
 };
 export type CrmListDealsApiResponse =
   /** status 200 Workspace deals */ CrmDealList;
-export type CrmListDealsApiArg = void;
+export type CrmListDealsApiArg = {
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
 export type CrmCreateDealApiResponse = /** status 201 Created deal */ CrmDeal;
 export type CrmCreateDealApiArg = {
   crmDealInput: CrmDealInput;
@@ -1747,6 +1773,10 @@ export type CrmListNotesApiResponse =
 export type CrmListNotesApiArg = {
   targetType: "contact" | "company" | "deal";
   targetId: string;
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
 };
 export type CrmCreateNoteApiResponse = /** status 201 Created note */ CrmNote;
 export type CrmCreateNoteApiArg = {
@@ -1766,6 +1796,10 @@ export type CrmListTasksApiResponse =
 export type CrmListTasksApiArg = {
   targetType: "contact" | "company" | "deal";
   targetId: string;
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
 };
 export type CrmCreateTaskApiResponse = /** status 201 Created task */ CrmTask;
 export type CrmCreateTaskApiArg = {
@@ -2731,13 +2765,14 @@ export type CrmCompanyInput = {
 };
 export type CrmCompany = CrmCompanyInput & {
   id: string;
-  workspace_id: string;
   deal_count: number;
   created_at: string;
   updated_at: string;
 };
 export type CrmCompanyList = {
   items: CrmCompany[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
 };
 export type CrmStageInput = {
   label: string;
@@ -2749,14 +2784,12 @@ export type CrmStageInput = {
 export type CrmStage = CrmStageInput & {
   id: string;
   pipeline_id: string;
-  workspace_id: string;
   key: string;
   created_at: string;
   updated_at: string;
 };
 export type CrmPipeline = {
   id: string;
-  workspace_id: string;
   name: string;
   is_default: boolean;
   stages: CrmStage[];
@@ -2782,7 +2815,8 @@ export type CrmDealInput = {
 };
 export type CrmDeal = CrmDealInput & {
   id: string;
-  workspace_id: string;
+  /** Fractional board ordering within the stage. Server-computed; change it with the move operation, never by writing it. */
+  position: number;
   source: string;
   source_campaign_id?: string | null;
   source_thread_ref?: string;
@@ -2801,6 +2835,8 @@ export type CrmDeal = CrmDealInput & {
 };
 export type CrmDealList = {
   items: CrmDeal[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
 };
 export type CrmBoardStage = {
   stage: CrmStage;
@@ -2879,7 +2915,6 @@ export type CrmSettings = CrmSettingsInput & {
 };
 export type CrmNote = {
   id: string;
-  workspace_id: string;
   title: string;
   body: string;
   created_by_actor: {
@@ -2890,6 +2925,8 @@ export type CrmNote = {
 };
 export type CrmNoteList = {
   items: CrmNote[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
 };
 export type CrmNoteUpdate = {
   title: string;
@@ -2902,7 +2939,6 @@ export type CrmTargetFields = {
 export type CrmNoteInput = CrmNoteUpdate & CrmTargetFields;
 export type CrmTask = {
   id: string;
-  workspace_id: string;
   title: string;
   body: string;
   due_at?: string | null;
@@ -2916,6 +2952,8 @@ export type CrmTask = {
 };
 export type CrmTaskList = {
   items: CrmTask[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
 };
 export type CrmTaskInput = CrmTargetFields & {
   title: string;
@@ -2927,7 +2965,6 @@ export type CrmTaskInput = CrmTargetFields & {
 export type CrmContactEmail = {
   id: string;
   contact_id: string;
-  workspace_id: string;
   email: string;
   is_primary: boolean;
   created_at: string;

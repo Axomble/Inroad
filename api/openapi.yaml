@@ -1768,6 +1768,9 @@ paths:
     get:
       operationId: crmListCompanies
       tags: [crm]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
       responses:
         '200':
           description: Workspace companies
@@ -1839,7 +1842,10 @@ paths:
     delete:
       operationId: crmDeletePipeline
       tags: [crm]
-      responses: { '204': { description: Pipeline deleted }, '409': { description: Default or referenced pipeline cannot be deleted } }
+      responses:
+        '204': { description: Pipeline deleted }
+        '404': { description: Pipeline not found }
+        '409': { description: The default pipeline cannot be deleted, or it is still referenced }
   /crm/pipelines/{id}/stages:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     post:
@@ -1868,11 +1874,17 @@ paths:
     delete:
       operationId: crmDeleteStage
       tags: [crm]
-      responses: { '204': { description: Stage deleted }, '409': { description: Stage is referenced } }
+      responses:
+        '204': { description: Stage deleted }
+        '404': { description: Stage not found }
+        '409': { description: Stage still has deals; move them to another stage first }
   /crm/deals:
     get:
       operationId: crmListDeals
       tags: [crm]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
       responses:
         '200': { description: Workspace deals, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDealList' } } } }
     post:
@@ -1964,6 +1976,8 @@ paths:
       parameters:
         - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
         - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
       responses:
         '200': { description: Notes attached to the target, content: { application/json: { schema: { $ref: '#/components/schemas/CRMNoteList' } } } }
     post:
@@ -1995,6 +2009,8 @@ paths:
       parameters:
         - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
         - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
       responses:
         '200': { description: Tasks attached to the target, content: { application/json: { schema: { $ref: '#/components/schemas/CRMTaskList' } } } }
     post:
@@ -2029,6 +2045,9 @@ paths:
     post:
       operationId: crmAddContactEmail
       tags: [crm]
+      description: >-
+        Requires BOTH crm:write and contacts:write. A contact's alias set decides
+        contacts.email, which is the recipient address on the send path.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/CRMContactEmailInput' } } }
@@ -2045,8 +2064,12 @@ paths:
     put:
       operationId: crmSetPrimaryContactEmail
       tags: [crm]
+      description: >-
+        Requires BOTH crm:write and contacts:write - this rewrites contacts.email,
+        which is the address a running campaign sends to.
       responses:
         '204': { description: Primary email changed }
+        '403': { description: Insufficient scope }
         '404': { description: Contact email not found }
 components:
   securitySchemes:
@@ -2060,6 +2083,20 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Defaults to 50, capped at 200.
+      schema: { type: integer, minimum: 1, maximum: 200 }
+    PageCursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque keyset cursor taken from the previous page's next_cursor.
+        Round-trip it untouched; never construct one.
+      schema: { type: string }
     CaptchaToken:
       name: X-Captcha-Token
       in: header
@@ -3373,17 +3410,20 @@ components:
       allOf:
         - $ref: '#/components/schemas/CRMCompanyInput'
         - type: object
-          required: [id, workspace_id, deal_count, created_at, updated_at]
+          required: [id, deal_count, created_at, updated_at]
           properties:
             id: { type: string, format: uuid }
-            workspace_id: { type: string, format: uuid }
             deal_count: { type: integer, format: int64 }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
     CRMCompanyList:
       type: object
       required: [items]
-      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMCompany' } } }
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMCompany' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
     CRMStageInput:
       type: object
       required: [label, color, position, is_won, is_lost]
@@ -3397,11 +3437,10 @@ components:
       allOf:
         - $ref: '#/components/schemas/CRMStageInput'
         - type: object
-          required: [id, pipeline_id, workspace_id, key, created_at, updated_at]
+          required: [id, pipeline_id, key, created_at, updated_at]
           properties:
             id: { type: string, format: uuid }
             pipeline_id: { type: string, format: uuid }
-            workspace_id: { type: string, format: uuid }
             key: { type: string }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
@@ -3411,10 +3450,9 @@ components:
       properties: { name: { type: string, minLength: 1, maxLength: 120 } }
     CRMPipeline:
       type: object
-      required: [id, workspace_id, name, is_default, stages, created_at, updated_at]
+      required: [id, name, is_default, stages, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
-        workspace_id: { type: string, format: uuid }
         name: { type: string }
         is_default: { type: boolean }
         stages: { type: array, items: { $ref: '#/components/schemas/CRMStage' } }
@@ -3441,10 +3479,14 @@ components:
       allOf:
         - $ref: '#/components/schemas/CRMDealInput'
         - type: object
-          required: [id, workspace_id, source, created_by_actor, pipeline_name, stage_label, stage_color, stage_is_won, stage_is_lost, created_at, updated_at]
+          required: [id, position, source, created_by_actor, pipeline_name, stage_label, stage_color, stage_is_won, stage_is_lost, created_at, updated_at]
           properties:
             id: { type: string, format: uuid }
-            workspace_id: { type: string, format: uuid }
+            position:
+              type: number
+              description: >-
+                Fractional board ordering within the stage. Server-computed;
+                change it with the move operation, never by writing it.
             source: { type: string }
             source_campaign_id: { type: string, format: uuid, nullable: true }
             source_thread_ref: { type: string }
@@ -3461,7 +3503,11 @@ components:
     CRMDealList:
       type: object
       required: [items]
-      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMDeal' } } }
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMDeal' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
     CRMMoveDealInput:
       type: object
       required: [stage_id]
@@ -3572,10 +3618,9 @@ components:
         - $ref: '#/components/schemas/CRMTargetFields'
     CRMNote:
       type: object
-      required: [id, workspace_id, title, body, created_by_actor, created_at, updated_at]
+      required: [id, title, body, created_by_actor, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
-        workspace_id: { type: string, format: uuid }
         title: { type: string }
         body: { type: string }
         created_by_actor: { type: object, additionalProperties: true }
@@ -3584,7 +3629,11 @@ components:
     CRMNoteList:
       type: object
       required: [items]
-      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMNote' } } }
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMNote' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
     CRMTaskInput:
       allOf:
         - $ref: '#/components/schemas/CRMTargetFields'
@@ -3598,10 +3647,9 @@ components:
             assignee_user_id: { type: string, format: uuid, nullable: true }
     CRMTask:
       type: object
-      required: [id, workspace_id, title, body, status, created_by_actor, created_at, updated_at]
+      required: [id, title, body, status, created_by_actor, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
-        workspace_id: { type: string, format: uuid }
         title: { type: string }
         body: { type: string }
         due_at: { type: string, format: date-time, nullable: true }
@@ -3613,18 +3661,21 @@ components:
     CRMTaskList:
       type: object
       required: [items]
-      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMTask' } } }
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMTask' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
     CRMContactEmailInput:
       type: object
       required: [email]
       properties: { email: { type: string, format: email } }
     CRMContactEmail:
       type: object
-      required: [id, contact_id, workspace_id, email, is_primary, created_at]
+      required: [id, contact_id, email, is_primary, created_at]
       properties:
         id: { type: string, format: uuid }
         contact_id: { type: string, format: uuid }
-        workspace_id: { type: string, format: uuid }
         email: { type: string, format: email }
         is_primary: { type: boolean }
         created_at: { type: string, format: date-time }

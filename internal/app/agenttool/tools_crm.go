@@ -82,12 +82,43 @@ type crmWriteArgs struct {
 	AmountMicros *int64 `json:"amount_micros"`
 }
 
+// CRMList is one page of a CRM listing as the model sees it. Truncated is not
+// cosmetic: a model that silently reasons over the first page of a longer list
+// draws confidently wrong conclusions ("this workspace has 50 deals"), so the
+// limit is always stated in the payload.
+type CRMList[T any] struct {
+	Items     []T    `json:"items"`
+	Truncated bool   `json:"truncated"`
+	Note      string `json:"note,omitempty"`
+}
+
+// NewCRMList builds a list payload, attaching the truncation note in one place
+// so every CRM listing reports it identically.
+func NewCRMList[T any](items []T, truncated bool) CRMList[T] {
+	out := CRMList[T]{Items: items, Truncated: truncated}
+	if truncated {
+		out.Note = "more records exist than are shown; this is one page, not the whole workspace"
+	}
+	return out
+}
+
 type CRMService interface {
-	ListCompanies(context.Context, uuid.UUID) ([]CRMCompany, error)
+	ListCompanies(context.Context, uuid.UUID) (CRMList[CRMCompany], error)
 	ListPipelines(context.Context, uuid.UUID) ([]CRMPipeline, error)
-	ListDeals(context.Context, uuid.UUID) ([]CRMDeal, error)
+	ListDeals(context.Context, uuid.UUID) (CRMList[CRMDeal], error)
 	CreateCompany(context.Context, uuid.UUID, CRMCompanyInput) (CRMCompany, error)
 	CreateDeal(context.Context, uuid.UUID, CRMDealInput) (CRMDeal, error)
+}
+
+// ErrorClassifier decides what a domain write failure looks like to the model.
+// It is declared here and implemented by the composition root so agenttool
+// never imports a domain package to inspect its sentinels — and so raw driver
+// text, which leaks table and column names, can never be forwarded to a model.
+type ErrorClassifier interface {
+	// Recoverable returns model-safe recovery guidance and true when the
+	// caller can fix the call itself; false means an infrastructure fault that
+	// must abort the run.
+	Recoverable(err error) (string, bool)
 }
 
 type CRMIntegrationService interface {
@@ -101,16 +132,17 @@ func crmTools(deps Deps) []Tool {
 	if deps.CRM == nil {
 		return nil
 	}
+	errs := deps.CRMErrors
 	tools := []Tool{
-		crmReadTool(deps.CRM), crmWriteTool(deps.CRM),
+		crmReadTool(deps.CRM), crmWriteTool(deps.CRM, errs),
 		crmCollectionReadTool("inroad_company_read", "Read CRM companies in this workspace.", "companies", deps.CRM),
-		crmCompanyWriteTool(deps.CRM),
+		crmCompanyWriteTool(deps.CRM, errs),
 		crmCollectionReadTool("inroad_deal_read", "Read CRM deals in this workspace.", "deals", deps.CRM),
-		crmDealWriteTool(deps.CRM),
+		crmDealWriteTool(deps.CRM, errs),
 		crmCollectionReadTool("inroad_pipeline_read", "Read CRM pipelines and their ordered stages.", "pipelines", deps.CRM),
 	}
 	if integrated, ok := deps.CRM.(CRMIntegrationService); ok {
-		tools = append(tools, crmNoteWriteTool(integrated), crmTaskWriteTool(integrated), crmEventsReadTool(integrated))
+		tools = append(tools, crmNoteWriteTool(integrated, errs), crmTaskWriteTool(integrated, errs), crmEventsReadTool(integrated))
 	}
 	return tools
 }
@@ -145,7 +177,7 @@ func crmCollectionReadTool(name, description, collection string, svc CRMService)
 		}}
 }
 
-func crmCompanyWriteTool(svc CRMService) Tool {
+func crmCompanyWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 	return Tool{Name: "inroad_company_write", Description: "Create a company in this workspace.",
 		InputSchema: mustSchema(strField("name", "Company name.", true), strField("domain", "Company hostname such as example.com.", false),
 			strField("currency", "Three-letter currency code; defaults to USD.", false)), Risk: RiskWrite,
@@ -163,13 +195,13 @@ func crmCompanyWriteTool(svc CRMService) Tool {
 			item, err := svc.CreateCompany(ctx, p.WorkspaceID, CRMCompanyInput{Name: args.Name, Domain: args.Domain,
 				Currency: args.Currency, Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
 			if err != nil {
-				return recoverableCRMError(err)
+				return recoverableCRMError(errs, err)
 			}
 			return Ok(item), nil
 		}}
 }
 
-func crmDealWriteTool(svc CRMService) Tool {
+func crmDealWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 	amount := field{name: "amount_micros", schema: jsonObject{{"type", "integer"}, {"minimum", 0}}}
 	return Tool{Name: "inroad_deal_write", Description: "Create a deal. Read pipelines first to obtain tenant-safe pipeline and stage ids.",
 		InputSchema: mustSchema(strField("name", "Deal name.", true), strField("pipeline_id", "Pipeline id.", true),
@@ -200,27 +232,27 @@ func crmDealWriteTool(svc CRMService) Tool {
 				StageID: stageID, CompanyID: companyID, AmountMicros: args.AmountMicros, Currency: args.Currency,
 				Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
 			if err != nil {
-				return recoverableCRMError(err)
+				return recoverableCRMError(errs, err)
 			}
 			return Ok(item), nil
 		}}
 }
 
-func crmNoteWriteTool(svc CRMIntegrationService) Tool {
-	return crmTargetWriteTool("inroad_note_write", "Create a note attached to a contact, company, or deal.", "body", func(ctx context.Context, p Principal, title, body string, target CRMTarget) error {
+func crmNoteWriteTool(svc CRMIntegrationService, errs ErrorClassifier) Tool {
+	return crmTargetWriteTool("inroad_note_write", "Create a note attached to a contact, company, or deal.", "body", errs, func(ctx context.Context, p Principal, title, body string, target CRMTarget) error {
 		return svc.CreateNote(ctx, p.WorkspaceID, CRMNoteInput{Title: title, Body: body, Target: target,
 			Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
 	})
 }
 
-func crmTaskWriteTool(svc CRMIntegrationService) Tool {
-	return crmTargetWriteTool("inroad_task_write", "Create a follow-up task attached to a contact, company, or deal.", "title", func(ctx context.Context, p Principal, title, body string, target CRMTarget) error {
+func crmTaskWriteTool(svc CRMIntegrationService, errs ErrorClassifier) Tool {
+	return crmTargetWriteTool("inroad_task_write", "Create a follow-up task attached to a contact, company, or deal.", "title", errs, func(ctx context.Context, p Principal, title, body string, target CRMTarget) error {
 		return svc.CreateTask(ctx, p.WorkspaceID, CRMTaskInput{Title: title, Body: body, Target: target,
 			Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
 	})
 }
 
-func crmTargetWriteTool(name, description, requiredText string, execute func(context.Context, Principal, string, string, CRMTarget) error) Tool {
+func crmTargetWriteTool(name, description, requiredText string, errs ErrorClassifier, execute func(context.Context, Principal, string, string, CRMTarget) error) Tool {
 	fields := []field{
 		strField("target_type", "Target kind: contact, company, or deal.", true),
 		strField("target_id", "Target record id.", true),
@@ -247,7 +279,7 @@ func crmTargetWriteTool(name, description, requiredText string, execute func(con
 				return Fail("target_type must be contact, company, or deal"), nil
 			}
 			if err := execute(ctx, p, args.Title, args.Body, CRMTarget{Type: args.TargetType, ID: id}); err != nil {
-				return recoverableCRMError(err)
+				return recoverableCRMError(errs, err)
 			}
 			return Ok(map[string]bool{"created": true}), nil
 		}}
@@ -312,7 +344,7 @@ func crmReadTool(svc CRMService) Tool {
 	}}
 }
 
-func crmWriteTool(svc CRMService) Tool {
+func crmWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 	methods := []string{"create_company", "create_deal"}
 	amount := field{name: "amount_micros", schema: jsonObject{{"type", "integer"}, {"description", "Optional monetary amount in millionths of the currency unit; zero or greater."}, {"minimum", 0}}}
 	return Tool{Name: "inroad_crm_write", Description: "Create a CRM company or deal. For a deal, first call inroad_crm_read with method=pipelines and method=companies to obtain tenant-safe IDs.", InputSchema: mustSchema(methodField("The CRM mutation to perform.", methods), strField("name", "Company or deal name.", true), strField("domain", "Company hostname such as example.com. Only for create_company.", false), strField("pipeline_id", "Pipeline id from inroad_crm_read. Required for create_deal.", false), strField("stage_id", "Stage id belonging to pipeline_id. Required for create_deal.", false), strField("company_id", "Optional company id from inroad_crm_read.", false), amount, strField("currency", "Three-letter currency code; defaults to USD.", false)), Risk: RiskWrite, Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
@@ -329,7 +361,7 @@ func crmWriteTool(svc CRMService) Tool {
 			item, err := svc.CreateCompany(ctx, p.WorkspaceID, CRMCompanyInput{Name: args.Name, Domain: args.Domain,
 				Currency: args.Currency, Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
 			if err != nil {
-				return recoverableCRMError(err)
+				return recoverableCRMError(errs, err)
 			}
 			return Ok(item), nil
 		case "create_deal":
@@ -351,7 +383,7 @@ func crmWriteTool(svc CRMService) Tool {
 			}
 			item, err := svc.CreateDeal(ctx, p.WorkspaceID, CRMDealInput{Name: args.Name, PipelineID: pipelineID, StageID: stageID, CompanyID: companyID, AmountMicros: args.AmountMicros, Currency: args.Currency, Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
 			if err != nil {
-				return recoverableCRMError(err)
+				return recoverableCRMError(errs, err)
 			}
 			return Ok(item), nil
 		default:
@@ -360,10 +392,16 @@ func crmWriteTool(svc CRMService) Tool {
 	}}
 }
 
-func recoverableCRMError(err error) (Result, error) {
-	message := err.Error()
-	if strings.Contains(message, "invalid") || strings.Contains(message, "not found") || strings.Contains(message, "conflict") {
-		return Fail(message + "; correct the values and call again after reading the current CRM records"), nil
+// recoverableCRMError turns a domain write failure into either a model-visible
+// retry prompt or an aborting error. The decision is delegated to the injected
+// classifier (sentinel matching in the composition root) rather than made here
+// by matching substrings of an error message, which both misclassifies and
+// forwards raw driver text to the model.
+func recoverableCRMError(errs ErrorClassifier, err error) (Result, error) {
+	if errs != nil {
+		if message, ok := errs.Recoverable(err); ok {
+			return Fail(message + "; correct the values and call again after reading the current CRM records"), nil
+		}
 	}
 	return Result{}, fmt.Errorf("write CRM: %w", err)
 }

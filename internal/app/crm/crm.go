@@ -18,6 +18,22 @@ var (
 	ErrValidation = errors.New("crm: invalid request")
 )
 
+// PageRequest is one page of a keyset-paginated listing. Cursor is opaque: a
+// client round-trips the previous page's NextCursor untouched and never mints
+// one. Limit is clamped by the service (see normalizePage).
+type PageRequest struct {
+	Limit  int32
+	Cursor string
+}
+
+// Page is a listing's wire shape. NextCursor is empty on the last page, which
+// is the only "no more rows" signal a client needs — a full page with no
+// cursor is the end, never a silent truncation.
+type Page[T any] struct {
+	Items      []T    `json:"items"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
 const (
 	TargetContact = "contact"
 	TargetCompany = "company"
@@ -47,7 +63,7 @@ func (a Actor) JSON() ([]byte, error) { return json.Marshal(a) }
 
 type Company struct {
 	ID                  uuid.UUID  `json:"id"`
-	WorkspaceID         uuid.UUID  `json:"workspace_id"`
+	WorkspaceID         uuid.UUID  `json:"-"`
 	Name                string     `json:"name"`
 	Domain              string     `json:"domain,omitempty"`
 	OwnerUserID         *uuid.UUID `json:"owner_user_id,omitempty"`
@@ -61,7 +77,7 @@ type Company struct {
 type Stage struct {
 	ID          uuid.UUID `json:"id"`
 	PipelineID  uuid.UUID `json:"pipeline_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
+	WorkspaceID uuid.UUID `json:"-"`
 	Key         string    `json:"key"`
 	Label       string    `json:"label"`
 	Color       string    `json:"color"`
@@ -74,7 +90,7 @@ type Stage struct {
 
 type Pipeline struct {
 	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
+	WorkspaceID uuid.UUID `json:"-"`
 	Name        string    `json:"name"`
 	IsDefault   bool      `json:"is_default"`
 	Stages      []Stage   `json:"stages"`
@@ -83,17 +99,21 @@ type Pipeline struct {
 }
 
 type Deal struct {
-	ID               uuid.UUID       `json:"id"`
-	WorkspaceID      uuid.UUID       `json:"workspace_id"`
-	PipelineID       uuid.UUID       `json:"pipeline_id"`
-	StageID          uuid.UUID       `json:"stage_id"`
-	CompanyID        *uuid.UUID      `json:"company_id,omitempty"`
-	PrimaryContactID *uuid.UUID      `json:"primary_contact_id,omitempty"`
-	OwnerUserID      *uuid.UUID      `json:"owner_user_id,omitempty"`
-	Name             string          `json:"name"`
-	AmountMicros     *int64          `json:"amount_micros,omitempty"`
-	Currency         string          `json:"currency"`
-	CloseDate        *time.Time      `json:"close_date,omitempty"`
+	ID               uuid.UUID  `json:"id"`
+	WorkspaceID      uuid.UUID  `json:"-"`
+	PipelineID       uuid.UUID  `json:"pipeline_id"`
+	StageID          uuid.UUID  `json:"stage_id"`
+	CompanyID        *uuid.UUID `json:"company_id,omitempty"`
+	PrimaryContactID *uuid.UUID `json:"primary_contact_id,omitempty"`
+	OwnerUserID      *uuid.UUID `json:"owner_user_id,omitempty"`
+	Name             string     `json:"name"`
+	AmountMicros     *int64     `json:"amount_micros,omitempty"`
+	Currency         string     `json:"currency"`
+	CloseDate        *time.Time `json:"close_date,omitempty"`
+	// Position is the fractional board ordering within a stage. Moves are
+	// computed server-side (POST /crm/deals/{id}/move) — a client reads this to
+	// render order, it never writes one.
+	Position         float64         `json:"position"`
 	Source           string          `json:"source"`
 	SourceCampaignID *uuid.UUID      `json:"source_campaign_id,omitempty"`
 	SourceThreadRef  string          `json:"source_thread_ref,omitempty"`
@@ -217,7 +237,7 @@ type Target struct {
 
 type Note struct {
 	ID             uuid.UUID       `json:"id"`
-	WorkspaceID    uuid.UUID       `json:"workspace_id"`
+	WorkspaceID    uuid.UUID       `json:"-"`
 	Title          string          `json:"title"`
 	Body           string          `json:"body"`
 	CreatedByActor json.RawMessage `json:"created_by_actor"`
@@ -227,7 +247,7 @@ type Note struct {
 
 type Task struct {
 	ID             uuid.UUID       `json:"id"`
-	WorkspaceID    uuid.UUID       `json:"workspace_id"`
+	WorkspaceID    uuid.UUID       `json:"-"`
 	Title          string          `json:"title"`
 	Body           string          `json:"body"`
 	DueAt          *time.Time      `json:"due_at,omitempty"`
@@ -241,7 +261,7 @@ type Task struct {
 type ContactEmail struct {
 	ID          uuid.UUID `json:"id"`
 	ContactID   uuid.UUID `json:"contact_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
+	WorkspaceID uuid.UUID `json:"-"`
 	Email       string    `json:"email"`
 	IsPrimary   bool      `json:"is_primary"`
 	CreatedAt   time.Time `json:"created_at"`

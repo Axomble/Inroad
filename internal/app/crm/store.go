@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,32 +16,38 @@ import (
 )
 
 type Store interface {
-	ListCompanies(context.Context, uuid.UUID, int32) ([]Company, error)
+	ListCompanies(context.Context, uuid.UUID, PageRequest) (Page[Company], error)
 	GetCompany(context.Context, uuid.UUID, uuid.UUID) (Company, error)
 	CreateCompany(context.Context, uuid.UUID, CompanyInput) (Company, error)
 	UpdateCompany(context.Context, uuid.UUID, uuid.UUID, CompanyInput) (Company, error)
 	DeleteCompany(context.Context, uuid.UUID, uuid.UUID) error
 
-	ListPipelines(context.Context, uuid.UUID) ([]Pipeline, error)
+	ListPipelines(context.Context, uuid.UUID, int32) ([]Pipeline, error)
 	GetPipeline(context.Context, uuid.UUID, uuid.UUID) (Pipeline, error)
 	CreatePipeline(context.Context, uuid.UUID, PipelineInput) (Pipeline, error)
 	UpdatePipeline(context.Context, uuid.UUID, uuid.UUID, PipelineInput) (Pipeline, error)
+	// PipelineIsDefault reports the guard state DeletePipeline enforces,
+	// separately from existence, so the service can tell "no such pipeline"
+	// (404) apart from "the default pipeline may not be deleted" (409).
+	PipelineIsDefault(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 	DeletePipeline(context.Context, uuid.UUID, uuid.UUID) error
 	CreateStage(context.Context, uuid.UUID, uuid.UUID, string, StageInput) (Stage, error)
 	UpdateStage(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, StageInput) (Stage, error)
+	StageExists(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
+	CountStageDeals(context.Context, uuid.UUID, uuid.UUID) (int64, error)
 	DeleteStage(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 
-	ListDeals(context.Context, uuid.UUID, int32) ([]Deal, error)
+	ListDeals(context.Context, uuid.UUID, PageRequest) (Page[Deal], error)
 	GetDeal(context.Context, uuid.UUID, uuid.UUID) (Deal, error)
 	CreateDeal(context.Context, uuid.UUID, DealInput) (Deal, error)
 	UpdateDeal(context.Context, uuid.UUID, uuid.UUID, DealInput) (Deal, error)
 	DeleteDeal(context.Context, uuid.UUID, uuid.UUID) error
 
-	ListNotes(context.Context, uuid.UUID, Target, int32) ([]Note, error)
+	ListNotes(context.Context, uuid.UUID, Target, PageRequest) (Page[Note], error)
 	CreateNote(context.Context, uuid.UUID, NoteInput) (Note, error)
 	UpdateNote(context.Context, uuid.UUID, uuid.UUID, string, string) (Note, error)
 	DeleteNote(context.Context, uuid.UUID, uuid.UUID) error
-	ListTasks(context.Context, uuid.UUID, Target, int32) ([]Task, error)
+	ListTasks(context.Context, uuid.UUID, Target, PageRequest) (Page[Task], error)
 	CreateTask(context.Context, uuid.UUID, TaskInput) (Task, error)
 	UpdateTask(context.Context, uuid.UUID, uuid.UUID, TaskInput) (Task, error)
 	DeleteTask(context.Context, uuid.UUID, uuid.UUID) error
@@ -58,16 +64,42 @@ type PgStore struct {
 
 func NewPgStore(pool *pgxpool.Pool) *PgStore { return &PgStore{pool: pool, q: gen.New(pool)} }
 
-func (s *PgStore) ListCompanies(ctx context.Context, workspaceID uuid.UUID, limit int32) ([]Company, error) {
-	rows, err := s.q.ListCompanies(ctx, gen.ListCompaniesParams{WorkspaceID: workspaceID, Limit: limit})
-	if err != nil {
-		return nil, err
+func (s *PgStore) ListCompanies(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Company], error) {
+	params := gen.ListCompaniesParams{WorkspaceID: workspaceID, PageLimit: page.Limit}
+	if page.Cursor != "" {
+		keys, err := decodeCursor(cursorCompanies, page.Cursor, 2)
+		if err != nil {
+			return Page[Company]{}, err
+		}
+		id, err := uuid.Parse(keys[0])
+		if err != nil {
+			return Page[Company]{}, validation("cursor is malformed")
+		}
+		params.Seek, params.CursorID, params.CursorName = true, id, keys[1]
 	}
-	out := make([]Company, len(rows))
+	rows, err := s.q.ListCompanies(ctx, params)
+	if err != nil {
+		return Page[Company]{}, err
+	}
+	out := Page[Company]{Items: make([]Company, len(rows))}
 	for i, row := range rows {
-		out[i] = companyFromList(row)
+		out.Items[i] = companyFromList(row)
+	}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorCompanies, last.ID.String(), last.NameKey)
 	}
 	return out, nil
+}
+
+// lastOfFullPage returns the row a next-page cursor should be built from: only
+// a page filled to the limit can have a successor, so a short page ends the
+// listing without an extra count query.
+func lastOfFullPage[T any](rows []T, limit int32) (T, bool) {
+	var zero T
+	if limit <= 0 || int32(len(rows)) < limit {
+		return zero, false
+	}
+	return rows[len(rows)-1], true
 }
 
 func (s *PgStore) GetCompany(ctx context.Context, workspaceID, id uuid.UUID) (Company, error) {
@@ -107,18 +139,26 @@ func (s *PgStore) DeleteCompany(ctx context.Context, workspaceID, id uuid.UUID) 
 	return affected(n, err)
 }
 
-func (s *PgStore) ListPipelines(ctx context.Context, workspaceID uuid.UUID) ([]Pipeline, error) {
-	rows, err := s.q.ListPipelines(ctx, workspaceID)
+func (s *PgStore) ListPipelines(ctx context.Context, workspaceID uuid.UUID, limit int32) ([]Pipeline, error) {
+	rows, err := s.q.ListPipelines(ctx, gen.ListPipelinesParams{WorkspaceID: workspaceID, Limit: limit})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Pipeline, 0, len(rows))
-	for _, row := range rows {
-		stages, err := s.q.ListPipelineStages(ctx, gen.ListPipelineStagesParams{WorkspaceID: workspaceID, PipelineID: row.ID})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, pipelineFromRows(row, stages))
+	ids := make([]uuid.UUID, len(rows))
+	for i, row := range rows {
+		ids[i] = row.ID
+	}
+	stages, err := s.q.ListStagesForPipelines(ctx, gen.ListStagesForPipelinesParams{WorkspaceID: workspaceID, PipelineIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	byPipeline := make(map[uuid.UUID][]gen.PipelineStage, len(rows))
+	for _, stage := range stages {
+		byPipeline[stage.PipelineID] = append(byPipeline[stage.PipelineID], stage)
+	}
+	out := make([]Pipeline, len(rows))
+	for i, row := range rows {
+		out[i] = pipelineFromRows(row, byPipeline[row.ID])
 	}
 	return out, nil
 }
@@ -135,17 +175,9 @@ func (s *PgStore) GetPipeline(ctx context.Context, workspaceID, id uuid.UUID) (P
 	return pipelineFromRows(row, stages), nil
 }
 
-var defaultStages = [...]struct {
-	key, label, color string
-	won, lost         bool
-}{
-	{"lead", "Lead", "#64748B", false, false},
-	{"qualified", "Qualified", "#3B82F6", false, false},
-	{"proposal", "Proposal", "#8B5CF6", false, false},
-	{"won", "Won", "#22C55E", true, false},
-	{"lost", "Lost", "#EF4444", false, true},
-}
-
+// CreatePipeline seeds the stage set through the same SQL function the
+// workspace seed uses, so the default stages have exactly one definition
+// (migration 000042) and the two paths cannot drift.
 func (s *PgStore) CreatePipeline(ctx context.Context, workspaceID uuid.UUID, in PipelineInput) (Pipeline, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -157,16 +189,12 @@ func (s *PgStore) CreatePipeline(ctx context.Context, workspaceID uuid.UUID, in 
 	if err != nil {
 		return Pipeline{}, err
 	}
-	stages := make([]gen.PipelineStage, 0, len(defaultStages))
-	for i, stage := range defaultStages {
-		created, err := qtx.InsertPipelineStage(ctx, gen.InsertPipelineStageParams{
-			WorkspaceID: workspaceID, PipelineID: row.ID, Key: stage.key,
-			Label: stage.label, Color: stage.color, Position: int32(i), IsWon: stage.won, IsLost: stage.lost,
-		})
-		if err != nil {
-			return Pipeline{}, err
-		}
-		stages = append(stages, created)
+	if err := qtx.SeedPipelineStages(ctx, gen.SeedPipelineStagesParams{PipelineID: row.ID, WorkspaceID: workspaceID}); err != nil {
+		return Pipeline{}, err
+	}
+	stages, err := qtx.ListPipelineStages(ctx, gen.ListPipelineStagesParams{WorkspaceID: workspaceID, PipelineID: row.ID})
+	if err != nil {
+		return Pipeline{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Pipeline{}, err
@@ -180,6 +208,14 @@ func (s *PgStore) UpdatePipeline(ctx context.Context, workspaceID, id uuid.UUID,
 		return Pipeline{}, notFound(err)
 	}
 	return s.GetPipeline(ctx, workspaceID, id)
+}
+
+func (s *PgStore) PipelineIsDefault(ctx context.Context, workspaceID, id uuid.UUID) (bool, error) {
+	isDefault, err := s.q.PipelineIsDefault(ctx, gen.PipelineIsDefaultParams{WorkspaceID: workspaceID, ID: id})
+	if err != nil {
+		return false, notFound(err)
+	}
+	return isDefault, nil
 }
 
 func (s *PgStore) DeletePipeline(ctx context.Context, workspaceID, id uuid.UUID) error {
@@ -209,19 +245,52 @@ func (s *PgStore) UpdateStage(ctx context.Context, workspaceID, pipelineID, id u
 	return stageFromRow(row), nil
 }
 
+func (s *PgStore) StageExists(ctx context.Context, workspaceID, pipelineID, id uuid.UUID) (bool, error) {
+	_, err := s.q.GetPipelineStage(ctx, gen.GetPipelineStageParams{WorkspaceID: workspaceID, PipelineID: pipelineID, ID: id})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *PgStore) CountStageDeals(ctx context.Context, workspaceID, stageID uuid.UUID) (int64, error) {
+	return s.q.CountStageDeals(ctx, gen.CountStageDealsParams{WorkspaceID: workspaceID, StageID: stageID})
+}
+
 func (s *PgStore) DeleteStage(ctx context.Context, workspaceID, pipelineID, id uuid.UUID) error {
 	n, err := s.q.DeletePipelineStage(ctx, gen.DeletePipelineStageParams{WorkspaceID: workspaceID, PipelineID: pipelineID, ID: id})
 	return affected(n, err)
 }
 
-func (s *PgStore) ListDeals(ctx context.Context, workspaceID uuid.UUID, limit int32) ([]Deal, error) {
-	rows, err := s.q.ListDeals(ctx, gen.ListDealsParams{WorkspaceID: workspaceID, Limit: limit})
-	if err != nil {
-		return nil, err
+func (s *PgStore) ListDeals(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Deal], error) {
+	params := gen.ListDealsParams{WorkspaceID: workspaceID, PageLimit: page.Limit}
+	if page.Cursor != "" {
+		keys, err := decodeCursor(cursorDeals, page.Cursor, 3)
+		if err != nil {
+			return Page[Deal]{}, err
+		}
+		stagePosition, err := strconv.ParseInt(keys[0], 10, 32)
+		if err != nil {
+			return Page[Deal]{}, validation("cursor is malformed")
+		}
+		id, err := uuid.Parse(keys[2])
+		if err != nil {
+			return Page[Deal]{}, validation("cursor is malformed")
+		}
+		params.Seek = true
+		params.CursorStagePosition, params.CursorPosition, params.CursorID = int32(stagePosition), keys[1], id
 	}
-	out := make([]Deal, len(rows))
+	rows, err := s.q.ListDeals(ctx, params)
+	if err != nil {
+		return Page[Deal]{}, err
+	}
+	out := Page[Deal]{Items: make([]Deal, len(rows))}
 	for i, row := range rows {
-		out[i] = dealFromList(row)
+		out.Items[i] = dealFromList(row)
+	}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorDeals,
+			strconv.FormatInt(int64(last.StagePosition), 10), last.PositionKey, last.ID.String())
 	}
 	return out, nil
 }
@@ -249,7 +318,7 @@ func (s *PgStore) CreateDeal(ctx context.Context, workspaceID uuid.UUID, in Deal
 		WorkspaceID: workspaceID, PipelineID: in.PipelineID, StageID: in.StageID,
 		CompanyID: pgUUID(in.CompanyID), PrimaryContactID: pgUUID(in.PrimaryContactID),
 		OwnerUserID: pgUUID(in.OwnerUserID), Name: in.Name, AmountMicros: in.AmountMicros,
-		Currency: in.Currency, CloseDate: pgDate(in.CloseDate), Position: pgNumeric(position),
+		Currency: in.Currency, CloseDate: pgDate(in.CloseDate), Position: position,
 		Source: in.Source, SourceCampaignID: pgUUID(in.SourceCampaignID),
 		SourceThreadRef: in.SourceThreadRef, CreatedByActor: actor,
 	})
@@ -272,7 +341,7 @@ func (s *PgStore) UpdateDeal(ctx context.Context, workspaceID, id uuid.UUID, in 
 		if nextErr != nil {
 			return Deal{}, nextErr
 		}
-		position = pgNumeric(next)
+		position = next
 	}
 	_, err = s.q.UpdateDeal(ctx, gen.UpdateDealParams{
 		WorkspaceID: workspaceID, ID: id, PipelineID: in.PipelineID, StageID: in.StageID,
@@ -291,20 +360,54 @@ func (s *PgStore) DeleteDeal(ctx context.Context, workspaceID, id uuid.UUID) err
 	return affected(n, err)
 }
 
-//nolint:dupl // Notes and tasks use distinct sqlc row types; keeping both typed avoids reflection and unsafe conversions.
-func (s *PgStore) ListNotes(ctx context.Context, workspaceID uuid.UUID, target Target, limit int32) ([]Note, error) {
-	return listTargeted(target,
+func (s *PgStore) ListNotes(ctx context.Context, workspaceID uuid.UUID, target Target, page PageRequest) (Page[Note], error) {
+	seek, cursorTime, cursorID, err := decodeTimeCursor(cursorNotes, page.Cursor)
+	if err != nil {
+		return Page[Note]{}, err
+	}
+	rows, err := listTargeted(target,
 		func(id pgtype.UUID) ([]gen.Note, error) {
-			return s.q.ListNotesForContact(ctx, gen.ListNotesForContactParams{WorkspaceID: workspaceID, ContactID: id, Limit: limit})
+			return s.q.ListNotesForContact(ctx, gen.ListNotesForContactParams{WorkspaceID: workspaceID, ContactID: id,
+				Seek: seek, CursorTime: cursorTime, CursorID: cursorID, PageLimit: page.Limit})
 		},
 		func(id pgtype.UUID) ([]gen.Note, error) {
-			return s.q.ListNotesForCompany(ctx, gen.ListNotesForCompanyParams{WorkspaceID: workspaceID, CompanyID: id, Limit: limit})
+			return s.q.ListNotesForCompany(ctx, gen.ListNotesForCompanyParams{WorkspaceID: workspaceID, CompanyID: id,
+				Seek: seek, CursorTime: cursorTime, CursorID: cursorID, PageLimit: page.Limit})
 		},
 		func(id pgtype.UUID) ([]gen.Note, error) {
-			return s.q.ListNotesForDeal(ctx, gen.ListNotesForDealParams{WorkspaceID: workspaceID, DealID: id, Limit: limit})
+			return s.q.ListNotesForDeal(ctx, gen.ListNotesForDealParams{WorkspaceID: workspaceID, DealID: id,
+				Seek: seek, CursorTime: cursorTime, CursorID: cursorID, PageLimit: page.Limit})
 		},
 		noteFromRow,
 	)
+	if err != nil {
+		return Page[Note]{}, err
+	}
+	out := Page[Note]{Items: rows}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorNotes, last.CreatedAt.UTC().Format(time.RFC3339Nano), last.ID.String())
+	}
+	return out, nil
+}
+
+// decodeTimeCursor reads the (created_at, id) cursor shared by the note lists.
+func decodeTimeCursor(kind cursorKind, raw string) (bool, pgtype.Timestamptz, uuid.UUID, error) {
+	if raw == "" {
+		return false, pgtype.Timestamptz{Valid: true}, uuid.Nil, nil
+	}
+	keys, err := decodeCursor(kind, raw, 2)
+	if err != nil {
+		return false, pgtype.Timestamptz{}, uuid.Nil, err
+	}
+	at, err := time.Parse(time.RFC3339Nano, keys[0])
+	if err != nil {
+		return false, pgtype.Timestamptz{}, uuid.Nil, validation("cursor is malformed")
+	}
+	id, err := uuid.Parse(keys[1])
+	if err != nil {
+		return false, pgtype.Timestamptz{}, uuid.Nil, validation("cursor is malformed")
+	}
+	return true, pgtype.Timestamptz{Time: at, Valid: true}, id, nil
 }
 
 func (s *PgStore) CreateNote(ctx context.Context, workspaceID uuid.UUID, in NoteInput) (Note, error) {
@@ -347,20 +450,73 @@ func (s *PgStore) DeleteNote(ctx context.Context, workspaceID, id uuid.UUID) err
 	return affected(n, err)
 }
 
-//nolint:dupl // See ListNotes: the parallel shape preserves compile-time mappings for separate aggregates.
-func (s *PgStore) ListTasks(ctx context.Context, workspaceID uuid.UUID, target Target, limit int32) ([]Task, error) {
-	return listTargeted(target,
+func (s *PgStore) ListTasks(ctx context.Context, workspaceID uuid.UUID, target Target, page PageRequest) (Page[Task], error) {
+	seek, done, due, cursorID, err := decodeTaskCursor(page.Cursor)
+	if err != nil {
+		return Page[Task]{}, err
+	}
+	rows, err := listTargeted(target,
 		func(id pgtype.UUID) ([]gen.Task, error) {
-			return s.q.ListTasksForContact(ctx, gen.ListTasksForContactParams{WorkspaceID: workspaceID, ContactID: id, Limit: limit})
+			return s.q.ListTasksForContact(ctx, gen.ListTasksForContactParams{WorkspaceID: workspaceID, ContactID: id,
+				Seek: seek, CursorDone: done, CursorDue: due, CursorID: cursorID, PageLimit: page.Limit})
 		},
 		func(id pgtype.UUID) ([]gen.Task, error) {
-			return s.q.ListTasksForCompany(ctx, gen.ListTasksForCompanyParams{WorkspaceID: workspaceID, CompanyID: id, Limit: limit})
+			return s.q.ListTasksForCompany(ctx, gen.ListTasksForCompanyParams{WorkspaceID: workspaceID, CompanyID: id,
+				Seek: seek, CursorDone: done, CursorDue: due, CursorID: cursorID, PageLimit: page.Limit})
 		},
 		func(id pgtype.UUID) ([]gen.Task, error) {
-			return s.q.ListTasksForDeal(ctx, gen.ListTasksForDealParams{WorkspaceID: workspaceID, DealID: id, Limit: limit})
+			return s.q.ListTasksForDeal(ctx, gen.ListTasksForDealParams{WorkspaceID: workspaceID, DealID: id,
+				Seek: seek, CursorDone: done, CursorDue: due, CursorID: cursorID, PageLimit: page.Limit})
 		},
 		taskFromRow,
 	)
+	if err != nil {
+		return Page[Task]{}, err
+	}
+	out := Page[Task]{Items: rows}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorTasks, strconv.FormatBool(taskIsClosed(last.Status)),
+			taskDueKey(last.DueAt), last.ID.String())
+	}
+	return out, nil
+}
+
+// taskIsClosed and taskDueKey mirror the task ordering expression in SQL
+// (`status IN ('done','cancelled')` and `COALESCE(due_at, 'infinity')`). They
+// are the Go half of one ordering, so they must change together with it.
+func taskIsClosed(status string) bool { return status == TaskDone || status == TaskCancelled }
+
+const taskDueInfinity = "infinity"
+
+func taskDueKey(due *time.Time) string {
+	if due == nil {
+		return taskDueInfinity
+	}
+	return due.UTC().Format(time.RFC3339Nano)
+}
+
+func decodeTaskCursor(raw string) (bool, bool, pgtype.Timestamptz, uuid.UUID, error) {
+	if raw == "" {
+		return false, false, pgtype.Timestamptz{Valid: true}, uuid.Nil, nil
+	}
+	keys, err := decodeCursor(cursorTasks, raw, 3)
+	if err != nil {
+		return false, false, pgtype.Timestamptz{}, uuid.Nil, err
+	}
+	done, doneErr := strconv.ParseBool(keys[0])
+	id, idErr := uuid.Parse(keys[2])
+	if doneErr != nil || idErr != nil {
+		return false, false, pgtype.Timestamptz{}, uuid.Nil, validation("cursor is malformed")
+	}
+	due := pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}
+	if keys[1] != taskDueInfinity {
+		at, parseErr := time.Parse(time.RFC3339Nano, keys[1])
+		if parseErr != nil {
+			return false, false, pgtype.Timestamptz{}, uuid.Nil, validation("cursor is malformed")
+		}
+		due = pgtype.Timestamptz{Time: at, Valid: true}
+	}
+	return true, done, due, id, nil
 }
 
 func listTargeted[Row, Value any](target Target, contact, company, deal func(pgtype.UUID) ([]Row, error), convert func(Row) Value) ([]Value, error) {
@@ -534,10 +690,6 @@ func pgTime(value *time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: *value, Valid: true}
-}
-
-func pgNumeric(value int32) pgtype.Numeric {
-	return pgtype.Numeric{Int: big.NewInt(int64(value)), Valid: true}
 }
 
 func stringPtr(value string) *string {

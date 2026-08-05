@@ -1,6 +1,7 @@
 package crm
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,15 +39,26 @@ func stageFromRow(row gen.PipelineStage) Stage {
 }
 
 func dealFromList(row gen.ListDealsRow) Deal {
-	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
+	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.PositionKey, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
 }
 
 func dealFromGet(row gen.GetDealRow) Deal {
-	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
+	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.PositionKey, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
 }
 
-func deal(id, workspaceID, pipelineID, stageID uuid.UUID, companyID, contactID, ownerID pgtype.UUID, name string, amount *int64, currency string, closeDate pgtype.Date, source string, campaignID pgtype.UUID, threadRef string, actor []byte, pipelineName, stageLabel, stageColor string, won, lost bool, companyName, contactEmail string, createdAt, updatedAt pgtype.Timestamptz) Deal {
-	return Deal{ID: id, WorkspaceID: workspaceID, PipelineID: pipelineID, StageID: stageID, CompanyID: uuidValue(companyID), PrimaryContactID: uuidValue(contactID), OwnerUserID: uuidValue(ownerID), Name: name, AmountMicros: amount, Currency: currency, CloseDate: dateValue(closeDate), Source: source, SourceCampaignID: uuidValue(campaignID), SourceThreadRef: threadRef, CreatedByActor: actor, PipelineName: pipelineName, StageLabel: stageLabel, StageColor: stageColor, StageIsWon: won, StageIsLost: lost, CompanyName: companyName, ContactEmail: contactEmail, CreatedAt: createdAt.Time, UpdatedAt: updatedAt.Time}
+func deal(id, workspaceID, pipelineID, stageID uuid.UUID, companyID, contactID, ownerID pgtype.UUID, name string, amount *int64, currency string, closeDate pgtype.Date, positionKey, source string, campaignID pgtype.UUID, threadRef string, actor []byte, pipelineName, stageLabel, stageColor string, won, lost bool, companyName, contactEmail string, createdAt, updatedAt pgtype.Timestamptz) Deal {
+	return Deal{ID: id, WorkspaceID: workspaceID, PipelineID: pipelineID, StageID: stageID, CompanyID: uuidValue(companyID), PrimaryContactID: uuidValue(contactID), OwnerUserID: uuidValue(ownerID), Name: name, AmountMicros: amount, Currency: currency, CloseDate: dateValue(closeDate), Position: positionValue(positionKey), Source: source, SourceCampaignID: uuidValue(campaignID), SourceThreadRef: threadRef, CreatedByActor: actor, PipelineName: pipelineName, StageLabel: stageLabel, StageColor: stageColor, StageIsWon: won, StageIsLost: lost, CompanyName: companyName, ContactEmail: contactEmail, CreatedAt: createdAt.Time, UpdatedAt: updatedAt.Time}
+}
+
+// positionValue renders the exact NUMERIC(30,12) board position for the wire.
+// The decimal text is the source of truth (it is what the keyset cursor
+// carries); the float is a lossy convenience for rendering order.
+func positionValue(key string) float64 {
+	value, err := strconv.ParseFloat(key, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func noteFromRow(row gen.Note) Note {

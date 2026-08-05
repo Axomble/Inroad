@@ -4,7 +4,7 @@
 -- is total and no row can be skipped or repeated between pages.
 
 -- name: ListCompanies :many
-SELECT c.*, count(d.id)::bigint AS deal_count
+SELECT c.*, count(d.id)::bigint AS deal_count, lower(c.name) AS name_key
 FROM companies c
 LEFT JOIN deals d ON d.workspace_id = c.workspace_id AND d.company_id = c.id
 WHERE c.workspace_id = sqlc.arg(workspace_id)
@@ -121,6 +121,7 @@ SELECT d.*,
        s.is_won AS stage_is_won,
        s.is_lost AS stage_is_lost,
        s.position AS stage_position,
+       d.position::text AS position_key,
        COALESCE(c.name, '') AS company_name,
        COALESCE(ct.email, '') AS contact_email
 FROM deals d
@@ -131,7 +132,7 @@ LEFT JOIN contacts ct ON ct.workspace_id = d.workspace_id AND ct.id = d.primary_
 WHERE d.workspace_id = sqlc.arg(workspace_id)
   AND (sqlc.arg(seek)::bool = false
        OR (s.position, d.position, d.id) > (sqlc.arg(cursor_stage_position)::int,
-                                            sqlc.arg(cursor_position)::numeric,
+                                            (sqlc.arg(cursor_position)::text)::numeric,
                                             sqlc.arg(cursor_id)::uuid))
 ORDER BY s.position, d.position, d.id
 LIMIT sqlc.arg(page_limit);
@@ -143,6 +144,7 @@ SELECT d.*,
        s.color AS stage_color,
        s.is_won AS stage_is_won,
        s.is_lost AS stage_is_lost,
+       d.position::text AS position_key,
        COALESCE(c.name, '') AS company_name,
        COALESCE(ct.email, '') AS contact_email
 FROM deals d

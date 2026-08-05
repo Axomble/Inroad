@@ -27,7 +27,7 @@ type integrationStore interface {
 }
 
 func (s *PgStore) GetBoard(ctx context.Context, workspaceID uuid.UUID, pipelineID *uuid.UUID) (Board, error) {
-	pipelines, err := s.ListPipelines(ctx, workspaceID)
+	pipelines, err := s.ListPipelines(ctx, workspaceID, maxPipelines)
 	if err != nil {
 		return Board{}, err
 	}
@@ -41,7 +41,7 @@ func (s *PgStore) GetBoard(ctx context.Context, workspaceID uuid.UUID, pipelineI
 	if selected == nil {
 		return Board{}, ErrNotFound
 	}
-	deals, err := s.ListDeals(ctx, workspaceID, 1000)
+	deals, err := s.ListDeals(ctx, workspaceID, PageRequest{Limit: boardDealLimit})
 	if err != nil {
 		return Board{}, err
 	}
@@ -51,7 +51,7 @@ func (s *PgStore) GetBoard(ctx context.Context, workspaceID uuid.UUID, pipelineI
 		board.Stages[i] = BoardStage{Stage: stage, Deals: []Deal{}}
 		byStage[stage.ID] = i
 	}
-	for _, deal := range deals {
+	for _, deal := range deals.Items {
 		if deal.PipelineID != selected.ID {
 			continue
 		}

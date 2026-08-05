@@ -303,6 +303,7 @@ func run() error {
 		ListWrites:     listSvc,
 		Warmup:         warmupTools{service: warmupSvc},
 		CRM:            crmTools{service: crmSvc},
+		CRMErrors:      crmErrors{},
 	})
 	modelResolver := agentchat.NewPgModelResolver(
 		queries, keyring, catalogSource, ai.NewStreamerFactory(cfg.AIAllowPrivateBaseURL),

@@ -132,10 +132,10 @@ const BoardColumn = memo(function BoardColumn({
   disabled,
   onMove,
 }: {
-  column: BoardStage
-  stages: BoardStage[]
+  column: CrmBoardStage
+  stages: CrmBoardStage[]
   disabled: boolean
-  onMove: (deal: Deal, stageId: string, beforeDealId?: string, afterDealId?: string) => Promise<void>
+  onMove: (deal: CrmDeal, stageId: string, beforeDealId?: string, afterDealId?: string) => Promise<void>
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: column.stage.id })
   return (
@@ -153,7 +153,7 @@ const BoardColumn = memo(function BoardColumn({
             <span className="size-2.5 rounded-full" style={{ backgroundColor: column.stage.color }} aria-hidden="true" />
             {column.stage.label}
           </h2>
-          <p className="mt-1 text-xs text-muted-foreground">{column.deal_count} deals / {formatMoney(column.amount_micros, 'USD')}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{column.deal_count} deals / {formatTotal(column.amount_micros, column.deals)}</p>
         </div>
       </header>
       <div className="space-y-2.5">
@@ -174,10 +174,10 @@ const DealCard = memo(function DealCard({
   disabled,
   onMove,
 }: {
-  deal: Deal
-  stages: BoardStage[]
+  deal: CrmDeal
+  stages: CrmBoardStage[]
   disabled: boolean
-  onMove: (deal: Deal, stageId: string) => Promise<void>
+  onMove: (deal: CrmDeal, stageId: string) => Promise<void>
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: deal.id })
   return (
@@ -236,6 +236,3 @@ function BoardSkeleton() {
   )
 }
 
-function formatMoney(micros: number, currency: string) {
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 0 }).format(micros / 1_000_000)
-}

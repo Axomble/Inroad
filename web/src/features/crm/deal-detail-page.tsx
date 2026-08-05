@@ -8,16 +8,19 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
+import { httpStatus } from '@/lib/rtk-error'
 import {
-  useCreateCrmNoteMutation,
-  useCreateCrmTaskMutation,
-  useGetCrmDealQuery,
-  useListCrmDealThreadsQuery,
-  useListCrmEventsQuery,
-  useListCrmNotesQuery,
-  useListCrmTasksQuery,
-  type CRMEvent,
+  useCrmCreateNoteMutation,
+  useCrmCreateTaskMutation,
+  useCrmGetDealQuery,
+  useCrmListDealThreadsQuery,
+  useCrmListEventsQuery,
+  useCrmListNotesQuery,
+  useCrmListTasksQuery,
+  type CrmEvent,
 } from './api'
+import { crmErrorMessage } from './error-copy'
+import { formatMoney } from './money'
 
 const noteSchema = z.object({
   title: z.string().trim().max(200),
@@ -32,16 +35,36 @@ const taskSchema = z.object({
 })
 type TaskValues = z.infer<typeof taskSchema>
 
+/** The API's page cap; see the pagination note in crm-page.tsx. */
+const attachmentPageSize = 200
+
 export function DealDetailPage({ dealId }: { dealId: string }) {
-  const dealQuery = useGetCrmDealQuery(dealId)
-  const eventsQuery = useListCrmEventsQuery({ targetType: 'deal', targetId: dealId })
-  const threadsQuery = useListCrmDealThreadsQuery(dealId)
-  const notesQuery = useListCrmNotesQuery({ targetType: 'deal', targetId: dealId })
-  const tasksQuery = useListCrmTasksQuery({ targetType: 'deal', targetId: dealId })
+  const dealQuery = useCrmGetDealQuery({ id: dealId })
+  const eventsQuery = useCrmListEventsQuery({ targetType: 'deal', targetId: dealId })
+  const threadsQuery = useCrmListDealThreadsQuery({ id: dealId })
+  // Notes and tasks are keyset-paginated; ask for the server's cap so a busy
+  // deal's history isn't quietly cut off at the default page size.
+  const notesQuery = useCrmListNotesQuery({ targetType: 'deal', targetId: dealId, limit: attachmentPageSize })
+  const tasksQuery = useCrmListTasksQuery({ targetType: 'deal', targetId: dealId, limit: attachmentPageSize })
   const deal = dealQuery.data
 
   if (dealQuery.isLoading) {
     return <Page><PageBody><div className="h-72 animate-pulse rounded-xl bg-surface-2" aria-label="Loading deal" /></PageBody></Page>
+  }
+  // A failed request is not the same as a missing deal: a 500 or an offline
+  // browser must offer a retry, not tell the user their deal was deleted.
+  if (dealQuery.isError && httpStatus(dealQuery.error) !== 404) {
+    return (
+      <Page>
+        <PageBody>
+          <EmptyBlock
+            title="This deal could not be loaded"
+            description={crmErrorMessage(dealQuery.error, 'Try again in a moment.')}
+            action={<Button onClick={() => void dealQuery.refetch()} disabled={dealQuery.isFetching}>Try again</Button>}
+          />
+        </PageBody>
+      </Page>
+    )
   }
   if (!deal) {
     return (
@@ -118,6 +141,7 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
                     <time className="mt-2 block text-xs text-faint" dateTime={note.created_at}>{formatDate(note.created_at)}</time>
                   </article>
                 ))}
+                {notesQuery.data?.next_cursor != null ? <MoreExist noun="notes" /> : null}
               </div>
             </Section>
           </div>
@@ -144,6 +168,7 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
                     </div>
                   </li>
                 ))}
+                {tasksQuery.data?.next_cursor != null ? <MoreExist noun="tasks" /> : null}
               </ul>
               {!tasksQuery.isLoading && openTasks.length === 0 ? <MutedEmpty text="No open tasks. Add the next concrete action." /> : null}
             </Section>
@@ -155,14 +180,14 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
 }
 
 function NoteComposer({ dealId }: { dealId: string }) {
-  const [createNote, state] = useCreateCrmNoteMutation()
+  const [createNote, state] = useCrmCreateNoteMutation()
   const form = useForm<NoteValues>({ resolver: zodResolver(noteSchema), defaultValues: { title: '', body: '' } })
-  const submit = form.handleSubmit(async (values) => {
+  const submit = form.handleSubmit(async ({ title, body }) => {
     try {
-      await createNote({ ...values, targetType: 'deal', targetId: dealId }).unwrap()
+      await createNote({ crmNoteInput: { title, body, target_type: 'deal', target_id: dealId } }).unwrap()
       form.reset()
-    } catch {
-      form.setError('root', { message: 'The note could not be saved. Try again.' })
+    } catch (error) {
+      form.setError('root', { message: crmErrorMessage(error, 'The note could not be saved. Try again.') })
     }
   })
   return (
@@ -189,20 +214,25 @@ function NoteComposer({ dealId }: { dealId: string }) {
 }
 
 function TaskComposer({ dealId }: { dealId: string }) {
-  const [createTask, state] = useCreateCrmTaskMutation()
+  const [createTask, state] = useCrmCreateTaskMutation()
   const form = useForm<TaskValues>({ resolver: zodResolver(taskSchema), defaultValues: { title: '', body: '', dueAt: '' } })
   const submit = form.handleSubmit(async ({ title, body, dueAt }) => {
     try {
       await createTask({
-        title,
-        body,
-        dueAt: dueAt ? new Date(dueAt).toISOString() : undefined,
-        targetType: 'deal',
-        targetId: dealId,
+        crmTaskInput: {
+          title,
+          body,
+          // `datetime-local` yields a local wall-clock string; the API takes an
+          // instant, so it is resolved against the browser's zone here.
+          due_at: dueAt ? new Date(dueAt).toISOString() : undefined,
+          status: 'open',
+          target_type: 'deal',
+          target_id: dealId,
+        },
       }).unwrap()
       form.reset()
-    } catch {
-      form.setError('root', { message: 'The task could not be saved. Try again.' })
+    } catch (error) {
+      form.setError('root', { message: crmErrorMessage(error, 'The task could not be saved. Try again.') })
     }
   })
   return (
@@ -222,15 +252,18 @@ function TaskComposer({ dealId }: { dealId: string }) {
   )
 }
 
-const ActivityRow = memo(function ActivityRow({ event }: { event: CRMEvent }) {
+const ActivityRow = memo(function ActivityRow({ event }: { event: CrmEvent }) {
   const label = event.name.split('.').map((part) => part.replaceAll('_', ' ')).join(' ')
+  // `actor` is an open JSON object in the contract, so the type is checked
+  // rather than assumed before it reaches the DOM.
+  const actor = typeof event.actor.type === 'string' ? event.actor.type : 'system'
   return (
     <li className="flex gap-3 py-3 first:pt-0 last:pb-0">
       <span className="mt-1.5 size-2 shrink-0 rounded-full bg-primary" aria-hidden="true" />
       <div className="min-w-0">
         <p className="text-sm font-medium capitalize">{label}</p>
         <p className="text-xs text-muted-foreground">
-          {event.actor.type ?? 'system'}{event.merged_count && event.merged_count > 1 ? ` / ${event.merged_count} events` : ''}
+          {actor}{event.merged_count && event.merged_count > 1 ? ` / ${event.merged_count} events` : ''}
           {' / '}<time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
         </p>
       </div>
@@ -255,5 +288,6 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 function InlineLoading() { return <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" aria-hidden="true" />Loading</p> }
 function MutedEmpty({ text }: { text: string }) { return <p className="rounded-lg border border-dashed border-border p-4 text-sm text-muted-foreground">{text}</p> }
+/** The page cap was reached — say so rather than let the list read as whole. */
+function MoreExist({ noun }: { noun: string }) { return <p role="status" className="pt-1 text-xs text-muted-foreground">Older {noun} are not shown.</p> }
 function formatDate(value: string) { return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) }
-function formatMoney(micros: number, currency: string) { return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 0 }).format(micros / 1_000_000) }

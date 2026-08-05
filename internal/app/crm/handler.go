@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -117,18 +118,28 @@ func (h *Handler) Routes() http.Handler {
 		write.Post("/tasks", h.createTask)
 		write.Put("/tasks/{id}", h.updateTask)
 		write.Delete("/tasks/{id}", h.deleteTask)
-		write.Post("/contacts/{id}/emails", h.addContactEmail)
-		write.Put("/contacts/{id}/emails/{emailID}/primary", h.setPrimaryContactEmail)
 		write.Put("/settings", h.updateSettings)
+		// A contact's alias set decides contacts.email, which IS the recipient
+		// on the send path (queries/stepsend.sql). Writing it therefore
+		// requires the contact-writing capability as well: a key holding only
+		// crm:write must not be able to redirect a live campaign's mail or
+		// rotate a contact off a suppressed address.
+		write.Group(func(contacts chi.Router) {
+			contacts.Use(auth.RequireScope(auth.ScopeContactsWrite))
+			contacts.Post("/contacts/{id}/emails", h.addContactEmail)
+			contacts.Put("/contacts/{id}/emails/{emailID}/primary", h.setPrimaryContactEmail)
+		})
 	})
 	return r
 }
 
 func (h *Handler) listCompanies(w http.ResponseWriter, r *http.Request) {
-	h.list(w, r, func(ws uuid.UUID) (any, error) {
-		items, err := h.svc.ListCompanies(r.Context(), ws)
-		return map[string]any{"items": items}, err
-	})
+	page, err := queryPage(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h.list(w, r, func(ws uuid.UUID) (any, error) { return h.svc.ListCompanies(r.Context(), ws, page) })
 }
 func (h *Handler) getCompany(w http.ResponseWriter, r *http.Request) {
 	h.get(w, r, func(ws, id uuid.UUID) (any, error) { return h.svc.GetCompany(r.Context(), ws, id) })
@@ -244,10 +255,12 @@ func (h *Handler) deleteStage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listDeals(w http.ResponseWriter, r *http.Request) {
-	h.list(w, r, func(ws uuid.UUID) (any, error) {
-		items, err := h.svc.ListDeals(r.Context(), ws)
-		return map[string]any{"items": items}, err
-	})
+	page, err := queryPage(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h.list(w, r, func(ws uuid.UUID) (any, error) { return h.svc.ListDeals(r.Context(), ws, page) })
 }
 func (h *Handler) getDeal(w http.ResponseWriter, r *http.Request) {
 	h.get(w, r, func(ws, id uuid.UUID) (any, error) { return h.svc.GetDeal(r.Context(), ws, id) })
@@ -330,15 +343,12 @@ func (h *Handler) deleteDeal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listNotes(w http.ResponseWriter, r *http.Request) {
-	target, err := queryTarget(r)
+	target, page, err := queryTargetPage(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	h.list(w, r, func(ws uuid.UUID) (any, error) {
-		items, err := h.svc.ListNotes(r.Context(), ws, target)
-		return map[string]any{"items": items}, err
-	})
+	h.list(w, r, func(ws uuid.UUID) (any, error) { return h.svc.ListNotes(r.Context(), ws, target, page) })
 }
 func (h *Handler) createNote(w http.ResponseWriter, r *http.Request) {
 	var req noteRequest
@@ -363,15 +373,12 @@ func (h *Handler) deleteNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
-	target, err := queryTarget(r)
+	target, page, err := queryTargetPage(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	h.list(w, r, func(ws uuid.UUID) (any, error) {
-		items, err := h.svc.ListTasks(r.Context(), ws, target)
-		return map[string]any{"items": items}, err
-	})
+	h.list(w, r, func(ws uuid.UUID) (any, error) { return h.svc.ListTasks(r.Context(), ws, target, page) })
 }
 func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	var req taskRequest
@@ -461,18 +468,18 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, fn func(uuid.UUID,
 	respond(w, http.StatusOK, value, err)
 }
 func (h *Handler) create(w http.ResponseWriter, r *http.Request, fn func(uuid.UUID, Actor) (any, error)) {
-	ws, ok := auth.WorkspaceID(w, r)
+	ws, actor, ok := attributed(w, r)
 	if !ok {
 		return
 	}
-	value, err := fn(ws, requestActor(r))
+	value, err := fn(ws, actor)
 	respond(w, http.StatusCreated, value, err)
 }
 func (h *Handler) update(w http.ResponseWriter, r *http.Request, fn func(uuid.UUID, uuid.UUID, Actor) (any, error)) {
 	h.updateStatus(w, r, http.StatusOK, fn)
 }
 func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request, status int, fn func(uuid.UUID, uuid.UUID, Actor) (any, error)) {
-	ws, ok := auth.WorkspaceID(w, r)
+	ws, actor, ok := attributed(w, r)
 	if !ok {
 		return
 	}
@@ -481,7 +488,7 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request, status in
 		writeError(w, err)
 		return
 	}
-	value, err := fn(ws, id, requestActor(r))
+	value, err := fn(ws, id, actor)
 	respond(w, status, value, err)
 }
 func (h *Handler) remove(w http.ResponseWriter, r *http.Request, fn func(context.Context, uuid.UUID, uuid.UUID) error) {
@@ -501,14 +508,53 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request, fn func(context
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func requestActor(r *http.Request) Actor {
-	p, _ := auth.UserFromContext(r.Context())
-	id, err := uuid.Parse(p.UserID)
-	if err != nil {
-		return Actor{Type: "user", ID: p.UserID}
+// attributed resolves the caller's workspace AND the actor every write is
+// stamped with. Attribution is not optional: an unidentifiable principal fails
+// the request rather than recording an empty actor, which would look like an
+// unattributed write in the activity feed and defeat validateDeal's own check.
+func attributed(w http.ResponseWriter, r *http.Request) (uuid.UUID, Actor, bool) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return uuid.Nil, Actor{}, false
 	}
-	return UserActor(id)
+	p, ok := auth.UserFromContext(r.Context())
+	if !ok || p.UserID == "" {
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
+		return uuid.Nil, Actor{}, false
+	}
+	if id, err := uuid.Parse(p.UserID); err == nil {
+		return ws, UserActor(id), true
+	}
+	return ws, Actor{Type: "user", ID: p.UserID}, true
 }
+
+// queryPage reads the shared ?limit=&cursor= page controls. A limit that is
+// not a positive integer is rejected rather than silently defaulted, so a
+// typo'd page size cannot masquerade as a truncated result.
+func queryPage(r *http.Request) (PageRequest, error) {
+	page := PageRequest{Cursor: r.URL.Query().Get("cursor")}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil || limit < 1 {
+			return PageRequest{}, validation("limit must be a positive integer")
+		}
+		page.Limit = int32(limit)
+	}
+	return page, nil
+}
+
+func queryTargetPage(r *http.Request) (Target, PageRequest, error) {
+	target, err := queryTarget(r)
+	if err != nil {
+		return Target{}, PageRequest{}, err
+	}
+	page, err := queryPage(r)
+	if err != nil {
+		return Target{}, PageRequest{}, err
+	}
+	return target, page, nil
+}
+
 func queryTarget(r *http.Request) (Target, error) {
 	id, err := uuid.Parse(r.URL.Query().Get("target_id"))
 	if err != nil {

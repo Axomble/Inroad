@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 
@@ -9,18 +10,23 @@ import (
 	"github.com/inroad/inroad/internal/app/crm"
 )
 
+// crmAgentPageLimit bounds what one agent read pulls into a model's context.
+// It is deliberately smaller than the HTTP ceiling: the tool reports
+// truncation rather than pretending a page is the whole workspace.
+const crmAgentPageLimit int32 = 50
+
 type crmTools struct{ service *crm.Service }
 
-func (a crmTools) ListCompanies(ctx context.Context, workspaceID uuid.UUID) ([]agenttool.CRMCompany, error) {
-	rows, err := a.service.ListCompanies(ctx, workspaceID)
+func (a crmTools) ListCompanies(ctx context.Context, workspaceID uuid.UUID) (agenttool.CRMList[agenttool.CRMCompany], error) {
+	page, err := a.service.ListCompanies(ctx, workspaceID, crm.PageRequest{Limit: crmAgentPageLimit})
 	if err != nil {
-		return nil, err
+		return agenttool.CRMList[agenttool.CRMCompany]{}, err
 	}
-	out := make([]agenttool.CRMCompany, len(rows))
-	for i, row := range rows {
+	out := make([]agenttool.CRMCompany, len(page.Items))
+	for i, row := range page.Items {
 		out[i] = agenttool.CRMCompany{ID: row.ID, Name: row.Name, Domain: row.Domain, Currency: row.Currency, DealCount: row.DealCount}
 	}
-	return out, nil
+	return agenttool.NewCRMList(out, page.NextCursor != ""), nil
 }
 
 func (a crmTools) ListPipelines(ctx context.Context, workspaceID uuid.UUID) ([]agenttool.CRMPipeline, error) {
@@ -39,16 +45,16 @@ func (a crmTools) ListPipelines(ctx context.Context, workspaceID uuid.UUID) ([]a
 	return out, nil
 }
 
-func (a crmTools) ListDeals(ctx context.Context, workspaceID uuid.UUID) ([]agenttool.CRMDeal, error) {
-	rows, err := a.service.ListDeals(ctx, workspaceID)
+func (a crmTools) ListDeals(ctx context.Context, workspaceID uuid.UUID) (agenttool.CRMList[agenttool.CRMDeal], error) {
+	page, err := a.service.ListDeals(ctx, workspaceID, crm.PageRequest{Limit: crmAgentPageLimit})
 	if err != nil {
-		return nil, err
+		return agenttool.CRMList[agenttool.CRMDeal]{}, err
 	}
-	out := make([]agenttool.CRMDeal, len(rows))
-	for i, row := range rows {
+	out := make([]agenttool.CRMDeal, len(page.Items))
+	for i, row := range page.Items {
 		out[i] = agenttool.CRMDeal{ID: row.ID, Name: row.Name, PipelineName: row.PipelineName, StageLabel: row.StageLabel, CompanyName: row.CompanyName, Currency: row.Currency, AmountMicros: row.AmountMicros}
 	}
-	return out, nil
+	return agenttool.NewCRMList(out, page.NextCursor != ""), nil
 }
 
 func (a crmTools) CreateCompany(ctx context.Context, workspaceID uuid.UUID, in agenttool.CRMCompanyInput) (agenttool.CRMCompany, error) {
@@ -103,4 +109,22 @@ func crmAgentActor(in agenttool.CRMActor) crm.Actor {
 	return crm.Actor{Type: "agent", ID: in.AgentClientID, ClientID: in.AgentClientID, OnBehalfOf: &userID}
 }
 
-var _ agenttool.CRMIntegrationService = crmTools{}
+// crmErrors is the ONE place a CRM error is classified for a model. It lives
+// in the composition root because errors.Is against crm's sentinels is legal
+// here and not inside agenttool (app packages do not import each other). Only
+// text this package composed — never driver output — reaches the model.
+type crmErrors struct{}
+
+func (crmErrors) Recoverable(err error) (string, bool) {
+	switch {
+	case errors.Is(err, crm.ErrValidation), errors.Is(err, crm.ErrNotFound), errors.Is(err, crm.ErrConflict):
+		return err.Error(), true
+	default:
+		return "", false
+	}
+}
+
+var (
+	_ agenttool.CRMIntegrationService = crmTools{}
+	_ agenttool.ErrorClassifier       = crmErrors{}
+)

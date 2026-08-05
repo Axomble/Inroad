@@ -35,6 +35,14 @@ const tabs: ReadonlyArray<{ id: View; label: string; icon: typeof Building2 }> =
   { id: 'pipelines', label: 'Pipelines', icon: GitBranch },
 ]
 
+/**
+ * Companies and deals are keyset-paginated (`next_cursor`). C1 asks for one
+ * page, at the server's cap, and *says so* when more exists — a list that
+ * silently stops at the default 50 reads as "that record isn't there". Paging
+ * the rest in is the follow-up; see the note on `TruncationNotice`.
+ */
+const listPageSize = 200
+
 // `data?.items ?? []` would hand every render a fresh array while a query is
 // uninitialised or erroring, which defeats the `memo()` on the list components.
 const noCompanies: readonly CrmCompany[] = Object.freeze([])
@@ -52,20 +60,23 @@ export function CRMPage() {
   const [view, setView] = useState<View>('deals')
   const [creating, setCreating] = useState(false)
   const tabsId = useId()
-  const companiesQuery = useCrmListCompaniesQuery()
+  const companiesQuery = useCrmListCompaniesQuery({ limit: listPageSize })
   const pipelinesQuery = useCrmListPipelinesQuery()
-  const dealsQuery = useCrmListDealsQuery()
+  const dealsQuery = useCrmListDealsQuery({ limit: listPageSize })
   const settingsQuery = useCrmGetSettingsQuery()
   const [updateSettings, settingsState] = useCrmUpdateSettingsMutation()
 
   const companies = companiesQuery.data?.items ?? noCompanies
   const pipelines = pipelinesQuery.data?.items ?? noPipelines
   const deals = dealsQuery.data?.items ?? noDeals
+  // A cursor on the response means the server held records back.
+  const moreCompanies = companiesQuery.data?.next_cursor != null
+  const moreDeals = dealsQuery.data?.next_cursor != null
 
   // Each tab reads exactly one list, so loading and failure are scoped to the
   // active tab: a 500 on companies must not make Deals unreachable.
   const activeQuery = view === 'companies' ? companiesQuery : view === 'pipelines' ? pipelinesQuery : dealsQuery
-  const openPipeline = summariseOpenPipeline(deals)
+  const openPipeline = summariseOpenPipeline(deals, moreDeals)
 
   return (
     <Page>
@@ -110,10 +121,14 @@ export function CRMPage() {
         <Stat label="Open pipeline" value={openPipeline.value} sub={openPipeline.sub} />
         <Stat
           label="Companies"
-          value={companiesQuery.isError ? '—' : companies.length}
+          value={companiesQuery.isError ? '—' : `${companies.length}${moreCompanies ? '+' : ''}`}
           sub="in this workspace"
         />
-        <Stat label="Won" value={dealsQuery.isError ? '—' : deals.filter((deal) => deal.stage_is_won).length} sub="closed deals" />
+        <Stat
+          label="Won"
+          value={dealsQuery.isError ? '—' : `${deals.filter((deal) => deal.stage_is_won).length}${moreDeals ? '+' : ''}`}
+          sub="closed deals"
+        />
         <Stat
           label="Pipelines"
           value={pipelinesQuery.isError ? '—' : pipelines.length}
@@ -139,11 +154,11 @@ export function CRMPage() {
           ) : activeQuery.isLoading ? (
             <LoadingRows />
           ) : view === 'companies' ? (
-            <CompaniesList companies={companies} />
+            <CompaniesList companies={companies} truncated={moreCompanies} />
           ) : view === 'pipelines' ? (
             <PipelinesList pipelines={pipelines} />
           ) : (
-            <DealsList deals={deals} />
+            <DealsList deals={deals} truncated={moreDeals} />
           )}
         </div>
       </PageBody>
@@ -251,7 +266,27 @@ function QueryErrorBanner({
   )
 }
 
-const CompaniesList = memo(function CompaniesList({ companies }: { companies: readonly CrmCompany[] }) {
+/**
+ * Says plainly that the list stops short of the whole workspace. Paging the
+ * remainder in needs an accumulating cache (RTK's `infiniteQuery`, which the
+ * OpenAPI codegen does not emit yet); until then the honest thing is to tell
+ * the user the list is partial rather than let it read as complete.
+ */
+function TruncationNotice({ noun, shown }: { noun: string; shown: number }) {
+  return (
+    <p role="status" className="border-t border-border px-5 py-3 text-xs text-muted-foreground">
+      Showing the first {shown} {noun}. More exist in this workspace and are not listed here yet.
+    </p>
+  )
+}
+
+const CompaniesList = memo(function CompaniesList({
+  companies,
+  truncated,
+}: {
+  companies: readonly CrmCompany[]
+  truncated: boolean
+}) {
   if (companies.length === 0) {
     return (
       <EmptyBlock
@@ -281,11 +316,18 @@ const CompaniesList = memo(function CompaniesList({ companies }: { companies: re
           </div>
         </article>
       ))}
+      {truncated && <TruncationNotice noun="companies" shown={companies.length} />}
     </div>
   )
 })
 
-const DealsList = memo(function DealsList({ deals }: { deals: readonly CrmDeal[] }) {
+const DealsList = memo(function DealsList({
+  deals,
+  truncated,
+}: {
+  deals: readonly CrmDeal[]
+  truncated: boolean
+}) {
   if (deals.length === 0) {
     return (
       <EmptyBlock
@@ -317,6 +359,7 @@ const DealsList = memo(function DealsList({ deals }: { deals: readonly CrmDeal[]
           </p>
         </article>
       ))}
+      {truncated && <TruncationNotice noun="deals" shown={deals.length} />}
     </div>
   )
 })
@@ -664,13 +707,16 @@ function LoadingRows() {
  * pipeline. Amounts are per-deal currency, so a mixed-currency workspace gets
  * an em dash rather than a fabricated total in one currency.
  */
-function summariseOpenPipeline(deals: readonly CrmDeal[]): { value: string; sub: string } {
+function summariseOpenPipeline(deals: readonly CrmDeal[], truncated: boolean): { value: string; sub: string } {
   const open = deals.filter((deal) => !deal.stage_is_won && !deal.stage_is_lost)
   const currencies = new Set(open.map((deal) => deal.currency))
-  const sub =
+  const counted =
     currencies.size > 1
       ? `${open.length} open deals across ${currencies.size} currencies`
       : `${open.length} open deal${open.length === 1 ? '' : 's'}`
+  // The total only covers the page that was loaded, so it must not present
+  // itself as the whole workspace's pipeline.
+  const sub = truncated ? `${counted} loaded so far` : counted
   const total = open.reduce((sum, deal) => sum + (deal.amount_micros ?? 0), 0)
   return { value: formatTotal(total, open), sub }
 }

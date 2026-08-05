@@ -14,7 +14,33 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const defaultLimit int32 = 100
+const (
+	// defaultPageLimit is what a caller that asks for no limit gets;
+	// maxPageLimit is the ceiling, so no single request can be made to scan a
+	// whole workspace.
+	defaultPageLimit int32 = 50
+	maxPageLimit     int32 = 200
+	// maxPipelines bounds the pipeline listing. Pipelines are a small,
+	// human-curated set; a workspace with more than this has a data problem,
+	// not a pagination need.
+	maxPipelines int32 = 100
+	// boardDealLimit bounds the deals a single board render loads. The
+	// per-stage counts and totals come from a separate aggregate query, so a
+	// board over this size still reports correct totals.
+	boardDealLimit int32 = 500
+)
+
+// normalizePage clamps the requested page size. A caller-supplied limit is
+// trusted only within [1, maxPageLimit]; anything else is the default.
+func normalizePage(page PageRequest) PageRequest {
+	if page.Limit <= 0 {
+		page.Limit = defaultPageLimit
+	}
+	if page.Limit > maxPageLimit {
+		page.Limit = maxPageLimit
+	}
+	return page
+}
 
 var (
 	currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
@@ -25,8 +51,8 @@ type Service struct{ store Store }
 
 func NewService(store Store) *Service { return &Service{store: store} }
 
-func (s *Service) ListCompanies(ctx context.Context, workspaceID uuid.UUID) ([]Company, error) {
-	return s.store.ListCompanies(ctx, workspaceID, defaultLimit)
+func (s *Service) ListCompanies(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Company], error) {
+	return s.store.ListCompanies(ctx, workspaceID, normalizePage(page))
 }
 
 func (s *Service) GetCompany(ctx context.Context, workspaceID, id uuid.UUID) (Company, error) {
@@ -76,7 +102,7 @@ func (s *Service) DeleteCompany(ctx context.Context, workspaceID, id uuid.UUID) 
 }
 
 func (s *Service) ListPipelines(ctx context.Context, workspaceID uuid.UUID) ([]Pipeline, error) {
-	return s.store.ListPipelines(ctx, workspaceID)
+	return s.store.ListPipelines(ctx, workspaceID, maxPipelines)
 }
 
 func (s *Service) GetPipeline(ctx context.Context, workspaceID, id uuid.UUID) (Pipeline, error) {
@@ -101,7 +127,18 @@ func (s *Service) UpdatePipeline(ctx context.Context, workspaceID, id uuid.UUID,
 	return pipeline, translateWriteError(err)
 }
 
+// DeletePipeline distinguishes the two ways a delete can be refused: an
+// unknown pipeline is 404, the default pipeline is 409 with text a caller can
+// act on. Collapsing both into "not found" (which is what a guarded DELETE
+// returning zero rows does) tells the caller their record vanished.
 func (s *Service) DeletePipeline(ctx context.Context, workspaceID, id uuid.UUID) error {
+	isDefault, err := s.store.PipelineIsDefault(ctx, workspaceID, id)
+	if err != nil {
+		return err
+	}
+	if isDefault {
+		return conflict("the default pipeline cannot be deleted; make another pipeline the default first")
+	}
 	return translateDeleteError(s.store.DeletePipeline(ctx, workspaceID, id))
 }
 
@@ -126,11 +163,25 @@ func (s *Service) UpdateStage(ctx context.Context, workspaceID, pipelineID, id u
 }
 
 func (s *Service) DeleteStage(ctx context.Context, workspaceID, pipelineID, id uuid.UUID) error {
+	exists, err := s.store.StageExists(ctx, workspaceID, pipelineID, id)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	deals, err := s.store.CountStageDeals(ctx, workspaceID, id)
+	if err != nil {
+		return err
+	}
+	if deals > 0 {
+		return fmt.Errorf("%w: stage still has %d deal(s); move them to another stage first", ErrConflict, deals)
+	}
 	return translateDeleteError(s.store.DeleteStage(ctx, workspaceID, pipelineID, id))
 }
 
-func (s *Service) ListDeals(ctx context.Context, workspaceID uuid.UUID) ([]Deal, error) {
-	return s.store.ListDeals(ctx, workspaceID, defaultLimit)
+func (s *Service) ListDeals(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Deal], error) {
+	return s.store.ListDeals(ctx, workspaceID, normalizePage(page))
 }
 
 func (s *Service) GetDeal(ctx context.Context, workspaceID, id uuid.UUID) (Deal, error) {
@@ -215,7 +266,7 @@ func (s *Service) ListEvents(ctx context.Context, workspaceID uuid.UUID, target 
 	if err != nil {
 		return nil, err
 	}
-	events, err := store.ListEvents(ctx, workspaceID, target, defaultLimit)
+	events, err := store.ListEvents(ctx, workspaceID, target, maxPageLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -268,11 +319,11 @@ func (s *Service) DeleteDeal(ctx context.Context, workspaceID, id uuid.UUID) err
 	return translateDeleteError(s.store.DeleteDeal(ctx, workspaceID, id))
 }
 
-func (s *Service) ListNotes(ctx context.Context, workspaceID uuid.UUID, target Target) ([]Note, error) {
+func (s *Service) ListNotes(ctx context.Context, workspaceID uuid.UUID, target Target, page PageRequest) (Page[Note], error) {
 	if err := validateTarget(target); err != nil {
-		return nil, err
+		return Page[Note]{}, err
 	}
-	return s.store.ListNotes(ctx, workspaceID, target, defaultLimit)
+	return s.store.ListNotes(ctx, workspaceID, target, normalizePage(page))
 }
 
 func (s *Service) CreateNote(ctx context.Context, workspaceID uuid.UUID, in NoteInput) (Note, error) {
@@ -304,14 +355,14 @@ func (s *Service) UpdateNote(ctx context.Context, workspaceID, id uuid.UUID, tit
 }
 
 func (s *Service) DeleteNote(ctx context.Context, workspaceID, id uuid.UUID) error {
-	return translateWriteError(s.store.DeleteNote(ctx, workspaceID, id))
+	return translateDeleteError(s.store.DeleteNote(ctx, workspaceID, id))
 }
 
-func (s *Service) ListTasks(ctx context.Context, workspaceID uuid.UUID, target Target) ([]Task, error) {
+func (s *Service) ListTasks(ctx context.Context, workspaceID uuid.UUID, target Target, page PageRequest) (Page[Task], error) {
 	if err := validateTarget(target); err != nil {
-		return nil, err
+		return Page[Task]{}, err
 	}
-	return s.store.ListTasks(ctx, workspaceID, target, defaultLimit)
+	return s.store.ListTasks(ctx, workspaceID, target, normalizePage(page))
 }
 
 func (s *Service) CreateTask(ctx context.Context, workspaceID uuid.UUID, in TaskInput) (Task, error) {
@@ -338,7 +389,7 @@ func (s *Service) UpdateTask(ctx context.Context, workspaceID, id uuid.UUID, in 
 }
 
 func (s *Service) DeleteTask(ctx context.Context, workspaceID, id uuid.UUID) error {
-	return translateWriteError(s.store.DeleteTask(ctx, workspaceID, id))
+	return translateDeleteError(s.store.DeleteTask(ctx, workspaceID, id))
 }
 
 func (s *Service) ListContactEmails(ctx context.Context, workspaceID, contactID uuid.UUID) ([]ContactEmail, error) {
@@ -450,6 +501,7 @@ func validateTarget(target Target) error {
 }
 
 func validation(message string) error { return fmt.Errorf("%w: %s", ErrValidation, message) }
+func conflict(message string) error   { return fmt.Errorf("%w: %s", ErrConflict, message) }
 
 func (s *Service) emit(ctx context.Context, workspaceID uuid.UUID, in EventInput) error {
 	store, ok := s.store.(integrationStore)
