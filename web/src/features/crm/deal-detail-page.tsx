@@ -1,10 +1,11 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
-import { ArrowLeft, CalendarClock, Loader2, MessageSquareText, NotebookPen } from 'lucide-react'
+import { ArrowLeft, Bot, CalendarClock, Loader2, MessageSquareText, NotebookPen, RotateCcw, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
@@ -17,6 +18,7 @@ import {
   useCrmListEventsQuery,
   useCrmListNotesQuery,
   useCrmListTasksQuery,
+  useCrmMoveDealMutation,
   type CrmEvent,
 } from './api'
 import { crmErrorMessage } from './error-copy'
@@ -34,6 +36,16 @@ const taskSchema = z.object({
   dueAt: z.string(),
 })
 type TaskValues = z.infer<typeof taskSchema>
+
+const eventActorSchema = z.object({
+  type: z.string().optional(),
+  client_id: z.string().optional(),
+  on_behalf_of_user_id: z.string().optional(),
+  thread_id: z.string().optional(),
+  run_id: z.string().optional(),
+}).passthrough()
+
+const stageChangeDataSchema = z.object({ from_stage_id: z.string().uuid() }).passthrough()
 
 /** The API's page cap; see the pagination note in crm-page.tsx. */
 const attachmentPageSize = 200
@@ -101,7 +113,7 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
               {eventsQuery.isLoading ? <InlineLoading /> : null}
               {eventsQuery.data?.items.length ? (
                 <ol className="divide-y divide-border">
-                  {eventsQuery.data.items.map((event) => <ActivityRow key={event.id} event={event} />)}
+                  {eventsQuery.data.items.map((event) => <ActivityRow key={event.id} dealId={dealId} event={event} />)}
                 </ol>
               ) : !eventsQuery.isLoading ? <MutedEmpty text="No activity has been recorded yet." /> : null}
             </Section>
@@ -252,20 +264,61 @@ function TaskComposer({ dealId }: { dealId: string }) {
   )
 }
 
-const ActivityRow = memo(function ActivityRow({ event }: { event: CrmEvent }) {
+const ActivityRow = memo(function ActivityRow({ dealId, event }: { dealId: string; event: CrmEvent }) {
+  const [moveDeal, moveState] = useCrmMoveDealMutation()
+  const [revertError, setRevertError] = useState<string | null>(null)
   const label = event.name.split('.').map((part) => part.replaceAll('_', ' ')).join(' ')
-  // `actor` is an open JSON object in the contract, so the type is checked
-  // rather than assumed before it reaches the DOM.
-  const actor = typeof event.actor.type === 'string' ? event.actor.type : 'system'
+  // Actor/data are open JSON objects in the API contract. Parse that boundary
+  // once before using fields in labels or mutations.
+  const actorResult = eventActorSchema.safeParse(event.actor)
+  const actor = actorResult.success ? actorResult.data : { type: 'system' }
+  const actorType = actor.type ?? 'system'
+  const actorLabel = actorType === 'agent' ? `Agent${actor.client_id ? ` / ${actor.client_id}` : ''}` : actorType === 'user' ? 'Workspace member' : 'Inroad automation'
+  const previousStage = event.name === 'deal.stage_changed' ? stageChangeDataSchema.safeParse(event.data) : null
+  const canRevert = previousStage?.success === true
+
+  const revert = async () => {
+    if (!canRevert) return
+    setRevertError(null)
+    try {
+      await moveDeal({ id: dealId, crmMoveDealInput: { stage_id: previousStage.data.from_stage_id } }).unwrap()
+    } catch (error) {
+      setRevertError(crmErrorMessage(error, 'The stage change could not be reverted.'))
+    }
+  }
+
   return (
-    <li className="flex gap-3 py-3 first:pt-0 last:pb-0">
+    <li className="flex min-w-0 gap-3 py-3 first:pt-0 last:pb-0">
       <span className="mt-1.5 size-2 shrink-0 rounded-full bg-primary" aria-hidden="true" />
-      <div className="min-w-0">
-        <p className="text-sm font-medium capitalize">{label}</p>
-        <p className="text-xs text-muted-foreground">
-          {actor}{event.merged_count && event.merged_count > 1 ? ` / ${event.merged_count} events` : ''}
-          {' / '}<time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
-        </p>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-sm font-medium capitalize">{label}</p>
+            <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              <Badge variant="secondary">
+                {actorType === 'agent' ? <Bot className="size-3" aria-hidden="true" /> : <UserRound className="size-3" aria-hidden="true" />}
+                {actorLabel}
+              </Badge>
+              {event.merged_count && event.merged_count > 1 ? <span>{event.merged_count} grouped events</span> : null}
+              <time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
+            </p>
+          </div>
+          {canRevert ? (
+            <Button type="button" variant="outline" size="sm" onClick={() => void revert()} disabled={moveState.isLoading} aria-label="Revert this stage change">
+              {moveState.isLoading ? <Loader2 className="animate-spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
+              Revert
+            </Button>
+          ) : null}
+        </div>
+        {event.source_thread_ref || event.source_message_id ? (
+          <p className="mt-2 break-all text-xs text-muted-foreground">
+            Source: {event.source_thread_ref ? `thread ${event.source_thread_ref}` : ''}
+            {event.source_thread_ref && event.source_message_id ? ' / ' : ''}
+            {event.source_message_id ? `message ${event.source_message_id}` : ''}
+          </p>
+        ) : null}
+        {actorType === 'agent' && actor.thread_id ? <p className="mt-1 break-all text-xs text-faint">Agent thread {actor.thread_id}{actor.run_id ? ` / run ${actor.run_id}` : ''}</p> : null}
+        {revertError ? <p role="alert" className="mt-2 text-xs text-danger">{revertError}</p> : null}
       </div>
     </li>
   )

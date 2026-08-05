@@ -1845,7 +1845,7 @@ paths:
       responses:
         '204': { description: Pipeline deleted }
         '404': { description: Pipeline not found }
-        '409': { description: The default pipeline cannot be deleted, or it is still referenced }
+        '409': { description: "The default pipeline cannot be deleted, or it is still referenced" }
   /crm/pipelines/{id}/stages:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     post:

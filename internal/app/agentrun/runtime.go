@@ -45,6 +45,25 @@ type Result struct {
 	Paused        bool
 }
 
+type runIDsContextKey struct{}
+
+type runIDs struct {
+	threadID uuid.UUID
+	runID    uuid.UUID
+}
+
+// RunIDsFromContext returns the active chat thread and run identifiers for
+// tool adapters that need durable audit attribution. Callers outside an agent
+// run receive zero UUIDs.
+func RunIDsFromContext(ctx context.Context) (uuid.UUID, uuid.UUID) {
+	ids, _ := ctx.Value(runIDsContextKey{}).(runIDs)
+	return ids.threadID, ids.runID
+}
+
+func withRunIDs(ctx context.Context, start agentchat.RunStart) context.Context {
+	return context.WithValue(ctx, runIDsContextKey{}, runIDs{threadID: start.ThreadID, runID: start.RunID})
+}
+
 type Runtime struct {
 	Store     agentchat.Store
 	Models    agentchat.ModelResolver
@@ -77,6 +96,7 @@ type toolCall struct {
 }
 
 func (r *Runtime) Execute(ctx context.Context, start agentchat.RunStart) (Result, error) {
+	ctx = withRunIDs(ctx, start)
 	model, err := r.Models.Resolve(ctx, start.Actor.WorkspaceID, start.Selector)
 	if err != nil {
 		return Result{}, err
@@ -357,6 +377,7 @@ func (r *Runtime) toolDefinitions(actor agentchat.Actor) []ai.ToolDef {
 }
 
 func (r *Runtime) Resume(ctx context.Context, start agentchat.RunStart) (Result, error) {
+	ctx = withRunIDs(ctx, start)
 	if r.Approvals == nil {
 		return Result{}, errors.New("agent approval store is unavailable")
 	}

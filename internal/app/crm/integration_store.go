@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/net/publicsuffix"
 )
 
 var ErrCaptureDisabled = errors.New("crm: automatic capture disabled")
@@ -448,9 +450,8 @@ func ensureCapturedCompany(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 	if capture.CompanyID != nil {
 		return capture.CompanyID, nil
 	}
-	address := strings.ToLower(strings.TrimSpace(sender))
-	parts := strings.Split(address, "@")
-	if len(parts) != 2 || isGroupAddress(parts[0]) || isFreeMailDomain(parts[1]) {
+	address, local, domain, ok := capturedCompanyDomain(sender)
+	if !ok || isGroupAddress(local) || isFreeMailDomain(domain) {
 		return nil, nil
 	}
 	var teamMember bool
@@ -463,12 +464,13 @@ func ensureCapturedCompany(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 	}
 	name := strings.TrimSpace(capture.CompanyText)
 	if name == "" {
-		name = strings.ToUpper(parts[1][:1]) + strings.Split(parts[1], ".")[0][1:]
+		label := strings.Split(domain, ".")[0]
+		name = strings.ToUpper(label[:1]) + label[1:]
 	}
 	var companyID uuid.UUID
 	if err := tx.QueryRow(ctx, `INSERT INTO companies(workspace_id,name,domain,currency) VALUES($1,$2,$3,'USD')
  ON CONFLICT(workspace_id,(lower(domain))) WHERE domain IS NOT NULL AND btrim(domain::text)<>''
- DO UPDATE SET domain=EXCLUDED.domain RETURNING id`, workspaceID, name, parts[1]).Scan(&companyID); err != nil {
+	 DO UPDATE SET domain=EXCLUDED.domain RETURNING id`, workspaceID, name, domain).Scan(&companyID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE contacts SET company_id=$3 WHERE workspace_id=$1 AND id=$2 AND company_id IS NULL`,
@@ -476,6 +478,27 @@ func ensureCapturedCompany(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID
 		return nil, err
 	}
 	return &companyID, nil
+}
+
+// capturedCompanyDomain normalizes a sender and returns its registrable domain
+// using the public suffix list. This prevents creating separate companies for
+// subdomains and avoids treating a public suffix such as co.uk as a company.
+func capturedCompanyDomain(sender string) (address, local, domain string, ok bool) {
+	parsed, err := mail.ParseAddress(strings.TrimSpace(sender))
+	if err != nil {
+		return "", "", "", false
+	}
+	address = strings.ToLower(strings.TrimSpace(parsed.Address))
+	local, host, found := strings.Cut(address, "@")
+	if !found || local == "" || host == "" {
+		return "", "", "", false
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	domain, err = publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return "", "", "", false
+	}
+	return address, local, domain, true
 }
 
 func isGroupAddress(local string) bool {

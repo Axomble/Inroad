@@ -82,6 +82,11 @@ type Principal struct {
 	// thread, an MCP client). Recorded on audit rows so agent activity is
 	// never indistinguishable from the human's own actions.
 	AgentClientID string
+	// ThreadID and RunID identify the exact delegated conversation and run.
+	// They are optional for non-chat clients, but CRM audit actors retain them
+	// whenever the runtime supplies them.
+	ThreadID string
+	RunID    string
 }
 
 // Result is a tool's outcome. Tools report failure as a Result rather than an

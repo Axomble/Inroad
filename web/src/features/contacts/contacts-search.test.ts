@@ -18,7 +18,8 @@ import {
 // request the API will accept, or the page 422s on arrival.
 
 test('parses a well-formed URL into the search contract', () => {
-  expect(parseContactsSearch({ list: 'l-1', q: 'acme', sort: 'email', cursor: 'c1', limit: 25 })).toEqual({
+  expect(parseContactsSearch({ contact: 'contact-1', list: 'l-1', q: 'acme', sort: 'email', cursor: 'c1', limit: 25 })).toEqual({
+    contact: 'contact-1',
     list: 'l-1',
     q: 'acme',
     sort: 'email',

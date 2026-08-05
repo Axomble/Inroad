@@ -34,6 +34,7 @@ const DEFAULT_SORT: ContactSort = 'newest'
  * reload lands you where you were.
  */
 export interface ContactsSearch {
+  contact?: string
   list?: string
   q?: string
   sort?: ContactSort
@@ -53,6 +54,7 @@ export interface ContactsSearch {
  */
 export function parseContactsSearch(search: Record<string, unknown>): ContactsSearch {
   return {
+    contact: text(search.contact),
     list: text(search.list),
     q: text(search.q),
     sort: CONTACT_SORTS.some((s) => s.id === search.sort) ? (search.sort as ContactSort) : undefined,
