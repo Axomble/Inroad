@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	cloud.google.com/go/auth v0.22.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/anthropics/anthropic-sdk-go v1.61.0
 	github.com/aws/aws-sdk-go-v2 v1.43.3
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.33
@@ -85,6 +86,7 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect

@@ -17,6 +17,7 @@ import { Route as RegisterRouteImport } from './routes/register'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
+import { Route as AppApprovalsRouteImport } from './routes/app.approvals'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
@@ -68,6 +69,11 @@ const VerifyEmailRoute = VerifyEmailRouteImport.update({
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppApprovalsRoute = AppApprovalsRouteImport.update({
+  id: '/approvals',
+  path: '/approvals',
   getParentRoute: () => AppRoute,
 } as any)
 const AppContactsRoute = AppContactsRouteImport.update({
@@ -139,6 +145,7 @@ export interface FileRoutesByFullPath {
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/approvals': typeof AppApprovalsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/mailboxes': typeof AppMailboxesRoute
@@ -160,6 +167,7 @@ export interface FileRoutesByTo {
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/approvals': typeof AppApprovalsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/mailboxes': typeof AppMailboxesRoute
@@ -183,6 +191,7 @@ export interface FileRoutesById {
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/app/approvals': typeof AppApprovalsRoute
   '/app/contacts': typeof AppContactsRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/mailboxes': typeof AppMailboxesRoute
@@ -207,6 +216,7 @@ export interface FileRouteTypes {
     | '/register'
     | '/reset-password'
     | '/verify-email'
+    | '/app/approvals'
     | '/app/contacts'
     | '/app/deliverability'
     | '/app/mailboxes'
@@ -228,6 +238,7 @@ export interface FileRouteTypes {
     | '/register'
     | '/reset-password'
     | '/verify-email'
+    | '/app/approvals'
     | '/app/contacts'
     | '/app/deliverability'
     | '/app/mailboxes'
@@ -250,6 +261,7 @@ export interface FileRouteTypes {
     | '/register'
     | '/reset-password'
     | '/verify-email'
+    | '/app/approvals'
     | '/app/contacts'
     | '/app/deliverability'
     | '/app/mailboxes'
@@ -332,6 +344,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/app/'
       preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/approvals': {
+      id: '/app/approvals'
+      path: '/approvals'
+      fullPath: '/app/approvals'
+      preLoaderRoute: typeof AppApprovalsRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/contacts': {
@@ -422,6 +441,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppApprovalsRoute: typeof AppApprovalsRoute
   AppContactsRoute: typeof AppContactsRoute
   AppDeliverabilityRoute: typeof AppDeliverabilityRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
@@ -437,6 +457,7 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppApprovalsRoute: AppApprovalsRoute,
   AppContactsRoute: AppContactsRoute,
   AppDeliverabilityRoute: AppDeliverabilityRoute,
   AppMailboxesRoute: AppMailboxesRoute,

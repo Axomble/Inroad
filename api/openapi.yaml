@@ -1042,6 +1042,43 @@ paths:
       responses:
         '200': { description: Agent event stream, content: { text/event-stream: { schema: { type: string } } } }
         '404': { description: Thread not found }
+        '429': { description: Too many concurrent streams for this user }
+  /agent/approvals:
+    get:
+      operationId: listAgentApprovals
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AgentApprovalStatus' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200': { description: Owner-scoped approval actions, content: { application/json: { schema: { $ref: '#/components/schemas/AgentApprovalList' } } } }
+        '401': { description: Unauthorized }
+  /agent/approvals/{actionID}:
+    parameters:
+      - { name: actionID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getAgentApproval
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Approval action, content: { application/json: { schema: { $ref: '#/components/schemas/AgentApproval' } } } }
+        '404': { description: Approval not found }
+  /agent/approvals/{actionID}/decision:
+    parameters:
+      - { name: actionID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: decideAgentApproval
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AgentApprovalDecisionRequest' } } }
+      responses:
+        '200': { description: Updated approval action, content: { application/json: { schema: { $ref: '#/components/schemas/AgentApproval' } } } }
+        '400': { description: Invalid decision or edited arguments }
+        '404': { description: Approval not found }
+        '409': { description: Approval already decided or expired }
   /lists:
     get:
       operationId: listLists
@@ -2710,6 +2747,41 @@ components:
       required: [queued]
       properties:
         queued: { type: array, items: { $ref: '#/components/schemas/AgentQueuedMessage' } }
+    AgentApprovalStatus:
+      type: string
+      enum: [pending, approved, rejected, expired, executed, failed]
+    AgentApproval:
+      type: object
+      required: [id, workspace_id, thread_id, run_id, tool_name, tool_call_id, arguments, risk_tier, status, expires_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        thread_id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        tool_name: { type: string }
+        tool_call_id: { type: string }
+        arguments: { type: object, additionalProperties: true }
+        edited_arguments: { type: object, additionalProperties: true }
+        risk_tier: { type: string, enum: [read, write, consequential, irreversible] }
+        status: { $ref: '#/components/schemas/AgentApprovalStatus' }
+        decision_reason: { type: string }
+        expires_at: { type: string, format: date-time }
+        result: {}
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AgentApprovalList:
+      type: object
+      required: [actions]
+      properties:
+        actions: { type: array, items: { $ref: '#/components/schemas/AgentApproval' } }
+    AgentApprovalDecisionRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        edited_arguments: { type: object, additionalProperties: true }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
     AISettingsUpdate:
       type: object
       description: >-

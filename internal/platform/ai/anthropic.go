@@ -13,6 +13,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -177,22 +178,85 @@ func anthropicParams(req ChatRequest) (anthropic.MessageNewParams, error) {
 		}
 		params.Tools = append(params.Tools, tool)
 	}
+	cacheAnthropicPrefix(&params)
 	return params, nil
 }
 
 func anthropicTool(t ToolDef) (anthropic.ToolUnionParam, error) {
-	schema, err := decodeToolSchema(t)
+	// The schema travels as one pre-rendered JSON object rather than through
+	// ToolInputSchemaParam's typed fields: the SDK serializes that struct's
+	// ExtraFields by ranging a map, so a schema with two or more extra
+	// JSON-Schema keys would emit them in a different ORDER on every request —
+	// which changes the cached prefix's bytes and silently defeats caching.
+	schema, err := toolSchemaMap(t)
 	if err != nil {
 		return anthropic.ToolUnionParam{}, err
 	}
 	tool := anthropic.ToolParam{
 		Name:        t.Name,
-		InputSchema: anthropic.ToolInputSchemaParam{Properties: schema.properties, Required: schema.required, ExtraFields: schema.extra},
+		InputSchema: param.Override[anthropic.ToolInputSchemaParam](schema),
 	}
 	if t.Description != "" {
 		tool.Description = anthropic.String(t.Description)
 	}
 	return anthropic.ToolUnionParam{OfTool: &tool}, nil
+}
+
+// anthropicCacheBreakpoints is the API's hard limit on cache_control markers
+// per request.
+const anthropicCacheBreakpoints = 4
+
+// cacheAnthropicPrefix places the ephemeral cache breakpoints that make the
+// agent loop affordable. Without them every iteration re-prefills the whole
+// transcript: by step 20 a 30k-token conversation has been sent twenty times.
+//
+// The API renders tools, then system, then messages, and a breakpoint caches
+// everything before it — so the four markers are spent from the most stable
+// content outward:
+//
+//   - the last tool, since the tool list is constant for a conversation by
+//     contract (ChatRequest.Tools) and survives a system-prompt edit;
+//   - the last system block, which caches tools+system together;
+//   - the last block of each of the final two messages. The tail marker is what
+//     the NEXT iteration reads: its prefix is byte-identical up to that point.
+//     Keeping the previous turn's marker too gives a second read point when one
+//     turn appends more blocks than the API's lookback window covers.
+func cacheAnthropicPrefix(params *anthropic.MessageNewParams) {
+	budget := anthropicCacheBreakpoints
+	mark := func(target *anthropic.CacheControlEphemeralParam) {
+		if target == nil || budget == 0 {
+			return
+		}
+		*target = anthropic.NewCacheControlEphemeralParam()
+		budget--
+	}
+
+	if last := len(params.Tools) - 1; last >= 0 && params.Tools[last].OfTool != nil {
+		mark(&params.Tools[last].OfTool.CacheControl)
+	}
+	if last := len(params.System) - 1; last >= 0 {
+		mark(&params.System[last].CacheControl)
+	}
+	for _, index := range lastTwoMessages(params.Messages) {
+		blocks := params.Messages[index].Content
+		if len(blocks) == 0 {
+			continue
+		}
+		mark(blocks[len(blocks)-1].GetCacheControl())
+	}
+}
+
+// lastTwoMessages returns the indexes of the final two messages, oldest first,
+// so breakpoints are spent on the earlier (more reusable) turn before the tail.
+func lastTwoMessages(messages []anthropic.MessageParam) []int {
+	switch len(messages) {
+	case 0:
+		return nil
+	case 1:
+		return []int{0}
+	default:
+		return []int{len(messages) - 2, len(messages) - 1}
+	}
 }
 
 // anthropicStream turns the Messages SSE event sequence into the neutral
@@ -230,7 +294,7 @@ func (s *anthropicStream) Next() (StreamEvent, error) {
 			if err := s.src.Err(); err != nil {
 				var apiErr *anthropic.Error
 				if errors.As(err, &apiErr) {
-					return StreamEvent{}, providerStatusError(s.kind, apiErr.StatusCode)
+					return StreamEvent{}, providerStatusError(s.kind, apiErr.StatusCode, apiErr.Response)
 				}
 				return StreamEvent{}, providerError(s.kind, err)
 			}

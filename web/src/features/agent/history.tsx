@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { AgentAlert } from './alert'
+import { agentErrorMessage } from './error-copy'
 import {
   useDeleteAgentThreadMutation,
   useListAgentThreadsQuery,
@@ -37,11 +39,13 @@ function HistoryRow({
   active,
   onSelect,
   onArchived,
+  onError,
 }: {
   thread: AgentThread
   active: boolean
   onSelect: () => void
   onArchived: () => void
+  onError: (message: string) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(thread.title || 'New conversation')
@@ -51,6 +55,29 @@ function HistoryRow({
   useEffect(() => {
     if (!editing) setTitle(thread.title || 'New conversation')
   }, [editing, thread.title])
+
+  // A rename that fails is silently undone by the tag invalidation that
+  // refetches the list, so the failure has to be reported or the title just
+  // reverts under the user with no explanation.
+  const commitRename = async () => {
+    const next = title.trim()
+    setEditing(false)
+    if (!next || next === thread.title) return
+    try {
+      await rename({ id: thread.id, body: { title: next } }).unwrap()
+    } catch (error) {
+      onError(agentErrorMessage(error, 'That conversation could not be renamed.'))
+    }
+  }
+
+  const archive = async () => {
+    try {
+      await remove({ id: thread.id }).unwrap()
+      onArchived()
+    } catch (error) {
+      onError(agentErrorMessage(error, 'That conversation could not be archived.'))
+    }
+  }
 
   if (editing) {
     return (
@@ -62,24 +89,25 @@ function HistoryRow({
           className="h-7 min-w-0 flex-1 text-[11px]"
           onChange={(event) => setTitle(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') setEditing(false)
-            if (event.key === 'Enter' && title.trim()) {
-              void rename({ id: thread.id, body: { title: title.trim() } })
+            if (event.key === 'Escape') {
+              event.stopPropagation()
+              setTitle(thread.title || 'New conversation')
               setEditing(false)
             }
+            if (event.key === 'Enter' && title.trim()) void commitRename()
           }}
         />
+        <button type="button" aria-label="Save title" onClick={() => void commitRename()}>
+          <Check className="size-3.5 text-ok" />
+        </button>
         <button
           type="button"
-          aria-label="Save title"
+          aria-label="Cancel rename"
           onClick={() => {
-            if (title.trim()) void rename({ id: thread.id, body: { title: title.trim() } })
+            setTitle(thread.title || 'New conversation')
             setEditing(false)
           }}
         >
-          <Check className="size-3.5 text-ok" />
-        </button>
-        <button type="button" aria-label="Cancel rename" onClick={() => setEditing(false)}>
           <X className="size-3.5 text-faint" />
         </button>
       </div>
@@ -105,9 +133,7 @@ function HistoryRow({
           className="p-1 text-faint hover:text-danger"
           aria-label="Archive thread"
           onClick={() => {
-            if (window.confirm('Archive this conversation?')) {
-              void remove({ id: thread.id }).unwrap().then(onArchived)
-            }
+            if (window.confirm('Archive this conversation?')) void archive()
           }}
         >
           <Archive className="size-3" />
@@ -128,8 +154,10 @@ export function AgentHistory({
 }) {
   const query = useListAgentThreadsQuery({ offset: 0, limit: 100 })
   const threads = query.data?.threads ?? []
+  const [rowError, setRowError] = useState('')
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {rowError && <AgentAlert message={rowError} onDismiss={() => setRowError('')} />}
       <div className="p-3">
         <Button variant="primary" size="sm" className="w-full" onClick={onNew}>
           <MessageSquarePlus className="size-4" />
@@ -142,6 +170,15 @@ export function AgentHistory({
             <Skeleton className="h-12" />
             <Skeleton className="h-12" />
             <Skeleton className="h-12" />
+          </div>
+        ) : query.isError ? (
+          <div className="px-3 py-8 text-center">
+            <p className="text-[12px] text-muted-foreground">
+              {agentErrorMessage(query.error, 'Conversations could not be loaded.')}
+            </p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void query.refetch()}>
+              Try again
+            </Button>
           </div>
         ) : threads.length === 0 ? (
           <p className="px-3 py-8 text-center text-[12px] text-muted-foreground">No conversations yet.</p>
@@ -159,6 +196,7 @@ export function AgentHistory({
                     onArchived={() => {
                       if (thread.id === activeThreadId) onNew()
                     }}
+                    onError={setRowError}
                   />
                 ))}
               </div>

@@ -39,4 +39,27 @@ describe('agent stream state', () => {
       state: 'done',
     })
   })
+
+  it('keeps the tool failure text instead of a generic label', () => {
+    const accumulator = createAccumulator('run-3')
+    applyStreamEvent(accumulator, { type: 'tool_input_start', tool_call_id: 'call-1' })
+    applyStreamEvent(accumulator, {
+      type: 'tool_output',
+      tool_call_id: 'call-1',
+      is_error: true,
+      text: 'campaign_id must be a uuid',
+    })
+
+    expect(accumulator.parts[0]).toMatchObject({ state: 'error', error: 'campaign_id must be a uuid' })
+  })
+
+  it('parses accumulated tool input at snapshot time, not on every delta', () => {
+    const accumulator = createAccumulator('run-4')
+    applyStreamEvent(accumulator, { type: 'tool_input_start', tool_call_id: 'call-1' })
+    applyStreamEvent(accumulator, { type: 'tool_input_delta', tool_call_id: 'call-1', text: '{"a"' })
+    expect(accumulator.parts[0]?.tool_input).toBeUndefined()
+
+    applyStreamEvent(accumulator, { type: 'tool_input_delta', tool_call_id: 'call-1', text: ':1}' })
+    expect(snapshotAccumulator(accumulator).parts[0]?.tool_input).toEqual({ a: 1 })
+  })
 })

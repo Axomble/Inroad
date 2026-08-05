@@ -12,7 +12,7 @@ import (
 // request: providers cache the system block plus the tool definitions, and a
 // prompt that changes every turn pays full price on every turn. Everything
 // situational — what page the user is on, what they just did — is appended to
-// the last USER message instead (see appendBrowsingContext).
+// the last USER message instead (see BrowsingContextText).
 const basePrompt = `You are the Inroad assistant, embedded in a cold-email sequencing and mailbox-warmup platform.
 
 You help the operator understand and run their outbound: campaigns and their sequence steps, contacts and lists, mailboxes and their warmup health, deliverability signals, and sending-domain authentication.
@@ -40,7 +40,10 @@ func SystemPrompt(additionalInstructions string) string {
 	return basePrompt + "\n\nWorkspace-specific instructions from the operator:\n" + extra
 }
 
-// browsingContextText renders the client's page context as a short data block.
+// BrowsingContextText renders the client's page context as a short data block,
+// which the transcript appends to that message rather than to the system
+// prompt: the system block is the cached prefix, and a context line that
+// changes as the user navigates would invalidate the cache on every message.
 // The record variant deliberately passes the ID and URL ONLY: telling the model
 // to fetch details if it needs them costs a tool call when it matters and zero
 // tokens when it does not, whereas inlining a record the user never asks about
@@ -73,23 +76,6 @@ func BrowsingContextText(raw []byte) string {
 		return s + ".]"
 	default:
 		return ""
-	}
-}
-
-// appendBrowsingContext attaches the page context to the LAST user message in
-// place. Never to the system prompt: the system block is the cached prefix, and
-// a context line that changes as the user navigates would invalidate the cache
-// on every message.
-func AppendBrowsingContext(msgs []ai.ChatMessage, text string) {
-	if text == "" {
-		return
-	}
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role != ai.RoleUser {
-			continue
-		}
-		msgs[i].Parts = append(msgs[i].Parts, ai.ChatPart{Type: ai.PartText, Text: text})
-		return
 	}
 }
 

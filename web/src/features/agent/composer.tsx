@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from '@tanstack/react-router'
 import { ArrowUp, Square, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
@@ -10,6 +11,8 @@ import {
   setAgentStreamStatus,
   setSubmittedAgentDraft,
 } from '@/store/slices/agent'
+import { AgentAlert } from './alert'
+import { agentErrorMessage } from './error-copy'
 import {
   useCreateAgentThreadMutation,
   useDeleteAgentQueuedMessageMutation,
@@ -79,6 +82,10 @@ export function AgentComposer({
 
   const isRunning = Boolean(activeRunId) || streamStatus === 'running'
   const isSending = createState.isLoading || sendState.isLoading
+  const enabledModels = (modelsQuery.data?.models ?? []).filter((item) => item.enabled)
+  // No provider configured means every send fails with an opaque error. Say so
+  // up front, and point at the page that fixes it.
+  const noProvider = !modelsQuery.isLoading && !modelsQuery.isError && enabledModels.length === 0
 
   const send = async () => {
     const text = draft.trim()
@@ -104,9 +111,32 @@ export function AgentComposer({
         dispatch(setSubmittedAgentDraft(text))
         dispatch(setAgentStreamStatus('running'))
       }
-    } catch {
-      setLocalError('Message could not be sent. Your draft has been kept.')
-      dispatch(setAgentStreamError('Message could not be sent. Try again.'))
+    } catch (error) {
+      const message = agentErrorMessage(error, 'Message could not be sent. Your draft has been kept.')
+      setLocalError(message)
+      dispatch(setAgentStreamError(message))
+    }
+  }
+
+  const stop = async () => {
+    if (!threadId) return
+    setLocalError('')
+    try {
+      await stopRun({ id: threadId }).unwrap()
+    } catch (error) {
+      // Stop is what people reach for when something is already going wrong;
+      // failing it silently is the worst outcome in the panel.
+      setLocalError(agentErrorMessage(error, 'The assistant could not be stopped. Try again.'))
+    }
+  }
+
+  const removeQueued = async (messageId: string) => {
+    if (!threadId) return
+    setLocalError('')
+    try {
+      await deleteQueued({ id: threadId, messageId }).unwrap()
+    } catch (error) {
+      setLocalError(agentErrorMessage(error, 'That queued message could not be removed.'))
     }
   }
 
@@ -121,8 +151,8 @@ export function AgentComposer({
               <button
                 type="button"
                 className="text-faint hover:text-danger"
-                aria-label="Remove queued message"
-                onClick={() => void deleteQueued({ id: threadId, messageId: item.id })}
+                aria-label={`Remove queued message ${index + 1}`}
+                onClick={() => void removeQueued(item.id)}
               >
                 <Trash2 className="size-3" />
               </button>
@@ -130,14 +160,34 @@ export function AgentComposer({
           ))}
         </div>
       )}
-      {localError && <p className="mb-1.5 text-[11px] text-danger">{localError}</p>}
+      {localError && (
+        <AgentAlert
+          className="mb-2 rounded-md border-x"
+          message={localError}
+          onDismiss={() => setLocalError('')}
+        />
+      )}
+      {noProvider && (
+        <p className="mb-2 rounded-md border border-border bg-surface-2 px-2.5 py-2 text-[11px] leading-4 text-muted-foreground">
+          No AI provider is configured yet, so the assistant cannot answer.{' '}
+          <Link to="/app/settings/ai" className="font-medium text-accent-ink underline underline-offset-2">
+            Add a provider in AI settings
+          </Link>
+          .
+        </p>
+      )}
+      {modelsQuery.isError && (
+        <p className="mb-2 text-[11px] text-muted-foreground">
+          The model list could not be loaded — sending will use the workspace default.
+        </p>
+      )}
       <div className="rounded-xl border border-border-strong bg-background p-1.5 shadow-[inset_0_1px_2px_var(--input-inset)] focus-within:border-primary">
         <Textarea
           ref={textareaRef}
           value={draft}
           rows={2}
           maxLength={20_000}
-          placeholder="Ask Inroad anything..."
+          placeholder={isRunning ? 'Queue a follow-up...' : 'Ask Inroad anything...'}
           className="min-h-14 resize-none border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
@@ -156,39 +206,41 @@ export function AgentComposer({
             aria-label="Agent model"
           >
             <option value={DEFAULT_MODEL}>Auto - recommended</option>
-            {(modelsQuery.data?.models ?? [])
-              .filter((item) => item.enabled)
-              .map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label}
-                </option>
-              ))}
+            {enabledModels.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
           </Select>
-          {isRunning && threadId ? (
+          {isRunning && threadId && (
             <Button
               size="icon-sm"
               variant="secondary"
               aria-label="Stop agent"
               disabled={stopState.isLoading}
-              onClick={() => void stopRun({ id: threadId })}
+              onClick={() => void stop()}
             >
               <Square className="size-3.5 fill-current" />
             </Button>
-          ) : (
-            <Button
-              size="icon-sm"
-              variant="primary"
-              aria-label="Send message"
-              disabled={!draft.trim() || isSending}
-              onClick={() => void send()}
-            >
-              <ArrowUp className="size-4" />
-            </Button>
           )}
+          {/* Send stays available while a run is in flight: Enter already
+              queues, and a mouse user must not be denied a feature the
+              keyboard has. */}
+          <Button
+            size="icon-sm"
+            variant="primary"
+            aria-label={isRunning && threadId ? 'Queue message' : 'Send message'}
+            disabled={!draft.trim() || isSending}
+            onClick={() => void send()}
+          >
+            <ArrowUp className="size-4" />
+          </Button>
         </div>
       </div>
       <p className="mt-1.5 text-center font-mono text-[8px] uppercase tracking-[0.12em] text-faint">
-        Enter to send / Shift+Enter for a new line
+        {isRunning && threadId
+          ? 'Enter queues this message until the assistant finishes'
+          : 'Enter to send / Shift+Enter for a new line'}
       </p>
     </div>
   )

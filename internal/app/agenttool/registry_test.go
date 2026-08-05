@@ -17,6 +17,7 @@ func fullDeps() Deps {
 		CampaignAdmin:  &fakeCampaignAdmin{},
 		Contacts:       &fakeContacts{},
 		ContactWrites:  &fakeContactWrites{},
+		ContactImports: &fakeContactImports{},
 		Mailboxes:      &fakeMailboxes{},
 		Lists:          &fakeLists{},
 		ListWrites:     &fakeListWrites{},
@@ -199,6 +200,23 @@ func TestExecuteRejectsNonObjectArguments(t *testing.T) {
 		if res.Error == "" {
 			t.Errorf("args %s: no recovery instruction", args)
 		}
+	}
+}
+
+// JSON null decodes into a map without error and yields a nil map, so it needs
+// its own rejection: a tool promised an object must never be handed null, and
+// the provider seam relies on this check rather than repeating it.
+func TestExecuteRejectsNullArguments(t *testing.T) {
+	reg := New(fullDeps())
+	res, err := reg.Execute(context.Background(), admin(), "inroad_list_read", json.RawMessage(`null`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Success {
+		t.Fatal("null arguments were accepted")
+	}
+	if !strings.Contains(res.Error, "null") {
+		t.Fatalf("failure does not tell the model null is the problem: %q", res.Error)
 	}
 }
 

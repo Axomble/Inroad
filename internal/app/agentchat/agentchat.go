@@ -47,7 +47,7 @@ const (
 	// the loading_message the model wrote for it.
 	EventToolOutput = "tool_output"
 	// EventApprovalRequired parks a consequential/irreversible tool call for a
-	// human decision. A2 emits it and exits the run; A4 implements the resume.
+	// human decision. A4 emits it, exits the run, and implements the resume.
 	EventApprovalRequired = "approval_required"
 	// EventThreadTitle carries the generated thread title.
 	EventThreadTitle = "thread_title"
@@ -64,11 +64,6 @@ const (
 	// exactly those RTK Query tags.
 	EventDone = "done"
 )
-
-// terminalEvents end a run's stream. The SSE bridge resets its sequence
-// high-water mark when it sees one, because the run's Redis log is deleted on
-// completion and the next run's sequence restarts at 1.
-var terminalEvents = map[string]bool{EventDone: true, EventRunError: true}
 
 // Event is one chunk on the stream. Only the fields relevant to Type are
 // populated. It is JSON-encoded into the SSE `data:` line; the sequence number
@@ -95,7 +90,10 @@ type Event struct {
 	LoadingMessage string `json:"loading_message,omitempty"`
 	// Risk is the tool's tier on EventApprovalRequired ("consequential" |
 	// "irreversible").
-	Risk string `json:"risk,omitempty"`
+	Risk      string `json:"risk,omitempty"`
+	ActionID  string `json:"action_id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 
 	// Title is set on EventThreadTitle.
 	Title string `json:"title,omitempty"`

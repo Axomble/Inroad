@@ -131,6 +131,20 @@ type fakeContactWrites struct {
 	gotList uuid.UUID
 }
 
+type fakeContactImports struct {
+	result  ContactImportResult
+	err     error
+	gotWS   uuid.UUID
+	gotList uuid.UUID
+	gotRows []ContactInput
+}
+
+func (f *fakeContactImports) Import(_ context.Context, ws, listID uuid.UUID, rows []ContactInput) (ContactImportResult, error) {
+	f.gotWS, f.gotList = ws, listID
+	f.gotRows = append([]ContactInput(nil), rows...)
+	return f.result, f.err
+}
+
 func (f *fakeContactWrites) Create(_ context.Context, ws uuid.UUID, in ContactInput) (uuid.UUID, bool, error) {
 	f.gotWS, f.gotIn = ws, in
 	if f.err != nil {

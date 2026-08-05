@@ -62,6 +62,19 @@ type ContactWriter interface {
 	AddToList(ctx context.Context, ws, listID, contactID uuid.UUID) error
 }
 
+type ContactImportResult struct {
+	Imported   int
+	Skipped    int
+	Duplicates int
+}
+
+// ContactImporter is the bulk-write seam. The concrete adapter reuses the
+// contact domain's validated CSV importer instead of bypassing its ownership
+// and deduplication rules.
+type ContactImporter interface {
+	Import(context.Context, uuid.UUID, uuid.UUID, []ContactInput) (ContactImportResult, error)
+}
+
 type contactView struct {
 	ID        string `json:"id"`
 	Email     string `json:"email"`
@@ -76,6 +89,9 @@ func contactTools(deps Deps) []Tool {
 	}
 	if deps.ContactWrites != nil {
 		out = append(out, contactWriteTool(deps.ContactWrites))
+	}
+	if deps.ContactImports != nil {
+		out = append(out, contactsImportTool(deps.ContactImports))
 	}
 	return out
 }
@@ -240,4 +256,70 @@ func contactAddToList(ctx context.Context, w ContactWriter, ws uuid.UUID, a cont
 		return Result{}, fmt.Errorf("add contact to list: %w", err)
 	}
 	return Ok(map[string]any{"contact_id": contactID.String(), "list_id": listID.String(), "added": true}), nil
+}
+
+const maxAgentImportRows = 1000
+
+type contactsImportArgs struct {
+	baseArgs
+	ListID   string         `json:"list_id"`
+	Contacts []ContactInput `json:"contacts"`
+}
+
+func contactsImportTool(importer ContactImporter) Tool {
+	contactItem := jsonObject{
+		{"type", "object"},
+		{"properties", jsonObject{
+			{"email", jsonObject{{"type", "string"}, {"description", "A single valid email address."}}},
+			{"first_name", jsonObject{{"type", "string"}}},
+			{"last_name", jsonObject{{"type", "string"}}},
+			{"company", jsonObject{{"type", "string"}}},
+		}},
+		{"required", []string{"email"}},
+		{"additionalProperties", false},
+	}
+	contacts := field{name: "contacts", required: true, schema: jsonObject{
+		{"type", "array"},
+		{"description", fmt.Sprintf("Contacts to import. This approval-gated bulk tool accepts 51-%d rows; use inroad_contact_write for 50 or fewer.", maxAgentImportRows)},
+		{"items", contactItem}, {"minItems", 51}, {"maxItems", maxAgentImportRows},
+	}}
+	return Tool{
+		Name: "inroad_contacts_import",
+		Description: "Import more than 50 contacts into an existing contact list in one consequential operation. " +
+			"Every call pauses for human review, where the exact rows can be edited before execution. Use inroad_contact_write for 50 or fewer contacts.",
+		InputSchema: mustSchema(
+			strField("list_id", "The target contact list id, from inroad_list_read.", true),
+			contacts,
+		),
+		Risk: RiskConsequential,
+		Execute: func(ctx context.Context, p Principal, args json.RawMessage) (Result, error) {
+			var a contactsImportArgs
+			if bad := decodeArgs(args, &a); bad != nil {
+				return *bad, nil
+			}
+			if len(a.Contacts) < 51 || len(a.Contacts) > maxAgentImportRows {
+				return Fail(fmt.Sprintf("contacts must contain 51-%d rows; use inroad_contact_write for smaller imports", maxAgentImportRows)), nil
+			}
+			listID, bad := parseID("list_id", a.ListID)
+			if bad != nil {
+				return *bad, nil
+			}
+			for i := range a.Contacts {
+				a.Contacts[i].Email = strings.TrimSpace(a.Contacts[i].Email)
+				if !isBareEmailAddress(a.Contacts[i].Email) {
+					return Fail(fmt.Sprintf("contacts[%d].email must be a single valid address like name@example.com", i)), nil
+				}
+			}
+			result, err := importer.Import(ctx, p.WorkspaceID, listID, a.Contacts)
+			if err != nil {
+				if isNoRecord(err) {
+					return listMissing(a.ListID), nil
+				}
+				return Result{}, fmt.Errorf("import contacts: %w", err)
+			}
+			return Ok(map[string]int{
+				"imported": result.Imported, "skipped": result.Skipped, "duplicates": result.Duplicates,
+			}), nil
+		},
+	}
 }

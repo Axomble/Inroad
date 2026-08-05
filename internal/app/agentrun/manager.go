@@ -16,6 +16,12 @@ type CancelBus interface {
 	RequestCancel(context.Context, uuid.UUID) error
 }
 
+// DefaultMaxConcurrentRuns bounds how many agent runs one API process executes
+// at once when the operator has not chosen a number. Each run holds a provider
+// stream, a database connection at every persist, and whatever its tools touch,
+// so unbounded goroutines let one workspace's burst starve the whole node.
+const DefaultMaxConcurrentRuns = 20
+
 type Manager struct {
 	root      context.Context
 	runtime   *Runtime
@@ -23,29 +29,87 @@ type Manager struct {
 	publisher agentchat.StreamPublisher
 	cancelBus CancelBus
 	logger    *slog.Logger
+	// slots is a counting semaphore over concurrent runs. A run that cannot
+	// get a slot WAITS rather than being rejected: it has already been
+	// accepted (its message is persisted and its run row exists), so queueing
+	// behind the running ones is the only correct answer.
+	slots chan struct{}
 }
 
-func NewManager(root context.Context, runtime *Runtime, store agentchat.Store, publisher agentchat.StreamPublisher, cancelBus CancelBus, logger *slog.Logger) *Manager {
-	return &Manager{root: root, runtime: runtime, store: store, publisher: publisher, cancelBus: cancelBus, logger: logger}
+func NewManager(root context.Context, runtime *Runtime, store agentchat.Store, publisher agentchat.StreamPublisher, cancelBus CancelBus, logger *slog.Logger, maxConcurrentRuns int) *Manager {
+	if maxConcurrentRuns <= 0 {
+		maxConcurrentRuns = DefaultMaxConcurrentRuns
+	}
+	return &Manager{
+		root: root, runtime: runtime, store: store, publisher: publisher,
+		cancelBus: cancelBus, logger: logger,
+		slots: make(chan struct{}, maxConcurrentRuns),
+	}
 }
 
 func (m *Manager) Start(start agentchat.RunStart) {
-	go m.run(start)
+	go m.run(start, false)
+}
+
+func (m *Manager) Resume(start agentchat.RunStart) { go m.run(start, true) }
+
+// acquire blocks for a run slot, reporting false when the process is shutting
+// down before one became free.
+func (m *Manager) acquire() bool {
+	select {
+	case m.slots <- struct{}{}:
+		return true
+	case <-m.root.Done():
+		return false
+	}
+}
+
+func (m *Manager) release() { <-m.slots }
+
+func (m *Manager) ContinueQueue(start agentchat.RunStart) {
+	go func() {
+		ctx, cancel := context.WithTimeout(m.root, 15*time.Second)
+		defer cancel()
+		m.startNext(ctx, start)
+	}()
+}
+
+func (m *Manager) ValidateApproval(actor agentchat.Actor, toolName string, arguments []byte) error {
+	if m.runtime.Tools == nil {
+		return errors.New("agent tools are unavailable")
+	}
+	return m.runtime.Tools.Validate(actor, toolName, arguments)
 }
 
 func (m *Manager) Stop(ctx context.Context, runID uuid.UUID) error {
 	return m.cancelBus.RequestCancel(ctx, runID)
 }
 
-func (m *Manager) run(start agentchat.RunStart) {
+func (m *Manager) run(start agentchat.RunStart, resume bool) {
+	if !m.acquire() {
+		m.logger.Warn("agent run abandoned during shutdown", "run_id", start.RunID, "thread_id", start.ThreadID)
+		return
+	}
+	defer m.release()
 	ctx, cancel := context.WithCancel(m.root)
 	unregister := m.cancelBus.RegisterCancel(start.RunID, cancel)
 	defer unregister()
 	defer cancel()
-	if err := m.publisher.Clear(ctx, start.ThreadID); err != nil {
-		m.logger.Error("agent stream reset failed", "run_id", start.RunID, "err", err)
+	if !resume {
+		if err := m.publisher.Clear(ctx, start.ThreadID); err != nil {
+			m.logger.Error("agent stream reset failed", "run_id", start.RunID, "err", err)
+		}
 	}
-	result, runErr := m.runtime.Execute(ctx, start)
+	var result Result
+	var runErr error
+	if resume {
+		result, runErr = m.runtime.Resume(ctx, start)
+	} else {
+		result, runErr = m.runtime.Execute(ctx, start)
+	}
+	if result.Paused && runErr == nil {
+		return
+	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		m.logger.Error("agent run failed", "run_id", start.RunID, "thread_id", start.ThreadID, "err", runErr)
 	}
@@ -78,6 +142,32 @@ func (m *Manager) run(start agentchat.RunStart) {
 		_, _ = m.publisher.Publish(cleanup, start.ThreadID, agentchat.Event{Type: agentchat.EventDone, RunID: start.RunID.String(), ObjectTypes: result.Touched})
 	}
 	m.startNext(cleanup, start)
+}
+
+func (m *Manager) StartExpirySweep() {
+	approvals, ok := m.store.(agentchat.ApprovalStore)
+	if !ok {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.root.Done():
+				return
+			case <-ticker.C:
+				starts, err := approvals.ExpirePendingActions(m.root, 100)
+				if err != nil {
+					m.logger.Error("agent approval expiry sweep failed", "err", err)
+					continue
+				}
+				for _, start := range starts {
+					m.Resume(start)
+				}
+			}
+		}
+	}()
 }
 
 func userFacingError(err error) string {

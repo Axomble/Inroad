@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -32,12 +34,15 @@ type ToolResult struct {
 type ToolRegistry interface {
 	Definitions(agentchat.Actor) []Tool
 	Execute(context.Context, agentchat.Actor, string, json.RawMessage) (ToolResult, error)
+	ExecuteApproved(context.Context, agentchat.Actor, string, json.RawMessage) (ToolResult, error)
+	Validate(agentchat.Actor, string, json.RawMessage) error
 }
 
 type Result struct {
 	Usage         ai.Usage
 	Touched       []string
 	FirstUserText string
+	Paused        bool
 }
 
 type Runtime struct {
@@ -45,6 +50,23 @@ type Runtime struct {
 	Models    agentchat.ModelResolver
 	Tools     ToolRegistry
 	Publisher agentchat.StreamPublisher
+	Approvals agentchat.ApprovalStore
+	// Logger records what the run could not surface on the stream. Optional:
+	// an unset logger falls back to the default, so a test constructing a
+	// Runtime by literal needs nothing extra.
+	Logger *slog.Logger
+}
+
+func (r *Runtime) logger() *slog.Logger {
+	if r.Logger == nil {
+		return slog.Default()
+	}
+	return r.Logger
+}
+
+// publisher builds the run's coalescing, never-failing view of the stream.
+func (r *Runtime) publisher(start agentchat.RunStart) *runPublisher {
+	return newRunPublisher(r.Publisher, r.logger(), start.ThreadID, start.RunID.String())
 }
 
 type toolCall struct {
@@ -72,29 +94,38 @@ func (r *Runtime) Execute(ctx context.Context, start agentchat.RunStart) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	compacted, err := agentchat.Prune(system, definitions, messages, model.ContextWindowTokens)
-	if err != nil {
-		return Result{}, err
-	}
-	if compacted {
-		_, err = r.Store.PersistMessage(ctx, agentchat.MessageInput{
-			WorkspaceID: start.Actor.WorkspaceID, ThreadID: start.ThreadID, TurnID: start.TurnID,
-			Role: ai.RoleAssistant, Status: agentchat.MessageStatusSent,
-			Parts: []agentchat.PartInput{{Type: agentchat.PartCompactionNotice, Text: agentchat.CompactionNotice}},
-		})
-		if err != nil {
-			return Result{}, err
-		}
-	}
+	pub := r.publisher(start)
+	defer pub.Close(ctx)
 	result := Result{FirstUserText: firstUserText}
 	touched := map[string]bool{}
+	compactedOnce := false
 	for step := 0; step < MaxSteps; step++ {
+		// Pruning belongs INSIDE the loop: one step's tool results can be
+		// larger than the whole conversation was, and the loop may append
+		// fifty of them. Pruning only the pre-loop transcript means a long
+		// tool-heavy run walks past the window and gets a provider 400 instead
+		// of the compaction the spec promises. The notice is persisted at most
+		// once — the transcript records that trimming happened, not how often.
+		compacted, err := agentchat.Prune(system, definitions, messages, model.ContextWindowTokens)
+		if err != nil {
+			return result, err
+		}
+		if compacted && !compactedOnce {
+			compactedOnce = true
+			if _, err := r.Store.PersistMessage(ctx, agentchat.MessageInput{
+				WorkspaceID: start.Actor.WorkspaceID, ThreadID: start.ThreadID, TurnID: start.TurnID,
+				Role: ai.RoleAssistant, Status: agentchat.MessageStatusSent,
+				Parts: []agentchat.PartInput{{Type: agentchat.PartCompactionNotice, Text: agentchat.CompactionNotice}},
+			}); err != nil {
+				return result, err
+			}
+		}
 		req := ai.ChatRequest{Model: model.Name, System: system, Messages: messages, Tools: definitions, MaxTokens: model.MaxOutputTokens}
 		stream, err := model.Streamer.StreamChat(ctx, req)
 		if err != nil {
 			return result, err
 		}
-		parts, calls, usage, _, err := r.consume(ctx, start, stream)
+		parts, calls, usage, stop, err := r.consume(ctx, start, stream, pub)
 		closeErr := stream.Close()
 		if err != nil {
 			for i := range parts {
@@ -133,7 +164,48 @@ func (r *Runtime) Execute(ctx context.Context, start agentchat.RunStart) (Result
 			result.Touched = sortedKeys(touched)
 			return result, nil
 		}
-		toolParts, toolMessage, err := r.executeTools(ctx, start, calls, touched)
+		// A step cut off at max_tokens leaves its tool arguments truncated:
+		// running them would dispatch a call the model never finished writing.
+		// Stop with a reason instead of treating the fragment as intent.
+		if stop == ai.StopMaxTokens {
+			for i := range parts {
+				if parts[i].Type == agentchat.PartToolCall && parts[i].State == agentchat.PartStateRunning {
+					parts[i].State = agentchat.PartStateError
+					parts[i].Error = "The model hit its output limit while writing this tool call."
+				}
+			}
+			if _, err := r.Store.PersistMessage(ctx, agentchat.MessageInput{
+				WorkspaceID: start.Actor.WorkspaceID, ThreadID: start.ThreadID, TurnID: start.TurnID,
+				Role: ai.RoleAssistant, Status: agentchat.MessageStatusSent, Parts: parts,
+			}); err != nil {
+				return result, err
+			}
+			return result, errors.New("the model reached its output limit before it finished requesting a tool")
+		}
+		if requests := r.approvalRequests(start.Actor, calls, parts); len(requests) > 0 {
+			actions, err := r.Approvals.PauseForApproval(ctx, agentchat.MessageInput{
+				WorkspaceID: start.Actor.WorkspaceID, ThreadID: start.ThreadID, TurnID: start.TurnID,
+				Role: ai.RoleAssistant, Status: agentchat.MessageStatusSent, Parts: parts,
+			}, start, requests)
+			if err != nil {
+				return result, err
+			}
+			pub.Publish(ctx, agentchat.Event{
+				Type: agentchat.EventMessagePersisted, RunID: start.RunID.String(),
+			})
+			for _, action := range actions {
+				pub.Publish(ctx, agentchat.Event{
+					Type: agentchat.EventApprovalRequired, RunID: start.RunID.String(),
+					ActionID: action.ID.String(), ToolCallID: action.ToolCallID,
+					ToolName: action.ToolName, ToolInput: action.Arguments,
+					Risk: action.RiskTier, Status: action.Status,
+					ExpiresAt: action.ExpiresAt.UTC().Format(time.RFC3339),
+				})
+			}
+			result.Paused = true
+			return result, nil
+		}
+		toolParts, toolMessage, err := r.executeTools(ctx, start, calls, touched, pub)
 		if err != nil {
 			return result, err
 		}
@@ -156,10 +228,33 @@ func (r *Runtime) Execute(ctx context.Context, start agentchat.RunStart) (Result
 		}
 		messages = append(messages, toolMessage)
 	}
-	return result, errors.New("agent reached the 50-step safety limit")
+	return result, fmt.Errorf("agent reached the %d-step safety limit", MaxSteps)
 }
 
-func (r *Runtime) consume(ctx context.Context, start agentchat.RunStart, stream ai.ChatStream) ([]agentchat.PartInput, []toolCall, ai.Usage, string, error) {
+func (r *Runtime) approvalRequests(actor agentchat.Actor, calls []toolCall, parts []agentchat.PartInput) []agentchat.ApprovalRequest {
+	if r.Approvals == nil || r.Tools == nil {
+		return nil
+	}
+	risks := make(map[string]string)
+	for _, tool := range r.Tools.Definitions(actor) {
+		risks[tool.Name] = tool.Risk
+	}
+	requests := make([]agentchat.ApprovalRequest, 0)
+	for _, call := range calls {
+		risk := risks[call.name]
+		if risk != "consequential" && risk != "irreversible" {
+			continue
+		}
+		parts[call.part].State = agentchat.PartStateAwaitingApproval
+		requests = append(requests, agentchat.ApprovalRequest{
+			ToolName: call.name, ToolCallID: call.id, Arguments: call.input,
+			RiskTier: risk, ExpiresAt: time.Now().Add(24 * time.Hour),
+		})
+	}
+	return requests
+}
+
+func (r *Runtime) consume(ctx context.Context, start agentchat.RunStart, stream ai.ChatStream, pub *runPublisher) ([]agentchat.PartInput, []toolCall, ai.Usage, string, error) {
 	var parts []agentchat.PartInput
 	calls := map[string]*toolCall{}
 	var order []string
@@ -208,10 +303,11 @@ func (r *Runtime) consume(ctx context.Context, start agentchat.RunStart, stream 
 		default:
 			continue
 		}
-		if _, err := r.Publisher.Publish(ctx, start.ThreadID, wire); err != nil {
-			return parts, orderedCalls(calls, order), usage, stop, err
-		}
+		pub.Publish(ctx, wire)
 	}
+	// The step is over: nothing may stay buffered behind a delta window while
+	// the loop moves on to persist and to publish tool output.
+	pub.Flush(ctx)
 	return parts, orderedCalls(calls, order), usage, stop, nil
 }
 
@@ -252,12 +348,99 @@ func (r *Runtime) toolDefinitions(actor agentchat.Actor) []ai.ToolDef {
 	tools := r.Tools.Definitions(actor)
 	out := make([]ai.ToolDef, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Risk == "consequential" || tool.Risk == "irreversible" {
+		if r.Approvals == nil && (tool.Risk == "consequential" || tool.Risk == "irreversible") {
 			continue
 		}
 		out = append(out, ai.ToolDef{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
 	}
 	return out
+}
+
+func (r *Runtime) Resume(ctx context.Context, start agentchat.RunStart) (Result, error) {
+	if r.Approvals == nil {
+		return Result{}, errors.New("agent approval store is unavailable")
+	}
+	batch, err := r.Approvals.LoadApprovalBatch(ctx, start)
+	if err != nil {
+		return Result{}, err
+	}
+	pub := r.publisher(start)
+	defer pub.Close(ctx)
+	touched := make(map[string]bool)
+	results := make([]agentchat.ApprovalResult, 0, len(batch.Calls))
+	for _, call := range batch.Calls {
+		input := call.Arguments
+		toolResult := ToolResult{}
+		outcome := ""
+		var executeErr error
+		switch {
+		case call.Action == nil:
+			toolResult, executeErr = r.Tools.Execute(ctx, start.Actor, call.ToolName, input)
+		case call.Action.Status == agentchat.ActionStatusExecuted || call.Action.Status == agentchat.ActionStatusFailed:
+			// Already run in an earlier resume of this same message. Nothing
+			// to do, and re-running it would repeat the side effect.
+			continue
+		case call.Action.Status == agentchat.ActionStatusApproved && !call.Action.ExpiresAt.After(time.Now()):
+			// Approved, but the deadline passed before the run got to it —
+			// typically because a sibling action in the same pause sat
+			// undecided until the expiry sweep. An approval is permission to
+			// act NOW, not whenever the batch happens to resume.
+			outcome = agentchat.ActionStatusExpired
+			toolResult.Output, _ = json.Marshal(map[string]string{
+				"status": "rejected", "reason": "This approval expired before the agent could run it.",
+			})
+		case call.Action.Status == agentchat.ActionStatusApproved:
+			input = call.Action.EffectiveArguments()
+			toolResult, executeErr = r.Tools.ExecuteApproved(ctx, start.Actor, call.ToolName, input)
+			outcome = agentchat.ActionStatusExecuted
+		case call.Action.Status == agentchat.ActionStatusRejected || call.Action.Status == agentchat.ActionStatusExpired:
+			toolResult.Output, _ = json.Marshal(map[string]string{
+				"status": "rejected", "reason": call.Action.DecisionReason,
+			})
+		default:
+			return Result{}, fmt.Errorf("approval action %s cannot resume from status %s", call.Action.ID, call.Action.Status)
+		}
+		if executeErr != nil {
+			return Result{}, executeErr
+		}
+		if len(toolResult.Output) == 0 || !json.Valid(toolResult.Output) {
+			toolResult = ToolResult{Output: json.RawMessage(`{"success":false,"error":"tool returned invalid output"}`), IsError: true}
+		}
+		if toolResult.IsError && outcome == agentchat.ActionStatusExecuted {
+			outcome = agentchat.ActionStatusFailed
+		}
+		result := agentchat.ApprovalResult{
+			PartID: call.PartID, ToolName: call.ToolName, ToolCallID: call.ToolCallID,
+			ToolInput: input, ToolOutput: toolResult.Output, IsError: toolResult.IsError,
+			Action: call.Action, Status: outcome,
+		}
+		// Settle this action before touching the next one: its side effect has
+		// already happened, so its row must not still read 'approved' if the
+		// call after it fails the run.
+		if outcome != "" {
+			if err := r.Approvals.RecordApprovalOutcome(ctx, result); err != nil {
+				return Result{}, err
+			}
+		}
+		results = append(results, result)
+		pub.Publish(ctx, agentchat.Event{
+			Type: agentchat.EventToolOutput, RunID: start.RunID.String(),
+			ToolCallID: call.ToolCallID, ToolName: call.ToolName, ToolInput: input,
+			ToolOutput: toolResult.Output, IsError: toolResult.IsError,
+		})
+		if !toolResult.IsError && isWriteTool(call.ToolName) {
+			touched[objectType(call.ToolName)] = true
+		}
+	}
+	if err := r.Approvals.CompleteApprovalBatch(ctx, start, results); err != nil {
+		return Result{}, err
+	}
+	result, err := r.Execute(ctx, start)
+	for _, object := range result.Touched {
+		touched[object] = true
+	}
+	result.Touched = sortedKeys(touched)
+	return result, err
 }
 
 func (r *Runtime) transcript(ctx context.Context, start agentchat.RunStart) ([]ai.ChatMessage, string, error) {
@@ -294,7 +477,7 @@ func (r *Runtime) transcript(ctx context.Context, start agentchat.RunStart) ([]a
 	return messages, firstUserText, nil
 }
 
-func (r *Runtime) executeTools(ctx context.Context, start agentchat.RunStart, calls []toolCall, touched map[string]bool) ([]agentchat.PartInput, ai.ChatMessage, error) {
+func (r *Runtime) executeTools(ctx context.Context, start agentchat.RunStart, calls []toolCall, touched map[string]bool, pub *runPublisher) ([]agentchat.PartInput, ai.ChatMessage, error) {
 	parts := make([]agentchat.PartInput, 0, len(calls))
 	chat := ai.ChatMessage{Role: ai.RoleUser}
 	for _, call := range calls {
@@ -322,14 +505,11 @@ func (r *Runtime) executeTools(ctx context.Context, start agentchat.RunStart, ca
 			Type: ai.PartToolResult, ToolName: call.name, ToolCallID: call.id,
 			ToolOutput: result.Output, IsError: result.IsError,
 		})
-		event := agentchat.Event{
+		pub.Publish(ctx, agentchat.Event{
 			Type: agentchat.EventToolOutput, RunID: start.RunID.String(),
 			ToolCallID: call.id, ToolName: call.name, ToolInput: call.input,
 			ToolOutput: result.Output, IsError: result.IsError, LoadingMessage: loading,
-		}
-		if _, err := r.Publisher.Publish(ctx, start.ThreadID, event); err != nil {
-			return nil, ai.ChatMessage{}, err
-		}
+		})
 		if !result.IsError && isWriteTool(call.name) {
 			touched[objectType(call.name)] = true
 		}
@@ -347,11 +527,15 @@ func loadingMessage(input json.RawMessage) string {
 	return strings.TrimSpace(message)
 }
 
-func isWriteTool(name string) bool { return strings.HasSuffix(name, "_write") }
+func isWriteTool(name string) bool {
+	return strings.HasSuffix(name, "_write") || strings.HasSuffix(name, "_control") || strings.HasSuffix(name, "_import")
+}
 
 func objectType(name string) string {
 	name = strings.TrimPrefix(name, "inroad_")
 	name = strings.TrimSuffix(name, "_write")
+	name = strings.TrimSuffix(name, "_control")
+	name = strings.TrimSuffix(name, "_import")
 	if name == "contacts" {
 		return "contact"
 	}

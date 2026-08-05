@@ -74,12 +74,11 @@ export function AppShell({
     dispatch(toggleAgentPanel())
   }
 
-  useHotkey({ key: '@', shift: true }, toggleAgent)
-  useHotkey(
-    { key: 'Escape', whileTyping: true },
-    () => dispatch(setAgentPanelOpen(false)),
-    agentOpen,
-  )
+  useHotkey({ key: '@', shift: 'any' }, toggleAgent)
+  // No `whileTyping`: that flag also switches off the guard that keeps hotkeys
+  // out of dialogs, menus and text fields, so Escape closing a modal — or
+  // cancelling an inline rename inside the panel — would close the panel too.
+  useHotkey({ key: 'Escape' }, () => dispatch(setAgentPanelOpen(false)), agentOpen)
 
   const openAgent = () => {
     if (!agentOpen) agentOpenerRef.current = document.activeElement as HTMLElement | null

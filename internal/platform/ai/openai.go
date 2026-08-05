@@ -222,7 +222,7 @@ func (s *openAIStream) Next() (StreamEvent, error) {
 			if err := s.src.Err(); err != nil {
 				var apiErr *openai.Error
 				if errors.As(err, &apiErr) {
-					return StreamEvent{}, providerStatusError(s.kind, apiErr.StatusCode)
+					return StreamEvent{}, providerStatusError(s.kind, apiErr.StatusCode, apiErr.Response)
 				}
 				return StreamEvent{}, providerError(s.kind, err)
 			}

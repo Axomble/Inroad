@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useRouterState, useSearch } from '@tanstack/react-router'
 import { ArrowLeft, History, MessageSquarePlus, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -15,10 +16,11 @@ import {
   setAgentPanelPage,
   setAgentPanelWidth,
 } from '@/store/slices/ui'
+import { AgentAlert } from './alert'
 import { AgentComposer } from './composer'
 import { AgentHistory } from './history'
 import { AgentMessageBubble } from './message'
-import { useGetAgentThreadQuery, useListAgentQueueQuery } from './api'
+import { useGetAgentThreadQuery, useListAgentApprovalsQuery, useListAgentQueueQuery, type AgentApproval } from './api'
 import { useAgentStream } from './use-agent-stream'
 
 const suggestions = [
@@ -27,24 +29,45 @@ const suggestions = [
   'Check mailbox health before I launch my next campaign.',
 ] as const
 
+const minPanelWidth = 340
+const maxPanelWidth = 640
+const widthStep = 24
+/** Distance from the bottom that still counts as "following along". */
+const stickToBottomSlack = 96
+
 interface SuggestedPrompt {
   id: number
   text: string
 }
 
-const MessageRecord = memo(function MessageRecord({ id }: { id: string }) {
+const MessageRecord = memo(function MessageRecord({ id, approvalsByCall }: { id: string; approvalsByCall: ReadonlyMap<string, AgentApproval> }) {
   const message = useAppSelector((state) => state.agent.messagesById[id])
-  return message ? <AgentMessageBubble message={message} /> : null
+  return message ? <AgentMessageBubble message={message} approvalsByCall={approvalsByCall} /> : null
 })
 
-function MessageScroller({ loading }: { loading: boolean }) {
+function MessageScroller({
+  loading,
+  approvalsByCall,
+  scrollRef,
+}: {
+  loading: boolean
+  approvalsByCall: ReadonlyMap<string, AgentApproval>
+  scrollRef: React.RefObject<HTMLDivElement | null>
+}) {
   const ids = useAppSelector((state) => state.agent.messageIds)
   const streaming = useAppSelector((state) => state.agent.streaming)
   const endRef = useRef<HTMLDivElement>(null)
 
+  // Only follow the stream while the reader is already at the bottom. Scrolling
+  // up to re-read an earlier answer must not be yanked back on the next
+  // 100 ms snapshot.
   useEffect(() => {
+    const container = scrollRef.current
+    if (!container) return
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight
+    if (distance > stickToBottomSlack) return
     endRef.current?.scrollIntoView({ block: 'end' })
-  }, [ids.length, streaming])
+  }, [ids.length, streaming, scrollRef])
 
   if (loading && ids.length === 0) {
     return (
@@ -59,12 +82,33 @@ function MessageScroller({ loading }: { loading: boolean }) {
   }
 
   return (
-    <div className="space-y-4 px-4 py-5" aria-live="polite" aria-relevant="additions text">
-      {ids.map((id) => <MessageRecord key={id} id={id} />)}
-      {streaming && <AgentMessageBubble message={streaming} streaming />}
+    // aria-live is deliberately off: the last bubble's text mutates every
+    // 100 ms, and a polite region over it makes a screen reader re-announce
+    // the whole growing answer. Transitions are announced once, separately,
+    // by StreamAnnouncer.
+    <div className="space-y-4 px-4 py-5" aria-live="off">
+      {ids.map((id) => <MessageRecord key={id} id={id} approvalsByCall={approvalsByCall} />)}
+      {streaming && <AgentMessageBubble message={streaming} streaming approvalsByCall={approvalsByCall} />}
       <div ref={endRef} aria-hidden="true" />
     </div>
   )
+}
+
+/** The one polite region: announces that a response started or finished, not its contents. */
+function StreamAnnouncer() {
+  const status = useAppSelector((state) => state.agent.streamStatus)
+  const [announcement, setAnnouncement] = useState('')
+  const previousRef = useRef(status)
+
+  useEffect(() => {
+    const previous = previousRef.current
+    previousRef.current = status
+    if (status === previous) return
+    if (status === 'running') setAnnouncement('Assistant is responding')
+    else if (previous === 'running' && status === 'idle') setAnnouncement('Response complete')
+  }, [status])
+
+  return <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
 }
 
 function EmptyConversation({ onPrompt }: { onPrompt: (text: string) => void }) {
@@ -93,20 +137,16 @@ function EmptyConversation({ onPrompt }: { onPrompt: (text: string) => void }) {
   )
 }
 
-function threadFromURL(): string | null {
-  return new URL(window.location.href).searchParams.get('thread')
-}
-
-function writeThreadToURL(threadId: string | null, replace = false): void {
-  const url = new URL(window.location.href)
-  if (threadId) url.searchParams.set('thread', threadId)
-  else url.searchParams.delete('thread')
-  window.history[replace ? 'replaceState' : 'pushState']({}, '', url)
-}
+const focusableSelector =
+  'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
 
 export function AgentPanel() {
   useAgentStream()
   const dispatch = useAppDispatch()
+  const navigate = useNavigate()
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const search = useSearch({ strict: false }) as { thread?: string }
+  const deepLinkedThread = search.thread ?? null
   const open = useAppSelector((state) => state.ui.agentPanelOpen)
   const width = useAppSelector((state) => state.ui.agentPanelWidth)
   const page = useAppSelector((state) => state.ui.agentPanelPage)
@@ -115,8 +155,10 @@ export function AgentPanel() {
   const streamError = useAppSelector((state) => state.agent.streamError)
   const panelRef = useRef<HTMLElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
   const resizeRef = useRef({ startX: 0, startWidth: width, nextWidth: width })
   const promptCounterRef = useRef(0)
+  const wasOpenRef = useRef(open)
   const [suggestedPrompt, setSuggestedPrompt] = useState<SuggestedPrompt | null>(null)
 
   const threadQuery = useGetAgentThreadQuery(
@@ -127,24 +169,82 @@ export function AgentPanel() {
     { id: threadId ?? '' },
     { skip: !threadId },
   )
+  // Two reads, deliberately. The endpoint has no `thread_id` filter and caps at
+  // 100, so an unfiltered page can push a live pending approval off the end and
+  // freeze the run with no explanation; `status: 'pending'` guarantees the
+  // blocking ones are present. The unfiltered page is what keeps a
+  // just-decided card showing its outcome in the transcript. A `thread_id`
+  // parameter would collapse this to one call — flagged as a backend follow-up.
+  const pendingApprovals = useListAgentApprovalsQuery({ status: 'pending', limit: 100 }, { skip: !threadId })
+  const recentApprovals = useListAgentApprovalsQuery({ limit: 100 }, { skip: !threadId })
+  const approvalsByCall = useMemo(() => {
+    const byCall = new Map<string, AgentApproval>()
+    for (const action of recentApprovals.data?.actions ?? []) {
+      if (action.thread_id === threadId) byCall.set(action.tool_call_id, action)
+    }
+    for (const action of pendingApprovals.data?.actions ?? []) {
+      if (action.thread_id === threadId) byCall.set(action.tool_call_id, action)
+    }
+    return byCall
+  }, [pendingApprovals.data?.actions, recentApprovals.data?.actions, threadId])
 
+  const writeThreadToURL = useCallback(
+    (next: string | null) => {
+      // Pinned to the current pathname: the panel lives in the /app layout, so
+      // a relative `to` would resolve to the layout and navigate the user off
+      // whatever page they were reading.
+      void navigate({
+        to: pathname,
+        search: (previous) => {
+          const { thread: _dropped, ...rest } = previous as Record<string, unknown>
+          return next ? { ...rest, thread: next } : rest
+        },
+      })
+    },
+    [navigate, pathname],
+  )
+
+  // The URL is the source of truth for which thread is shown, so back/forward
+  // and a deep link all take the same path through the router instead of a
+  // hand-rolled popstate listener the router doesn't know about.
   useEffect(() => {
-    const deepLinkedThread = threadFromURL()
     if (deepLinkedThread) {
       dispatch(selectAgentThread(deepLinkedThread))
       dispatch(setAgentPanelOpen(true))
+    } else {
+      dispatch(selectAgentThread(null))
     }
-    const onPopState = () => {
-      const nextThread = threadFromURL()
-      dispatch(selectAgentThread(nextThread))
-      if (nextThread) dispatch(setAgentPanelOpen(true))
-    }
-    window.addEventListener('popstate', onPopState)
-    return () => window.removeEventListener('popstate', onPopState)
-  }, [dispatch])
+  }, [deepLinkedThread, dispatch])
 
+  // Only on an open transition. The panel mounts already-open when the state
+  // was persisted, and stealing focus onto Close after a reload is hostile.
   useEffect(() => {
-    if (open) closeButtonRef.current?.focus()
+    if (open && !wasOpenRef.current) closeButtonRef.current?.focus()
+    wasOpenRef.current = open
+  }, [open])
+
+  // Mobile renders the panel as a modal overlay over the app; without a trap,
+  // Tab walks into the page behind it.
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const panel = panelRef.current
+      if (!panel || !window.matchMedia('(max-width: 639px)').matches) return
+      const focusable = [...panel.querySelectorAll<HTMLElement>(focusableSelector)]
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
   }, [open])
 
   useEffect(() => {
@@ -161,17 +261,23 @@ export function AgentPanel() {
     dispatch(selectAgentThread(id))
     dispatch(setAgentPanelPage('chat'))
     writeThreadToURL(id)
-  }, [dispatch])
+  }, [dispatch, writeThreadToURL])
 
   const newConversation = useCallback(() => {
     dispatch(selectAgentThread(null))
     dispatch(setAgentPanelPage('chat'))
     writeThreadToURL(null)
-  }, [dispatch])
+  }, [dispatch, writeThreadToURL])
 
   const requestPrompt = (text: string) => {
     promptCounterRef.current += 1
     setSuggestedPrompt({ id: promptCounterRef.current, text })
+  }
+
+  const applyWidth = (next: number) => {
+    const clamped = Math.max(minPanelWidth, Math.min(maxPanelWidth, next))
+    panelRef.current?.style.setProperty('--agent-panel-width', `${clamped}px`)
+    dispatch(setAgentPanelWidth(clamped))
   }
 
   const panelStyle = {
@@ -201,16 +307,40 @@ export function AgentPanel() {
       >
         <div
           role="separator"
+          tabIndex={0}
           aria-label="Resize assistant panel"
           aria-orientation="vertical"
-          className="absolute inset-y-0 -left-1 hidden w-2 cursor-col-resize touch-none sm:block"
+          aria-valuenow={width}
+          aria-valuemin={minPanelWidth}
+          aria-valuemax={maxPanelWidth}
+          aria-valuetext={`${width} pixels wide`}
+          className="absolute inset-y-0 -left-1 hidden w-2 cursor-col-resize touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:block"
+          onKeyDown={(event) => {
+            const delta =
+              event.key === 'ArrowLeft' ? widthStep : event.key === 'ArrowRight' ? -widthStep : 0
+            if (delta !== 0) {
+              event.preventDefault()
+              applyWidth(width + delta)
+              return
+            }
+            if (event.key === 'Home') {
+              event.preventDefault()
+              applyWidth(minPanelWidth)
+            } else if (event.key === 'End') {
+              event.preventDefault()
+              applyWidth(maxPanelWidth)
+            }
+          }}
           onPointerDown={(event) => {
             resizeRef.current = { startX: event.clientX, startWidth: width, nextWidth: width }
             event.currentTarget.setPointerCapture(event.pointerId)
           }}
           onPointerMove={(event) => {
             if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
-            const nextWidth = Math.max(340, Math.min(640, resizeRef.current.startWidth + resizeRef.current.startX - event.clientX))
+            const nextWidth = Math.max(
+              minPanelWidth,
+              Math.min(maxPanelWidth, resizeRef.current.startWidth + resizeRef.current.startX - event.clientX),
+            )
             resizeRef.current.nextWidth = nextWidth
             panelRef.current?.style.setProperty('--agent-panel-width', `${nextWidth}px`)
           }}
@@ -256,18 +386,23 @@ export function AgentPanel() {
           <AgentHistory activeThreadId={threadId} onSelect={selectThread} onNew={newConversation} />
         ) : (
           <>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <StreamAnnouncer />
+            <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {!threadId && messageCount === 0 ? (
                 <EmptyConversation onPrompt={requestPrompt} />
               ) : (
-                <MessageScroller loading={threadQuery.isLoading} />
+                <MessageScroller
+                  loading={threadQuery.isLoading}
+                  approvalsByCall={approvalsByCall}
+                  scrollRef={scrollRef}
+                />
               )}
             </div>
             {streamError && (
-              <div role="alert" className="flex items-center gap-2 border-t border-danger/25 bg-danger/10 px-3 py-2 text-[10px] text-danger">
-                <span className="min-w-0 flex-1">{streamError}</span>
-                <button type="button" className="font-semibold underline underline-offset-2" onClick={() => dispatch(setAgentStreamStatus('idle'))}>Dismiss</button>
-              </div>
+              <AgentAlert
+                message={streamError}
+                onDismiss={() => dispatch(setAgentStreamStatus('idle'))}
+              />
             )}
             <AgentComposer
               threadId={threadId}

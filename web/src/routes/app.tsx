@@ -17,6 +17,12 @@ import { UnverifiedBanner } from '@/features/auth/unverified-banner'
  * this module stays testable — a test can `createRouter` with any store shape.
  */
 export const Route = createFileRoute('/app')({
+  // `thread` is declared on the layout, not on each page, because the
+  // assistant panel lives in the shell and must keep its deep link while the
+  // user moves between /app/* pages — a param missing from every matched
+  // route's validator is stripped on the next navigation.
+  validateSearch: (search: Record<string, unknown>): { thread?: string } =>
+    typeof search.thread === 'string' && search.thread ? { thread: search.thread } : {},
   beforeLoad: async ({ context }) => {
     const { store } = context
     if (store.getState().auth.status === 'idle') {

@@ -1,8 +1,9 @@
 import { lazy, memo, Suspense, useEffect, useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Copy, Wrench } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Copy, Info, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { AgentMessage, AgentPart } from './api'
+import type { AgentApproval, AgentMessage, AgentPart } from './api'
+import { ApprovalCard } from './approval-card'
 import type { StreamingMessage, StreamingPart } from '@/store/slices/agent'
 
 const Markdown = lazy(() =>
@@ -10,12 +11,33 @@ const Markdown = lazy(() =>
 )
 
 type PartView = AgentPart | StreamingPart
+const emptyApprovals = new Map<string, AgentApproval>()
 
+// Compaction notices are the system telling the user that earlier turns were
+// summarised away. Folding them into the assistant's markdown makes the system
+// sound like the assistant, so they render as their own chip.
 function textOf(parts: PartView[]): string {
   return parts
-    .filter((part) => part.type === 'text' || part.type === 'compaction_notice')
+    .filter((part) => part.type === 'text')
     .map((part) => part.text ?? '')
     .join('')
+}
+
+function CompactionNotices({ parts }: { parts: PartView[] }) {
+  if (parts.length === 0) return null
+  return (
+    <div className="mb-2 space-y-1">
+      {parts.map((part) => (
+        <p
+          key={part.id}
+          className="flex items-start gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1.5 text-[10px] leading-4 text-muted-foreground"
+        >
+          <Info className="mt-px size-3 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1">{part.text}</span>
+        </p>
+      ))}
+    </div>
+  )
 }
 
 function toolLabel(name: string | undefined): string {
@@ -35,7 +57,7 @@ function JsonView({ value }: { value: unknown }) {
   )
 }
 
-function ToolRow({ part }: { part: PartView }) {
+function ToolRow({ part, approval }: { part: PartView; approval?: AgentApproval }) {
   const [tab, setTab] = useState<'input' | 'output'>('input')
   const running = part.state === 'running' || !part.state
   return (
@@ -74,11 +96,12 @@ function ToolRow({ part }: { part: PartView }) {
           {part.error && <p className="mt-1.5 text-[11px] text-danger">{part.error}</p>}
         </div>
       )}
+      {approval && <div className="px-2.5 pb-2.5"><ApprovalCard action={approval} compact /></div>}
     </div>
   )
 }
 
-function ToolSteps({ parts, streaming, hasText }: { parts: PartView[]; streaming: boolean; hasText: boolean }) {
+function ToolSteps({ parts, streaming, hasText, approvalsByCall }: { parts: PartView[]; streaming: boolean; hasText: boolean; approvalsByCall: ReadonlyMap<string, AgentApproval> }) {
   const [open, setOpen] = useState(streaming && !hasText)
   useEffect(() => {
     if (hasText) setOpen(false)
@@ -96,7 +119,7 @@ function ToolSteps({ parts, streaming, hasText }: { parts: PartView[]; streaming
         {parts.length} {parts.length === 1 ? 'step' : 'steps'}
         {streaming && !hasText && <span className="ml-auto size-1.5 rounded-full bg-primary agent-pulse" />}
       </button>
-      {open && <div>{parts.map((part) => <ToolRow key={part.id} part={part} />)}</div>}
+      {open && <div>{parts.map((part) => <ToolRow key={part.id} part={part} approval={part.tool_call_id ? approvalsByCall.get(part.tool_call_id) : undefined} />)}</div>}
     </div>
   )
 }
@@ -115,17 +138,32 @@ function Reasoning({ parts }: { parts: PartView[] }) {
 export const AgentMessageBubble = memo(function AgentMessageBubble({
   message,
   streaming = false,
+  approvalsByCall = emptyApprovals,
 }: {
   message: AgentMessage | StreamingMessage
   streaming?: boolean
+  approvalsByCall?: ReadonlyMap<string, AgentApproval>
 }) {
   const isUser = 'role' in message && message.role === 'user'
   const parts = message.parts as PartView[]
   const text = textOf(parts)
   const tools = parts.filter((part) => part.type === 'tool_call')
   const reasoning = parts.filter((part) => part.type === 'reasoning')
+  const notices = parts.filter((part) => part.type === 'compaction_notice')
   const createdAt = 'created_at' in message ? message.created_at : message.createdAt
-  const [copied, setCopied] = useState(false)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+
+  // The clipboard rejects on insecure origins and when permission is denied;
+  // showing the copied check regardless is a lie the user acts on.
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopyState('copied')
+      window.setTimeout(() => setCopyState('idle'), 1200)
+    } catch {
+      setCopyState('failed')
+    }
+  }
 
   return (
     <article className={cn('group flex w-full flex-col', isUser && 'items-end')}>
@@ -137,7 +175,8 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
             : 'w-full',
         )}
       >
-        {!isUser && <ToolSteps parts={tools} streaming={streaming} hasText={Boolean(text)} />}
+        {!isUser && <CompactionNotices parts={notices} />}
+        {!isUser && <ToolSteps parts={tools} streaming={streaming} hasText={Boolean(text)} approvalsByCall={approvalsByCall} />}
         {!isUser && <Reasoning parts={reasoning} />}
         {text && (
           <Suspense fallback={<div className="space-y-2"><Skeleton className="h-3 w-4/5" /><Skeleton className="h-3 w-2/3" /></div>}>
@@ -156,18 +195,21 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
           {createdAt ? new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
         </time>
         {text && (
-          <button
-            type="button"
-            className="rounded p-0.5 text-faint hover:text-foreground"
-            aria-label="Copy message"
-            onClick={() => {
-              void navigator.clipboard.writeText(text)
-              setCopied(true)
-              window.setTimeout(() => setCopied(false), 1200)
-            }}
-          >
-            {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-          </button>
+          <>
+            <button
+              type="button"
+              className="rounded p-0.5 text-faint hover:text-foreground"
+              aria-label="Copy message"
+              onClick={() => void copy()}
+            >
+              {copyState === 'copied' ? <Check className="size-3" /> : <Copy className="size-3" />}
+            </button>
+            {copyState === 'failed' && (
+              <span role="alert" className="text-[9px] text-danger">
+                Copy blocked by the browser
+              </span>
+            )}
+          </>
         )}
       </footer>
     </article>
