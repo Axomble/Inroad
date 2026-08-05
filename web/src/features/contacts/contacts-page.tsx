@@ -325,6 +325,8 @@ function ContactsPane({
         <ListHeader>
           <ListHeaderCell className="min-w-0 flex-1">Email</ListHeaderCell>
           <ListHeaderCell className="hidden w-40 sm:block">First name</ListHeaderCell>
+          <ListHeaderCell className="hidden w-44 md:block">Company</ListHeaderCell>
+          <ListHeaderCell className="hidden w-16 text-right lg:block">Deals</ListHeaderCell>
         </ListHeader>
       )}
 
@@ -385,6 +387,12 @@ function ContactsPane({
                 <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{c.email}</span>
                 <span className="hidden w-40 truncate text-xs text-muted-foreground sm:block">
                   {c.first_name || '—'}
+                </span>
+                <span className="hidden w-44 truncate text-xs text-muted-foreground md:block">
+                  {c.company_name || '-'}
+                </span>
+                <span className="hidden w-16 text-right font-mono text-xs tabular-nums text-muted-foreground lg:block">
+                  {c.deal_count ?? 0}
                 </span>
               </li>
             ))}

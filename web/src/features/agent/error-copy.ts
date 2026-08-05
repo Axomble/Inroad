@@ -1,4 +1,4 @@
-import { httpStatus, isFetchBaseQueryError, retryAfterSeconds } from '@/lib/rtk-error'
+import { httpStatus, retryAfterSeconds, serverDetail } from '@/lib/rtk-error'
 
 /**
  * The one place agent RTK errors turn into words. Everything here narrows
@@ -6,21 +6,6 @@ import { httpStatus, isFetchBaseQueryError, retryAfterSeconds } from '@/lib/rtk-
  * transport failure (no numeric status) and an HTTP refusal never get confused
  * for one another.
  */
-
-/** The server's own explanation, when it sent one worth showing. */
-function serverDetail(error: unknown): string | undefined {
-  if (!isFetchBaseQueryError(error)) return undefined
-  const { data } = error
-  if (typeof data === 'string' && data.trim()) return data.trim()
-  if (typeof data !== 'object' || data === null) return undefined
-  const body = data as { message?: unknown; error?: unknown }
-  for (const value of [body.message, body.error]) {
-    // `error` is often a machine code like `email_not_verified`; a code with no
-    // spaces reads as noise in a sentence, so only surface prose.
-    if (typeof value === 'string' && value.trim() && value.includes(' ')) return value.trim()
-  }
-  return undefined
-}
 
 /** Maps any agent request failure to a sentence, falling back to the caller's phrasing. */
 export function agentErrorMessage(error: unknown, fallback: string): string {
