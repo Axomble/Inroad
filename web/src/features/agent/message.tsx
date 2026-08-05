@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useEffect, useState } from 'react'
-import { Check, ChevronDown, ChevronRight, Copy, Wrench } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Copy, Info, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { AgentApproval, AgentMessage, AgentPart } from './api'
@@ -13,11 +13,31 @@ const Markdown = lazy(() =>
 type PartView = AgentPart | StreamingPart
 const emptyApprovals = new Map<string, AgentApproval>()
 
+// Compaction notices are the system telling the user that earlier turns were
+// summarised away. Folding them into the assistant's markdown makes the system
+// sound like the assistant, so they render as their own chip.
 function textOf(parts: PartView[]): string {
   return parts
-    .filter((part) => part.type === 'text' || part.type === 'compaction_notice')
+    .filter((part) => part.type === 'text')
     .map((part) => part.text ?? '')
     .join('')
+}
+
+function CompactionNotices({ parts }: { parts: PartView[] }) {
+  if (parts.length === 0) return null
+  return (
+    <div className="mb-2 space-y-1">
+      {parts.map((part) => (
+        <p
+          key={part.id}
+          className="flex items-start gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1.5 text-[10px] leading-4 text-muted-foreground"
+        >
+          <Info className="mt-px size-3 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1">{part.text}</span>
+        </p>
+      ))}
+    </div>
+  )
 }
 
 function toolLabel(name: string | undefined): string {
@@ -129,8 +149,21 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
   const text = textOf(parts)
   const tools = parts.filter((part) => part.type === 'tool_call')
   const reasoning = parts.filter((part) => part.type === 'reasoning')
+  const notices = parts.filter((part) => part.type === 'compaction_notice')
   const createdAt = 'created_at' in message ? message.created_at : message.createdAt
-  const [copied, setCopied] = useState(false)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+
+  // The clipboard rejects on insecure origins and when permission is denied;
+  // showing the copied check regardless is a lie the user acts on.
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopyState('copied')
+      window.setTimeout(() => setCopyState('idle'), 1200)
+    } catch {
+      setCopyState('failed')
+    }
+  }
 
   return (
     <article className={cn('group flex w-full flex-col', isUser && 'items-end')}>
@@ -142,6 +175,7 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
             : 'w-full',
         )}
       >
+        {!isUser && <CompactionNotices parts={notices} />}
         {!isUser && <ToolSteps parts={tools} streaming={streaming} hasText={Boolean(text)} approvalsByCall={approvalsByCall} />}
         {!isUser && <Reasoning parts={reasoning} />}
         {text && (
@@ -161,18 +195,21 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
           {createdAt ? new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
         </time>
         {text && (
-          <button
-            type="button"
-            className="rounded p-0.5 text-faint hover:text-foreground"
-            aria-label="Copy message"
-            onClick={() => {
-              void navigator.clipboard.writeText(text)
-              setCopied(true)
-              window.setTimeout(() => setCopied(false), 1200)
-            }}
-          >
-            {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-          </button>
+          <>
+            <button
+              type="button"
+              className="rounded p-0.5 text-faint hover:text-foreground"
+              aria-label="Copy message"
+              onClick={() => void copy()}
+            >
+              {copyState === 'copied' ? <Check className="size-3" /> : <Copy className="size-3" />}
+            </button>
+            {copyState === 'failed' && (
+              <span role="alert" className="text-[9px] text-danger">
+                Copy blocked by the browser
+              </span>
+            )}
+          </>
         )}
       </footer>
     </article>

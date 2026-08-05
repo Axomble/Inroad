@@ -364,6 +364,69 @@ func (q *Queries) InsertAgentMessagePart(ctx context.Context, arg InsertAgentMes
 	return i, err
 }
 
+const insertAgentMessageParts = `-- name: InsertAgentMessageParts :many
+INSERT INTO agent_message_parts (
+    workspace_id, message_id, order_index, type,
+    text_content, reasoning_content, tool_name, tool_call_id,
+    tool_input, tool_output, state, error_message)
+SELECT $1, m.id, p.order_index, p.type, p.text_content, p.reasoning_content,
+       p.tool_name, p.tool_call_id, p.tool_input, p.tool_output, p.state, p.error_message
+FROM agent_messages m
+CROSS JOIN jsonb_to_recordset($3::jsonb) AS p(
+    order_index int, type text, text_content text, reasoning_content text,
+    tool_name text, tool_call_id text, tool_input jsonb, tool_output jsonb,
+    state text, error_message text)
+WHERE m.id = $2 AND m.workspace_id = $1
+RETURNING id, workspace_id, message_id, order_index, type, text_content, reasoning_content, tool_name, tool_call_id, tool_input, tool_output, state, error_message, created_at
+`
+
+type InsertAgentMessagePartsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ID          uuid.UUID `json:"id"`
+	Parts       []byte    `json:"parts"`
+}
+
+// Every part of one message in a single round trip. The run loop persists a
+// message per provider turn, each with up to a few dozen parts; one statement
+// per part meant a dozen round trips inside a held transaction, which is
+// latency the whole pool pays for. Tenancy stays self-enforcing: the join to
+// agent_messages emits zero rows for a foreign message id, so the CROSS JOIN
+// produces nothing rather than trusting the caller.
+func (q *Queries) InsertAgentMessageParts(ctx context.Context, arg InsertAgentMessagePartsParams) ([]AgentMessagePart, error) {
+	rows, err := q.db.Query(ctx, insertAgentMessageParts, arg.WorkspaceID, arg.ID, arg.Parts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AgentMessagePart
+	for rows.Next() {
+		var i AgentMessagePart
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.MessageID,
+			&i.OrderIndex,
+			&i.Type,
+			&i.TextContent,
+			&i.ReasoningContent,
+			&i.ToolName,
+			&i.ToolCallID,
+			&i.ToolInput,
+			&i.ToolOutput,
+			&i.State,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertAgentRun = `-- name: InsertAgentRun :one
 INSERT INTO agent_runs (workspace_id, thread_id, model_id)
 SELECT $1, t.id, $3

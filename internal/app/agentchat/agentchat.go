@@ -65,11 +65,6 @@ const (
 	EventDone = "done"
 )
 
-// terminalEvents end a run's stream. The SSE bridge resets its sequence
-// high-water mark when it sees one, because the run's Redis log is deleted on
-// completion and the next run's sequence restarts at 1.
-var terminalEvents = map[string]bool{EventDone: true, EventRunError: true}
-
 // Event is one chunk on the stream. Only the fields relevant to Type are
 // populated. It is JSON-encoded into the SSE `data:` line; the sequence number
 // travels in the SSE `id:` line, not in the body, so replaying a stored chunk

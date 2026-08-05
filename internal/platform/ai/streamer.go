@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -26,6 +29,18 @@ const (
 	streamResponseHeaderTimeout = 90 * time.Second
 	streamExpectContinueTimeout = 1 * time.Second
 	streamIdleConnTimeout       = 90 * time.Second
+)
+
+// Retry tuning for a provider turn that fails BEFORE producing any output.
+// Attempts counts the first try, so 3 means at most two retries. The backoff
+// ceiling bounds our own exponential growth; a provider that asks for a longer
+// wait through Retry-After is honored up to a separate, larger ceiling, beyond
+// which a run would be pinned waiting rather than failing visibly.
+const (
+	streamRetryAttempts      = 3
+	streamRetryBaseDelay     = 500 * time.Millisecond
+	streamRetryMaxDelay      = 8 * time.Second
+	streamRetryMaxRetryAfter = 30 * time.Second
 )
 
 // ErrUnsupportedKind is wrapped by Streamer when asked for a kind outside
@@ -55,15 +70,32 @@ func NewStreamerFactory(allowPrivateBaseURL bool) StreamerFactory {
 // Streamer dispatches on kind to the adapter that speaks that vendor's wire
 // protocol. Three adapters cover eight doors: Anthropic (direct/Bedrock/Vertex),
 // OpenAI (direct/Azure/any compatible gateway), Google (AI Studio/Vertex).
+//
+// Every adapter is wrapped in the shared retry policy, so a routine 429 or a
+// provider hiccup before the first token is retried rather than killing the
+// caller's turn — one policy for all three families, since only the two
+// Stainless SDKs retry on their own and the Gemini SDK does not.
 func (f *streamerFactory) Streamer(kind string, creds Credentials, config map[string]string) (ChatStreamer, error) {
 	client := f.httpClient()
 	switch kind {
 	case KindAnthropic, KindBedrock, KindVertexAnthropic:
-		return newAnthropicStreamer(kind, creds, config, client)
+		s, err := newAnthropicStreamer(kind, creds, config, client)
+		if err != nil {
+			return nil, err
+		}
+		return withStreamRetry(s), nil
 	case KindOpenAI, KindAzureOpenAI, KindOpenAICompatible:
-		return newOpenAIStreamer(kind, creds, config, client)
+		s, err := newOpenAIStreamer(kind, creds, config, client)
+		if err != nil {
+			return nil, err
+		}
+		return withStreamRetry(s), nil
 	case KindGoogle, KindVertexGoogle:
-		return newGoogleStreamer(kind, creds, config, client)
+		s, err := newGoogleStreamer(kind, creds, config, client)
+		if err != nil {
+			return nil, err
+		}
+		return withStreamRetry(s), nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedKind, kind)
 	}
@@ -308,8 +340,10 @@ func accumulatedToolInput(buffered string) json.RawMessage {
 		return json.RawMessage(`{}`)
 	}
 	if !jsonObject(json.RawMessage(trimmed)) {
-		// Fail closed: registry argument validation rejects null. Replacing a
-		// truncated call with {} could execute a tool using guessed defaults.
+		// Fail closed: a truncated or non-object argument stream becomes the
+		// JSON literal null, which no tool's object schema accepts, so the
+		// registry rejects the call. Substituting {} instead would let a
+		// half-streamed call execute on guessed defaults.
 		return json.RawMessage(`null`)
 	}
 	return json.RawMessage(trimmed)
@@ -358,6 +392,185 @@ func providerError(kind string, err error) error {
 	return fmt.Errorf("ai: %s stream: %w", kind, err)
 }
 
-func providerStatusError(kind string, status int) error {
-	return fmt.Errorf("ai: %s stream: provider returned HTTP %d", kind, status)
+// ProviderStatusError is a non-2xx response from a provider. It carries the
+// status (and Retry-After when the provider sent one) so callers can tell a
+// transient rate limit from a permanently malformed request without parsing a
+// message. It deliberately carries NO body: provider bodies can reflect request
+// and header material back at us.
+type ProviderStatusError struct {
+	Kind       string
+	StatusCode int
+	// RetryAfter is the provider's requested wait; zero when it sent none.
+	RetryAfter time.Duration
+}
+
+func (e *ProviderStatusError) Error() string {
+	return fmt.Sprintf("ai: %s stream: provider returned HTTP %d", e.Kind, e.StatusCode)
+}
+
+// Retryable reports whether re-sending the same request could plausibly
+// succeed: rate limits, request timeouts, and the transient server-side
+// statuses (including Anthropic's 529 overloaded). Everything else — a 400 for
+// a malformed request, a 401 for a bad key — fails the same way every time.
+func (e *ProviderStatusError) Retryable() bool {
+	switch e.StatusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout, 529:
+		return true
+	default:
+		return false
+	}
+}
+
+func providerStatusError(kind string, status int, resp *http.Response) error {
+	return &ProviderStatusError{Kind: kind, StatusCode: status, RetryAfter: retryAfter(resp)}
+}
+
+// retryAfter reads the Retry-After header in either documented form — delay in
+// seconds, or an HTTP date. A header we cannot parse is treated as absent so
+// the caller falls back to its own backoff.
+func retryAfter(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(raw)
+	if err != nil {
+		return 0
+	}
+	if d := time.Until(when); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// retryingStreamer re-opens a provider turn that failed before emitting any
+// output. It sits behind the ChatStreamer seam so the runtime needs no change:
+// a retried step looks like one that simply took longer to produce its first
+// event.
+type retryingStreamer struct {
+	inner    ChatStreamer
+	attempts int
+	sleep    func(context.Context, time.Duration) error
+}
+
+func withStreamRetry(inner ChatStreamer) ChatStreamer {
+	return &retryingStreamer{inner: inner, attempts: streamRetryAttempts, sleep: sleepContext}
+}
+
+func (s *retryingStreamer) StreamChat(ctx context.Context, req ChatRequest) (ChatStream, error) {
+	first, err := s.inner.StreamChat(ctx, req)
+	if err != nil {
+		// Request-shaping failures (validation, unusable params) are terminal;
+		// only in-flight provider responses are worth another attempt.
+		return nil, err
+	}
+	return &retryStream{
+		ctx:       ctx,
+		req:       req,
+		inner:     s.inner,
+		current:   first,
+		remaining: s.attempts - 1,
+		sleep:     s.sleep,
+	}, nil
+}
+
+// retryStream owns at most one live provider turn at a time. It retries ONLY
+// while no event has been handed to the caller: once a delta is out, re-opening
+// would duplicate text the user has already seen, so a mid-stream failure is
+// always terminal.
+type retryStream struct {
+	ctx     context.Context
+	req     ChatRequest
+	inner   ChatStreamer
+	sleep   func(context.Context, time.Duration) error
+	current ChatStream
+
+	remaining int
+	emitted   bool
+	closeOnce sync.Once
+}
+
+func (s *retryStream) Next() (StreamEvent, error) {
+	for {
+		ev, err := s.current.Next()
+		if err == nil {
+			s.emitted = true
+			return ev, nil
+		}
+		// The end of a healthy turn (io.EOF) and every terminal provider failure
+		// leave here; only a retryable status with no output yet loops.
+		var status *ProviderStatusError
+		if !errors.As(err, &status) || !s.shouldRetry(status) {
+			return StreamEvent{}, err
+		}
+		if waitErr := s.sleep(s.ctx, retryDelay(s.attempt(), status.RetryAfter)); waitErr != nil {
+			return StreamEvent{}, waitErr
+		}
+		_ = s.current.Close()
+		next, openErr := s.inner.StreamChat(s.ctx, s.req)
+		if openErr != nil {
+			return StreamEvent{}, openErr
+		}
+		s.current = next
+		s.remaining--
+	}
+}
+
+// shouldRetry decides whether to re-open the turn. A stream that has already
+// emitted an event is never retried: re-opening would duplicate text the caller
+// has seen.
+func (s *retryStream) shouldRetry(status *ProviderStatusError) bool {
+	return !s.emitted && s.remaining > 0 && s.ctx.Err() == nil && status.Retryable()
+}
+
+// attempt is the zero-based index of the retry about to be made, which is what
+// the exponential backoff is a function of.
+func (s *retryStream) attempt() int {
+	return streamRetryAttempts - s.remaining - 1
+}
+
+func (s *retryStream) Close() error {
+	var err error
+	s.closeOnce.Do(func() { err = s.current.Close() })
+	return err
+}
+
+// retryDelay prefers the provider's own Retry-After and otherwise grows
+// exponentially. Jitter is applied to the computed backoff (never to an
+// explicit Retry-After) so a workspace's concurrent runs don't all come back at
+// the same instant after a rate limit.
+func retryDelay(attempt int, providerAsked time.Duration) time.Duration {
+	if providerAsked > 0 {
+		return min(providerAsked, streamRetryMaxRetryAfter)
+	}
+	backoff := min(streamRetryBaseDelay<<attempt, streamRetryMaxDelay)
+	return backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)))
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

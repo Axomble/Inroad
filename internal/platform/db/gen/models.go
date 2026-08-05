@@ -483,6 +483,43 @@ type OauthRefreshToken struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type PendingAction struct {
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	ThreadID        uuid.UUID          `json:"thread_id"`
+	RunID           uuid.UUID          `json:"run_id"`
+	MessageID       uuid.UUID          `json:"message_id"`
+	MessagePartID   uuid.UUID          `json:"message_part_id"`
+	TurnID          uuid.UUID          `json:"turn_id"`
+	CreatedByUserID uuid.UUID          `json:"created_by_user_id"`
+	ActorRole       string             `json:"actor_role"`
+	ToolName        string             `json:"tool_name"`
+	ToolCallID      string             `json:"tool_call_id"`
+	Arguments       []byte             `json:"arguments"`
+	EditedArguments []byte             `json:"edited_arguments"`
+	RiskTier        string             `json:"risk_tier"`
+	Status          string             `json:"status"`
+	DecisionReason  string             `json:"decision_reason"`
+	DecidedByUserID pgtype.UUID        `json:"decided_by_user_id"`
+	DecidedAt       pgtype.Timestamptz `json:"decided_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	Result          []byte             `json:"result"`
+	ErrorMessage    string             `json:"error_message"`
+	ExecutedAt      pgtype.Timestamptz `json:"executed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type PendingActionAudit struct {
+	ID              uuid.UUID          `json:"id"`
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	PendingActionID uuid.UUID          `json:"pending_action_id"`
+	ActorUserID     pgtype.UUID        `json:"actor_user_id"`
+	Event           string             `json:"event"`
+	Details         []byte             `json:"details"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type Send struct {
 	ID               uuid.UUID          `json:"id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`

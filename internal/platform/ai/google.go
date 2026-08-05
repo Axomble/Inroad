@@ -13,6 +13,7 @@ import (
 
 	"cloud.google.com/go/auth/credentials"
 	"cloud.google.com/go/auth/httptransport"
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 )
 
@@ -238,11 +239,16 @@ type googleStream struct {
 	stop func()
 	eventQueue
 
-	usage        Usage
-	reasoning    int
-	stopReason   string
-	sawToolCall  bool
+	usage      Usage
+	reasoning  int
+	stopReason string
+	// callSeed namespaces synthesized tool-call ids to THIS stream, and callSeq
+	// orders them within it. A bare ordinal would repeat "call_1" on every turn
+	// of a thread, so persisted tool_call_ids would collide and a tool result
+	// could be matched to the wrong call.
+	callSeed     string
 	callSeq      int
+	sawToolCall  bool
 	emittedUsage bool
 	closeOnce    sync.Once
 }
@@ -256,7 +262,9 @@ func (s *googleStream) Next() (StreamEvent, error) {
 		if err != nil {
 			var apiErr genai.APIError
 			if errors.As(err, &apiErr) {
-				return StreamEvent{}, providerStatusError(s.kind, apiErr.Code)
+				// The genai SDK surfaces only the status code, so there is no
+				// Retry-After to read; backoff falls back to our own schedule.
+				return StreamEvent{}, providerStatusError(s.kind, apiErr.Code, nil)
 			}
 			return StreamEvent{}, providerError(s.kind, err)
 		}
@@ -338,10 +346,14 @@ func (s *googleStream) pushToolCall(call *genai.FunctionCall) {
 	s.sawToolCall = true
 	id := call.ID
 	if id == "" {
-		// AI Studio omits call ids; the runtime correlates results by id, so
-		// one is synthesized per turn.
+		// AI Studio omits call ids; the runtime correlates results by id, so one
+		// is synthesized — seeded from a UUID minted once per stream so ids stay
+		// unique across every turn of a thread.
+		if s.callSeed == "" {
+			s.callSeed = uuid.NewString()
+		}
 		s.callSeq++
-		id = "call_" + strconv.Itoa(s.callSeq)
+		id = "call_" + s.callSeed + "_" + strconv.Itoa(s.callSeq)
 	}
 	args, err := json.Marshal(call.Args)
 	if err != nil || call.Args == nil {

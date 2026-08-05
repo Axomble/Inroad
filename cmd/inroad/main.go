@@ -305,9 +305,9 @@ func run() error {
 	)
 	runtime := &agentrun.Runtime{
 		Store: agentStore, Models: modelResolver, Tools: runtimeTools{registry: toolRegistry},
-		Publisher: agentStream, Approvals: agentStore,
+		Publisher: agentStream, Approvals: agentStore, Logger: logger,
 	}
-	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger)
+	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger, cfg.AgentMaxConcurrentRuns)
 	runManager.StartExpirySweep()
 	agentHandler := agentchat.NewHandler(agentchat.NewService(agentStore, runManager, agentStream))
 	suppStore := suppression.NewStore(queries)

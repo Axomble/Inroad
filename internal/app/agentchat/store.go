@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -29,6 +30,11 @@ var (
 	ErrRunActive = errors.New("agentchat: thread already has an active run")
 	// ErrQueueEmpty is returned when a promotion found nothing to promote.
 	ErrQueueEmpty = errors.New("agentchat: no queued message")
+	// ErrNoActiveRun is the opposite of ErrRunActive: there is nothing to stop.
+	// The two are distinct because "already running" and "not running" are
+	// opposite conditions, and reusing one sentinel for both made a stop
+	// request on an idle thread report that the thread was busy.
+	ErrNoActiveRun = errors.New("agentchat: thread has no active run")
 )
 
 // PartInput is one part to persist alongside a message.
@@ -239,28 +245,61 @@ func (s *PgStore) persistMessageTx(ctx context.Context, qtx *gen.Queries, in Mes
 		return Message{}, err
 	}
 
-	parts := make([]gen.AgentMessagePart, 0, len(in.Parts))
-	for i, p := range in.Parts {
-		part, err := qtx.InsertAgentMessagePart(ctx, gen.InsertAgentMessagePartParams{
-			WorkspaceID:      in.WorkspaceID,
-			ID:               row.ID, // bound as the MESSAGE id (INSERT ... SELECT)
-			OrderIndex:       int32(i),
-			Type:             p.Type,
-			TextContent:      p.Text,
-			ReasoningContent: p.Reasoning,
-			ToolName:         p.ToolName,
-			ToolCallID:       p.ToolCallID,
-			ToolInput:        p.ToolInput,
-			ToolOutput:       p.ToolOutput,
-			State:            p.State,
-			ErrorMessage:     p.Error,
-		})
-		if err != nil {
-			return Message{}, fmt.Errorf("agentchat: insert part %d: %w", i, err)
-		}
-		parts = append(parts, part)
+	if len(in.Parts) == 0 {
+		return Message{Row: row}, nil
 	}
+	// One statement for every part. A message can carry a few dozen parts, and
+	// a statement each meant a round trip each while the transaction — and the
+	// pooled connection behind it — stayed open.
+	encoded, err := json.Marshal(partRows(in.Parts))
+	if err != nil {
+		return Message{}, fmt.Errorf("agentchat: encode parts: %w", err)
+	}
+	parts, err := qtx.InsertAgentMessageParts(ctx, gen.InsertAgentMessagePartsParams{
+		WorkspaceID: in.WorkspaceID,
+		ID:          row.ID, // bound as the MESSAGE id (INSERT ... SELECT)
+		Parts:       encoded,
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("agentchat: insert parts: %w", err)
+	}
+	if len(parts) != len(in.Parts) {
+		return Message{}, fmt.Errorf("agentchat: inserted %d of %d parts", len(parts), len(in.Parts))
+	}
+	// RETURNING order is not the input order; callers read parts positionally.
+	slices.SortFunc(parts, func(a, b gen.AgentMessagePart) int {
+		return int(a.OrderIndex - b.OrderIndex)
+	})
 	return Message{Row: row, Parts: parts}, nil
+}
+
+// partRow is the wire shape jsonb_to_recordset destructures. The JSON field
+// names are the column names, so the query's column definition list is the
+// single description of the mapping.
+type partRow struct {
+	OrderIndex       int             `json:"order_index"`
+	Type             string          `json:"type"`
+	TextContent      string          `json:"text_content"`
+	ReasoningContent string          `json:"reasoning_content"`
+	ToolName         string          `json:"tool_name"`
+	ToolCallID       string          `json:"tool_call_id"`
+	ToolInput        json.RawMessage `json:"tool_input"`
+	ToolOutput       json.RawMessage `json:"tool_output"`
+	State            string          `json:"state"`
+	ErrorMessage     string          `json:"error_message"`
+}
+
+func partRows(parts []PartInput) []partRow {
+	out := make([]partRow, len(parts))
+	for i, p := range parts {
+		out[i] = partRow{
+			OrderIndex: i, Type: p.Type, TextContent: p.Text, ReasoningContent: p.Reasoning,
+			ToolName: p.ToolName, ToolCallID: p.ToolCallID,
+			ToolInput: p.ToolInput, ToolOutput: p.ToolOutput,
+			State: p.State, ErrorMessage: p.Error,
+		}
+	}
+	return out
 }
 
 func (s *PgStore) ListMessages(ctx context.Context, workspaceID, threadID uuid.UUID) ([]Message, error) {

@@ -50,6 +50,50 @@ func TestGoogleStreamEventsAndUsage(t *testing.T) {
 	}
 }
 
+// TestGoogleSynthesizedCallIDsAreUniquePerStream covers the AI Studio path that
+// omits call ids: ids must be ordered within a turn AND distinct across turns of
+// the same thread, or two persisted tool_call_ids collide and a tool result can
+// be matched to the wrong call.
+func TestGoogleSynthesizedCallIDsAreUniquePerStream(t *testing.T) {
+	call := func(name string) *genai.FunctionCall {
+		return &genai.FunctionCall{Name: name, Args: map[string]any{}}
+	}
+	idsFrom := func(s *googleStream) []string {
+		s.pushToolCall(call("lookup"))
+		s.pushToolCall(call("write"))
+		var ids []string
+		for {
+			ev, ok := s.pop()
+			if !ok {
+				return ids
+			}
+			if ev.Type == EventToolCallEnd {
+				ids = append(ids, ev.ToolCallID)
+			}
+		}
+	}
+
+	first, second := idsFrom(&googleStream{}), idsFrom(&googleStream{})
+	if len(first) != 2 || len(second) != 2 {
+		t.Fatalf("ids = %v, %v", first, second)
+	}
+	seen := map[string]bool{}
+	for _, id := range append(append([]string{}, first...), second...) {
+		if id == "" || seen[id] {
+			t.Fatalf("duplicate or empty id %q across turns: %v, %v", id, first, second)
+		}
+		seen[id] = true
+	}
+
+	// A provider-supplied id is always preferred over a synthesized one.
+	explicit := &googleStream{}
+	explicit.pushToolCall(&genai.FunctionCall{ID: "vertex-id", Name: "lookup"})
+	ev, _ := explicit.pop()
+	if ev.ToolCallID != "vertex-id" {
+		t.Fatalf("explicit id = %q", ev.ToolCallID)
+	}
+}
+
 func TestGoogleArgsRejectsNonObject(t *testing.T) {
 	if _, err := googleArgs(json.RawMessage("[]")); err == nil {
 		t.Fatal("array accepted")

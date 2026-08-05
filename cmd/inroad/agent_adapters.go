@@ -41,7 +41,11 @@ func (a runtimeTools) Execute(ctx context.Context, actor agentchat.Actor, name s
 		return agentrun.ToolResult{}, agenttool.ErrNotFound
 	}
 	if risk.NeedsApproval() {
-		output, _ := json.Marshal(agenttool.Fail("this action requires human approval and is unavailable until the approval gate is enabled"))
+		// Unreachable through the run loop, which parks these calls before it
+		// executes anything. It stays as the deterministic backstop: an
+		// approval-tier tool can only run via ExecuteApproved, so no future
+		// caller can dispatch one by taking the ordinary path.
+		output, _ := json.Marshal(agenttool.Fail("this action requires human approval and cannot be run directly"))
 		return agentrun.ToolResult{Output: output, IsError: true}, nil
 	}
 	return a.execute(ctx, actor, name, input)

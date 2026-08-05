@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -91,10 +92,14 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrValidation):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, ErrRunActive):
+	case errors.Is(err, ErrNoActiveRun):
 		httpx.Error(w, http.StatusConflict, "thread has no stoppable run")
+	case errors.Is(err, ErrRunActive):
+		httpx.Error(w, http.StatusConflict, "thread already has an active run")
 	case errors.Is(err, ErrActionDecided):
 		httpx.Error(w, http.StatusConflict, "approval has already been decided")
+	case errors.Is(err, ErrStreamLimit):
+		httpx.Error(w, http.StatusTooManyRequests, "too many open streams for this user")
 	default:
 		httpx.Error(w, http.StatusInternalServerError, "internal error")
 	}
@@ -387,10 +392,20 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	header.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+	// An agent can think for a long time between chunks, and an idle
+	// connection is what proxies reap first (nginx defaults to 60s). A comment
+	// line is a no-op for every SSE client and keeps the hop alive.
+	heartbeat := time.NewTicker(streamHeartbeat)
+	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case frame, open := <-frames:
 			if !open {
 				return

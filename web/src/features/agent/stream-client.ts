@@ -5,6 +5,22 @@ export interface SSEFrame {
   event: AgentStreamEvent
 }
 
+/**
+ * A stream request that reached the server and was refused. Carries the status
+ * so the caller can decide between "retry" and "give up and tell the user"
+ * without string-matching the message — the SSE stream is opened with `fetch`,
+ * so it never flows through the RTK error seam in `@/lib/rtk-error`.
+ */
+export class AgentStreamHttpError extends Error {
+  readonly status: number
+
+  constructor(status: number) {
+    super(`Agent stream returned HTTP ${status}.`)
+    this.name = 'AgentStreamHttpError'
+    this.status = status
+  }
+}
+
 function apiURL(path: string): string {
   const base = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
   const normalized = base.endsWith('/') ? base.slice(0, -1) : base
@@ -80,6 +96,6 @@ export async function openAgentStream(
     credentials: 'include',
     signal,
   })
-  if (!response.ok) throw new Error(`Agent stream returned HTTP ${response.status}.`)
+  if (!response.ok) throw new AgentStreamHttpError(response.status)
   return response
 }

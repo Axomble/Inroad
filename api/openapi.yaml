@@ -1042,6 +1042,7 @@ paths:
       responses:
         '200': { description: Agent event stream, content: { text/event-stream: { schema: { type: string } } } }
         '404': { description: Thread not found }
+        '429': { description: Too many concurrent streams for this user }
   /agent/approvals:
     get:
       operationId: listAgentApprovals

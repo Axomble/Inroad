@@ -14,6 +14,22 @@ describe('AgentMarkdown', () => {
     expect(screen.getByRole('link', { name: 'docs' })).toHaveAttribute('rel', 'noopener noreferrer')
   })
 
+  it('treats a protocol-relative link as external even though it starts with a slash', () => {
+    render(<AgentMarkdown text={'[offsite](//evil.example.com/x)'} />)
+
+    const link = screen.getByRole('link', { name: 'offsite' })
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('keeps a genuine in-app path in the same tab', () => {
+    render(<AgentMarkdown text={'[mailboxes](/app/mailboxes)'} />)
+
+    const link = screen.getByRole('link', { name: 'mailboxes' })
+    expect(link).not.toHaveAttribute('target')
+    expect(link).not.toHaveAttribute('rel')
+  })
+
   it('does not make unsafe protocols clickable', () => {
     render(<AgentMarkdown text={'[unsafe](javascript:alert(1))'} />)
     expect(screen.queryByRole('link')).not.toBeInTheDocument()

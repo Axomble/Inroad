@@ -3,12 +3,20 @@ import remarkGfm from 'remark-gfm'
 
 const referencePattern = /\[\[([a-z_]+):([0-9a-f-]{36}):([^\]]+)\]\]/gi
 
-function safeHref(value: string | undefined): string | undefined {
+interface SafeLink {
+  href: string
+  /** True only when the resolved URL is same-origin — a protocol-relative
+   * `//evil.com` also "starts with /", so the path prefix cannot be trusted to
+   * decide whether a model-emitted link stays in the tab. */
+  internal: boolean
+}
+
+function safeLink(value: string | undefined): SafeLink | undefined {
   if (!value) return undefined
   try {
     const url = new URL(value, window.location.origin)
     if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return undefined
-    return value
+    return { href: value, internal: url.protocol !== 'mailto:' && url.origin === window.location.origin }
   } catch {
     return undefined
   }
@@ -31,12 +39,12 @@ function recordHref(type: string, id: string): string | undefined {
 
 const components: Components = {
   a: ({ href, children }) => {
-    const safe = safeHref(href)
+    const safe = safeLink(href)
     return safe ? (
       <a
-        href={safe}
-        target={safe.startsWith('/') ? undefined : '_blank'}
-        rel={safe.startsWith('/') ? undefined : 'noopener noreferrer'}
+        href={safe.href}
+        target={safe.internal ? undefined : '_blank'}
+        rel={safe.internal ? undefined : 'noopener noreferrer'}
         className="font-medium text-accent-ink underline decoration-accent-ink/35 underline-offset-2"
       >
         {children}

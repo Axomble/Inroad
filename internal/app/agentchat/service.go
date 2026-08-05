@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -21,7 +23,20 @@ const (
 	maxThreadLimit     = int32(100)
 	maxMessageChars    = 20_000
 	maxTitleChars      = 120
+	// streamHeartbeat is how often an idle SSE connection gets a comment line,
+	// short enough for the 30-60s idle timeouts proxies ship with.
+	streamHeartbeat = 20 * time.Second
+	// maxStreamsPerUser caps concurrent SSE attachments for one user. Each one
+	// holds a goroutine and a fan-out slot for as long as its panel is open, so
+	// a client stuck in a reconnect loop must not be able to accumulate them
+	// without bound. A handful covers the real case (a few tabs, plus the
+	// overlap while a reconnect replaces a dead connection).
+	maxStreamsPerUser = 8
 )
+
+// ErrStreamLimit is returned when a user already holds the maximum number of
+// concurrent streams. It is transient by nature — closing a tab frees a slot.
+var ErrStreamLimit = errors.New("agentchat: too many concurrent streams for this user")
 
 type Actor struct {
 	WorkspaceID uuid.UUID
@@ -35,6 +50,12 @@ type RunStart struct {
 	RunID    uuid.UUID
 	TurnID   uuid.UUID
 	Selector string
+	// MessageID is set only when resuming from an approval pause: it is the
+	// assistant message THAT pause parked. A run can pause more than once, so
+	// the resume must replay the calls of the pause it is resuming and no
+	// others — replaying by run id re-executes every earlier pause's
+	// non-gated tool calls and strands the approval that was just granted.
+	MessageID uuid.UUID
 }
 
 type RunManager interface {
@@ -58,11 +79,19 @@ type Service struct {
 	runs      RunManager
 	streams   StreamTransport
 	approvals ApprovalStore
+
+	// mu guards openStreams, the per-user count of live SSE attachments on
+	// this node.
+	mu          sync.Mutex
+	openStreams map[uuid.UUID]int
 }
 
 func NewService(store Store, runs RunManager, streams StreamTransport) *Service {
 	approvals, _ := store.(ApprovalStore)
-	return &Service{store: store, runs: runs, streams: streams, approvals: approvals}
+	return &Service{
+		store: store, runs: runs, streams: streams, approvals: approvals,
+		openStreams: map[uuid.UUID]int{},
+	}
 }
 
 func (s *Service) ListPendingActions(ctx context.Context, actor Actor, status string, limit int32) ([]PendingActionDTO, error) {
@@ -327,7 +356,7 @@ func (s *Service) Stop(ctx context.Context, actor Actor, threadID uuid.UUID) err
 	}
 	run, err := s.store.GetActiveRun(ctx, actor.WorkspaceID, threadID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrRunActive
+		return ErrNoActiveRun
 	}
 	if err != nil {
 		return err
@@ -353,7 +382,39 @@ func (s *Service) Attach(ctx context.Context, actor Actor, threadID uuid.UUID, a
 	if _, err := s.store.GetThread(ctx, actor.WorkspaceID, actor.UserID, threadID); err != nil {
 		return nil, err
 	}
-	return s.streams.Attach(ctx, threadID, after)
+	if !s.claimStream(actor.UserID) {
+		return nil, ErrStreamLimit
+	}
+	frames, err := s.streams.Attach(ctx, threadID, after)
+	if err != nil {
+		s.releaseStream(actor.UserID)
+		return nil, err
+	}
+	// The transport ties the stream's life to ctx, so releasing on ctx is the
+	// same moment the goroutine behind it exits — no extra bookkeeping
+	// goroutine, and no slot leaked by a client that vanishes mid-stream.
+	context.AfterFunc(ctx, func() { s.releaseStream(actor.UserID) })
+	return frames, nil
+}
+
+func (s *Service) claimStream(userID uuid.UUID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openStreams[userID] >= maxStreamsPerUser {
+		return false
+	}
+	s.openStreams[userID]++
+	return true
+}
+
+func (s *Service) releaseStream(userID uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openStreams[userID] <= 1 {
+		delete(s.openStreams, userID)
+		return
+	}
+	s.openStreams[userID]--
 }
 
 func threadDTO(row gen.AgentThread, messages []Message) ThreadDTO {

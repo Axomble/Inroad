@@ -89,6 +89,10 @@ type ApprovalResult struct {
 	IsError      bool
 	ErrorMessage string
 	Action       *PendingAction
+	// Status is the terminal state to write onto Action: executed, failed, or
+	// expired (an approval whose deadline passed before the run resumed).
+	// Empty means the call had no action to settle.
+	Status string
 }
 
 type ApprovalDecision struct {
@@ -104,6 +108,10 @@ type ApprovalStore interface {
 	DecidePendingAction(context.Context, Actor, uuid.UUID, ApprovalDecision) (PendingAction, *RunStart, error)
 	ExpirePendingActions(context.Context, int32) ([]RunStart, error)
 	LoadApprovalBatch(context.Context, RunStart) (ApprovalBatch, error)
+	// RecordApprovalOutcome settles ONE action the moment its tool returns, so
+	// a failure later in the batch cannot leave a side effect that already
+	// happened recorded as still pending.
+	RecordApprovalOutcome(context.Context, ApprovalResult) error
 	CompleteApprovalBatch(context.Context, RunStart, []ApprovalResult) error
 	CancelApprovalRun(context.Context, Actor, uuid.UUID, string) error
 }

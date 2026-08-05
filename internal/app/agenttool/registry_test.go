@@ -203,6 +203,23 @@ func TestExecuteRejectsNonObjectArguments(t *testing.T) {
 	}
 }
 
+// JSON null decodes into a map without error and yields a nil map, so it needs
+// its own rejection: a tool promised an object must never be handed null, and
+// the provider seam relies on this check rather than repeating it.
+func TestExecuteRejectsNullArguments(t *testing.T) {
+	reg := New(fullDeps())
+	res, err := reg.Execute(context.Background(), admin(), "inroad_list_read", json.RawMessage(`null`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Success {
+		t.Fatal("null arguments were accepted")
+	}
+	if !strings.Contains(res.Error, "null") {
+		t.Fatalf("failure does not tell the model null is the problem: %q", res.Error)
+	}
+}
+
 // An unknown property is a model mistake it can correct, so it comes back as a
 // Result naming the schema rather than being silently dropped.
 func TestExecuteRejectsUnknownArgumentProperty(t *testing.T) {

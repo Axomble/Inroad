@@ -266,6 +266,9 @@ WHERE workspace_id = $1 AND id = $2 AND status = 'paused_approval'`,
 			start = &RunStart{
 				Actor:    Actor{WorkspaceID: updated.WorkspaceID, UserID: updated.CreatedByUserID, Role: updated.ActorRole},
 				ThreadID: updated.ThreadID, RunID: updated.RunID, TurnID: updated.TurnID, Selector: selector,
+				// The resume belongs to the message THIS action paused, not to
+				// the run as a whole (see RunStart.MessageID).
+				MessageID: updated.MessageID,
 			}
 		}
 	}
@@ -280,6 +283,15 @@ func nullableJSON(value json.RawMessage) any {
 		return nil
 	}
 	return value
+}
+
+// nullableUUID renders the zero uuid as SQL NULL, so a query can treat "not
+// specified" and "this id" through one parameter.
+func nullableUUID(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }
 
 func (s *PgStore) ExpirePendingActions(ctx context.Context, limit int32) ([]RunStart, error) {
@@ -323,8 +335,17 @@ ORDER BY expires_at LIMIT $1`, limit)
 	return starts, nil
 }
 
+// LoadApprovalBatch returns the tool calls a resume must run: the calls of the
+// message the pause parked, each paired with its pending action when it had
+// one.
+//
+// The scope is ONE message, never the run. A run that pauses twice has two
+// paused messages, and replaying by run id would re-execute the first pause's
+// non-gated calls (a second import, a second campaign pause) before failing on
+// an action that already ran — leaving the approval the human actually granted
+// unexecuted.
 func (s *PgStore) LoadApprovalBatch(ctx context.Context, start RunStart) (ApprovalBatch, error) {
-	actions, err := s.listRunActions(ctx, start.Actor.WorkspaceID, start.RunID)
+	actions, err := s.listMessageActions(ctx, start.Actor.WorkspaceID, start.RunID, start.MessageID)
 	if err != nil {
 		return ApprovalBatch{}, err
 	}
@@ -356,9 +377,14 @@ ORDER BY order_index`, start.Actor.WorkspaceID, actions[0].MessageID)
 	return batch, rows.Err()
 }
 
-func (s *PgStore) listRunActions(ctx context.Context, workspaceID, runID uuid.UUID) ([]PendingAction, error) {
+// listMessageActions returns the run's actions for one paused message. A nil
+// messageID falls back to the whole run and is only reachable from a RunStart
+// built before the message was known.
+func (s *PgStore) listMessageActions(ctx context.Context, workspaceID, runID, messageID uuid.UUID) ([]PendingAction, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+pendingActionColumns+`
-FROM pending_actions WHERE workspace_id = $1 AND run_id = $2 ORDER BY created_at, id`, workspaceID, runID)
+FROM pending_actions
+WHERE workspace_id = $1 AND run_id = $2 AND ($3::uuid IS NULL OR message_id = $3)
+ORDER BY created_at, id`, workspaceID, runID, nullableUUID(messageID))
 	if err != nil {
 		return nil, err
 	}
@@ -374,6 +400,44 @@ FROM pending_actions WHERE workspace_id = $1 AND run_id = $2 ORDER BY created_at
 	return actions, rows.Err()
 }
 
+// RecordApprovalOutcome commits ONE approved action's terminal state in its own
+// transaction, immediately after that tool ran.
+//
+// It is deliberately not folded into CompleteApprovalBatch. The side effect —
+// a paused campaign, an import — is already committed by the time this is
+// called, so deferring the bookkeeping to the end of the batch means a failure
+// on the next call in the batch leaves an action that DID run still sitting at
+// 'approved', indistinguishable from one waiting to run.
+func (s *PgStore) RecordApprovalOutcome(ctx context.Context, result ApprovalResult) error {
+	if result.Action == nil || result.Status == "" {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+UPDATE pending_actions
+SET status = $3, result = $4, error_message = $5, executed_at = now(), updated_at = now()
+WHERE workspace_id = $1 AND id = $2 AND status = 'approved'`,
+		result.Action.WorkspaceID, result.Action.ID, result.Status,
+		nullableJSON(result.ToolOutput), result.ErrorMessage); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO pending_action_audit (workspace_id, pending_action_id, event, details)
+VALUES ($1,$2,$3,jsonb_build_object('tool_call_id',$4::text))`,
+		result.Action.WorkspaceID, result.Action.ID, result.Status, result.ToolCallID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// CompleteApprovalBatch writes the transcript side of a resumed pause: each
+// tool_call part's final state and one tool_result message for the provider.
+// The pending_actions rows were already settled per call by
+// RecordApprovalOutcome.
 func (s *PgStore) CompleteApprovalBatch(ctx context.Context, start RunStart, results []ApprovalResult) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -395,27 +459,6 @@ UPDATE agent_message_parts SET state = $4, error_message = $5, tool_input = $6
 WHERE workspace_id = $1 AND id = $2 AND tool_call_id = $3`,
 			start.Actor.WorkspaceID, result.PartID, result.ToolCallID, state,
 			result.ErrorMessage, result.ToolInput); err != nil {
-			return err
-		}
-		if result.Action == nil || result.Action.Status != ActionStatusApproved {
-			continue
-		}
-		actionStatus, auditEvent := ActionStatusExecuted, ActionStatusExecuted
-		if result.IsError {
-			actionStatus, auditEvent = ActionStatusFailed, ActionStatusFailed
-		}
-		if _, err := tx.Exec(ctx, `
-UPDATE pending_actions
-SET status = $3, result = $4, error_message = $5, executed_at = now(), updated_at = now()
-WHERE workspace_id = $1 AND id = $2 AND status = 'approved'`,
-			result.Action.WorkspaceID, result.Action.ID, actionStatus,
-			result.ToolOutput, result.ErrorMessage); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-INSERT INTO pending_action_audit (workspace_id, pending_action_id, event, details)
-VALUES ($1,$2,$3,jsonb_build_object('tool_call_id',$4::text))`,
-			result.Action.WorkspaceID, result.Action.ID, auditEvent, result.ToolCallID); err != nil {
 			return err
 		}
 	}

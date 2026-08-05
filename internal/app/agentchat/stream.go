@@ -20,11 +20,32 @@ import (
 // case of a run whose process died before it could clean up.
 const streamTTL = time.Hour
 
+// streamLogEntries caps the replay buffer. A single long run can emit tens of
+// thousands of token deltas; without a bound the list grows for the whole TTL
+// on memory that exists only to serve a reconnect. Trimming costs the oldest
+// chunks of a very long answer — a reconnecting client sees the tail plus the
+// canonical transcript it refetches on message_persisted, never a corrupted
+// sequence, because every entry carries its own sequence number.
+const streamLogEntries = 5000
+
 // cancelChannel is the single pub/sub channel every API instance listens on for
 // stop requests. ONE shared subscriber connection multiplexes every run, rather
 // than a connection per run — a workspace with fifty live threads must not cost
 // fifty Redis connections per node.
 const cancelChannel = "agentcancel"
+
+// streamPattern matches every thread's chunk channel. The same shared
+// subscriber that carries cancellations carries chunks: SSE readers attach to
+// an in-process fan-out, so a hundred open panels cost one Redis connection,
+// not a hundred.
+const streamPattern = "agentstream.ch:*"
+
+// subscriberBuffer is how many envelopes a single SSE reader may fall behind
+// before it is dropped. A dropped reader's channel is closed, its request ends,
+// and the browser reconnects with Last-Event-ID — replaying from the log is the
+// designed recovery, and it is strictly better than letting one stalled client
+// block the shared dispatch loop for every other reader on the node.
+const subscriberBuffer = 256
 
 // StreamPublisher is the write half of the stream, as the run loop sees it.
 // Defined here (by the consumer) so the runtime can be tested against an
@@ -45,21 +66,28 @@ type Frame struct {
 	Data []byte
 }
 
-// publishChunk appends the payload, arms the log's TTL, and fans the payload
-// out on the thread's pub/sub channel — atomically, in one server-side
-// evaluation.
+// publishChunk assigns the event's sequence, appends it to the log, trims and
+// arms the log's TTL, and fans the payload out on the thread's pub/sub
+// channel — atomically, in one server-side evaluation.
 //
-// Atomicity is what makes the replay contract hold. RPUSH's return value is the
-// new length, i.e. a monotonic 1-based sequence number, and because the PUBLISH
-// happens inside the same script, live subscribers observe events in exactly
-// the order and numbering the log records. A reader can therefore splice a
-// LRANGE replay onto the live feed with no gap (it subscribed first) and no
-// duplicate (it drops anything at or below the last sequence it replayed).
+// Atomicity is what makes the replay contract hold. The sequence comes from a
+// per-thread counter that OUTLIVES the log: Clear deletes a finished run's
+// chunks but not the counter, so the next run on the thread keeps counting up
+// instead of restarting at 1. That is what stops a client holding
+// Last-Event-ID: 20 from silently discarding the next run's first twenty
+// events. The stored entry and the published payload are the same
+// "<seq>:<json>" envelope, so a reader splices an LRANGE replay onto the live
+// feed with no gap (it subscribed first) and no duplicate (it drops anything at
+// or below the last sequence it delivered).
 var publishChunk = redis.NewScript(`
-local n = redis.call('RPUSH', KEYS[1], ARGV[1])
+local seq = redis.call('INCR', KEYS[3])
+redis.call('PEXPIRE', KEYS[3], ARGV[2])
+local entry = seq .. ':' .. ARGV[1]
+redis.call('RPUSH', KEYS[1], entry)
+redis.call('LTRIM', KEYS[1], -tonumber(ARGV[3]), -1)
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
-redis.call('PUBLISH', KEYS[2], n .. ':' .. ARGV[1])
-return n
+redis.call('PUBLISH', KEYS[2], entry)
+return seq
 `)
 
 // RedisStream is the Redis-backed implementation of the chunk transport: the
@@ -67,13 +95,28 @@ return n
 // the shared cancel bus that turns a stop request into a context cancellation
 // on whichever node is actually running the goroutine.
 type RedisStream struct {
-	rdb *redis.Client
-	ttl time.Duration
+	rdb        *redis.Client
+	ttl        time.Duration
+	logEntries int
 
-	// cancels maps a live run to its cancel func. Guarded by mu; the shared
-	// subscriber goroutine reads it, the run manager writes it.
-	mu      sync.Mutex
+	// mu guards every map below plus the shared subscriber's lifecycle.
+	mu sync.Mutex
+	// cancels maps a live run to its cancel func. The shared subscriber
+	// goroutine reads it, the run manager writes it.
 	cancels map[uuid.UUID]context.CancelFunc
+	// readers maps a thread to the SSE readers currently attached to it on
+	// THIS node. The shared subscriber fans one Redis message out to all of
+	// them in-process.
+	readers  map[uuid.UUID]map[*reader]struct{}
+	pubsub   *redis.PubSub
+	stopSubs context.CancelFunc
+}
+
+// reader is one attached SSE client's slot in the in-process fan-out.
+type reader struct {
+	threadID uuid.UUID
+	envelope chan string
+	closed   bool
 }
 
 // NewRedisStream dials Redis at addr — the same instance the queue and rate
@@ -86,13 +129,48 @@ func NewRedisStream(addr string) *RedisStream {
 // NewRedisStreamWithClient wraps an existing client (integration tests supply
 // one pointed at the test instance).
 func NewRedisStreamWithClient(rdb *redis.Client) *RedisStream {
-	return &RedisStream{rdb: rdb, ttl: streamTTL, cancels: map[uuid.UUID]context.CancelFunc{}}
+	return &RedisStream{
+		rdb: rdb, ttl: streamTTL, logEntries: streamLogEntries,
+		cancels: map[uuid.UUID]context.CancelFunc{},
+		readers: map[uuid.UUID]map[*reader]struct{}{},
+	}
 }
 
-func (s *RedisStream) Close() error { return s.rdb.Close() }
+func (s *RedisStream) Close() error {
+	s.mu.Lock()
+	stop, sub := s.stopSubs, s.pubsub
+	s.stopSubs, s.pubsub = nil, nil
+	// Release every attached reader: with the subscriber gone nothing will ever
+	// arrive, so their pumps must end rather than park on a dead channel.
+	for threadID, set := range s.readers {
+		for rd := range set {
+			s.closeLocked(rd)
+		}
+		delete(s.readers, threadID)
+	}
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	if sub != nil {
+		_ = sub.Close()
+	}
+	return s.rdb.Close()
+}
 
 func logKey(threadID uuid.UUID) string     { return "agentstream:" + threadID.String() }
 func channelKey(threadID uuid.UUID) string { return "agentstream.ch:" + threadID.String() }
+func seqKey(threadID uuid.UUID) string     { return "agentstream.seq:" + threadID.String() }
+
+// threadFromChannel recovers the thread id a pattern message arrived for.
+func threadFromChannel(channel string) (uuid.UUID, bool) {
+	raw, ok := strings.CutPrefix(channel, "agentstream.ch:")
+	if !ok {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(raw)
+	return id, err == nil
+}
 
 // Publish implements StreamPublisher.
 func (s *RedisStream) Publish(ctx context.Context, threadID uuid.UUID, ev Event) (int64, error) {
@@ -101,8 +179,8 @@ func (s *RedisStream) Publish(ctx context.Context, threadID uuid.UUID, ev Event)
 		return 0, fmt.Errorf("agentchat: encode event: %w", err)
 	}
 	seq, err := publishChunk.Run(ctx, s.rdb,
-		[]string{logKey(threadID), channelKey(threadID)},
-		payload, s.ttl.Milliseconds(),
+		[]string{logKey(threadID), channelKey(threadID), seqKey(threadID)},
+		payload, s.ttl.Milliseconds(), s.logEntries,
 	).Int64()
 	if err != nil {
 		return 0, fmt.Errorf("agentchat: publish chunk: %w", err)
@@ -110,7 +188,9 @@ func (s *RedisStream) Publish(ctx context.Context, threadID uuid.UUID, ev Event)
 	return seq, nil
 }
 
-// Clear implements StreamPublisher.
+// Clear implements StreamPublisher. The sequence counter deliberately survives:
+// it is the thread's numbering epoch, and resetting it is exactly the bug that
+// makes a reconnecting client miss the next run.
 func (s *RedisStream) Clear(ctx context.Context, threadID uuid.UUID) error {
 	if err := s.rdb.Del(ctx, logKey(threadID)).Err(); err != nil {
 		return fmt.Errorf("agentchat: clear stream: %w", err)
@@ -121,73 +201,78 @@ func (s *RedisStream) Clear(ctx context.Context, threadID uuid.UUID) error {
 // Attach returns a channel of every event after afterSeq: first the log entries
 // already recorded, then the live feed, with no gap and no duplicate.
 //
-// The ordering is what makes that true. It subscribes and WAITS for the
-// subscription to be confirmed before reading the log, so an event published
-// during the handoff lands in the pub/sub buffer rather than being missed; then
-// it replays the log; then it forwards live events, discarding any whose
-// sequence it already replayed.
+// The ordering is what makes that true. It joins the shared subscriber's
+// fan-out BEFORE reading the log, so an event published during the handoff
+// lands in this reader's buffer rather than being missed; then it replays the
+// log; then it forwards live events, discarding any whose sequence it already
+// replayed.
 //
-// The returned channel is closed when ctx is done or the subscription drops.
+// afterSeq is treated as stale — and replay starts from the beginning of the
+// log — when it is ahead of the thread's current counter. That happens when the
+// counter's TTL lapsed between runs; without the check the client would filter
+// out the whole of the next run.
+//
+// The returned channel is closed when ctx is done, or when this reader falls
+// too far behind and is dropped.
 func (s *RedisStream) Attach(ctx context.Context, threadID uuid.UUID, afterSeq int64) (<-chan Frame, error) {
 	if afterSeq < 0 {
 		afterSeq = 0
 	}
-	sub := s.rdb.Subscribe(ctx, channelKey(threadID))
-	// Receive blocks until Redis acknowledges the SUBSCRIBE. Without it the
-	// LRANGE below could run before the subscription is live, opening exactly
-	// the gap this design exists to close.
-	if _, err := sub.Receive(ctx); err != nil {
-		_ = sub.Close()
-		return nil, fmt.Errorf("agentchat: subscribe: %w", err)
+	if err := s.ensureSubscriber(ctx); err != nil {
+		return nil, err
+	}
+	rd := s.addReader(threadID)
+
+	if afterSeq > 0 {
+		current, err := s.rdb.Get(ctx, seqKey(threadID)).Int64()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			s.removeReader(rd)
+			return nil, fmt.Errorf("agentchat: read stream sequence: %w", err)
+		}
+		if errors.Is(err, redis.Nil) || current < afterSeq {
+			afterSeq = 0
+		}
 	}
 
-	// Sequence numbers are 1-based, so the entry numbered afterSeq+1 sits at
-	// zero-based index afterSeq.
-	backlog, err := s.rdb.LRange(ctx, logKey(threadID), afterSeq, -1).Result()
+	entries, err := s.rdb.LRange(ctx, logKey(threadID), 0, -1).Result()
 	if err != nil {
-		_ = sub.Close()
+		s.removeReader(rd)
 		return nil, fmt.Errorf("agentchat: replay log: %w", err)
 	}
 
 	out := make(chan Frame, 64)
-	go s.pump(ctx, sub, out, afterSeq, backlog)
+	go s.pump(ctx, rd, out, afterSeq, entries)
 	return out, nil
 }
 
 // pump emits the replayed backlog and then bridges the live feed.
-func (s *RedisStream) pump(ctx context.Context, sub *redis.PubSub, out chan<- Frame, afterSeq int64, backlog []string) {
+func (s *RedisStream) pump(ctx context.Context, rd *reader, out chan<- Frame, afterSeq int64, backlog []string) {
 	defer close(out)
-	defer func() { _ = sub.Close() }()
+	defer s.removeReader(rd)
 
 	// high is the last sequence already delivered. A live event at or below it
 	// was part of the backlog and would be a duplicate.
 	high := afterSeq
-	for i, payload := range backlog {
-		seq := afterSeq + int64(i) + 1
-		if !send(ctx, out, Frame{Seq: seq, Data: []byte(payload)}) {
+	for _, entry := range backlog {
+		seq, payload, ok := splitEnvelope(entry)
+		if !ok || seq <= high {
+			continue
+		}
+		if !send(ctx, out, Frame{Seq: seq, Data: payload}) {
 			return
 		}
 		high = seq
-		// A terminal event ends a run, and the run's log is deleted right
-		// after — so the NEXT run on this thread starts numbering at 1 again.
-		// Resetting the high-water mark here is what lets one long-lived
-		// subscription survive across runs instead of silently filtering the
-		// next run's entire output as "already seen".
-		if isTerminal([]byte(payload)) {
-			high = 0
-		}
 	}
 
-	live := sub.Channel()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg, ok := <-live:
-			if !ok {
+		case entry, open := <-rd.envelope:
+			if !open {
 				return
 			}
-			seq, payload, ok := splitEnvelope(msg.Payload)
+			seq, payload, ok := splitEnvelope(entry)
 			if !ok || seq <= high {
 				continue
 			}
@@ -195,9 +280,6 @@ func (s *RedisStream) pump(ctx context.Context, sub *redis.PubSub, out chan<- Fr
 				return
 			}
 			high = seq
-			if isTerminal(payload) {
-				high = 0
-			}
 		}
 	}
 }
@@ -212,7 +294,7 @@ func send(ctx context.Context, out chan<- Frame, f Frame) bool {
 	}
 }
 
-// splitEnvelope parses the "<seq>:<json>" wire form the Lua script publishes.
+// splitEnvelope parses the "<seq>:<json>" wire form the Lua script writes.
 func splitEnvelope(raw string) (int64, []byte, bool) {
 	i := strings.IndexByte(raw, ':')
 	if i <= 0 {
@@ -225,17 +307,120 @@ func splitEnvelope(raw string) (int64, []byte, bool) {
 	return seq, []byte(raw[i+1:]), true
 }
 
-// isTerminal reports whether a payload ends a run. It decodes only the type
-// field: an unparseable payload is treated as non-terminal, which at worst
-// keeps the high-water mark one event too high rather than replaying a run.
-func isTerminal(payload []byte) bool {
-	var probe struct {
-		Type string `json:"type"`
+// ---- shared subscriber -----------------------------------------------------
+
+// ensureSubscriber starts the ONE pub/sub connection this process uses for both
+// cancellations and chunk fan-out, if it is not already running. It is
+// idempotent, so whichever comes first — the cancellation listener at startup
+// or the first SSE attach — pays for it, and every later caller reuses it.
+//
+// The subscriber outlives the caller's request context on purpose: it is
+// process-scoped infrastructure, torn down by Close.
+func (s *RedisStream) ensureSubscriber(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pubsub != nil {
+		return nil
 	}
-	if err := json.Unmarshal(payload, &probe); err != nil {
-		return false
+	subCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	sub := s.rdb.Subscribe(subCtx, cancelChannel)
+	if err := sub.PSubscribe(subCtx, streamPattern); err != nil {
+		cancel()
+		_ = sub.Close()
+		return fmt.Errorf("agentchat: subscribe stream pattern: %w", err)
 	}
-	return terminalEvents[probe.Type]
+	// One confirmation per subscription. Waiting for both is what guarantees a
+	// message published after Attach returns cannot be missed.
+	for range 2 {
+		if _, err := sub.Receive(subCtx); err != nil {
+			cancel()
+			_ = sub.Close()
+			return fmt.Errorf("agentchat: subscribe: %w", err)
+		}
+	}
+	s.pubsub, s.stopSubs = sub, cancel
+	go s.dispatch(subCtx, sub)
+	return nil
+}
+
+// dispatch is the shared subscriber's loop: one Redis message in, either a
+// local run cancellation or an in-process fan-out to that thread's readers.
+func (s *RedisStream) dispatch(ctx context.Context, sub *redis.PubSub) {
+	messages := sub.Channel(redis.WithChannelSize(subscriberBuffer))
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, open := <-messages:
+			if !open {
+				return
+			}
+			if msg.Channel == cancelChannel {
+				if runID, err := uuid.Parse(msg.Payload); err == nil {
+					s.cancelLocal(runID)
+				}
+				continue
+			}
+			threadID, ok := threadFromChannel(msg.Channel)
+			if !ok {
+				continue
+			}
+			s.deliver(threadID, msg.Payload)
+		}
+	}
+}
+
+func (s *RedisStream) addReader(threadID uuid.UUID) *reader {
+	rd := &reader{threadID: threadID, envelope: make(chan string, subscriberBuffer)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readers[threadID] == nil {
+		s.readers[threadID] = map[*reader]struct{}{}
+	}
+	s.readers[threadID][rd] = struct{}{}
+	return rd
+}
+
+func (s *RedisStream) removeReader(rd *reader) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	set := s.readers[rd.threadID]
+	if _, ok := set[rd]; !ok {
+		return
+	}
+	delete(set, rd)
+	if len(set) == 0 {
+		delete(s.readers, rd.threadID)
+	}
+	s.closeLocked(rd)
+}
+
+// closeLocked closes a reader's envelope channel exactly once. Callers hold mu.
+func (s *RedisStream) closeLocked(rd *reader) {
+	if rd.closed {
+		return
+	}
+	rd.closed = true
+	close(rd.envelope)
+}
+
+// deliver hands one envelope to every reader attached to the thread on this
+// node. A reader whose buffer is full is dropped rather than waited on — see
+// subscriberBuffer.
+func (s *RedisStream) deliver(threadID uuid.UUID, envelope string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for rd := range s.readers[threadID] {
+		select {
+		case rd.envelope <- envelope:
+		default:
+			delete(s.readers[threadID], rd)
+			s.closeLocked(rd)
+		}
+	}
+	if len(s.readers[threadID]) == 0 {
+		delete(s.readers, threadID)
+	}
 }
 
 // ---- cancellation ----------------------------------------------------------
@@ -268,30 +453,14 @@ func (s *RedisStream) RequestCancel(ctx context.Context, runID uuid.UUID) error 
 	return nil
 }
 
-// ListenCancellations runs the ONE shared subscriber for stop requests. It
-// blocks until ctx is done and is started once per process.
+// ListenCancellations starts the shared subscriber (if the first SSE attach has
+// not already) and blocks until ctx is done. It is started once per process.
 func (s *RedisStream) ListenCancellations(ctx context.Context) error {
-	sub := s.rdb.Subscribe(ctx, cancelChannel)
-	defer func() { _ = sub.Close() }()
-	if _, err := sub.Receive(ctx); err != nil {
-		return fmt.Errorf("agentchat: subscribe cancel channel: %w", err)
+	if err := s.ensureSubscriber(ctx); err != nil {
+		return err
 	}
-	ch := sub.Channel()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case msg, ok := <-ch:
-			if !ok {
-				return errors.New("agentchat: cancel subscription closed")
-			}
-			runID, err := uuid.Parse(msg.Payload)
-			if err != nil {
-				continue
-			}
-			s.cancelLocal(runID)
-		}
-	}
+	<-ctx.Done()
+	return nil
 }
 
 // cancelLocal fires the cancel func for runID if this process owns it.

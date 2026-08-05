@@ -138,6 +138,27 @@ FROM agent_messages m
 WHERE m.id = $2 AND m.workspace_id = $1
 RETURNING *;
 
+-- name: InsertAgentMessageParts :many
+-- Every part of one message in a single round trip. The run loop persists a
+-- message per provider turn, each with up to a few dozen parts; one statement
+-- per part meant a dozen round trips inside a held transaction, which is
+-- latency the whole pool pays for. Tenancy stays self-enforcing: the join to
+-- agent_messages emits zero rows for a foreign message id, so the CROSS JOIN
+-- produces nothing rather than trusting the caller.
+INSERT INTO agent_message_parts (
+    workspace_id, message_id, order_index, type,
+    text_content, reasoning_content, tool_name, tool_call_id,
+    tool_input, tool_output, state, error_message)
+SELECT $1, m.id, p.order_index, p.type, p.text_content, p.reasoning_content,
+       p.tool_name, p.tool_call_id, p.tool_input, p.tool_output, p.state, p.error_message
+FROM agent_messages m
+CROSS JOIN jsonb_to_recordset(sqlc.arg(parts)::jsonb) AS p(
+    order_index int, type text, text_content text, reasoning_content text,
+    tool_name text, tool_call_id text, tool_input jsonb, tool_output jsonb,
+    state text, error_message text)
+WHERE m.id = $2 AND m.workspace_id = $1
+RETURNING *;
+
 -- name: InsertAgentRun :one
 -- Starts a run. The partial unique index uq_agent_runs_one_active_per_thread
 -- makes "at most one live run per thread" a database guarantee: a concurrent

@@ -48,6 +48,12 @@ type Config struct {
 	// §3). Link-local (incl. cloud metadata) and multicast stay blocked always.
 	AIAllowPrivateBaseURL bool
 
+	// AgentMaxConcurrentRuns caps how many agent runs one API process executes
+	// simultaneously. Runs are goroutines in the API binary (never asynq), so
+	// without a bound a burst of sends is unbounded concurrency against the
+	// provider, the pool, and every tool they call. Default 20.
+	AgentMaxConcurrentRuns int
+
 	// PublicURL is the externally-reachable base URL used to build links
 	// (e.g. unsubscribe) embedded in outbound email.
 	PublicURL string
@@ -206,6 +212,10 @@ func Load() (*Config, error) {
 	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
+	// Zero is passed through and means "use the run manager's own default";
+	// platform packages never import app packages, so the number itself lives
+	// in agentrun.DefaultMaxConcurrentRuns.
+	cfg.AgentMaxConcurrentRuns = getenvInt("INROAD_AGENT_MAX_CONCURRENT_RUNS", 0)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 
 	// Derive the WebAuthn Relying Party from the public URL by default: RPID is the

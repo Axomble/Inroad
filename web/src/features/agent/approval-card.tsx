@@ -1,27 +1,37 @@
 import { memo, useEffect, useId, useMemo, useState } from 'react'
-import { AlertTriangle, Check, Clock3, Loader2, Pencil, X } from 'lucide-react'
+import { AlertTriangle, Braces, Check, Clock3, Loader2, Pencil, X } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { useDecideAgentApprovalMutation, type AgentApproval } from './api'
+import {
+  createDraft,
+  diffArguments,
+  draftArguments,
+  hasRenderedView,
+  isJSONObject,
+  type EditDraft,
+  type ToolArguments,
+} from './approval-args'
+import { ActionSummary, ApprovalDiff, ApprovalEditor, ApprovalPreview } from './approval-preview'
+import { approvalDecisionMessage } from './error-copy'
+
+/** Under this much time left the countdown ticks by the second, so "expired" never lags. */
+const secondPrecisionWindow = 120_000
 
 function toolLabel(name: string): string {
   return name.replace(/^inroad_/, '').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-function timeRemaining(expiresAt: string, now: number): string {
-  const milliseconds = new Date(expiresAt).getTime() - now
+function timeRemaining(milliseconds: number): string {
   if (milliseconds <= 0) return 'Expired'
-  const minutes = Math.ceil(milliseconds / 60_000)
-  if (minutes < 60) return `${minutes}m remaining`
-  const hours = Math.ceil(minutes / 60)
-  return `${hours}h remaining`
-}
-
-function isJSONObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  const seconds = Math.ceil(milliseconds / 1000)
+  if (seconds < 60) return `${seconds}s remaining`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s remaining`
+  return `${Math.ceil(minutes / 60)}h remaining`
 }
 
 export const ApprovalCard = memo(function ApprovalCard({
@@ -32,38 +42,76 @@ export const ApprovalCard = memo(function ApprovalCard({
   compact?: boolean
 }) {
   const [mode, setMode] = useState<'preview' | 'edit' | 'reject'>('preview')
-  const [editedText, setEditedText] = useState(() => JSON.stringify(action.edited_arguments ?? action.arguments, null, 2))
   const [reason, setReason] = useState('')
   const [formError, setFormError] = useState<string | null>(null)
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState(() => Date.now())
   const [decide, decision] = useDecideAgentApprovalMutation()
-  const editId = useId()
   const reasonId = useId()
-  const pending = action.status === 'pending' && new Date(action.expires_at).getTime() > now
+  const editId = useId()
 
+  const currentArguments: ToolArguments = useMemo(() => {
+    const value = action.edited_arguments ?? action.arguments
+    return isJSONObject(value) ? value : {}
+  }, [action.arguments, action.edited_arguments])
+
+  const [draft, setDraft] = useState<EditDraft>(() => createDraft(action.tool_name, currentArguments))
+
+  const expiresAt = useMemo(() => new Date(action.expires_at).getTime(), [action.expires_at])
+  const remaining = expiresAt - now
+  const expired = remaining <= 0
+  const pending = action.status === 'pending' && !expired
+
+  // Tick by the second in the last two minutes, by the half-minute before
+  // that, and stop entirely once expired — a card that keeps a live interval
+  // after its deadline is a leak on a page that renders up to a hundred. The
+  // interval only re-arms when the cadence itself changes, not on every tick.
+  const cadence = remaining <= secondPrecisionWindow ? 1000 : 30_000
   useEffect(() => {
-    if (action.status !== 'pending') return
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    if (action.status !== 'pending' || expired) return
+    const timer = window.setInterval(() => setNow(Date.now()), cadence)
     return () => window.clearInterval(timer)
-  }, [action.status])
+  }, [action.status, cadence, expired])
 
-  const argumentsText = useMemo(
-    () => JSON.stringify(action.edited_arguments ?? action.arguments, null, 2),
-    [action.arguments, action.edited_arguments],
+  const proposedArguments: ToolArguments = useMemo(
+    () => (isJSONObject(action.arguments) ? action.arguments : {}),
+    [action.arguments],
   )
+  const draftResult = useMemo(() => draftArguments(draft), [draft])
+  const changes = useMemo(
+    () => (draftResult.ok ? diffArguments(proposedArguments, draftResult.value) : []),
+    [draftResult, proposedArguments],
+  )
+
+  const toggleJSONMode = () => {
+    setFormError(null)
+    if (draft.tool === 'json') {
+      const parsed = draftArguments(draft)
+      if (!parsed.ok) {
+        setFormError(parsed.message)
+        return
+      }
+      setDraft(createDraft(action.tool_name, parsed.value))
+      return
+    }
+    const current = draftArguments(draft)
+    setDraft({ tool: 'json', text: JSON.stringify(current.ok ? current.value : currentArguments, null, 2) })
+  }
+
+  const startEdit = () => {
+    setFormError(null)
+    setDraft(createDraft(action.tool_name, currentArguments))
+    setMode('edit')
+  }
 
   const submit = async (kind: 'approve' | 'reject') => {
     setFormError(null)
-    let editedArguments: Record<string, unknown> | undefined
+    let editedArguments: ToolArguments | undefined
     if (kind === 'approve' && mode === 'edit') {
-      try {
-        const parsed: unknown = JSON.parse(editedText)
-        if (!isJSONObject(parsed)) throw new Error('not an object')
-        editedArguments = parsed
-      } catch {
-        setFormError('Edited arguments must be a valid JSON object.')
+      if (!draftResult.ok) {
+        setFormError(draftResult.message)
         return
       }
+      editedArguments = draftResult.value
     }
     if (kind === 'reject' && reason.trim().length === 0) {
       setFormError('Tell the assistant why this action should not run.')
@@ -79,52 +127,93 @@ export const ApprovalCard = memo(function ApprovalCard({
         },
       }).unwrap()
       setMode('preview')
-    } catch {
-      setFormError('This decision could not be saved. Refresh and try again; the action may have expired or already been decided.')
+    } catch (error) {
+      setFormError(approvalDecisionMessage(error))
     }
   }
 
-  const statusTone = action.status === 'executed' ? 'ok' : action.status === 'failed' || action.status === 'rejected' || action.status === 'expired' ? 'danger' : 'warm'
+  const statusLabel = expired && action.status === 'pending' ? 'expired' : action.status
+  const statusTone =
+    action.status === 'executed'
+      ? 'ok'
+      : statusLabel === 'expired' || action.status === 'failed' || action.status === 'rejected'
+        ? 'danger'
+        : 'warm'
 
   return (
-    <section className={cn('border border-warm/35 bg-warm/5', compact ? 'rounded-md p-2.5' : 'rounded-lg p-4')} aria-labelledby={`approval-${action.id}`}>
+    <section
+      className={cn('border border-warm/35 bg-warm/5', compact ? 'rounded-md p-2.5' : 'rounded-lg p-4')}
+      aria-labelledby={`approval-${action.id}`}
+    >
       <div className="flex flex-wrap items-start gap-2">
-        <span className="grid size-8 shrink-0 place-items-center rounded-md bg-warm/15 text-warm"><AlertTriangle className="size-4" aria-hidden="true" /></span>
+        <span className="grid size-8 shrink-0 place-items-center rounded-md bg-warm/15 text-warm">
+          <AlertTriangle className="size-4" aria-hidden="true" />
+        </span>
         <div className="min-w-0 flex-1">
-          <h3 id={`approval-${action.id}`} className="text-sm font-semibold text-foreground">Approve {toolLabel(action.tool_name)}</h3>
-          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">The assistant is paused. Review the exact inputs before allowing this consequential action.</p>
+          <h3 id={`approval-${action.id}`} className="text-sm font-semibold text-foreground">
+            Approve {toolLabel(action.tool_name)}
+          </h3>
+          <div className="mt-0.5">
+            <ActionSummary toolName={action.tool_name} args={currentArguments} />
+          </div>
         </div>
-        <Badge variant={statusTone}>{action.status.replaceAll('_', ' ')}</Badge>
+        <Badge variant={statusTone}>{statusLabel.replaceAll('_', ' ')}</Badge>
       </div>
 
-      <div className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-        <Clock3 className="size-3" aria-hidden="true" />
-        <span>{timeRemaining(action.expires_at, now)}</span>
-      </div>
+      {action.status === 'pending' && (
+        <div
+          className={cn(
+            'mt-3 flex items-center gap-1.5 text-[11px]',
+            expired ? 'text-danger' : 'text-muted-foreground',
+          )}
+        >
+          <Clock3 className="size-3" aria-hidden="true" />
+          <span>{timeRemaining(remaining)}</span>
+        </div>
+      )}
 
       {mode === 'edit' ? (
-        <div className="mt-3">
-          <Label htmlFor={editId}>Edited action inputs (JSON)</Label>
-          <Textarea id={editId} value={editedText} onChange={(event) => setEditedText(event.target.value)} className="mt-1 min-h-36 font-mono text-xs" aria-invalid={Boolean(formError)} />
-          <p className="mt-1 text-[11px] text-muted-foreground">Only these edited inputs will be executed.</p>
+        <div className="mt-3 space-y-3">
+          <ApprovalEditor
+            draft={draft}
+            onChange={setDraft}
+            invalid={Boolean(formError)}
+            idPrefix={editId}
+          />
+          <ApprovalDiff changes={changes} />
+          <p className="text-[11px] text-muted-foreground">Only these edited inputs will be executed.</p>
         </div>
       ) : mode === 'reject' ? (
         <div className="mt-3">
           <Label htmlFor={reasonId}>Reason for rejecting</Label>
-          <Textarea id={reasonId} value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} className="mt-1 min-h-20" placeholder="Explain what should change before the assistant tries again." aria-invalid={Boolean(formError)} />
+          <Textarea
+            id={reasonId}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            maxLength={1000}
+            className="mt-1 min-h-20"
+            placeholder="Explain what should change before the assistant tries again."
+            aria-invalid={Boolean(formError)}
+          />
         </div>
       ) : (
-        <details className="mt-3 rounded-md border border-border bg-background" open={!compact}>
-          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-foreground">Action inputs</summary>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words border-t border-border p-3 font-mono text-[11px] leading-5 text-muted-foreground">{argumentsText}</pre>
+        <details className="mt-3" open={!compact}>
+          <summary className="cursor-pointer py-1 text-xs font-medium text-foreground">Action inputs</summary>
+          <div className="mt-2">
+            <ApprovalPreview toolName={action.tool_name} args={currentArguments} />
+          </div>
         </details>
       )}
 
       {formError && <p role="alert" className="mt-2 text-xs text-danger">{formError}</p>}
       {action.error && <p role="alert" className="mt-2 text-xs text-danger">{action.error}</p>}
-      {action.decision_reason && <p className="mt-2 text-xs text-muted-foreground"><span className="font-medium text-foreground">Decision note:</span> {action.decision_reason}</p>}
+      {action.decision_reason && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">Decision note:</span> {action.decision_reason}
+        </p>
+      )}
 
-      {pending && (
+      {pending ? (
         <div className="mt-3 flex flex-wrap gap-2" aria-busy={decision.isLoading}>
           {mode === 'reject' ? (
             <Button size="sm" variant="destructive" disabled={decision.isLoading} onClick={() => void submit('reject')}>
@@ -132,14 +221,51 @@ export const ApprovalCard = memo(function ApprovalCard({
             </Button>
           ) : (
             <Button size="sm" variant="primary" disabled={decision.isLoading} onClick={() => void submit('approve')}>
-              {decision.isLoading ? <Loader2 className="animate-spin" /> : <Check />} {mode === 'edit' ? 'Approve edited action' : 'Approve action'}
+              {decision.isLoading ? <Loader2 className="animate-spin" /> : <Check />}{' '}
+              {mode === 'edit' ? 'Approve edited action' : 'Approve action'}
             </Button>
           )}
-          <Button size="sm" variant="outline" disabled={decision.isLoading} onClick={() => { setFormError(null); setMode(mode === 'edit' ? 'preview' : 'edit') }}><Pencil />{mode === 'edit' ? 'Cancel edit' : 'Edit inputs'}</Button>
-          <Button size="sm" variant="ghost" disabled={decision.isLoading} onClick={() => { setFormError(null); setMode(mode === 'reject' ? 'preview' : 'reject') }}>{mode === 'reject' ? 'Cancel' : 'Reject'}</Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={decision.isLoading}
+            onClick={() => {
+              setFormError(null)
+              if (mode === 'edit') setMode('preview')
+              else startEdit()
+            }}
+          >
+            <Pencil />
+            {mode === 'edit' ? 'Cancel edit' : 'Edit inputs'}
+          </Button>
+          {mode === 'edit' && hasRenderedView(action.tool_name) && (
+            <Button size="sm" variant="ghost" disabled={decision.isLoading} onClick={toggleJSONMode}>
+              <Braces />
+              {draft.tool === 'json' ? 'Back to fields' : 'Edit as JSON'}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={decision.isLoading}
+            onClick={() => {
+              setFormError(null)
+              setMode(mode === 'reject' ? 'preview' : 'reject')
+            }}
+          >
+            {mode === 'reject' ? 'Cancel' : 'Reject'}
+          </Button>
         </div>
+      ) : (
+        action.status === 'pending' && (
+          <p className="mt-3 text-xs text-danger">
+            This action expired before it was reviewed, so the assistant did not run it.
+          </p>
+        )
       )}
-      <span className="sr-only" role="status">Approval status: {action.status}</span>
+      <span className="sr-only" role="status">
+        Approval status: {statusLabel}
+      </span>
     </section>
   )
 })

@@ -189,6 +189,15 @@ func TestModelsSelfEnforcingTenancyAndCascade(t *testing.T) {
 func TestCatalogCacheSingleRow(t *testing.T) {
 	f := setupAI(t)
 
+	// ai_catalog_cache is deployment-global, not workspace-scoped, so unlike
+	// every other table here it is NOT empty just because this test made a
+	// fresh workspace — this test's own previous run populated it, and so does
+	// any code path that fetched the catalog. Start from a known-empty table
+	// rather than asserting a virgin database.
+	if _, err := f.pool.Exec(f.ctx, "TRUNCATE ai_catalog_cache"); err != nil {
+		t.Fatalf("truncate catalog cache: %v", err)
+	}
+
 	if _, err := f.q.GetAICatalogCache(f.ctx); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("fresh cache must be ErrNoRows, got %v", err)
 	}

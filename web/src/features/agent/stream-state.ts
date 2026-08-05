@@ -97,10 +97,11 @@ export function applyStreamEvent(
       break
     }
     case 'tool_input_delta': {
+      // Accumulate raw text only. Parsing here would re-parse the whole
+      // argument blob on every delta (quadratic); the snapshot parses once per
+      // 100 ms flush instead.
       const callId = event.tool_call_id ?? ''
       accumulator.inputText[callId] = (accumulator.inputText[callId] ?? '') + (event.text ?? '')
-      const part = toolPart(accumulator, callId)
-      if (part) part.tool_input = parsedInput(accumulator.inputText[callId])
       break
     }
     case 'tool_output': {
@@ -120,10 +121,23 @@ export function applyStreamEvent(
       part.tool_output = event.tool_output
       part.loading_message = event.loading_message
       part.state = event.is_error ? 'error' : 'done'
-      if (event.is_error) part.error = 'Tool call failed'
+      if (event.is_error) part.error = toolErrorText(event)
       break
     }
   }
+}
+
+/** The tool's own failure text, kept verbatim — a generic label hides the one detail that helps. */
+function toolErrorText(event: AgentStreamEvent): string {
+  if (event.text) return event.text
+  const output = event.tool_output
+  if (typeof output === 'string' && output.trim()) return output
+  if (output !== undefined && output !== null) {
+    const message = (output as { error?: unknown }).error
+    if (typeof message === 'string' && message.trim()) return message
+    return JSON.stringify(output)
+  }
+  return 'Tool call failed'
 }
 
 export function snapshotAccumulator(accumulator: StreamAccumulator): StreamingMessage {
@@ -131,6 +145,11 @@ export function snapshotAccumulator(accumulator: StreamAccumulator): StreamingMe
     id: `stream-${accumulator.runId}`,
     runId: accumulator.runId,
     createdAt: accumulator.createdAt,
-    parts: accumulator.parts.map((part) => ({ ...part })),
+    parts: accumulator.parts.map((part) => {
+      if (part.type !== 'tool_call' || part.tool_input !== undefined || !part.tool_call_id) {
+        return { ...part }
+      }
+      return { ...part, tool_input: parsedInput(accumulator.inputText[part.tool_call_id] ?? '') }
+    }),
   }
 }

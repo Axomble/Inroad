@@ -6,7 +6,12 @@ export interface Hotkey {
   key: string
   /** Require Cmd (mac) or Ctrl (everywhere else). Never both-or-either by accident. */
   mod?: boolean
-  shift?: boolean
+  /**
+   * Require (or forbid) Shift. Use `'any'` for punctuation keys — whether `@`
+   * needs Shift or AltGr depends on the keyboard layout, so matching on the
+   * character alone is the only portable check.
+   */
+  shift?: boolean | 'any'
   /**
    * Fire even while the user is typing in an input, textarea, select, or
    * contentEditable. Defaults to `false`: a bare `/` or `j` must never steal a
@@ -33,7 +38,7 @@ function matches(e: KeyboardEvent, hotkey: Hotkey): boolean {
   if (e.key.toLowerCase() !== hotkey.key.toLowerCase()) return false
   const mod = e.metaKey || e.ctrlKey
   if (!!hotkey.mod !== mod) return false
-  if (!!hotkey.shift !== e.shiftKey) return false
+  if (hotkey.shift !== 'any' && !!hotkey.shift !== e.shiftKey) return false
   return true
 }
 

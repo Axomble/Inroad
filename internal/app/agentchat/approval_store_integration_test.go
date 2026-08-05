@@ -137,6 +137,158 @@ func TestApprovalDecisionIsTenantScopedAuditedAndSingleUse(t *testing.T) {
 	}
 }
 
+// A run can pause more than once. The resume of the SECOND pause must load
+// only that pause's calls: scoping by run id instead replays the first pause's
+// message, re-running its non-gated tool calls and then tripping over an
+// action that already executed — which strands the approval the human just
+// granted.
+func TestLoadApprovalBatchIsScopedToThePausedMessage(t *testing.T) {
+	ctx, store, _, workspaceID, userID := setupApprovalStore(t)
+	actor := Actor{WorkspaceID: workspaceID, UserID: userID, Role: "admin"}
+	thread, err := store.CreateThread(ctx, workspaceID, userID, "Two pauses")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := store.InsertRun(ctx, workspaceID, thread.ID, "provider/model")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	start := RunStart{Actor: actor, ThreadID: thread.ID, RunID: run.ID, TurnID: uuid.New(), Selector: "provider/model"}
+
+	// First pause: one gated call plus a read-only call that shares the message
+	// and must NOT be replayed by a later resume.
+	first, err := store.PauseForApproval(ctx, MessageInput{
+		WorkspaceID: workspaceID, ThreadID: thread.ID, TurnID: start.TurnID,
+		Role: "assistant", Status: MessageStatusSent,
+		Parts: []PartInput{
+			{Type: PartToolCall, ToolName: "inroad_contact_read", ToolCallID: "call-read",
+				ToolInput: []byte(`{"query":"ada"}`), State: PartStateDone},
+			{Type: PartToolCall, ToolName: "inroad_campaign_control", ToolCallID: "call-a",
+				ToolInput: []byte(`{"method":"pause"}`), State: PartStateAwaitingApproval},
+		},
+	}, start, []ApprovalRequest{{
+		ToolName: "inroad_campaign_control", ToolCallID: "call-a",
+		Arguments: []byte(`{"method":"pause"}`), RiskTier: "consequential",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}})
+	if err != nil {
+		t.Fatalf("first pause: %v", err)
+	}
+
+	firstResume, err := decideAndResume(ctx, store, actor, first[0].ID)
+	if err != nil {
+		t.Fatalf("approve first: %v", err)
+	}
+	if firstResume.MessageID != first[0].MessageID {
+		t.Fatalf("resume message=%v, want the paused message %v", firstResume.MessageID, first[0].MessageID)
+	}
+	firstBatch, err := store.LoadApprovalBatch(ctx, firstResume)
+	if err != nil {
+		t.Fatalf("load first batch: %v", err)
+	}
+	if len(firstBatch.Calls) != 2 {
+		t.Fatalf("first batch calls=%d, want the message's 2 tool calls", len(firstBatch.Calls))
+	}
+
+	// Settle the first pause the way a resume does, then pause again on a new
+	// message — the same run, a second approval.
+	for _, call := range firstBatch.Calls {
+		if call.Action == nil {
+			continue
+		}
+		if err := store.RecordApprovalOutcome(ctx, ApprovalResult{
+			ToolName: call.ToolName, ToolCallID: call.ToolCallID, Action: call.Action,
+			ToolOutput: []byte(`{"success":true}`), Status: ActionStatusExecuted,
+		}); err != nil {
+			t.Fatalf("record first outcome: %v", err)
+		}
+	}
+	second, err := store.PauseForApproval(ctx, MessageInput{
+		WorkspaceID: workspaceID, ThreadID: thread.ID, TurnID: start.TurnID,
+		Role: "assistant", Status: MessageStatusSent,
+		Parts: []PartInput{{
+			Type: PartToolCall, ToolName: "inroad_campaign_control", ToolCallID: "call-b",
+			ToolInput: []byte(`{"method":"resume"}`), State: PartStateAwaitingApproval,
+		}},
+	}, start, []ApprovalRequest{{
+		ToolName: "inroad_campaign_control", ToolCallID: "call-b",
+		Arguments: []byte(`{"method":"resume"}`), RiskTier: "consequential",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}})
+	if err != nil {
+		t.Fatalf("second pause: %v", err)
+	}
+	if second[0].MessageID == first[0].MessageID {
+		t.Fatal("second pause reused the first pause's message")
+	}
+
+	secondResume, err := decideAndResume(ctx, store, actor, second[0].ID)
+	if err != nil {
+		t.Fatalf("approve second: %v", err)
+	}
+	batch, err := store.LoadApprovalBatch(ctx, secondResume)
+	if err != nil {
+		t.Fatalf("load second batch: %v", err)
+	}
+	if len(batch.Calls) != 1 || batch.Calls[0].ToolCallID != "call-b" {
+		ids := make([]string, len(batch.Calls))
+		for i, call := range batch.Calls {
+			ids[i] = call.ToolCallID
+		}
+		t.Fatalf("second batch calls=%v, want only [call-b]", ids)
+	}
+	if batch.Calls[0].Action == nil || batch.Calls[0].Action.Status != ActionStatusApproved {
+		t.Fatalf("second batch action=%+v", batch.Calls[0].Action)
+	}
+
+	// The outcome recorded per call is committed on its own, and audited.
+	if err := store.RecordApprovalOutcome(ctx, ApprovalResult{
+		ToolName: "inroad_campaign_control", ToolCallID: "call-b", Action: batch.Calls[0].Action,
+		ToolOutput: []byte(`{"success":true}`), Status: ActionStatusExecuted,
+	}); err != nil {
+		t.Fatalf("record second outcome: %v", err)
+	}
+	settled, err := store.GetPendingAction(ctx, actor, second[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Status != ActionStatusExecuted || settled.ExecutedAt == nil {
+		t.Fatalf("settled action=%+v", settled)
+	}
+	var events []string
+	rows, err := store.pool.Query(ctx, "SELECT event FROM pending_action_audit WHERE workspace_id=$1 AND pending_action_id=$2 ORDER BY created_at, id", workspaceID, second[0].ID)
+	if err != nil {
+		t.Fatalf("audit query: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var event string
+		if err := rows.Scan(&event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(events) != "[created approved executed]" {
+		t.Fatalf("audit events=%v", events)
+	}
+}
+
+// decideAndResume approves an action and returns the resume its decision
+// released, failing when the decision did not release one.
+func decideAndResume(ctx context.Context, store *PgStore, actor Actor, id uuid.UUID) (RunStart, error) {
+	_, start, err := store.DecidePendingAction(ctx, actor, id, ApprovalDecision{Decision: ApprovalDecisionApprove})
+	if err != nil {
+		return RunStart{}, err
+	}
+	if start == nil {
+		return RunStart{}, errors.New("decision did not release a resume")
+	}
+	return *start, nil
+}
+
 func TestExpiredApprovalDeniesAndResumes(t *testing.T) {
 	ctx, store, _, workspaceID, userID := setupApprovalStore(t)
 	actor := Actor{WorkspaceID: workspaceID, UserID: userID, Role: "admin"}

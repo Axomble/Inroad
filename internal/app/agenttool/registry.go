@@ -111,6 +111,10 @@ func (r *Reg) Execute(ctx context.Context, p Principal, name string, args json.R
 // validateArgsObject checks the syntactic shape the ExecuteFunc contract
 // promises: absent/empty args is an empty object, anything else must parse as
 // one. Semantic validation is the tool's own.
+//
+// JSON null needs its own check: decoding "null" into a map succeeds and
+// yields a nil map, so without it a literal null would reach a tool that was
+// promised an object — and the provider seam relies on this rejection.
 func validateArgsObject(args json.RawMessage) *Result {
 	if len(args) == 0 {
 		return nil
@@ -118,6 +122,10 @@ func validateArgsObject(args json.RawMessage) *Result {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(args, &probe); err != nil {
 		r := Fail(fmt.Sprintf("arguments must be a JSON object (%s); call the tool again with an object matching its input schema", err))
+		return &r
+	}
+	if probe == nil {
+		r := Fail("arguments must be a JSON object, not null; call the tool again with an object matching its input schema")
 		return &r
 	}
 	return nil
