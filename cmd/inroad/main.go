@@ -30,6 +30,7 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
+	"github.com/inroad/inroad/internal/app/crm"
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/identity"
@@ -260,6 +261,8 @@ func run() error {
 	deliverabilitySvc := deliverability.NewService(deliverability.NewPgStore(pool))
 	deliverabilityHandler := deliverability.NewHandler(deliverabilitySvc)
 	pulseSvc := pulse.NewService(pulse.NewPgStore(queries))
+	crmSvc := crm.NewService(crm.NewPgStore(pool))
+	crmHandler := crm.NewHandler(crmSvc)
 	// AI settings (agent platform PR A1). No shipped model catalog: native
 	// model metadata comes from models.dev at runtime, cached in Postgres with
 	// serve-stale-on-failure. Provider credentials seal under the same
@@ -299,6 +302,7 @@ func run() error {
 		Lists:          listSvc,
 		ListWrites:     listSvc,
 		Warmup:         warmupTools{service: warmupSvc},
+		CRM:            crmTools{service: crmSvc},
 	})
 	modelResolver := agentchat.NewPgModelResolver(
 		queries, keyring, catalogSource, ai.NewStreamerFactory(cfg.AIAllowPrivateBaseURL),
@@ -369,6 +373,7 @@ func run() error {
 		// overlap with /api/v1/lists that would otherwise 404 the import route.
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
+		{pattern: "/api/v1/crm", handler: crmHandler.Routes()},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
 		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
 		// Routes(identStore) additionally applies RequireVerified to /launch

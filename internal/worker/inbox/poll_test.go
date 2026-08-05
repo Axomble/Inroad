@@ -86,6 +86,7 @@ type stubCore struct {
 	recordedSource []string  // source arg parallel to recorded
 	recordedConf   []float64 // confidence arg parallel to recorded
 	bounced        []bouncedCall
+	captured       []coreapi.CRMReplyInput
 
 	mailboxes []coreapi.MailboxRef
 	listErr   error
@@ -145,6 +146,11 @@ func (s *stubCore) MarkReplied(_ context.Context, enrollmentID, _, class, source
 	s.repliedClass = append(s.repliedClass, class)
 	s.repliedSource = append(s.repliedSource, source)
 	s.repliedConf = append(s.repliedConf, confidence)
+	return nil
+}
+
+func (s *stubCore) CaptureCRMReply(_ context.Context, in coreapi.CRMReplyInput) error {
+	s.captured = append(s.captured, in)
 	return nil
 }
 
@@ -413,6 +419,10 @@ func TestPollPositiveReplyMarksRepliedPositive(t *testing.T) {
 	}
 	if len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
 		t.Fatalf("a positive reply must only MarkReplied, got unsub=%v recorded=%v", core.unsubscribed, core.recorded)
+	}
+	if len(core.captured) != 1 || core.captured[0].SendID != "s1" ||
+		core.captured[0].EnrollmentID != "e1" || core.captured[0].ReplyClass != replyclassify.ClassPositive {
+		t.Fatalf("positive reply was not captured for CRM: %+v", core.captured)
 	}
 }
 

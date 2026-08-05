@@ -25,7 +25,10 @@ import (
 // searchColumns is the projection both the page query and the row scan agree
 // on. lower(email) is selected rather than lower-cased in Go so the cursor key
 // is byte-identical to the value idx_contacts_ws_email_id is built on.
-const searchColumns = `c.id, c.email, c.first_name, c.created_at, lower(c.email) AS sort_email`
+const searchColumns = `c.id, c.email, c.first_name, c.last_name, c.company_id,
+COALESCE(co.name, c.company) AS company_name, c.job_title, c.linkedin_url,
+(SELECT count(*) FROM deals d WHERE d.workspace_id=c.workspace_id AND d.primary_contact_id=c.id) AS deal_count,
+c.created_at, lower(c.email) AS sort_email`
 
 // sortKey is the indexed expression a sort orders by.
 func sortKey(s cursor.Sort) string {
@@ -114,7 +117,7 @@ func searchSQL(ws uuid.UUID, f SearchFilter, sort cursor.Sort, cur *cursor.Curso
 	// page could repeat or skip them.
 	order := sortKey(sort) + " " + dir + ", c.id " + dir
 
-	return "SELECT " + searchColumns + "\nFROM contacts c\nWHERE " +
+	return "SELECT " + searchColumns + "\nFROM contacts c\nLEFT JOIN companies co ON co.workspace_id=c.workspace_id AND co.id=c.company_id\nWHERE " +
 		strings.Join(conds, "\n  AND ") +
 		"\nORDER BY " + order +
 		"\nLIMIT " + a.add(int32(limit)), a.args

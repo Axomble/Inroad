@@ -22,4 +22,5 @@ type Deps struct {
 	ListWrites     ListWriter
 	Deliverability DeliverabilityReader
 	Warmup         WarmupReader
+	CRM            CRMService
 }

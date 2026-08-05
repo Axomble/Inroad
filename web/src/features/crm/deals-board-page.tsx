@@ -17,11 +17,17 @@ import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
 import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
 import { cn } from '@/lib/utils'
-import { useGetCrmBoardQuery, useMoveCrmDealMutation, type BoardStage, type Deal } from './api'
+import { useCrmGetBoardQuery, useCrmMoveDealMutation, type CrmBoardStage, type CrmDeal } from './api'
+import { crmErrorMessage } from './error-copy'
+import { formatMoney, formatTotal } from './money'
+
+// The board endpoint takes an optional `pipelineId`; C1 always shows the
+// default pipeline, so one constant arg keeps every reader on one cache entry.
+const defaultBoardArg = {}
 
 export function DealsBoardPage() {
-  const boardQuery = useGetCrmBoardQuery()
-  const [moveDeal, moveState] = useMoveCrmDealMutation()
+  const boardQuery = useCrmGetBoardQuery(defaultBoardArg)
+  const [moveDeal, moveState] = useCrmMoveDealMutation()
   const [announcement, setAnnouncement] = useState('')
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -32,15 +38,20 @@ export function DealsBoardPage() {
     (result, stage) => ({ count: result.count + stage.deal_count, amount: result.amount + stage.amount_micros }),
     { count: 0, amount: 0 },
   ), [stages])
+  const allDeals = useMemo(() => stages.flatMap(({ deals }) => deals), [stages])
 
-  const move = async (deal: Deal, stageId: string, beforeDealId?: string, afterDealId?: string) => {
+  const move = async (deal: CrmDeal, stageId: string, beforeDealId?: string, afterDealId?: string) => {
     if (deal.stage_id === stageId && !beforeDealId && !afterDealId) return
     const target = stages.find(({ stage }) => stage.id === stageId)
     try {
-      await moveDeal({ id: deal.id, stageId, beforeDealId, afterDealId }).unwrap()
+      await moveDeal({
+        id: deal.id,
+        crmMoveDealInput: { stage_id: stageId, before_deal_id: beforeDealId, after_deal_id: afterDealId },
+      }).unwrap()
       setAnnouncement(`${deal.name} moved to ${target?.stage.label ?? 'the selected stage'}.`)
-    } catch {
-      setAnnouncement(`Could not move ${deal.name}. The board was restored.`)
+    } catch (error) {
+      // The optimistic patch has already rolled back; say why it snapped back.
+      setAnnouncement(`Could not move ${deal.name}. ${crmErrorMessage(error, 'The board was restored.')}`)
     }
   }
 
@@ -74,7 +85,7 @@ export function DealsBoardPage() {
         }
       />
       <StatStrip>
-        <Stat label="Pipeline value" value={formatMoney(totals.amount, 'USD')} sub="Across all stages" />
+        <Stat label="Pipeline value" value={formatTotal(totals.amount, allDeals)} sub="Across all stages" />
         <Stat label="Deals" value={totals.count} sub={boardQuery.data?.pipeline.name ?? 'Default pipeline'} />
         <Stat label="Open stages" value={stages.filter(({ stage }) => !stage.is_won && !stage.is_lost).length} sub="Active workflow" />
       </StatStrip>
@@ -84,7 +95,7 @@ export function DealsBoardPage() {
         {boardQuery.isError ? (
           <EmptyBlock
             title="The pipeline could not be loaded"
-            description="Try refreshing. Your deals have not been changed."
+            description={crmErrorMessage(boardQuery.error, 'Try refreshing. Your deals have not been changed.')}
             action={<Button onClick={() => void boardQuery.refetch()}>Try again</Button>}
           />
         ) : null}

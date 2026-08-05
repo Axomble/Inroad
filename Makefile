@@ -74,7 +74,13 @@ lint-go: ## Run golangci-lint on the Go backend
 lint-web: ## Run oxlint + strict typecheck on the SPA
 	cd web && npm run lint && npm run typecheck
 
-dev: db-up db-wait migrate-up ## Start everything: services, migrations, api + worker + web
+dev-docker: ## Start the WHOLE stack in Docker (no local Go/Node/make needed)
+	docker compose -f deploy/compose/docker-compose.dev.yml up
+
+dev-docker-down: ## Stop the Docker dev stack (add ARGS=-v to wipe its data)
+	docker compose -f deploy/compose/docker-compose.dev.yml down $(ARGS)
+
+dev: db-up db-wait migrate-up ## Start everything natively: services, migrations, api + worker + web
 	@echo ""
 	@echo "  api  -> http://localhost:8080"
 	@echo "  web  -> http://localhost:5173"

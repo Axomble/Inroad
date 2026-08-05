@@ -1,0 +1,21 @@
+# Dev image for the React SPA. Runs the Vite dev server with HMR.
+#
+# node_modules lives in a named volume rather than the bind mount: on Windows
+# and macOS a bind-mounted node_modules is the single biggest source of slow
+# installs and flaky file watching, and the host's platform-specific binaries
+# (esbuild, rollup) are the wrong architecture for the container anyway.
+FROM node:22-alpine
+
+WORKDIR /web
+
+# Install against the lockfile in its own layer so an edit to source does not
+# reinstall the world. The compose entrypoint re-runs `npm ci` when the
+# lockfile is newer than the volume, which keeps a long-running stack honest.
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+EXPOSE 5173
+
+# --host is required: bound to localhost inside the container the port is
+# unreachable from the host even when published.
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

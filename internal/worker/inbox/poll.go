@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	netmail "net/mail"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -501,6 +503,34 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 			// positive / negative / neutral / unknown: stop, tagged.
 			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID, r.Class, r.Source, r.Confidence); err != nil {
 				return false, err
+			}
+			if r.Class == replyclassify.ClassPositive && s.EnrollmentID != "" {
+				if capture, ok := core.(coreapi.CRMCaptureClient); ok {
+					senderEmail, senderName := s.ContactEmail, ""
+					if address, parseErr := netmail.ParseAddress(msg.Header.Get("From")); parseErr == nil {
+						senderEmail, senderName = address.Address, address.Name
+					}
+					threadRef := strings.TrimSpace(msg.Header.Get("In-Reply-To"))
+					if threadRef == "" {
+						refs := strings.Fields(msg.Header.Get("References"))
+						if len(refs) > 0 {
+							threadRef = refs[0]
+						}
+					}
+					occurredAt := time.Now().UTC()
+					if headerDate, dateErr := msg.Header.Date(); dateErr == nil {
+						occurredAt = headerDate.UTC()
+					}
+					if err := capture.CaptureCRMReply(ctx, coreapi.CRMReplyInput{
+						WorkspaceID: workspaceID, EnrollmentID: s.EnrollmentID, SendID: s.SendID,
+						ThreadRef: threadRef, MessageID: strings.TrimSpace(msg.Header.Get("Message-ID")),
+						Subject: msg.Header.Get("Subject"), SenderEmail: strings.ToLower(senderEmail),
+						RecipientEmail: strings.ToLower(msg.Header.Get("To")), SenderDisplayName: senderName,
+						ReplyClass: r.Class, OccurredAt: occurredAt,
+					}); err != nil {
+						return false, err
+					}
+				}
 			}
 			// Only an enrollment reply is an "engaged reply": a legacy
 			// direct-send match (EnrollmentID == "") has nothing to stop, so
