@@ -1,0 +1,22 @@
+# Dev image for the Go binaries (api, worker, migrate).
+#
+# Unlike the production images this does NOT compile a binary at build time:
+# the source is bind-mounted and `air` rebuilds on change, so a code edit costs
+# a few seconds instead of a full image rebuild. Module downloads and the Go
+# build cache live in named volumes (see docker-compose.dev.yml) so a rebuild
+# after an edit reuses everything it can.
+FROM golang:1.25-alpine
+
+# git: some Go modules resolve over git. curl: healthchecks.
+RUN apk add --no-cache git curl
+
+# air is the file-watcher that gives us hot reload. Pinned so a dev stack built
+# today matches one built in six months.
+RUN go install github.com/air-verse/air@v1.63.0
+
+WORKDIR /src
+
+# Nothing is COPYed: docker-compose bind-mounts the repo at /src. That is the
+# whole point — the container sees your working tree, not a snapshot of it.
+EXPOSE 8080
+CMD ["air", "-c", ".air.api.toml"]

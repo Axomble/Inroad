@@ -22,4 +22,8 @@ type Deps struct {
 	ListWrites     ListWriter
 	Deliverability DeliverabilityReader
 	Warmup         WarmupReader
+	CRM            CRMService
+	// CRMErrors classifies CRM write failures for the model. Nil means every
+	// failure aborts the run rather than being offered back as a retry prompt.
+	CRMErrors ErrorClassifier
 }

@@ -55,9 +55,15 @@ func (h *Handler) importCSV(w http.ResponseWriter, r *http.Request) {
 // construction — the search columns (last name, company) are matched against
 // but not returned, matching the committed Contact schema.
 type contactResponse struct {
-	ID        string `json:"id"`
-	Email     string `json:"email"`
-	FirstName string `json:"first_name"`
+	ID          string  `json:"id"`
+	Email       string  `json:"email"`
+	FirstName   string  `json:"first_name"`
+	LastName    string  `json:"last_name"`
+	CompanyID   *string `json:"company_id,omitempty"`
+	CompanyName string  `json:"company_name,omitempty"`
+	JobTitle    string  `json:"job_title,omitempty"`
+	LinkedInURL string  `json:"linkedin_url,omitempty"`
+	DealCount   int64   `json:"deal_count"`
 }
 
 // pageResponse is the ContactPage schema. The cursors are pointers so an
@@ -100,7 +106,14 @@ func (h *Handler) listContacts(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]contactResponse, 0, len(page.Items))
 	for _, c := range page.Items {
-		items = append(items, contactResponse{ID: c.ID.String(), Email: c.Email, FirstName: c.FirstName})
+		var companyID *string
+		if c.CompanyID != nil {
+			value := c.CompanyID.String()
+			companyID = &value
+		}
+		items = append(items, contactResponse{ID: c.ID.String(), Email: c.Email, FirstName: c.FirstName,
+			LastName: c.LastName, CompanyID: companyID, CompanyName: c.CompanyName, JobTitle: c.JobTitle,
+			LinkedInURL: c.LinkedInURL, DealCount: c.DealCount})
 	}
 	httpx.JSON(w, http.StatusOK, pageResponse{
 		Items:         items,

@@ -52,13 +52,27 @@ Language-agnostic rules for writing code in this repo — apply to every languag
 
 ## Dev
 
-    cp .env.example .env
-    make db-up && make migrate-up
-    make run-api        # :8080
-    make run-worker
-    cd web && npm install && npm run dev
+**One command, no local toolchain** (no Go, Node, or make needed):
 
-Tests: `make test` (unit) · `make test-integration` (needs `make db-up`).
+    docker compose -f deploy/compose/docker-compose.dev.yml up
+
+Brings up Postgres, Redis, migrations, api (:8080), worker, and the SPA (:5173).
+Go rebuilds via `air` and the SPA hot-reloads via Vite — both watch the
+bind-mounted source tree, so edits on the host apply live. Ctrl+C stops
+everything; add `-d` to detach. Dev secrets are baked into that compose file, so
+`.env` is not required. Integration tests can run against this stack too — the
+`inroad_test` database is created on first boot.
+
+Native alternative (needs Go + Node on PATH, and `make`, which is not installed
+by default on Windows):
+
+    cp .env.example .env
+    make dev            # services + migrations + api + worker + web
+
+Note the Go binaries do **not** read `.env` themselves — running them directly
+means exporting it first (`set -a && . ./.env && set +a`).
+
+Tests: `make test` (unit) · `make test-integration` (needs the DB up).
 Lint: `make lint` (Go + web) · `make lint-go` · `make lint-web`. Needs `golangci-lint` on PATH (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`).
 
 ## More docs

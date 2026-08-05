@@ -316,6 +316,18 @@ type CampaignSender struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
+type Company struct {
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	Name                string             `json:"name"`
+	Domain              *string            `json:"domain"`
+	OwnerUserID         pgtype.UUID        `json:"owner_user_id"`
+	AnnualRevenueMicros *int64             `json:"annual_revenue_micros"`
+	Currency            string             `json:"currency"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Contact struct {
 	ID           uuid.UUID          `json:"id"`
 	WorkspaceID  uuid.UUID          `json:"workspace_id"`
@@ -326,6 +338,87 @@ type Contact struct {
 	CustomFields []byte             `json:"custom_fields"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	SearchText   *string            `json:"search_text"`
+	CompanyID    pgtype.UUID        `json:"company_id"`
+	JobTitle     string             `json:"job_title"`
+	LinkedinUrl  string             `json:"linkedin_url"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ContactEmail struct {
+	ID          uuid.UUID          `json:"id"`
+	ContactID   uuid.UUID          `json:"contact_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Email       string             `json:"email"`
+	IsPrimary   bool               `json:"is_primary"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type CrmMessage struct {
+	ID             uuid.UUID          `json:"id"`
+	ThreadID       uuid.UUID          `json:"thread_id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	Direction      string             `json:"direction"`
+	Kind           string             `json:"kind"`
+	MessageID      string             `json:"message_id"`
+	SenderEmail    string             `json:"sender_email"`
+	RecipientEmail string             `json:"recipient_email"`
+	Subject        string             `json:"subject"`
+	ReplyClass     string             `json:"reply_class"`
+	OccurredAt     pgtype.Timestamptz `json:"occurred_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type CrmThread struct {
+	ID            uuid.UUID          `json:"id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	ThreadRef     string             `json:"thread_ref"`
+	Subject       string             `json:"subject"`
+	ReplyClass    string             `json:"reply_class"`
+	CampaignID    pgtype.UUID        `json:"campaign_id"`
+	ContactID     pgtype.UUID        `json:"contact_id"`
+	LastMessageAt pgtype.Timestamptz `json:"last_message_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type CrmThreadParticipant struct {
+	ID          uuid.UUID          `json:"id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Email       string             `json:"email"`
+	DisplayName string             `json:"display_name"`
+	ContactID   pgtype.UUID        `json:"contact_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type Deal struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	PipelineID       uuid.UUID          `json:"pipeline_id"`
+	StageID          uuid.UUID          `json:"stage_id"`
+	CompanyID        pgtype.UUID        `json:"company_id"`
+	PrimaryContactID pgtype.UUID        `json:"primary_contact_id"`
+	OwnerUserID      pgtype.UUID        `json:"owner_user_id"`
+	Name             string             `json:"name"`
+	AmountMicros     *int64             `json:"amount_micros"`
+	Currency         string             `json:"currency"`
+	CloseDate        pgtype.Date        `json:"close_date"`
+	Position         pgtype.Numeric     `json:"position"`
+	Source           string             `json:"source"`
+	SourceCampaignID pgtype.UUID        `json:"source_campaign_id"`
+	SourceThreadRef  string             `json:"source_thread_ref"`
+	CreatedByActor   []byte             `json:"created_by_actor"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SourceMessageID  string             `json:"source_message_id"`
+}
+
+type DealThread struct {
+	DealID      uuid.UUID          `json:"deal_id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Source      string             `json:"source"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type DeliverabilityEvent struct {
@@ -347,6 +440,25 @@ type EmailOtpCode struct {
 	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
 	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type Event struct {
+	ID                     uuid.UUID          `json:"id"`
+	WorkspaceID            uuid.UUID          `json:"workspace_id"`
+	Name                   string             `json:"name"`
+	Kind                   string             `json:"kind"`
+	ObjectType             string             `json:"object_type"`
+	ObjectID               pgtype.UUID        `json:"object_id"`
+	ContactID              pgtype.UUID        `json:"contact_id"`
+	CompanyID              pgtype.UUID        `json:"company_id"`
+	DealID                 pgtype.UUID        `json:"deal_id"`
+	Actor                  []byte             `json:"actor"`
+	Data                   []byte             `json:"data"`
+	LinkedRecordCachedName string             `json:"linked_record_cached_name"`
+	SourceMessageID        string             `json:"source_message_id"`
+	SourceThreadRef        string             `json:"source_thread_ref"`
+	OccurredAt             pgtype.Timestamptz `json:"occurred_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 }
 
 type List struct {
@@ -396,6 +508,26 @@ type MailboxWorkerAssignment struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	WorkerID    string             `json:"worker_id"`
 	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+}
+
+type Note struct {
+	ID             uuid.UUID          `json:"id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	Title          string             `json:"title"`
+	Body           string             `json:"body"`
+	CreatedByActor []byte             `json:"created_by_actor"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type NoteTarget struct {
+	ID          uuid.UUID          `json:"id"`
+	NoteID      uuid.UUID          `json:"note_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ContactID   pgtype.UUID        `json:"contact_id"`
+	CompanyID   pgtype.UUID        `json:"company_id"`
+	DealID      pgtype.UUID        `json:"deal_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type OauthAccessToken struct {
@@ -520,6 +652,29 @@ type PendingActionAudit struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+type Pipeline struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	IsDefault   bool               `json:"is_default"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type PipelineStage struct {
+	ID          uuid.UUID          `json:"id"`
+	PipelineID  uuid.UUID          `json:"pipeline_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Key         string             `json:"key"`
+	Label       string             `json:"label"`
+	Color       string             `json:"color"`
+	Position    int32              `json:"position"`
+	IsWon       bool               `json:"is_won"`
+	IsLost      bool               `json:"is_lost"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Send struct {
 	ID               uuid.UUID          `json:"id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
@@ -607,6 +762,29 @@ type Suppression struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	Email       string             `json:"email"`
 	Reason      string             `json:"reason"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type Task struct {
+	ID             uuid.UUID          `json:"id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	Title          string             `json:"title"`
+	Body           string             `json:"body"`
+	DueAt          pgtype.Timestamptz `json:"due_at"`
+	Status         string             `json:"status"`
+	AssigneeUserID pgtype.UUID        `json:"assignee_user_id"`
+	CreatedByActor []byte             `json:"created_by_actor"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type TaskTarget struct {
+	ID          uuid.UUID          `json:"id"`
+	TaskID      uuid.UUID          `json:"task_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ContactID   pgtype.UUID        `json:"contact_id"`
+	CompanyID   pgtype.UUID        `json:"company_id"`
+	DealID      pgtype.UUID        `json:"deal_id"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -806,6 +984,13 @@ type WorkspaceAiSetting struct {
 	EnabledModelIds        []string           `json:"enabled_model_ids"`
 	AdditionalInstructions string             `json:"additional_instructions"`
 	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkspaceCrmSetting struct {
+	WorkspaceID       uuid.UUID          `json:"workspace_id"`
+	AutoCapturePolicy string             `json:"auto_capture_policy"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
 type WorkspaceDek struct {

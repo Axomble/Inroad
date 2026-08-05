@@ -1,0 +1,13 @@
+DROP TRIGGER IF EXISTS trg_crm_threads_updated ON crm_threads;
+DROP TRIGGER IF EXISTS trg_crm_settings_updated ON workspace_crm_settings;
+DROP TRIGGER IF EXISTS trg_contact_emails_match_threads ON contact_emails;
+DROP FUNCTION IF EXISTS crm_match_participant_email();
+DROP INDEX IF EXISTS uq_events_source_once;
+DROP TABLE IF EXISTS events;
+DROP INDEX IF EXISTS uq_deals_reply_capture;
+ALTER TABLE deals DROP COLUMN IF EXISTS source_message_id;
+DROP TABLE IF EXISTS deal_threads;
+DROP TABLE IF EXISTS crm_messages;
+DROP TABLE IF EXISTS crm_thread_participants;
+DROP TABLE IF EXISTS crm_threads;
+DROP TABLE IF EXISTS workspace_crm_settings;

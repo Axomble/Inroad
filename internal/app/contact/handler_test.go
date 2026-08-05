@@ -93,7 +93,15 @@ func TestListContactsStatusMapping(t *testing.T) {
 // neighbours are explicit nulls, not omitted keys, so the client can tell "no
 // next page" from "the field is missing".
 func TestListContactsResponseShape(t *testing.T) {
-	w := serveSearch(t, newHandler(&fakeStore{searchRows: rows(1), countN: 1}, true), "")
+	searchRows := rows(1)
+	companyID := uuid.New()
+	searchRows[0].LastName = "Customer"
+	searchRows[0].CompanyID = &companyID
+	searchRows[0].CompanyName = "Acme"
+	searchRows[0].JobTitle = "VP Sales"
+	searchRows[0].LinkedInURL = "https://linkedin.com/in/customer"
+	searchRows[0].DealCount = 2
+	w := serveSearch(t, newHandler(&fakeStore{searchRows: searchRows, countN: 1}, true), "")
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("body is not an object: %v (%s)", err, w.Body.String())
@@ -113,12 +121,10 @@ func TestListContactsResponseShape(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
 		t.Fatalf("items: %v", err)
 	}
-	// The item shape is closed by construction: last name and company are
-	// searched but never returned.
-	if len(page.Items) != 1 || len(page.Items[0]) != 3 {
-		t.Fatalf("item = %v, want exactly id/email/first_name", page.Items)
+	if len(page.Items) != 1 || len(page.Items[0]) != 9 {
+		t.Fatalf("item = %v, want the complete CRM contact context", page.Items)
 	}
-	for _, key := range []string{"id", "email", "first_name"} {
+	for _, key := range []string{"id", "email", "first_name", "last_name", "company_id", "company_name", "job_title", "linkedin_url", "deal_count"} {
 		if _, ok := page.Items[0][key]; !ok {
 			t.Fatalf("item is missing %q: %v", key, page.Items[0])
 		}

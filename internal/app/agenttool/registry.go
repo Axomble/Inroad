@@ -40,6 +40,7 @@ func New(deps Deps) *Reg {
 		listTools(deps),
 		deliverabilityTools(deps),
 		warmupTools(deps),
+		crmTools(deps),
 	} {
 		tools = append(tools, group...)
 	}

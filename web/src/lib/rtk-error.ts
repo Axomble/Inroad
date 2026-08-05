@@ -23,6 +23,26 @@ export function httpStatus(err: unknown): number | undefined {
 }
 
 /**
+ * The server's own explanation of a failure, when it sent one worth showing.
+ * The API's error envelope is `{"error": msg}` (see `httpx.Error`), and some
+ * handlers answer `{"message": …}` instead, so both are read. Machine codes
+ * like `email_not_verified` are filtered out: a token with no spaces reads as
+ * noise inside a sentence, while prose ("currency must be a three-letter ISO
+ * code") is exactly what the user needs.
+ */
+export function serverDetail(err: unknown): string | undefined {
+  if (!isFetchBaseQueryError(err)) return undefined
+  const { data } = err
+  if (typeof data === 'string' && data.trim()) return data.trim()
+  if (typeof data !== 'object' || data === null) return undefined
+  const body = data as { message?: unknown; error?: unknown }
+  for (const value of [body.message, body.error]) {
+    if (typeof value === 'string' && value.trim() && value.includes(' ')) return value.trim()
+  }
+  return undefined
+}
+
+/**
  * The `Retry-After` value (in seconds) from a rate-limited RTK Query error, or
  * `null` when the header is absent/unparseable. The header rides on the raw
  * `Response` that `fetchBaseQuery` stashes on `error.meta` — this encapsulates

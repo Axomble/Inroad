@@ -16,6 +16,8 @@ const (
 	ScopeCampaignsWrite = "campaigns:write"
 	ScopeContactsRead   = "contacts:read"
 	ScopeContactsWrite  = "contacts:write"
+	ScopeCRMRead        = "crm:read"
+	ScopeCRMWrite       = "crm:write"
 	ScopeListsRead      = "lists:read"
 	ScopeListsWrite     = "lists:write"
 	ScopeCampaignsSend  = "campaigns:send"
@@ -38,6 +40,8 @@ var AllScopes = []string{
 	ScopeCampaignsSend,
 	ScopeContactsRead,
 	ScopeContactsWrite,
+	ScopeCRMRead,
+	ScopeCRMWrite,
 	ScopeListsRead,
 	ScopeListsWrite,
 	ScopeDeliverabilityWrite,
