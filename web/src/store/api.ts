@@ -516,6 +516,34 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    listAgentApprovals: build.query<
+      ListAgentApprovalsApiResponse,
+      ListAgentApprovalsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/approvals`,
+        params: {
+          status: queryArg.status,
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    getAgentApproval: build.query<
+      GetAgentApprovalApiResponse,
+      GetAgentApprovalApiArg
+    >({
+      query: (queryArg) => ({ url: `/agent/approvals/${queryArg.actionId}` }),
+    }),
+    decideAgentApproval: build.mutation<
+      DecideAgentApprovalApiResponse,
+      DecideAgentApprovalApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/approvals/${queryArg.actionId}/decision`,
+        method: "POST",
+        body: queryArg.agentApprovalDecisionRequest,
+      }),
+    }),
     listLists: build.query<ListListsApiResponse, ListListsApiArg>({
       query: () => ({ url: `/lists` }),
     }),
@@ -1092,6 +1120,23 @@ export type StreamAgentThreadApiArg = {
   id: string;
   afterSeq?: number;
   "Last-Event-ID"?: string;
+};
+export type ListAgentApprovalsApiResponse =
+  /** status 200 Owner-scoped approval actions */ AgentApprovalList;
+export type ListAgentApprovalsApiArg = {
+  status?: AgentApprovalStatus;
+  limit?: number;
+};
+export type GetAgentApprovalApiResponse =
+  /** status 200 Approval action */ AgentApproval;
+export type GetAgentApprovalApiArg = {
+  actionId: string;
+};
+export type DecideAgentApprovalApiResponse =
+  /** status 200 Updated approval action */ AgentApproval;
+export type DecideAgentApprovalApiArg = {
+  actionId: string;
+  agentApprovalDecisionRequest: AgentApprovalDecisionRequest;
 };
 export type ListListsApiResponse = /** status 200 Lists */ List[];
 export type ListListsApiArg = void;
@@ -1807,6 +1852,40 @@ export type AgentQueuedMessage = {
 export type AgentQueue = {
   queued: AgentQueuedMessage[];
 };
+export type AgentApprovalStatus =
+  "pending" | "approved" | "rejected" | "expired" | "executed" | "failed";
+export type AgentApproval = {
+  id: string;
+  workspace_id: string;
+  thread_id: string;
+  run_id: string;
+  tool_name: string;
+  tool_call_id: string;
+  arguments: {
+    [key: string]: any;
+  };
+  edited_arguments?: {
+    [key: string]: any;
+  };
+  risk_tier: "read" | "write" | "consequential" | "irreversible";
+  status: AgentApprovalStatus;
+  decision_reason?: string;
+  expires_at: string;
+  result?: any;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+};
+export type AgentApprovalList = {
+  actions: AgentApproval[];
+};
+export type AgentApprovalDecisionRequest = {
+  decision: "approve" | "reject";
+  edited_arguments?: {
+    [key: string]: any;
+  };
+  reason?: string;
+};
 export type List = {
   id?: string;
   name?: string;
@@ -2248,6 +2327,9 @@ export const {
   useDeleteAgentQueuedMessageMutation,
   useStopAgentRunMutation,
   useStreamAgentThreadQuery,
+  useListAgentApprovalsQuery,
+  useGetAgentApprovalQuery,
+  useDecideAgentApprovalMutation,
   useListListsQuery,
   useCreateListMutation,
   useImportContactsMutation,

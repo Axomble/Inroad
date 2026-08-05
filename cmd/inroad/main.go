@@ -293,6 +293,7 @@ func run() error {
 		Campaigns:      campaignSvc,
 		Contacts:       contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
 		ContactWrites:  contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactImports: contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
 		Mailboxes:      mailboxTools{service: mailboxSvc},
 		Deliverability: deliverabilityToolAdapter{deliverability: deliverabilitySvc, pulse: pulseSvc},
 		Lists:          listSvc,
@@ -302,8 +303,12 @@ func run() error {
 	modelResolver := agentchat.NewPgModelResolver(
 		queries, keyring, catalogSource, ai.NewStreamerFactory(cfg.AIAllowPrivateBaseURL),
 	)
-	runtime := &agentrun.Runtime{Store: agentStore, Models: modelResolver, Tools: runtimeTools{registry: toolRegistry}, Publisher: agentStream}
+	runtime := &agentrun.Runtime{
+		Store: agentStore, Models: modelResolver, Tools: runtimeTools{registry: toolRegistry},
+		Publisher: agentStream, Approvals: agentStore,
+	}
 	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger)
+	runManager.StartExpirySweep()
 	agentHandler := agentchat.NewHandler(agentchat.NewService(agentStore, runManager, agentStream))
 	suppStore := suppression.NewStore(queries)
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))

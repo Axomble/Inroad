@@ -42,19 +42,116 @@ type RunManager interface {
 	Stop(context.Context, uuid.UUID) error
 }
 
+type ApprovalRunManager interface {
+	Resume(RunStart)
+	ContinueQueue(RunStart)
+	ValidateApproval(Actor, string, []byte) error
+}
+
 type StreamTransport interface {
 	Attach(context.Context, uuid.UUID, int64) (<-chan Frame, error)
 	Publish(context.Context, uuid.UUID, Event) (int64, error)
 }
 
 type Service struct {
-	store   Store
-	runs    RunManager
-	streams StreamTransport
+	store     Store
+	runs      RunManager
+	streams   StreamTransport
+	approvals ApprovalStore
 }
 
 func NewService(store Store, runs RunManager, streams StreamTransport) *Service {
-	return &Service{store: store, runs: runs, streams: streams}
+	approvals, _ := store.(ApprovalStore)
+	return &Service{store: store, runs: runs, streams: streams, approvals: approvals}
+}
+
+func (s *Service) ListPendingActions(ctx context.Context, actor Actor, status string, limit int32) ([]PendingActionDTO, error) {
+	if s.approvals == nil {
+		return nil, errors.New("agent approvals are unavailable")
+	}
+	if limit == 0 {
+		limit = defaultThreadLimit
+	}
+	if limit < 1 || limit > maxThreadLimit {
+		return nil, fmt.Errorf("%w: limit must be between 1 and %d", ErrValidation, maxThreadLimit)
+	}
+	allowed := map[string]bool{
+		"": true, ActionStatusPending: true, ActionStatusApproved: true,
+		ActionStatusRejected: true, ActionStatusExpired: true,
+		ActionStatusExecuted: true, ActionStatusFailed: true,
+	}
+	if !allowed[status] {
+		return nil, fmt.Errorf("%w: invalid action status", ErrValidation)
+	}
+	actions, err := s.approvals.ListPendingActions(ctx, actor, status, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PendingActionDTO, len(actions))
+	for i, action := range actions {
+		out[i] = pendingActionDTO(action)
+	}
+	return out, nil
+}
+
+func (s *Service) GetPendingAction(ctx context.Context, actor Actor, id uuid.UUID) (PendingActionDTO, error) {
+	if s.approvals == nil {
+		return PendingActionDTO{}, errors.New("agent approvals are unavailable")
+	}
+	action, err := s.approvals.GetPendingAction(ctx, actor, id)
+	if err != nil {
+		return PendingActionDTO{}, err
+	}
+	return pendingActionDTO(action), nil
+}
+
+func (s *Service) DecidePendingAction(ctx context.Context, actor Actor, id uuid.UUID, in ApprovalDecision) (PendingActionDTO, error) {
+	if s.approvals == nil {
+		return PendingActionDTO{}, errors.New("agent approvals are unavailable")
+	}
+	if in.Decision != ApprovalDecisionApprove && in.Decision != ApprovalDecisionReject {
+		return PendingActionDTO{}, fmt.Errorf("%w: decision must be approve or reject", ErrValidation)
+	}
+	in.Reason = strings.TrimSpace(in.Reason)
+	if in.Decision == ApprovalDecisionReject && (in.Reason == "" || len(in.Reason) > 1000) {
+		return PendingActionDTO{}, fmt.Errorf("%w: rejection reason must be 1-1000 characters", ErrValidation)
+	}
+	if len(in.EditedArguments) > 0 {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(in.EditedArguments, &object) != nil || object == nil {
+			return PendingActionDTO{}, fmt.Errorf("%w: edited_arguments must be a JSON object", ErrValidation)
+		}
+	}
+	action, err := s.approvals.GetPendingAction(ctx, actor, id)
+	if err != nil {
+		return PendingActionDTO{}, err
+	}
+	if in.Decision == ApprovalDecisionApprove {
+		arguments := action.Arguments
+		if len(in.EditedArguments) > 0 {
+			arguments = in.EditedArguments
+		}
+		runner, ok := s.runs.(ApprovalRunManager)
+		if !ok {
+			return PendingActionDTO{}, errors.New("agent approval runner is unavailable")
+		}
+		if err := runner.ValidateApproval(actor, action.ToolName, arguments); err != nil {
+			return PendingActionDTO{}, fmt.Errorf("%w: %w", ErrValidation, err)
+		}
+	}
+	updated, start, err := s.approvals.DecidePendingAction(ctx, actor, id, in)
+	if err != nil {
+		return PendingActionDTO{}, err
+	}
+	_, _ = s.streams.Publish(ctx, updated.ThreadID, Event{
+		Type: EventMessagePersisted, RunID: updated.RunID.String(),
+	})
+	if start != nil {
+		if runner, ok := s.runs.(ApprovalRunManager); ok {
+			runner.Resume(*start)
+		}
+	}
+	return pendingActionDTO(updated), nil
 }
 
 func (s *Service) CreateThread(ctx context.Context, actor Actor) (ThreadDTO, error) {
@@ -115,8 +212,14 @@ func (s *Service) DeleteThread(ctx context.Context, actor Actor, id uuid.UUID) e
 		return err
 	}
 	if run, err := s.store.GetActiveRun(ctx, actor.WorkspaceID, id); err == nil {
-		if err := s.runs.Stop(ctx, run.ID); err != nil {
-			return err
+		if run.Status == RunStatusPausedApproval && s.approvals != nil {
+			if err := s.approvals.CancelApprovalRun(ctx, actor, run.ID, "Thread deleted while awaiting approval."); err != nil {
+				return err
+			}
+		} else {
+			if err := s.runs.Stop(ctx, run.ID); err != nil {
+				return err
+			}
 		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return err
@@ -228,6 +331,17 @@ func (s *Service) Stop(ctx context.Context, actor Actor, threadID uuid.UUID) err
 	}
 	if err != nil {
 		return err
+	}
+	if run.Status == RunStatusPausedApproval && s.approvals != nil {
+		if err := s.approvals.CancelApprovalRun(ctx, actor, run.ID, "Stopped by the user while awaiting approval."); err != nil {
+			return err
+		}
+		_, _ = s.streams.Publish(ctx, threadID, Event{Type: EventMessagePersisted, RunID: run.ID.String()})
+		_, _ = s.streams.Publish(ctx, threadID, Event{Type: EventDone, RunID: run.ID.String()})
+		if runner, ok := s.runs.(ApprovalRunManager); ok {
+			runner.ContinueQueue(RunStart{Actor: actor, ThreadID: threadID, RunID: run.ID})
+		}
+		return nil
 	}
 	return s.runs.Stop(ctx, run.ID)
 }

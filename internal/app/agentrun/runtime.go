@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -32,12 +33,15 @@ type ToolResult struct {
 type ToolRegistry interface {
 	Definitions(agentchat.Actor) []Tool
 	Execute(context.Context, agentchat.Actor, string, json.RawMessage) (ToolResult, error)
+	ExecuteApproved(context.Context, agentchat.Actor, string, json.RawMessage) (ToolResult, error)
+	Validate(agentchat.Actor, string, json.RawMessage) error
 }
 
 type Result struct {
 	Usage         ai.Usage
 	Touched       []string
 	FirstUserText string
+	Paused        bool
 }
 
 type Runtime struct {
@@ -45,6 +49,7 @@ type Runtime struct {
 	Models    agentchat.ModelResolver
 	Tools     ToolRegistry
 	Publisher agentchat.StreamPublisher
+	Approvals agentchat.ApprovalStore
 }
 
 type toolCall struct {
@@ -133,6 +138,31 @@ func (r *Runtime) Execute(ctx context.Context, start agentchat.RunStart) (Result
 			result.Touched = sortedKeys(touched)
 			return result, nil
 		}
+		if requests := r.approvalRequests(start.Actor, calls, parts); len(requests) > 0 {
+			actions, err := r.Approvals.PauseForApproval(ctx, agentchat.MessageInput{
+				WorkspaceID: start.Actor.WorkspaceID, ThreadID: start.ThreadID, TurnID: start.TurnID,
+				Role: ai.RoleAssistant, Status: agentchat.MessageStatusSent, Parts: parts,
+			}, start, requests)
+			if err != nil {
+				return result, err
+			}
+			_, _ = r.Publisher.Publish(ctx, start.ThreadID, agentchat.Event{
+				Type: agentchat.EventMessagePersisted, RunID: start.RunID.String(),
+			})
+			for _, action := range actions {
+				if _, err := r.Publisher.Publish(ctx, start.ThreadID, agentchat.Event{
+					Type: agentchat.EventApprovalRequired, RunID: start.RunID.String(),
+					ActionID: action.ID.String(), ToolCallID: action.ToolCallID,
+					ToolName: action.ToolName, ToolInput: action.Arguments,
+					Risk: action.RiskTier, Status: action.Status,
+					ExpiresAt: action.ExpiresAt.UTC().Format(time.RFC3339),
+				}); err != nil {
+					return result, err
+				}
+			}
+			result.Paused = true
+			return result, nil
+		}
 		toolParts, toolMessage, err := r.executeTools(ctx, start, calls, touched)
 		if err != nil {
 			return result, err
@@ -157,6 +187,29 @@ func (r *Runtime) Execute(ctx context.Context, start agentchat.RunStart) (Result
 		messages = append(messages, toolMessage)
 	}
 	return result, errors.New("agent reached the 50-step safety limit")
+}
+
+func (r *Runtime) approvalRequests(actor agentchat.Actor, calls []toolCall, parts []agentchat.PartInput) []agentchat.ApprovalRequest {
+	if r.Approvals == nil || r.Tools == nil {
+		return nil
+	}
+	risks := make(map[string]string)
+	for _, tool := range r.Tools.Definitions(actor) {
+		risks[tool.Name] = tool.Risk
+	}
+	requests := make([]agentchat.ApprovalRequest, 0)
+	for _, call := range calls {
+		risk := risks[call.name]
+		if risk != "consequential" && risk != "irreversible" {
+			continue
+		}
+		parts[call.part].State = agentchat.PartStateAwaitingApproval
+		requests = append(requests, agentchat.ApprovalRequest{
+			ToolName: call.name, ToolCallID: call.id, Arguments: call.input,
+			RiskTier: risk, ExpiresAt: time.Now().Add(24 * time.Hour),
+		})
+	}
+	return requests
 }
 
 func (r *Runtime) consume(ctx context.Context, start agentchat.RunStart, stream ai.ChatStream) ([]agentchat.PartInput, []toolCall, ai.Usage, string, error) {
@@ -252,12 +305,73 @@ func (r *Runtime) toolDefinitions(actor agentchat.Actor) []ai.ToolDef {
 	tools := r.Tools.Definitions(actor)
 	out := make([]ai.ToolDef, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Risk == "consequential" || tool.Risk == "irreversible" {
+		if r.Approvals == nil && (tool.Risk == "consequential" || tool.Risk == "irreversible") {
 			continue
 		}
 		out = append(out, ai.ToolDef{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
 	}
 	return out
+}
+
+func (r *Runtime) Resume(ctx context.Context, start agentchat.RunStart) (Result, error) {
+	if r.Approvals == nil {
+		return Result{}, errors.New("agent approval store is unavailable")
+	}
+	batch, err := r.Approvals.LoadApprovalBatch(ctx, start)
+	if err != nil {
+		return Result{}, err
+	}
+	touched := make(map[string]bool)
+	results := make([]agentchat.ApprovalResult, 0, len(batch.Calls))
+	for _, call := range batch.Calls {
+		input := call.Arguments
+		toolResult := ToolResult{}
+		var executeErr error
+		switch {
+		case call.Action == nil:
+			toolResult, executeErr = r.Tools.Execute(ctx, start.Actor, call.ToolName, input)
+		case call.Action.Status == agentchat.ActionStatusApproved:
+			input = call.Action.EffectiveArguments()
+			toolResult, executeErr = r.Tools.ExecuteApproved(ctx, start.Actor, call.ToolName, input)
+		case call.Action.Status == agentchat.ActionStatusRejected || call.Action.Status == agentchat.ActionStatusExpired:
+			toolResult.Output, _ = json.Marshal(map[string]string{
+				"status": "rejected", "reason": call.Action.DecisionReason,
+			})
+		default:
+			return Result{}, fmt.Errorf("approval action %s cannot resume from status %s", call.Action.ID, call.Action.Status)
+		}
+		if executeErr != nil {
+			return Result{}, executeErr
+		}
+		if len(toolResult.Output) == 0 || !json.Valid(toolResult.Output) {
+			toolResult = ToolResult{Output: json.RawMessage(`{"success":false,"error":"tool returned invalid output"}`), IsError: true}
+		}
+		result := agentchat.ApprovalResult{
+			PartID: call.PartID, ToolName: call.ToolName, ToolCallID: call.ToolCallID,
+			ToolInput: input, ToolOutput: toolResult.Output, IsError: toolResult.IsError,
+			Action: call.Action,
+		}
+		results = append(results, result)
+		if _, err := r.Publisher.Publish(ctx, start.ThreadID, agentchat.Event{
+			Type: agentchat.EventToolOutput, RunID: start.RunID.String(),
+			ToolCallID: call.ToolCallID, ToolName: call.ToolName, ToolInput: input,
+			ToolOutput: toolResult.Output, IsError: toolResult.IsError,
+		}); err != nil {
+			return Result{}, err
+		}
+		if !toolResult.IsError && isWriteTool(call.ToolName) {
+			touched[objectType(call.ToolName)] = true
+		}
+	}
+	if err := r.Approvals.CompleteApprovalBatch(ctx, start, results); err != nil {
+		return Result{}, err
+	}
+	result, err := r.Execute(ctx, start)
+	for _, object := range result.Touched {
+		touched[object] = true
+	}
+	result.Touched = sortedKeys(touched)
+	return result, err
 }
 
 func (r *Runtime) transcript(ctx context.Context, start agentchat.RunStart) ([]ai.ChatMessage, string, error) {
@@ -347,11 +461,15 @@ func loadingMessage(input json.RawMessage) string {
 	return strings.TrimSpace(message)
 }
 
-func isWriteTool(name string) bool { return strings.HasSuffix(name, "_write") }
+func isWriteTool(name string) bool {
+	return strings.HasSuffix(name, "_write") || strings.HasSuffix(name, "_control") || strings.HasSuffix(name, "_import")
+}
 
 func objectType(name string) string {
 	name = strings.TrimPrefix(name, "inroad_")
 	name = strings.TrimSuffix(name, "_write")
+	name = strings.TrimSuffix(name, "_control")
+	name = strings.TrimSuffix(name, "_import")
 	if name == "contacts" {
 		return "contact"
 	}

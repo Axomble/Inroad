@@ -22,6 +22,9 @@ func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/threads", h.listThreads)
+	r.Get("/approvals", h.listPendingActions)
+	r.Get("/approvals/{actionID}", h.getPendingAction)
+	r.Post("/approvals/{actionID}/decision", h.decidePendingAction)
 	r.Post("/threads", h.createThread)
 	r.Get("/threads/{id}", h.getThread)
 	r.Patch("/threads/{id}", h.renameThread)
@@ -63,7 +66,11 @@ func threadID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	return decodeBodyLimit(w, r, dst, 64<<10)
+}
+
+func decodeBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
@@ -80,15 +87,91 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
 
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrThreadNotFound), errors.Is(err, ErrQueueEmpty):
+	case errors.Is(err, ErrThreadNotFound), errors.Is(err, ErrQueueEmpty), errors.Is(err, ErrActionNotFound):
 		httpx.Error(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrValidation):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrRunActive):
 		httpx.Error(w, http.StatusConflict, "thread has no stoppable run")
+	case errors.Is(err, ErrActionDecided):
+		httpx.Error(w, http.StatusConflict, "approval has already been decided")
 	default:
 		httpx.Error(w, http.StatusInternalServerError, "internal error")
 	}
+}
+
+func pendingActionID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	id, err := uuid.Parse(chi.URLParam(r, "actionID"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid action id")
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+func (h *Handler) listPendingActions(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorFromRequest(w, r)
+	if !ok {
+		return
+	}
+	limit, err := queryInt32(r, "limit", defaultThreadLimit)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	actions, err := h.service.ListPendingActions(r.Context(), actor, r.URL.Query().Get("status"), limit)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string][]PendingActionDTO{"actions": actions})
+}
+
+func (h *Handler) getPendingAction(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorFromRequest(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pendingActionID(w, r)
+	if !ok {
+		return
+	}
+	action, err := h.service.GetPendingAction(r.Context(), actor, id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, action)
+}
+
+func (h *Handler) decidePendingAction(w http.ResponseWriter, r *http.Request) {
+	actor, ok := actorFromRequest(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pendingActionID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Decision        string          `json:"decision"`
+		EditedArguments json.RawMessage `json:"edited_arguments"`
+		Reason          string          `json:"reason"`
+	}
+	// Edited bulk-import arguments can legitimately exceed the small request
+	// limit used by chat metadata, while still staying bounded.
+	if err := decodeBodyLimit(w, r, &body, 2<<20); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	action, err := h.service.DecidePendingAction(r.Context(), actor, id, ApprovalDecision{
+		Decision: body.Decision, EditedArguments: body.EditedArguments, Reason: body.Reason,
+	})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, action)
 }
 
 func (h *Handler) createThread(w http.ResponseWriter, r *http.Request) {

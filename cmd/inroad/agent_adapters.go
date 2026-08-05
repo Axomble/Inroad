@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -41,6 +44,17 @@ func (a runtimeTools) Execute(ctx context.Context, actor agentchat.Actor, name s
 		output, _ := json.Marshal(agenttool.Fail("this action requires human approval and is unavailable until the approval gate is enabled"))
 		return agentrun.ToolResult{Output: output, IsError: true}, nil
 	}
+	return a.execute(ctx, actor, name, input)
+}
+
+func (a runtimeTools) ExecuteApproved(ctx context.Context, actor agentchat.Actor, name string, input json.RawMessage) (agentrun.ToolResult, error) {
+	if err := a.Validate(actor, name, input); err != nil {
+		return agentrun.ToolResult{}, err
+	}
+	return a.execute(ctx, actor, name, input)
+}
+
+func (a runtimeTools) execute(ctx context.Context, actor agentchat.Actor, name string, input json.RawMessage) (agentrun.ToolResult, error) {
 	result, err := a.registry.Execute(ctx, toolPrincipal(actor), name, input)
 	if err != nil {
 		return agentrun.ToolResult{}, err
@@ -50,6 +64,24 @@ func (a runtimeTools) Execute(ctx context.Context, actor agentchat.Actor, name s
 		return agentrun.ToolResult{}, err
 	}
 	return agentrun.ToolResult{Output: output, IsError: !result.Success}, nil
+}
+
+func (a runtimeTools) Validate(actor agentchat.Actor, name string, input json.RawMessage) error {
+	found := false
+	for _, tool := range a.registry.Definitions(toolPrincipal(actor)) {
+		if tool.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("tool %q is not available for this user", name)
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(input, &object) != nil || object == nil {
+		return errors.New("arguments must be a JSON object")
+	}
+	return nil
 }
 
 func toolPrincipal(actor agentchat.Actor) agenttool.Principal {
@@ -244,4 +276,28 @@ func (a contactTools) AddToList(ctx context.Context, ws, listID, contactID uuid.
 		return pgx.ErrNoRows
 	}
 	return a.store.AddToList(ctx, listID, contactID)
+}
+
+func (a contactTools) Import(ctx context.Context, ws, listID uuid.UUID, contacts []agenttool.ContactInput) (agenttool.ContactImportResult, error) {
+	var payload bytes.Buffer
+	w := csv.NewWriter(&payload)
+	if err := w.Write([]string{"email", "first_name", "last_name", "company"}); err != nil {
+		return agenttool.ContactImportResult{}, err
+	}
+	for _, row := range contacts {
+		if err := w.Write([]string{row.Email, row.FirstName, row.LastName, row.Company}); err != nil {
+			return agenttool.ContactImportResult{}, err
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return agenttool.ContactImportResult{}, err
+	}
+	result, err := a.service.ImportCSV(ctx, ws, listID, bytes.NewReader(payload.Bytes()))
+	if errors.Is(err, contact.ErrListNotFound) {
+		return agenttool.ContactImportResult{}, pgx.ErrNoRows
+	}
+	return agenttool.ContactImportResult{
+		Imported: result.Imported, Skipped: result.Skipped, Duplicates: result.Duplicates,
+	}, err
 }

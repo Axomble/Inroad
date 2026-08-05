@@ -117,6 +117,11 @@ export function useAgentStream(): void {
           dispatch(setAgentQueue(event.queued ?? []))
           break
         case 'message_persisted':
+          dispatch(agentApi.util.invalidateTags(['AgentApproval']))
+          void refreshTranscript()
+          break
+        case 'approval_required':
+          dispatch(agentApi.util.invalidateTags(['AgentApproval']))
           void refreshTranscript()
           break
         case 'thread_title':

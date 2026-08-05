@@ -25,6 +25,9 @@ export interface AgentStreamEvent {
   title?: string
   queued?: AgentQueuedMessage[]
   object_types?: string[]
+  action_id?: string
+  status?: string
+  expires_at?: string
 }
 
 export interface StreamAccumulator {

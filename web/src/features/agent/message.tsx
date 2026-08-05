@@ -2,7 +2,8 @@ import { lazy, memo, Suspense, useEffect, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { AgentMessage, AgentPart } from './api'
+import type { AgentApproval, AgentMessage, AgentPart } from './api'
+import { ApprovalCard } from './approval-card'
 import type { StreamingMessage, StreamingPart } from '@/store/slices/agent'
 
 const Markdown = lazy(() =>
@@ -10,6 +11,7 @@ const Markdown = lazy(() =>
 )
 
 type PartView = AgentPart | StreamingPart
+const emptyApprovals = new Map<string, AgentApproval>()
 
 function textOf(parts: PartView[]): string {
   return parts
@@ -35,7 +37,7 @@ function JsonView({ value }: { value: unknown }) {
   )
 }
 
-function ToolRow({ part }: { part: PartView }) {
+function ToolRow({ part, approval }: { part: PartView; approval?: AgentApproval }) {
   const [tab, setTab] = useState<'input' | 'output'>('input')
   const running = part.state === 'running' || !part.state
   return (
@@ -74,11 +76,12 @@ function ToolRow({ part }: { part: PartView }) {
           {part.error && <p className="mt-1.5 text-[11px] text-danger">{part.error}</p>}
         </div>
       )}
+      {approval && <div className="px-2.5 pb-2.5"><ApprovalCard action={approval} compact /></div>}
     </div>
   )
 }
 
-function ToolSteps({ parts, streaming, hasText }: { parts: PartView[]; streaming: boolean; hasText: boolean }) {
+function ToolSteps({ parts, streaming, hasText, approvalsByCall }: { parts: PartView[]; streaming: boolean; hasText: boolean; approvalsByCall: ReadonlyMap<string, AgentApproval> }) {
   const [open, setOpen] = useState(streaming && !hasText)
   useEffect(() => {
     if (hasText) setOpen(false)
@@ -96,7 +99,7 @@ function ToolSteps({ parts, streaming, hasText }: { parts: PartView[]; streaming
         {parts.length} {parts.length === 1 ? 'step' : 'steps'}
         {streaming && !hasText && <span className="ml-auto size-1.5 rounded-full bg-primary agent-pulse" />}
       </button>
-      {open && <div>{parts.map((part) => <ToolRow key={part.id} part={part} />)}</div>}
+      {open && <div>{parts.map((part) => <ToolRow key={part.id} part={part} approval={part.tool_call_id ? approvalsByCall.get(part.tool_call_id) : undefined} />)}</div>}
     </div>
   )
 }
@@ -115,9 +118,11 @@ function Reasoning({ parts }: { parts: PartView[] }) {
 export const AgentMessageBubble = memo(function AgentMessageBubble({
   message,
   streaming = false,
+  approvalsByCall = emptyApprovals,
 }: {
   message: AgentMessage | StreamingMessage
   streaming?: boolean
+  approvalsByCall?: ReadonlyMap<string, AgentApproval>
 }) {
   const isUser = 'role' in message && message.role === 'user'
   const parts = message.parts as PartView[]
@@ -137,7 +142,7 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
             : 'w-full',
         )}
       >
-        {!isUser && <ToolSteps parts={tools} streaming={streaming} hasText={Boolean(text)} />}
+        {!isUser && <ToolSteps parts={tools} streaming={streaming} hasText={Boolean(text)} approvalsByCall={approvalsByCall} />}
         {!isUser && <Reasoning parts={reasoning} />}
         {text && (
           <Suspense fallback={<div className="space-y-2"><Skeleton className="h-3 w-4/5" /><Skeleton className="h-3 w-2/3" /></div>}>

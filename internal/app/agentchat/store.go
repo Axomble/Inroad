@@ -209,8 +209,17 @@ func (s *PgStore) PersistMessage(ctx context.Context, in MessageInput) (Message,
 		return Message{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	qtx := s.q.WithTx(tx)
+	message, err := s.persistMessageTx(ctx, s.q.WithTx(tx), in)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Message{}, err
+	}
+	return message, nil
+}
 
+func (s *PgStore) persistMessageTx(ctx context.Context, qtx *gen.Queries, in MessageInput) (Message, error) {
 	row, err := qtx.InsertAgentMessage(ctx, gen.InsertAgentMessageParams{
 		WorkspaceID: in.WorkspaceID,
 		// The generated field is named ID because the statement is an
@@ -250,9 +259,6 @@ func (s *PgStore) PersistMessage(ctx context.Context, in MessageInput) (Message,
 			return Message{}, fmt.Errorf("agentchat: insert part %d: %w", i, err)
 		}
 		parts = append(parts, part)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Message{}, err
 	}
 	return Message{Row: row, Parts: parts}, nil
 }

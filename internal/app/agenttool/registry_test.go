@@ -17,6 +17,7 @@ func fullDeps() Deps {
 		CampaignAdmin:  &fakeCampaignAdmin{},
 		Contacts:       &fakeContacts{},
 		ContactWrites:  &fakeContactWrites{},
+		ContactImports: &fakeContactImports{},
 		Mailboxes:      &fakeMailboxes{},
 		Lists:          &fakeLists{},
 		ListWrites:     &fakeListWrites{},

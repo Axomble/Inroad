@@ -47,7 +47,7 @@ const (
 	// the loading_message the model wrote for it.
 	EventToolOutput = "tool_output"
 	// EventApprovalRequired parks a consequential/irreversible tool call for a
-	// human decision. A2 emits it and exits the run; A4 implements the resume.
+	// human decision. A4 emits it, exits the run, and implements the resume.
 	EventApprovalRequired = "approval_required"
 	// EventThreadTitle carries the generated thread title.
 	EventThreadTitle = "thread_title"
@@ -95,7 +95,10 @@ type Event struct {
 	LoadingMessage string `json:"loading_message,omitempty"`
 	// Risk is the tool's tier on EventApprovalRequired ("consequential" |
 	// "irreversible").
-	Risk string `json:"risk,omitempty"`
+	Risk      string `json:"risk,omitempty"`
+	ActionID  string `json:"action_id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 
 	// Title is set on EventThreadTitle.
 	Title string `json:"title,omitempty"`

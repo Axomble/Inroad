@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, History, MessageSquarePlus, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -18,7 +18,7 @@ import {
 import { AgentComposer } from './composer'
 import { AgentHistory } from './history'
 import { AgentMessageBubble } from './message'
-import { useGetAgentThreadQuery, useListAgentQueueQuery } from './api'
+import { useGetAgentThreadQuery, useListAgentApprovalsQuery, useListAgentQueueQuery, type AgentApproval } from './api'
 import { useAgentStream } from './use-agent-stream'
 
 const suggestions = [
@@ -32,12 +32,12 @@ interface SuggestedPrompt {
   text: string
 }
 
-const MessageRecord = memo(function MessageRecord({ id }: { id: string }) {
+const MessageRecord = memo(function MessageRecord({ id, approvalsByCall }: { id: string; approvalsByCall: ReadonlyMap<string, AgentApproval> }) {
   const message = useAppSelector((state) => state.agent.messagesById[id])
-  return message ? <AgentMessageBubble message={message} /> : null
+  return message ? <AgentMessageBubble message={message} approvalsByCall={approvalsByCall} /> : null
 })
 
-function MessageScroller({ loading }: { loading: boolean }) {
+function MessageScroller({ loading, approvalsByCall }: { loading: boolean; approvalsByCall: ReadonlyMap<string, AgentApproval> }) {
   const ids = useAppSelector((state) => state.agent.messageIds)
   const streaming = useAppSelector((state) => state.agent.streaming)
   const endRef = useRef<HTMLDivElement>(null)
@@ -60,8 +60,8 @@ function MessageScroller({ loading }: { loading: boolean }) {
 
   return (
     <div className="space-y-4 px-4 py-5" aria-live="polite" aria-relevant="additions text">
-      {ids.map((id) => <MessageRecord key={id} id={id} />)}
-      {streaming && <AgentMessageBubble message={streaming} streaming />}
+      {ids.map((id) => <MessageRecord key={id} id={id} approvalsByCall={approvalsByCall} />)}
+      {streaming && <AgentMessageBubble message={streaming} streaming approvalsByCall={approvalsByCall} />}
       <div ref={endRef} aria-hidden="true" />
     </div>
   )
@@ -127,6 +127,13 @@ export function AgentPanel() {
     { id: threadId ?? '' },
     { skip: !threadId },
   )
+  const approvalsQuery = useListAgentApprovalsQuery({ limit: 100 }, { skip: !threadId })
+  const approvalsByCall = useMemo(() => {
+    const entries = (approvalsQuery.data?.actions ?? [])
+      .filter((action) => action.thread_id === threadId)
+      .map((action) => [action.tool_call_id, action] as const)
+    return new Map(entries)
+  }, [approvalsQuery.data?.actions, threadId])
 
   useEffect(() => {
     const deepLinkedThread = threadFromURL()
@@ -260,7 +267,7 @@ export function AgentPanel() {
               {!threadId && messageCount === 0 ? (
                 <EmptyConversation onPrompt={requestPrompt} />
               ) : (
-                <MessageScroller loading={threadQuery.isLoading} />
+                <MessageScroller loading={threadQuery.isLoading} approvalsByCall={approvalsByCall} />
               )}
             </div>
             {streamError && (

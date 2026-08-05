@@ -110,6 +110,67 @@ func (f *fakeTools) Execute(context.Context, agentchat.Actor, string, json.RawMe
 	f.calls++
 	return ToolResult{Output: json.RawMessage(`{"success":true,"data":{"name":"Ada"}}`)}, nil
 }
+func (f *fakeTools) ExecuteApproved(ctx context.Context, actor agentchat.Actor, name string, input json.RawMessage) (ToolResult, error) {
+	return f.Execute(ctx, actor, name, input)
+}
+func (*fakeTools) Validate(agentchat.Actor, string, json.RawMessage) error { return nil }
+
+type fakeApprovals struct {
+	agentchat.ApprovalStore
+	requests []agentchat.ApprovalRequest
+	message  agentchat.MessageInput
+}
+
+func (f *fakeApprovals) PauseForApproval(_ context.Context, message agentchat.MessageInput, _ agentchat.RunStart, requests []agentchat.ApprovalRequest) ([]agentchat.PendingAction, error) {
+	f.message = message
+	f.requests = append([]agentchat.ApprovalRequest(nil), requests...)
+	actions := make([]agentchat.PendingAction, len(requests))
+	for i, request := range requests {
+		actions[i] = agentchat.PendingAction{
+			ID: uuid.New(), ToolName: request.ToolName, ToolCallID: request.ToolCallID,
+			Arguments: request.Arguments, RiskTier: request.RiskTier,
+			Status: agentchat.ActionStatusPending, ExpiresAt: request.ExpiresAt,
+		}
+	}
+	return actions, nil
+}
+
+func TestRuntimePausesConsequentialToolBeforeExecution(t *testing.T) {
+	workspaceID, threadID, runID, turnID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	store := &fakeStore{transcript: []agentchat.Message{{
+		Row:   gen.AgentMessage{WorkspaceID: workspaceID, ThreadID: threadID, TurnID: turnID, Role: ai.RoleUser, Status: agentchat.MessageStatusProcessing},
+		Parts: []gen.AgentMessagePart{{Type: agentchat.PartText, TextContent: "Pause the campaign"}},
+	}}}
+	streamer := &fakeStreamer{turns: [][]ai.StreamEvent{{
+		{Type: ai.EventToolCallStart, ToolCallID: "call-control", ToolName: "inroad_campaign_control"},
+		{Type: ai.EventToolCallEnd, ToolCallID: "call-control", ToolName: "inroad_campaign_control", ToolInput: json.RawMessage(`{"loading_message":"Pausing Q3","method":"pause"}`)},
+		{Type: ai.EventUsage, Usage: &ai.Usage{InputTokens: 7, OutputTokens: 3}, StopReason: ai.StopToolUse},
+	}}}
+	tools, approvals, publisher := &fakeTools{}, &fakeApprovals{}, &fakePublisher{}
+	runtime := &Runtime{Store: store, Models: fakeResolver{streamer: streamer}, Tools: tools, Publisher: publisher, Approvals: approvals}
+	result, err := runtime.Execute(context.Background(), agentchat.RunStart{
+		Actor:    agentchat.Actor{WorkspaceID: workspaceID, UserID: uuid.New(), Role: "admin"},
+		ThreadID: threadID, RunID: runID, TurnID: turnID, Selector: "default-smart-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Paused || tools.calls != 0 {
+		t.Fatalf("paused=%v tool calls=%d", result.Paused, tools.calls)
+	}
+	if len(approvals.requests) != 1 || approvals.requests[0].ToolName != "inroad_campaign_control" {
+		t.Fatalf("requests=%+v", approvals.requests)
+	}
+	if approvals.message.Parts[0].State != agentchat.PartStateAwaitingApproval {
+		t.Fatalf("part state=%q", approvals.message.Parts[0].State)
+	}
+	if len(streamer.requests[0].Tools) != 2 {
+		t.Fatalf("approval-enabled tool set=%+v", streamer.requests[0].Tools)
+	}
+	if len(publisher.events) < 2 || publisher.events[len(publisher.events)-1].Type != agentchat.EventApprovalRequired {
+		t.Fatalf("events=%+v", publisher.events)
+	}
+}
 
 func TestRuntimeStreamsToolLoopAndPersistsTranscript(t *testing.T) {
 	workspaceID, threadID, runID, turnID := uuid.New(), uuid.New(), uuid.New(), uuid.New()

@@ -16,6 +16,7 @@ type Deps struct {
 	CampaignAdmin  CampaignController
 	Contacts       ContactReader
 	ContactWrites  ContactWriter
+	ContactImports ContactImporter
 	Mailboxes      MailboxReader
 	Lists          ListReader
 	ListWrites     ListWriter
