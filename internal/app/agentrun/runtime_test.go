@@ -99,6 +99,14 @@ func (f *fakeStream) Next() (ai.StreamEvent, error) {
 }
 func (*fakeStream) Close() error { return nil }
 
+func TestRunIDsContextRoundTrip(t *testing.T) {
+	start := agentchat.RunStart{ThreadID: uuid.New(), RunID: uuid.New()}
+	threadID, runID := RunIDsFromContext(withRunIDs(context.Background(), start))
+	if threadID != start.ThreadID || runID != start.RunID {
+		t.Fatalf("thread=%s run=%s", threadID, runID)
+	}
+}
+
 type fakePublisher struct {
 	events []agentchat.Event
 	err    error

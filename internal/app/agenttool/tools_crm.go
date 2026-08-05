@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -26,17 +27,22 @@ type CRMPipeline struct {
 	Stages []CRMStage `json:"stages"`
 }
 type CRMDeal struct {
-	ID           uuid.UUID `json:"id"`
-	Name         string    `json:"name"`
-	PipelineName string    `json:"pipeline_name"`
-	StageLabel   string    `json:"stage_label"`
-	CompanyName  string    `json:"company_name,omitempty"`
-	Currency     string    `json:"currency"`
-	AmountMicros *int64    `json:"amount_micros,omitempty"`
+	ID           uuid.UUID  `json:"id"`
+	PipelineID   uuid.UUID  `json:"pipeline_id"`
+	StageID      uuid.UUID  `json:"stage_id"`
+	CompanyID    *uuid.UUID `json:"company_id,omitempty"`
+	Name         string     `json:"name"`
+	PipelineName string     `json:"pipeline_name"`
+	StageLabel   string     `json:"stage_label"`
+	CompanyName  string     `json:"company_name,omitempty"`
+	Currency     string     `json:"currency"`
+	AmountMicros *int64     `json:"amount_micros,omitempty"`
 }
 type CRMActor struct {
 	UserID        uuid.UUID
 	AgentClientID string
+	ThreadID      string
+	RunID         string
 }
 type CRMCompanyInput struct {
 	Name, Domain, Currency string
@@ -65,9 +71,52 @@ type CRMTaskInput struct {
 	Actor       CRMActor
 }
 type CRMEvent struct {
-	Name, Kind, LinkedRecordCachedName string
-	OccurredAt                         string
-	MergedCount                        int
+	ID, Name, Kind, LinkedRecordCachedName string
+	OccurredAt                             string
+	MergedCount                            int
+	Actor, Data                            json.RawMessage
+	SourceMessageID, SourceThreadRef       string
+}
+
+type CRMBoardStage struct {
+	Stage        CRMStage  `json:"stage"`
+	Deals        []CRMDeal `json:"deals"`
+	DealCount    int64     `json:"deal_count"`
+	AmountMicros int64     `json:"amount_micros"`
+}
+type CRMBoard struct {
+	Pipeline CRMPipeline     `json:"pipeline"`
+	Stages   []CRMBoardStage `json:"stages"`
+}
+type CRMThread struct {
+	ID            uuid.UUID              `json:"id"`
+	ThreadRef     string                 `json:"thread_ref"`
+	Subject       string                 `json:"subject,omitempty"`
+	ReplyClass    string                 `json:"reply_class,omitempty"`
+	LastMessageAt string                 `json:"last_message_at"`
+	Participants  []CRMThreadParticipant `json:"participants"`
+	Messages      []CRMThreadMessage     `json:"messages"`
+}
+type CRMThreadParticipant struct {
+	Email       string     `json:"email"`
+	DisplayName string     `json:"display_name,omitempty"`
+	ContactID   *uuid.UUID `json:"contact_id,omitempty"`
+}
+type CRMThreadMessage struct {
+	ID             uuid.UUID `json:"id"`
+	Direction      string    `json:"direction"`
+	Kind           string    `json:"kind"`
+	MessageID      string    `json:"message_id,omitempty"`
+	SenderEmail    string    `json:"sender_email,omitempty"`
+	RecipientEmail string    `json:"recipient_email,omitempty"`
+	Subject        string    `json:"subject,omitempty"`
+	ReplyClass     string    `json:"reply_class,omitempty"`
+	OccurredAt     string    `json:"occurred_at"`
+}
+type CRMDealMoveInput struct {
+	DealID, StageID           uuid.UUID
+	BeforeDealID, AfterDealID *uuid.UUID
+	Actor                     CRMActor
 }
 
 type crmWriteArgs struct {
@@ -104,10 +153,16 @@ func NewCRMList[T any](items []T, truncated bool) CRMList[T] {
 
 type CRMService interface {
 	ListCompanies(context.Context, uuid.UUID) (CRMList[CRMCompany], error)
+	GetCompany(context.Context, uuid.UUID, uuid.UUID) (CRMCompany, error)
 	ListPipelines(context.Context, uuid.UUID) ([]CRMPipeline, error)
 	ListDeals(context.Context, uuid.UUID) (CRMList[CRMDeal], error)
+	GetDeal(context.Context, uuid.UUID, uuid.UUID) (CRMDeal, error)
+	GetBoard(context.Context, uuid.UUID, *uuid.UUID) (CRMBoard, error)
 	CreateCompany(context.Context, uuid.UUID, CRMCompanyInput) (CRMCompany, error)
+	UpdateCompany(context.Context, uuid.UUID, uuid.UUID, CRMCompanyInput) (CRMCompany, error)
 	CreateDeal(context.Context, uuid.UUID, CRMDealInput) (CRMDeal, error)
+	UpdateDeal(context.Context, uuid.UUID, uuid.UUID, CRMDealInput) (CRMDeal, error)
+	MoveDeal(context.Context, uuid.UUID, CRMDealMoveInput) (CRMDeal, error)
 }
 
 // ErrorClassifier decides what a domain write failure looks like to the model.
@@ -126,6 +181,7 @@ type CRMIntegrationService interface {
 	CreateNote(context.Context, uuid.UUID, CRMNoteInput) error
 	CreateTask(context.Context, uuid.UUID, CRMTaskInput) error
 	ListEvents(context.Context, uuid.UUID, CRMTarget) ([]CRMEvent, error)
+	ListDealThreads(context.Context, uuid.UUID, uuid.UUID) ([]CRMThread, error)
 }
 
 func crmTools(deps Deps) []Tool {
@@ -134,57 +190,167 @@ func crmTools(deps Deps) []Tool {
 	}
 	errs := deps.CRMErrors
 	tools := []Tool{
-		crmReadTool(deps.CRM), crmWriteTool(deps.CRM, errs),
-		crmCollectionReadTool("inroad_company_read", "Read CRM companies in this workspace.", "companies", deps.CRM),
+		crmCompanyReadTool(deps.CRM),
 		crmCompanyWriteTool(deps.CRM, errs),
-		crmCollectionReadTool("inroad_deal_read", "Read CRM deals in this workspace.", "deals", deps.CRM),
+		crmDealReadTool(deps.CRM),
 		crmDealWriteTool(deps.CRM, errs),
-		crmCollectionReadTool("inroad_pipeline_read", "Read CRM pipelines and their ordered stages.", "pipelines", deps.CRM),
+		crmPipelineReadTool(deps.CRM),
 	}
 	if integrated, ok := deps.CRM.(CRMIntegrationService); ok {
-		tools = append(tools, crmNoteWriteTool(integrated, errs), crmTaskWriteTool(integrated, errs), crmEventsReadTool(integrated))
+		tools = append(tools, crmNoteWriteTool(integrated, errs), crmTaskWriteTool(integrated, errs), crmEventsReadTool(integrated), crmThreadReadTool(integrated))
+	}
+	for i := range tools {
+		if tools[i].Risk == RiskWrite {
+			tools[i] = withCRMWriteLimit(tools[i], deps.CRMWriteLimiter)
+		}
 	}
 	return tools
 }
 
-func crmCollectionReadTool(name, description, collection string, svc CRMService) Tool {
-	return Tool{Name: name, Description: description, InputSchema: mustSchema(), Risk: RiskRead,
+const crmWritesPerMinute = 30
+
+func withCRMWriteLimit(tool Tool, limiter RateLimiter) Tool {
+	if limiter == nil {
+		return tool
+	}
+	execute := tool.Execute
+	tool.Execute = func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
+		clientID := p.AgentClientID
+		if clientID == "" {
+			clientID = p.UserID.String()
+		}
+		key := fmt.Sprintf("agent-crm-write:%s:%s", p.WorkspaceID, clientID)
+		allowed, err := limiter.Allow(ctx, key, crmWritesPerMinute, time.Minute)
+		if err != nil {
+			return Result{}, fmt.Errorf("limit CRM agent writes: %w", err)
+		}
+		if !allowed {
+			return Fail("CRM write rate limit reached; wait briefly before trying again"), nil
+		}
+		return execute(ctx, p, raw)
+	}
+	return tool
+}
+
+func crmActor(p Principal) CRMActor {
+	return CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID, ThreadID: p.ThreadID, RunID: p.RunID}
+}
+
+func crmCompanyReadTool(svc CRMService) Tool {
+	methods := []string{"list", "get"}
+	return Tool{Name: "inroad_company_read", Description: "List CRM companies or get one company by id.",
+		InputSchema: mustSchema(methodField("Company read operation.", methods), strField("company_id", "Company id required for get.", false)), Risk: RiskRead,
 		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
-			var args baseArgs
+			var args struct {
+				baseArgs
+				Method    string `json:"method"`
+				CompanyID string `json:"company_id"`
+			}
 			if bad := decodeArgs(raw, &args); bad != nil {
 				return *bad, nil
 			}
-			switch collection {
-			case "companies":
+			switch args.Method {
+			case "list":
 				items, err := svc.ListCompanies(ctx, p.WorkspaceID)
 				if err != nil {
 					return Result{}, fmt.Errorf("list CRM companies: %w", err)
 				}
 				return Ok(items), nil
-			case "deals":
+			case "get":
+				id, bad := parseID("company_id", args.CompanyID)
+				if bad != nil {
+					return *bad, nil
+				}
+				item, err := svc.GetCompany(ctx, p.WorkspaceID, id)
+				if err != nil {
+					return Result{}, fmt.Errorf("get CRM company: %w", err)
+				}
+				return Ok(item), nil
+			default:
+				return unknownMethod(args.Method, methods), nil
+			}
+		}}
+}
+
+func crmPipelineReadTool(svc CRMService) Tool {
+	return Tool{Name: "inroad_pipeline_read", Description: "Read CRM pipelines and their ordered stages.", InputSchema: mustSchema(), Risk: RiskRead,
+		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
+			var args baseArgs
+			if bad := decodeArgs(raw, &args); bad != nil {
+				return *bad, nil
+			}
+			items, err := svc.ListPipelines(ctx, p.WorkspaceID)
+			if err != nil {
+				return Result{}, fmt.Errorf("list CRM pipelines: %w", err)
+			}
+			return Ok(items), nil
+		}}
+}
+
+func crmDealReadTool(svc CRMService) Tool {
+	methods := []string{"list", "get", "board"}
+	return Tool{Name: "inroad_deal_read", Description: "List deals, get one deal, or read a pipeline board with stage totals.",
+		InputSchema: mustSchema(methodField("Deal read operation.", methods), strField("deal_id", "Deal id required for get.", false), strField("pipeline_id", "Optional pipeline id for board.", false)), Risk: RiskRead,
+		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
+			var args struct {
+				baseArgs
+				Method     string `json:"method"`
+				DealID     string `json:"deal_id"`
+				PipelineID string `json:"pipeline_id"`
+			}
+			if bad := decodeArgs(raw, &args); bad != nil {
+				return *bad, nil
+			}
+			switch args.Method {
+			case "list":
 				items, err := svc.ListDeals(ctx, p.WorkspaceID)
 				if err != nil {
 					return Result{}, fmt.Errorf("list CRM deals: %w", err)
 				}
 				return Ok(items), nil
-			default:
-				items, err := svc.ListPipelines(ctx, p.WorkspaceID)
-				if err != nil {
-					return Result{}, fmt.Errorf("list CRM pipelines: %w", err)
+			case "get":
+				id, bad := parseID("deal_id", args.DealID)
+				if bad != nil {
+					return *bad, nil
 				}
-				return Ok(items), nil
+				item, err := svc.GetDeal(ctx, p.WorkspaceID, id)
+				if err != nil {
+					return Result{}, fmt.Errorf("get CRM deal: %w", err)
+				}
+				return Ok(item), nil
+			case "board":
+				var pipelineID *uuid.UUID
+				if args.PipelineID != "" {
+					id, bad := parseID("pipeline_id", args.PipelineID)
+					if bad != nil {
+						return *bad, nil
+					}
+					pipelineID = &id
+				}
+				board, err := svc.GetBoard(ctx, p.WorkspaceID, pipelineID)
+				if err != nil {
+					return Result{}, fmt.Errorf("get CRM board: %w", err)
+				}
+				return Ok(board), nil
+			default:
+				return unknownMethod(args.Method, methods), nil
 			}
 		}}
 }
 
 func crmCompanyWriteTool(svc CRMService, errs ErrorClassifier) Tool {
-	return Tool{Name: "inroad_company_write", Description: "Create a company in this workspace.",
-		InputSchema: mustSchema(strField("name", "Company name.", true), strField("domain", "Company hostname such as example.com.", false),
+	methods := []string{"create", "update"}
+	return Tool{Name: "inroad_company_write", Description: "Create or update a company in this workspace.",
+		InputSchema: mustSchema(methodField("Company write operation.", methods), strField("company_id", "Company id required for update.", false), strField("name", "Company name.", true), strField("domain", "Company hostname such as example.com.", false),
 			strField("currency", "Three-letter currency code; defaults to USD.", false)), Risk: RiskWrite,
 		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
 			var args struct {
 				baseArgs
-				Name, Domain, Currency string
+				Method    string `json:"method"`
+				CompanyID string `json:"company_id"`
+				Name      string `json:"name"`
+				Domain    string `json:"domain"`
+				Currency  string `json:"currency"`
 			}
 			if bad := decodeArgs(raw, &args); bad != nil {
 				return *bad, nil
@@ -192,8 +358,21 @@ func crmCompanyWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 			if strings.TrimSpace(args.Name) == "" {
 				return Fail("name is required; call again with the company name"), nil
 			}
-			item, err := svc.CreateCompany(ctx, p.WorkspaceID, CRMCompanyInput{Name: args.Name, Domain: args.Domain,
-				Currency: args.Currency, Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
+			input := CRMCompanyInput{Name: args.Name, Domain: args.Domain, Currency: args.Currency, Actor: crmActor(p)}
+			var item CRMCompany
+			var err error
+			switch args.Method {
+			case "create":
+				item, err = svc.CreateCompany(ctx, p.WorkspaceID, input)
+			case "update":
+				id, bad := parseID("company_id", args.CompanyID)
+				if bad != nil {
+					return *bad, nil
+				}
+				item, err = svc.UpdateCompany(ctx, p.WorkspaceID, id, input)
+			default:
+				return unknownMethod(args.Method, methods), nil
+			}
 			if err != nil {
 				return recoverableCRMError(errs, err)
 			}
@@ -202,15 +381,50 @@ func crmCompanyWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 }
 
 func crmDealWriteTool(svc CRMService, errs ErrorClassifier) Tool {
+	methods := []string{"create", "update", "move_stage"}
 	amount := field{name: "amount_micros", schema: jsonObject{{"type", "integer"}, {"minimum", 0}}}
-	return Tool{Name: "inroad_deal_write", Description: "Create a deal. Read pipelines first to obtain tenant-safe pipeline and stage ids.",
-		InputSchema: mustSchema(strField("name", "Deal name.", true), strField("pipeline_id", "Pipeline id.", true),
-			strField("stage_id", "Stage id belonging to the pipeline.", true), strField("company_id", "Optional company id.", false),
+	return Tool{Name: "inroad_deal_write", Description: "Create, update, or move a deal. Read the deal and pipelines first to obtain current tenant-safe ids.",
+		InputSchema: mustSchema(methodField("Deal write operation.", methods), strField("deal_id", "Deal id required for update or move_stage.", false), strField("name", "Deal name required for create or update.", false), strField("pipeline_id", "Pipeline id required for create or update.", false),
+			strField("stage_id", "Destination stage id.", true), strField("company_id", "Optional company id.", false), strField("before_deal_id", "Optional neighbor placed after this deal.", false), strField("after_deal_id", "Optional neighbor placed before this deal.", false),
 			amount, strField("currency", "Three-letter currency code; defaults to USD.", false)), Risk: RiskWrite,
 		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
-			var args crmWriteArgs
+			var args struct {
+				crmWriteArgs
+				DealID       string `json:"deal_id"`
+				BeforeDealID string `json:"before_deal_id"`
+				AfterDealID  string `json:"after_deal_id"`
+			}
 			if bad := decodeArgs(raw, &args); bad != nil {
 				return *bad, nil
+			}
+			if args.Method == "move_stage" {
+				dealID, bad := parseID("deal_id", args.DealID)
+				if bad != nil {
+					return *bad, nil
+				}
+				stageID, bad := parseID("stage_id", args.StageID)
+				if bad != nil {
+					return *bad, nil
+				}
+				beforeID, bad := optionalID("before_deal_id", args.BeforeDealID)
+				if bad != nil {
+					return *bad, nil
+				}
+				afterID, bad := optionalID("after_deal_id", args.AfterDealID)
+				if bad != nil {
+					return *bad, nil
+				}
+				item, err := svc.MoveDeal(ctx, p.WorkspaceID, CRMDealMoveInput{DealID: dealID, StageID: stageID, BeforeDealID: beforeID, AfterDealID: afterID, Actor: crmActor(p)})
+				if err != nil {
+					return recoverableCRMError(errs, err)
+				}
+				return Ok(item), nil
+			}
+			if args.Method != "create" && args.Method != "update" {
+				return unknownMethod(args.Method, methods), nil
+			}
+			if strings.TrimSpace(args.Name) == "" {
+				return Fail("name is required for create or update; read the deal and call again with its full values"), nil
 			}
 			pipelineID, bad := parseID("pipeline_id", args.PipelineID)
 			if bad != nil {
@@ -228,9 +442,20 @@ func crmDealWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 				}
 				companyID = &id
 			}
-			item, err := svc.CreateDeal(ctx, p.WorkspaceID, CRMDealInput{Name: args.Name, PipelineID: pipelineID,
+			input := CRMDealInput{Name: args.Name, PipelineID: pipelineID,
 				StageID: stageID, CompanyID: companyID, AmountMicros: args.AmountMicros, Currency: args.Currency,
-				Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
+				Actor: crmActor(p)}
+			var item CRMDeal
+			var err error
+			if args.Method == "create" {
+				item, err = svc.CreateDeal(ctx, p.WorkspaceID, input)
+			} else {
+				dealID, invalid := parseID("deal_id", args.DealID)
+				if invalid != nil {
+					return *invalid, nil
+				}
+				item, err = svc.UpdateDeal(ctx, p.WorkspaceID, dealID, input)
+			}
 			if err != nil {
 				return recoverableCRMError(errs, err)
 			}
@@ -238,17 +463,28 @@ func crmDealWriteTool(svc CRMService, errs ErrorClassifier) Tool {
 		}}
 }
 
+func optionalID(name, raw string) (*uuid.UUID, *Result) {
+	if raw == "" {
+		return nil, nil
+	}
+	id, bad := parseID(name, raw)
+	if bad != nil {
+		return nil, bad
+	}
+	return &id, nil
+}
+
 func crmNoteWriteTool(svc CRMIntegrationService, errs ErrorClassifier) Tool {
 	return crmTargetWriteTool("inroad_note_write", "Create a note attached to a contact, company, or deal.", "body", errs, func(ctx context.Context, p Principal, title, body string, target CRMTarget) error {
 		return svc.CreateNote(ctx, p.WorkspaceID, CRMNoteInput{Title: title, Body: body, Target: target,
-			Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
+			Actor: crmActor(p)})
 	})
 }
 
 func crmTaskWriteTool(svc CRMIntegrationService, errs ErrorClassifier) Tool {
 	return crmTargetWriteTool("inroad_task_write", "Create a follow-up task attached to a contact, company, or deal.", "title", errs, func(ctx context.Context, p Principal, title, body string, target CRMTarget) error {
 		return svc.CreateTask(ctx, p.WorkspaceID, CRMTaskInput{Title: title, Body: body, Target: target,
-			Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
+			Actor: crmActor(p)})
 	})
 }
 
@@ -309,87 +545,27 @@ func crmEventsReadTool(svc CRMIntegrationService) Tool {
 		}}
 }
 
-func crmReadTool(svc CRMService) Tool {
-	methods := []string{"companies", "pipelines", "deals"}
-	return Tool{Name: "inroad_crm_read", Description: "Read CRM companies, pipelines with stages, or deals in this workspace. Read pipelines before creating a deal so you can supply valid pipeline_id and stage_id values.", InputSchema: mustSchema(methodField("The CRM collection to read.", methods)), Risk: RiskRead, Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
-		var args struct {
-			baseArgs
-			Method string `json:"method"`
-		}
-		if bad := decodeArgs(raw, &args); bad != nil {
-			return *bad, nil
-		}
-		switch args.Method {
-		case "companies":
-			items, err := svc.ListCompanies(ctx, p.WorkspaceID)
-			if err != nil {
-				return Result{}, fmt.Errorf("list CRM companies: %w", err)
+func crmThreadReadTool(svc CRMIntegrationService) Tool {
+	return Tool{Name: "inroad_thread_read", Description: "Read structured CRM thread metadata for a deal. Returns participants and message metadata, never raw message bodies.",
+		InputSchema: mustSchema(strField("deal_id", "Deal id whose linked threads should be read.", true)), Risk: RiskRead,
+		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
+			var args struct {
+				baseArgs
+				DealID string `json:"deal_id"`
 			}
-			return Ok(items), nil
-		case "pipelines":
-			items, err := svc.ListPipelines(ctx, p.WorkspaceID)
-			if err != nil {
-				return Result{}, fmt.Errorf("list CRM pipelines: %w", err)
+			if bad := decodeArgs(raw, &args); bad != nil {
+				return *bad, nil
 			}
-			return Ok(items), nil
-		case "deals":
-			items, err := svc.ListDeals(ctx, p.WorkspaceID)
-			if err != nil {
-				return Result{}, fmt.Errorf("list CRM deals: %w", err)
-			}
-			return Ok(items), nil
-		default:
-			return unknownMethod(args.Method, methods), nil
-		}
-	}}
-}
-
-func crmWriteTool(svc CRMService, errs ErrorClassifier) Tool {
-	methods := []string{"create_company", "create_deal"}
-	amount := field{name: "amount_micros", schema: jsonObject{{"type", "integer"}, {"description", "Optional monetary amount in millionths of the currency unit; zero or greater."}, {"minimum", 0}}}
-	return Tool{Name: "inroad_crm_write", Description: "Create a CRM company or deal. For a deal, first call inroad_crm_read with method=pipelines and method=companies to obtain tenant-safe IDs.", InputSchema: mustSchema(methodField("The CRM mutation to perform.", methods), strField("name", "Company or deal name.", true), strField("domain", "Company hostname such as example.com. Only for create_company.", false), strField("pipeline_id", "Pipeline id from inroad_crm_read. Required for create_deal.", false), strField("stage_id", "Stage id belonging to pipeline_id. Required for create_deal.", false), strField("company_id", "Optional company id from inroad_crm_read.", false), amount, strField("currency", "Three-letter currency code; defaults to USD.", false)), Risk: RiskWrite, Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
-		var args crmWriteArgs
-		if bad := decodeArgs(raw, &args); bad != nil {
-			return *bad, nil
-		}
-		args.Name = strings.TrimSpace(args.Name)
-		if args.Name == "" {
-			return Fail("name is required; call again with the company or deal name"), nil
-		}
-		switch args.Method {
-		case "create_company":
-			item, err := svc.CreateCompany(ctx, p.WorkspaceID, CRMCompanyInput{Name: args.Name, Domain: args.Domain,
-				Currency: args.Currency, Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
-			if err != nil {
-				return recoverableCRMError(errs, err)
-			}
-			return Ok(item), nil
-		case "create_deal":
-			pipelineID, bad := parseID("pipeline_id", args.PipelineID)
+			id, bad := parseID("deal_id", args.DealID)
 			if bad != nil {
 				return *bad, nil
 			}
-			stageID, bad := parseID("stage_id", args.StageID)
-			if bad != nil {
-				return *bad, nil
-			}
-			var companyID *uuid.UUID
-			if args.CompanyID != "" {
-				id, bad := parseID("company_id", args.CompanyID)
-				if bad != nil {
-					return *bad, nil
-				}
-				companyID = &id
-			}
-			item, err := svc.CreateDeal(ctx, p.WorkspaceID, CRMDealInput{Name: args.Name, PipelineID: pipelineID, StageID: stageID, CompanyID: companyID, AmountMicros: args.AmountMicros, Currency: args.Currency, Actor: CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID}})
+			items, err := svc.ListDealThreads(ctx, p.WorkspaceID, id)
 			if err != nil {
-				return recoverableCRMError(errs, err)
+				return Result{}, fmt.Errorf("list structured CRM threads: %w", err)
 			}
-			return Ok(item), nil
-		default:
-			return unknownMethod(args.Method, methods), nil
-		}
-	}}
+			return Ok(items), nil
+		}}
 }
 
 // recoverableCRMError turns a domain write failure into either a model-visible

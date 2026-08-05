@@ -59,7 +59,15 @@ func (a runtimeTools) ExecuteApproved(ctx context.Context, actor agentchat.Actor
 }
 
 func (a runtimeTools) execute(ctx context.Context, actor agentchat.Actor, name string, input json.RawMessage) (agentrun.ToolResult, error) {
-	result, err := a.registry.Execute(ctx, toolPrincipal(actor), name, input)
+	principal := toolPrincipal(actor)
+	threadID, runID := agentrun.RunIDsFromContext(ctx)
+	if threadID != uuid.Nil {
+		principal.ThreadID = threadID.String()
+	}
+	if runID != uuid.Nil {
+		principal.RunID = runID.String()
+	}
+	result, err := a.registry.Execute(ctx, principal, name, input)
 	if err != nil {
 		return agentrun.ToolResult{}, err
 	}

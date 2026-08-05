@@ -293,17 +293,18 @@ func run() error {
 		}
 	}()
 	toolRegistry := agenttool.New(agenttool.Deps{
-		Campaigns:      campaignSvc,
-		Contacts:       contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
-		ContactWrites:  contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
-		ContactImports: contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
-		Mailboxes:      mailboxTools{service: mailboxSvc},
-		Deliverability: deliverabilityToolAdapter{deliverability: deliverabilitySvc, pulse: pulseSvc},
-		Lists:          listSvc,
-		ListWrites:     listSvc,
-		Warmup:         warmupTools{service: warmupSvc},
-		CRM:            crmTools{service: crmSvc},
-		CRMErrors:      crmErrors{},
+		Campaigns:       campaignSvc,
+		Contacts:        contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactWrites:   contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactImports:  contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		Mailboxes:       mailboxTools{service: mailboxSvc},
+		Deliverability:  deliverabilityToolAdapter{deliverability: deliverabilitySvc, pulse: pulseSvc},
+		Lists:           listSvc,
+		ListWrites:      listSvc,
+		Warmup:          warmupTools{service: warmupSvc},
+		CRM:             crmTools{service: crmSvc},
+		CRMErrors:       crmErrors{},
+		CRMWriteLimiter: redisLimiter,
 	})
 	modelResolver := agentchat.NewPgModelResolver(
 		queries, keyring, catalogSource, ai.NewStreamerFactory(cfg.AIAllowPrivateBaseURL),

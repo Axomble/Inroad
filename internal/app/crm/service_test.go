@@ -173,3 +173,23 @@ func TestCursorsAreOpaqueAndListScoped(t *testing.T) {
 		t.Fatalf("wrong key count = %v, want ErrValidation", err)
 	}
 }
+
+func TestCapturedCompanyDomainUsesRegistrableDomain(t *testing.T) {
+	tests := []struct {
+		name, sender, address, local, domain string
+		ok                                   bool
+	}{
+		{name: "subdomain and multi-label suffix", sender: "Alice <Alice@Sales.EU.Example.CO.UK>", address: "alice@sales.eu.example.co.uk", local: "alice", domain: "example.co.uk", ok: true},
+		{name: "ordinary domain", sender: "person@sub.example.com", address: "person@sub.example.com", local: "person", domain: "example.com", ok: true},
+		{name: "public suffix only", sender: "person@co.uk"},
+		{name: "invalid address", sender: "not-an-address"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			address, local, domain, ok := capturedCompanyDomain(tt.sender)
+			if address != tt.address || local != tt.local || domain != tt.domain || ok != tt.ok {
+				t.Fatalf("capturedCompanyDomain(%q) = %q, %q, %q, %v", tt.sender, address, local, domain, ok)
+			}
+		})
+	}
+}

@@ -1,5 +1,16 @@
 package agenttool
 
+import (
+	"context"
+	"time"
+)
+
+// RateLimiter is the shared atomic fixed-window limiter seam. Production uses
+// Redis, while tests can inject a deterministic fake.
+type RateLimiter interface {
+	Allow(context.Context, string, int, time.Duration) (bool, error)
+}
+
 // Deps carries the domain capabilities the tools call. Every field is one of
 // this package's own narrow interfaces (declared beside the tools that use
 // them), never a concrete domain service: the registry is unit-testable
@@ -25,5 +36,6 @@ type Deps struct {
 	CRM            CRMService
 	// CRMErrors classifies CRM write failures for the model. Nil means every
 	// failure aborts the run rather than being offered back as a retry prompt.
-	CRMErrors ErrorClassifier
+	CRMErrors       ErrorClassifier
+	CRMWriteLimiter RateLimiter
 }
