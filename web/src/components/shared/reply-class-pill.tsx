@@ -1,15 +1,13 @@
 import { cn } from '@/lib/utils'
-import type { CampaignEnrollment } from './api'
 
 /**
  * The reply classes the backend stores on an enrollment
- * (`sequence_enrollments.reply_class`), derived from the generated API type so
- * this stays in lockstep with the backend enum — add a class there and the
- * `classMeta`/`dotColor` maps below fail to compile until they cover it.
+ * (`sequence_enrollments.reply_class`). This is a closed, stable set defined
+ * authoritative in the backend (`internal/platform/replyclassify/classifier.go`).
  * `null`/absent means the contact hasn't replied (or the reply wasn't
  * classified) — the pill renders nothing then.
  */
-export type ReplyClass = NonNullable<CampaignEnrollment['reply_class']>
+export type ReplyClass = 'positive' | 'negative' | 'neutral' | 'out_of_office' | 'auto_reply' | 'unsubscribe' | 'unknown'
 
 /**
  * Per-class label + tone. The label is the primary signal so state stays

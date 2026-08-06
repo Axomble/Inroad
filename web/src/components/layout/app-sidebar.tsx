@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Building2, CircleCheckBig, CircleDollarSign, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
+import { Building2, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { PulseCard } from './pulse-card'
@@ -44,6 +44,7 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Overview', to: '/app', icon: LayoutDashboard },
       { label: 'Approvals', to: '/app/approvals', icon: CircleCheckBig },
+      { label: 'Inbox', to: '/app/inbox', icon: Inbox },
     ],
   },
   {

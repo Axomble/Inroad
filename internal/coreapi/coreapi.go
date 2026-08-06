@@ -43,6 +43,38 @@ type CRMReplyInput struct {
 	OccurredAt        time.Time
 }
 
+// InboxCaptureClient is an optional execution-plane capability, same reasoning
+// as CRMCaptureClient above: kept separate from Client so a worker fake that
+// doesn't care about inbox storage doesn't have to implement it.
+type InboxCaptureClient interface {
+	StoreInboundMessage(context.Context, InboxMessageInput) error
+}
+
+// InboxMessageInput is one inbound reply the poller matched (or a legacy
+// direct-send match with no enrollment). CampaignID/ContactID are *string,
+// not an empty-string sentinel: they mirror inbox.RecordReplyInput's
+// *uuid.UUID nilability at this string-typed seam, so "no match" is
+// unambiguous even though a matched id is never itself the empty string.
+type InboxMessageInput struct {
+	WorkspaceID string
+	MailboxID   string
+	CampaignID  *string // nil when the match has no campaign (legacy direct-send)
+	ContactID   *string // nil likewise
+	// RootMessageID is sends.message_id this thread anchors on; "" for a
+	// legacy match (RootMessageID has no pointer form: "" is itself the
+	// domain's documented legacy sentinel — see inbox's partial unique index).
+	RootMessageID string
+	Subject       string
+	MessageID     string
+	FromEmail     string
+	FromName      string
+	ToEmail       string
+	BodyText      string
+	BodyHTML      string
+	ReplyClass    string
+	OccurredAt    time.Time
+}
+
 type Client interface {
 	// MailboxExists reports whether a mailbox is present and active.
 	MailboxExists(ctx context.Context, id string) (bool, error)
@@ -543,11 +575,20 @@ type InboxPollJob struct {
 
 // SendRef identifies the send an inbound reply/bounce matched, and the
 // enrollment (if any) it belongs to. EnrollmentID is "" when the matched send
-// has no enrollment — the legacy direct-send path.
+// has no enrollment — the legacy direct-send path. MailboxID/CampaignID/
+// ContactID/MessageID are the send row's own columns (all NOT NULL on sends),
+// carried so the inbox poller can store the matched reply against the right
+// mailbox/campaign/contact and anchor the thread on the send's own outbound
+// Message-ID (MessageID — the reply's In-Reply-To/References target, i.e. the
+// thread's root_message_id) without a second lookup.
 type SendRef struct {
 	SendID       string
 	EnrollmentID string
 	ContactEmail string
+	MailboxID    string
+	CampaignID   string
+	ContactID    string
+	MessageID    string
 }
 
 // SendJob is everything the worker needs to send one email — including the

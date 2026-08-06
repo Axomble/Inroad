@@ -23,6 +23,7 @@ type Store interface {
 	SentToday(ctx context.Context, workspaceID uuid.UUID) (int64, error)
 	SenderCapacities(ctx context.Context, workspaceID uuid.UUID) ([]gen.ListPulseSenderCapacityRow, error)
 	DmarcAttention(ctx context.Context, workspaceID uuid.UUID) (gen.GetPulseDmarcAttentionRow, error)
+	InboxCounts(ctx context.Context, workspaceID uuid.UUID) (gen.GetInboxPulseCountsRow, error)
 }
 
 // PgStore implements Store by delegating to the sqlc-generated pulse queries;
@@ -59,4 +60,8 @@ func (s *PgStore) SenderCapacities(ctx context.Context, workspaceID uuid.UUID) (
 
 func (s *PgStore) DmarcAttention(ctx context.Context, workspaceID uuid.UUID) (gen.GetPulseDmarcAttentionRow, error) {
 	return s.q.GetPulseDmarcAttention(ctx, workspaceID)
+}
+
+func (s *PgStore) InboxCounts(ctx context.Context, workspaceID uuid.UUID) (gen.GetInboxPulseCountsRow, error) {
+	return s.q.GetInboxPulseCounts(ctx, workspaceID)
 }

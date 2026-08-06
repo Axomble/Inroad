@@ -21,6 +21,8 @@ const (
 	ScopeListsRead      = "lists:read"
 	ScopeListsWrite     = "lists:write"
 	ScopeCampaignsSend  = "campaigns:send"
+	ScopeInboxRead      = "inbox:read"
+	ScopeInboxWrite     = "inbox:write"
 	// ScopeDeliverabilityWrite authorizes POST /deliverability/events — an
 	// external pipeline (an SES SNS subscriber, a provider webhook) reporting a
 	// complaint or bounce. It is its own scope rather than campaigns:write
@@ -45,6 +47,8 @@ var AllScopes = []string{
 	ScopeListsRead,
 	ScopeListsWrite,
 	ScopeDeliverabilityWrite,
+	ScopeInboxRead,
+	ScopeInboxWrite,
 }
 
 // IsKnownScope reports whether scope is part of the server's vocabulary.
@@ -77,11 +81,22 @@ func IsKnownScope(scope string) bool {
 //     workspace-wide and can trip a campaign's circuit breaker. A third party that
 //     could forge complaints could suppress a workspace's contacts and stop its
 //     campaigns; that belongs to a workspace-minted key, not a delegated grant.
+//   - ScopeInboxRead — reply bodies are free-text correspondence content, a
+//     materially more sensitive category than the structured CRM/contact data this
+//     set already grants; reading a workspace's inbound mail is excluded even
+//     though reading its contacts is not.
+//
+// ScopeInboxWrite, by contrast, IS granted below: it authorizes only the boolean
+// unread/read toggle on a thread (PUT /inbox/threads/{id}/read). It exposes no
+// reply content and mutates no business data (no campaign, no contact, no send),
+// so by this file's own criteria it is no more dangerous than the other included
+// writes (contacts/lists) — nothing above justifies excluding it.
 //
 // Admin and API-key management are NOT scopes at all (they are session + admin-role
 // gated, never scope-gated — see RequireRole), so they are structurally unreachable
 // through any grant regardless of this list. What remains is read access plus the
-// two low-risk data-entry writes (contacts/lists) a legitimate integration needs.
+// low-risk writes (contacts, lists, and marking an inbox thread read) a legitimate
+// integration needs.
 var OAuthGrantableScopes = []string{
 	ScopeMailboxesRead,
 	ScopeCampaignsRead,
@@ -91,6 +106,7 @@ var OAuthGrantableScopes = []string{
 	ScopeCRMWrite,
 	ScopeListsRead,
 	ScopeListsWrite,
+	ScopeInboxWrite,
 }
 
 // IsOAuthGrantableScope reports whether scope may be granted to a third-party OAuth

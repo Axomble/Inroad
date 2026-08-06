@@ -177,6 +177,29 @@ func (s *stubCore) ListActiveMailboxes(context.Context) ([]coreapi.MailboxRef, e
 	return s.mailboxes, s.listErr
 }
 
+// fakeInboxCapture is a test double for coreapi.InboxCaptureClient: it records
+// every stored message for assertion, mirroring stubCore's recording
+// convention. Kept as its OWN type (not a stubCore method) so a test can drive
+// a core that does NOT implement InboxCaptureClient (plain *stubCore) to prove
+// the feature-detection type assertion in processMessage never panics.
+type fakeInboxCapture struct {
+	stored []coreapi.InboxMessageInput
+}
+
+func (f *fakeInboxCapture) StoreInboundMessage(_ context.Context, in coreapi.InboxMessageInput) error {
+	f.stored = append(f.stored, in)
+	return nil
+}
+
+// coreWithInboxCapture composes a *stubCore with a *fakeInboxCapture so the
+// resulting value satisfies BOTH coreapi.Client (promoted from stubCore) and
+// coreapi.InboxCaptureClient (promoted from fakeInboxCapture) — mirroring how
+// the real inprocess client implements both interfaces on one concrete type.
+type coreWithInboxCapture struct {
+	*stubCore
+	*fakeInboxCapture
+}
+
 func pollTask(t *testing.T) *asynq.Task {
 	t.Helper()
 	b, err := json.Marshal(queue.InboxPollPayload{MailboxID: "mb1", WorkspaceID: "ws1"})
@@ -851,5 +874,110 @@ func TestPollM365PropagatesFetchError(t *testing.T) {
 	}
 	if core.cursorStringSet {
 		t.Fatal("a failed graph Fetch must not persist a cursor")
+	}
+}
+
+// TestPollPositiveReplyIsAlsoStoredInTheInbox proves a matched reply is stored
+// via coreapi.InboxCaptureClient (not just tagged/CRM-captured) — same fixture
+// as TestPollPositiveReplyMarksRepliedPositive, wrapped with a
+// coreWithInboxCapture so the core also satisfies InboxCaptureClient.
+func TestPollPositiveReplyIsAlsoStoredInTheInbox(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {
+			SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io",
+			MailboxID: "mb1", CampaignID: "camp1", ContactID: "contact1", MessageID: "<root@x>",
+		}},
+	}
+	capture := &fakeInboxCapture{}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Sounds great, let's chat this week.", "<root@x>"))},
+	}
+	if err := runPoll(t, coreWithInboxCapture{stubCore: core, fakeInboxCapture: capture}, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.stored) != 1 {
+		t.Fatalf("expected 1 stored message, got %d", len(capture.stored))
+	}
+	if capture.stored[0].ReplyClass != replyclassify.ClassPositive {
+		t.Fatalf("stored reply class = %q, want positive", capture.stored[0].ReplyClass)
+	}
+}
+
+// TestPollAutoReplyIsAlsoStoredInTheInbox proves inbox storage fires for EVERY
+// reply class, not just the ones that stop an enrollment: an out-of-office
+// message (same fixture as TestPollOutOfOfficeRecordsClassWithoutStopping,
+// which is tagged via RecordReplyClass but keeps the enrollment active) is
+// still stored.
+func TestPollAutoReplyIsAlsoStoredInTheInbox(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {
+			SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io",
+			MailboxID: "mb1", CampaignID: "camp1", ContactID: "contact1", MessageID: "<root@x>",
+		}},
+	}
+	capture := &fakeInboxCapture{}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Out of Office", "I am away until Monday.", "<root@x>"))},
+	}
+	if err := runPoll(t, coreWithInboxCapture{stubCore: core, fakeInboxCapture: capture}, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.stored) != 1 {
+		t.Fatalf("expected 1 stored message, got %d", len(capture.stored))
+	}
+	if capture.stored[0].ReplyClass != replyclassify.ClassOutOfOffice {
+		t.Fatalf("stored reply class = %q, want out_of_office", capture.stored[0].ReplyClass)
+	}
+}
+
+// TestPollUnmatchedMessageStoresNothing proves a message that never matched a
+// send (same fixture as TestPollNoMatchIsIgnoredButCursorAdvances) is never
+// reachable by the store call — there is no s (matched send) to build an
+// InboxMessageInput from.
+func TestPollUnmatchedMessageStoresNothing(t *testing.T) {
+	core := &stubCore{job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10}}
+	capture := &fakeInboxCapture{}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyFixture("<unknown@x>"))},
+	}
+	if err := runPoll(t, coreWithInboxCapture{stubCore: core, fakeInboxCapture: capture}, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.stored) != 0 {
+		t.Fatalf("expected nothing stored for an unmatched message, got %d", len(capture.stored))
+	}
+}
+
+// TestPollWithoutAnInboxCaptureClientStillClassifiesNormally proves the
+// feature-detection type assertion in processMessage never panics when core
+// does NOT implement coreapi.InboxCaptureClient (plain *stubCore, same as
+// every pre-existing test in this file) — same fixture and assertions as
+// TestPollPositiveReplyMarksRepliedPositive, which must still hold unchanged.
+func TestPollWithoutAnInboxCaptureClientStillClassifiesNormally(t *testing.T) {
+	core := &stubCore{
+		job:      coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		sendRefs: map[string]coreapi.SendRef{"<root@x>": {SendID: "s1", EnrollmentID: "e1", ContactEmail: "a@b.io"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, replyWith("Re: Hello", "Sounds great, let's chat this week.", "<root@x>"))},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.replied) != 1 || core.replied[0] != "e1" || core.repliedClass[0] != replyclassify.ClassPositive {
+		t.Fatalf("expected MarkReplied(e1, positive), got ids=%v classes=%v", core.replied, core.repliedClass)
+	}
+	if len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
+		t.Fatalf("a positive reply must only MarkReplied, got unsub=%v recorded=%v", core.unsubscribed, core.recorded)
+	}
+	if len(core.captured) != 1 || core.captured[0].SendID != "s1" ||
+		core.captured[0].EnrollmentID != "e1" || core.captured[0].ReplyClass != replyclassify.ClassPositive {
+		t.Fatalf("positive reply was not captured for CRM: %+v", core.captured)
 	}
 }

@@ -32,6 +32,7 @@ export default defineConfig({
 						{ label: 'CRM & Contact Management', slug: 'guides/crm-contacts' },
 						{ label: 'Deliverability & Circuit Breaker', slug: 'guides/deliverability' },
 						{ label: 'Offline Reply Classification', slug: 'guides/reply-classification' },
+						{ label: 'Unified Inbox', slug: 'guides/unified-inbox' },
 						{ label: 'Authentication & Tenant Security', slug: 'guides/auth-security' },
 					],
 				},

@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/platform/cursor"
+	"github.com/inroad/inroad/internal/platform/db"
 )
 
 // The keyset search SQL is assembled here rather than written out as sqlc
@@ -52,15 +53,6 @@ func scanDescending(s cursor.Sort, dir cursor.Direction) bool {
 	return descending(s)
 }
 
-// likeEscaper neutralises the LIKE metacharacters. A user typing "%" means the
-// literal character, not "match anything" — left unescaped it would turn a
-// keystroke into a pattern the trigram index cannot serve, which is a latency
-// footgun as much as a correctness one. Backslash is LIKE's default escape
-// character, so no ESCAPE clause is needed.
-var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-
-func escapeLike(s string) string { return likeEscaper.Replace(s) }
-
 // argList accumulates positional placeholders so a clause never has to know
 // which $n it is.
 type argList struct{ args []any }
@@ -77,7 +69,7 @@ func (f SearchFilter) where(ws uuid.UUID, a *argList) []string {
 	if f.Query != "" {
 		// Substring match against the generated, already-lower-cased column;
 		// this is what idx_contacts_search serves.
-		conds = append(conds, "c.search_text LIKE '%' || "+a.add(escapeLike(f.Query))+" || '%'")
+		conds = append(conds, "c.search_text LIKE '%' || "+a.add(db.EscapeLike(f.Query))+" || '%'")
 	}
 	if f.ListID != nil {
 		// A semi-join rather than a JOIN: EXISTS cannot duplicate a contact row

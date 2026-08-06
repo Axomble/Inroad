@@ -1,0 +1,88 @@
+-- name: UpsertInboxThread :one
+-- Lazy thread creation: the FIRST reply to a root_message_id creates the row;
+-- every later reply just bumps last_reply_class/last_message_at/unread. A
+-- legacy match (root_message_id = '') never conflicts (see the partial
+-- unique index) and always inserts a fresh row.
+INSERT INTO inbox_threads (workspace_id, mailbox_id, campaign_id, contact_id, root_message_id, subject, last_reply_class, last_message_at)
+VALUES (@workspace_id, @mailbox_id, sqlc.narg('campaign_id')::uuid, sqlc.narg('contact_id')::uuid, @root_message_id, @subject, @last_reply_class, now())
+ON CONFLICT (workspace_id, mailbox_id, root_message_id) WHERE root_message_id <> ''
+DO UPDATE SET last_reply_class = @last_reply_class, last_message_at = now(), unread = true
+RETURNING *;
+
+-- name: InsertInboxMessage :exec
+-- The conflict target names the partial unique index's columns + predicate
+-- directly (index inference) rather than `ON CONFLICT ON CONSTRAINT`: a
+-- CREATE UNIQUE INDEX ... WHERE ... is an index, not a named constraint (a
+-- table constraint cannot carry a WHERE clause), so ON CONSTRAINT cannot
+-- target it — Postgres rejects that with "constraint ... does not exist".
+INSERT INTO inbox_messages (thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
+VALUES (@thread_id, @workspace_id, @direction, @message_id, @from_email, @from_name, @to_email, @subject, @body_text, @body_html, @reply_class, @occurred_at)
+ON CONFLICT (workspace_id, message_id) WHERE message_id <> '' DO NOTHING;
+
+-- name: ListInboxThreads :many
+-- Keyset on (last_message_at, id) DESC, newest first. sqlc.narg fields are
+-- optional filters, omitted (NULL) when the caller doesn't set them.
+-- contact_* columns come from a LEFT JOIN: a thread with no contact_id (a
+-- legacy direct-send match) has nothing to join on and reports an empty
+-- string via COALESCE, never NULL — the same "absent is empty string"
+-- convention inbox_messages' own text columns already use. The query
+-- parameter substring-matches (case-insensitive) the thread's subject OR the
+-- joined contact's email; the caller escapes LIKE metacharacters before this
+-- reaches Postgres (see db.EscapeLike in platform/db) so a literal % or _ typed
+-- by a user is never treated as a wildcard.
+SELECT t.*,
+       COALESCE(c.email, '') AS contact_email,
+       COALESCE(c.first_name, '') AS contact_first_name,
+       COALESCE(c.last_name, '') AS contact_last_name
+FROM inbox_threads t
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE t.workspace_id = @workspace_id
+  AND (sqlc.narg('mailbox_id')::uuid IS NULL OR t.mailbox_id = sqlc.narg('mailbox_id'))
+  AND (sqlc.narg('reply_class')::text IS NULL OR t.last_reply_class = sqlc.narg('reply_class'))
+  AND (sqlc.narg('before_last_message_at')::timestamptz IS NULL
+       OR (t.last_message_at, t.id) < (sqlc.narg('before_last_message_at')::timestamptz, sqlc.narg('before_id')::uuid))
+  AND (sqlc.narg('query')::text IS NULL
+       OR t.subject ILIKE '%' || sqlc.narg('query')::text || '%'
+       OR c.email ILIKE '%' || sqlc.narg('query')::text || '%')
+ORDER BY t.last_message_at DESC, t.id DESC
+LIMIT @page_limit;
+
+-- name: GetInboxThread :one
+-- contact_* columns follow ListInboxThreads' LEFT JOIN convention above.
+SELECT t.*,
+       COALESCE(c.email, '') AS contact_email,
+       COALESCE(c.first_name, '') AS contact_first_name,
+       COALESCE(c.last_name, '') AS contact_last_name
+FROM inbox_threads t
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE t.id = @id AND t.workspace_id = @workspace_id;
+
+-- name: ListInboxMessagesByThread :many
+SELECT * FROM inbox_messages WHERE thread_id = @thread_id AND workspace_id = @workspace_id ORDER BY occurred_at;
+
+-- name: SetInboxThreadUnread :execrows
+-- :execrows (not :exec) so the store can tell "matched and updated" apart
+-- from "zero rows matched" (an unknown or cross-workspace id) and map the
+-- latter to ErrNotFound, rather than silently reporting success.
+UPDATE inbox_threads SET unread = @unread WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: ListSentOutboundStepsForThread :many
+-- The outbound leg of a thread (design spec: "Data model" — the original
+-- sent message + any follow-up steps already sent), synthesized at READ time
+-- by joining sends to the step that sent it (by campaign_id + step_order),
+-- never duplicated into inbox_messages since the send content already lives
+-- in sequence_steps. Only steps that actually went out are returned
+-- (sent_at IS NOT NULL) — a queued/failed/skipped step never happened and
+-- must not appear in a reply thread. from_email/from_name come from the
+-- sending mailbox; a LEFT JOIN (COALESCE to '') rather than an INNER JOIN
+-- purely as defense in depth — sends.mailbox_id is NOT NULL and FK's
+-- ON DELETE CASCADE to mailboxes, so in practice the row always exists.
+SELECT s.step_order, s.to_email, s.message_id, s.sent_at, s.created_at,
+       st.subject AS step_subject, st.body_text AS step_body_text, st.body_html AS step_body_html,
+       COALESCE(m.email, '') AS from_email, COALESCE(m.display_name, '') AS from_name
+FROM sends s
+JOIN sequence_steps st ON st.campaign_id = s.campaign_id AND st.step_order = s.step_order AND st.workspace_id = s.workspace_id
+LEFT JOIN mailboxes m ON m.id = s.mailbox_id AND m.workspace_id = s.workspace_id
+WHERE s.workspace_id = @workspace_id AND s.campaign_id = @campaign_id AND s.contact_id = @contact_id
+  AND s.sent_at IS NOT NULL
+ORDER BY s.step_order;

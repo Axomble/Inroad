@@ -49,6 +49,29 @@ func (q *Queries) CountPulseSentToday(ctx context.Context, workspaceID uuid.UUID
 	return sent_today, err
 }
 
+const getInboxPulseCounts = `-- name: GetInboxPulseCounts :one
+SELECT COUNT(*) FILTER (WHERE unread)::bigint AS unread,
+       COUNT(*) FILTER (WHERE unread AND last_reply_class = 'positive')::bigint AS interested
+FROM inbox_threads
+WHERE workspace_id = $1
+`
+
+type GetInboxPulseCountsRow struct {
+	Unread     int64 `json:"unread"`
+	Interested int64 `json:"interested"`
+}
+
+// Unread counts every unread thread; Interested narrows that to the ones
+// whose last reply classified positive. Both predicates are index-backed
+// (idx_inbox_threads_workspace_unread, idx_inbox_threads_workspace_unread_positive)
+// so this stays O(1) relative to workspace scale like every other pulse read.
+func (q *Queries) GetInboxPulseCounts(ctx context.Context, workspaceID uuid.UUID) (GetInboxPulseCountsRow, error) {
+	row := q.db.QueryRow(ctx, getInboxPulseCounts, workspaceID)
+	var i GetInboxPulseCountsRow
+	err := row.Scan(&i.Unread, &i.Interested)
+	return i, err
+}
+
 const getPulseCampaignCounts = `-- name: GetPulseCampaignCounts :one
 SELECT COUNT(*)::bigint                                    AS total,
        COUNT(*) FILTER (WHERE status = 'running')::bigint  AS running,

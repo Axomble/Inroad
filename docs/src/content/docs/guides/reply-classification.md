@@ -11,7 +11,7 @@ Inroad features a **Pure Offline 3-Layer Reply Classifier** (`internal/platform/
 
 ## The 3-Layer Classification Pipeline
 
-Every incoming reply fetched by the inbox poller worker passes sequentially through three deterministic classification layers.
+Every incoming reply fetched by the inbox poller worker passes sequentially through three deterministic classification layers to resolve one of seven `reply_class` values: `positive`, `negative`, `neutral`, `auto_reply`, `out_of_office`, `unsubscribe`, or `unknown`. Classification only decides *automation* behavior — compliance suppression, OOO deferral — never whether the message survives. Every matched reply, whatever class it resolves to, is durably stored and surfaces workspace-wide in the [Unified Inbox](/guides/unified-inbox/), not just the ones flagged as positive.
 
 ```mermaid
 graph TD

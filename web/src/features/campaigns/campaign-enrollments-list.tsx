@@ -3,7 +3,7 @@ import { EmptyBlock, SectionBar } from '@/components/layout/page'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { httpStatus } from '@/lib/rtk-error'
-import { ReplyClassPill } from './reply-class-pill'
+import { ReplyClassPill } from '@/components/shared/reply-class-pill'
 import { useListCampaignEnrollmentsQuery, type CampaignEnrollment } from './api'
 
 /**

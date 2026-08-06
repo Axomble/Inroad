@@ -24,6 +24,7 @@ type fakeStore struct {
 	sent     int64
 	caps     []gen.ListPulseSenderCapacityRow
 	dmarc    gen.GetPulseDmarcAttentionRow
+	inbox    gen.GetInboxPulseCountsRow
 	err      error
 }
 
@@ -45,6 +46,9 @@ func (f *fakeStore) SenderCapacities(context.Context, uuid.UUID) ([]gen.ListPuls
 }
 func (f *fakeStore) DmarcAttention(context.Context, uuid.UUID) (gen.GetPulseDmarcAttentionRow, error) {
 	return f.dmarc, f.err
+}
+func (f *fakeStore) InboxCounts(context.Context, uuid.UUID) (gen.GetInboxPulseCountsRow, error) {
+	return f.inbox, f.err
 }
 
 // testNow is the pinned clock every test's service runs on, so ramp-age
@@ -103,6 +107,7 @@ func TestAggregatesMapThrough(t *testing.T) {
 		contacts: 1243,
 		sent:     247,
 		caps:     []gen.ListPulseSenderCapacityRow{capRow(600, false, "", 40)},
+		inbox:    gen.GetInboxPulseCountsRow{Unread: 5, Interested: 2},
 	})
 	p, err := svc.Get(context.Background(), uuid.New())
 	if err != nil {
@@ -123,8 +128,8 @@ func TestAggregatesMapThrough(t *testing.T) {
 	if p.Sending != (SendingStatus{SentToday: 247, DailyCap: 600}) {
 		t.Errorf("sending = %+v", p.Sending)
 	}
-	if p.Inbox != (InboxCounts{}) {
-		t.Errorf("inbox must be literal zeros until the read-model ships: %+v", p.Inbox)
+	if p.Inbox != (InboxCounts{Unread: 5, Interested: 2}) {
+		t.Errorf("inbox = %+v, want the store row mapped through untouched", p.Inbox)
 	}
 }
 

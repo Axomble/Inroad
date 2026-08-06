@@ -84,6 +84,10 @@ func (s *Service) Get(ctx context.Context, workspaceID uuid.UUID) (Pulse, error)
 	if err != nil {
 		return Pulse{}, fmt.Errorf("pulse: dmarc attention: %w", err)
 	}
+	inbox, err := s.store.InboxCounts(ctx, workspaceID)
+	if err != nil {
+		return Pulse{}, fmt.Errorf("pulse: inbox counts: %w", err)
+	}
 
 	capToday := s.capacityOf(caps)
 	return Pulse{
@@ -92,7 +96,7 @@ func (s *Service) Get(ctx context.Context, workspaceID uuid.UUID) (Pulse, error)
 		Campaigns: CampaignCounts{Total: cam.Total, Running: cam.Running, Draft: cam.Draft, Paused: cam.Paused},
 		Contacts:  ContactCounts{Total: contacts},
 		Sending:   SendingStatus{SentToday: sentToday, DailyCap: capToday.dailyCap},
-		Inbox:     InboxCounts{}, // literal zeros until the inbox read-model ships
+		Inbox:     InboxCounts{Unread: inbox.Unread, Interested: inbox.Interested},
 		Attention: attention(mb, capToday, dmarc, sentToday),
 	}, nil
 }
