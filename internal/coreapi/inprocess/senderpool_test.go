@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/rotation"
 )
 
@@ -87,5 +88,108 @@ func TestEligibleCandidatesEmptyPoolIsNoEligibleSender(t *testing.T) {
 	}
 	if _, err := rotation.Select(rotation.ModeWeighted, got); err == nil {
 		t.Error("an empty eligible set must not yield a selection")
+	}
+}
+
+// withTransport tags a pool row with the mailbox transport fields ESP matching
+// classifies on. Both are needed: provider selects the code path, and for
+// provider='smtp' the host is the only evidence of who really handles the mail.
+func withTransport(r gen.ListCampaignSenderCandidatesRow, provider, host string) gen.ListCampaignSenderCandidatesRow {
+	r.Provider, r.SmtpHost = provider, host
+	return r
+}
+
+// espPool builds a two-member pool in which the SECOND member wins under every
+// rotation mode: more weight and capacity (weighted), never assigned
+// (round_robin), and never used (LRU). Each test then makes the FIRST member the
+// ESP match, so a passing assertion can only mean the partition ran — no
+// scoring tweak could have produced it.
+func espPool() (google, other gen.ListCampaignSenderCandidatesRow) {
+	g := withTransport(candidateRow(uuid.MustParse("00000000-0000-0000-0000-0000000000a1"),
+		1, true, mailboxStatusActive, 10, 0), "smtp", "smtp.gmail.com")
+	g.AssignedCount = 99
+	g.LastAssignedAt = pgtype.Timestamptz{Time: mailboxBirthday.Add(24 * time.Hour), Valid: true}
+
+	o := withTransport(candidateRow(uuid.MustParse("00000000-0000-0000-0000-0000000000b2"),
+		100, true, mailboxStatusActive, 1000, 0), "smtp", "mail.acme.test")
+	return g, o
+}
+
+// The load-bearing property of partitioning over scoring: narrowing the set
+// before rotation.Select behaves identically under ALL THREE modes. A score
+// multiplier on rotation.Candidate would have been silently inert under
+// round_robin and least_recently_used, whose comparisons never read the score.
+func TestPartitionByESPWinsUnderEveryRotationMode(t *testing.T) {
+	g, o := espPool()
+	rows := []gen.ListCampaignSenderCandidatesRow{g, o}
+	eligible := eligibleCandidates(rows)
+	if len(eligible) != 2 {
+		t.Fatalf("eligible = %d rows, want both", len(eligible))
+	}
+	for _, mode := range []string{rotation.ModeWeighted, rotation.ModeRoundRobin, rotation.ModeLRU} {
+		t.Run(mode, func(t *testing.T) {
+			// Unmatched: the fixture's second member wins in every mode.
+			unmatched, err := rotation.Select(mode, eligible)
+			if err != nil {
+				t.Fatalf("Select: %v", err)
+			}
+			if unmatched.MailboxID != o.MailboxID.String() {
+				t.Fatalf("baseline winner = %s, want the un-ESP-matched %s — fixture no longer proves anything",
+					unmatched.MailboxID, o.MailboxID)
+			}
+			matched, err := rotation.Select(mode, partitionByESP(rows, eligible, esp.Google))
+			if err != nil {
+				t.Fatalf("Select on the matched subset: %v", err)
+			}
+			if matched.MailboxID != g.MailboxID.String() {
+				t.Errorf("winner = %s, want the Google-matched %s", matched.MailboxID, g.MailboxID)
+			}
+		})
+	}
+}
+
+// Matching is an optimisation, never a gate: when nothing in the pool matches,
+// the full eligible set must reach rotation unchanged rather than deferring a
+// send an unmatched mailbox could deliver.
+func TestPartitionByESPFallsBackToTheFullPool(t *testing.T) {
+	g, o := espPool()
+	rows := []gen.ListCampaignSenderCandidatesRow{g, o}
+	eligible := eligibleCandidates(rows)
+
+	for _, tc := range []struct {
+		name string
+		want esp.ESP
+	}{
+		{"no mailbox is microsoft", esp.Microsoft},
+		{"an uncached recipient tells us nothing", esp.Unknown},
+		{"other is a bucket, not shared infrastructure", esp.Other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := partitionByESP(rows, eligible, tc.want)
+			if len(got) != len(eligible) {
+				t.Fatalf("subset = %d candidates, want the full pool of %d", len(got), len(eligible))
+			}
+			for i := range got {
+				if got[i].MailboxID != eligible[i].MailboxID {
+					t.Errorf("candidate %d = %s, want %s (order must be preserved)",
+						i, got[i].MailboxID, eligible[i].MailboxID)
+				}
+			}
+		})
+	}
+}
+
+// A cache miss must cost nothing. With one eligible member there is nothing to
+// choose between, so espMatched must return before it reaches the database —
+// which a zero-value client proves by panicking on a nil *gen.Queries if it does
+// not.
+func TestESPMatchSkipsTheLookupWhenThereIsNothingToChoose(t *testing.T) {
+	g, _ := espPool()
+	rows := []gen.ListCampaignSenderCandidatesRow{g}
+	eligible := eligibleCandidates(rows)
+
+	got := client{}.espMatched(t.Context(), uuid.New(), "someone@acme.test", rows, eligible)
+	if len(got) != 1 || got[0].MailboxID != g.MailboxID.String() {
+		t.Errorf("subset = %+v, want the single eligible member unchanged", got)
 	}
 }

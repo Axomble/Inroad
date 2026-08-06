@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/rotation"
 	"github.com/inroad/inroad/internal/platform/sendcap"
 )
@@ -75,6 +77,12 @@ func threadLostItsMailbox(currentStep int32, pinned pgtype.UUID) bool {
 //
 // A pool whose every member is disabled, inactive, health-paused or capped defers
 // instead (exhaustedPoolSender), and pins nothing.
+//
+// ESP matching narrows step 2's candidate set only. It CANNOT apply at step 1,
+// which keeps the thread's mailbox: a follow-up carries In-Reply-To/References
+// from the previous message, so a live thread is never re-routed no matter what
+// the recipient's ESP turns out to be. Matching is therefore a property of the
+// initial assignment and of nothing else.
 func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b gen.GetStepEnrollmentBundleRow) (resolvedSender, error) {
 	if b.EnrollmentMailboxID.Valid {
 		return c.withTodaysCapacity(ctx, ws, bundleSender(b))
@@ -93,7 +101,7 @@ func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b
 		if len(eligible) == 0 {
 			return c.exhaustedPoolSender(b, rows)
 		}
-		winner, serr := rotation.Select(b.RotationMode, eligible)
+		winner, serr := rotation.Select(b.RotationMode, c.espMatched(ctx, ws, b.ToEmail, rows, eligible))
 		if serr != nil {
 			return resolvedSender{}, serr
 		}
@@ -185,6 +193,91 @@ func eligibleCandidates(rows []gen.ListCampaignSenderCandidatesRow) []rotation.C
 		})
 	}
 	return out
+}
+
+// espMatched narrows the eligible set to the mailboxes that send through the
+// same provider as the recipient's domain, so a Google contact is assigned a
+// Google mailbox and a Microsoft contact a Microsoft one. It is a NARROWING, not
+// a re-ranking: rotation.Select is then called on the subset unchanged, so every
+// rotation mode behaves identically to before within it. Adding an ESP factor to
+// rotation.Candidate instead would have been silently inert under round_robin
+// and least_recently_used, whose comparisons never consult the score.
+//
+// The recipient's ESP is read from the cache ONLY. resolveSender already runs
+// three or four queries inside the send job, and a DNS lookup here would put a
+// network round trip on the hot path of every first send; a miss (or a read
+// error) therefore reads as unknown, which skips matching entirely and falls
+// back to the full pool. The cache is filled off the hot path by
+// worker/recipientesp.
+//
+// Skipped outright when the pool has one eligible member — there is nothing to
+// choose between, so the lookup would be a query spent to reach the same answer.
+func (c client) espMatched(ctx context.Context, ws uuid.UUID, toEmail string,
+	rows []gen.ListCampaignSenderCandidatesRow, eligible []rotation.Candidate,
+) []rotation.Candidate {
+	if len(eligible) < 2 {
+		return eligible
+	}
+	return partitionByESP(rows, eligible, c.recipientESP(ctx, ws, toEmail))
+}
+
+// recipientESP reads one domain's cached classification. Every failure — a
+// malformed address, a cache miss, a database error — is esp.Unknown, because
+// none of them is a reason to fail a send that would otherwise go out. A read
+// error is logged rather than swallowed, so a persistently broken cache is
+// visible instead of silently degrading every campaign to unmatched sending.
+func (c client) recipientESP(ctx context.Context, ws uuid.UUID, toEmail string) esp.ESP {
+	domain := esp.Domain(toEmail)
+	if domain == "" {
+		return esp.Unknown
+	}
+	stored, err := c.q.GetRecipientDomainESP(ctx, gen.GetRecipientDomainESPParams{
+		WorkspaceID: ws, Domain: domain,
+	})
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.WarnContext(ctx, "recipient_esp_lookup_failed", "domain", domain, "err", err)
+		}
+		return esp.Unknown
+	}
+	if !esp.Valid(stored) {
+		return esp.Unknown
+	}
+	return esp.ESP(stored)
+}
+
+// partitionByESP keeps the eligible candidates whose mailbox sends through want,
+// or returns the whole set when that would select nothing. Pure, and order
+// preserving — the input is ordered by mailbox_id, which is rotation's tie-break,
+// so the subset stays deterministic.
+//
+// Falling back on an empty subset is the rule that makes this safe to enable
+// unconditionally: a matched pool that is exhausted for today must not defer a
+// send that an unmatched mailbox could deliver. Matching is an optimisation and
+// never a gate.
+//
+// Unknown and Other never match (esp.Matchable). Unknown has no information;
+// Other is a catch-all bucket rather than shared infrastructure, so pairing an
+// "other" recipient with an "other" sender would be a coincidence presented as a
+// decision.
+func partitionByESP(rows []gen.ListCampaignSenderCandidatesRow, eligible []rotation.Candidate, want esp.ESP) []rotation.Candidate {
+	if !want.Matchable() {
+		return eligible
+	}
+	matching := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		matching[r.MailboxID.String()] = esp.FromMailbox(r.Provider, r.SmtpHost) == want
+	}
+	matched := make([]rotation.Candidate, 0, len(eligible))
+	for _, cand := range eligible {
+		if matching[cand.MailboxID] {
+			matched = append(matched, cand)
+		}
+	}
+	if len(matched) == 0 {
+		return eligible
+	}
+	return matched
 }
 
 // availableToday is how much cold volume this pool row may still send today: its

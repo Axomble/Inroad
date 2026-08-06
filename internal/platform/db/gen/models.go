@@ -717,6 +717,16 @@ type PipelineStage struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type RecipientDomain struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Domain      string             `json:"domain"`
+	Esp         string             `json:"esp"`
+	MxHost      string             `json:"mx_host"`
+	CheckedAt   pgtype.Timestamptz `json:"checked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type ReplyLabel struct {
 	ID                uuid.UUID          `json:"id"`
 	WorkspaceID       uuid.UUID          `json:"workspace_id"`

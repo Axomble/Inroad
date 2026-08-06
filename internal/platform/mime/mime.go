@@ -33,6 +33,11 @@ const maxRecursionDepth = 8
 func Extract(contentType string, body []byte) (plainText, html string, err error) {
 	mediaType, params, parseErr := mime.ParseMediaType(contentType)
 	if parseErr != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		// A Content-Type this package cannot parse is not a failure, it is a
+		// single-part body. Propagating parseErr would drop a real reply from a
+		// client that sent an odd header, which is strictly worse than treating
+		// the bytes as plain text. See the doc comment above.
+		//nolint:nilerr // documented fallback: unparseable MIME is not an error
 		return string(body), "", nil
 	}
 	boundary := params["boundary"]

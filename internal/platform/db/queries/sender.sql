@@ -84,7 +84,14 @@ SELECT COALESCE((SELECT CASE WHEN wp.enabled THEN wp.health_state ELSE '' END
 -- sent_today repeats CountSentToday's UTC-day half-open range verbatim so a
 -- mailbox's cap means the same thing here as on the single-mailbox path, and so
 -- the idx_sends_mailbox_sent partial index can range-seek per candidate.
+--
+-- provider and smtp_host travel for ESP matching, and BOTH are needed: provider
+-- is a transport tag (smtp|gmail|m365) that selects a code path, not an ESP — a
+-- Google Workspace mailbox connected by app password is provider='smtp' — so the
+-- host is the only evidence for that case. No secrets are projected; smtp_host
+-- is a public endpoint name.
 SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned_at,
+       m.provider, m.smtp_host,
        m.status AS mailbox_status, m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
