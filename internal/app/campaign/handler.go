@@ -352,6 +352,8 @@ func (h *Handler) testSend(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrStepNotFound):
 		httpx.Error(w, http.StatusNotFound, "step not found")
+	case errors.Is(err, ErrRecipientSuppressed):
+		httpx.Error(w, http.StatusUnprocessableEntity, "recipient_suppressed")
 	case errors.Is(err, ErrNoEligibleSender):
 		httpx.Error(w, http.StatusUnprocessableEntity, "no enabled sender with an active mailbox")
 	case errors.Is(err, ErrTestSendRateLimited):

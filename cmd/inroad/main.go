@@ -280,6 +280,11 @@ func run() error {
 	sendingdomainSvc := sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver())
 	// checker adapts the mailbox and list stores for campaign ownership checks.
 	campaignStore := campaign.NewPgStore(pool)
+	// Built here (not inline at its mount below) because campaign test-send's
+	// suppression check also reads it, through campaign.SuppressionChecker --
+	// suppStore satisfies that interface structurally, so no adapter type is
+	// needed (unlike domainAuthAdapter, whose source returns a different shape).
+	suppStore := suppression.NewStore(queries)
 	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc},
 		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
 		// Test-send (POST /campaigns/{id}/test-send) only ENQUEUES a
@@ -292,6 +297,12 @@ func run() error {
 		// Reuses the same Redis-backed limiter the auth throttles use, so the
 		// 5/min test-send cap holds across every API server instance.
 		campaign.WithRateLimiter(redisLimiter),
+		// A test-send must never reach an address the workspace has explicitly
+		// unsubscribed or bounced -- the SAME suppression table a real send
+		// checks. internal/worker/testsend re-checks independently before
+		// dialing (defense in depth against a race with an incoming
+		// unsubscribe between enqueue and the task running).
+		campaign.WithSuppressionChecker(suppStore),
 	)
 	// Sequence steps live under /campaigns/{id}/steps; the step service checks
 	// campaign status (draft-gating) via an adapter over the campaign store.
@@ -305,7 +316,6 @@ func run() error {
 	deliverabilityHandler := deliverability.NewHandler(
 		deliverability.NewService(deliverability.NewPgStore(pool)),
 	)
-	suppStore := suppression.NewStore(queries)
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
 	// Deny-by-default routing. Two groups:

@@ -72,3 +72,17 @@ func (c client) GetTestSendContent(ctx context.Context, workspaceID, campaignID,
 		FirstName: firstName, Company: company,
 	}, nil
 }
+
+// IsSuppressed reports whether `to` is on workspaceID's suppression list --
+// the SAME (workspace_id, lower(email))-indexed lookup GetSendJob and
+// GetStepSendJob use for a real send. Consumed through the narrow
+// testsend.Core interface (defense-in-depth re-check right before the
+// testsend:send task dials, since the control-plane check in
+// campaign.Service.TestSend can race an incoming unsubscribe).
+func (c client) IsSuppressed(ctx context.Context, workspaceID, to string) (bool, error) {
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return false, err
+	}
+	return c.q.IsSuppressed(ctx, gen.IsSuppressedParams{WorkspaceID: ws, Lower: to})
+}

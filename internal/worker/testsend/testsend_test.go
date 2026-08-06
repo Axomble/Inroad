@@ -21,9 +21,15 @@ type stubCore struct {
 	contentErr   error
 	transport    coreapi.SenderTransport
 	transportErr error
+	// suppressed/suppressedErr back IsSuppressed; suppressed defaults to
+	// false (not suppressed) so every existing test -- which never sets it --
+	// keeps exercising the full send path unchanged.
+	suppressed    bool
+	suppressedErr error
 
-	contentCalls   [][3]string // {workspaceID, campaignID, stepID}
-	transportCalls [][2]string // {workspaceID, mailboxID}
+	contentCalls    [][3]string // {workspaceID, campaignID, stepID}
+	transportCalls  [][2]string // {workspaceID, mailboxID}
+	suppressedCalls [][2]string // {workspaceID, to}
 }
 
 func (s *stubCore) GetTestSendContent(_ context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error) {
@@ -34,6 +40,11 @@ func (s *stubCore) GetTestSendContent(_ context.Context, workspaceID, campaignID
 func (s *stubCore) ResolveSenderTransport(_ context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error) {
 	s.transportCalls = append(s.transportCalls, [2]string{workspaceID, mailboxID})
 	return s.transport, s.transportErr
+}
+
+func (s *stubCore) IsSuppressed(_ context.Context, workspaceID, to string) (bool, error) {
+	s.suppressedCalls = append(s.suppressedCalls, [2]string{workspaceID, to})
+	return s.suppressed, s.suppressedErr
 }
 
 // stubMailer is the mocked mail sender seam: it never dials out, it just
@@ -265,5 +276,75 @@ func TestHandlerRejectsMalformedPayload(t *testing.T) {
 	task := asynq.NewTask(queue.TaskTestSend, []byte("not json"))
 	if err := Handler(&stubCore{}, &stubMailer{})(context.Background(), task); err == nil {
 		t.Fatal("err = nil, want an error for a malformed payload")
+	}
+}
+
+// --- Defense-in-depth suppression re-check ----------------------------------
+//
+// docs/security.md: a test-send must never reach an address the workspace has
+// unsubscribed or bounced. The API-side check in campaign.Service.TestSend is
+// primary; these tests cover the worker's OWN re-check, which exists because
+// that API check can race an incoming unsubscribe between enqueue and this
+// task running.
+
+// TestHandlerSkipsASuppressedRecipientWithoutSending is the headline: a
+// suppressed `to` must short-circuit BEFORE any content is loaded, any
+// credential decrypted, or the mailer invoked -- and it must not be reported
+// as a task failure (no retry storm on an intentional skip).
+func TestHandlerSkipsASuppressedRecipientWithoutSending(t *testing.T) {
+	core := &stubCore{
+		suppressed: true,
+		content:    coreapi.TestSendContent{Subject: "Hi", FirstName: "Alex", Company: "Acme"},
+		transport:  coreapi.SenderTransport{Provider: "smtp"},
+	}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v, want nil (a suppressed recipient is skipped, not failed)", err)
+	}
+	if mailer.calls != 0 {
+		t.Error("a suppressed recipient must not be sent to")
+	}
+	if len(core.contentCalls) != 0 {
+		t.Error("a suppressed recipient must not load test-send content")
+	}
+	if len(core.transportCalls) != 0 {
+		t.Error("a suppressed recipient must not resolve (decrypt) a sender transport")
+	}
+	if len(core.suppressedCalls) != 1 || core.suppressedCalls[0] != [2]string{"ws-1", "preview@example.com"} {
+		t.Errorf("suppression check calls = %+v, want [{ws-1 preview@example.com}]", core.suppressedCalls)
+	}
+}
+
+// An unsuppressed recipient is unaffected: the full send path still runs.
+func TestHandlerStillSendsToAnUnsuppressedRecipient(t *testing.T) {
+	core := &stubCore{
+		suppressed: false,
+		content:    coreapi.TestSendContent{Subject: "Hi", FirstName: "Alex", Company: "Acme"},
+		transport:  coreapi.SenderTransport{Provider: "smtp"},
+	}
+	mailer := &stubMailer{}
+
+	if err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload())); err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+	if mailer.calls != 1 {
+		t.Errorf("mailer calls = %d, want 1", mailer.calls)
+	}
+}
+
+// A suppression-check failure (e.g. the DB is down) must fail the task rather
+// than silently treat it as "not suppressed" and send anyway.
+func TestHandlerPropagatesTheSuppressionCheckError(t *testing.T) {
+	boom := errors.New("db unavailable")
+	core := &stubCore{suppressedErr: boom}
+	mailer := &stubMailer{}
+
+	err := Handler(core, mailer)(context.Background(), testSendTask(t, defaultPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated suppression-check error", err)
+	}
+	if mailer.calls != 0 {
+		t.Error("a suppression-check failure must not send anything")
 	}
 }

@@ -16,7 +16,24 @@ var (
 	ErrStepNotFound        = errors.New("sequence step not found")
 	ErrNoEligibleSender    = errors.New("no enabled sender with an active mailbox")
 	ErrTestSendRateLimited = errors.New("too many test sends; try again shortly")
+	// ErrRecipientSuppressed is returned when the requested `to` address is on
+	// the workspace's suppression list (unsubscribed or bounced): a test-send
+	// must never bypass the same suppression check a real send honors
+	// (docs/security.md).
+	ErrRecipientSuppressed = errors.New("recipient is on the workspace's suppression list")
 )
+
+// SuppressionChecker reports whether an address is on the workspace's
+// suppression list. Suppression is owned by the suppression app domain;
+// app/* packages never import each other (CLAUDE.md), so this narrow,
+// consumer-defined interface is satisfied at wiring time in cmd/inroad by
+// suppression.Store -- the same shape as DomainAuthReader.
+type SuppressionChecker interface {
+	// IsSuppressed reports whether email is on ws's suppression list
+	// (case-insensitive lookup, backed by the (workspace_id, lower(email))
+	// index).
+	IsSuppressed(ctx context.Context, ws uuid.UUID, email string) (bool, error)
+}
 
 // testSendRateLimit / testSendRateLimitWindow bound test-send: 5 per
 // workspace per minute. Reuses the SAME Redis-backed fixed-window limiter the
@@ -50,14 +67,14 @@ type TestSendEnqueuer interface {
 }
 
 // TestSend validates a test-send request (campaign/step ownership, rate
-// limit, an eligible sender exists) and enqueues the render+send as a
-// testsend:send task. Nothing is decrypted or dialed here -- see
-// TestSendEnqueuer's doc comment. The worker handler renders the step for the
-// campaign list's first contact (or the synthetic first_name=Alex,
-// company=Acme fallback when the list is empty), prefixes the subject with
-// "[Test] ", and sends through the resolved mailbox: nothing is persisted to
-// sends, tracking links are never rewritten, and no List-Unsubscribe header
-// is set.
+// limit, the recipient is not suppressed, an eligible sender exists) and
+// enqueues the render+send as a testsend:send task. Nothing is decrypted or
+// dialed here -- see TestSendEnqueuer's doc comment. The worker handler
+// renders the step for the campaign list's first contact (or the synthetic
+// first_name=Alex, company=Acme fallback when the list is empty), prefixes
+// the subject with "[Test] ", and sends through the resolved mailbox: nothing
+// is persisted to sends, tracking links are never rewritten, and no
+// List-Unsubscribe header is set.
 func (s *Service) TestSend(ctx context.Context, ws, campaignID, stepID uuid.UUID, to string) error {
 	if _, err := s.store.Get(ctx, ws, campaignID); err != nil {
 		return ErrNotFound
@@ -72,6 +89,9 @@ func (s *Service) TestSend(ctx context.Context, ws, campaignID, stepID uuid.UUID
 	if _, ok := findStep(steps, stepID); !ok {
 		return ErrStepNotFound
 	}
+	if err := s.checkRecipientNotSuppressed(ctx, ws, to); err != nil {
+		return err
+	}
 	sender, err := s.firstEligibleSender(ctx, ws, campaignID)
 	if err != nil {
 		return err
@@ -80,6 +100,29 @@ func (s *Service) TestSend(ctx context.Context, ws, campaignID, stepID uuid.UUID
 		return errors.New("campaign: test-send is not configured")
 	}
 	return s.testSendEnq.EnqueueTestSend(campaignID.String(), stepID.String(), sender.MailboxID.String(), to, ws.String())
+}
+
+// checkRecipientNotSuppressed rejects a test-send to an address the
+// workspace has already unsubscribed or bounced: a test-send must never
+// bypass the same suppression list a real send honors (docs/security.md). A
+// checker error is propagated (fails closed, like checkTestSendRateLimit) --
+// it is never swallowed into "not suppressed". No checker wired (nil) is
+// unwired -- a deployment/test choice, like domainAuth/limiter -- but
+// cmd/inroad always wires one in production, and internal/worker/testsend
+// re-checks independently before dialing as defense in depth against the
+// race between this check and an incoming unsubscribe.
+func (s *Service) checkRecipientNotSuppressed(ctx context.Context, ws uuid.UUID, to string) error {
+	if s.suppression == nil {
+		return nil
+	}
+	suppressed, err := s.suppression.IsSuppressed(ctx, ws, to)
+	if err != nil {
+		return err
+	}
+	if suppressed {
+		return ErrRecipientSuppressed
+	}
+	return nil
 }
 
 // checkTestSendRateLimit fails closed: a limiter error (e.g. an unreachable

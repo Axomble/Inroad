@@ -1223,7 +1223,11 @@ paths:
         '400': { description: "Invalid JSON, campaign id, step_id, or to address" }
         '401': { description: Unauthorized }
         '404': { description: Campaign or step not found }
-        '422': { description: No enabled sender with an active mailbox }
+        '422':
+          description: >-
+            No enabled sender with an active mailbox, or the recipient is on
+            the workspace's suppression list (unsubscribed or bounced) --
+            {"error": "recipient_suppressed"}
         '429': { description: Too many test sends; try again shortly }
   # The unsubscribe endpoint is served outside the /api/v1 base — it is
   # public and browser-facing (no auth, returns HTML). RFC 8058 requires the

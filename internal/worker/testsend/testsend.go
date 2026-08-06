@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/hibiken/asynq"
 
@@ -45,6 +46,13 @@ type Core interface {
 	// ResolveSenderTransport decrypts the resolved mailbox's send credential
 	// (refreshing an OAuth token for gmail/m365), workspace-pinned.
 	ResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error)
+	// IsSuppressed reports whether `to` is on the workspace's suppression
+	// list. This is the defense-in-depth half of the fix in
+	// internal/app/campaign.Service.TestSend's own suppression check: that
+	// API-side check can race an incoming unsubscribe between enqueue and
+	// this task running, so the worker re-checks the SAME table right before
+	// dialing, workspace-pinned.
+	IsSuppressed(ctx context.Context, workspaceID, to string) (bool, error)
 }
 
 // Mailer sends one email through whichever transport the resolved
@@ -60,6 +68,23 @@ func Handler(core Core, sender Mailer) func(context.Context, *asynq.Task) error 
 		var p queue.TestSendPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
 			return err
+		}
+
+		// Defense in depth (docs/security.md): re-check suppression right here,
+		// before any content is loaded or credential decrypted. The API-side
+		// check in campaign.Service.TestSend can race an incoming unsubscribe
+		// between enqueue and this task running; a suppressed recipient is
+		// skipped (not an error -- the task should not retry) and logged at
+		// WARN so a persistent hit is observable. The raw recipient address is
+		// deliberately not logged.
+		suppressed, err := core.IsSuppressed(ctx, p.WorkspaceID, p.To)
+		if err != nil {
+			return fmt.Errorf("check suppression: %w", err)
+		}
+		if suppressed {
+			slog.WarnContext(ctx, "testsend_recipient_suppressed",
+				"workspace_id", p.WorkspaceID, "campaign_id", p.CampaignID, "step_id", p.StepID)
+			return nil
 		}
 
 		content, err := core.GetTestSendContent(ctx, p.WorkspaceID, p.CampaignID, p.StepID)

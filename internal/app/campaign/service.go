@@ -35,12 +35,13 @@ type Enqueuer interface {
 // Checker interfaces, not on the sqlc-backed struct or other domains'
 // concrete stores -- dependency inversion.
 //
-// domainAuth/testSendEnq/limiter back the preflight report's domain_auth
-// check and test-send respectively. They are all OPTIONAL (nil-safe: see
-// Service.readDomainAuth, TestSend's own nil check, and
-// checkTestSendRateLimit) and injected via ServiceOption rather than added as
-// NewService parameters, so every existing caller of NewService(store,
-// checker) -- and every existing unit test -- keeps compiling unchanged.
+// domainAuth/testSendEnq/limiter/suppression back the preflight report's
+// domain_auth check and test-send respectively. They are all OPTIONAL
+// (nil-safe: see Service.readDomainAuth, TestSend's own nil check,
+// checkTestSendRateLimit, and checkRecipientNotSuppressed) and injected via
+// ServiceOption rather than added as NewService parameters, so every existing
+// caller of NewService(store, checker) -- and every existing unit test --
+// keeps compiling unchanged.
 //
 // Neither TestSend nor anything else in this package ever decrypts a mailbox
 // credential or dials a provider (docs/security.md invariant 1): test-send's
@@ -54,6 +55,7 @@ type Service struct {
 	domainAuth  DomainAuthReader
 	testSendEnq TestSendEnqueuer
 	limiter     RateLimiter
+	suppression SuppressionChecker
 }
 
 // ServiceOption configures an optional Service dependency. See the Service
@@ -74,6 +76,16 @@ func WithTestSendEnqueuer(e TestSendEnqueuer) ServiceOption {
 // unlimited (see Service.checkTestSendRateLimit) -- a deployment choice made
 // once at wiring time, not a silent bypass.
 func WithRateLimiter(l RateLimiter) ServiceOption { return func(s *Service) { s.limiter = l } }
+
+// WithSuppressionChecker wires test-send's suppression-list guard: a test
+// email must never go to an address the workspace has explicitly
+// unsubscribed or bounced. Without it, TestSend skips the check (see
+// Service.checkRecipientNotSuppressed) -- cmd/inroad always wires one in
+// production; internal/worker/testsend re-checks independently before
+// dialing as defense in depth.
+func WithSuppressionChecker(c SuppressionChecker) ServiceOption {
+	return func(s *Service) { s.suppression = c }
+}
 
 func NewService(store Store, checker Checker, opts ...ServiceOption) *Service {
 	s := &Service{store: store, checker: checker, metrics: newMetricsCache(metricsCacheTTL)}

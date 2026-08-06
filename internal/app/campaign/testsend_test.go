@@ -57,6 +57,25 @@ func (f *fakeRateLimiter) Allow(_ context.Context, key string, _ int, _ time.Dur
 	return f.allow, f.err
 }
 
+// fakeSuppressionCall records one IsSuppressed invocation.
+type fakeSuppressionCall struct {
+	ws    uuid.UUID
+	email string
+}
+
+// fakeSuppressionChecker is the mocked SuppressionChecker: suppressed/err are
+// set per test, calls records every (workspace, email) it was asked about.
+type fakeSuppressionChecker struct {
+	suppressed bool
+	err        error
+	calls      []fakeSuppressionCall
+}
+
+func (f *fakeSuppressionChecker) IsSuppressed(_ context.Context, ws uuid.UUID, email string) (bool, error) {
+	f.calls = append(f.calls, fakeSuppressionCall{ws: ws, email: email})
+	return f.suppressed, f.err
+}
+
 // --- Service.TestSend --------------------------------------------------------
 
 // testSendFixture bundles a ready-to-use campaign/step/store so most tests
@@ -254,6 +273,97 @@ func TestTestSendPropagatesTheEnqueueError(t *testing.T) {
 	}
 }
 
+// --- Service.TestSend: the suppression-list gate (security fix) ------------
+//
+// POST /campaigns/{id}/test-send must never send a "[Test] " email to an
+// address the workspace has explicitly unsubscribed or bounced -- the SAME
+// suppression table a real send checks. See also
+// internal/worker/testsend.Handler's own defense-in-depth re-check.
+
+func TestTestSendRejectsASuppressedRecipient(t *testing.T) {
+	ctx := context.Background()
+	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
+	store := testSendFixture(ws, id, stepID)
+	enq := &fakeTestSendEnqueuer{}
+	checker := &fakeSuppressionChecker{suppressed: true}
+	svc := campaign.NewService(store, noopChecker{},
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}),
+		campaign.WithSuppressionChecker(checker))
+
+	err := svc.TestSend(ctx, ws, id, stepID, "unsubscribed@example.com")
+	if !errors.Is(err, campaign.ErrRecipientSuppressed) {
+		t.Fatalf("err = %v, want ErrRecipientSuppressed", err)
+	}
+	if len(enq.calls) != 0 {
+		t.Error("a suppressed recipient must not enqueue a test-send")
+	}
+	if len(checker.calls) != 1 || checker.calls[0] != (fakeSuppressionCall{ws: ws, email: "unsubscribed@example.com"}) {
+		t.Errorf("suppression checker calls = %+v, want exactly one call for (ws, the requested address)", checker.calls)
+	}
+}
+
+// A suppression-checker failure (e.g. the DB is down) must fail closed --
+// propagated, never silently treated as "not suppressed".
+func TestTestSendSuppressionCheckerErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
+	store := testSendFixture(ws, id, stepID)
+	enq := &fakeTestSendEnqueuer{}
+	boom := errors.New("suppression lookup unavailable")
+	svc := campaign.NewService(store, noopChecker{},
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}),
+		campaign.WithSuppressionChecker(&fakeSuppressionChecker{err: boom}))
+
+	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated suppression-checker error", err)
+	}
+	if len(enq.calls) != 0 {
+		t.Error("a suppression-checker error must not enqueue anything")
+	}
+}
+
+// No SuppressionChecker wired at all is unwired -- a deployment/test choice,
+// like the rate limiter and domain-auth reader -- not a missing-dependency
+// failure. cmd/inroad always wires one in production.
+func TestTestSendWithoutASuppressionCheckerStillSends(t *testing.T) {
+	ctx := context.Background()
+	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
+	store := testSendFixture(ws, id, stepID)
+	enq := &fakeTestSendEnqueuer{}
+	svc := campaign.NewService(store, noopChecker{},
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}))
+
+	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err != nil {
+		t.Fatalf("TestSend: %v", err)
+	}
+	if len(enq.calls) != 1 {
+		t.Errorf("enqueue calls = %d, want 1", len(enq.calls))
+	}
+}
+
+// A non-suppressed address is unaffected: the checker is consulted but does
+// not block the send.
+func TestTestSendAllowsAnUnsuppressedRecipient(t *testing.T) {
+	ctx := context.Background()
+	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
+	store := testSendFixture(ws, id, stepID)
+	enq := &fakeTestSendEnqueuer{}
+	checker := &fakeSuppressionChecker{suppressed: false}
+	svc := campaign.NewService(store, noopChecker{},
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}),
+		campaign.WithSuppressionChecker(checker))
+
+	if err := svc.TestSend(ctx, ws, id, stepID, "preview@example.com"); err != nil {
+		t.Fatalf("TestSend: %v", err)
+	}
+	if len(enq.calls) != 1 {
+		t.Errorf("enqueue calls = %d, want 1", len(enq.calls))
+	}
+	if len(checker.calls) != 1 {
+		t.Errorf("suppression checker calls = %d, want 1 (consulted, but did not block)", len(checker.calls))
+	}
+}
+
 // --- Handler.testSend: HTTP status mapping ----------------------------------
 
 // noopEnqueuer satisfies campaign.Enqueuer; testSend never calls Launch.
@@ -355,6 +465,33 @@ func TestTestSendHandlerReturns422ForNoEligibleSender(t *testing.T) {
 
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("code = %d, want 422: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestTestSendHandlerReturns422ForASuppressedRecipient is the wire-level
+// assertion of the security fix: the JSON error code is stable API contract
+// ({"error":"recipient_suppressed"}), and nothing was enqueued.
+func TestTestSendHandlerReturns422ForASuppressedRecipient(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	ws, id, stepID := uuid.New(), uuid.New(), uuid.New()
+	store := testSendFixture(ws, id, stepID)
+	enq := &fakeTestSendEnqueuer{}
+	h := campaign.NewHandler(campaign.NewService(store, noopChecker{},
+		campaign.WithTestSendEnqueuer(enq), campaign.WithRateLimiter(&fakeRateLimiter{allow: true}),
+		campaign.WithSuppressionChecker(&fakeSuppressionChecker{suppressed: true})),
+		noopEnqueuer{})
+
+	body := `{"step_id":"` + stepID.String() + `","to":"unsubscribed@example.com"}`
+	w := serveTestSend(t, h, secret, ws, id, body)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("code = %d, want 422: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"error":"recipient_suppressed"`) {
+		t.Errorf("body = %s, want {\"error\":\"recipient_suppressed\"}", w.Body.String())
+	}
+	if len(enq.calls) != 0 {
+		t.Error("a suppressed recipient must not enqueue a test-send")
 	}
 }
 
