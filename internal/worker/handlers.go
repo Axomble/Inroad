@@ -6,6 +6,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/dnsauth"
+	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
@@ -13,6 +14,7 @@ import (
 	"github.com/inroad/inroad/internal/worker/domainauth"
 	"github.com/inroad/inroad/internal/worker/inbox"
 	"github.com/inroad/inroad/internal/worker/maintenance"
+	"github.com/inroad/inroad/internal/worker/recipientesp"
 	"github.com/inroad/inroad/internal/worker/sender"
 	"github.com/inroad/inroad/internal/worker/sequence"
 	"github.com/inroad/inroad/internal/worker/testsend"
@@ -24,9 +26,10 @@ import (
 // open and click tracking links (internal/worker/track) for campaigns with
 // tracking enabled. resolver is the DNS seam the domain-authentication sweep
 // looks records up through — injected at the composition root so tests never
-// touch real DNS. mtx records inroad_sends_total at the campaign and warmup
+// touch real DNS, and mxResolver is the same seam for the recipient-domain ESP
+// sweep's MX lookups. mtx records inroad_sends_total at the campaign and warmup
 // send handlers' finalize points; a nil mtx (metrics disabled) no-ops.
-func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, resolver dnsauth.Resolver, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte, mtx *metrics.Metrics) {
+func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, resolver dnsauth.Resolver, mxResolver esp.Resolver, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte, mtx *metrics.Metrics) {
 	if cleaner, ok := core.(maintenance.Cleaner); ok {
 		mux.HandleFunc(queue.TaskMaintenanceCleanup, maintenance.CleanupHandler(cleaner))
 	}
@@ -41,6 +44,15 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	// Domain authentication: re-check stale sending domains' SPF/DKIM/DMARC.
 	// Informational only — nothing on the send path reads the result.
 	mux.HandleFunc(queue.TaskDomainAuthSweep, domainauth.SweepHandler(core, resolver, domainauth.DefaultStaleAfter))
+	// Recipient-domain ESP cache: classify by MX off the send path, and evict.
+	// Registered by type assertion for the same reason as the cleaner/breaker —
+	// the capability is consumed through recipientesp.Core rather than widening
+	// coreapi.Client and its many fakes. A Client without it simply has no cache
+	// refresh, which degrades to unmatched sending and never to a failed send.
+	if rc, ok := core.(recipientesp.Core); ok {
+		mux.HandleFunc(queue.TaskRecipientESPSweep, recipientesp.SweepHandler(
+			rc, mxResolver, recipientesp.DefaultStaleAfter, recipientesp.DefaultRetention))
+	}
 	// Warmup: send one warmup email per tick (lazy chain) + fan-out/health sweep +
 	// recipient-side engagement (rescue/mark-read/reply) of received warmup mail.
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.SendHandler(core, sndr, enq, mtx))

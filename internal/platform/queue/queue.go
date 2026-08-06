@@ -66,6 +66,11 @@ const TaskMaintenanceCleanup = "maintenance:cleanup"
 // domain whose last completed check is older than the staleness window.
 const TaskDomainAuthSweep = "domainauth:sweep"
 
+// TaskRecipientESPSweep classifies recipient domains by MX (Google/Microsoft/
+// other) and evicts expired rows from that cache. It exists so ESP-matched
+// sender selection never resolves DNS on the send path.
+const TaskRecipientESPSweep = "recipientesp:sweep"
+
 const TaskSendEmail = "send:email"
 
 // SendEmailPayload is the body of a send:email task. WorkspaceID is
@@ -484,6 +489,22 @@ func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
 // it from re-resolving the same records twelve times a day.
 func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
 	_, err := sch.Register("@every 1h", asynq.NewTask(TaskDomainAuthSweep, nil))
+	return err
+}
+
+// RegisterRecipientESPSweep registers the periodic recipient-domain ESP sweep.
+// It ticks every 5 minutes against a 30-day staleness window, and the two rates
+// answer different questions: the WINDOW is how often a domain's MX records are
+// re-read (rarely, because they rarely change), while the TICK is how quickly a
+// NEWLY enrolled contact's domain gets classified before its first send. Each
+// tick is bounded by the fan-out query's LIMIT, so a large import costs more
+// ticks rather than one unbounded DNS run.
+//
+// A slow tick can overlap the next one, which is harmless: the classification
+// write is an idempotent upsert and eviction is a range delete, so two ticks
+// racing over the same domain converge on the same row.
+func RegisterRecipientESPSweep(sch *asynq.Scheduler) error {
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskRecipientESPSweep, nil))
 	return err
 }
 
