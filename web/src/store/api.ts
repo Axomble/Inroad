@@ -1193,6 +1193,37 @@ const injectedRtkApi = api.injectEndpoints({
         method: "PUT",
       }),
     }),
+    listInboxThreads: build.query<
+      ListInboxThreadsApiResponse,
+      ListInboxThreadsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads`,
+        params: {
+          mailbox_id: queryArg.mailboxId,
+          reply_class: queryArg.replyClass,
+          before_last_message_at: queryArg.beforeLastMessageAt,
+          before_id: queryArg.beforeId,
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    getInboxThread: build.query<
+      GetInboxThreadApiResponse,
+      GetInboxThreadApiArg
+    >({
+      query: (queryArg) => ({ url: `/inbox/threads/${queryArg.id}` }),
+    }),
+    setInboxThreadRead: build.mutation<
+      SetInboxThreadReadApiResponse,
+      SetInboxThreadReadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/read`,
+        method: "PUT",
+        body: queryArg.setInboxThreadReadRequest,
+      }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -1911,6 +1942,30 @@ export type CrmSetPrimaryContactEmailApiResponse = unknown;
 export type CrmSetPrimaryContactEmailApiArg = {
   id: string;
   emailId: string;
+};
+export type ListInboxThreadsApiResponse =
+  /** status 200 Threads in the workspace */ InboxThreadPage;
+export type ListInboxThreadsApiArg = {
+  /** Restrict to one mailbox. */
+  mailboxId?: string;
+  /** Restrict to one reply classification (e.g. positive, neutral, negative). */
+  replyClass?: string;
+  /** Keyset cursor. Must be set together with before_id, or not at all. */
+  beforeLastMessageAt?: string;
+  /** Keyset cursor. Must be set together with before_last_message_at, or not at all. */
+  beforeId?: string;
+  /** Page size. Defaults to 25, capped at 200. */
+  limit?: number;
+};
+export type GetInboxThreadApiResponse =
+  /** status 200 Thread with its full message history, oldest first */ InboxThreadDetail;
+export type GetInboxThreadApiArg = {
+  id: string;
+};
+export type SetInboxThreadReadApiResponse = unknown;
+export type SetInboxThreadReadApiArg = {
+  id: string;
+  setInboxThreadReadRequest: SetInboxThreadReadRequest;
 };
 export type Membership = {
   workspace_id: string;
@@ -3092,6 +3147,37 @@ export type CrmContactEmailList = {
 export type CrmContactEmailInput = {
   email: string;
 };
+export type InboxThreadSummary = {
+  id: string;
+  mailbox_id: string;
+  campaign_id: string | null;
+  contact_id: string | null;
+  subject: string;
+  last_reply_class: string;
+  unread: boolean;
+  last_message_at: string;
+};
+export type InboxThreadPage = {
+  items: InboxThreadSummary[];
+};
+export type InboxMessage = {
+  direction: "inbound" | "outbound";
+  message_id: string;
+  from_email: string;
+  from_name: string;
+  to_email: string;
+  subject: string;
+  body_text: string;
+  body_html: string;
+  reply_class: string;
+  occurred_at: string;
+};
+export type InboxThreadDetail = InboxThreadSummary & {
+  messages: InboxMessage[];
+};
+export type SetInboxThreadReadRequest = {
+  unread: boolean;
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -3240,4 +3326,7 @@ export const {
   useCrmListContactEmailsQuery,
   useCrmAddContactEmailMutation,
   useCrmSetPrimaryContactEmailMutation,
+  useListInboxThreadsQuery,
+  useGetInboxThreadQuery,
+  useSetInboxThreadReadMutation,
 } = injectedRtkApi;

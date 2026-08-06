@@ -472,6 +472,37 @@ type IdempotencyKey struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxMessage struct {
+	ID          uuid.UUID          `json:"id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Direction   string             `json:"direction"`
+	MessageID   string             `json:"message_id"`
+	FromEmail   string             `json:"from_email"`
+	FromName    string             `json:"from_name"`
+	ToEmail     string             `json:"to_email"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	BodyHtml    string             `json:"body_html"`
+	ReplyClass  string             `json:"reply_class"`
+	OccurredAt  pgtype.Timestamptz `json:"occurred_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type InboxThread struct {
+	ID             uuid.UUID          `json:"id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	MailboxID      uuid.UUID          `json:"mailbox_id"`
+	CampaignID     pgtype.UUID        `json:"campaign_id"`
+	ContactID      pgtype.UUID        `json:"contact_id"`
+	RootMessageID  string             `json:"root_message_id"`
+	Subject        string             `json:"subject"`
+	LastReplyClass string             `json:"last_reply_class"`
+	Unread         bool               `json:"unread"`
+	LastMessageAt  pgtype.Timestamptz `json:"last_message_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
 type List struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`

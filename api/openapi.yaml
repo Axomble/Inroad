@@ -2172,6 +2172,80 @@ paths:
         '204': { description: Primary email changed }
         '403': { description: Insufficient scope }
         '404': { description: Contact email not found }
+  /inbox/threads:
+    get:
+      operationId: listInboxThreads
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        One row per matched-reply thread (or per legacy direct-send match, which
+        has no root message to anchor a thread on), newest first. There is no
+        opaque cursor: to page past the last item on this page, pass its own
+        last_message_at/id as before_last_message_at/before_id.
+      parameters:
+        - name: mailbox_id
+          in: query
+          required: false
+          description: Restrict to one mailbox.
+          schema: { type: string, format: uuid }
+        - name: reply_class
+          in: query
+          required: false
+          description: Restrict to one reply classification (e.g. positive, neutral, negative).
+          schema: { type: string }
+        - name: before_last_message_at
+          in: query
+          required: false
+          description: Keyset cursor. Must be set together with before_id, or not at all.
+          schema: { type: string, format: date-time }
+        - name: before_id
+          in: query
+          required: false
+          description: Keyset cursor. Must be set together with before_last_message_at, or not at all.
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 25, capped at 200.
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Threads in the workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxThreadPage' }
+        '400': { description: Malformed filter (bad UUID/timestamp, or a half-set keyset cursor) }
+        '401': { description: Unauthorized }
+  /inbox/threads/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getInboxThread
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Thread with its full message history, oldest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxThreadDetail' }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+  /inbox/threads/{id}/read:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: setInboxThreadRead
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetInboxThreadReadRequest' }
+      responses:
+        '204': { description: Read state updated }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
 components:
   securitySchemes:
     bearerAuth:
@@ -3843,3 +3917,46 @@ components:
       type: object
       required: [items]
       properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMContactEmail' } } }
+    InboxThreadSummary:
+      type: object
+      required: [id, mailbox_id, campaign_id, contact_id, subject, last_reply_class, unread, last_message_at]
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        campaign_id: { type: string, format: uuid, nullable: true }
+        contact_id: { type: string, format: uuid, nullable: true }
+        subject: { type: string }
+        last_reply_class: { type: string }
+        unread: { type: boolean }
+        last_message_at: { type: string, format: date-time }
+    InboxThreadPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxMessage:
+      type: object
+      required: [direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at]
+      properties:
+        direction: { type: string, enum: [inbound, outbound] }
+        message_id: { type: string }
+        from_email: { type: string }
+        from_name: { type: string }
+        to_email: { type: string }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string }
+        reply_class: { type: string }
+        occurred_at: { type: string, format: date-time }
+    InboxThreadDetail:
+      allOf:
+        - $ref: '#/components/schemas/InboxThreadSummary'
+        - type: object
+          required: [messages]
+          properties:
+            messages: { type: array, items: { $ref: '#/components/schemas/InboxMessage' } }
+    SetInboxThreadReadRequest:
+      type: object
+      required: [unread]
+      properties:
+        unread: { type: boolean }

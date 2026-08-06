@@ -21,6 +21,8 @@ const (
 	ScopeListsRead      = "lists:read"
 	ScopeListsWrite     = "lists:write"
 	ScopeCampaignsSend  = "campaigns:send"
+	ScopeInboxRead      = "inbox:read"
+	ScopeInboxWrite     = "inbox:write"
 	// ScopeDeliverabilityWrite authorizes POST /deliverability/events — an
 	// external pipeline (an SES SNS subscriber, a provider webhook) reporting a
 	// complaint or bounce. It is its own scope rather than campaigns:write
@@ -45,6 +47,8 @@ var AllScopes = []string{
 	ScopeListsRead,
 	ScopeListsWrite,
 	ScopeDeliverabilityWrite,
+	ScopeInboxRead,
+	ScopeInboxWrite,
 }
 
 // IsKnownScope reports whether scope is part of the server's vocabulary.
