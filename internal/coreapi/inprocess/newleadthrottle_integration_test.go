@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -212,5 +213,99 @@ func TestNewLeadLimitCountsOnlyItsOwnCampaign(t *testing.T) {
 	}
 	if job.NewLeadLimited {
 		t.Error("another campaign's new leads consumed this campaign's new-lead limit")
+	}
+}
+
+// The count is workspace-pinned, not merely campaign-scoped (see
+// TestNewLeadLimitCountsOnlyItsOwnCampaign for the same-workspace half of this):
+// two campaigns in DIFFERENT workspaces, configured identically
+// (max_new_leads_per_day=1), must not share their allowance even though
+// nothing else distinguishes them.
+func TestNewLeadLimitIsWorkspacePinned(t *testing.T) {
+	ctx, f := setupPool(t)
+	limit := int32(1)
+	f.setMaxNewLeads(t, ctx, &limit)
+	f.fillFirstStepsToday(t, ctx, 1) // workspace A used its one slot today
+
+	// Sanity: A really is limited now, or the assertion on B below proves nothing.
+	aJob, err := f.core.GetStepSendJob(ctx, f.enroll(t, ctx).String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob (A): %v", err)
+	}
+	if !aJob.NewLeadLimited {
+		t.Fatalf("workspace A job = %+v, want NewLeadLimited (setup didn't reach the limit)", aJob)
+	}
+
+	// A second workspace, with its own campaign configured identically
+	// (max_new_leads_per_day=1), with nothing sent yet.
+	sealer, err := crypto.NewSealer(itMasterKey)
+	if err != nil {
+		t.Fatalf("sealer: %v", err)
+	}
+	ct, err := sealer.Seal([]byte("smtp-app-password"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	wsB, err := f.q.CreateWorkspace(ctx, "NewLead IT B "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace B: %v", err)
+	}
+	emailB := "b-" + uuid.NewString() + "@acme.test"
+	mailboxB, err := f.q.CreateMailbox(ctx, gen.CreateMailboxParams{
+		WorkspaceID: wsB.ID, Provider: "smtp", Email: emailB, DisplayName: emailB,
+		SmtpHost: "smtp.acme.test", SmtpPort: 587, SmtpUsername: emailB,
+		ImapHost: "imap.acme.test", ImapPort: 993, ImapUsername: emailB,
+		SecretCiphertext: ct, DailyCap: 100, MinIntervalSeconds: 0,
+		RampEnabled: false, RampStartCap: 5, RampDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("mailbox B: %v", err)
+	}
+	listB, err := f.q.CreateList(ctx, gen.CreateListParams{WorkspaceID: wsB.ID, Name: "L-B"})
+	if err != nil {
+		t.Fatalf("list B: %v", err)
+	}
+	campaignB, err := f.q.CreateCampaign(ctx, gen.CreateCampaignParams{
+		WorkspaceID: wsB.ID, Name: "Pool B", MailboxID: mailboxB.ID, ListID: listB.ID,
+		Subject: "Hi", BodyText: "Hello",
+	})
+	if err != nil {
+		t.Fatalf("campaign B: %v", err)
+	}
+	if _, err := f.q.CreateStep(ctx, gen.CreateStepParams{
+		WorkspaceID: wsB.ID, CampaignID: campaignB.ID, StepOrder: 1, DelaySeconds: 0,
+		Subject: "Hi", BodyText: "Hello",
+	}); err != nil {
+		t.Fatalf("step B: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE campaigns SET status = 'running', max_new_leads_per_day = $2 WHERE id = $1`,
+		campaignB.ID, limit); err != nil {
+		t.Fatalf("configure campaign B: %v", err)
+	}
+
+	contactB, err := f.q.UpsertContact(ctx, gen.UpsertContactParams{
+		WorkspaceID: wsB.ID, Email: "c-" + uuid.NewString() + "@x.test", FirstName: "C",
+	})
+	if err != nil {
+		t.Fatalf("contact B: %v", err)
+	}
+	var enrollmentB uuid.UUID
+	if err := f.pool.QueryRow(ctx,
+		`INSERT INTO sequence_enrollments (workspace_id, campaign_id, contact_id, next_due_at)
+		 VALUES ($1,$2,$3, now()) RETURNING id`, wsB.ID, campaignB.ID, contactB.ID).Scan(&enrollmentB); err != nil {
+		t.Fatalf("enrollment B: %v", err)
+	}
+
+	// Workspace B's step-1 job must still proceed: A's count must not leak in.
+	bJob, err := f.core.GetStepSendJob(ctx, enrollmentB.String(), wsB.ID.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob (B): %v", err)
+	}
+	if bJob.NewLeadLimited {
+		t.Fatalf("workspace B job = %+v, want NOT NewLeadLimited -- workspace A's count leaked across tenants", bJob)
+	}
+	if bJob.MailboxID == "" {
+		t.Error("workspace B did not resolve a sender for its otherwise-unlimited step-1 job")
 	}
 }
