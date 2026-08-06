@@ -717,6 +717,33 @@ type PipelineStage struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type RecipientDomain struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Domain      string             `json:"domain"`
+	Esp         string             `json:"esp"`
+	MxHost      string             `json:"mx_host"`
+	CheckedAt   pgtype.Timestamptz `json:"checked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ReplyLabel struct {
+	ID                uuid.UUID          `json:"id"`
+	WorkspaceID       uuid.UUID          `json:"workspace_id"`
+	Key               string             `json:"key"`
+	Label             string             `json:"label"`
+	Color             string             `json:"color"`
+	Position          int32              `json:"position"`
+	IsBuiltin         bool               `json:"is_builtin"`
+	StopsEnrollment   bool               `json:"stops_enrollment"`
+	IsAutomated       bool               `json:"is_automated"`
+	SuppressesContact bool               `json:"suppresses_contact"`
+	CapturesDeal      bool               `json:"captures_deal"`
+	DefersEnrollment  bool               `json:"defers_enrollment"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Send struct {
 	ID               uuid.UUID          `json:"id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
