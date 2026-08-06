@@ -74,6 +74,16 @@ LEFT JOIN warmup_participants wp
        ON wp.mailbox_id = m.id AND wp.workspace_id = m.workspace_id
 WHERE m.workspace_id = $1 AND m.status = 'active';
 
+-- name: GetInboxPulseCounts :one
+-- Unread counts every unread thread; Interested narrows that to the ones
+-- whose last reply classified positive. Both predicates are index-backed
+-- (idx_inbox_threads_workspace_unread, idx_inbox_threads_workspace_unread_positive)
+-- so this stays O(1) relative to workspace scale like every other pulse read.
+SELECT COUNT(*) FILTER (WHERE unread)::bigint AS unread,
+       COUNT(*) FILTER (WHERE unread AND last_reply_class = 'positive')::bigint AS interested
+FROM inbox_threads
+WHERE workspace_id = $1;
+
 -- name: GetPulseDmarcAttention :one
 -- Domains with ACTIVE senders whose last COMPLETED DNS check found no DMARC
 -- record. checked_at IS NOT NULL keeps 'unknown' (never checked / resolver

@@ -240,6 +240,48 @@ func TestPulseAggregatesAndTenantIsolation(t *testing.T) {
 	}
 }
 
+// addInboxThread seeds one inbox_threads row directly (bypassing the
+// enrollment-driven UpsertInboxThread path), so the test can hold the
+// unread/last_reply_class combination fixed regardless of insert order. Each
+// call uses a fresh root_message_id so the partial unique index never
+// collides between rows.
+func addInboxThread(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ws, mb uuid.UUID, unread bool, replyClass string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO inbox_threads (workspace_id, mailbox_id, root_message_id, last_reply_class, unread)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		ws, mb, uuid.NewString(), replyClass, unread,
+	); err != nil {
+		t.Fatalf("inbox thread (unread=%v class=%q): %v", unread, replyClass, err)
+	}
+}
+
+// TestPulseInboxCountsReflectUnreadAndInterested proves Inbox.Unread counts
+// every unread thread and Inbox.Interested counts only the unread ones whose
+// last reply classified positive — a READ positive-class thread must NOT
+// count toward Interested (or Unread).
+func TestPulseInboxCountsReflectUnreadAndInterested(t *testing.T) {
+	ctx, pool, q := setup(t)
+	ws, err := q.CreateWorkspace(ctx, "PulseInbox "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	mb := addMailbox(t, ctx, pool, q, ws.ID, "inbox@pulse-i.test", "active", "", 50)
+
+	addInboxThread(t, ctx, pool, ws.ID, mb.ID, true, "positive")  // unread + interested
+	addInboxThread(t, ctx, pool, ws.ID, mb.ID, true, "neutral")   // unread, not interested
+	addInboxThread(t, ctx, pool, ws.ID, mb.ID, true, "")          // unread, not interested
+	addInboxThread(t, ctx, pool, ws.ID, mb.ID, false, "positive") // read: must not count toward either
+
+	p, err := NewService(NewPgStore(q)).Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if p.Inbox != (InboxCounts{Unread: 3, Interested: 1}) {
+		t.Errorf("inbox = %+v, want {Unread:3 Interested:1}", p.Inbox)
+	}
+}
+
 // TestPulseEmptyWorkspace proves a workspace with no rows anywhere returns
 // the stable all-zero payload (no NULL-scan errors from the aggregate
 // queries) and an empty, non-nil attention list.
