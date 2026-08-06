@@ -111,6 +111,27 @@ func TestValid(t *testing.T) {
 	}
 }
 
+// Domain is a cache KEY, and the send path's key must be byte-identical to the
+// one the sweep wrote — which Postgres computes as
+// lower(split_part(email,'@',2)). Every case here is that function's behaviour,
+// including the odd ones: a second '@' and an empty local part are what make
+// "take the segment after the FIRST '@'" a rule rather than an accident.
+func TestDomainMatchesPostgresSplitPart(t *testing.T) {
+	for _, tc := range []struct{ email, want string }{
+		{"ana@acme.com", "acme.com"},
+		{"Ana@ACME.COM", "acme.com"},
+		{"a@b@c.example", "b"},
+		{"@acme.com", "acme.com"},
+		{"ana@", ""},
+		{"no-at-sign", ""},
+		{"", ""},
+	} {
+		if got := Domain(tc.email); got != tc.want {
+			t.Errorf("Domain(%q) = %q, want %q", tc.email, got, tc.want)
+		}
+	}
+}
+
 // fakeResolver answers MX from a table so no test touches real DNS.
 type fakeResolver struct {
 	mx    map[string][]*net.MX
