@@ -27,7 +27,7 @@ See [Offline Reply Classification & Compliance](/guides/reply-classification/) f
 
 ## Workspace-Wide Scope & the Scope Rail
 
-The inbox lists threads across **all mailboxes in the workspace** by default. A scope rail on the left lets an operator narrow to one mailbox at a time, with a live thread count per mailbox and for "All mailboxes":
+The inbox lists threads across **all mailboxes in the workspace** by default. A scope rail on the left lets an operator narrow to one mailbox at a time, with a thread count per mailbox and for "All mailboxes" (drawn from a sample of the most recent threads, so it may undercount on a workspace with a very large inbox):
 
 ```mermaid
 graph LR
