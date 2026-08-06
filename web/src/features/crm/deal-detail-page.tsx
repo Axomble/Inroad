@@ -3,9 +3,8 @@ import { Link } from '@tanstack/react-router'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
-import { ArrowLeft, Bot, CalendarClock, Loader2, MessageSquareText, NotebookPen, RotateCcw, UserRound } from 'lucide-react'
+import { ArrowLeft, CalendarClock, Loader2, MessageSquareText, NotebookPen, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
@@ -21,6 +20,8 @@ import {
   useCrmMoveDealMutation,
   type CrmEvent,
 } from './api'
+import { parseActor } from './actor'
+import { ActorBadge } from './actor-badge'
 import { crmErrorMessage } from './error-copy'
 import { formatMoney } from './money'
 
@@ -36,14 +37,6 @@ const taskSchema = z.object({
   dueAt: z.string(),
 })
 type TaskValues = z.infer<typeof taskSchema>
-
-const eventActorSchema = z.object({
-  type: z.string().optional(),
-  client_id: z.string().optional(),
-  on_behalf_of_user_id: z.string().optional(),
-  thread_id: z.string().optional(),
-  run_id: z.string().optional(),
-}).passthrough()
 
 const stageChangeDataSchema = z.object({ from_stage_id: z.string().uuid() }).passthrough()
 
@@ -99,7 +92,14 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
         eyebrow="Deal"
         title={deal.name}
         subtitle={deal.company_name || deal.contact_email || 'Unlinked opportunity'}
-        actions={<Button asChild size="sm"><Link to="/app/deals"><ArrowLeft aria-hidden="true" />Board</Link></Button>}
+        actions={
+          <>
+            {/* Who created this deal, next to the deal itself — the activity
+                feed below only attributes individual events. */}
+            <ActorBadge actor={parseActor(deal.created_by_actor)} source={deal.source} />
+            <Button asChild size="sm"><Link to="/app/deals"><ArrowLeft aria-hidden="true" />Board</Link></Button>
+          </>
+        }
       />
       <StatStrip>
         <Stat label="Value" value={formatMoney(deal.amount_micros ?? 0, deal.currency)} sub={deal.currency} />
@@ -150,7 +150,10 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
                   <article key={note.id} className="rounded-lg border border-border bg-background p-3">
                     {note.title ? <h3 className="text-sm font-semibold">{note.title}</h3> : null}
                     <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{note.body}</p>
-                    <time className="mt-2 block text-xs text-faint" dateTime={note.created_at}>{formatDate(note.created_at)}</time>
+                    <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-faint">
+                      <ActorBadge actor={parseActor(note.created_by_actor)} />
+                      <time dateTime={note.created_at}>{formatDate(note.created_at)}</time>
+                    </p>
                   </article>
                 ))}
                 {notesQuery.data?.next_cursor != null ? <MoreExist noun="notes" /> : null}
@@ -175,7 +178,10 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
                       <CalendarClock className="mt-0.5 size-4 text-accent-ink" aria-hidden="true" />
                       <div className="min-w-0">
                         <p className="text-sm font-medium">{task.title}</p>
-                        {task.due_at ? <time className="text-xs text-muted-foreground" dateTime={task.due_at}>Due {formatDate(task.due_at)}</time> : null}
+                        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <ActorBadge actor={parseActor(task.created_by_actor)} />
+                          {task.due_at ? <time dateTime={task.due_at}>Due {formatDate(task.due_at)}</time> : null}
+                        </p>
                       </div>
                     </div>
                   </li>
@@ -270,10 +276,7 @@ const ActivityRow = memo(function ActivityRow({ dealId, event }: { dealId: strin
   const label = event.name.split('.').map((part) => part.replaceAll('_', ' ')).join(' ')
   // Actor/data are open JSON objects in the API contract. Parse that boundary
   // once before using fields in labels or mutations.
-  const actorResult = eventActorSchema.safeParse(event.actor)
-  const actor = actorResult.success ? actorResult.data : { type: 'system' }
-  const actorType = actor.type ?? 'system'
-  const actorLabel = actorType === 'agent' ? `Agent${actor.client_id ? ` / ${actor.client_id}` : ''}` : actorType === 'user' ? 'Workspace member' : 'Inroad automation'
+  const actor = parseActor(event.actor)
   const previousStage = event.name === 'deal.stage_changed' ? stageChangeDataSchema.safeParse(event.data) : null
   const canRevert = previousStage?.success === true
 
@@ -295,10 +298,7 @@ const ActivityRow = memo(function ActivityRow({ dealId, event }: { dealId: strin
           <div className="min-w-0">
             <p className="text-sm font-medium capitalize">{label}</p>
             <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-              <Badge variant="secondary">
-                {actorType === 'agent' ? <Bot className="size-3" aria-hidden="true" /> : <UserRound className="size-3" aria-hidden="true" />}
-                {actorLabel}
-              </Badge>
+              <ActorBadge actor={actor} />
               {event.merged_count && event.merged_count > 1 ? <span>{event.merged_count} grouped events</span> : null}
               <time dateTime={event.occurred_at}>{formatDate(event.occurred_at)}</time>
             </p>
@@ -317,7 +317,7 @@ const ActivityRow = memo(function ActivityRow({ dealId, event }: { dealId: strin
             {event.source_message_id ? `message ${event.source_message_id}` : ''}
           </p>
         ) : null}
-        {actorType === 'agent' && actor.thread_id ? <p className="mt-1 break-all text-xs text-faint">Agent thread {actor.thread_id}{actor.run_id ? ` / run ${actor.run_id}` : ''}</p> : null}
+        {actor.type === 'agent' && actor.thread_id ? <p className="mt-1 break-all text-xs text-faint">Agent thread {actor.thread_id}{actor.run_id ? ` / run ${actor.run_id}` : ''}</p> : null}
         {revertError ? <p role="alert" className="mt-2 text-xs text-danger">{revertError}</p> : null}
       </div>
     </li>

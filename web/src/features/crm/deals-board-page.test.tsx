@@ -145,6 +145,31 @@ test('rolls the board back and says why when the server refuses the move', async
   expect(within(column('Won')).queryByText('Acme renewal')).not.toBeInTheDocument()
 })
 
+test('an agent-created deal is tellable from a hand-made one on the board', async () => {
+  const board = boardBody()
+  const qualified = board.stages[0]
+  const manual = qualified?.deals[0]
+  if (!qualified || !manual) throw new Error('fixture lost its deal')
+  qualified.deals = [
+    manual,
+    { ...manual, id: 'd-2', name: 'Agent-sourced lead', source: 'agent', created_by_actor: { type: 'agent', client_id: 'cli-9' } },
+  ]
+  qualified.deal_count = 2
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    if (url.pathname.endsWith('/crm/board')) return Promise.resolve(json(board))
+    throw new Error(`unexpected request: ${url.pathname}`)
+  }))
+  renderWithProviders(<DealsBoardPage />)
+
+  const agentCard = (await screen.findByText('Agent-sourced lead')).closest('article')
+  const manualCard = screen.getByText('Acme renewal').closest('article')
+  if (!agentCard || !manualCard) throw new Error('deal cards did not render')
+  expect(within(agentCard).getByText('Agent / cli-9')).toBeInTheDocument()
+  expect(within(agentCard).getByTitle(/Created by an AI agent/)).toBeInTheDocument()
+  expect(within(manualCard).getByText('Workspace member')).toBeInTheDocument()
+})
+
 test('a failed board load explains the failure and offers a retry', async () => {
   vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json({ error: 'boom' }, 500))))
   renderWithProviders(<DealsBoardPage />)
