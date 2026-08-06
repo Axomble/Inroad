@@ -1,0 +1,34 @@
+---
+title: Inroad Documentation
+description: Self-hostable cold email sequencing and mailbox warmup platform. Open-core alternative to Instantly and Smartlead.
+template: splash
+hero:
+  tagline: Enterprise-grade cold outreach, peer-to-peer mailbox warmup, deliverability telemetry, and Model Context Protocol (MCP) AI integrations.
+  actions:
+    - text: Self-Hosting Guide
+      link: /deploy/docker-compose/
+      icon: right-arrow
+      variant: primary
+    - text: MCP AI Integration
+      link: /mcp/
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Core Platform Capabilities
+
+<CardGrid stack>
+	<Card title="Cold Email Sequencing" icon="pencil">
+		Multi-step sequences with automated delays, dynamic liquid variables, custom send pools, and claim-before-send delivery protection.
+	</Card>
+	<Card title="Peer-to-Peer Mailbox Warmup" icon="setting">
+		Workspace-isolated warmup engine with constant-time HMAC header verification (`X-Inroad-Warmup`) and automatic spam placement recovery.
+	</Card>
+	<Card title="Deliverability Circuit Breaker" icon="warning">
+		Real-time telemetry and circuit breaker that automatically pauses campaigns when bounce or complaint ratios exceed safety thresholds.
+	</Card>
+	<Card title="Model Context Protocol (MCP)" icon="rocket">
+		Native MCP Streamable HTTP server (`/v1/mcp`) with OAuth 2.1 authentication, allowing Claude, Cursor, Windsurf, and custom AI agents to interact with your outreach infrastructure.
+	</Card>
+</CardGrid>

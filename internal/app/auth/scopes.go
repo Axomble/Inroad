@@ -87,6 +87,8 @@ var OAuthGrantableScopes = []string{
 	ScopeCampaignsRead,
 	ScopeContactsRead,
 	ScopeContactsWrite,
+	ScopeCRMRead,
+	ScopeCRMWrite,
 	ScopeListsRead,
 	ScopeListsWrite,
 }

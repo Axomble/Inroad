@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
 import { Route as AppRouteImport } from './routes/app'
+import { Route as DocsRouteImport } from './routes/docs'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
@@ -21,6 +22,7 @@ import { Route as AppApprovalsRouteImport } from './routes/app.approvals'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppCrmRouteImport } from './routes/app.crm'
 import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
+import { Route as AppDocsRouteImport } from './routes/app.docs'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
@@ -47,6 +49,11 @@ const AcceptInviteRoute = AcceptInviteRouteImport.update({
 const AppRoute = AppRouteImport.update({
   id: '/app',
   path: '/app',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DocsRoute = DocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
@@ -92,6 +99,11 @@ const AppCrmRoute = AppCrmRouteImport.update({
 const AppDeliverabilityRoute = AppDeliverabilityRouteImport.update({
   id: '/deliverability',
   path: '/deliverability',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppDocsRoute = AppDocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
   getParentRoute: () => AppRoute,
 } as any)
 const AppMailboxesRoute = AppMailboxesRouteImport.update({
@@ -159,6 +171,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/app': typeof AppRouteWithChildren
+  '/docs': typeof DocsRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -167,6 +180,7 @@ export interface FileRoutesByFullPath {
   '/app/contacts': typeof AppContactsRoute
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
+  '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -184,6 +198,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
+  '/docs': typeof DocsRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -192,6 +207,7 @@ export interface FileRoutesByTo {
   '/app/contacts': typeof AppContactsRoute
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
+  '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -211,6 +227,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/app': typeof AppRouteWithChildren
+  '/docs': typeof DocsRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/register': typeof RegisterRoute
   '/reset-password': typeof ResetPasswordRoute
@@ -219,6 +236,7 @@ export interface FileRoutesById {
   '/app/contacts': typeof AppContactsRoute
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
+  '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -239,6 +257,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accept-invite'
     | '/app'
+    | '/docs'
     | '/forgot-password'
     | '/register'
     | '/reset-password'
@@ -247,6 +266,7 @@ export interface FileRouteTypes {
     | '/app/contacts'
     | '/app/crm'
     | '/app/deliverability'
+    | '/app/docs'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
@@ -264,6 +284,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/accept-invite'
+    | '/docs'
     | '/forgot-password'
     | '/register'
     | '/reset-password'
@@ -272,6 +293,7 @@ export interface FileRouteTypes {
     | '/app/contacts'
     | '/app/crm'
     | '/app/deliverability'
+    | '/app/docs'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
@@ -290,6 +312,7 @@ export interface FileRouteTypes {
     | '/'
     | '/accept-invite'
     | '/app'
+    | '/docs'
     | '/forgot-password'
     | '/register'
     | '/reset-password'
@@ -298,6 +321,7 @@ export interface FileRouteTypes {
     | '/app/contacts'
     | '/app/crm'
     | '/app/deliverability'
+    | '/app/docs'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
@@ -317,6 +341,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AcceptInviteRoute: typeof AcceptInviteRoute
   AppRoute: typeof AppRouteWithChildren
+  DocsRoute: typeof DocsRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   RegisterRoute: typeof RegisterRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
@@ -345,6 +370,13 @@ declare module '@tanstack/react-router' {
       path: '/app'
       fullPath: '/app'
       preLoaderRoute: typeof AppRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/docs': {
+      id: '/docs'
+      path: '/docs'
+      fullPath: '/docs'
+      preLoaderRoute: typeof DocsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/forgot-password': {
@@ -408,6 +440,13 @@ declare module '@tanstack/react-router' {
       path: '/deliverability'
       fullPath: '/app/deliverability'
       preLoaderRoute: typeof AppDeliverabilityRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/docs': {
+      id: '/app/docs'
+      path: '/docs'
+      fullPath: '/app/docs'
+      preLoaderRoute: typeof AppDocsRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/mailboxes': {
@@ -502,6 +541,7 @@ interface AppRouteChildren {
   AppContactsRoute: typeof AppContactsRoute
   AppCrmRoute: typeof AppCrmRoute
   AppDeliverabilityRoute: typeof AppDeliverabilityRoute
+  AppDocsRoute: typeof AppDocsRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -521,6 +561,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppContactsRoute: AppContactsRoute,
   AppCrmRoute: AppCrmRoute,
   AppDeliverabilityRoute: AppDeliverabilityRoute,
+  AppDocsRoute: AppDocsRoute,
   AppMailboxesRoute: AppMailboxesRoute,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
@@ -541,6 +582,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AcceptInviteRoute: AcceptInviteRoute,
   AppRoute: AppRouteWithChildren,
+  DocsRoute: DocsRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,
   RegisterRoute: RegisterRoute,
   ResetPasswordRoute: ResetPasswordRoute,

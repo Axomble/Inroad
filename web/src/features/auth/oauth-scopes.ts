@@ -46,6 +46,8 @@ const SCOPE_CONSENT_LABELS: Record<string, string> = {
   'contacts:write': 'Add and edit your contacts',
   'lists:read': 'Read your contact lists',
   'lists:write': 'Create and edit your contact lists',
+  'crm:read': 'Read your CRM companies, deals, pipelines, activities, and threads',
+  'crm:write': 'Create and edit your CRM companies, deals, and pipelines',
 }
 
 /** A human-readable consent sentence for a scope, or the raw value if unmapped. */
