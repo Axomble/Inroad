@@ -164,6 +164,49 @@ test('renders inbound and outbound messages in occurred_at order', async () => {
   expect(screen.getAllByText('Jamie Lin').length).toBeGreaterThan(0)
 })
 
+test('renders multiple outbound messages with a blank message_id and reply_class without collision or an "unknown" state', async () => {
+  // The backend only records a provider Message-ID once a send is actually
+  // delivered, and never classifies a reply_class on an outbound leg at
+  // all — a real thread with two sequence steps sent before either got a
+  // reply legitimately has two outbound messages that are both `""` on
+  // both fields. `message_id` was the React key here; two blanks used to
+  // collide and only one bubble would keep rendering.
+  if (!thread) throw new Error('fixture not set')
+  thread.messages = [
+    makeMessage({
+      message_id: '',
+      direction: 'outbound',
+      reply_class: '',
+      from_name: '',
+      from_email: 'sales@acme.test',
+      body_text: 'Step 1: quick intro',
+      occurred_at: '2026-08-06T10:00:00.000Z',
+    }),
+    makeMessage({
+      message_id: '',
+      direction: 'outbound',
+      reply_class: '',
+      from_name: '',
+      from_email: 'sales@acme.test',
+      body_text: 'Step 2: following up',
+      occurred_at: '2026-08-06T10:05:00.000Z',
+    }),
+  ]
+
+  renderWithProviders(<ThreadDetailPage />)
+
+  expect(await screen.findByText('Step 1: quick intro')).toBeInTheDocument()
+  // The real bug: a `key` collision on two blank `message_id`s means React
+  // reconciles the second bubble into the first's slot instead of mounting
+  // a sibling — this would silently disappear rather than throw.
+  expect(screen.getByText('Step 2: following up')).toBeInTheDocument()
+  // A blank `reply_class` on an outbound bubble is not "missing data" — an
+  // outbound send is never classified — so it must render as a plain "You"
+  // bubble, never an "Unknown" badge.
+  expect(screen.getAllByText('You')).toHaveLength(2)
+  expect(screen.queryByText(/unknown/i)).not.toBeInTheDocument()
+})
+
 test('mark-read fires exactly once per thread open, even across the background refetch its own mutation triggers', async () => {
   renderWithProviders(<ThreadDetailPage />)
   await screen.findByText('Sounds good, let’s talk Thursday')

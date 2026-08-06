@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useSearch } from '@tanstack/react-router'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -11,7 +11,7 @@ import { useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-nav'
 import { useListMailboxesQuery } from '@/store/api'
-import { useListInboxThreadsQuery, useSetInboxThreadReadMutation, type InboxThreadSummary } from './api'
+import { useListInboxThreadsQuery, type InboxThreadSummary } from './api'
 import { ThreadList } from './thread-list'
 import {
   parseInboxSearch,
@@ -49,6 +49,7 @@ const RAIL_SAMPLE_SIZE = 200
 export function InboxPage() {
   const search = parseInboxSearch(useSearch({ strict: false }))
   const patch = useUrlPatch()
+  const navigate = useNavigate()
   const selectedMailbox = search.mailbox ?? ''
   const replyClass = search.class ?? ''
 
@@ -165,12 +166,11 @@ export function InboxPage() {
     }
   }
 
-  const [setRead] = useSetInboxThreadReadMutation()
+  // Opening a thread is navigation, not a mark-read trigger — the reader at
+  // `/app/inbox/$threadId` marks it read on mount (Gmail-style), which keeps
+  // exactly one place responsible for that side effect.
   const openThread = (thread: InboxThreadSummary) => {
-    // Reading marks read — the one meaningful action a list-only inbox has
-    // today. A row click navigating into a full thread reader is a later,
-    // separate route (not part of this screen).
-    if (thread.unread) void setRead({ id: thread.id, setInboxThreadReadRequest: { unread: false } })
+    void navigate({ to: '/app/inbox/$threadId', params: { threadId: thread.id } })
   }
 
   const nav = useListKeyboardNav({

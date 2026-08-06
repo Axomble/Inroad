@@ -75,7 +75,17 @@ export function ThreadDetailPage() {
             }
           />
         ) : (
-          data?.messages.map((message) => <MessageBubble key={message.message_id} message={message} />)
+          data?.messages.map((message, index) => (
+            // `message_id` is blank for most outbound sends (no provider
+            // Message-ID recorded, or none generated yet) — never a safe key
+            // on its own, since two outbound messages in the same thread can
+            // legitimately share the empty string. `occurred_at` isn't unique
+            // either (same-second sends), so pair it with the array index —
+            // safe here because `messages` is a fixed, server-sorted list
+            // that this component never reorders or filters client-side.
+            // oxlint-disable-next-line no-array-index-key -- fixed, server-sorted list; index+occurred_at is stable, message_id/occurred_at alone are not unique for outbound legs
+            <MessageBubble key={`${message.occurred_at}-${index}`} message={message} />
+          ))
         )}
       </PageBody>
     </Page>

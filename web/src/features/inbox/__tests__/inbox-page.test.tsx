@@ -14,14 +14,28 @@ const router = vi.hoisted(() => {
   const listeners = new Set<() => void>()
   const state = {
     search: {} as Record<string, unknown>,
+    // The one `navigate({ to, params })` call a row click or Enter makes —
+    // distinct from `search`, which is this screen's OWN url-patch style
+    // navigation (filters, paging). A real `useNavigate()` handles both
+    // shapes; this stub mirrors that instead of assuming only one is ever
+    // used, which is what let the list's dead row-click go unnoticed.
+    lastNavigation: null as { to: string; params?: Record<string, unknown> } | null,
     listeners,
     subscribe: (cb: () => void) => {
       listeners.add(cb)
       return () => listeners.delete(cb)
     },
-    navigate: (options: { search: (prev: Record<string, unknown>) => Record<string, unknown> }) => {
-      state.search = options.search(state.search)
-      for (const cb of listeners) cb()
+    navigate: (
+      options:
+        | { search: (prev: Record<string, unknown>) => Record<string, unknown> }
+        | { to: string; params?: Record<string, unknown> },
+    ) => {
+      if ('search' in options) {
+        state.search = options.search(state.search)
+        for (const cb of listeners) cb()
+      } else {
+        state.lastNavigation = { to: options.to, params: options.params }
+      }
       return Promise.resolve()
     },
   }
@@ -74,7 +88,6 @@ const PAGE_SIZE = 25
 let mailboxes: Mailbox[]
 let threads: Thread[]
 let threadRequests: URL[]
-let readRequests: { id: string; body: unknown }[]
 
 function lastThreadRequest(): URL {
   const last = threadRequests[threadRequests.length - 1]
@@ -113,8 +126,8 @@ function applyKeyset(items: Thread[], beforeLastMessageAt: string | null, before
 
 beforeEach(() => {
   router.search = {}
+  router.lastNavigation = null
   threadRequests = []
-  readRequests = []
   mailboxes = [
     { id: 'mb-1', email: 'sales@acme.test' },
     { id: 'mb-2', email: 'support@acme.test' },
@@ -154,17 +167,6 @@ beforeEach(() => {
       const method = (isRequest ? input.method : init?.method ?? 'GET').toUpperCase()
 
       if (url.pathname.endsWith('/mailboxes')) return json(mailboxes)
-
-      const readMatch = /\/inbox\/threads\/([^/]+)\/read$/.exec(url.pathname)
-      if (readMatch?.[1] && method === 'PUT') {
-        const body = isRequest
-          ? await input.clone().json()
-          : typeof init?.body === 'string'
-            ? JSON.parse(init.body)
-            : {}
-        readRequests.push({ id: readMatch[1], body })
-        return json({})
-      }
 
       if (url.pathname.endsWith('/inbox/threads') && method === 'GET') {
         threadRequests.push(url)
@@ -275,34 +277,34 @@ test('empty state when no threads exist', async () => {
   expect(await screen.findByText('No replies yet')).toBeInTheDocument()
 })
 
-test('opening an unread thread marks it read', async () => {
+test('clicking a thread row navigates to its own thread route, not a mark-read call', async () => {
   renderWithProviders(<InboxPage />)
   const row = await screen.findByText('Jamie Lin')
 
   fireEvent.click(row)
 
-  await waitFor(() => expect(readRequests).toEqual([{ id: 't-1', body: { unread: false } }]))
+  // The reader route (`/app/inbox/$threadId`) is the single source of truth
+  // for marking a thread read on open — the list must only navigate.
+  await waitFor(() => expect(router.lastNavigation).toEqual({ to: '/app/inbox/$threadId', params: { threadId: 't-1' } }))
 })
 
-test('clicking an already-read thread does not fire a mark-read request', async () => {
+test('clicking an already-read thread still navigates to it', async () => {
   renderWithProviders(<InboxPage />)
   const row = await screen.findByText('Unknown sender')
 
   fireEvent.click(row)
 
-  // Give the (absent) request a chance to prove itself wrong.
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  expect(readRequests).toEqual([])
+  await waitFor(() => expect(router.lastNavigation).toEqual({ to: '/app/inbox/$threadId', params: { threadId: 't-2' } }))
 })
 
-test('j/k moves the keyboard cursor and Enter opens (marks read) the row under it', async () => {
+test('j/k moves the keyboard cursor and Enter navigates to the row under it', async () => {
   renderWithProviders(<InboxPage />)
   await screen.findByText('Jamie Lin')
 
   fireEvent.keyDown(document, { key: 'j' })
   fireEvent.keyDown(document, { key: 'Enter' })
 
-  await waitFor(() => expect(readRequests).toEqual([{ id: 't-1', body: { unread: false } }]))
+  await waitFor(() => expect(router.lastNavigation).toEqual({ to: '/app/inbox/$threadId', params: { threadId: 't-1' } }))
 })
 
 test('Next is disabled on a partial page, enabled on a full one, and paging forward fetches with the last row\'s real cursor', async () => {
