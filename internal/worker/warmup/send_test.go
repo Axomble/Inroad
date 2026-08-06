@@ -12,6 +12,8 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
@@ -33,6 +35,12 @@ type sendCore struct {
 	failedMsg   string
 	assignCalls int
 	nextCalls   int
+	// failFailN makes the first N FailWarmupSend calls fail (returning an
+	// error, as if the DB write itself failed), to exercise the
+	// fail-then-retry double-count regression: the metric for a permanent
+	// failure must only be recorded once FailWarmupSend actually commits.
+	failFailN int
+	failCalls int
 }
 
 func (c *sendCore) GetWarmupSendJob(context.Context, string, string) (coreapi.WarmupSendJob, error) {
@@ -51,6 +59,10 @@ func (c *sendCore) ReleaseWarmupSend(context.Context, coreapi.WarmupSendJob) err
 	return nil
 }
 func (c *sendCore) FailWarmupSend(_ context.Context, _ coreapi.WarmupSendJob, msg string) error {
+	c.failCalls++
+	if c.failCalls <= c.failFailN {
+		return errors.New("fail warmup send failed")
+	}
 	c.failed = true
 	c.failedMsg = msg
 	return nil
@@ -89,7 +101,7 @@ func TestSendHappyPathSendsSetsHeaderMarksAndSchedules(t *testing.T) {
 	snd := &fakeSender{msgID: "<mid-1@x.com>"}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 
@@ -133,7 +145,7 @@ func TestSendZeroizesSecretsAfterSend(t *testing.T) {
 	core := &sendCore{job: job, claim: coreapi.ClaimWon, assigned: ""}
 	snd := &fakeSender{msgID: "<m@x>"}
 
-	if err := SendHandler(core, snd, &fakeEnq{})(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, &fakeEnq{}, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	// The handler holds the SAME backing slices the job exposed; after the deferred
@@ -156,7 +168,7 @@ func TestSendRetryableReleasesAndReturnsError(t *testing.T) {
 	snd := &fakeSender{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}
 	enq := &fakeEnq{}
 
-	err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1"))
+	err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1"))
 	if !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Fatalf("handler err = %v, want the transient send error (asynq retry)", err)
 	}
@@ -178,7 +190,7 @@ func TestSendPermanentFailsAndSchedulesNext(t *testing.T) {
 	snd := &fakeSender{err: errors.New("550 mailbox unavailable")}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("permanent failure should be swallowed (fail-forward), got %v", err)
 	}
 	if !core.failed || core.failedMsg == "" {
@@ -198,7 +210,7 @@ func TestSendSkipsWhenJobSkip(t *testing.T) {
 	snd := &fakeSender{}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if snd.calls != 0 {
@@ -214,7 +226,7 @@ func TestSendClaimSkipDoesNothing(t *testing.T) {
 	snd := &fakeSender{}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if snd.calls != 0 || len(enq.calls) != 0 {
@@ -228,7 +240,7 @@ func TestSendClaimAlreadySentSchedulesWithoutSending(t *testing.T) {
 	snd := &fakeSender{}
 	enq := &fakeEnq{}
 
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if snd.calls != 0 {
@@ -248,7 +260,7 @@ func TestSendUsesNowWhenNextDueIsSendNow(t *testing.T) {
 	enq := &fakeEnq{}
 
 	before := time.Now()
-	if err := SendHandler(core, snd, enq)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+	if err := SendHandler(core, snd, enq, nil)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if len(enq.calls) != 1 {
@@ -257,5 +269,125 @@ func TestSendUsesNowWhenNextDueIsSendNow(t *testing.T) {
 	// sendNow overrides the (zero) due time with ~now.
 	if enq.calls[0].at.Before(before) {
 		t.Fatalf("sendNow tick scheduled at %v, want >= %v", enq.calls[0].at, before)
+	}
+}
+
+// sendsCount scrapes mtx's real Prometheus registry and returns the current
+// inroad_sends_total value for kind="warmup" + result, or 0 if that series
+// doesn't exist yet.
+func sendsCount(t *testing.T, mtx *metrics.Metrics, result string) float64 {
+	t.Helper()
+	families := metricstest.Scrape(t, mtx)
+	return metricstest.CounterValue(families, "inroad_sends_total", map[string]string{"kind": "warmup", "result": result})
+}
+
+// TestSendRecordsSendFinalizedMetrics proves each finalize point SendHandler
+// passes through increments inroad_sends_total{kind="warmup"} with the
+// outcome bucket it belongs to, and that ClaimAlreadySent's recover-forward
+// does not double-count a delivery already recorded on the run that sent it.
+func TestSendRecordsSendFinalizedMetrics(t *testing.T) {
+	cases := []struct {
+		name string
+		core *sendCore
+		snd  *fakeSender
+		want string
+	}{
+		{
+			name: "job.Skip is skipped",
+			core: &sendCore{job: coreapi.WarmupSendJob{Skip: true}, claim: coreapi.ClaimWon},
+			snd:  &fakeSender{}, want: "skipped",
+		},
+		{
+			name: "ClaimSkip is skipped",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimSkip},
+			snd:  &fakeSender{}, want: "skipped",
+		},
+		{
+			name: "successful send is sent",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimWon, assigned: "w:node-a"},
+			snd:  &fakeSender{msgID: "<m@x>"}, want: "sent",
+		},
+		{
+			// Transient (nothing delivered, asynq WILL retry the task): a
+			// self-clearing wait, not a terminal outcome — "deferred", not
+			// "failed".
+			name: "transient send failure is deferred",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimWon},
+			snd:  &fakeSender{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}, want: "deferred",
+		},
+		{
+			name: "permanent send failure is failed",
+			core: &sendCore{job: wonJob(), claim: coreapi.ClaimWon, assigned: "w:node-b"},
+			snd:  &fakeSender{err: errors.New("550 mailbox unavailable")}, want: "failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mtx := metrics.New()
+			_ = SendHandler(tc.core, tc.snd, &fakeEnq{}, mtx)(context.Background(), tickTask(t, "mb-1", "ws-1"))
+
+			for _, result := range []string{"sent", "failed", "skipped", "deferred"} {
+				got := sendsCount(t, mtx, result)
+				want := 0.0
+				if result == tc.want {
+					want = 1
+				}
+				if got != want {
+					t.Errorf("inroad_sends_total{kind=warmup,result=%s} = %v, want %v", result, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSendClaimAlreadySentDoesNotDoubleCountSent proves the recover-forward
+// path (schedule the next tick without re-sending) emits no metric of its
+// own — the delivery it's recovering was already counted "sent" by the run
+// that actually sent it.
+func TestSendClaimAlreadySentDoesNotDoubleCountSent(t *testing.T) {
+	mtx := metrics.New()
+	due := time.Now().Add(15 * time.Minute).Truncate(time.Second)
+	core := &sendCore{job: wonJob(), claim: coreapi.ClaimAlreadySent, dueAt: due, assigned: "w:node-c"}
+	snd := &fakeSender{}
+
+	if err := SendHandler(core, snd, &fakeEnq{}, mtx)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if got := sendsCount(t, mtx, "sent"); got != 0 {
+		t.Fatalf("inroad_sends_total{result=sent} = %v, want 0 (recover-forward must not record a fresh send)", got)
+	}
+}
+
+// TestSendPermanentFailureDoesNotDoubleCountOnFailWarmupSendFailureThenRetry
+// is the reordering regression, mirroring
+// sequence.TestAdvanceSuppressedDoesNotDoubleCountOnStopFailureThenRetry: if
+// FailWarmupSend itself fails (e.g. a transient DB error), asynq redelivers
+// the task, sender.Send fails again with the same permanent error, and the
+// SAME default branch runs again. Incrementing "failed" BEFORE
+// FailWarmupSend would count a failure that never durably committed — and
+// count it AGAIN when the retry finally succeeds.
+func TestSendPermanentFailureDoesNotDoubleCountOnFailWarmupSendFailureThenRetry(t *testing.T) {
+	mtx := metrics.New()
+	core := &sendCore{job: wonJob(), claim: coreapi.ClaimWon, assigned: "w:node-b", failFailN: 1}
+	snd := &fakeSender{err: errors.New("550 mailbox unavailable")}
+
+	// First run: FailWarmupSend fails -> the error must surface WITHOUT
+	// incrementing the metric — the failure never durably committed.
+	if err := SendHandler(core, snd, &fakeEnq{}, mtx)(context.Background(), tickTask(t, "mb-1", "ws-1")); err == nil {
+		t.Fatal("first run: expected the FailWarmupSend failure to surface")
+	}
+	if got := sendsCount(t, mtx, "failed"); got != 0 {
+		t.Fatalf("inroad_sends_total{result=failed} = %v, want 0 (must not count a failure that failed to commit)", got)
+	}
+
+	// Second run (retry): FailWarmupSend succeeds -> exactly one increment.
+	if err := SendHandler(core, snd, &fakeEnq{}, mtx)(context.Background(), tickTask(t, "mb-1", "ws-1")); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if !core.failed {
+		t.Fatal("FailWarmupSend was not eventually recorded")
+	}
+	if got := sendsCount(t, mtx, "failed"); got != 1 {
+		t.Fatalf("inroad_sends_total{result=failed} = %v, want 1 (recorded once, on the run that actually committed it)", got)
 	}
 }

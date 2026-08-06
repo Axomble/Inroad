@@ -113,6 +113,22 @@ type InboxPollPayload struct {
 // for every active mailbox.
 const TaskInboxSweep = "inbox:sweep"
 
+const TaskTestSend = "testsend:send"
+
+// TestSendPayload is the body of a testsend:send task. It carries only ids --
+// the worker (internal/worker/testsend) loads the step content, the preview
+// personalization vars, and the resolved mailbox's decrypted transport itself
+// through coreapi, so nothing here is a credential or rendered content.
+// WorkspaceID travels alongside every other id so the worker's coreapi lookups
+// are workspace-pinned (defense in depth on the unguessable ids).
+type TestSendPayload struct {
+	CampaignID  string `json:"campaign_id"`
+	StepID      string `json:"step_id"`
+	MailboxID   string `json:"mailbox_id"`
+	To          string `json:"to"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
 // TaskDeliverabilityEvaluate re-evaluates one campaign's circuit breaker. It is
 // enqueued AFTER a send is finalised, never inside the send transaction, so a
 // scoring bug cannot fail a delivery.
@@ -310,6 +326,36 @@ func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) e
 	return c.enqueue(asynq.NewTask(TaskDeliverabilityEvaluate, b),
 		asynq.TaskID(fmt.Sprintf("deliverability:%s:%d", campaignID, bucket.Unix())),
 		asynq.ProcessAt(bucket),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Retention(taskRetention),
+	)
+}
+
+// testSendTaskID keys a testsend:send on (campaign, step, mailbox,
+// due-second) so a double-submitted form within the same second collapses to
+// one send, while a genuinely distinct test-send a moment later still
+// enqueues. Unlike sendOpts/enqueueAdvance, there is no downstream row-claim
+// backing this as a correctness guarantee (a test-send writes no sends row) --
+// the per-workspace rate limiter (campaign.Service.TestSend) is the abuse
+// guard; this key only cuts an accidental double-click. The recipient address
+// is deliberately NOT part of the key (test-send operator input, kept out of
+// a Redis-visible identifier). now is passed in (rather than read from
+// time.Now() here) so the dedup window is deterministic under test, mirroring
+// warmupTickTaskID.
+func testSendTaskID(campaignID, stepID, mailboxID string, now time.Time) string {
+	return fmt.Sprintf("testsend:%s:%s:%s:%d", campaignID, stepID, mailboxID, now.Unix())
+}
+
+// EnqueueTestSend enqueues a testsend:send task for immediate processing.
+func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID string) error {
+	b, err := json.Marshal(TestSendPayload{
+		CampaignID: campaignID, StepID: stepID, MailboxID: mailboxID, To: to, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueue(asynq.NewTask(TaskTestSend, b),
+		asynq.TaskID(testSendTaskID(campaignID, stepID, mailboxID, time.Now())),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Retention(taskRetention),
 	)

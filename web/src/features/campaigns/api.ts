@@ -40,6 +40,14 @@ export type {
 // wired here rather than reaching across features.
 export type { CampaignDeliverability, CampaignGuardrails, CampaignPauseEvent } from '@/store/api'
 
+// Preflight + test-send shapes. Both endpoints are read-your-own-workspace
+// actions with nothing else in the app to invalidate (a test send changes no
+// resource the UI renders, and the preflight report is re-fetched fresh every
+// time its dialog opens), so neither needs tag wiring below — they're
+// re-exported as-is from the generated client, kept behind this feature's one
+// import surface like everything else here.
+export type { CampaignPreflight, CampaignPreflightCheck, TestSendRequest, TestSendResponse } from '@/store/api'
+
 const campaignApi = api.enhanceEndpoints({
   addTagTypes: ['Campaign', 'Step', 'Schedule', 'SenderPool', 'Guardrails'],
   endpoints: {
@@ -64,6 +72,33 @@ const campaignApi = api.enhanceEndpoints({
       invalidatesTags: (_result, _error, arg) => [{ type: 'Campaign', id: arg.id }],
     },
     launchCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    // Lifecycle transitions (rename/delete/pause/resume) all change what the
+    // list row and the detail page show, so each mirrors launch's tag wiring:
+    // invalidate both the specific campaign and the list.
+    renameCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    deleteCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    pauseCampaign: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Campaign', id: arg.id },
+        { type: 'Campaign', id: 'LIST' },
+      ],
+    },
+    resumeCampaign: {
       invalidatesTags: (_result, _error, arg) => [
         { type: 'Campaign', id: arg.id },
         { type: 'Campaign', id: 'LIST' },
@@ -125,6 +160,10 @@ export const {
   useGetCampaignQuery,
   useCreateCampaignMutation,
   useLaunchCampaignMutation,
+  useRenameCampaignMutation,
+  useDeleteCampaignMutation,
+  usePauseCampaignMutation,
+  useResumeCampaignMutation,
   useUpdateCampaignTrackingMutation,
   useListCampaignEnrollmentsQuery,
   useListStepsQuery,
@@ -138,4 +177,6 @@ export const {
   useUpdateCampaignSendersMutation,
   useGetCampaignDeliverabilityQuery,
   useUpdateCampaignGuardrailsMutation,
+  useGetCampaignPreflightQuery,
+  useTestSendCampaignMutation,
 } = campaignApi

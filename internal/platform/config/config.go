@@ -19,6 +19,14 @@ type Config struct {
 	JWTSecret   []byte
 	MasterKey   []byte
 
+	// MetricsAddr is the address the dedicated Prometheus /metrics listener
+	// binds to (e.g. ":9091"), started by both cmd/inroad and cmd/worker.
+	// Empty (default) disables the listener entirely — self-hosters who don't
+	// run Prometheus get no extra open port. This is a SEPARATE listener from
+	// HTTPAddr: metrics is never mounted on the public API router, so serving
+	// it raises no auth question.
+	MetricsAddr string
+
 	// KeyProvider selects the KEK backend that wraps per-workspace DEKs.
 	// "local" (default) wraps under INROAD_MASTER_KEY; a cloud KMS is a future
 	// drop-in. An unknown value fails closed at binary startup.
@@ -168,6 +176,7 @@ func Load() (*Config, error) {
 		DatabaseURL: getenv("INROAD_DATABASE_URL", "postgres://inroad:inroad@localhost:5432/inroad?sslmode=disable"),
 		RedisAddr:   getenv("INROAD_REDIS_ADDR", "localhost:6379"),
 	}
+	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
 
 	secret := os.Getenv("INROAD_JWT_SECRET")
 	if len(secret) < 16 {

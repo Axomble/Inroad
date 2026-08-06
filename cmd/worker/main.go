@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	// time/tzdata embeds the IANA zone database in the binary. Campaign send
@@ -20,9 +21,11 @@ import (
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/dnsauth"
+	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
@@ -53,6 +56,38 @@ func run() error {
 		return err
 	}
 	logger := log.New(cfg.Env)
+
+	// Prometheus /metrics listener. mtx is always constructed (never nil): the
+	// campaign/warmup send handlers' finalize points record into it
+	// unconditionally below; INROAD_METRICS_ADDR only controls whether the
+	// dedicated listener actually opens a port.
+	//
+	// Shutdown must be a synchronous cancel-THEN-wait, not a bare cancel: a
+	// deferred cancelMetrics() alone unblocks httpx.Run's goroutine but
+	// nothing then waits for that goroutine to finish its own graceful
+	// srv.Shutdown — run() (and the process) can return before it does,
+	// which defeats the whole point of a graceful shutdown. metricsWG makes
+	// the deferred cleanup below block until the listener has actually
+	// stopped, same as the heartbeat's hbCtx/cancelHeartbeat further down
+	// (which has no listener to wait for, so it only needs the cancel).
+	mtx := metrics.New()
+	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
+	var metricsWG sync.WaitGroup
+	if cfg.MetricsAddr != "" {
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		metricsWG.Add(1)
+		go func() {
+			defer metricsWG.Done()
+			if err := httpx.Run(metricsCtx, metricsSrv); err != nil {
+				logger.Error("metrics server error", "err", err)
+			}
+		}()
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+	}
+	defer func() {
+		cancelMetrics()
+		metricsWG.Wait()
+	}()
 
 	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
 	if err != nil {
@@ -158,7 +193,7 @@ func run() error {
 	// The DNS resolver for the domain-authentication sweep. It resolves only
 	// domains derived from connected mailboxes (coreapi supplies the list), and
 	// a TXT lookup dials no user-supplied host, so it needs no SSRF vet.
-	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret)
+	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret, mtx)
 
 	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {

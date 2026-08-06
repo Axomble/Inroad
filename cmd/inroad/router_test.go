@@ -69,7 +69,7 @@ func TestBuildRouterProtectedGroupRejectsAnonymous(t *testing.T) {
 	mb := chi.NewRouter()
 	mb.Get("/", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(), nil, []protectedGroup{{
+	r := buildRouter(discardLogger(), nil, nil, []protectedGroup{{
 		verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
 		mounts:    []mount{{pattern: "/api/v1/mailboxes", handler: mb}},
 	}})
@@ -91,7 +91,7 @@ func TestBuildRouterFailsSafeForNewRoutes(t *testing.T) {
 	brandNew := chi.NewRouter()
 	brandNew.Get("/", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(), nil, []protectedGroup{{
+	r := buildRouter(discardLogger(), nil, nil, []protectedGroup{{
 		verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
 		mounts:    []mount{{pattern: "/api/v1/brand-new", handler: brandNew}},
 	}})
@@ -111,7 +111,7 @@ func TestBuildRouterPublicGroupNeedsNoToken(t *testing.T) {
 	pub.Post("/register", okHandler().ServeHTTP)
 	pub.Post("/login", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(),
+	r := buildRouter(discardLogger(), nil,
 		[]mount{{pattern: "/api/v1/auth", handler: pub}},
 		nil,
 	)
@@ -135,7 +135,7 @@ func TestBuildRouterPublicCSRFRouteNeedsCSRFNotBearer(t *testing.T) {
 	pub := chi.NewRouter()
 	pub.With(auth.RequireCSRF).Post("/refresh", okHandler().ServeHTTP)
 
-	r := buildRouter(discardLogger(),
+	r := buildRouter(discardLogger(), nil,
 		[]mount{{pattern: "/api/v1/auth", handler: pub}},
 		nil,
 	)
@@ -168,7 +168,7 @@ func TestBuildRouterPublicCSRFRouteNeedsCSRFNotBearer(t *testing.T) {
 func TestBuildRouterIdentityMeStaysGuarded(t *testing.T) {
 	h := &identity.Handler{}
 
-	r := buildRouter(discardLogger(),
+	r := buildRouter(discardLogger(), nil,
 		[]mount{{pattern: "/api/v1/auth", handler: h.Routes(identity.RouteDeps{Verifier: auth.NewJWTVerifier(testSecret)})}},
 		nil,
 	)

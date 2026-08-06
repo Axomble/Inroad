@@ -34,14 +34,65 @@ type Enqueuer interface {
 // Service implements campaign use cases. It depends on the Store and
 // Checker interfaces, not on the sqlc-backed struct or other domains'
 // concrete stores -- dependency inversion.
+//
+// domainAuth/testSendEnq/limiter/suppression back the preflight report's
+// domain_auth check and test-send respectively. They are all OPTIONAL
+// (nil-safe: see Service.readDomainAuth, TestSend's own nil check,
+// checkTestSendRateLimit, and checkRecipientNotSuppressed) and injected via
+// ServiceOption rather than added as NewService parameters, so every existing
+// caller of NewService(store, checker) -- and every existing unit test --
+// keeps compiling unchanged.
+//
+// Neither TestSend nor anything else in this package ever decrypts a mailbox
+// credential or dials a provider (docs/security.md invariant 1): test-send's
+// actual render+send is a testsend:send task, executed by
+// internal/worker/testsend in the execution plane. testSendEnq only enqueues
+// that task.
 type Service struct {
-	store   Store
-	checker Checker
-	metrics *metricsCache
+	store       Store
+	checker     Checker
+	metrics     *metricsCache
+	domainAuth  DomainAuthReader
+	testSendEnq TestSendEnqueuer
+	limiter     RateLimiter
+	suppression SuppressionChecker
 }
 
-func NewService(store Store, checker Checker) *Service {
-	return &Service{store: store, checker: checker, metrics: newMetricsCache(metricsCacheTTL)}
+// ServiceOption configures an optional Service dependency. See the Service
+// doc comment for why these are options rather than NewService parameters.
+type ServiceOption func(*Service)
+
+// WithDomainAuth wires the preflight domain_auth check's evidence source.
+// Without it, every sender domain reports as "not checked" (see
+// Service.readDomainAuth) rather than the loader failing.
+func WithDomainAuth(r DomainAuthReader) ServiceOption { return func(s *Service) { s.domainAuth = r } }
+
+// WithTestSendEnqueuer wires test-send's testsend:send task enqueue.
+func WithTestSendEnqueuer(e TestSendEnqueuer) ServiceOption {
+	return func(s *Service) { s.testSendEnq = e }
+}
+
+// WithRateLimiter wires test-send's abuse guard. Without it, test-send is
+// unlimited (see Service.checkTestSendRateLimit) -- a deployment choice made
+// once at wiring time, not a silent bypass.
+func WithRateLimiter(l RateLimiter) ServiceOption { return func(s *Service) { s.limiter = l } }
+
+// WithSuppressionChecker wires test-send's suppression-list guard: a test
+// email must never go to an address the workspace has explicitly
+// unsubscribed or bounced. Without it, TestSend skips the check (see
+// Service.checkRecipientNotSuppressed) -- cmd/inroad always wires one in
+// production; internal/worker/testsend re-checks independently before
+// dialing as defense in depth.
+func WithSuppressionChecker(c SuppressionChecker) ServiceOption {
+	return func(s *Service) { s.suppression = c }
+}
+
+func NewService(store Store, checker Checker, opts ...ServiceOption) *Service {
+	s := &Service{store: store, checker: checker, metrics: newMetricsCache(metricsCacheTTL)}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Create verifies the mailbox is active and the list exists in the

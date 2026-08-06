@@ -280,6 +280,7 @@ type Campaign struct {
 	BouncePausePct      pgtype.Numeric     `json:"bounce_pause_pct"`
 	ComplaintPausePct   pgtype.Numeric     `json:"complaint_pause_pct"`
 	GuardrailsEnabledAt pgtype.Timestamptz `json:"guardrails_enabled_at"`
+	MaxNewLeadsPerDay   *int32             `json:"max_new_leads_per_day"`
 }
 
 type CampaignPauseEvent struct {
@@ -459,6 +460,16 @@ type Event struct {
 	SourceThreadRef        string             `json:"source_thread_ref"`
 	OccurredAt             pgtype.Timestamptz `json:"occurred_at"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+}
+
+type IdempotencyKey struct {
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	Key          string             `json:"key"`
+	RequestHash  []byte             `json:"request_hash"`
+	StatusCode   *int32             `json:"status_code"`
+	ResponseBody []byte             `json:"response_body"`
+	ContentType  *string            `json:"content_type"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type List struct {

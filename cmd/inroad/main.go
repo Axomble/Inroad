@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/inroad/inroad/internal/app/crm"
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
+	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
@@ -58,6 +60,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/ratelimit"
@@ -86,6 +89,39 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Always constructed (never nil): the API router's metrics middleware
+	// records into it unconditionally, and the dedicated /metrics listener
+	// below is the only piece that's actually optional (INROAD_METRICS_ADDR).
+	//
+	// metricsCtx is a CHILD of ctx (not ctx itself): an OS-signal shutdown
+	// cancels it automatically alongside the main server below, but run()
+	// can also return earlier on a plain error (e.g. db.Connect failing),
+	// which never cancels ctx at all — the explicit cancelMetrics() in the
+	// deferred cleanup covers that path too, so this can never deadlock
+	// waiting on a listener nothing told to stop. The wait itself matters
+	// just as much as the cancel: a bare deferred cancel with nothing
+	// awaiting the goroutine lets run() (and the process) return before the
+	// listener's own graceful srv.Shutdown finishes, which defeats the
+	// point of a graceful shutdown.
+	mtx := metrics.New()
+	metricsCtx, cancelMetrics := context.WithCancel(ctx)
+	var metricsWG sync.WaitGroup
+	if cfg.MetricsAddr != "" {
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		metricsWG.Add(1)
+		go func() {
+			defer metricsWG.Done()
+			if err := httpx.Run(metricsCtx, metricsSrv); err != nil {
+				logger.Error("metrics server error", "err", err)
+			}
+		}()
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+	}
+	defer func() {
+		cancelMetrics()
+		metricsWG.Wait()
+	}()
 
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -248,9 +284,37 @@ func run() error {
 	// keeps the "app packages don't import each other" invariant intact.
 	contactStore := contact.NewPgStore(pool)
 	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc})
+	// Sending-domain authentication (SPF/DKIM/DMARC). Built here (not inline at
+	// its mount below) because campaign preflight's domain_auth check also
+	// reads it, through the narrow domainAuthAdapter — the domain list is
+	// derived from this workspace's mailboxes, so nothing here reaches DNS.
+	sendingdomainSvc := sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver())
 	// checker adapts the mailbox and list stores for campaign ownership checks.
 	campaignStore := campaign.NewPgStore(pool)
-	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc})
+	// Built here (not inline at its mount below) because campaign test-send's
+	// suppression check also reads it, through campaign.SuppressionChecker --
+	// suppStore satisfies that interface structurally, so no adapter type is
+	// needed (unlike domainAuthAdapter, whose source returns a different shape).
+	suppStore := suppression.NewStore(queries)
+	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc},
+		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
+		// Test-send (POST /campaigns/{id}/test-send) only ENQUEUES a
+		// testsend:send task here: cmd/inroad must never decrypt a mailbox
+		// credential or dial a provider (docs/security.md invariant 1). The
+		// actual render+send happens in the execution plane
+		// (internal/worker/testsend), which resolves the mailbox transport
+		// through the same coreapi credential path every real send uses.
+		campaign.WithTestSendEnqueuer(enq),
+		// Reuses the same Redis-backed limiter the auth throttles use, so the
+		// 5/min test-send cap holds across every API server instance.
+		campaign.WithRateLimiter(redisLimiter),
+		// A test-send must never reach an address the workspace has explicitly
+		// unsubscribed or bounced -- the SAME suppression table a real send
+		// checks. internal/worker/testsend re-checks independently before
+		// dialing (defense in depth against a race with an incoming
+		// unsubscribe between enqueue and the task running).
+		campaign.WithSuppressionChecker(suppStore),
+	)
 	// Sequence steps live under /campaigns/{id}/steps; the step service checks
 	// campaign status (draft-gating) via an adapter over the campaign store.
 	stepHandler := sequencestep.NewHandler(
@@ -334,7 +398,6 @@ func run() error {
 	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger, cfg.AgentMaxConcurrentRuns)
 	runManager.StartExpirySweep()
 	agentHandler := agentchat.NewHandler(agentchat.NewService(agentStore, runManager, agentStream))
-	suppStore := suppression.NewStore(queries)
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
 	// Deny-by-default routing. Two groups:
@@ -415,9 +478,7 @@ func run() error {
 		// data plane because ingest is api-key authenticated: an external bounce/
 		// complaint pipeline is exactly the caller this group exists for.
 		{pattern: "/api/v1/deliverability", handler: deliverabilityHandler.Routes()},
-		{pattern: "/api/v1/sending-domains", handler: sendingdomain.NewHandler(
-			sendingdomain.NewService(sendingdomain.NewPgStore(queries), dnsauth.NewResolver()),
-		).Routes()},
+		{pattern: "/api/v1/sending-domains", handler: sendingdomain.NewHandler(sendingdomainSvc).Routes()},
 	}
 	// Session-only surface: workspace administration and the warmup overview are not
 	// part of the api-key contract, so they authenticate with the session verifier
@@ -440,10 +501,27 @@ func run() error {
 		// OAuth clients cannot create threads or inherit a user's tool authority.
 		{pattern: "/api/v1/agent", handler: agentHandler.Routes()},
 	}
-	router := buildRouter(logger, public, []protectedGroup{
+	// Idempotency-Key replay cache: generic cross-cutting middleware, mounted
+	// inside every authenticated group (after RequireAuth resolves the
+	// principal) and before the domain routers. The workspace-id accessor is a
+	// small function seam rather than an import of app/auth — platform/*
+	// must never import app/* — using the non-writing UserFromContext (this
+	// middleware only ever runs inside an already-authenticated group, so a
+	// missing principal here is a programming error the middleware itself
+	// fails closed on, rather than the request-writing auth.WorkspaceID).
+	idempotencyStore := idempotency.NewPgStore(pool)
+	idempotencyMW := httpx.Idempotency(idempotencyStore, func(r *http.Request) (string, bool) {
+		p, ok := auth.UserFromContext(r.Context())
+		if !ok {
+			return "", false
+		}
+		return p.WorkspaceID, true
+	})
+
+	router := buildRouter(logger, mtx, public, []protectedGroup{
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
 		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
-	})
+	}, idempotencyMW)
 	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -489,14 +567,23 @@ type protectedGroup struct {
 // root, by auth.RequireAuth(verifiers...). A route added under a protected group
 // is therefore authenticated whether or not it wires up any middleware of its
 // own -- forgetting a per-domain guard can no longer expose a route.
-func buildRouter(logger *slog.Logger, public []mount, groups []protectedGroup) *chi.Mux {
-	r := httpx.NewRouter(logger)
+//
+// groupMiddleware applies to every protected group, AFTER RequireAuth (so it
+// can read the authenticated principal) and BEFORE the group's own domain
+// routers mount -- currently just the Idempotency-Key replay cache, which
+// needs an authenticated workspace and must run ahead of every handler it
+// might short-circuit a replay for.
+func buildRouter(logger *slog.Logger, mtx *metrics.Metrics, public []mount, groups []protectedGroup, groupMiddleware ...func(http.Handler) http.Handler) *chi.Mux {
+	r := httpx.NewRouter(logger, mtx)
 	for _, m := range public {
 		r.Mount(m.pattern, m.handler)
 	}
 	for _, g := range groups {
 		r.Group(func(pr chi.Router) {
 			pr.Use(auth.RequireAuth(g.verifiers...))
+			for _, mw := range groupMiddleware {
+				pr.Use(mw)
+			}
 			for _, m := range g.mounts {
 				pr.Mount(m.pattern, m.handler)
 			}
@@ -540,6 +627,26 @@ func (o ownershipChecker) ListExists(ctx context.Context, ws, listID uuid.UUID) 
 		return false, err
 	}
 	return true, nil
+}
+
+// domainAuthAdapter satisfies campaign.DomainAuthReader over the sendingdomain
+// service, so the preflight domain_auth check reads real SPF/DMARC verdicts
+// without the campaign package importing sendingdomain (app/* packages never
+// import each other).
+type domainAuthAdapter struct{ domains *sendingdomain.Service }
+
+func (a domainAuthAdapter) DomainAuth(ctx context.Context, ws uuid.UUID) (map[string]campaign.DomainAuthVerdict, error) {
+	rows, err := a.domains.List(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]campaign.DomainAuthVerdict, len(rows))
+	for _, d := range rows {
+		out[d.Domain] = campaign.DomainAuthVerdict{
+			Checked: d.CheckedAt != nil, SPFFound: d.SPFFound, DMARCFound: d.DMARCFound,
+		}
+	}
+	return out, nil
 }
 
 // campaignStatusChecker adapts the campaign store to sequencestep.CampaignChecker

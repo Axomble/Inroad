@@ -8,11 +8,19 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/inroad/inroad/internal/platform/metrics"
 )
 
-// NewRouter returns a chi mux pre-wired with standard middleware and a health check.
-func NewRouter(logger *slog.Logger) *chi.Mux {
+// NewRouter returns a chi mux pre-wired with standard middleware and a health
+// check. mtx's HTTPMiddleware is mounted FIRST — outermost in the chain,
+// before middleware.Recoverer — so it observes the true final status of every
+// request, including a panic Recoverer converts to 500 (see HTTPMiddleware's
+// doc comment). A nil mtx (metrics disabled) is a safe no-op, so callers
+// never need their own nil check.
+func NewRouter(logger *slog.Logger, mtx *metrics.Metrics) *chi.Mux {
 	r := chi.NewRouter()
+	r.Use(mtx.HTTPMiddleware())
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)

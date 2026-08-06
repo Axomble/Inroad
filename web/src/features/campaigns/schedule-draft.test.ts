@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   MAX_DAILY_LIMIT,
+  MAX_NEW_LEADS_PER_DAY,
   dailyLimitFromDraft,
   dailyLimitToDraft,
   fromDraft,
+  maxNewLeadsFromDraft,
+  maxNewLeadsToDraft,
   newInterval,
   toDraft,
 } from './schedule-draft'
@@ -192,5 +195,47 @@ describe('dailyLimitFromDraft upper bound', () => {
 
   it.each([String(MAX_DAILY_LIMIT + 1), '2147483648', '99999999999'])('refuses %s', (raw) => {
     expect(dailyLimitFromDraft(raw)).toEqual({ problem: expect.stringContaining('or less') })
+  })
+})
+
+describe('maxNewLeadsToDraft', () => {
+  it('shows a set limit as its digits', () => {
+    expect(maxNewLeadsToDraft(25)).toBe('25')
+    // Not filtered out as falsy: a 0 the server somehow returned must be visible
+    // and rejected, not silently displayed as "no limit".
+    expect(maxNewLeadsToDraft(0)).toBe('0')
+  })
+
+  it('shows no limit as an empty field', () => {
+    expect(maxNewLeadsToDraft(null)).toBe('')
+    expect(maxNewLeadsToDraft(undefined)).toBe('')
+  })
+})
+
+describe('maxNewLeadsFromDraft', () => {
+  it('reads an empty field as no new-lead limit', () => {
+    expect(maxNewLeadsFromDraft('')).toEqual({ maxNewLeads: null })
+    expect(maxNewLeadsFromDraft('   ')).toEqual({ maxNewLeads: null })
+  })
+
+  it('reads digits as the limit', () => {
+    expect(maxNewLeadsFromDraft('40')).toEqual({ maxNewLeads: 40 })
+    expect(maxNewLeadsFromDraft(' 1 ')).toEqual({ maxNewLeads: 1 })
+  })
+
+  // The API's own minimum is 1; refusing here gives the specific reason instead
+  // of a 422 the operator has to interpret.
+  it.each(['0', '-5', '2.5', 'lots', '1e3', '1 000'])('refuses %j', (raw) => {
+    expect(maxNewLeadsFromDraft(raw)).toEqual({ problem: expect.stringContaining('1 or more') })
+  })
+})
+
+describe('maxNewLeadsFromDraft upper bound', () => {
+  it('accepts the documented maximum', () => {
+    expect(maxNewLeadsFromDraft(String(MAX_NEW_LEADS_PER_DAY))).toEqual({ maxNewLeads: MAX_NEW_LEADS_PER_DAY })
+  })
+
+  it.each([String(MAX_NEW_LEADS_PER_DAY + 1), '2147483648', '99999999999'])('refuses %s', (raw) => {
+    expect(maxNewLeadsFromDraft(raw)).toEqual({ problem: expect.stringContaining('or less') })
   })
 })

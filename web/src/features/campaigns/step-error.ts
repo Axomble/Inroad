@@ -12,3 +12,19 @@ export function stepErrorMessage(error: unknown): string {
   if (status === 400) return 'Please fill in all required fields.'
   return "Couldn't save the step. Please try again."
 }
+
+/**
+ * Maps an RTK Query error from `testSendCampaign` to a human message. Mirrors
+ * the status codes `internal/app/campaign/handler.go`'s `testSend` actually
+ * returns: 400 is either a malformed step id or a `to` that failed the
+ * backend's `validate:"required,email"` tag, 422 is "no eligible sender",
+ * 429 is the per-workspace test-send rate limit.
+ */
+export function testSendErrorMessage(error: unknown): string {
+  const status = httpStatus(error)
+  if (status === 400) return 'Enter a valid email address.'
+  if (status === 404) return 'This step no longer exists.'
+  if (status === 422) return 'No enabled sender with a connected mailbox — add one in Senders first.'
+  if (status === 429) return 'Too many test sends. Please wait a moment, then try again.'
+  return "Couldn't send the test email. Please try again."
+}

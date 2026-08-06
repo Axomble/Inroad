@@ -213,3 +213,36 @@ func TestDefaultWorkerQueuesEmptyID(t *testing.T) {
 		t.Fatalf("defaultWorkerQueues(\"\") = %v, want [default]", got)
 	}
 }
+
+// TestLoadMetricsAddrDefaultsToDisabled proves the Prometheus listener is off
+// by default (empty INROAD_METRICS_ADDR) — self-hosters who don't run
+// Prometheus get no extra open port.
+func TestLoadMetricsAddrDefaultsToDisabled(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("INROAD_METRICS_ADDR", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.MetricsAddr != "" {
+		t.Fatalf("MetricsAddr = %q, want empty (disabled) by default", cfg.MetricsAddr)
+	}
+}
+
+// TestLoadMetricsAddrOverride proves an explicit INROAD_METRICS_ADDR is
+// honored verbatim.
+func TestLoadMetricsAddrOverride(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("INROAD_METRICS_ADDR", ":9091")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.MetricsAddr != ":9091" {
+		t.Fatalf("MetricsAddr = %q, want :9091", cfg.MetricsAddr)
+	}
+}

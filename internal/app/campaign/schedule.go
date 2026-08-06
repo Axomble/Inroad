@@ -27,16 +27,26 @@ func DefaultSchedule(tz string) Schedule { return cadence.DefaultSchedule(tz) }
 // is expressed by a nil limit, never by zero.
 var ErrDailyLimit = errors.New("daily limit out of range")
 
-// Plan is a campaign's whole sending plan: when it may send (the schedule) and at
-// most how much per UTC day (DailyLimit, nil = no campaign limit). One panel and
-// one save own both, so the service reads and writes them together — a schedule
-// with a stale limit beside it is a plan that was never configured as a whole.
+// ErrMaxNewLeadsPerDay rejects a max-new-leads-per-day value outside the usable
+// range, mapped to 422 by the handler. Mirrors ErrDailyLimit: "no limit" is a nil
+// pointer, never zero.
+var ErrMaxNewLeadsPerDay = errors.New("max new leads per day out of range")
+
+// Plan is a campaign's whole sending plan: when it may send (the schedule), at
+// most how much in total per UTC day (DailyLimit), and at most how many BRAND-NEW
+// contacts may START per UTC day (MaxNewLeadsPerDay). nil means no limit for
+// either. One panel and one save own all three, so a schedule saved without them
+// is a plan that was never configured as a whole.
 //
-// The limit is campaign-WIDE across the sender pool, and can only lower throughput:
-// it never raises a mailbox above its own ramped, health-scaled cap.
+// Both limits are campaign-WIDE across the sender pool and can only lower
+// throughput: neither ever raises a mailbox above its own ramped, health-scaled
+// cap. MaxNewLeadsPerDay is narrower than DailyLimit — it counts only step-1
+// sends, so a sequence already in flight keeps sending its follow-ups on
+// schedule regardless of how many new contacts started today.
 type Plan struct {
 	Schedule
-	DailyLimit *int
+	DailyLimit        *int
+	MaxNewLeadsPerDay *int
 }
 
 // GetSchedule returns the campaign's sending plan: timezone, weekly windows and
@@ -52,7 +62,11 @@ func (s *Service) GetSchedule(ctx context.Context, ws, campaignID uuid.UUID) (Pl
 	}
 	// A campaign with no window rows was never configured (a direct insert, the
 	// seeder) rather than corrupted, so it reads as the default schedule.
-	return Plan{Schedule: cadence.ScheduleFrom(c.Timezone, windows), DailyLimit: dailyLimit(c.DailyLimit)}, nil
+	return Plan{
+		Schedule:          cadence.ScheduleFrom(c.Timezone, windows),
+		DailyLimit:        optionalInt(c.DailyLimit),
+		MaxNewLeadsPerDay: optionalInt(c.MaxNewLeadsPerDay),
+	}, nil
 }
 
 // SetSchedule replaces the campaign's sending plan wholesale. Validation runs
@@ -73,6 +87,9 @@ func (s *Service) SetSchedule(ctx context.Context, ws, campaignID uuid.UUID, in 
 	if in.DailyLimit != nil && (*in.DailyLimit < minDailyLimit || *in.DailyLimit > maxDailyLimit) {
 		return Plan{}, ErrDailyLimit
 	}
+	if in.MaxNewLeadsPerDay != nil && (*in.MaxNewLeadsPerDay < minNewLeadsPerDay || *in.MaxNewLeadsPerDay > maxNewLeadsPerDay) {
+		return Plan{}, ErrMaxNewLeadsPerDay
+	}
 	// Compile is the validation: unknown zone, malformed interval, overlap, or an
 	// all-closed week is rejected before anything is persisted.
 	if _, err := in.Compile(); err != nil {
@@ -92,14 +109,23 @@ func (s *Service) SetSchedule(ctx context.Context, ws, campaignID uuid.UUID, in 
 // left to the INT column: a value like 99999999999 is a well-formed JSON number
 // that reaches Postgres out of range, which surfaces as a 500 instead of the 422
 // this is. The client's own bound is a convenience — this is the guarantee.
+//
+// minNewLeadsPerDay/maxNewLeadsPerDay mirror the same reasoning for
+// max_new_leads_per_day: the column's own CHECK only enforces >= 1, so the upper
+// bound is purely an application guard against an out-of-int32-range value.
 const (
 	minDailyLimit = 1
 	maxDailyLimit = 1_000_000
+
+	minNewLeadsPerDay = 1
+	maxNewLeadsPerDay = 1_000_000
 )
 
-// dailyLimit converts the nullable column into the optional Go value, so "no
-// limit" is nil rather than a zero that reads as a limit of none-per-day.
-func dailyLimit(stored *int32) *int {
+// optionalInt converts a nullable int32 column into the optional Go value it
+// represents, so "no limit" is nil rather than a zero that reads as a limit of
+// none-per-day. Shared by every nullable per-UTC-day campaign ceiling
+// (daily_limit, max_new_leads_per_day).
+func optionalInt(stored *int32) *int {
 	if stored == nil {
 		return nil
 	}

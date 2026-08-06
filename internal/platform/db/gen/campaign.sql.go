@@ -12,6 +12,36 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countFirstStepSendsToday = `-- name: CountFirstStepSendsToday :one
+SELECT count(*) FROM sends
+WHERE campaign_id = $1 AND workspace_id = $2
+  AND step_order = 1
+  AND created_at >= date_trunc('day', now() AT TIME ZONE 'utc')
+`
+
+type CountFirstStepSendsTodayParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// "New lead" = a step-1 send: the consumption side of max_new_leads_per_day.
+// sends.step_order already carries the step number directly (added by 000007),
+// so no join to sequence_steps is needed to find "the first step". Counts
+// today's rows (UTC) regardless of status -- deliberately unlike
+// CountCampaignSentToday's status='sent': ClaimStepSend's INSERT is the moment a
+// contact is actually STARTED, and that is what this throttle limits, so a
+// claimed-but-not-yet-finalized 'sending' row (or one that later fails) still
+// consumes today's allowance. This is a chosen divergence, not an oversight: the
+// field's own contract is "brand-new contacts started per day", not "contacts
+// successfully delivered to", so a started contact that later hard-fails has
+// still used one of today's slots. Workspace-pinned like every new query.
+func (q *Queries) CountFirstStepSendsToday(ctx context.Context, arg CountFirstStepSendsTodayParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countFirstStepSendsToday, arg.CampaignID, arg.WorkspaceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countSendsByStatus = `-- name: CountSendsByStatus :many
 SELECT status, count(*) AS n FROM sends
 WHERE campaign_id = $1 AND workspace_id = $2
@@ -51,9 +81,35 @@ func (q *Queries) CountSendsByStatus(ctx context.Context, arg CountSendsByStatus
 	return items, nil
 }
 
+const countUnsuppressedAudience = `-- name: CountUnsuppressedAudience :one
+SELECT count(*)::bigint AS n
+FROM campaigns cam
+JOIN list_members lm ON lm.list_id = cam.list_id
+JOIN contacts ct ON ct.id = lm.contact_id
+LEFT JOIN suppression s ON s.workspace_id = cam.workspace_id AND lower(s.email) = lower(ct.email)
+WHERE cam.id = $1 AND cam.workspace_id = $2
+  AND s.email IS NULL
+`
+
+type CountUnsuppressedAudienceParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// The preflight "audience" check's evidence: how many of the campaign's list
+// members are NOT on the workspace suppression list. Workspace-pinned on the
+// campaign, so a cross-tenant id counts zero rather than leaking another
+// tenant's list size.
+func (q *Queries) CountUnsuppressedAudience(ctx context.Context, arg CountUnsuppressedAudienceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnsuppressedAudience, arg.ID, arg.WorkspaceID)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
 const createCampaign = `-- name: CreateCampaign :one
 INSERT INTO campaigns (workspace_id, name, mailbox_id, list_id, subject, body_text, body_html)
-VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at
+VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at, max_new_leads_per_day
 `
 
 type CreateCampaignParams struct {
@@ -97,8 +153,65 @@ func (q *Queries) CreateCampaign(ctx context.Context, arg CreateCampaignParams) 
 		&i.BouncePausePct,
 		&i.ComplaintPausePct,
 		&i.GuardrailsEnabledAt,
+		&i.MaxNewLeadsPerDay,
 	)
 	return i, err
+}
+
+const deleteCampaignSendersByCampaign = `-- name: DeleteCampaignSendersByCampaign :exec
+DELETE FROM campaign_senders WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteCampaignSendersByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Unconditional delete of every pool member, for DeleteDraftCampaign's
+// transaction. Distinct from DeleteCampaignSendersExcept (sender.sql), which
+// keeps a caller-supplied subset for a pool replace.
+func (q *Queries) DeleteCampaignSendersByCampaign(ctx context.Context, arg DeleteCampaignSendersByCampaignParams) error {
+	_, err := q.db.Exec(ctx, deleteCampaignSendersByCampaign, arg.CampaignID, arg.WorkspaceID)
+	return err
+}
+
+const deleteDraftCampaign = `-- name: DeleteDraftCampaign :execrows
+DELETE FROM campaigns WHERE id = $1 AND workspace_id = $2 AND status = 'draft'
+`
+
+type DeleteDraftCampaignParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Guarded on status='draft' in SQL as defense in depth; the service re-checks
+// first for a typed 409 (ErrNotDraft). Run only after the caller has deleted
+// the draft's dependents (send windows, campaign_senders, sequence_steps,
+// sequence_enrollments) in the same transaction -- this does NOT rely on FK
+// cascade, even though every one of those FKs is ON DELETE CASCADE.
+func (q *Queries) DeleteDraftCampaign(ctx context.Context, arg DeleteDraftCampaignParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDraftCampaign, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteEnrollmentsByCampaign = `-- name: DeleteEnrollmentsByCampaign :exec
+DELETE FROM sequence_enrollments WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteEnrollmentsByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// A draft campaign has never been launched so this is normally a no-op, but a
+// draft can carry enrollment rows left over from build tooling or a future
+// re-draft path; deleted explicitly rather than assumed empty.
+func (q *Queries) DeleteEnrollmentsByCampaign(ctx context.Context, arg DeleteEnrollmentsByCampaignParams) error {
+	_, err := q.db.Exec(ctx, deleteEnrollmentsByCampaign, arg.CampaignID, arg.WorkspaceID)
+	return err
 }
 
 const deleteSendWindows = `-- name: DeleteSendWindows :exec
@@ -118,8 +231,25 @@ func (q *Queries) DeleteSendWindows(ctx context.Context, arg DeleteSendWindowsPa
 	return err
 }
 
+const deleteStepsByCampaign = `-- name: DeleteStepsByCampaign :exec
+DELETE FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2
+`
+
+type DeleteStepsByCampaignParams struct {
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Unconditional delete of every sequence step, for DeleteDraftCampaign's
+// transaction. Distinct from DeleteStep (sequencestep.sql), which removes one
+// step by id.
+func (q *Queries) DeleteStepsByCampaign(ctx context.Context, arg DeleteStepsByCampaignParams) error {
+	_, err := q.db.Exec(ctx, deleteStepsByCampaign, arg.CampaignID, arg.WorkspaceID)
+	return err
+}
+
 const getCampaign = `-- name: GetCampaign :one
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at FROM campaigns WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at, max_new_leads_per_day FROM campaigns WHERE id = $1 AND workspace_id = $2
 `
 
 type GetCampaignParams struct {
@@ -150,12 +280,45 @@ func (q *Queries) GetCampaign(ctx context.Context, arg GetCampaignParams) (Campa
 		&i.BouncePausePct,
 		&i.ComplaintPausePct,
 		&i.GuardrailsEnabledAt,
+		&i.MaxNewLeadsPerDay,
 	)
 	return i, err
 }
 
+const getCampaignFirstContact = `-- name: GetCampaignFirstContact :one
+SELECT ct.first_name, ct.company
+FROM campaigns cam
+JOIN list_members lm ON lm.list_id = cam.list_id
+JOIN contacts ct ON ct.id = lm.contact_id
+WHERE cam.id = $1 AND cam.workspace_id = $2
+ORDER BY lm.added_at ASC, ct.id ASC
+LIMIT 1
+`
+
+type GetCampaignFirstContactParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+type GetCampaignFirstContactRow struct {
+	FirstName string `json:"first_name"`
+	Company   string `json:"company"`
+}
+
+// The campaign list's earliest-added member, for test-send's real-contact
+// preview (spec: "renders the step for the first contact of the campaign's
+// list"). Zero rows means an empty list; the service substitutes the
+// synthetic fallback vars (first_name=Alex, company=Acme). Workspace-pinned
+// on the campaign.
+func (q *Queries) GetCampaignFirstContact(ctx context.Context, arg GetCampaignFirstContactParams) (GetCampaignFirstContactRow, error) {
+	row := q.db.QueryRow(ctx, getCampaignFirstContact, arg.ID, arg.WorkspaceID)
+	var i GetCampaignFirstContactRow
+	err := row.Scan(&i.FirstName, &i.Company)
+	return i, err
+}
+
 const listCampaigns = `-- name: ListCampaigns :many
-SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at, max_new_leads_per_day FROM campaigns WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]Campaign, error) {
@@ -187,6 +350,7 @@ func (q *Queries) ListCampaigns(ctx context.Context, workspaceID uuid.UUID) ([]C
 			&i.BouncePausePct,
 			&i.ComplaintPausePct,
 			&i.GuardrailsEnabledAt,
+			&i.MaxNewLeadsPerDay,
 		); err != nil {
 			return nil, err
 		}
@@ -237,6 +401,46 @@ func (q *Queries) ListSendWindows(ctx context.Context, arg ListSendWindowsParams
 	return items, nil
 }
 
+const renameCampaign = `-- name: RenameCampaign :one
+UPDATE campaigns SET name = $3 WHERE id = $1 AND workspace_id = $2 RETURNING id, workspace_id, name, mailbox_id, list_id, subject, body_text, body_html, status, created_at, launched_at, tracking_enabled, timezone, rotation_mode, daily_limit, auto_pause_enabled, bounce_pause_pct, complaint_pause_pct, guardrails_enabled_at, max_new_leads_per_day
+`
+
+type RenameCampaignParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+}
+
+// Rename is allowed at any lifecycle status; the service validates the name
+// (min=1,max=200, mirroring Create) before this runs.
+func (q *Queries) RenameCampaign(ctx context.Context, arg RenameCampaignParams) (Campaign, error) {
+	row := q.db.QueryRow(ctx, renameCampaign, arg.ID, arg.WorkspaceID, arg.Name)
+	var i Campaign
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.MailboxID,
+		&i.ListID,
+		&i.Subject,
+		&i.BodyText,
+		&i.BodyHtml,
+		&i.Status,
+		&i.CreatedAt,
+		&i.LaunchedAt,
+		&i.TrackingEnabled,
+		&i.Timezone,
+		&i.RotationMode,
+		&i.DailyLimit,
+		&i.AutoPauseEnabled,
+		&i.BouncePausePct,
+		&i.ComplaintPausePct,
+		&i.GuardrailsEnabledAt,
+		&i.MaxNewLeadsPerDay,
+	)
+	return i, err
+}
+
 const setCampaignDailyLimit = `-- name: SetCampaignDailyLimit :exec
 UPDATE campaigns SET daily_limit = $3 WHERE id = $1 AND workspace_id = $2
 `
@@ -252,6 +456,25 @@ type SetCampaignDailyLimitParams struct {
 // rejected value is a 422 rather than a constraint violation surfacing as a 500.
 func (q *Queries) SetCampaignDailyLimit(ctx context.Context, arg SetCampaignDailyLimitParams) error {
 	_, err := q.db.Exec(ctx, setCampaignDailyLimit, arg.ID, arg.WorkspaceID, arg.DailyLimit)
+	return err
+}
+
+const setCampaignMaxNewLeads = `-- name: SetCampaignMaxNewLeads :exec
+UPDATE campaigns SET max_new_leads_per_day = $3 WHERE id = $1 AND workspace_id = $2
+`
+
+type SetCampaignMaxNewLeadsParams struct {
+	ID                uuid.UUID `json:"id"`
+	WorkspaceID       uuid.UUID `json:"workspace_id"`
+	MaxNewLeadsPerDay *int32    `json:"max_new_leads_per_day"`
+}
+
+// The max BRAND-NEW contacts (step-1 sends) this campaign may start per UTC day;
+// NULL clears it. Validated at the boundary (>= 1) the same way SetCampaignDailyLimit
+// is. Distinct from daily_limit: this counts only step-1 sends, so an in-flight
+// sequence's follow-ups never consume or contend for this allowance.
+func (q *Queries) SetCampaignMaxNewLeads(ctx context.Context, arg SetCampaignMaxNewLeadsParams) error {
+	_, err := q.db.Exec(ctx, setCampaignMaxNewLeads, arg.ID, arg.WorkspaceID, arg.MaxNewLeadsPerDay)
 	return err
 }
 

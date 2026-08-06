@@ -644,6 +644,43 @@ const injectedRtkApi = api.injectEndpoints({
     getCampaign: build.query<GetCampaignApiResponse, GetCampaignApiArg>({
       query: (queryArg) => ({ url: `/campaigns/${queryArg.id}` }),
     }),
+    renameCampaign: build.mutation<
+      RenameCampaignApiResponse,
+      RenameCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.renameCampaignRequest,
+      }),
+    }),
+    deleteCampaign: build.mutation<
+      DeleteCampaignApiResponse,
+      DeleteCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    pauseCampaign: build.mutation<
+      PauseCampaignApiResponse,
+      PauseCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/pause`,
+        method: "POST",
+      }),
+    }),
+    resumeCampaign: build.mutation<
+      ResumeCampaignApiResponse,
+      ResumeCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/resume`,
+        method: "POST",
+      }),
+    }),
     updateCampaignTracking: build.mutation<
       UpdateCampaignTrackingApiResponse,
       UpdateCampaignTrackingApiArg
@@ -735,6 +772,22 @@ const injectedRtkApi = api.injectEndpoints({
       query: (queryArg) => ({
         url: `/campaigns/${queryArg.id}/launch`,
         method: "POST",
+      }),
+    }),
+    getCampaignPreflight: build.query<
+      GetCampaignPreflightApiResponse,
+      GetCampaignPreflightApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/preflight` }),
+    }),
+    testSendCampaign: build.mutation<
+      TestSendCampaignApiResponse,
+      TestSendCampaignApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/test-send`,
+        method: "POST",
+        body: queryArg.testSendRequest,
       }),
     }),
     unsubscribeConfirmPage: build.query<
@@ -1510,6 +1563,24 @@ export type GetCampaignApiResponse =
 export type GetCampaignApiArg = {
   id: string;
 };
+export type RenameCampaignApiResponse =
+  /** status 200 Renamed campaign */ Campaign;
+export type RenameCampaignApiArg = {
+  id: string;
+  renameCampaignRequest: RenameCampaignRequest;
+};
+export type DeleteCampaignApiResponse = unknown;
+export type DeleteCampaignApiArg = {
+  id: string;
+};
+export type PauseCampaignApiResponse = unknown;
+export type PauseCampaignApiArg = {
+  id: string;
+};
+export type ResumeCampaignApiResponse = unknown;
+export type ResumeCampaignApiArg = {
+  id: string;
+};
 export type UpdateCampaignTrackingApiResponse =
   /** status 200 Tracking flag updated */ {
     tracking_enabled?: boolean;
@@ -1584,6 +1655,17 @@ export type LaunchCampaignApiResponse =
   };
 export type LaunchCampaignApiArg = {
   id: string;
+};
+export type GetCampaignPreflightApiResponse =
+  /** status 200 Readiness report */ CampaignPreflight;
+export type GetCampaignPreflightApiArg = {
+  id: string;
+};
+export type TestSendCampaignApiResponse =
+  /** status 202 Queued */ TestSendResponse;
+export type TestSendCampaignApiArg = {
+  id: string;
+  testSendRequest: TestSendRequest;
 };
 export type UnsubscribeConfirmPageApiResponse = unknown;
 export type UnsubscribeConfirmPageApiArg = {
@@ -2558,6 +2640,9 @@ export type CampaignDetail = {
   steps?: SequenceStep[];
   metrics?: Metrics;
 };
+export type RenameCampaignRequest = {
+  name: string;
+};
 export type UpdateCampaignTrackingRequest = {
   enabled?: boolean;
 };
@@ -2575,6 +2660,8 @@ export type CampaignSchedule = {
   days: SendWindowDay[];
   /** Campaign-wide cap on sends per UTC day, across every mailbox in the pool. null means no campaign limit. It can only lower throughput: a mailbox is never raised above its own ramped, health-scaled daily cap. Bounded at 1000000 because the column is a 32-bit integer — an unbounded value would reach Postgres out of range and surface as a 500 instead of a validation error. */
   daily_limit?: number | null;
+  /** Narrower than daily_limit: caps how many BRAND-NEW contacts this campaign starts per UTC day. null means no limit. Counts only step-1 sends, so a sequence already in flight keeps sending its follow-ups on schedule regardless of how many new contacts started today. Bounded at 1000000 for the same 32-bit-integer reason as daily_limit. */
+  max_new_leads_per_day?: number | null;
   /** Human-readable preview of the next few send instants this schedule produces, in its own timezone. */
   preview?: string[];
 };
@@ -2583,6 +2670,8 @@ export type CampaignScheduleRequest = {
   days: SendWindowDay[];
   /** Campaign-wide sends per UTC day; null or omitted clears the limit. */
   daily_limit?: number | null;
+  /** Brand-new contacts started per UTC day; null or omitted clears the limit. This is a full-replace PUT, so an omitted field clears it exactly like an explicit null. */
+  max_new_leads_per_day?: number | null;
 };
 export type RotationMode = "round_robin" | "least_recently_used" | "weighted";
 export type CampaignSender = {
@@ -2651,6 +2740,34 @@ export type StepRequest = {
 export type ReorderStepsRequest = {
   /** the FULL ordered list of the campaign's step ids, in the desired order */
   step_ids: string[];
+};
+export type CampaignPreflightCheck = {
+  id:
+    | "sequence_steps"
+    | "empty_bodies"
+    | "schedule_windows"
+    | "sender_pool"
+    | "audience"
+    | "domain_auth"
+    | "tracking"
+    | "daily_limit"
+    | "warmup_health";
+  severity: "pass" | "warn" | "fail";
+  title: string;
+  detail: string;
+  /** Empty string for a passing check. */
+  remedy: string;
+};
+export type CampaignPreflight = {
+  ready: boolean;
+  checks: CampaignPreflightCheck[];
+};
+export type TestSendResponse = {
+  queued: boolean;
+};
+export type TestSendRequest = {
+  step_id: string;
+  to: string;
 };
 export type OAuth2Client = {
   client_id: string;
@@ -3057,6 +3174,10 @@ export const {
   useListCampaignsQuery,
   useCreateCampaignMutation,
   useGetCampaignQuery,
+  useRenameCampaignMutation,
+  useDeleteCampaignMutation,
+  usePauseCampaignMutation,
+  useResumeCampaignMutation,
   useUpdateCampaignTrackingMutation,
   useGetCampaignScheduleQuery,
   useUpdateCampaignScheduleMutation,
@@ -3069,6 +3190,8 @@ export const {
   useDeleteStepMutation,
   useReorderStepsMutation,
   useLaunchCampaignMutation,
+  useGetCampaignPreflightQuery,
+  useTestSendCampaignMutation,
   useUnsubscribeConfirmPageQuery,
   useUnsubscribeMutation,
   useTrackOpenQuery,

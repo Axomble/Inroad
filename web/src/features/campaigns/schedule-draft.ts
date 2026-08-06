@@ -114,11 +114,46 @@ export function dailyLimitFromDraft(raw: string): { dailyLimit: number | null } 
   return { dailyLimit: Number(trimmed) }
 }
 
+/**
+ * The new-leads-per-day throttle as the editor holds it: a raw string, empty
+ * meaning "no limit". Narrower than the daily limit — it caps only how many
+ * BRAND-NEW contacts this campaign starts per day; a sequence already in flight
+ * keeps sending its follow-ups on schedule regardless of this field.
+ */
+/** Matches the contract's `maximum` on `max_new_leads_per_day`, which the API also enforces. */
+export const MAX_NEW_LEADS_PER_DAY = 1_000_000
+
+export function maxNewLeadsToDraft(limit: number | null | undefined): string {
+  return typeof limit === 'number' ? String(limit) : ''
+}
+
+/**
+ * Parses the new-leads-per-day field: empty ⇄ `null` (no limit on brand-new
+ * contacts started per day), otherwise a whole number of 1 or more. Mirrors
+ * dailyLimitFromDraft's rules exactly, on the sibling field.
+ */
+export function maxNewLeadsFromDraft(raw: string): { maxNewLeads: number | null } | { problem: string } {
+  const trimmed = raw.trim()
+  if (trimmed === '') return { maxNewLeads: null }
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) < 1) {
+    return {
+      problem: 'New leads per day must be a whole number of 1 or more — leave it empty for no limit.',
+    }
+  }
+  // Upper bound, not cosmetic: same reasoning as MAX_DAILY_LIMIT — the column is a
+  // 32-bit integer, and this also stays inside the range JSON numbers represent
+  // exactly.
+  if (Number(trimmed) > MAX_NEW_LEADS_PER_DAY) {
+    return { problem: `New leads per day must be ${MAX_NEW_LEADS_PER_DAY.toLocaleString()} or less.` }
+  }
+  return { maxNewLeads: Number(trimmed) }
+}
+
 /** Maps a schedule-save failure to human copy, mirroring the API's 422 reasons. */
 export function scheduleErrorMessage(error: unknown): string {
   const status = httpStatus(error)
   if (status === 422) {
-    return 'That schedule is invalid — check for overlapping or inverted times, leave at least one window open, and keep the daily limit at 1 or more.'
+    return 'That schedule is invalid — check for overlapping or inverted times, leave at least one window open, and keep both daily limits at 1 or more.'
   }
   if (status === 404) return 'This campaign no longer exists.'
   return "Couldn't save the schedule. Please try again."

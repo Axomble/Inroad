@@ -80,6 +80,45 @@ func TestInboxPollPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTestSendPayloadRoundTrip(t *testing.T) {
+	p := TestSendPayload{CampaignID: "c1", StepID: "s1", MailboxID: "m1", To: "preview@example.com", WorkspaceID: "w1"}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got TestSendPayload
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != p {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", got, p)
+	}
+	if TaskTestSend != "testsend:send" {
+		t.Errorf("task name drift: %q", TaskTestSend)
+	}
+}
+
+// TestTestSendTaskID proves the dedup key collapses two enqueues for the SAME
+// (campaign, step, mailbox) within the same second (a double-submitted form),
+// while a later second yields a distinct key (a genuinely new test-send); a
+// different mailbox always yields a distinct key.
+func TestTestSendTaskID(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	a := testSendTaskID("c1", "s1", "m1", base)
+	if a != "testsend:c1:s1:m1:1700000000" {
+		t.Fatalf("task id = %q, want testsend:c1:s1:m1:1700000000", a)
+	}
+	if got := testSendTaskID("c1", "s1", "m1", base.Add(500*time.Millisecond)); got != a {
+		t.Fatalf("sub-second re-submits must share a key: %q != %q", got, a)
+	}
+	if got := testSendTaskID("c1", "s1", "m1", base.Add(time.Second)); got == a {
+		t.Fatalf("a later-second test-send must get a distinct key: %q == %q", got, a)
+	}
+	if testSendTaskID("c1", "s1", "m2", base) == a {
+		t.Fatal("different mailboxes must get distinct keys")
+	}
+}
+
 // TestQueuePriorities proves an ordered queue list maps to descending asynq
 // weights (earlier = higher priority) with duplicates and empty names dropped,
 // so a worker prefers its own per-IP queue over the shared default (spec §15)

@@ -1,0 +1,173 @@
+package spintax_test
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/inroad/inroad/internal/platform/spintax"
+)
+
+// TestExpandPicksEachOptionDeterministically proves the two halves of the
+// contract: the SAME seed always yields the SAME output (so a retried send
+// regenerates the identical variant), and DIFFERENT seeds are not all funneled
+// onto one option (spinning actually varies content across sends).
+func TestExpandPicksEachOptionDeterministically(t *testing.T) {
+	const s = "{a|b|c}"
+
+	for seed := uint64(0); seed < 100; seed++ {
+		first := spintax.Expand(s, seed)
+		second := spintax.Expand(s, seed)
+		if first != second {
+			t.Fatalf("seed %d: Expand not deterministic: %q vs %q", seed, first, second)
+		}
+	}
+
+	seen := map[string]bool{}
+	for seed := uint64(0); seed < 100; seed++ {
+		seen[spintax.Expand(s, seed)] = true
+	}
+	for _, want := range []string{"a", "b", "c"} {
+		if !seen[want] {
+			t.Errorf("option %q never chosen across 100 seeds: %v", want, seen)
+		}
+	}
+}
+
+// TestExpandNested proves the innermost group resolves first: "{Hey|Yo}"
+// inside "{Hi|{Hey|Yo}}" must collapse to one concrete word before the outer
+// group is itself resolved, so the final result is always one of the three
+// leaf options — never a literal brace or pipe left over.
+func TestExpandNested(t *testing.T) {
+	const s = "{Hi|{Hey|Yo}} there"
+	want := map[string]bool{"Hi there": true, "Hey there": true, "Yo there": true}
+
+	for seed := uint64(0); seed < 50; seed++ {
+		got := spintax.Expand(s, seed)
+		if !want[got] {
+			t.Fatalf("seed %d: Expand(%q) = %q, want one of %v", seed, s, got, want)
+		}
+	}
+}
+
+// TestExpandLeavesMergeFieldsAlone proves a doubled merge field like
+// {{first_name}} is inert to Expand: its inner brace span ("{first_name}")
+// has no '|', so it is not spin syntax and must survive byte-for-byte,
+// including both braces, even though a sibling spin group in the same string
+// IS resolved.
+func TestExpandLeavesMergeFieldsAlone(t *testing.T) {
+	const s = "Hi {{first_name}}, {a|b}"
+
+	for seed := uint64(0); seed < 20; seed++ {
+		got := spintax.Expand(s, seed)
+		if !strings.Contains(got, "{{first_name}}") {
+			t.Fatalf("seed %d: merge field mangled: %q", seed, got)
+		}
+		if got != "Hi {{first_name}}, a" && got != "Hi {{first_name}}, b" {
+			t.Fatalf("seed %d: unexpected result: %q", seed, got)
+		}
+	}
+}
+
+// TestExpandResolvesASpinOptionThatDirectlyWrapsAMergeField proves the case
+// spin-before-personalize actually exists for: a merge field placed directly
+// inside a spin option's own braces, with no separating structure, must
+// still let the ENCLOSING group resolve, and the chosen option's merge field
+// must survive intact for personalize to substitute afterward. Without
+// treating "{{...}}" as an atomic token during scanning, the outer group's
+// content looks like it contains a nested, unresolved brace pair (the merge
+// field's own), which wrongly disqualifies it from ever resolving — leaving
+// a real recipient with the literal, un-personalized text
+// "{Hi {{first_name}}|Hey {{first_name}}}".
+func TestExpandResolvesASpinOptionThatDirectlyWrapsAMergeField(t *testing.T) {
+	const s = "{Hi {{first_name}}|Hey {{first_name}}}"
+	want := map[string]bool{
+		"Hi {{first_name}}":  true,
+		"Hey {{first_name}}": true,
+	}
+
+	seen := map[string]bool{}
+	for seed := uint64(0); seed < 50; seed++ {
+		got := spintax.Expand(s, seed)
+		if !want[got] {
+			t.Fatalf("seed %d: Expand(%q) = %q, want one of %v", seed, s, got, want)
+		}
+		seen[got] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("only saw %v across 50 seeds, want both options covered", seen)
+	}
+
+	// Determinism preserved: same seed, same choice.
+	a := spintax.Expand(s, 7)
+	b := spintax.Expand(s, 7)
+	if a != b {
+		t.Fatalf("seed 7 not deterministic: %q vs %q", a, b)
+	}
+}
+
+// TestExpandResolvesAMergeFieldAsAWholeOption proves the same atomic-token
+// treatment when a merge field is an entire option by itself (rather than
+// text alongside one): "{a|{{x}}}" must resolve to plain "a" or the intact
+// "{{x}}" — never a literal, unresolved "{a|{{x}}}".
+func TestExpandResolvesAMergeFieldAsAWholeOption(t *testing.T) {
+	const s = "{a|{{x}}}"
+	want := map[string]bool{"a": true, "{{x}}": true}
+
+	for seed := uint64(0); seed < 50; seed++ {
+		got := spintax.Expand(s, seed)
+		if !want[got] {
+			t.Fatalf("seed %d: Expand(%q) = %q, want one of %v", seed, s, got, want)
+		}
+	}
+}
+
+// TestExpandSiblingGroupsAreIndependentAndOrdered locks in the draw order for
+// two INDEPENDENT (non-nested) groups in one string: the left group closes
+// (and resolves) before the right one, so it consumes the FIRST draw off the
+// seeded source and the right group the second. This is a stability lock,
+// not a behavioral requirement in itself — a future refactor that changed
+// scan order (e.g. right-to-left, or resolving all matches in one batch by
+// some other order) would flip which draw lands on which group and silently
+// change every existing seed's output; pinning one seed's exact result here
+// makes that mechanical to catch instead of relying on manual re-verification.
+func TestExpandSiblingGroupsAreIndependentAndOrdered(t *testing.T) {
+	const s = "{a|b} and {c|d}"
+	const want = "a and d"
+	if got := spintax.Expand(s, 1); got != want {
+		t.Fatalf("Expand(%q, 1) = %q, want %q (draw order changed)", s, got, want)
+	}
+}
+
+// TestExpandNoPipesUntouched proves a brace group with no '|' is left
+// completely unchanged — it is literal text (or a single-brace placeholder),
+// not a spin group, so Expand must not touch it at all.
+func TestExpandNoPipesUntouched(t *testing.T) {
+	const s = "{literal}"
+	for seed := uint64(0); seed < 5; seed++ {
+		if got := spintax.Expand(s, seed); got != s {
+			t.Fatalf("seed %d: Expand(%q) = %q, want unchanged", seed, s, got)
+		}
+	}
+}
+
+// TestExpandPathologicalInputTerminates proves the 10,000-iteration cap
+// actually bounds pathological input: 20,000 levels of nested spin groups
+// (more than the cap can fully resolve) must still return promptly rather
+// than hang, looping forever trying to fully collapse every level.
+func TestExpandPathologicalInputTerminates(t *testing.T) {
+	s := "z"
+	for i := 0; i < 20000; i++ {
+		s = "{" + s + "|x}"
+	}
+
+	done := make(chan string, 1)
+	go func() { done <- spintax.Expand(s, spintax.Seed("pathological")) }()
+
+	select {
+	case <-done:
+		// Terminated within the iteration cap — the property under test.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expand did not terminate on pathological input — the iteration cap did not bound the work")
+	}
+}

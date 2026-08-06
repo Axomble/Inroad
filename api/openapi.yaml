@@ -1282,6 +1282,60 @@ paths:
         '200': { description: Campaign with steps + enrollment counts, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignDetail' } } } }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+    put:
+      operationId: renameCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: Renames the campaign. Allowed at any lifecycle status.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/RenameCampaignRequest' } } }
+      responses:
+        '200': { description: Renamed campaign, content: { application/json: { schema: { $ref: '#/components/schemas/Campaign' } } } }
+        '400': { description: "Invalid JSON, or name is missing/too long" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+    delete:
+      operationId: deleteCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Deletes a campaign that has never been launched, along with its send
+        windows, sender pool and sequence steps. Draft only.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Campaign is not a draft }
+  /campaigns/{id}/pause:
+    post:
+      operationId: pauseCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: Stops a running campaign from dispatching further step advances. Allowed only from running.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Paused }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Campaign is not running }
+  /campaigns/{id}/resume:
+    post:
+      operationId: resumeCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Restarts a paused campaign. Allowed only from paused; works
+        identically whether the pause was set by an operator or by the
+        deliverability circuit breaker.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Resumed }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Campaign is not paused }
   /campaigns/{id}/tracking:
     put:
       operationId: updateCampaignTracking
@@ -1471,6 +1525,53 @@ paths:
         '404': { description: Not found }
         '409': { description: Already launched }
         '422': { description: Target list empty or campaign has no steps }
+  /campaigns/{id}/preflight:
+    get:
+      operationId: getCampaignPreflight
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Launch-readiness report: nine independent checks (sequence steps,
+        empty bodies, schedule windows, sender pool, audience, sending-domain
+        authentication, tracking, daily limit, warmup health). ready is true
+        iff no check is severity fail — a warn is informational and never
+        blocks a launch.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Readiness report, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignPreflight' } } } }
+        '400': { description: Invalid campaign id }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+  /campaigns/{id}/test-send:
+    post:
+      operationId: testSendCampaign
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Validates the request (campaign/step ownership, an eligible sender
+        exists, rate limit) and enqueues an execution-plane task that renders
+        the step for a preview recipient and sends it through the campaign's
+        first enabled+active pool mailbox. Personalization uses the campaign
+        list's first contact where one exists, otherwise synthetic
+        first_name=Alex, company=Acme. Nothing is persisted to sends; tracking
+        links are never rewritten and no List-Unsubscribe header is set.
+        Rate-limited (5/workspace/minute). The send itself is asynchronous —
+        a 202 means the task was queued, not that delivery has completed.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TestSendRequest' } } }
+      responses:
+        '202': { description: Queued, content: { application/json: { schema: { $ref: '#/components/schemas/TestSendResponse' } } } }
+        '400': { description: "Invalid JSON, campaign id, step_id, or to address" }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign or step not found }
+        '422':
+          description: >-
+            No enabled sender with an active mailbox, or the recipient is on
+            the workspace's suppression list (unsubscribed or bounced) --
+            {"error": "recipient_suppressed"}
+        '429': { description: Too many test sends; try again shortly }
   # The unsubscribe endpoint is served outside the /api/v1 base — it is
   # public and browser-facing (no auth, returns HTML). RFC 8058 requires the
   # state change to live on POST so email preview scanners auto-following
@@ -2560,6 +2661,11 @@ components:
       type: object
       properties:
         enabled: { type: boolean }
+    RenameCampaignRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
     DomainAuthState:
       type: string
       description: >-
@@ -2822,6 +2928,17 @@ components:
             1000000 because the column is a 32-bit integer — an unbounded value would
             reach Postgres out of range and surface as a 500 instead of a validation
             error.
+        max_new_leads_per_day:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          nullable: true
+          description: >-
+            Narrower than daily_limit: caps how many BRAND-NEW contacts this campaign
+            starts per UTC day. null means no limit. Counts only step-1 sends, so a
+            sequence already in flight keeps sending its follow-ups on schedule
+            regardless of how many new contacts started today. Bounded at 1000000 for
+            the same 32-bit-integer reason as daily_limit.
         preview:
           type: array
           description: "Human-readable preview of the next few send instants this schedule produces, in its own timezone."
@@ -2839,6 +2956,49 @@ components:
           maximum: 1000000
           nullable: true
           description: "Campaign-wide sends per UTC day; null or omitted clears the limit."
+        max_new_leads_per_day:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          nullable: true
+          description: >-
+            Brand-new contacts started per UTC day; null or omitted clears the limit.
+            This is a full-replace PUT, so an omitted field clears it exactly like an
+            explicit null.
+
+    CampaignPreflightCheck:
+      type: object
+      description: One readiness check's verdict.
+      required: [id, severity, title, detail, remedy]
+      properties:
+        id:
+          type: string
+          enum: [sequence_steps, empty_bodies, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+        severity: { type: string, enum: [pass, warn, fail] }
+        title: { type: string }
+        detail: { type: string }
+        remedy: { type: string, description: "Empty string for a passing check." }
+    CampaignPreflight:
+      type: object
+      description: >-
+        GET /campaigns/{id}/preflight's launch-readiness report. ready is true
+        iff no check below is severity fail — a warn is informational and
+        never blocks a launch.
+      required: [ready, checks]
+      properties:
+        ready: { type: boolean }
+        checks: { type: array, items: { $ref: '#/components/schemas/CampaignPreflightCheck' } }
+    TestSendRequest:
+      type: object
+      required: [step_id, to]
+      properties:
+        step_id: { type: string, format: uuid }
+        to: { type: string, format: email }
+    TestSendResponse:
+      type: object
+      required: [queued]
+      properties:
+        queued: { type: boolean }
 
     WarmupSettings:
       type: object

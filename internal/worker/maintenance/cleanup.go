@@ -12,10 +12,18 @@ import (
 // coreapi.Client avoids coupling every send-path test double to maintenance.
 type Cleaner interface {
 	CleanupExpired(ctx context.Context) (deleted int64, err error)
+	// PurgeIdempotencyKeys removes Idempotency-Key replay-cache rows past
+	// their fixed 24h retention window. Kept as its own method rather than
+	// folded into CleanupExpired: that method's own doc scopes it to
+	// authentication/authorization artifacts specifically, and the
+	// idempotency cache is an HTTP-layer concern, not a security artifact.
+	PurgeIdempotencyKeys(ctx context.Context) (deleted int64, err error)
 }
 
-// CleanupHandler purges expired security artifacts. Returning database errors
-// lets asynq retry; successful runs log the affected count for observability.
+// CleanupHandler purges expired security artifacts AND expired
+// Idempotency-Key replay-cache rows. Returning a database error from either
+// purge lets asynq retry; successful runs log each affected count for
+// observability.
 func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, _ *asynq.Task) error {
 		deleted, err := core.CleanupExpired(ctx)
@@ -23,6 +31,12 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired security artifacts purged", "rows", deleted)
+
+		idempotencyDeleted, err := core.PurgeIdempotencyKeys(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired idempotency keys purged", "rows", idempotencyDeleted)
 		return nil
 	}
 }

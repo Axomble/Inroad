@@ -76,6 +76,19 @@ type fakeStore struct {
 	rescheduleErr      error
 	replacedSchedule   *Plan
 	replaceScheduleErr error
+
+	// lifecycle spies. Pause/Resume/Rename/DeleteDraft themselves are exercised
+	// in the black-box lifecycle_test.go; these methods exist here only so this
+	// white-box fakeStore keeps satisfying the Store interface for the rest of
+	// this package's tests.
+	setStatusCalls   int
+	renameCalls      int
+	deleteDraftCalls int
+
+	// preflight fixtures. See CountUnsuppressedAudience below — full coverage
+	// lives in preflight_test.go's own black-box fake.
+	audienceCount    int64
+	audienceCountErr error
 }
 
 func (*fakeStore) Create(_ context.Context, _ uuid.UUID, in CreateInput) (gen.Campaign, error) {
@@ -182,6 +195,48 @@ func (f *fakeStore) ListEnrollments(_ context.Context, _, _ uuid.UUID, limit, of
 	f.listEnrollmentsCalls++
 	f.listEnrollmentsLimit, f.listEnrollmentsOffset = limit, offset
 	return f.enrollmentRows, nil
+}
+
+func (f *fakeStore) SetStatus(_ context.Context, ws, id uuid.UUID, status CampaignStatus) error {
+	f.setStatusCalls++
+	f.status = string(status)
+	if f.campaigns != nil {
+		if c, ok := f.campaigns[[2]uuid.UUID{ws, id}]; ok {
+			c.Status = string(status)
+			f.campaigns[[2]uuid.UUID{ws, id}] = c
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) Rename(_ context.Context, ws, id uuid.UUID, name string) (gen.Campaign, error) {
+	f.renameCalls++
+	if f.campaigns != nil {
+		c, ok := f.campaigns[[2]uuid.UUID{ws, id}]
+		if !ok {
+			return gen.Campaign{}, errNotFound
+		}
+		c.Name = name
+		f.campaigns[[2]uuid.UUID{ws, id}] = c
+		return c, nil
+	}
+	return gen.Campaign{ID: id, Name: name}, nil
+}
+
+func (f *fakeStore) DeleteDraft(_ context.Context, ws, id uuid.UUID) error {
+	f.deleteDraftCalls++
+	if f.campaigns != nil {
+		delete(f.campaigns, [2]uuid.UUID{ws, id})
+	}
+	return nil
+}
+
+// audienceCount backs CountUnsuppressedAudience. Preflight is exercised in
+// its own black-box test file (preflight_test.go); this exists here only so
+// this white-box fakeStore keeps satisfying the Store interface for the rest
+// of this package's tests.
+func (f *fakeStore) CountUnsuppressedAudience(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
+	return f.audienceCount, f.audienceCountErr
 }
 
 // errNotFound is what the sqlc-backed Get returns when the row isn't in the

@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useId, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -7,9 +7,15 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { useCreateStepMutation, useUpdateStepMutation, type SequenceStep } from './api'
+import { useAppSelector } from '@/store/hooks'
+import {
+  useCreateStepMutation,
+  useUpdateStepMutation,
+  useTestSendCampaignMutation,
+  type SequenceStep,
+} from './api'
 import { delayToSeconds, secondsToDelay } from './step-delay'
-import { stepErrorMessage } from './step-error'
+import { stepErrorMessage, testSendErrorMessage } from './step-error'
 
 /**
  * Two schemas, not one: the first step's subject opens the thread, so it is
@@ -60,6 +66,23 @@ export function StepForm({
   const hoursId = useId()
   const subjectId = useId()
   const bodyId = useId()
+  const testAddressId = useId()
+
+  // Defaults to the signed-in operator's own inbox — the most common test
+  // recipient — but stays editable so a teammate's mailbox can be checked too.
+  const userEmail = useAppSelector((s) => s.auth.userEmail)
+  const [testSend, testSendState] = useTestSendCampaignMutation()
+  const [testAddress, setTestAddress] = useState(userEmail ?? '')
+  const [sentTo, setSentTo] = useState<string | null>(null)
+
+  async function onSendTest() {
+    const stepId = step?.id
+    const address = testAddress.trim()
+    if (!stepId || !address) return
+    setSentTo(null)
+    const result = await testSend({ id: campaignId, testSendRequest: { step_id: stepId, to: address } })
+    if ('data' in result) setSentTo(address)
+  }
 
   const originalDelaySeconds = step?.delay_seconds ?? 0
   const initialDelay = secondsToDelay(originalDelaySeconds)
@@ -168,7 +191,8 @@ export function StepForm({
           {...register('body_text')}
         />
         <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">
-          {'{{first_name}}'} and {'{{email}}'} are personalized per contact
+          {'{{first_name}}'} and {'{{email}}'} are personalized per contact — {'{option a|option b}'}{' '}
+          spins a random variant per send
         </span>
       </div>
 
@@ -176,6 +200,46 @@ export function StepForm({
         <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
           {stepErrorMessage(error)}
         </p>
+      )}
+
+      {/* Edit-mode only: a step being added has nothing rendered yet to test
+          send, and no `step.id` for the API to key the test-send request on. */}
+      {isEdit && step?.id && (
+        <div className="flex flex-wrap items-end gap-3 border-t border-border pt-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor={testAddressId}>Send test to</Label>
+            <Input
+              id={testAddressId}
+              type="email"
+              className="w-56"
+              value={testAddress}
+              onChange={(e) => {
+                setTestAddress(e.target.value)
+                setSentTo(null)
+              }}
+            />
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={testSendState.isLoading || testAddress.trim() === ''}
+            onClick={() => void onSendTest()}
+          >
+            {testSendState.isLoading && <Loader2 className="animate-spin" />}
+            Send test
+          </Button>
+          {sentTo && (
+            <p role="status" className="text-xs text-ok">
+              Test queued for {sentTo} — it should arrive shortly.
+            </p>
+          )}
+          {testSendState.error && (
+            <p role="alert" className="text-xs text-danger">
+              {testSendErrorMessage(testSendState.error)}
+            </p>
+          )}
+        </div>
       )}
 
       <div className="flex items-center justify-end gap-2">

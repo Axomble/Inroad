@@ -1,14 +1,8 @@
 import { useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { MoreVertical, Plus, Rocket } from 'lucide-react'
+import { Plus, Rocket } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { StatusPill, StatusDot } from '@/components/shared/status-pill'
 import { ListSearchInput } from '@/components/shared/list-search-input'
 import { SortMenu } from '@/components/shared/sort-menu'
@@ -32,6 +26,10 @@ import type { Campaign } from '@/store/api'
 import { useListCampaignsQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
+import { LifecycleMenu, PauseResumeDialog } from './lifecycle-menu'
+import { usePauseResume } from './lifecycle-actions'
+import { PreflightDialog } from './preflight-dialog'
+import { StopClickBubble } from './stop-click-bubble'
 
 /**
  * Module scope, not inline: `useListControls` memoises on the active
@@ -218,6 +216,12 @@ function CampaignRow({
 }) {
   const [launch, { isLoading }] = useLaunchCampaignMutation()
   const [error, setError] = useState<string | null>(null)
+  const [preflightOpen, setPreflightOpen] = useState(false)
+  // One instance per row, shared by LifecycleMenu's menu item and the
+  // PauseResumeDialog it opens — this row has only the one trigger today, but
+  // sharing keeps the row's wiring identical to the detail topbar's (which has
+  // two triggers) rather than two different patterns for the same hook.
+  const pauseResume = usePauseResume(campaign)
   const id = campaign.id ?? ''
 
   async function onLaunch() {
@@ -261,37 +265,28 @@ function CampaignRow({
 
       <div className="flex w-36 shrink-0 items-center justify-end gap-1">
         {campaign.status === 'draft' && (
-          <Button
-            variant="secondary"
-            size="xs"
-            disabled={isLoading}
-            onClick={(e) => {
-              e.stopPropagation()
-              void onLaunch()
-            }}
-          >
-            <Rocket className="size-3.5" />
-            Launch
-          </Button>
+          <StopClickBubble>
+            <Button variant="secondary" size="xs" disabled={isLoading} onClick={() => setPreflightOpen(true)}>
+              <Rocket className="size-3.5" />
+              Launch
+            </Button>
+            <PreflightDialog
+              open={preflightOpen}
+              onOpenChange={setPreflightOpen}
+              campaignId={id}
+              campaignName={campaign.name}
+              onConfirm={() => void onLaunch()}
+              isLaunching={isLoading}
+            />
+          </StopClickBubble>
         )}
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Actions for ${campaign.name}`}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <MoreVertical className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {/* Same name as the row click's destination — the menu item and the
-                row now do, and say, the same thing. */}
-            <DropdownMenuItem onSelect={() => onOpen(campaign)}>Open campaign</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* Pause/resume/rename/delete, status-appropriate. "Open campaign" isn't
+            duplicated here — clicking anywhere else on the row (or the
+            keyboard nav's ↵) already opens it, and LifecycleMenu stops its own
+            clicks from also bubbling into the row's onClick. */}
+        <LifecycleMenu campaign={campaign} pauseResume={pauseResume} />
+        <PauseResumeDialog campaign={campaign} pauseResume={pauseResume} />
       </div>
     </li>
   )

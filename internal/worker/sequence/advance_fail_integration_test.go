@@ -46,7 +46,7 @@ func (s *capturingSender) Send(_ context.Context, tj mail.OutboundJob, _ mail.Me
 // helper, which fails the test on any error — the failing-sender cases expect one).
 func runAdvance(core coreapi.Client, s Sender, enq Enqueuer, eid, ws string) error {
 	b, _ := json.Marshal(map[string]string{"enrollment_id": eid, "workspace_id": ws})
-	h := AdvanceHandler(core, s, enq, "https://app.test", []byte("0123456789abcdef0123456789abcdef"))
+	h := AdvanceHandler(core, s, enq, "https://app.test", []byte("0123456789abcdef0123456789abcdef"), nil)
 	return h(context.Background(), asynq.NewTask("sequence:advance", b))
 }
 

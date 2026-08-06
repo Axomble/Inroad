@@ -31,8 +31,14 @@ func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r.With(write).Post("/", h.create)
 	r.With(read).Get("/", h.list)
 	r.With(read).Get("/{id}", h.get)
+	r.With(write).Put("/{id}", h.rename)
+	r.With(write).Delete("/{id}", h.deleteDraft)
 	r.With(read).Get("/{id}/enrollments", h.listEnrollments)
 	r.With(auth.RequireScope(auth.ScopeCampaignsSend), auth.RequireVerified(checker)).Post("/{id}/launch", h.launch)
+	r.With(auth.RequireScope(auth.ScopeCampaignsSend)).Post("/{id}/pause", h.pause)
+	r.With(auth.RequireScope(auth.ScopeCampaignsSend)).Post("/{id}/resume", h.resume)
+	r.With(read).Get("/{id}/preflight", h.preflight)
+	r.With(auth.RequireScope(auth.ScopeCampaignsSend), auth.RequireVerified(checker)).Post("/{id}/test-send", h.testSend)
 	r.With(write).Put("/{id}/tracking", h.toggleTracking)
 	r.With(read).Get("/{id}/schedule", h.getSchedule)
 	r.With(write).Put("/{id}/schedule", h.putSchedule)
@@ -138,6 +144,36 @@ func toMetricsResponse(m Metrics) metricsResponse {
 		OpenRate: round4(m.OpenRate), ClickRate: round4(m.ClickRate), ReplyRate: round4(m.ReplyRate),
 		BounceRate: round4(m.BounceRate), UnsubRate: round4(m.UnsubRate),
 	}
+}
+
+// preflightCheckResponse is one check row of GET /campaigns/{id}/preflight.
+// remedy is "" (never omitted) for a passing check, so the frontend never has
+// to distinguish "absent" from "empty".
+type preflightCheckResponse struct {
+	ID       string `json:"id"`
+	Severity string `json:"severity"`
+	Title    string `json:"title"`
+	Detail   string `json:"detail"`
+	Remedy   string `json:"remedy"`
+}
+
+// preflightResponse is GET /campaigns/{id}/preflight: ready = no check below
+// is severity fail.
+type preflightResponse struct {
+	Ready  bool                     `json:"ready"`
+	Checks []preflightCheckResponse `json:"checks"`
+}
+
+func toPreflightResponse(r PreflightReport) preflightResponse {
+	checks := make([]preflightCheckResponse, 0, len(r.Checks))
+	for _, c := range r.Checks {
+		// PreflightCheck and preflightCheckResponse share the identical field
+		// sequence (ids/severity/title/detail/remedy, all strings); the
+		// conversion is exactly as explicit as a field-by-field literal, without
+		// staticcheck (S1016) flagging the redundancy.
+		checks = append(checks, preflightCheckResponse(c))
+	}
+	return preflightResponse{Ready: r.Ready, Checks: checks}
 }
 
 func toDetailResponse(d CampaignDetail) campaignDetailResponse {

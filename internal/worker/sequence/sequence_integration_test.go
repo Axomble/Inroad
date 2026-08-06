@@ -161,7 +161,7 @@ func seedCampaign(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.
 func advance(t *testing.T, core coreapi.Client, s Sender, enq Enqueuer, enrollmentID, ws string) {
 	t.Helper()
 	b, _ := json.Marshal(map[string]string{"enrollment_id": enrollmentID, "workspace_id": ws})
-	h := AdvanceHandler(core, s, enq, "https://app.test", []byte("0123456789abcdef0123456789abcdef"))
+	h := AdvanceHandler(core, s, enq, "https://app.test", []byte("0123456789abcdef0123456789abcdef"), nil)
 	if err := h(context.Background(), asynq.NewTask("sequence:advance", b)); err != nil {
 		t.Fatalf("advance: %v", err)
 	}

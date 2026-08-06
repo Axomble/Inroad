@@ -18,13 +18,15 @@ import (
 
 // scheduleResponse is the wire shape of a campaign's sending plan: the zone plus
 // the week's open intervals, grouped per weekday so the UI renders a row per day
-// without regrouping a flat list, and the campaign-wide daily limit (null = no
-// limit).
+// without regrouping a flat list, the campaign-wide daily limit (null = no
+// limit), and the narrower new-leads-per-day throttle (null = no limit) that
+// counts only brand-new contacts starting the sequence, never its follow-ups.
 type scheduleResponse struct {
-	Timezone   string        `json:"timezone"`
-	Days       []scheduleDay `json:"days"`
-	DailyLimit *int          `json:"daily_limit"`
-	Preview    []string      `json:"preview"`
+	Timezone          string        `json:"timezone"`
+	Days              []scheduleDay `json:"days"`
+	DailyLimit        *int          `json:"daily_limit"`
+	MaxNewLeadsPerDay *int          `json:"max_new_leads_per_day"`
+	Preview           []string      `json:"preview"`
 }
 
 type scheduleDay struct {
@@ -39,11 +41,12 @@ type scheduleInterval struct {
 
 // scheduleRequest is the full-replace payload. Days not present are closed, so
 // omitting a weekday is how the client turns sending off for it; an omitted or null
-// daily_limit is how it clears the campaign-wide limit.
+// daily_limit or max_new_leads_per_day is how it clears that limit.
 type scheduleRequest struct {
-	Timezone   string        `json:"timezone"`
-	Days       []scheduleDay `json:"days"`
-	DailyLimit *int          `json:"daily_limit"`
+	Timezone          string        `json:"timezone"`
+	Days              []scheduleDay `json:"days"`
+	DailyLimit        *int          `json:"daily_limit"`
+	MaxNewLeadsPerDay *int          `json:"max_new_leads_per_day"`
 }
 
 func (r scheduleRequest) toPlan() Plan {
@@ -55,7 +58,11 @@ func (r scheduleRequest) toPlan() Plan {
 			})
 		}
 	}
-	return Plan{Schedule: Schedule{Timezone: r.Timezone, Windows: windows}, DailyLimit: r.DailyLimit}
+	return Plan{
+		Schedule:          Schedule{Timezone: r.Timezone, Windows: windows},
+		DailyLimit:        r.DailyLimit,
+		MaxNewLeadsPerDay: r.MaxNewLeadsPerDay,
+	}
 }
 
 // newScheduleResponse groups the flat window list by weekday and renders a short
@@ -70,7 +77,8 @@ func newScheduleResponse(p Plan) scheduleResponse {
 	}
 	out := scheduleResponse{
 		Timezone: p.Timezone, Days: make([]scheduleDay, 0, len(byDay)),
-		DailyLimit: p.DailyLimit, Preview: schedulePreview(p.Schedule),
+		DailyLimit: p.DailyLimit, MaxNewLeadsPerDay: p.MaxNewLeadsPerDay,
+		Preview: schedulePreview(p.Schedule),
 	}
 	for weekday := range 7 {
 		if intervals, ok := byDay[weekday]; ok {
@@ -144,6 +152,8 @@ func (h *Handler) putSchedule(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrDailyLimit):
 		httpx.Error(w, http.StatusUnprocessableEntity, "daily limit must be between 1 and 1000000")
+	case errors.Is(err, ErrMaxNewLeadsPerDay):
+		httpx.Error(w, http.StatusUnprocessableEntity, "max new leads per day must be between 1 and 1000000")
 	case errors.Is(err, cadence.ErrUnknownTimezone):
 		httpx.Error(w, http.StatusUnprocessableEntity, "unknown timezone")
 	case errors.Is(err, cadence.ErrEmptySchedule):
