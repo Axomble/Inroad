@@ -5,6 +5,7 @@ package inbox_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -419,9 +420,12 @@ func TestListThreadsFiltersAndPaginatesAgainstPostgres(t *testing.T) {
 }
 
 // SetUnread is workspace-scoped in the WHERE clause itself, not merely in Go:
-// a foreign workspace's SetUnread affects zero rows and the real thread is
-// unchanged.
-func TestSetUnreadCrossWorkspaceDoesNotMutateAgainstPostgres(t *testing.T) {
+// a foreign workspace's SetUnread affects zero rows, and the store surfaces
+// that as ErrNotFound (matching the fake store, handler_test.go's
+// TestSetReadOnForeignThreadIs404, and the documented 404 on PUT
+// /inbox/threads/{id}/read) rather than silently succeeding. The real thread
+// is left unchanged either way.
+func TestSetUnreadCrossWorkspaceReturnsNotFoundAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, ctx)
 	th, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
@@ -433,8 +437,8 @@ func TestSetUnreadCrossWorkspaceDoesNotMutateAgainstPostgres(t *testing.T) {
 	}
 
 	foreignWS, _ := seedTenant(t, ctx, f.q)
-	if err := f.store.SetUnread(ctx, foreignWS, th.ID, false); err != nil {
-		t.Fatalf("cross-workspace SetUnread must not error (zero rows matched, not a failure): %v", err)
+	if err := f.store.SetUnread(ctx, foreignWS, th.ID, false); !errors.Is(err, inbox.ErrNotFound) {
+		t.Fatalf("cross-workspace SetUnread error = %v, want ErrNotFound", err)
 	}
 	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
 	if err != nil {
@@ -621,6 +625,215 @@ func TestListThreadsSearchEscapesLikeMetacharactersAgainstPostgres(t *testing.T)
 	}
 	if len(underscore.Items) != 1 || underscore.Items[0].Subject != "widget_pro release notes" {
 		t.Fatalf("literal-_-search page = %+v, want exactly the ONE subject containing a literal _", underscore.Items)
+	}
+}
+
+// insertSentStep inserts a 'sent' sends row directly (bypassing the claim
+// machinery this test has no need to exercise) so GetThread's outbound-leg
+// join has something real to find. sentAt distinguishes ordering across
+// steps without relying on wall-clock timing between inserts.
+func insertSentStep(t *testing.T, ctx context.Context, f *fixture, campaignID, contactID uuid.UUID, stepOrder int32, sentAt time.Time) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email, status, message_id, sent_at, step_order)
+		 VALUES ($1,$2,$3,$4,'them@example.com','sent',$5,$6,$7)`,
+		f.ws, campaignID, contactID, f.mailbox, "<step-"+strconv.Itoa(int(stepOrder))+"@sender.test>", sentAt, stepOrder,
+	); err != nil {
+		t.Fatalf("insert sent step %d: %v", stepOrder, err)
+	}
+}
+
+// seedTwoStepCampaign creates a campaign with two sequence steps (step 2's
+// subject left "" — the "reply in the same thread" convention replySubject
+// resolves against step 1's subject) and one enrolled contact, for the
+// outbound-leg tests below.
+func seedTwoStepCampaign(t *testing.T, ctx context.Context, f *fixture) (campaignID, contactID uuid.UUID) {
+	t.Helper()
+	list, err := f.q.CreateList(ctx, gen.CreateListParams{WorkspaceID: f.ws, Name: "L-" + uuid.NewString()})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	campaign, err := f.q.CreateCampaign(ctx, gen.CreateCampaignParams{
+		WorkspaceID: f.ws, Name: "C", MailboxID: f.mailbox, ListID: list.ID, Subject: "Intro", BodyText: "b",
+	})
+	if err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	if _, err := f.q.CreateStep(ctx, gen.CreateStepParams{
+		WorkspaceID: f.ws, CampaignID: campaign.ID, StepOrder: 1, Subject: "Intro", BodyText: "step one body",
+	}); err != nil {
+		t.Fatalf("step 1: %v", err)
+	}
+	if _, err := f.q.CreateStep(ctx, gen.CreateStepParams{
+		WorkspaceID: f.ws, CampaignID: campaign.ID, StepOrder: 2, Subject: "", BodyText: "step two body",
+	}); err != nil {
+		t.Fatalf("step 2: %v", err)
+	}
+	contact, err := f.q.UpsertContact(ctx, gen.UpsertContactParams{
+		WorkspaceID: f.ws, Email: "outbound-" + uuid.NewString() + "@x.test", FirstName: "O",
+	})
+	if err != nil {
+		t.Fatalf("contact: %v", err)
+	}
+	return campaign.ID, contact.ID
+}
+
+// The core behavior the design spec's "outbound leg" paragraph requires:
+// GetThread synthesizes the outbound leg from sends/sequence_steps at read
+// time (never duplicated into inbox_messages) and interleaves it with the
+// stored inbound reply, ordered by time. Step 1 sent, then an inbound reply
+// arrives — the reader must show BOTH, oldest first.
+func TestGetThreadInterleavesOutboundStepWithInboundReplyAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	campaignID, contactID := seedTwoStepCampaign(t, ctx, f)
+
+	sentAt := time.Now().UTC().Add(-time.Hour)
+	insertSentStep(t, ctx, f, campaignID, contactID, 1, sentAt)
+
+	th, err := f.store.RecordReply(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, CampaignID: &campaignID, ContactID: &contactID,
+		RootMessageID: "<outbound-thread@sender.test>", Subject: "Intro", LastReplyClass: "neutral",
+	}, inbox.InsertMessageInput{
+		Direction: "inbound", FromEmail: "them@example.com", BodyText: "sounds good",
+		OccurredAt: sentAt.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("RecordReply: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if len(detail.Messages) != 2 {
+		t.Fatalf("messages = %+v, want exactly 2 (outbound step 1 + inbound reply)", detail.Messages)
+	}
+	outbound, inbound := detail.Messages[0], detail.Messages[1]
+	if outbound.Direction != "outbound" || outbound.Subject != "Intro" || outbound.BodyText != "step one body" {
+		t.Errorf("first message = %+v, want the outbound step 1 send", outbound)
+	}
+	if outbound.ToEmail != "them@example.com" || outbound.FromEmail == "" {
+		t.Errorf("outbound message = %+v, want to_email/from_email populated from the send/mailbox", outbound)
+	}
+	if inbound.Direction != "inbound" || inbound.BodyText != "sounds good" {
+		t.Errorf("second message = %+v, want the inbound reply", inbound)
+	}
+	if !outbound.OccurredAt.Before(inbound.OccurredAt) {
+		t.Errorf("outbound.OccurredAt=%v is not before inbound.OccurredAt=%v", outbound.OccurredAt, inbound.OccurredAt)
+	}
+}
+
+// A follow-up step (step 2) that left its own subject blank sends "in the
+// same thread" — the outbound leg must show the SAME "Re: <step 1 subject>"
+// convention the send-time path (stepsendjob.go's replySubject) actually
+// applies, so the reader's subject line matches what the recipient's mail
+// client really threaded on. Also proves ordering with TWO outbound steps
+// plus one inbound reply.
+func TestGetThreadOutboundStepWithEmptySubjectUsesReplySubjectConventionAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	campaignID, contactID := seedTwoStepCampaign(t, ctx, f)
+
+	step1At := time.Now().UTC().Add(-2 * time.Hour)
+	step2At := time.Now().UTC().Add(-time.Hour)
+	insertSentStep(t, ctx, f, campaignID, contactID, 1, step1At)
+	insertSentStep(t, ctx, f, campaignID, contactID, 2, step2At)
+
+	th, err := f.store.RecordReply(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, CampaignID: &campaignID, ContactID: &contactID,
+		RootMessageID: "<outbound-thread-2@sender.test>", Subject: "Intro", LastReplyClass: "neutral",
+	}, inbox.InsertMessageInput{
+		Direction: "inbound", FromEmail: "them@example.com", BodyText: "ok, replying now",
+		OccurredAt: step2At.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("RecordReply: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if len(detail.Messages) != 3 {
+		t.Fatalf("messages = %+v, want exactly 3 (2 outbound steps + 1 inbound reply)", detail.Messages)
+	}
+	step1Msg, step2Msg, inboundMsg := detail.Messages[0], detail.Messages[1], detail.Messages[2]
+	if step1Msg.Subject != "Intro" {
+		t.Errorf("step 1 subject = %q, want its own subject %q", step1Msg.Subject, "Intro")
+	}
+	if step2Msg.Subject != "Re: Intro" {
+		t.Errorf("step 2 subject = %q, want the same-thread convention %q", step2Msg.Subject, "Re: Intro")
+	}
+	if step2Msg.BodyText != "step two body" {
+		t.Errorf("step 2 body = %q, want the step's real body", step2Msg.BodyText)
+	}
+	if inboundMsg.Direction != "inbound" {
+		t.Errorf("third message direction = %q, want inbound", inboundMsg.Direction)
+	}
+}
+
+// A queued (never-sent) step must NOT appear in the reader: an unsent step
+// never happened yet.
+func TestGetThreadExcludesUnsentStepsAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	campaignID, contactID := seedTwoStepCampaign(t, ctx, f)
+
+	step1At := time.Now().UTC().Add(-time.Hour)
+	insertSentStep(t, ctx, f, campaignID, contactID, 1, step1At)
+	// Step 2 is queued, never sent: no sends row for it at all (mirrors an
+	// enrollment that has not yet reached its follow-up).
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email, status, step_order)
+		 VALUES ($1,$2,$3,$4,'them@example.com','queued',2)`,
+		f.ws, campaignID, contactID, f.mailbox,
+	); err != nil {
+		t.Fatalf("insert queued step 2: %v", err)
+	}
+
+	th, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, CampaignID: &campaignID, ContactID: &contactID,
+		RootMessageID: "<queued-step@sender.test>", Subject: "Intro", LastReplyClass: "neutral",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if len(detail.Messages) != 1 || detail.Messages[0].Direction != "outbound" || detail.Messages[0].Subject != "Intro" {
+		t.Fatalf("messages = %+v, want exactly the ONE sent step (the queued step 2 must not appear)", detail.Messages)
+	}
+}
+
+// The legacy-direct-send case: a thread with no campaign_id/contact_id (or
+// missing either one) has nothing for the outbound-leg join to match, and
+// must return its stored inbound messages with no error or panic — not
+// attempt a join on a nil id.
+func TestGetThreadWithNoCampaignOrContactReturnsInboundOnlyAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	th, err := f.store.RecordReply(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "",
+		Subject: "Legacy", LastReplyClass: "neutral",
+	}, inbox.InsertMessageInput{
+		Direction: "inbound", FromEmail: "legacy@example.com", BodyText: "a direct-send reply",
+		OccurredAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("RecordReply: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if len(detail.Messages) != 1 || detail.Messages[0].Direction != "inbound" || detail.Messages[0].BodyText != "a direct-send reply" {
+		t.Fatalf("messages = %+v, want exactly the one stored inbound message, no outbound synthesis", detail.Messages)
 	}
 }
 

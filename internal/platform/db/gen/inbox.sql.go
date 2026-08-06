@@ -254,7 +254,79 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 	return items, nil
 }
 
-const setInboxThreadUnread = `-- name: SetInboxThreadUnread :exec
+const listSentOutboundStepsForThread = `-- name: ListSentOutboundStepsForThread :many
+SELECT s.step_order, s.to_email, s.message_id, s.sent_at, s.created_at,
+       st.subject AS step_subject, st.body_text AS step_body_text, st.body_html AS step_body_html,
+       COALESCE(m.email, '') AS from_email, COALESCE(m.display_name, '') AS from_name
+FROM sends s
+JOIN sequence_steps st ON st.campaign_id = s.campaign_id AND st.step_order = s.step_order AND st.workspace_id = s.workspace_id
+LEFT JOIN mailboxes m ON m.id = s.mailbox_id AND m.workspace_id = s.workspace_id
+WHERE s.workspace_id = $1 AND s.campaign_id = $2 AND s.contact_id = $3
+  AND s.sent_at IS NOT NULL
+ORDER BY s.step_order
+`
+
+type ListSentOutboundStepsForThreadParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+}
+
+type ListSentOutboundStepsForThreadRow struct {
+	StepOrder    int32              `json:"step_order"`
+	ToEmail      string             `json:"to_email"`
+	MessageID    string             `json:"message_id"`
+	SentAt       pgtype.Timestamptz `json:"sent_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	StepSubject  string             `json:"step_subject"`
+	StepBodyText string             `json:"step_body_text"`
+	StepBodyHtml string             `json:"step_body_html"`
+	FromEmail    string             `json:"from_email"`
+	FromName     string             `json:"from_name"`
+}
+
+// The outbound leg of a thread (design spec: "Data model" — the original
+// sent message + any follow-up steps already sent), synthesized at READ time
+// by joining sends to the step that sent it (by campaign_id + step_order),
+// never duplicated into inbox_messages since the send content already lives
+// in sequence_steps. Only steps that actually went out are returned
+// (sent_at IS NOT NULL) — a queued/failed/skipped step never happened and
+// must not appear in a reply thread. from_email/from_name come from the
+// sending mailbox; a LEFT JOIN (COALESCE to ”) rather than an INNER JOIN
+// purely as defense in depth — sends.mailbox_id is NOT NULL and FK's
+// ON DELETE CASCADE to mailboxes, so in practice the row always exists.
+func (q *Queries) ListSentOutboundStepsForThread(ctx context.Context, arg ListSentOutboundStepsForThreadParams) ([]ListSentOutboundStepsForThreadRow, error) {
+	rows, err := q.db.Query(ctx, listSentOutboundStepsForThread, arg.WorkspaceID, arg.CampaignID, arg.ContactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSentOutboundStepsForThreadRow
+	for rows.Next() {
+		var i ListSentOutboundStepsForThreadRow
+		if err := rows.Scan(
+			&i.StepOrder,
+			&i.ToEmail,
+			&i.MessageID,
+			&i.SentAt,
+			&i.CreatedAt,
+			&i.StepSubject,
+			&i.StepBodyText,
+			&i.StepBodyHtml,
+			&i.FromEmail,
+			&i.FromName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setInboxThreadUnread = `-- name: SetInboxThreadUnread :execrows
 UPDATE inbox_threads SET unread = $1 WHERE id = $2 AND workspace_id = $3
 `
 
@@ -264,9 +336,15 @@ type SetInboxThreadUnreadParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-func (q *Queries) SetInboxThreadUnread(ctx context.Context, arg SetInboxThreadUnreadParams) error {
-	_, err := q.db.Exec(ctx, setInboxThreadUnread, arg.Unread, arg.ID, arg.WorkspaceID)
-	return err
+// :execrows (not :exec) so the store can tell "matched and updated" apart
+// from "zero rows matched" (an unknown or cross-workspace id) and map the
+// latter to ErrNotFound, rather than silently reporting success.
+func (q *Queries) SetInboxThreadUnread(ctx context.Context, arg SetInboxThreadUnreadParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setInboxThreadUnread, arg.Unread, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertInboxThread = `-- name: UpsertInboxThread :one

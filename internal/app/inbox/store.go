@@ -15,6 +15,7 @@ package inbox
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -300,23 +301,99 @@ func (s *PgStore) GetThread(ctx context.Context, workspaceID, id uuid.UUID) (Thr
 	if err != nil {
 		return ThreadDetail{}, mapNotFound(err)
 	}
+	th := threadFromGetRow(row)
+
 	msgRows, err := s.q.ListInboxMessagesByThread(ctx, gen.ListInboxMessagesByThreadParams{
 		ThreadID: id, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return ThreadDetail{}, err
 	}
-	messages := make([]Message, len(msgRows))
+	inbound := make([]Message, len(msgRows))
 	for i, m := range msgRows {
-		messages[i] = messageFromRow(m)
+		inbound[i] = messageFromRow(m)
 	}
-	return ThreadDetail{Thread: threadFromGetRow(row), Messages: messages}, nil
+
+	outbound, err := s.outboundLeg(ctx, workspaceID, th)
+	if err != nil {
+		return ThreadDetail{}, err
+	}
+
+	return ThreadDetail{Thread: th, Messages: mergeMessagesByOccurredAt(inbound, outbound)}, nil
 }
 
+// outboundLeg synthesizes a thread's outbound leg (design spec's "Data
+// model" section — the original sent message + any follow-up steps already
+// sent) from sends/sequence_steps at READ time, rather than duplicating it
+// into inbox_messages: the send content already lives in sequence_steps. A
+// thread missing either link — a legacy direct-send match, or (defensively)
+// one with only one of the two set — has nothing for the join to match and
+// returns no outbound messages, not an error.
+func (s *PgStore) outboundLeg(ctx context.Context, workspaceID uuid.UUID, th Thread) ([]Message, error) {
+	if th.CampaignID == nil || th.ContactID == nil {
+		return nil, nil
+	}
+	rows, err := s.q.ListSentOutboundStepsForThread(ctx, gen.ListSentOutboundStepsForThreadParams{
+		WorkspaceID: workspaceID, CampaignID: *th.CampaignID, ContactID: *th.ContactID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	// The step-1 subject is the anchor "Re: <this>" resolves against for a
+	// later step that left its own subject empty — the SAME rule
+	// stepsendjob.go's replySubject applies at send time (ported here, not
+	// imported: app/* never depends on coreapi/inprocess — see replySubject's
+	// own comment), so the reader shows the identical subject line the
+	// recipient's mail client actually threaded on.
+	threadSubject := ""
+	step1, err := s.q.GetStepByOrder(ctx, gen.GetStepByOrderParams{
+		CampaignID: *th.CampaignID, WorkspaceID: workspaceID, StepOrder: 1,
+	})
+	switch {
+	case err == nil:
+		threadSubject = step1.Subject
+	case errors.Is(err, pgx.ErrNoRows):
+		// Step 1 was deleted after sending: leave threadSubject "" so
+		// replySubject yields a bare "Re: " rather than failing the whole read.
+	default:
+		return nil, err
+	}
+
+	messages := make([]Message, len(rows))
+	for i, r := range rows {
+		messages[i] = outboundMessageFromRow(r, threadSubject)
+	}
+	return messages, nil
+}
+
+// SetUnread flips a thread's read state. workspace_id is pinned in the
+// UPDATE's own WHERE clause (not merely checked in Go), so a foreign
+// workspace's call matches zero rows; :execrows lets us tell that apart from
+// a real update and map it to ErrNotFound, mirroring crm.PgStore's identical
+// affected() pattern.
 func (s *PgStore) SetUnread(ctx context.Context, workspaceID, id uuid.UUID, unread bool) error {
-	return s.q.SetInboxThreadUnread(ctx, gen.SetInboxThreadUnreadParams{
+	n, err := s.q.SetInboxThreadUnread(ctx, gen.SetInboxThreadUnreadParams{
 		Unread: unread, ID: id, WorkspaceID: workspaceID,
 	})
+	return affected(n, err)
+}
+
+// affected turns a sqlc :execrows result into the domain's ErrNotFound when
+// zero rows matched — mirrors crm.PgStore's identical helper (this domain has
+// only the one :execrows call site so far; a second would promote this to a
+// shared package rather than duplicate it there too).
+func affected(n int64, err error) error {
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // threadFields is the common shape every sqlc row this domain converts to a
@@ -423,6 +500,54 @@ func messageFromRow(row gen.InboxMessage) Message {
 		OccurredAt:  row.OccurredAt.Time,
 		CreatedAt:   row.CreatedAt.Time,
 	}
+}
+
+// outboundMessageFromRow maps one ListSentOutboundStepsForThread row to the
+// domain Message. ReplyClass is left "" — an outbound send has no reply
+// classification — matching this domain's "absent is empty string"
+// convention.
+func outboundMessageFromRow(r gen.ListSentOutboundStepsForThreadRow, threadSubject string) Message {
+	return Message{
+		Direction:  "outbound",
+		MessageID:  r.MessageID,
+		FromEmail:  r.FromEmail,
+		FromName:   r.FromName,
+		ToEmail:    r.ToEmail,
+		Subject:    replySubject(int(r.StepOrder), r.StepSubject, threadSubject),
+		BodyText:   r.StepBodyText,
+		BodyHTML:   r.StepBodyHtml,
+		OccurredAt: r.SentAt.Time,
+		CreatedAt:  r.CreatedAt.Time,
+	}
+}
+
+// replySubject synthesizes a step's effective subject for the outbound leg.
+// Ported from (not imported — app/* never depends on coreapi/inprocess)
+// internal/coreapi/inprocess/stepsendjob.go's identical send-time rule (spec
+// A5), so the reader's subject line always matches what the recipient's mail
+// client actually threaded on: step 1 always uses its own subject; from step
+// 2, an empty step subject means "reply in the same thread" and resolves to
+// "Re: <step 1 subject>" (threadSubject); a non-empty step subject is a
+// deliberate new one and is used verbatim.
+func replySubject(order int, stepSubject, threadSubject string) string {
+	if order <= 1 || stepSubject != "" {
+		return stepSubject
+	}
+	return "Re: " + threadSubject
+}
+
+// mergeMessagesByOccurredAt interleaves the stored inbound messages with the
+// synthesized outbound leg by time, ascending — the same ordering
+// ListInboxMessagesByThread's own ORDER BY occurred_at already gives the
+// inbound-only case, now applied across both legs together. Stable so two
+// messages landing at the exact same instant keep the order they were
+// appended in (inbound before outbound) rather than an arbitrary one.
+func mergeMessagesByOccurredAt(inbound, outbound []Message) []Message {
+	merged := make([]Message, 0, len(inbound)+len(outbound))
+	merged = append(merged, inbound...)
+	merged = append(merged, outbound...)
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].OccurredAt.Before(merged[j].OccurredAt) })
+	return merged
 }
 
 // pgUUID converts an optional domain id to the nullable pgtype the generated

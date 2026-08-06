@@ -60,5 +60,29 @@ WHERE t.id = @id AND t.workspace_id = @workspace_id;
 -- name: ListInboxMessagesByThread :many
 SELECT * FROM inbox_messages WHERE thread_id = @thread_id AND workspace_id = @workspace_id ORDER BY occurred_at;
 
--- name: SetInboxThreadUnread :exec
+-- name: SetInboxThreadUnread :execrows
+-- :execrows (not :exec) so the store can tell "matched and updated" apart
+-- from "zero rows matched" (an unknown or cross-workspace id) and map the
+-- latter to ErrNotFound, rather than silently reporting success.
 UPDATE inbox_threads SET unread = @unread WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: ListSentOutboundStepsForThread :many
+-- The outbound leg of a thread (design spec: "Data model" — the original
+-- sent message + any follow-up steps already sent), synthesized at READ time
+-- by joining sends to the step that sent it (by campaign_id + step_order),
+-- never duplicated into inbox_messages since the send content already lives
+-- in sequence_steps. Only steps that actually went out are returned
+-- (sent_at IS NOT NULL) — a queued/failed/skipped step never happened and
+-- must not appear in a reply thread. from_email/from_name come from the
+-- sending mailbox; a LEFT JOIN (COALESCE to '') rather than an INNER JOIN
+-- purely as defense in depth — sends.mailbox_id is NOT NULL and FK's
+-- ON DELETE CASCADE to mailboxes, so in practice the row always exists.
+SELECT s.step_order, s.to_email, s.message_id, s.sent_at, s.created_at,
+       st.subject AS step_subject, st.body_text AS step_body_text, st.body_html AS step_body_html,
+       COALESCE(m.email, '') AS from_email, COALESCE(m.display_name, '') AS from_name
+FROM sends s
+JOIN sequence_steps st ON st.campaign_id = s.campaign_id AND st.step_order = s.step_order AND st.workspace_id = s.workspace_id
+LEFT JOIN mailboxes m ON m.id = s.mailbox_id AND m.workspace_id = s.workspace_id
+WHERE s.workspace_id = @workspace_id AND s.campaign_id = @campaign_id AND s.contact_id = @contact_id
+  AND s.sent_at IS NOT NULL
+ORDER BY s.step_order;
