@@ -18,6 +18,8 @@ import { Select } from '@/components/ui/select'
 import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
 import { cn } from '@/lib/utils'
 import { useCrmGetBoardQuery, useCrmMoveDealMutation, type CrmBoardStage, type CrmDeal } from './api'
+import { parseActor } from './actor'
+import { ActorBadge } from './actor-badge'
 import { crmErrorMessage } from './error-copy'
 import { formatMoney, formatTotal } from './money'
 
@@ -210,7 +212,12 @@ const DealCard = memo(function DealCard({
             {deal.name}
           </Link>
           <p className="mt-1 truncate text-xs text-muted-foreground">{deal.company_name || deal.contact_email || 'No company linked'}</p>
-          <p className="mt-2 text-sm font-semibold">{formatMoney(deal.amount_micros ?? 0, deal.currency)}</p>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold">{formatMoney(deal.amount_micros ?? 0, deal.currency)}</p>
+            {/* An agent- or reply-created deal has to be tellable from a
+                hand-made one without opening it. */}
+            <ActorBadge actor={parseActor(deal.created_by_actor)} source={deal.source} />
+          </div>
           <label className="mt-3 block text-[11px] font-medium text-muted-foreground">
             Move to stage
             <Select
