@@ -167,6 +167,22 @@ func advance(t *testing.T, core coreapi.Client, s Sender, enq Enqueuer, enrollme
 	}
 }
 
+// arriveAtDueTime pulls the enrollment's next_due_at back to now, standing in
+// for the wait asynq performs between a step being scheduled and its advance
+// task running.
+//
+// It is needed because the claim now REFUSES a step that is not yet due — the
+// guard that stops an out-of-office deferral being ignored by the advance task
+// already queued for the old time. A test that drives two advances back to back
+// is skipping that wait, so it has to model it.
+func arriveAtDueTime(t *testing.T, ctx context.Context, pool *pgxpool.Pool, enrollmentID string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`UPDATE sequence_enrollments SET next_due_at = now() WHERE id = $1`, enrollmentID); err != nil {
+		t.Fatalf("arrive at due time: %v", err)
+	}
+}
+
 func newSealer(t *testing.T) *crypto.Sealer {
 	t.Helper()
 	s, err := crypto.NewSealer(itMasterKey)
@@ -225,7 +241,8 @@ func TestSequenceMultiStepThreaded(t *testing.T) {
 		t.Fatal("step 1 should schedule step 2 (lazy chain)")
 	}
 
-	// Step 2.
+	// Step 2, once its scheduled moment arrives.
+	arriveAtDueTime(t, ctx, pool, eid)
 	advance(t, fx.core, snd, enq, eid, fx.ws.String())
 	if len(snd.sent) != 2 {
 		t.Fatalf("expected 2 sends, got %d", len(snd.sent))

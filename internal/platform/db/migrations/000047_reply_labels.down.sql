@@ -12,8 +12,7 @@ ALTER TABLE sequence_enrollments
     CHECK (reply_class IS NULL OR reply_class IN
         ('positive','negative','neutral','auto_reply','out_of_office','unsubscribe','unknown'));
 
--- Restore the 000046 unread index pair.
-DROP INDEX idx_inbox_threads_workspace_unread_any;
+-- Restore the 000046 positive-unread index with its EXACT prior definition.
 CREATE INDEX idx_inbox_threads_workspace_unread_positive
     ON inbox_threads (workspace_id) WHERE unread AND last_reply_class = 'positive';
 

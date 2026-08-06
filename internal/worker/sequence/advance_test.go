@@ -361,6 +361,40 @@ func TestAdvanceMailboxSpacingReEnqueuesWithoutSending(t *testing.T) {
 	}
 }
 
+// TestAdvanceNotYetDueWaitsOutTheNewDueTime covers the out-of-office deferral's
+// worker half: the task queued for the OLD due time cannot be cancelled, so it
+// runs, the claim refuses it (ClaimDeferred), and this handler must reschedule
+// for the NEW due time rather than the mailbox's min-interval — which would
+// fail the same guard again seconds later, for the whole absence.
+//
+// Critically, nothing is sent and the cursor does not move: the recipient said
+// they were away.
+func TestAdvanceNotYetDueWaitsOutTheNewDueTime(t *testing.T) {
+	until := time.Now().Add(72 * time.Hour)
+	core := &stubCore{
+		job: coreapi.StepSendJob{
+			EnrollmentID: "e", EffectiveDailyCap: 100, MinIntervalSeconds: 90,
+			NotDueUntil: until,
+		},
+		claimDeferred: true,
+	}
+	snd, enq := &fakeSender{}, &fakeEnq{}
+	if err := run(t, core, snd, enq); err != nil {
+		t.Fatal(err)
+	}
+	if snd.called() || core.advanceCalls != 0 {
+		t.Fatal("a step deferred into a stated absence must not send or advance")
+	}
+	if !enq.inCalled {
+		t.Fatal("expected a re-enqueue")
+	}
+	// The delay must clear the new due time. An exact value would pin the
+	// window-snapping policy; what matters is that it is not the 90s spacing.
+	if enq.in < 71*time.Hour {
+		t.Fatalf("expected a retry after the new due time (~72h), got %v", enq.in)
+	}
+}
+
 func TestAdvanceZeroCapStopsFailed(t *testing.T) {
 	// Degenerate cap: cannot ever send. Must stop 'failed', not defer forever.
 	core := &stubCore{job: coreapi.StepSendJob{EffectiveDailyCap: 0, SentToday: 0}}

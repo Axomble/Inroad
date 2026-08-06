@@ -50,6 +50,42 @@ type InboxCaptureClient interface {
 	StoreInboundMessage(context.Context, InboxMessageInput) error
 }
 
+// ReplyLabelClient is an optional execution-plane capability (same reasoning as
+// the two above) that resolves a classified reply key to the workspace's label
+// row, so the inbox poller can dispatch on the label's ROLE FLAGS instead of a
+// hardcoded class switch.
+//
+// ok=false is NOT an error: it means no label in the workspace claims the key
+// (a deleted custom label whose key survives on historical rows, or a core that
+// predates the taxonomy). The caller must then fall back to its pre-taxonomy
+// behaviour rather than inventing a label.
+type ReplyLabelClient interface {
+	ResolveReplyLabel(ctx context.Context, workspaceID, key string) (ReplyLabel, bool, error)
+}
+
+// ReplyLabel is the automation contract of one reply label, flattened to the
+// role flags the execution plane acts on. It deliberately omits the display
+// fields (label/color/position) — the worker never renders a label, and a seam
+// type that carries only what the caller may act on cannot grow a display
+// dependency by accident.
+type ReplyLabel struct {
+	// Key is the stable machine key the classifier produced and historical
+	// rows store as free text.
+	Key string
+	// StopsEnrollment halts the enrollment (MarkReplied).
+	StopsEnrollment bool
+	// IsAutomated marks the machine-generated family (OOO/auto-reply): never a
+	// human reply, so it never stops the sequence.
+	IsAutomated bool
+	// SuppressesContact suppresses the address then stops (compliance).
+	SuppressesContact bool
+	// CapturesDeal opens/updates a CRM deal from the reply.
+	CapturesDeal bool
+	// DefersEnrollment pushes the next step past a stated return date instead
+	// of stopping. Only meaningful on an automated (non-stopping) label.
+	DefersEnrollment bool
+}
+
 // InboxMessageInput is one inbound reply the poller matched (or a legacy
 // direct-send match with no enrollment). CampaignID/ContactID are *string,
 // not an empty-string sentinel: they mirror inbox.RecordReplyInput's
@@ -164,6 +200,18 @@ type Client interface {
 	// MarkStepStopped halts an enrollment (the single stop entry point). reason
 	// is one of the enrollment stop reasons (e.g. "suppressed").
 	MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error
+	// DeferEnrollment pushes an ACTIVE enrollment's next_due_at out to until,
+	// leaving it active — the out-of-office path, where the contact stated a
+	// return date and the sequence should resume after it rather than stop.
+	// Delegates to the enrollment state machine's Reschedule, so it is the same
+	// single SetDue entry point the launch stagger uses; a non-active enrollment
+	// matches 0 rows and is a safe no-op.
+	//
+	// Pushing next_due_at does NOT cancel the asynq advance task already queued
+	// for the OLD time. The claim-time guard (see StepSendJob.NotDueUntil /
+	// NotYetDue, enforced in ClaimStepSend) is what actually stops that task
+	// from firing into the stated absence; this method only moves the date.
+	DeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error
 	// IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter
 	// and returns the new value. Mirrors IncrementSendAttempts on the direct-send
 	// path: the advance handler uses it to break out of the cap-defer loop when a
@@ -479,7 +527,14 @@ type StepSendJob struct {
 	// Skip means "nothing to do here ever" and leaves the enrollment where it is,
 	// whereas a pause is a condition that CLEARS. The enrollment has to wait and
 	// resume, so the worker defers it (see the blocked branch in advance.go).
-	CampaignPaused     bool
+	CampaignPaused bool
+	// NotDueUntil is the enrollment's persisted next_due_at, carried so the
+	// claim can refuse a step that is not due yet. It exists because pushing
+	// next_due_at out (DeferEnrollment, the out-of-office path) cannot cancel
+	// the asynq advance task ALREADY queued for the old time: without this
+	// guard that task fires on schedule and sends into the stated absence.
+	// Zero when the enrollment has no due time recorded.
+	NotDueUntil        time.Time
 	EffectiveDailyCap  int
 	SentToday          int
 	MinIntervalSeconds int
@@ -517,6 +572,17 @@ type StepSendJob struct {
 	// allow_plaintext). Threaded into OutboundJob so the send applies the SAME
 	// TLS policy the connect-test validated; false keeps TLS enforced.
 	AllowPlaintext bool
+}
+
+// NotYetDue reports whether this step's enrollment is scheduled for a moment
+// still in the future — i.e. an advance task queued for an earlier due time is
+// trying to send early. Pure and clock-injected so both the claim (which
+// enforces it) and the worker (which reschedules on it) read one rule.
+//
+// A zero NotDueUntil means "no recorded due time", which is never "not due":
+// the pre-taxonomy behaviour is to send.
+func (j StepSendJob) NotYetDue(now time.Time) bool {
+	return !j.NotDueUntil.IsZero() && now.Before(j.NotDueUntil)
 }
 
 // StepResult is the outcome of one step send.

@@ -1193,6 +1193,51 @@ const injectedRtkApi = api.injectEndpoints({
         method: "PUT",
       }),
     }),
+    listReplyLabels: build.query<
+      ListReplyLabelsApiResponse,
+      ListReplyLabelsApiArg
+    >({
+      query: () => ({ url: `/reply-labels` }),
+    }),
+    createReplyLabel: build.mutation<
+      CreateReplyLabelApiResponse,
+      CreateReplyLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/reply-labels`,
+        method: "POST",
+        body: queryArg.replyLabelInput,
+      }),
+    }),
+    reorderReplyLabels: build.mutation<
+      ReorderReplyLabelsApiResponse,
+      ReorderReplyLabelsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/reply-labels/reorder`,
+        method: "PUT",
+        body: queryArg.replyLabelReorderInput,
+      }),
+    }),
+    updateReplyLabel: build.mutation<
+      UpdateReplyLabelApiResponse,
+      UpdateReplyLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/reply-labels/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.replyLabelInput,
+      }),
+    }),
+    deleteReplyLabel: build.mutation<
+      DeleteReplyLabelApiResponse,
+      DeleteReplyLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/reply-labels/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
     listInboxThreads: build.query<
       ListInboxThreadsApiResponse,
       ListInboxThreadsApiArg
@@ -1943,6 +1988,29 @@ export type CrmSetPrimaryContactEmailApiResponse = unknown;
 export type CrmSetPrimaryContactEmailApiArg = {
   id: string;
   emailId: string;
+};
+export type ListReplyLabelsApiResponse =
+  /** status 200 Reply labels */ ReplyLabelList;
+export type ListReplyLabelsApiArg = void;
+export type CreateReplyLabelApiResponse =
+  /** status 201 Created label */ ReplyLabel;
+export type CreateReplyLabelApiArg = {
+  replyLabelInput: ReplyLabelInput;
+};
+export type ReorderReplyLabelsApiResponse =
+  /** status 200 Reply labels in their new order */ ReplyLabelList;
+export type ReorderReplyLabelsApiArg = {
+  replyLabelReorderInput: ReplyLabelReorderInput;
+};
+export type UpdateReplyLabelApiResponse =
+  /** status 200 Updated label */ ReplyLabel;
+export type UpdateReplyLabelApiArg = {
+  id: string;
+  replyLabelInput: ReplyLabelInput;
+};
+export type DeleteReplyLabelApiResponse = unknown;
+export type DeleteReplyLabelApiArg = {
+  id: string;
 };
 export type ListInboxThreadsApiResponse =
   /** status 200 Threads in the workspace */ InboxThreadPage;
@@ -2772,18 +2840,8 @@ export type CampaignEnrollment = {
   first_name: string;
   /** enrollment lifecycle status (active/completed/stopped) */
   status: string;
-  /** classified sentiment/intent bucket of the reply */
-  reply_class:
-    | (
-        | "positive"
-        | "negative"
-        | "neutral"
-        | "auto_reply"
-        | "out_of_office"
-        | "unsubscribe"
-        | "unknown"
-      )
-    | null;
+  /** Key of the reply label this reply was classified into. Deliberately an OPEN string, not an enum: a workspace defines its own labels (GET /reply-labels), and the key of a deleted custom label survives on historical enrollments, so clients must resolve it for display and degrade to showing the raw key. */
+  reply_class: string | null;
   /** layer that decided the class (header/lexicon/model) */
   reply_source: string | null;
   /** RFC3339 timestamp the reply was classified */
@@ -3150,6 +3208,37 @@ export type CrmContactEmailList = {
 export type CrmContactEmailInput = {
   email: string;
 };
+export type ReplyLabelInput = {
+  label: string;
+  color: string;
+  /** halt the sequence on this reply */
+  stops_enrollment: boolean;
+  /** machine-generated mail (out-of-office / auto-reply); never a human reply */
+  is_automated: boolean;
+  /** suppress the address */
+  suppresses_contact: boolean;
+  /** open or update a CRM deal from this reply */
+  captures_deal: boolean;
+  /** Reschedule the next step past a return date stated in the body instead of stopping. When no date can be parsed the reply is only tagged - the sequence is never deferred on a guess. Deferrals are capped at 30 days. */
+  defers_enrollment: boolean;
+};
+export type ReplyLabel = ReplyLabelInput & {
+  id: string;
+  /** stable machine key; the value stored on CampaignEnrollment.reply_class */
+  key: string;
+  position: number;
+  /** Seeded with the workspace. May be renamed and have its flags changed, but never deleted - the classifier and historical enrollments both name its key. */
+  is_builtin: boolean;
+  created_at: string;
+  updated_at: string;
+};
+export type ReplyLabelList = {
+  labels: ReplyLabel[];
+};
+export type ReplyLabelReorderInput = {
+  /** every label in the workspace, exactly once, in the new order */
+  ids: string[];
+};
 export type InboxThreadSummary = {
   id: string;
   mailbox_id: string;
@@ -3335,6 +3424,11 @@ export const {
   useCrmListContactEmailsQuery,
   useCrmAddContactEmailMutation,
   useCrmSetPrimaryContactEmailMutation,
+  useListReplyLabelsQuery,
+  useCreateReplyLabelMutation,
+  useReorderReplyLabelsMutation,
+  useUpdateReplyLabelMutation,
+  useDeleteReplyLabelMutation,
   useListInboxThreadsQuery,
   useGetInboxThreadQuery,
   useSetInboxThreadReadMutation,

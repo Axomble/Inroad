@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -435,8 +436,9 @@ func (s *PgStore) CapturePositiveReply(ctx context.Context, workspaceID uuid.UUI
 	_, err = tx.Exec(ctx, `INSERT INTO events
  (workspace_id,name,kind,object_type,object_id,contact_id,company_id,deal_id,actor,data,
  linked_record_cached_name,source_message_id,source_thread_ref,occurred_at)
- VALUES($1,'reply.positive','reply','deal',$2,$3,$4,$2,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
-		workspaceID, dealID, capture.ContactID, companyID, actor, data, dealName, in.MessageID, threadRef, when)
+ VALUES($1,$11,'reply','deal',$2,$3,$4,$2,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
+		workspaceID, dealID, capture.ContactID, companyID, actor, data, dealName, in.MessageID, threadRef, when,
+		replyEventName(in.ReplyClass))
 	if err != nil {
 		return Deal{}, err
 	}
@@ -444,6 +446,27 @@ func (s *PgStore) CapturePositiveReply(ctx context.Context, workspaceID uuid.UUI
 		return Deal{}, err
 	}
 	return s.GetDeal(ctx, workspaceID, dealID)
+}
+
+// replyLabelKey is the shape reply_labels.key is constrained to by migration
+// 000047. Matching it here is what makes the derived event name safe to build
+// by concatenation: the key reaches this code from a classifier, and an event
+// name is read back by dashboards and webhooks.
+var replyLabelKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// replyEventName derives the auto-capture event name from the reply label the
+// message was classified into, so a custom capturing label emits
+// "reply.demo_requested" instead of masquerading as "reply.positive". The
+// builtin "positive" label reproduces the historical name exactly.
+//
+// A key that does not match the reply_labels shape (an unlabelled or corrupted
+// class) degrades to the historical name rather than emitting something a
+// consumer cannot parse.
+func replyEventName(replyClass string) string {
+	if !replyLabelKey.MatchString(replyClass) {
+		return "reply.positive"
+	}
+	return "reply." + replyClass
 }
 
 func ensureCapturedCompany(ctx context.Context, tx pgx.Tx, workspaceID uuid.UUID, capture captureContext, sender string) (*uuid.UUID, error) {

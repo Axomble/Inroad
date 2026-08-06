@@ -122,6 +122,7 @@ func TestPausedCampaignSendsNothingAndKeepsItsEnrollments(t *testing.T) {
 	// stuck permanently closed would pass every assertion above.
 	setCampaignStatus(t, ctx, pool, fx.ws, fx.campaignID, "running")
 	resumed := &fakeSender{id: "<step2@x>"}
+	arriveAtDueTime(t, ctx, pool, enrollmentID.String())
 	advance(t, fx.core, resumed, &fakeEnq{}, enrollmentID.String(), fx.ws.String())
 	if resumed.calls != 1 {
 		t.Fatalf("relaunched campaign did not resume: %d calls", resumed.calls)

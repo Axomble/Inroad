@@ -92,11 +92,12 @@ AFTER INSERT ON workspaces FOR EACH ROW EXECUTE FUNCTION seed_new_workspace_repl
 -- label is unwritable / unindexed.
 
 -- 1. The inbox unread index pinned last_reply_class = 'positive'
---    (000046_inbox.up.sql:20), so it served exactly one label. Replaced with an
---    unconditional (workspace_id, unread) index, which serves the unread filter
---    for ANY label rather than one privileged value.
+--    (000046_inbox.up.sql:20-21), so it served exactly ONE privileged label out
+--    of a set the workspace now defines. Dropped and NOT replaced: the sibling
+--    idx_inbox_threads_workspace_unread (000046:18-19, partial WHERE unread)
+--    already serves the unread filter for any label, so a replacement would be
+--    a redundant index earning its write cost on every thread update.
 DROP INDEX idx_inbox_threads_workspace_unread_positive;
-CREATE INDEX idx_inbox_threads_workspace_unread_any ON inbox_threads (workspace_id, unread);
 
 -- 2. sequence_enrollments.reply_class CHECK pinned the seven classes
 --    (000014_reply_class.up.sql:14-17). Dropped, and deliberately NOT replaced

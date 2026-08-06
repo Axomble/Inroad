@@ -405,6 +405,10 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		SendID:      sendID.String(),
 		CurrentStep: int(b.CurrentStep), StepOrder: nextOrder, NextDelaySeconds: nextDelay, LastStep: lastStep,
 		Suppressed: suppressed, HealthPaused: sender.healthPaused,
+		// The persisted due time travels so ClaimStepSend can refuse an advance
+		// task queued for an EARLIER due time (an out-of-office deferral pushed
+		// next_due_at out; the queued task was not cancelled by that push).
+		NotDueUntil:       b.NextDueAt.Time,
 		EffectiveDailyCap: sender.effectiveCap, SentToday: sender.sentToday,
 		MinIntervalSeconds: int(sender.minIntervalSeconds),
 		ToEmail:            b.ToEmail,
@@ -440,6 +444,15 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 // became 'sent' (the sweeper/retry re-drives it) or ClaimAlreadySent on one that
 // just became 'sent' by another worker (the cursor advance is idempotent).
 func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
+	// Not-due guard, BEFORE any row is written: an advance task queued for an
+	// earlier due time must not deliver after next_due_at was pushed out (the
+	// out-of-office deferral). Enqueueing cannot be undone, so the claim — the
+	// single gate every step-send passes through — is where the push is made to
+	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
+	// advance" outcome.
+	if job.NotYetDue(time.Now()) {
+		return coreapi.ClaimDeferred, nil
+	}
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return coreapi.ClaimSkip, err
@@ -692,6 +705,26 @@ func (c client) MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, 
 		return err
 	}
 	return c.enroll.MarkStepStopped(ctx, ws, eid, enrollment.StopReason(reason))
+}
+
+// DeferEnrollment pushes an active enrollment's next_due_at out to until,
+// delegating to the enrollment state machine's Reschedule (the same single
+// SetDue entry point the launch stagger uses, guarded on status='active' in
+// SQL, so a stopped/completed enrollment matches 0 rows and is a no-op).
+//
+// It does NOT cancel the advance task already queued for the old time — nothing
+// can — so the ClaimStepSend not-due guard above is the half that actually
+// prevents the early send.
+func (c client) DeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error {
+	eid, err := uuid.Parse(enrollmentID)
+	if err != nil {
+		return err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return err
+	}
+	return c.enroll.Reschedule(ctx, ws, eid, until)
 }
 
 // IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter

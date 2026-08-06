@@ -47,6 +47,9 @@ func (f *fakeCore) FinalizeStepSend(context.Context, coreapi.StepSendJob, coreap
 }
 func (f *fakeCore) ReleaseStepSend(context.Context, coreapi.StepSendJob) error    { return nil }
 func (f *fakeCore) MarkStepStopped(context.Context, string, string, string) error { return nil }
+func (f *fakeCore) DeferEnrollment(context.Context, string, string, time.Time) error {
+	return nil
+}
 func (f *fakeCore) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
 	return 0, nil
 }
