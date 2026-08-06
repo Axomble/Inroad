@@ -575,11 +575,20 @@ type InboxPollJob struct {
 
 // SendRef identifies the send an inbound reply/bounce matched, and the
 // enrollment (if any) it belongs to. EnrollmentID is "" when the matched send
-// has no enrollment — the legacy direct-send path.
+// has no enrollment — the legacy direct-send path. MailboxID/CampaignID/
+// ContactID/MessageID are the send row's own columns (all NOT NULL on sends),
+// carried so the inbox poller can store the matched reply against the right
+// mailbox/campaign/contact and anchor the thread on the send's own outbound
+// Message-ID (MessageID — the reply's In-Reply-To/References target, i.e. the
+// thread's root_message_id) without a second lookup.
 type SendRef struct {
 	SendID       string
 	EnrollmentID string
 	ContactEmail string
+	MailboxID    string
+	CampaignID   string
+	ContactID    string
+	MessageID    string
 }
 
 // SendJob is everything the worker needs to send one email — including the

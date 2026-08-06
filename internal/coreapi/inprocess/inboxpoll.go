@@ -144,6 +144,10 @@ func (c client) FindSendByMessageID(ctx context.Context, workspaceID, messageID 
 		SendID:       row.ID.String(),
 		EnrollmentID: enrollmentRefID(row.EnrollmentID),
 		ContactEmail: row.ToEmail,
+		MailboxID:    row.MailboxID.String(),
+		CampaignID:   row.CampaignID.String(),
+		ContactID:    row.ContactID.String(),
+		MessageID:    row.MessageID,
 	}, nil
 }
 

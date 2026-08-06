@@ -13,6 +13,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/mime"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/replyclassify"
 	"github.com/inroad/inroad/internal/platform/warmup"
@@ -474,6 +475,44 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 			BodyText: string(msg.Body),
 		}
 		r := classifier.Classify(ctx, in)
+
+		// Store the matched reply in the unified inbox EXACTLY ONCE, before the
+		// class-based switch below, so every reachable class — automated
+		// (auto_reply/out_of_office), unsubscribe, and positive/negative/
+		// neutral/unknown — is captured, not just the ones that stop an
+		// enrollment. InboxCaptureClient is an OPTIONAL execution-plane
+		// capability (feature-detected via type assertion, like
+		// coreapi.CRMCaptureClient below): a core that doesn't implement it
+		// (e.g. a worker fake) simply skips storage without panicking.
+		if capture, ok := core.(coreapi.InboxCaptureClient); ok {
+			plainText, html, _ := mime.Extract(msg.ContentType, msg.Body) // Extract never errors per its own contract
+			from, fromName := msg.Header.Get("From"), ""
+			if addr, parseErr := netmail.ParseAddress(msg.Header.Get("From")); parseErr == nil {
+				from, fromName = addr.Address, addr.Name
+			}
+			occurredAt := time.Now().UTC()
+			if headerDate, dateErr := msg.Header.Date(); dateErr == nil {
+				occurredAt = headerDate.UTC()
+			}
+			// campaignID/contactID are always populated: sends.campaign_id and
+			// sends.contact_id are NOT NULL columns, so every matched send
+			// carries both regardless of whether it belongs to an enrollment.
+			campaignID, contactID := s.CampaignID, s.ContactID
+			if err := capture.StoreInboundMessage(ctx, coreapi.InboxMessageInput{
+				WorkspaceID: workspaceID, MailboxID: s.MailboxID, CampaignID: &campaignID, ContactID: &contactID,
+				// RootMessageID anchors the thread on the send's OWN outbound
+				// Message-ID (s.MessageID) — the value this reply's
+				// In-Reply-To/References matched against — never this reply's
+				// own Message-ID.
+				RootMessageID: s.MessageID, Subject: msg.Header.Get("Subject"),
+				MessageID: strings.TrimSpace(msg.Header.Get("Message-ID")),
+				FromEmail: strings.ToLower(from), FromName: fromName, ToEmail: strings.ToLower(msg.Header.Get("To")),
+				BodyText: plainText, BodyHTML: html, ReplyClass: r.Class, OccurredAt: occurredAt,
+			}); err != nil {
+				return false, err
+			}
+		}
+
 		switch {
 		case replyclassify.IsAutomated(r.Class):
 			if classifier.LooksLikeUnsubscribe(in) {

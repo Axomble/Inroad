@@ -251,7 +251,7 @@ func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (G
 }
 
 const getSendByMessageID = `-- name: GetSendByMessageID :one
-SELECT s.id, s.contact_id, s.to_email, e.id AS enrollment_id
+SELECT s.id, s.contact_id, s.to_email, s.mailbox_id, s.campaign_id, s.message_id, e.id AS enrollment_id
 FROM sends s
 LEFT JOIN sequence_enrollments e
     ON e.campaign_id = s.campaign_id AND e.contact_id = s.contact_id
@@ -269,6 +269,9 @@ type GetSendByMessageIDRow struct {
 	ID           uuid.UUID   `json:"id"`
 	ContactID    uuid.UUID   `json:"contact_id"`
 	ToEmail      string      `json:"to_email"`
+	MailboxID    uuid.UUID   `json:"mailbox_id"`
+	CampaignID   uuid.UUID   `json:"campaign_id"`
+	MessageID    string      `json:"message_id"`
 	EnrollmentID pgtype.UUID `json:"enrollment_id"`
 }
 
@@ -279,7 +282,9 @@ type GetSendByMessageIDRow struct {
 // enrollment_id comes back null; the handler treats that as "no enrollment to
 // stop". message_id has no uniqueness constraint, so ORDER BY created_at DESC
 // makes the LIMIT 1 deterministic: the most recent send wins if it's ever
-// non-unique.
+// non-unique. mailbox_id/campaign_id/message_id are additionally selected so the
+// inbox-poll worker can store the matched reply against its mailbox/campaign and
+// anchor the thread on the send's own outbound Message-ID (root_message_id).
 func (q *Queries) GetSendByMessageID(ctx context.Context, arg GetSendByMessageIDParams) (GetSendByMessageIDRow, error) {
 	row := q.db.QueryRow(ctx, getSendByMessageID, arg.WorkspaceID, arg.MessageID)
 	var i GetSendByMessageIDRow
@@ -287,6 +292,9 @@ func (q *Queries) GetSendByMessageID(ctx context.Context, arg GetSendByMessageID
 		&i.ID,
 		&i.ContactID,
 		&i.ToEmail,
+		&i.MailboxID,
+		&i.CampaignID,
+		&i.MessageID,
 		&i.EnrollmentID,
 	)
 	return i, err
