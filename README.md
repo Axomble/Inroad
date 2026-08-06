@@ -239,17 +239,20 @@ make seed
 ## Self-hosting
 
 Inroad runs with no cloud account of any kind — no AWS, no GCP, no Stripe, no managed queue. One
-command brings up the whole platform:
+command brings up the whole platform with zero manual configuration:
 
 ```bash
 git clone https://github.com/Axomble/Inroad && cd Inroad
-cp .env.example .env        # fill in INROAD_JWT_SECRET + INROAD_MASTER_KEY
-docker compose up --build
+docker compose up -d
 ```
 
-The API serves the built SPA on <http://localhost:8080>, migrations run automatically on the API
-container's startup, and the worker attaches to Redis. The stack refuses to boot if the two secrets
-are missing — no insecure defaults.
+The stack uses default environment fallback values so `docker compose up -d` boots out of the box. The Nginx SPA runs on <http://localhost> (Port 80), the API serves on <http://localhost:8080>, database migrations execute automatically before API/Worker boot, and the worker attaches to Redis.
+
+For local live-reloading dev, copy `cp docker-compose.override.yml.example docker-compose.override.yml` and run `docker compose up` (Air hot reloading for Go backend, Vite HMR for React SPA).
+
+For cloud infrastructure, production deployment manifests are included in the repository:
+- **AWS Cloud (Terraform):** Complete VPC, RDS PostgreSQL, ElastiCache Redis, S3, ECS Fargate (API & Worker), ALB, IAM roles, and KMS key manifests in [`deploy/terraform/aws/main.tf`](deploy/terraform/aws/main.tf).
+- **Kubernetes (Helm Chart):** Production Helm chart with Deployments, Service, ConfigMaps, Secrets, and Ingress templates in [`deploy/helm/inroad/`](deploy/helm/inroad/).
 
 | Concern | Self-host default | Optional / swap-in |
 |---|---|---|
@@ -260,8 +263,7 @@ are missing — no insecure defaults.
 | Reply classification | Deterministic, offline, no network | An optional `ModelClassifier` seam for the ambiguous middle |
 | Payments / licensing | None — everything is unlocked | — |
 
-Reverse-proxy `:8080` behind TLS in production. For a worker fleet across multiple hosts, run the
-`worker` binary directly rather than via Compose. Connecting Gmail and Microsoft 365 (OAuth client
+Detailed deployment guides and configuration options are in [docs/self-hosting.md](docs/self-hosting.md). Connecting Gmail and Microsoft 365 (OAuth client
 setup, exact scopes requested, redirect URIs) is covered step by step in
 [docs/self-hosting.md](docs/self-hosting.md).
 

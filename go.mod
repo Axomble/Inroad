@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/auth v0.22.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/anthropics/anthropic-sdk-go v1.61.0
-	github.com/aws/aws-sdk-go-v2 v1.43.3
+	github.com/aws/aws-sdk-go-v2 v1.43.4
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.33
 	github.com/descope/virtualwebauthn v1.0.5
 	github.com/emersion/go-imap v1.2.1
@@ -18,6 +18,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hibiken/asynq v0.26.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/openai/openai-go/v3 v3.50.0
 	github.com/redis/go-redis/v9 v9.14.1
 	github.com/vgarvardt/pgx-google-uuid/v5 v5.6.0
@@ -36,14 +37,18 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.12.0 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.3 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.16 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.32.33 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.34 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.34 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.34 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.35 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.35 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.35 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.36 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.15 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.34 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.28 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.35 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.36 // indirect
+	github.com/aws/aws-sdk-go-v2/service/kms v1.55.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.5.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.33.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.3 // indirect
@@ -65,6 +70,7 @@ require (
 	github.com/go-webauthn/x v0.2.6 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
+	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.18 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
@@ -78,6 +84,8 @@ require (
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
+	github.com/segmentio/asm v1.1.3 // indirect
+	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
@@ -86,6 +94,7 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect

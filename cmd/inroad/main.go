@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
+	"github.com/inroad/inroad/internal/app/mcpserver"
 	"github.com/inroad/inroad/internal/app/oauthprovider"
 	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/pulse"
@@ -306,6 +308,22 @@ func run() error {
 		CRMErrors:       crmErrors{},
 		CRMWriteLimiter: redisLimiter,
 	})
+	mcpResourceURL := strings.TrimRight(cfg.PublicURL, "/") + "/v1/mcp"
+	mcpHandler := mcpserver.New(toolRegistry, func(ctx context.Context, r *http.Request) (agenttool.Principal, []string, time.Time, string, bool, error) {
+		p, expiresAt, clientID, ok, err := oauthVerifier.VerifyToken(ctx, r)
+		if err != nil || !ok {
+			return agenttool.Principal{}, nil, time.Time{}, "", false, err
+		}
+		userID, err := uuid.Parse(p.UserID)
+		if err != nil {
+			return agenttool.Principal{}, nil, time.Time{}, "", false, err
+		}
+		workspaceID, err := uuid.Parse(p.WorkspaceID)
+		if err != nil {
+			return agenttool.Principal{}, nil, time.Time{}, "", false, err
+		}
+		return agenttool.Principal{WorkspaceID: workspaceID, UserID: userID, Role: "member", AgentClientID: clientID}, p.Scopes, expiresAt, clientID, true, nil
+	}, mcpResourceURL, strings.TrimRight(cfg.PublicURL, "/")+"/oauth2")
 	modelResolver := agentchat.NewPgModelResolver(
 		queries, keyring, catalogSource, ai.NewStreamerFactory(cfg.AIAllowPrivateBaseURL),
 	)
@@ -360,6 +378,11 @@ func run() error {
 		// (unauth -> login redirect), so it is public here rather than in a
 		// RequireAuth group; its sub-routes apply their own session/admin/CSRF guards.
 		{pattern: "/oauth2", handler: oauthProviderHandler.Routes(sessionVerifier, oauthRegisterThrottle)},
+		{pattern: "/oauth2/.well-known/oauth-authorization-server", handler: oauthprovider.AuthorizationServerMetadata(cfg.PublicURL)},
+		// MCP clients discover the protected-resource metadata without a bearer
+		// token; the stream endpoint performs its own OAuth bearer validation.
+		{pattern: "/.well-known/oauth-protected-resource", handler: mcpHandler.Metadata()},
+		{pattern: "/v1/mcp", handler: mcpHandler.StreamableHTTP()},
 	}
 	// The data-plane REST surface accepts a session, an api-key, OR an OAuth access
 	// token. The api-key verifier runs first and DEFERS on a non-`inrd_` token; the

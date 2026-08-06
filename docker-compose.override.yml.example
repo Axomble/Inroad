@@ -1,0 +1,73 @@
+# Example Docker Compose override for local live-reloading development.
+# Usage:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   docker compose up
+#
+# Modifications made here take effect automatically when running `docker compose up`.
+# - Go binaries (api & worker) auto-recompile on code changes using Air.
+# - The React SPA runs Vite dev server with Hot Module Replacement (HMR).
+
+services:
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.dev-go
+    entrypoint: []
+    command: go run ./cmd/migrate up
+    environment:
+      INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
+    volumes:
+      - .:/src
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.dev-go
+    entrypoint: []
+    command: sh -c "mkdir -p tmp/air-api && air -c .air.api.toml"
+    environment:
+      INROAD_ENV: development
+      INROAD_LOG_LEVEL: debug
+      INROAD_MAIL_ALLOW_PRIVATE_HOSTS: "true"
+      INROAD_AI_ALLOW_PRIVATE_BASE_URL: "true"
+      INROAD_PUBLIC_URL: http://localhost:5173
+    volumes:
+      - .:/src
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.dev-go
+    entrypoint: []
+    command: sh -c "mkdir -p tmp/air-worker && air -c .air.worker.toml"
+    environment:
+      INROAD_ENV: development
+      INROAD_LOG_LEVEL: debug
+      INROAD_MAIL_ALLOW_PRIVATE_HOSTS: "true"
+      INROAD_AI_ALLOW_PRIVATE_BASE_URL: "true"
+    volumes:
+      - .:/src
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.dev-web
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8080
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./web:/web
+      - ./api:/api
+      - /web/node_modules
+
+volumes:
+  go-mod:
+  go-build:

@@ -8,5 +8,8 @@ RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
 FROM alpine:3.20
 RUN adduser -D -u 10001 inroad
 COPY --from=build /out/worker /usr/local/bin/worker
+COPY deploy/docker/load-secrets.sh /usr/local/bin/load-secrets.sh
+COPY deploy/docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint
+RUN chmod 0444 /usr/local/bin/load-secrets.sh && chmod 0555 /usr/local/bin/worker-entrypoint
 USER inroad
-ENTRYPOINT ["worker"]
+ENTRYPOINT ["/usr/local/bin/worker-entrypoint"]

@@ -44,6 +44,13 @@ export const API_KEY_SCOPE_GROUPS: readonly ScopeGroup[] = [
       { value: 'lists:write', label: 'Write', description: 'Create and edit contact lists' },
     ],
   },
+  {
+    domain: 'CRM',
+    scopes: [
+      { value: 'crm:read', label: 'Read', description: 'View companies, deals, pipelines, activities, and threads' },
+      { value: 'crm:write', label: 'Write', description: 'Create, update, and move companies, deals, and pipelines' },
+    ],
+  },
 ] as const
 
 /** Every grantable scope value, flattened — for validation/labelling. */

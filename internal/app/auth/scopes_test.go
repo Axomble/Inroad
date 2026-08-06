@@ -33,6 +33,8 @@ func TestOAuthGrantableScopesExactSet(t *testing.T) {
 		ScopeCampaignsRead: true,
 		ScopeContactsRead:  true,
 		ScopeContactsWrite: true,
+		ScopeCRMRead:       true,
+		ScopeCRMWrite:      true,
 		ScopeListsRead:     true,
 		ScopeListsWrite:    true,
 	}

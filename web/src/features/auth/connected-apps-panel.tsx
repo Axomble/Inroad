@@ -74,6 +74,8 @@ export function ConnectedAppsPanel() {
       <PageBody>
         {notice && <NoticeBanner notice={notice} />}
 
+        <McpAccessCard />
+
         {isLoading ? (
           <LoadingRows />
         ) : isError ? (
@@ -100,6 +102,65 @@ export function ConnectedAppsPanel() {
         />
       )}
     </Page>
+  )
+}
+
+function McpAccessCard() {
+  const [copied, setCopied] = useState<'endpoint' | 'metadata' | null>(null)
+
+  const values = {
+    endpoint: '/v1/mcp',
+    metadata: '/.well-known/oauth-protected-resource',
+  } as const
+
+  async function copy(kind: keyof typeof values) {
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}${values[kind]}`)
+      setCopied(kind)
+      window.setTimeout(() => setCopied((current) => (current === kind ? null : current)), 1800)
+    } catch {
+      setCopied(null)
+    }
+  }
+
+  return (
+    <section className="mb-6 rounded-lg border border-border bg-surface-1 p-5" aria-labelledby="mcp-access-title">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <h2 id="mcp-access-title" className="text-sm font-semibold text-foreground">
+            MCP server access
+          </h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Connect an MCP-compatible agent to Inroad with an OAuth app and the scopes it needs.
+          </p>
+        </div>
+        <StatusPill tone="running">Available</StatusPill>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {(Object.keys(values) as Array<keyof typeof values>).map((kind) => {
+          const label = kind === 'endpoint' ? 'Server endpoint' : 'Protected-resource metadata'
+          return (
+            <div key={kind} className="min-w-0 rounded-md border border-border bg-surface-2 p-3">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-faint">{label}</div>
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">{values[kind]}</code>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0"
+                  aria-label={`Copy ${label.toLowerCase()}`}
+                  onClick={() => void copy(kind)}
+                >
+                  {copied === kind ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                  {copied === kind ? 'Copied' : 'Copy'}
+                </Button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 

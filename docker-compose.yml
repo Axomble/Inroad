@@ -1,3 +1,141 @@
-# Convenience wrapper so `docker compose up` works from the repo root.
-include:
-  - deploy/compose/docker-compose.yml
+# Inroad Production / Self-Hosting Compose Manifest
+# Zero-config single entrypoint for self-hosting.
+# Usage: docker compose up -d
+#
+# INROAD_JWT_SECRET and INROAD_MASTER_KEY are deliberately absent from the
+# defaults below. The init-secrets service generates real random values into
+# a volume the first time the stack boots (see deploy/docker/generate-secrets.sh),
+# so a bare `docker compose up` stays zero-config without ever running on a
+# fixed, publicly-known secret. Set both explicitly in the environment (or a
+# `.env` file) to override this — required for any multi-host deployment,
+# since the generated file lives on a single Docker volume local to this host.
+
+services:
+  init-secrets:
+    image: alpine:3.20
+    environment:
+      SECRETS_FILE: /run/secrets/inroad/env
+    volumes:
+      - appsecrets:/run/secrets/inroad
+      - ./deploy/docker/generate-secrets.sh:/generate-secrets.sh:ro
+    entrypoint: ["sh", "/generate-secrets.sh"]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-inroad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inroad}
+      POSTGRES_DB: ${POSTGRES_DB:-inroad}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-inroad}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.api
+    # cmd/migrate loads the full config, so it needs the crypto secrets too,
+    # even though it never uses them — load-secrets.sh before it same as api/worker.
+    entrypoint: ["/bin/sh", "-c", ". /usr/local/bin/load-secrets.sh && exec migrate up"]
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+      SECRETS_FILE: /run/secrets/inroad/env
+    volumes:
+      - appsecrets:/run/secrets/inroad:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init-secrets:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.api
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+      SECRETS_FILE: /run/secrets/inroad/env
+      INROAD_WEB_DIR: /srv/web
+      INROAD_PUBLIC_URL: ${INROAD_PUBLIC_URL:-http://localhost:8080}
+      INROAD_ENV: ${INROAD_ENV:-production}
+      INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+    volumes:
+      - appsecrets:/run/secrets/inroad:ro
+    ports:
+      - "${API_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+      SECRETS_FILE: /run/secrets/inroad/env
+      INROAD_ENV: ${INROAD_ENV:-production}
+      INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+    volumes:
+      - appsecrets:/run/secrets/inroad:ro
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.web
+    ports:
+      - "${WEB_PORT:-80}:80"
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  appsecrets:
