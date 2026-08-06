@@ -125,6 +125,107 @@ func TestListNeverReturnsAnotherWorkspacesThreads(t *testing.T) {
 	}
 }
 
+// The handler must parse ?q= into ListFilter.Query and pass it to the Store
+// untouched — the fake records the filter it last received precisely so this
+// can be asserted without a real Postgres LIKE match.
+func TestListThreadsThreadsTheQueryParamToTheFilter(t *testing.T) {
+	store := newFakeStore()
+	h := inbox.NewHandler(inbox.NewService(store))
+
+	w := serve(t, h, http.MethodGet, "/inbox/threads?q=acme", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if store.lastListFilter.Query != "acme" {
+		t.Fatalf("filter.Query = %q, want %q", store.lastListFilter.Query, "acme")
+	}
+}
+
+// Omitting ?q= entirely must leave ListFilter.Query as "" (no search filter),
+// not some other sentinel — "" is this domain's own convention for absent
+// text.
+func TestListThreadsWithoutQueryParamLeavesFilterQueryEmpty(t *testing.T) {
+	store := newFakeStore()
+	h := inbox.NewHandler(inbox.NewService(store))
+
+	w := serve(t, h, http.MethodGet, "/inbox/threads", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if store.lastListFilter.Query != "" {
+		t.Fatalf("filter.Query = %q, want \"\"", store.lastListFilter.Query)
+	}
+}
+
+// The three new contact_* fields must round-trip through the JSON wire shape
+// for both the list and detail endpoints — a regression here would silently
+// drop the fields the frontend task depends on.
+func TestListAndGetThreadIncludeContactFields(t *testing.T) {
+	store := newFakeStore()
+	th := seedThread(store, testWS, uuid.New(), "Re: Hi", "neutral")
+	th.ContactEmail, th.ContactFirstName, th.ContactLastName = "them@example.com", "Ada", "Lovelace"
+	store.threads[th.ID] = th
+	h := inbox.NewHandler(inbox.NewService(store))
+
+	list := serve(t, h, http.MethodGet, "/inbox/threads", "")
+	var listResp struct {
+		Items []struct {
+			ContactEmail     string `json:"contact_email"`
+			ContactFirstName string `json:"contact_first_name"`
+			ContactLastName  string `json:"contact_last_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listResp.Items) != 1 || listResp.Items[0].ContactEmail != "them@example.com" ||
+		listResp.Items[0].ContactFirstName != "Ada" || listResp.Items[0].ContactLastName != "Lovelace" {
+		t.Fatalf("list items = %+v, want the seeded contact fields", listResp.Items)
+	}
+
+	get := serve(t, h, http.MethodGet, "/inbox/threads/"+th.ID.String(), "")
+	var getResp struct {
+		ContactEmail     string `json:"contact_email"`
+		ContactFirstName string `json:"contact_first_name"`
+		ContactLastName  string `json:"contact_last_name"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if getResp.ContactEmail != "them@example.com" || getResp.ContactFirstName != "Ada" || getResp.ContactLastName != "Lovelace" {
+		t.Fatalf("get detail = %+v, want the seeded contact fields", getResp)
+	}
+}
+
+// A thread with no contact link (a legacy direct-send match) must serialize
+// the three contact fields as "" — never null/omitted — matching the
+// zero-value Thread the fake seeds by default.
+func TestListThreadWithNoContactLinkHasEmptyContactFields(t *testing.T) {
+	store := newFakeStore()
+	seedThread(store, testWS, uuid.New(), "Re: Hi", "neutral")
+	h := inbox.NewHandler(inbox.NewService(store))
+
+	w := serve(t, h, http.MethodGet, "/inbox/threads", "")
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %+v, want exactly one", resp.Items)
+	}
+	for _, field := range []string{"contact_email", "contact_first_name", "contact_last_name"} {
+		v, ok := resp.Items[0][field]
+		if !ok {
+			t.Fatalf("field %q missing from response entirely, want present and \"\"", field)
+		}
+		if v != "" {
+			t.Fatalf("field %q = %v, want \"\"", field, v)
+		}
+	}
+}
+
 func TestListBadLimitIs400(t *testing.T) {
 	h := inbox.NewHandler(inbox.NewService(newFakeStore()))
 	w := serve(t, h, http.MethodGet, "/inbox/threads?limit=notanumber", "")

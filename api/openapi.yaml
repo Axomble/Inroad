@@ -2193,6 +2193,14 @@ paths:
           required: false
           description: Restrict to one reply classification (e.g. positive, neutral, negative).
           schema: { type: string }
+        - name: q
+          in: query
+          required: false
+          description: >-
+            Case-insensitive substring search against the thread's subject or its
+            linked contact's email. LIKE metacharacters (% and _) are matched
+            literally, not as wildcards.
+          schema: { type: string }
         - name: before_last_message_at
           in: query
           required: false
@@ -3919,12 +3927,28 @@ components:
       properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMContactEmail' } } }
     InboxThreadSummary:
       type: object
-      required: [id, mailbox_id, campaign_id, contact_id, subject, last_reply_class, unread, last_message_at]
+      required:
+        [
+          id,
+          mailbox_id,
+          campaign_id,
+          contact_id,
+          contact_email,
+          contact_first_name,
+          contact_last_name,
+          subject,
+          last_reply_class,
+          unread,
+          last_message_at,
+        ]
       properties:
         id: { type: string, format: uuid }
         mailbox_id: { type: string, format: uuid }
         campaign_id: { type: string, format: uuid, nullable: true }
         contact_id: { type: string, format: uuid, nullable: true }
+        contact_email: { type: string, description: The linked contact's email, or "" when contact_id is null (e.g. a legacy direct-send match). }
+        contact_first_name: { type: string, description: The linked contact's first name, or "" when contact_id is null. }
+        contact_last_name: { type: string, description: The linked contact's last name, or "" when contact_id is null. }
         subject: { type: string }
         last_reply_class: { type: string }
         unread: { type: boolean }

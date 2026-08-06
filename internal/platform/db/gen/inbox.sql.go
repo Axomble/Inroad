@@ -13,7 +13,13 @@ import (
 )
 
 const getInboxThread = `-- name: GetInboxThread :one
-SELECT id, workspace_id, mailbox_id, campaign_id, contact_id, root_message_id, subject, last_reply_class, unread, last_message_at, created_at FROM inbox_threads WHERE id = $1 AND workspace_id = $2
+SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
+       COALESCE(c.email, '') AS contact_email,
+       COALESCE(c.first_name, '') AS contact_first_name,
+       COALESCE(c.last_name, '') AS contact_last_name
+FROM inbox_threads t
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE t.id = $1 AND t.workspace_id = $2
 `
 
 type GetInboxThreadParams struct {
@@ -21,9 +27,27 @@ type GetInboxThreadParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) (InboxThread, error) {
+type GetInboxThreadRow struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	CampaignID       pgtype.UUID        `json:"campaign_id"`
+	ContactID        pgtype.UUID        `json:"contact_id"`
+	RootMessageID    string             `json:"root_message_id"`
+	Subject          string             `json:"subject"`
+	LastReplyClass   string             `json:"last_reply_class"`
+	Unread           bool               `json:"unread"`
+	LastMessageAt    pgtype.Timestamptz `json:"last_message_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ContactEmail     string             `json:"contact_email"`
+	ContactFirstName string             `json:"contact_first_name"`
+	ContactLastName  string             `json:"contact_last_name"`
+}
+
+// contact_* columns follow ListInboxThreads' LEFT JOIN convention above.
+func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) (GetInboxThreadRow, error) {
 	row := q.db.QueryRow(ctx, getInboxThread, arg.ID, arg.WorkspaceID)
-	var i InboxThread
+	var i GetInboxThreadRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkspaceID,
@@ -36,6 +60,9 @@ func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) 
 		&i.Unread,
 		&i.LastMessageAt,
 		&i.CreatedAt,
+		&i.ContactEmail,
+		&i.ContactFirstName,
+		&i.ContactLastName,
 	)
 	return i, err
 }
@@ -129,14 +156,22 @@ func (q *Queries) ListInboxMessagesByThread(ctx context.Context, arg ListInboxMe
 }
 
 const listInboxThreads = `-- name: ListInboxThreads :many
-SELECT id, workspace_id, mailbox_id, campaign_id, contact_id, root_message_id, subject, last_reply_class, unread, last_message_at, created_at FROM inbox_threads
-WHERE workspace_id = $1
-  AND ($2::uuid IS NULL OR mailbox_id = $2)
-  AND ($3::text IS NULL OR last_reply_class = $3)
+SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
+       COALESCE(c.email, '') AS contact_email,
+       COALESCE(c.first_name, '') AS contact_first_name,
+       COALESCE(c.last_name, '') AS contact_last_name
+FROM inbox_threads t
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE t.workspace_id = $1
+  AND ($2::uuid IS NULL OR t.mailbox_id = $2)
+  AND ($3::text IS NULL OR t.last_reply_class = $3)
   AND ($4::timestamptz IS NULL
-       OR (last_message_at, id) < ($4::timestamptz, $5::uuid))
-ORDER BY last_message_at DESC, id DESC
-LIMIT $6
+       OR (t.last_message_at, t.id) < ($4::timestamptz, $5::uuid))
+  AND ($6::text IS NULL
+       OR t.subject ILIKE '%' || $6::text || '%'
+       OR c.email ILIKE '%' || $6::text || '%')
+ORDER BY t.last_message_at DESC, t.id DESC
+LIMIT $7
 `
 
 type ListInboxThreadsParams struct {
@@ -145,27 +180,54 @@ type ListInboxThreadsParams struct {
 	ReplyClass          *string            `json:"reply_class"`
 	BeforeLastMessageAt pgtype.Timestamptz `json:"before_last_message_at"`
 	BeforeID            pgtype.UUID        `json:"before_id"`
+	Query               *string            `json:"query"`
 	PageLimit           int32              `json:"page_limit"`
+}
+
+type ListInboxThreadsRow struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	CampaignID       pgtype.UUID        `json:"campaign_id"`
+	ContactID        pgtype.UUID        `json:"contact_id"`
+	RootMessageID    string             `json:"root_message_id"`
+	Subject          string             `json:"subject"`
+	LastReplyClass   string             `json:"last_reply_class"`
+	Unread           bool               `json:"unread"`
+	LastMessageAt    pgtype.Timestamptz `json:"last_message_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ContactEmail     string             `json:"contact_email"`
+	ContactFirstName string             `json:"contact_first_name"`
+	ContactLastName  string             `json:"contact_last_name"`
 }
 
 // Keyset on (last_message_at, id) DESC, newest first. sqlc.narg fields are
 // optional filters, omitted (NULL) when the caller doesn't set them.
-func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsParams) ([]InboxThread, error) {
+// contact_* columns come from a LEFT JOIN: a thread with no contact_id (a
+// legacy direct-send match) has nothing to join on and reports ” via
+// COALESCE, never NULL — the same "absent is empty string" convention
+// inbox_messages' own text columns already use. 'query' substring-matches
+// (case-insensitive) the thread's subject OR the joined contact's email; the
+// caller escapes LIKE metacharacters before this reaches Postgres (see
+// escapeLike in store.go) so a literal % or _ typed by a user is never
+// treated as a wildcard.
+func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsParams) ([]ListInboxThreadsRow, error) {
 	rows, err := q.db.Query(ctx, listInboxThreads,
 		arg.WorkspaceID,
 		arg.MailboxID,
 		arg.ReplyClass,
 		arg.BeforeLastMessageAt,
 		arg.BeforeID,
+		arg.Query,
 		arg.PageLimit,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []InboxThread
+	var items []ListInboxThreadsRow
 	for rows.Next() {
-		var i InboxThread
+		var i ListInboxThreadsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WorkspaceID,
@@ -178,6 +240,9 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 			&i.Unread,
 			&i.LastMessageAt,
 			&i.CreatedAt,
+			&i.ContactEmail,
+			&i.ContactFirstName,
+			&i.ContactLastName,
 		); err != nil {
 			return nil, err
 		}

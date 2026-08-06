@@ -1202,6 +1202,7 @@ const injectedRtkApi = api.injectEndpoints({
         params: {
           mailbox_id: queryArg.mailboxId,
           reply_class: queryArg.replyClass,
+          q: queryArg.q,
           before_last_message_at: queryArg.beforeLastMessageAt,
           before_id: queryArg.beforeId,
           limit: queryArg.limit,
@@ -1950,6 +1951,8 @@ export type ListInboxThreadsApiArg = {
   mailboxId?: string;
   /** Restrict to one reply classification (e.g. positive, neutral, negative). */
   replyClass?: string;
+  /** Case-insensitive substring search against the thread's subject or its linked contact's email. LIKE metacharacters (% and _) are matched literally, not as wildcards. */
+  q?: string;
   /** Keyset cursor. Must be set together with before_id, or not at all. */
   beforeLastMessageAt?: string;
   /** Keyset cursor. Must be set together with before_last_message_at, or not at all. */
@@ -3152,6 +3155,12 @@ export type InboxThreadSummary = {
   mailbox_id: string;
   campaign_id: string | null;
   contact_id: string | null;
+  /** The linked contact's email */
+  contact_email: string;
+  /** The linked contact's first name */
+  contact_first_name: string;
+  /** The linked contact's last name */
+  contact_last_name: string;
   subject: string;
   last_reply_class: string;
   unread: boolean;

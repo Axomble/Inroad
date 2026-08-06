@@ -445,6 +445,167 @@ func TestSetUnreadCrossWorkspaceDoesNotMutateAgainstPostgres(t *testing.T) {
 	}
 }
 
+// contact_email/contact_first_name/contact_last_name come from ListThreads
+// and GetThread's LEFT JOIN on contacts, against real Postgres: a thread
+// linked to a real contact reports that contact's own email/name, and a
+// thread with no contact_id (root_message_id="", a legacy direct-send match)
+// reports "" for all three — never NULL, never an error.
+func TestListAndGetThreadReportRealContactFieldsAndEmptyStringWhenUnlinkedAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	contactEmail := "ada-" + uuid.NewString() + "@x.test"
+	contact, err := f.q.UpsertContact(ctx, gen.UpsertContactParams{
+		WorkspaceID: f.ws, Email: contactEmail, FirstName: "Ada", LastName: "Lovelace",
+	})
+	if err != nil {
+		t.Fatalf("contact: %v", err)
+	}
+
+	linked, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<linked-contact@sender.test>",
+		ContactID: &contact.ID, Subject: "Hi", LastReplyClass: "neutral",
+	})
+	if err != nil {
+		t.Fatalf("upsert linked: %v", err)
+	}
+	unlinked, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "", Subject: "Legacy", LastReplyClass: "neutral",
+	})
+	if err != nil {
+		t.Fatalf("upsert unlinked: %v", err)
+	}
+
+	// GetThread.
+	detail, err := f.store.GetThread(ctx, f.ws, linked.ID)
+	if err != nil {
+		t.Fatalf("GetThread(linked): %v", err)
+	}
+	if detail.Thread.ContactEmail != contactEmail || detail.Thread.ContactFirstName != "Ada" || detail.Thread.ContactLastName != "Lovelace" {
+		t.Fatalf("GetThread(linked).Thread = %+v, want the real contact fields", detail.Thread)
+	}
+
+	legacy, err := f.store.GetThread(ctx, f.ws, unlinked.ID)
+	if err != nil {
+		t.Fatalf("GetThread(unlinked): %v", err)
+	}
+	if legacy.Thread.ContactEmail != "" || legacy.Thread.ContactFirstName != "" || legacy.Thread.ContactLastName != "" {
+		t.Fatalf("GetThread(unlinked).Thread = %+v, want all three contact fields \"\"", legacy.Thread)
+	}
+
+	// ListThreads.
+	page, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox})
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	byID := map[uuid.UUID]inbox.Thread{}
+	for _, it := range page.Items {
+		byID[it.ID] = it
+	}
+	gotLinked, ok := byID[linked.ID]
+	if !ok {
+		t.Fatalf("ListThreads did not return the linked thread: %+v", page.Items)
+	}
+	if gotLinked.ContactEmail != contactEmail || gotLinked.ContactFirstName != "Ada" || gotLinked.ContactLastName != "Lovelace" {
+		t.Fatalf("ListThreads linked item = %+v, want the real contact fields", gotLinked)
+	}
+	gotUnlinked, ok := byID[unlinked.ID]
+	if !ok {
+		t.Fatalf("ListThreads did not return the unlinked thread: %+v", page.Items)
+	}
+	if gotUnlinked.ContactEmail != "" || gotUnlinked.ContactFirstName != "" || gotUnlinked.ContactLastName != "" {
+		t.Fatalf("ListThreads unlinked item = %+v, want all three contact fields \"\"", gotUnlinked)
+	}
+}
+
+// ListFilter.Query substring-matches (case-insensitively) the thread's
+// subject OR its linked contact's email against real Postgres: a query
+// matching the contact's email returns that thread, a query matching a word
+// in the subject returns that thread, and a query matching neither returns
+// zero results.
+func TestListThreadsSearchMatchesSubjectOrContactEmailAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	contact, err := f.q.UpsertContact(ctx, gen.UpsertContactParams{
+		WorkspaceID: f.ws, Email: "searchable-" + uuid.NewString() + "@x.test", FirstName: "S",
+	})
+	if err != nil {
+		t.Fatalf("contact: %v", err)
+	}
+	byContact, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<by-contact@sender.test>",
+		ContactID: &contact.ID, Subject: "Nothing special", LastReplyClass: "neutral",
+	})
+	if err != nil {
+		t.Fatalf("upsert by-contact: %v", err)
+	}
+	bySubject, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<by-subject@sender.test>",
+		Subject: "Re: pricing question about widgets", LastReplyClass: "neutral",
+	})
+	if err != nil {
+		t.Fatalf("upsert by-subject: %v", err)
+	}
+
+	// q matching the contact's email returns that thread.
+	byEmail, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox, Query: "searchable-"})
+	if err != nil {
+		t.Fatalf("ListThreads(query=email substring): %v", err)
+	}
+	if len(byEmail.Items) != 1 || byEmail.Items[0].ID != byContact.ID {
+		t.Fatalf("email-search page = %+v, want exactly [%s]", byEmail.Items, byContact.ID)
+	}
+
+	// q matching a word in the subject returns that thread.
+	bySubj, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox, Query: "widgets"})
+	if err != nil {
+		t.Fatalf("ListThreads(query=subject word): %v", err)
+	}
+	if len(bySubj.Items) != 1 || bySubj.Items[0].ID != bySubject.ID {
+		t.Fatalf("subject-search page = %+v, want exactly [%s]", bySubj.Items, bySubject.ID)
+	}
+
+	// q matching neither returns zero results.
+	none, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox, Query: "no-such-match-xyz"})
+	if err != nil {
+		t.Fatalf("ListThreads(query=no match): %v", err)
+	}
+	if len(none.Items) != 0 {
+		t.Fatalf("no-match page = %+v, want zero results", none.Items)
+	}
+}
+
+// LIKE metacharacters typed by a user (a literal % or _) must be escaped
+// before this reaches Postgres, not treated as wildcards: a query of a bare
+// "%" must match ONLY the thread whose subject literally contains a "%"
+// character, not every thread in the workspace.
+func TestListThreadsSearchEscapesLikeMetacharactersAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	if _, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<wild1@sender.test>",
+		Subject: "Ordinary subject one", LastReplyClass: "neutral",
+	}); err != nil {
+		t.Fatalf("seed 1: %v", err)
+	}
+	if _, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<wild2@sender.test>",
+		Subject: "50% off this week", LastReplyClass: "neutral",
+	}); err != nil {
+		t.Fatalf("seed 2: %v", err)
+	}
+
+	page, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox, Query: "%"})
+	if err != nil {
+		t.Fatalf("ListThreads(query=%%): %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Subject != "50% off this week" {
+		t.Fatalf("literal-%%-search page = %+v, want exactly the ONE subject containing a literal %%", page.Items)
+	}
+}
+
 // seedMailbox adds a SECOND mailbox to the workspace, for the mailbox_id
 // filter test above.
 func seedMailbox(t *testing.T, ctx context.Context, q *gen.Queries, ws uuid.UUID) uuid.UUID {

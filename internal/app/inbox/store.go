@@ -15,6 +15,7 @@ package inbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,14 @@ type Thread struct {
 	Unread         bool
 	LastMessageAt  time.Time
 	CreatedAt      time.Time
+	// ContactEmail/ContactFirstName/ContactLastName come from a LEFT JOIN on
+	// contacts and are '' (never a nil/pointer) when ContactID is nil — a
+	// legacy direct-send match legitimately has no contact to join on. Same
+	// "absent is empty string" convention as every other text field in this
+	// domain (see inbox_messages' columns).
+	ContactEmail     string
+	ContactFirstName string
+	ContactLastName  string
 }
 
 // Message is one inbound or outbound email on a Thread.
@@ -84,7 +93,11 @@ type ListFilter struct {
 	ReplyClass          *string
 	BeforeLastMessageAt *time.Time
 	BeforeID            *uuid.UUID
-	Limit               int32
+	// Query is an optional case-insensitive substring match against the
+	// thread's subject or its contact's email. "" means no search filter —
+	// this domain's usual convention for "absent" text, not a pointer.
+	Query string
+	Limit int32
 }
 
 // UpsertThreadInput carries the fields UpsertThread writes on first insert, and
@@ -268,6 +281,7 @@ func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 		ReplyClass:          filter.ReplyClass,
 		BeforeLastMessageAt: pgTimestamptz(filter.BeforeLastMessageAt),
 		BeforeID:            pgUUID(filter.BeforeID),
+		Query:               likeQuery(filter.Query),
 		PageLimit:           NormalizeLimit(filter.Limit),
 	})
 	if err != nil {
@@ -275,7 +289,7 @@ func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 	}
 	items := make([]Thread, len(rows))
 	for i, row := range rows {
-		items[i] = threadFromRow(row)
+		items[i] = threadFromListRow(row)
 	}
 	return ThreadPage{Items: items}, nil
 }
@@ -295,7 +309,7 @@ func (s *PgStore) GetThread(ctx context.Context, workspaceID, id uuid.UUID) (Thr
 	for i, m := range msgRows {
 		messages[i] = messageFromRow(m)
 	}
-	return ThreadDetail{Thread: threadFromRow(row), Messages: messages}, nil
+	return ThreadDetail{Thread: threadFromGetRow(row), Messages: messages}, nil
 }
 
 func (s *PgStore) SetUnread(ctx context.Context, workspaceID, id uuid.UUID, unread bool) error {
@@ -304,20 +318,56 @@ func (s *PgStore) SetUnread(ctx context.Context, workspaceID, id uuid.UUID, unre
 	})
 }
 
-// threadFromRow maps a generated inbox_threads row to the domain type.
+// threadFromRow maps a generated inbox_threads row (no contact join — the
+// UpsertInboxThread RETURNING clause this backs never joins contacts) to the
+// domain type. ContactEmail/ContactFirstName/ContactLastName are left at
+// their zero value (""), matching the "absent is empty string" convention;
+// callers that need them go through GetThread/ListThreads instead.
 func threadFromRow(row gen.InboxThread) Thread {
+	return thread(row.ID, row.WorkspaceID, row.MailboxID, row.CampaignID, row.ContactID,
+		row.RootMessageID, row.Subject, row.LastReplyClass, row.Unread, row.LastMessageAt, row.CreatedAt,
+		"", "", "")
+}
+
+// threadFromListRow maps one ListInboxThreads row (sqlc's own row type,
+// distinct from InboxThread because the query joins contacts) to the domain
+// type.
+func threadFromListRow(row gen.ListInboxThreadsRow) Thread {
+	return thread(row.ID, row.WorkspaceID, row.MailboxID, row.CampaignID, row.ContactID,
+		row.RootMessageID, row.Subject, row.LastReplyClass, row.Unread, row.LastMessageAt, row.CreatedAt,
+		row.ContactEmail, row.ContactFirstName, row.ContactLastName)
+}
+
+// threadFromGetRow maps the GetInboxThread row (also its own sqlc row type,
+// for the same reason as ListInboxThreadsRow) to the domain type.
+func threadFromGetRow(row gen.GetInboxThreadRow) Thread {
+	return thread(row.ID, row.WorkspaceID, row.MailboxID, row.CampaignID, row.ContactID,
+		row.RootMessageID, row.Subject, row.LastReplyClass, row.Unread, row.LastMessageAt, row.CreatedAt,
+		row.ContactEmail, row.ContactFirstName, row.ContactLastName)
+}
+
+// thread is the one place that assembles a Thread from its scalar
+// components, shared by all three row-mapping functions above so they can
+// never drift on the field order/shape (mirrors crm.deal's identical shape).
+func thread(id, workspaceID, mailboxID uuid.UUID, campaignID, contactID pgtype.UUID,
+	rootMessageID, subject, lastReplyClass string, unread bool, lastMessageAt, createdAt pgtype.Timestamptz,
+	contactEmail, contactFirstName, contactLastName string,
+) Thread {
 	return Thread{
-		ID:             row.ID,
-		WorkspaceID:    row.WorkspaceID,
-		MailboxID:      row.MailboxID,
-		CampaignID:     uuidValue(row.CampaignID),
-		ContactID:      uuidValue(row.ContactID),
-		RootMessageID:  row.RootMessageID,
-		Subject:        row.Subject,
-		LastReplyClass: row.LastReplyClass,
-		Unread:         row.Unread,
-		LastMessageAt:  row.LastMessageAt.Time,
-		CreatedAt:      row.CreatedAt.Time,
+		ID:               id,
+		WorkspaceID:      workspaceID,
+		MailboxID:        mailboxID,
+		CampaignID:       uuidValue(campaignID),
+		ContactID:        uuidValue(contactID),
+		RootMessageID:    rootMessageID,
+		Subject:          subject,
+		LastReplyClass:   lastReplyClass,
+		Unread:           unread,
+		LastMessageAt:    lastMessageAt.Time,
+		CreatedAt:        createdAt.Time,
+		ContactEmail:     contactEmail,
+		ContactFirstName: contactFirstName,
+		ContactLastName:  contactLastName,
 	}
 }
 
@@ -368,6 +418,29 @@ func pgTimestamptz(t *time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
+// likeEscaper neutralises the LIKE metacharacters so a caller's literal "%"
+// or "_" is matched as itself, not as a wildcard. Duplicated (not imported)
+// from contact.escapeLike's identical helper: app/* packages never import
+// each other (see CLAUDE.md), and this one-line helper is cheaper to
+// duplicate than to promote to a shared platform package for a single reuse.
+// Backslash is LIKE's default escape character, so no ESCAPE clause is
+// needed on the query side.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
+// likeQuery escapes filter.Query (a plain string, "" meaning "no search")
+// into the optional narg ListInboxThreads' query param expects: nil skips
+// the filter's IS NULL guard entirely rather than matching an empty pattern
+// against every row.
+func likeQuery(q string) *string {
+	if q == "" {
+		return nil
+	}
+	escaped := escapeLike(q)
+	return &escaped
 }
 
 // mapNotFound turns pgx's "no rows" into the domain's ErrNotFound so the

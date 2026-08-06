@@ -68,26 +68,32 @@ func toMessageResponse(m Message) messageResponse {
 // threadSummaryResponse is the wire shape of one Thread — the ThreadSummary
 // schema shared by the list and detail endpoints.
 type threadSummaryResponse struct {
-	ID             string  `json:"id"`
-	MailboxID      string  `json:"mailbox_id"`
-	CampaignID     *string `json:"campaign_id"`
-	ContactID      *string `json:"contact_id"`
-	Subject        string  `json:"subject"`
-	LastReplyClass string  `json:"last_reply_class"`
-	Unread         bool    `json:"unread"`
-	LastMessageAt  string  `json:"last_message_at"`
+	ID               string  `json:"id"`
+	MailboxID        string  `json:"mailbox_id"`
+	CampaignID       *string `json:"campaign_id"`
+	ContactID        *string `json:"contact_id"`
+	ContactEmail     string  `json:"contact_email"`
+	ContactFirstName string  `json:"contact_first_name"`
+	ContactLastName  string  `json:"contact_last_name"`
+	Subject          string  `json:"subject"`
+	LastReplyClass   string  `json:"last_reply_class"`
+	Unread           bool    `json:"unread"`
+	LastMessageAt    string  `json:"last_message_at"`
 }
 
 func toThreadSummaryResponse(t Thread) threadSummaryResponse {
 	return threadSummaryResponse{
-		ID:             t.ID.String(),
-		MailboxID:      t.MailboxID.String(),
-		CampaignID:     uuidString(t.CampaignID),
-		ContactID:      uuidString(t.ContactID),
-		Subject:        t.Subject,
-		LastReplyClass: t.LastReplyClass,
-		Unread:         t.Unread,
-		LastMessageAt:  t.LastMessageAt.UTC().Format(time.RFC3339),
+		ID:               t.ID.String(),
+		MailboxID:        t.MailboxID.String(),
+		CampaignID:       uuidString(t.CampaignID),
+		ContactID:        uuidString(t.ContactID),
+		ContactEmail:     t.ContactEmail,
+		ContactFirstName: t.ContactFirstName,
+		ContactLastName:  t.ContactLastName,
+		Subject:          t.Subject,
+		LastReplyClass:   t.LastReplyClass,
+		Unread:           t.Unread,
+		LastMessageAt:    t.LastMessageAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -162,6 +168,7 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 	if raw := q.Get("reply_class"); raw != "" {
 		filter.ReplyClass = &raw
 	}
+	filter.Query = q.Get("q")
 	beforeAt := q.Get("before_last_message_at")
 	beforeID := q.Get("before_id")
 	// Checked BEFORE trying to parse either field: a half-set pair must

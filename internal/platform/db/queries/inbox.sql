@@ -22,17 +22,40 @@ ON CONFLICT (workspace_id, message_id) WHERE message_id <> '' DO NOTHING;
 -- name: ListInboxThreads :many
 -- Keyset on (last_message_at, id) DESC, newest first. sqlc.narg fields are
 -- optional filters, omitted (NULL) when the caller doesn't set them.
-SELECT * FROM inbox_threads
-WHERE workspace_id = @workspace_id
-  AND (sqlc.narg('mailbox_id')::uuid IS NULL OR mailbox_id = sqlc.narg('mailbox_id'))
-  AND (sqlc.narg('reply_class')::text IS NULL OR last_reply_class = sqlc.narg('reply_class'))
+-- contact_* columns come from a LEFT JOIN: a thread with no contact_id (a
+-- legacy direct-send match) has nothing to join on and reports '' via
+-- COALESCE, never NULL — the same "absent is empty string" convention
+-- inbox_messages' own text columns already use. 'query' substring-matches
+-- (case-insensitive) the thread's subject OR the joined contact's email; the
+-- caller escapes LIKE metacharacters before this reaches Postgres (see
+-- escapeLike in store.go) so a literal % or _ typed by a user is never
+-- treated as a wildcard.
+SELECT t.*,
+       COALESCE(c.email, '') AS contact_email,
+       COALESCE(c.first_name, '') AS contact_first_name,
+       COALESCE(c.last_name, '') AS contact_last_name
+FROM inbox_threads t
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE t.workspace_id = @workspace_id
+  AND (sqlc.narg('mailbox_id')::uuid IS NULL OR t.mailbox_id = sqlc.narg('mailbox_id'))
+  AND (sqlc.narg('reply_class')::text IS NULL OR t.last_reply_class = sqlc.narg('reply_class'))
   AND (sqlc.narg('before_last_message_at')::timestamptz IS NULL
-       OR (last_message_at, id) < (sqlc.narg('before_last_message_at')::timestamptz, sqlc.narg('before_id')::uuid))
-ORDER BY last_message_at DESC, id DESC
+       OR (t.last_message_at, t.id) < (sqlc.narg('before_last_message_at')::timestamptz, sqlc.narg('before_id')::uuid))
+  AND (sqlc.narg('query')::text IS NULL
+       OR t.subject ILIKE '%' || sqlc.narg('query')::text || '%'
+       OR c.email ILIKE '%' || sqlc.narg('query')::text || '%')
+ORDER BY t.last_message_at DESC, t.id DESC
 LIMIT @page_limit;
 
 -- name: GetInboxThread :one
-SELECT * FROM inbox_threads WHERE id = @id AND workspace_id = @workspace_id;
+-- contact_* columns follow ListInboxThreads' LEFT JOIN convention above.
+SELECT t.*,
+       COALESCE(c.email, '') AS contact_email,
+       COALESCE(c.first_name, '') AS contact_first_name,
+       COALESCE(c.last_name, '') AS contact_last_name
+FROM inbox_threads t
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE t.id = @id AND t.workspace_id = @workspace_id;
 
 -- name: ListInboxMessagesByThread :many
 SELECT * FROM inbox_messages WHERE thread_id = @thread_id AND workspace_id = @workspace_id ORDER BY occurred_at;

@@ -14,6 +14,11 @@ import (
 type fakeStore struct {
 	threads  map[uuid.UUID]inbox.Thread
 	messages map[uuid.UUID][]inbox.Message
+	// lastListFilter records the filter the most recent ListThreads call
+	// received, so handler tests can assert the HTTP layer actually threads a
+	// query param through to the Store without needing a real Postgres LIKE
+	// match to prove it.
+	lastListFilter inbox.ListFilter
 }
 
 func newFakeStore() *fakeStore {
@@ -63,7 +68,8 @@ func (f *fakeStore) RecordReply(ctx context.Context, threadIn inbox.UpsertThread
 	return th, nil
 }
 
-func (f *fakeStore) ListThreads(_ context.Context, ws uuid.UUID, _ inbox.ListFilter) (inbox.ThreadPage, error) {
+func (f *fakeStore) ListThreads(_ context.Context, ws uuid.UUID, filter inbox.ListFilter) (inbox.ThreadPage, error) {
+	f.lastListFilter = filter
 	var items []inbox.Thread
 	for _, t := range f.threads {
 		if t.WorkspaceID == ws {
