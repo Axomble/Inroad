@@ -23,7 +23,6 @@ import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppCrmRouteImport } from './routes/app.crm'
 import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
 import { Route as AppDocsRouteImport } from './routes/app.docs'
-import { Route as AppInboxRouteImport } from './routes/app.inbox'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
@@ -31,6 +30,8 @@ import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.in
 import { Route as AppCampaignsIdRouteImport } from './routes/app.campaigns.$id'
 import { Route as AppDealsIndexRouteImport } from './routes/app.deals.index'
 import { Route as AppDealsIdRouteImport } from './routes/app.deals.$id'
+import { Route as AppInboxIndexRouteImport } from './routes/app.inbox.index'
+import { Route as AppInboxThreadIdRouteImport } from './routes/app.inbox.$threadId'
 import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
 import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.oauth-apps'
@@ -107,11 +108,6 @@ const AppDocsRoute = AppDocsRouteImport.update({
   path: '/docs',
   getParentRoute: () => AppRoute,
 } as any)
-const AppInboxRoute = AppInboxRouteImport.update({
-  id: '/inbox',
-  path: '/inbox',
-  getParentRoute: () => AppRoute,
-} as any)
 const AppMailboxesRoute = AppMailboxesRouteImport.update({
   id: '/mailboxes',
   path: '/mailboxes',
@@ -145,6 +141,16 @@ const AppDealsIndexRoute = AppDealsIndexRouteImport.update({
 const AppDealsIdRoute = AppDealsIdRouteImport.update({
   id: '/deals/$id',
   path: '/deals/$id',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppInboxIndexRoute = AppInboxIndexRouteImport.update({
+  id: '/inbox/',
+  path: '/inbox/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppInboxThreadIdRoute = AppInboxThreadIdRouteImport.update({
+  id: '/inbox/$threadId',
+  path: '/inbox/$threadId',
   getParentRoute: () => AppRoute,
 } as any)
 const AppSettingsAiRoute = AppSettingsAiRouteImport.update({
@@ -187,13 +193,13 @@ export interface FileRoutesByFullPath {
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
-  '/app/inbox': typeof AppInboxRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
+  '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
@@ -201,6 +207,7 @@ export interface FileRoutesByFullPath {
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/app/deals/': typeof AppDealsIndexRoute
+  '/app/inbox/': typeof AppInboxIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -215,13 +222,13 @@ export interface FileRoutesByTo {
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
-  '/app/inbox': typeof AppInboxRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
+  '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
@@ -229,6 +236,7 @@ export interface FileRoutesByTo {
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
   '/app/deals': typeof AppDealsIndexRoute
+  '/app/inbox': typeof AppInboxIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -245,13 +253,13 @@ export interface FileRoutesById {
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
-  '/app/inbox': typeof AppInboxRoute
   '/app/mailboxes': typeof AppMailboxesRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
+  '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
@@ -259,6 +267,7 @@ export interface FileRoutesById {
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/app/deals/': typeof AppDealsIndexRoute
+  '/app/inbox/': typeof AppInboxIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -276,13 +285,13 @@ export interface FileRouteTypes {
     | '/app/crm'
     | '/app/deliverability'
     | '/app/docs'
-    | '/app/inbox'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app/'
     | '/app/campaigns/$id'
     | '/app/deals/$id'
+    | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
@@ -290,6 +299,7 @@ export interface FileRouteTypes {
     | '/app/settings/team'
     | '/app/campaigns/'
     | '/app/deals/'
+    | '/app/inbox/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -304,13 +314,13 @@ export interface FileRouteTypes {
     | '/app/crm'
     | '/app/deliverability'
     | '/app/docs'
-    | '/app/inbox'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app'
     | '/app/campaigns/$id'
     | '/app/deals/$id'
+    | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
@@ -318,6 +328,7 @@ export interface FileRouteTypes {
     | '/app/settings/team'
     | '/app/campaigns'
     | '/app/deals'
+    | '/app/inbox'
   id:
     | '__root__'
     | '/'
@@ -333,13 +344,13 @@ export interface FileRouteTypes {
     | '/app/crm'
     | '/app/deliverability'
     | '/app/docs'
-    | '/app/inbox'
     | '/app/mailboxes'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app/'
     | '/app/campaigns/$id'
     | '/app/deals/$id'
+    | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
@@ -347,6 +358,7 @@ export interface FileRouteTypes {
     | '/app/settings/team'
     | '/app/campaigns/'
     | '/app/deals/'
+    | '/app/inbox/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -461,13 +473,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDocsRouteImport
       parentRoute: typeof AppRoute
     }
-    '/app/inbox': {
-      id: '/app/inbox'
-      path: '/inbox'
-      fullPath: '/app/inbox'
-      preLoaderRoute: typeof AppInboxRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/app/mailboxes': {
       id: '/app/mailboxes'
       path: '/mailboxes'
@@ -517,6 +522,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppDealsIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/inbox/': {
+      id: '/app/inbox/'
+      path: '/inbox'
+      fullPath: '/app/inbox/'
+      preLoaderRoute: typeof AppInboxIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/inbox/$threadId': {
+      id: '/app/inbox/$threadId'
+      path: '/inbox/$threadId'
+      fullPath: '/app/inbox/$threadId'
+      preLoaderRoute: typeof AppInboxThreadIdRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/ai': {
       id: '/app/settings/ai'
       path: '/settings/ai'
@@ -561,12 +580,12 @@ interface AppRouteChildren {
   AppCrmRoute: typeof AppCrmRoute
   AppDeliverabilityRoute: typeof AppDeliverabilityRoute
   AppDocsRoute: typeof AppDocsRoute
-  AppInboxRoute: typeof AppInboxRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCampaignsIdRoute: typeof AppCampaignsIdRoute
   AppDealsIdRoute: typeof AppDealsIdRoute
+  AppInboxThreadIdRoute: typeof AppInboxThreadIdRoute
   AppSettingsAiRoute: typeof AppSettingsAiRoute
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
   AppSettingsOauthAppsRoute: typeof AppSettingsOauthAppsRoute
@@ -574,6 +593,7 @@ interface AppRouteChildren {
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
   AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
   AppDealsIndexRoute: typeof AppDealsIndexRoute
+  AppInboxIndexRoute: typeof AppInboxIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -582,12 +602,12 @@ const AppRouteChildren: AppRouteChildren = {
   AppCrmRoute: AppCrmRoute,
   AppDeliverabilityRoute: AppDeliverabilityRoute,
   AppDocsRoute: AppDocsRoute,
-  AppInboxRoute: AppInboxRoute,
   AppMailboxesRoute: AppMailboxesRoute,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
   AppCampaignsIdRoute: AppCampaignsIdRoute,
   AppDealsIdRoute: AppDealsIdRoute,
+  AppInboxThreadIdRoute: AppInboxThreadIdRoute,
   AppSettingsAiRoute: AppSettingsAiRoute,
   AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
   AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
@@ -595,6 +615,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppCampaignsIndexRoute: AppCampaignsIndexRoute,
   AppDealsIndexRoute: AppDealsIndexRoute,
+  AppInboxIndexRoute: AppInboxIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

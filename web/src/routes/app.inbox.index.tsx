@@ -10,7 +10,7 @@ import { parseInboxSearch, type InboxSearch } from '@/features/inbox/inbox-searc
  * `features/inbox/inbox-search.ts`, and applied here (matches
  * `routes/app.contacts.tsx`'s identical reasoning).
  */
-export const Route = createFileRoute('/app/inbox')({
+export const Route = createFileRoute('/app/inbox/')({
   validateSearch: (search: Record<string, unknown>): InboxSearch => parseInboxSearch(search),
   component: InboxPage,
 })

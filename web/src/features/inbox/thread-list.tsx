@@ -3,21 +3,7 @@ import { relativeTime } from '@/lib/relative-time'
 import { cn } from '@/lib/utils'
 import type { ListKeyboardNav } from '@/hooks/use-list-keyboard-nav'
 import type { InboxThreadSummary } from './api'
-
-/**
- * The row's primary identity — who replied, not which mailbox received it or
- * what the subject line says: knowing WHO is the core value of an inbox.
- * `InboxThreadSummary` carries the contact's name/email straight on the
- * thread now (no separate lookup needed); a legacy direct-send match (no
- * linked contact at all) has none of the three, and falls back to a neutral
- * label rather than rendering blank.
- */
-function contactLabel(thread: InboxThreadSummary): string {
-  const name = `${thread.contact_first_name} ${thread.contact_last_name}`.trim()
-  if (name) return name
-  if (thread.contact_email) return thread.contact_email
-  return 'Unknown sender'
-}
+import { contactLabel } from './contact-label'
 
 /**
  * Dense thread rows: unread dot, contact (primary), subject (secondary),
