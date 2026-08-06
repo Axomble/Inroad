@@ -2172,6 +2172,82 @@ paths:
         '204': { description: Primary email changed }
         '403': { description: Insufficient scope }
         '404': { description: Contact email not found }
+  /reply-labels:
+    get:
+      operationId: listReplyLabels
+      tags: [reply-labels]
+      description: >-
+        The workspace's reply-label taxonomy, ordered by position. Seven builtin
+        labels are seeded per workspace and reproduce the platform's historical
+        reply automation exactly; a workspace may add its own on top.
+
+        Gated on the CAMPAIGN scopes rather than the inbox ones: a label's role
+        flags decide whether a reply stops an enrollment, suppresses a contact,
+        or opens a deal, which is send-automation configuration.
+      responses:
+        '200':
+          description: Reply labels
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabelList' } } }
+    post:
+      operationId: createReplyLabel
+      tags: [reply-labels]
+      description: >-
+        Creates a custom label. Its machine `key` is slugified from `label` and
+        is immutable thereafter, because historical enrollments name it as free
+        text.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabelInput' } } }
+      responses:
+        '201':
+          description: Created label
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabel' } } }
+        '409': { description: A label with that name already exists }
+        '422': { description: Validation error }
+  /reply-labels/reorder:
+    put:
+      operationId: reorderReplyLabels
+      tags: [reply-labels]
+      description: >-
+        Rewrites label positions to the given order. Every label in the
+        workspace must appear exactly once, so a stale client list cannot
+        silently collapse two labels onto one position.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabelReorderInput' } } }
+      responses:
+        '200':
+          description: Reply labels in their new order
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabelList' } } }
+        '422': { description: The order must list every label exactly once }
+  /reply-labels/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: updateReplyLabel
+      tags: [reply-labels]
+      description: >-
+        Edits the display fields and role flags. `key` cannot be changed, for
+        builtin and custom labels alike.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabelInput' } } }
+      responses:
+        '200':
+          description: Updated label
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReplyLabel' } } }
+        '404': { description: Reply label not found }
+        '422': { description: Validation error }
+    delete:
+      operationId: deleteReplyLabel
+      tags: [reply-labels]
+      description: >-
+        Deletes a CUSTOM label. Historical enrollments keep the now-orphaned key
+        on purpose - a recorded classification is a fact, not a foreign key -
+        and readers degrade to showing the raw key.
+      responses:
+        '204': { description: Reply label deleted }
+        '404': { description: Reply label not found }
+        '409': { description: Builtin labels cannot be deleted }
   /inbox/threads:
     get:
       operationId: listInboxThreads
@@ -2694,8 +2770,12 @@ components:
         reply_class:
           type: string
           nullable: true
-          enum: [positive, negative, neutral, auto_reply, out_of_office, unsubscribe, unknown]
-          description: classified sentiment/intent bucket of the reply
+          description: >-
+            Key of the reply label this reply was classified into. Deliberately
+            an OPEN string, not an enum: a workspace defines its own labels
+            (GET /reply-labels), and the key of a deleted custom label survives
+            on historical enrollments, so clients must resolve it for display
+            and degrade to showing the raw key.
         reply_source:
           type: string
           nullable: true
@@ -3686,6 +3766,63 @@ components:
             key: { type: string }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
+    ReplyLabelInput:
+      type: object
+      description: >-
+        The editable surface of a reply label. `key` is deliberately absent: it
+        is derived from `label` on create and immutable thereafter.
+
+        The role flags are the automation contract the inbox poller reads.
+        Two combinations are refused: an automated label that also stops the
+        enrollment (automated mail is not a human reply), and a deferring label
+        that is not automated.
+      required: [label, color, stops_enrollment, is_automated, suppresses_contact, captures_deal, defers_enrollment]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 80 }
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+        stops_enrollment: { type: boolean, description: halt the sequence on this reply }
+        is_automated: { type: boolean, description: machine-generated mail (out-of-office / auto-reply); never a human reply }
+        suppresses_contact: { type: boolean, description: 'suppress the address, then stop (compliance)' }
+        captures_deal: { type: boolean, description: open or update a CRM deal from this reply }
+        defers_enrollment:
+          type: boolean
+          description: >-
+            Reschedule the next step past a return date stated in the body
+            instead of stopping. When no date can be parsed the reply is only
+            tagged - the sequence is never deferred on a guess. Deferrals are
+            capped at 30 days.
+    ReplyLabel:
+      allOf:
+        - $ref: '#/components/schemas/ReplyLabelInput'
+        - type: object
+          required: [id, key, position, is_builtin, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            key:
+              type: string
+              description: stable machine key; the value stored on CampaignEnrollment.reply_class
+            position: { type: integer, minimum: 0 }
+            is_builtin:
+              type: boolean
+              description: >-
+                Seeded with the workspace. May be renamed and have its flags
+                changed, but never deleted - the classifier and historical
+                enrollments both name its key.
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    ReplyLabelList:
+      type: object
+      required: [labels]
+      properties:
+        labels: { type: array, items: { $ref: '#/components/schemas/ReplyLabel' } }
+    ReplyLabelReorderInput:
+      type: object
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: every label in the workspace, exactly once, in the new order
     CRMPipelineInput:
       type: object
       required: [name]

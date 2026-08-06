@@ -47,9 +47,41 @@ var (
 	colorPattern    = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 )
 
-type Service struct{ store Store }
+// ReplyLabelReader answers whether a reply label opens a deal. The reply-label
+// taxonomy is owned by the replylabel app domain and app/* packages never
+// import each other (CLAUDE.md), so this narrow, consumer-defined interface is
+// satisfied at wiring time by an adapter over that domain's service — the same
+// shape as campaign.DomainAuthReader.
+type ReplyLabelReader interface {
+	// CapturesDeal reports whether the workspace's label for key has the
+	// captures_deal role. ok=false means no label claims the key, which is not
+	// an error: the caller degrades to the pre-taxonomy rule.
+	CapturesDeal(ctx context.Context, workspaceID uuid.UUID, key string) (captures bool, ok bool, err error)
+}
 
-func NewService(store Store) *Service { return &Service{store: store} }
+// ServiceOption configures optional, nil-safe collaborators on the service.
+type ServiceOption func(*Service)
+
+// WithReplyLabels wires the source of truth for which reply labels auto-capture
+// a deal. Unwired, CapturePositiveReply degrades to the pre-taxonomy rule (only
+// reply_class "positive" captures) rather than failing — see capturesDeal.
+func WithReplyLabels(r ReplyLabelReader) ServiceOption {
+	return func(s *Service) { s.replyLabels = r }
+}
+
+type Service struct {
+	store Store
+	// replyLabels is optional; nil is a supported state (see capturesDeal).
+	replyLabels ReplyLabelReader
+}
+
+func NewService(store Store, opts ...ServiceOption) *Service {
+	s := &Service{store: store}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
 
 func (s *Service) ListCompanies(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Company], error) {
 	return s.store.ListCompanies(ctx, workspaceID, normalizePage(page))
@@ -240,14 +272,42 @@ func (s *Service) CapturePositiveReply(ctx context.Context, workspaceID uuid.UUI
 	if in.EnrollmentID == uuid.Nil || in.SendID == uuid.Nil || strings.TrimSpace(in.SenderEmail) == "" {
 		return Deal{}, validation("enrollment, send, and sender are required")
 	}
-	if in.ReplyClass != "positive" {
-		return Deal{}, validation("only positive replies can be auto-captured")
+	captures, err := s.capturesDeal(ctx, workspaceID, in.ReplyClass)
+	if err != nil {
+		return Deal{}, err
+	}
+	if !captures {
+		return Deal{}, validation("only a reply label that captures deals can be auto-captured")
 	}
 	store, err := integration(s.store)
 	if err != nil {
 		return Deal{}, err
 	}
 	return store.CapturePositiveReply(ctx, workspaceID, in)
+}
+
+// capturesDeal decides whether a reply classified as key may open a deal.
+//
+// The rule used to be the literal `key == "positive"`. It is now the label's
+// captures_deal role, so a workspace can point auto-capture at a label of its
+// own ("demo requested") — but the old rule remains the fallback for the two
+// cases where the taxonomy cannot answer: no reader wired, and a key no label
+// claims (a deleted custom label whose key survives on historical rows).
+// Degrading to "positive still captures" keeps a pre-taxonomy deployment
+// working; degrading to "nothing captures" would silently switch auto-capture
+// off, which no operator asked for.
+func (s *Service) capturesDeal(ctx context.Context, workspaceID uuid.UUID, key string) (bool, error) {
+	if s.replyLabels == nil {
+		return key == "positive", nil
+	}
+	captures, ok, err := s.replyLabels.CapturesDeal(ctx, workspaceID, key)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return key == "positive", nil
+	}
+	return captures, nil
 }
 
 func (s *Service) ListDealThreads(ctx context.Context, workspaceID, dealID uuid.UUID) ([]Thread, error) {

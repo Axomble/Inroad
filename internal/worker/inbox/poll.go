@@ -410,17 +410,16 @@ func logJunkScanErr(err error, p queue.InboxPollPayload, provider string) {
 
 // processMessage classifies one fetched message and takes the corresponding
 // action. A DSN is handled first (hard bounce → MarkBounced) and never falls
-// through to the reply path. A non-DSN message that matches a send is routed
-// through the reply classifier:
+// through to the reply path. A non-DSN message that matches a send is
+// classified, stored in the unified inbox, and then dispatched on the
+// WORKSPACE'S REPLY LABEL for that class rather than on the class itself:
+// suppresses_contact → MarkUnsubscribed, stops_enrollment → MarkReplied,
+// captures_deal → CRM capture, defers_enrollment → a return-date deferral. See
+// replyDispatch.byLabel; a class no label claims falls back to byClass, the
+// pre-taxonomy switch.
 //
-//   - automated (auto_reply / out_of_office) → RecordReplyClass, enrollment
-//     kept ACTIVE (the OOO-trap fix) and counted as skipped, NOT a reply —
-//     UNLESS the automated message also carries an explicit opt-out, in which
-//     case compliance wins and it is routed to MarkUnsubscribed;
-//   - unsubscribe → MarkUnsubscribed (address suppressed + stop), counted as
-//     handled;
-//   - anything else (positive/negative/neutral/unknown) → MarkReplied tagged,
-//     counted as an engaged reply.
+// The seeded builtin labels carry exactly the flags that reproduce byClass, so
+// a workspace that has not touched its taxonomy behaves identically either way.
 //
 // *bounces is bumped on a marked hard bounce; *replies is bumped on a matched
 // reply routed to MarkReplied that actually has an enrollment to stop (so the
@@ -513,72 +512,18 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 			}
 		}
 
-		switch {
-		case replyclassify.IsAutomated(r.Class):
-			if classifier.LooksLikeUnsubscribe(in) {
-				// Compliance wins over automation: an explicit opt-out is
-				// honored even inside an automated message. The accepted
-				// trade-off is occasionally suppressing an OOO whose footer
-				// says "unsubscribe" — suppression is the fail-safe/compliant
-				// direction, so we err that way on purpose.
-				if err := core.MarkUnsubscribed(ctx, s.EnrollmentID, workspaceID, s.ContactEmail); err != nil {
-					return false, err
-				}
-				return true, nil
-			}
-			// auto_reply / out_of_office: tag but keep the enrollment ACTIVE
-			// (the OOO-trap fix). Not an engaged reply → reported as skipped.
-			if err := core.RecordReplyClass(ctx, s.EnrollmentID, workspaceID, r.Class, r.Source, r.Confidence); err != nil {
-				return false, err
-			}
-			return false, nil
-		case r.Class == replyclassify.ClassUnsubscribe:
-			// Reply-based opt-out: suppress the address (compliance) + stop.
-			if err := core.MarkUnsubscribed(ctx, s.EnrollmentID, workspaceID, s.ContactEmail); err != nil {
-				return false, err
-			}
-			return true, nil
-		default:
-			// positive / negative / neutral / unknown: stop, tagged.
-			if err := core.MarkReplied(ctx, s.EnrollmentID, workspaceID, r.Class, r.Source, r.Confidence); err != nil {
-				return false, err
-			}
-			if r.Class == replyclassify.ClassPositive && s.EnrollmentID != "" {
-				if capture, ok := core.(coreapi.CRMCaptureClient); ok {
-					senderEmail, senderName := s.ContactEmail, ""
-					if address, parseErr := netmail.ParseAddress(msg.Header.Get("From")); parseErr == nil {
-						senderEmail, senderName = address.Address, address.Name
-					}
-					threadRef := strings.TrimSpace(msg.Header.Get("In-Reply-To"))
-					if threadRef == "" {
-						refs := strings.Fields(msg.Header.Get("References"))
-						if len(refs) > 0 {
-							threadRef = refs[0]
-						}
-					}
-					occurredAt := time.Now().UTC()
-					if headerDate, dateErr := msg.Header.Date(); dateErr == nil {
-						occurredAt = headerDate.UTC()
-					}
-					if err := capture.CaptureCRMReply(ctx, coreapi.CRMReplyInput{
-						WorkspaceID: workspaceID, EnrollmentID: s.EnrollmentID, SendID: s.SendID,
-						ThreadRef: threadRef, MessageID: strings.TrimSpace(msg.Header.Get("Message-ID")),
-						Subject: msg.Header.Get("Subject"), SenderEmail: strings.ToLower(senderEmail),
-						RecipientEmail: strings.ToLower(msg.Header.Get("To")), SenderDisplayName: senderName,
-						ReplyClass: r.Class, OccurredAt: occurredAt,
-					}); err != nil {
-						return false, err
-					}
-				}
-			}
-			// Only an enrollment reply is an "engaged reply": a legacy
-			// direct-send match (EnrollmentID == "") has nothing to stop, so
-			// MarkReplied no-ops coreapi-side and it isn't counted.
-			if s.EnrollmentID != "" {
-				*replies++
-			}
-			return true, nil
+		// What HAPPENS to the enrollment/contact/deal is read off the workspace's
+		// reply label for this class (its role flags), not compiled into a
+		// switch. A key no label claims falls back to the pre-taxonomy switch —
+		// see replyDispatch.byClass.
+		d := replyDispatch{
+			core: core, classifier: classifier, workspaceID: workspaceID,
+			msg: msg, in: in, send: s, result: r, replies: replies,
 		}
+		if label, ok := resolveReplyLabel(ctx, core, workspaceID, r.Class); ok {
+			return d.byLabel(ctx, label)
+		}
+		return d.byClass(ctx)
 	}
 	return false, nil
 }

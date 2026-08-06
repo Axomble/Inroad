@@ -46,6 +46,9 @@ func (stubCore) FinalizeStepSend(context.Context, coreapi.StepSendJob, coreapi.S
 }
 func (stubCore) ReleaseStepSend(context.Context, coreapi.StepSendJob) error    { return nil }
 func (stubCore) MarkStepStopped(context.Context, string, string, string) error { return nil }
+func (stubCore) DeferEnrollment(context.Context, string, string, time.Time) error {
+	return nil
+}
 func (stubCore) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
 	return 0, nil
 }

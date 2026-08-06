@@ -44,6 +44,7 @@ import (
 	"github.com/inroad/inroad/internal/app/oauthprovider"
 	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/pulse"
+	"github.com/inroad/inroad/internal/app/replylabel"
 	"github.com/inroad/inroad/internal/app/sendingdomain"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
@@ -328,7 +329,17 @@ func run() error {
 	deliverabilitySvc := deliverability.NewService(deliverability.NewPgStore(pool))
 	deliverabilityHandler := deliverability.NewHandler(deliverabilitySvc)
 	pulseSvc := pulse.NewService(pulse.NewPgStore(queries))
-	crmSvc := crm.NewService(crm.NewPgStore(pool))
+	// The reply-label taxonomy: which buckets a reply is classified into and,
+	// through each label's role flags, what automation that triggers. The
+	// execution plane reads the same table through coreapi, so the operator's
+	// edit and the poller's dispatch cannot drift.
+	replyLabelSvc := replylabel.NewService(replylabel.NewPgStore(pool))
+	// Auto-capture is no longer pinned to reply_class="positive": it fires for
+	// any label carrying captures_deal, read through the narrow
+	// replyLabelAdapter (app/* packages never import each other). Unwired it
+	// degrades to the old literal rule, so a deployment mid-migration keeps
+	// capturing positives.
+	crmSvc := crm.NewService(crm.NewPgStore(pool), crm.WithReplyLabels(replyLabelAdapter{labels: replyLabelSvc}))
 	crmHandler := crm.NewHandler(crmSvc)
 	// Unified inbox (thread/message read model). The write path (RecordReply)
 	// is called by the reply-polling worker through its own coreapi seam
@@ -468,6 +479,9 @@ func run() error {
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
 		{pattern: "/api/v1/crm", handler: crmHandler.Routes()},
+		// Reply-label taxonomy CRUD + reorder. Gated on the campaign scopes
+		// inside Routes(): a label's role flags are send-automation config.
+		{pattern: "/api/v1/reply-labels", handler: replylabel.NewHandler(replyLabelSvc).Routes()},
 		// Unified inbox: GET /threads, GET /threads/{id}, PUT /threads/{id}/read.
 		// Scope-gated per route inside Routes() (inbox:read / inbox:write); a
 		// session principal holds both implicitly.
@@ -657,6 +671,20 @@ func (a domainAuthAdapter) DomainAuth(ctx context.Context, ws uuid.UUID) (map[st
 		}
 	}
 	return out, nil
+}
+
+// replyLabelAdapter satisfies crm.ReplyLabelReader over the replylabel service,
+// so CRM auto-capture can ask "does this label capture a deal?" without the crm
+// package importing replylabel (app/* packages never import each other) — the
+// same shape as domainAuthAdapter above.
+type replyLabelAdapter struct{ labels *replylabel.Service }
+
+func (a replyLabelAdapter) CapturesDeal(ctx context.Context, ws uuid.UUID, key string) (bool, bool, error) {
+	label, ok, err := a.labels.Resolve(ctx, ws, key)
+	if err != nil || !ok {
+		return false, false, err
+	}
+	return label.CapturesDeal, true, nil
 }
 
 // campaignStatusChecker adapts the campaign store to sequencestep.CampaignChecker

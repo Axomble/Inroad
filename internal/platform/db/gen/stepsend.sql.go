@@ -65,7 +65,7 @@ func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (u
 
 const getStepEnrollmentBundle = `-- name: GetStepEnrollmentBundle :one
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
-       e.status, e.thread_root_id, e.mailbox_id AS enrollment_mailbox_id,
+       e.status, e.thread_root_id, e.next_due_at, e.mailbox_id AS enrollment_mailbox_id,
        cam.id AS campaign_id, cam.rotation_mode, cam.tracking_enabled, cam.timezone,
        cam.daily_limit, cam.max_new_leads_per_day, cam.status AS campaign_status,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
@@ -92,6 +92,7 @@ type GetStepEnrollmentBundleRow struct {
 	CurrentStep         int32              `json:"current_step"`
 	Status              string             `json:"status"`
 	ThreadRootID        string             `json:"thread_root_id"`
+	NextDueAt           pgtype.Timestamptz `json:"next_due_at"`
 	EnrollmentMailboxID pgtype.UUID        `json:"enrollment_mailbox_id"`
 	CampaignID          uuid.UUID          `json:"campaign_id"`
 	RotationMode        string             `json:"rotation_mode"`
@@ -149,6 +150,7 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 		&i.CurrentStep,
 		&i.Status,
 		&i.ThreadRootID,
+		&i.NextDueAt,
 		&i.EnrollmentMailboxID,
 		&i.CampaignID,
 		&i.RotationMode,

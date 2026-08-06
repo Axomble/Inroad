@@ -102,11 +102,30 @@ func nextAttemptIn(sched cadence.Schedule, key string, dayBoundary, poll bool, n
 			target = midnight
 		}
 	}
+	return max(snapToWindow(sched, key, target).Sub(now), minBlockedBackoff)
+}
+
+// snapToWindow moves target forward to the next instant inside the campaign's
+// send window. A schedule that will not compile, or a window that yields no next
+// instant, leaves target untouched — a deferral that cannot be placed precisely
+// must still happen.
+func snapToWindow(sched cadence.Schedule, key string, target time.Time) time.Time {
 	if win, err := sched.Compile(); err == nil {
 		if at, nerr := win.Next(target, key); nerr == nil {
-			target = at
+			return at
 		}
 	}
+	return target
+}
+
+// notDueBackoff is how long to wait before re-attempting a step the claim
+// refused as NOT YET DUE — an out-of-office deferral pushed next_due_at past the
+// time this advance task was queued for. It waits out the new due time rather
+// than the mailbox's min-interval, so a 5-day absence costs one requeue instead
+// of one every few seconds for five days, and snaps into the send window so a
+// midnight-UTC return date does not fire at 8pm in the recipient's evening.
+func notDueBackoff(job coreapi.StepSendJob, now time.Time) time.Duration {
+	target := snapToWindow(job.Schedule, job.EnrollmentID, job.NotDueUntil)
 	return max(target.Sub(now), minBlockedBackoff)
 }
 
@@ -346,6 +365,13 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			delay := time.Duration(job.MinIntervalSeconds) * time.Second
 			if delay < time.Second {
 				delay = time.Second
+			}
+			// The OTHER reason a claim defers: the enrollment is not due yet
+			// (an out-of-office deferral moved next_due_at past the time this
+			// task was queued for). Waiting out a min-interval would just fail
+			// the same guard again in seconds, so wait out the new due time.
+			if now := time.Now(); job.NotYetDue(now) {
+				delay = max(delay, notDueBackoff(job, now))
 			}
 			if err := enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, delay); err != nil {
 				return err

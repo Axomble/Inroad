@@ -17,7 +17,7 @@
 -- is still 'active' at the moment of the pause and each successful send re-enqueues
 -- the next advance.
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
-       e.status, e.thread_root_id, e.mailbox_id AS enrollment_mailbox_id,
+       e.status, e.thread_root_id, e.next_due_at, e.mailbox_id AS enrollment_mailbox_id,
        cam.id AS campaign_id, cam.rotation_mode, cam.tracking_enabled, cam.timezone,
        cam.daily_limit, cam.max_new_leads_per_day, cam.status AS campaign_status,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
