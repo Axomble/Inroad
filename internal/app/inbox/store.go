@@ -15,7 +15,6 @@ package inbox
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -84,7 +84,8 @@ type ThreadPage struct {
 }
 
 // ListFilter narrows ListThreads. MailboxID and ReplyClass are optional exact
-// filters; BeforeLastMessageAt/BeforeID are the keyset cursor (both set, or
+// filters; Query is an optional substring search (see its own comment
+// below); BeforeLastMessageAt/BeforeID are the keyset cursor (both set, or
 // both zero, for the first page) — the pair names the row a page continues
 // after, per the (last_message_at, id) DESC ordering. Limit is the requested
 // page size; a non-positive or over-large value is normalized by the store.
@@ -318,56 +319,89 @@ func (s *PgStore) SetUnread(ctx context.Context, workspaceID, id uuid.UUID, unre
 	})
 }
 
+// threadFields is the common shape every sqlc row this domain converts to a
+// Thread shares — named fields, not positional parameters, so a future
+// reorder of same-typed adjacent fields (e.g. ContactFirstName/
+// ContactLastName, both string) fails to compile instead of silently
+// swapping them the way a positional-parameter builder would have.
+type threadFields struct {
+	ID             uuid.UUID
+	WorkspaceID    uuid.UUID
+	MailboxID      uuid.UUID
+	CampaignID     pgtype.UUID
+	ContactID      pgtype.UUID
+	RootMessageID  string
+	Subject        string
+	LastReplyClass string
+	Unread         bool
+	LastMessageAt  pgtype.Timestamptz
+	CreatedAt      pgtype.Timestamptz
+	// ContactEmail/ContactFirstName/ContactLastName stay at their zero value
+	// ("") for threadFromRow, whose row type never joins contacts.
+	ContactEmail     string
+	ContactFirstName string
+	ContactLastName  string
+}
+
 // threadFromRow maps a generated inbox_threads row (no contact join — the
 // UpsertInboxThread RETURNING clause this backs never joins contacts) to the
 // domain type. ContactEmail/ContactFirstName/ContactLastName are left at
 // their zero value (""), matching the "absent is empty string" convention;
 // callers that need them go through GetThread/ListThreads instead.
 func threadFromRow(row gen.InboxThread) Thread {
-	return thread(row.ID, row.WorkspaceID, row.MailboxID, row.CampaignID, row.ContactID,
-		row.RootMessageID, row.Subject, row.LastReplyClass, row.Unread, row.LastMessageAt, row.CreatedAt,
-		"", "", "")
+	return thread(threadFields{
+		ID: row.ID, WorkspaceID: row.WorkspaceID, MailboxID: row.MailboxID,
+		CampaignID: row.CampaignID, ContactID: row.ContactID, RootMessageID: row.RootMessageID,
+		Subject: row.Subject, LastReplyClass: row.LastReplyClass, Unread: row.Unread,
+		LastMessageAt: row.LastMessageAt, CreatedAt: row.CreatedAt,
+	})
 }
 
 // threadFromListRow maps one ListInboxThreads row (sqlc's own row type,
 // distinct from InboxThread because the query joins contacts) to the domain
 // type.
 func threadFromListRow(row gen.ListInboxThreadsRow) Thread {
-	return thread(row.ID, row.WorkspaceID, row.MailboxID, row.CampaignID, row.ContactID,
-		row.RootMessageID, row.Subject, row.LastReplyClass, row.Unread, row.LastMessageAt, row.CreatedAt,
-		row.ContactEmail, row.ContactFirstName, row.ContactLastName)
+	return thread(threadFields{
+		ID: row.ID, WorkspaceID: row.WorkspaceID, MailboxID: row.MailboxID,
+		CampaignID: row.CampaignID, ContactID: row.ContactID, RootMessageID: row.RootMessageID,
+		Subject: row.Subject, LastReplyClass: row.LastReplyClass, Unread: row.Unread,
+		LastMessageAt: row.LastMessageAt, CreatedAt: row.CreatedAt,
+		ContactEmail: row.ContactEmail, ContactFirstName: row.ContactFirstName, ContactLastName: row.ContactLastName,
+	})
 }
 
 // threadFromGetRow maps the GetInboxThread row (also its own sqlc row type,
 // for the same reason as ListInboxThreadsRow) to the domain type.
 func threadFromGetRow(row gen.GetInboxThreadRow) Thread {
-	return thread(row.ID, row.WorkspaceID, row.MailboxID, row.CampaignID, row.ContactID,
-		row.RootMessageID, row.Subject, row.LastReplyClass, row.Unread, row.LastMessageAt, row.CreatedAt,
-		row.ContactEmail, row.ContactFirstName, row.ContactLastName)
+	return thread(threadFields{
+		ID: row.ID, WorkspaceID: row.WorkspaceID, MailboxID: row.MailboxID,
+		CampaignID: row.CampaignID, ContactID: row.ContactID, RootMessageID: row.RootMessageID,
+		Subject: row.Subject, LastReplyClass: row.LastReplyClass, Unread: row.Unread,
+		LastMessageAt: row.LastMessageAt, CreatedAt: row.CreatedAt,
+		ContactEmail: row.ContactEmail, ContactFirstName: row.ContactFirstName, ContactLastName: row.ContactLastName,
+	})
 }
 
 // thread is the one place that assembles a Thread from its scalar
 // components, shared by all three row-mapping functions above so they can
-// never drift on the field order/shape (mirrors crm.deal's identical shape).
-func thread(id, workspaceID, mailboxID uuid.UUID, campaignID, contactID pgtype.UUID,
-	rootMessageID, subject, lastReplyClass string, unread bool, lastMessageAt, createdAt pgtype.Timestamptz,
-	contactEmail, contactFirstName, contactLastName string,
-) Thread {
+// never drift on the field shape (mirrors crm.deal's identical shape, but
+// keyed by field name via threadFields rather than by position).
+func thread(f threadFields) Thread {
 	return Thread{
-		ID:               id,
-		WorkspaceID:      workspaceID,
-		MailboxID:        mailboxID,
-		CampaignID:       uuidValue(campaignID),
-		ContactID:        uuidValue(contactID),
-		RootMessageID:    rootMessageID,
-		Subject:          subject,
-		LastReplyClass:   lastReplyClass,
-		Unread:           unread,
-		LastMessageAt:    lastMessageAt.Time,
-		CreatedAt:        createdAt.Time,
-		ContactEmail:     contactEmail,
-		ContactFirstName: contactFirstName,
-		ContactLastName:  contactLastName,
+		ID:               f.ID,
+		WorkspaceID:      f.WorkspaceID,
+		MailboxID:        f.MailboxID,
+		CampaignID:       uuidValue(f.CampaignID),
+		ContactID:        uuidValue(f.ContactID),
+		RootMessageID:    f.RootMessageID,
+		Subject:          f.Subject,
+		LastReplyClass:   f.LastReplyClass,
+		Unread:           f.Unread,
+		LastMessageAt:    f.LastMessageAt.Time,
+		CreatedAt:        f.CreatedAt.Time,
+		ContactEmail:     f.ContactEmail,
+		ContactFirstName: f.ContactFirstName,
+		ContactLastName:  f.ContactLastName,
 	}
 }
 
@@ -420,26 +454,16 @@ func pgTimestamptz(t *time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: *t, Valid: true}
 }
 
-// likeEscaper neutralises the LIKE metacharacters so a caller's literal "%"
-// or "_" is matched as itself, not as a wildcard. Duplicated (not imported)
-// from contact.escapeLike's identical helper: app/* packages never import
-// each other (see CLAUDE.md), and this one-line helper is cheaper to
-// duplicate than to promote to a shared platform package for a single reuse.
-// Backslash is LIKE's default escape character, so no ESCAPE clause is
-// needed on the query side.
-var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-
-func escapeLike(s string) string { return likeEscaper.Replace(s) }
-
 // likeQuery escapes filter.Query (a plain string, "" meaning "no search")
 // into the optional narg ListInboxThreads' query param expects: nil skips
 // the filter's IS NULL guard entirely rather than matching an empty pattern
-// against every row.
+// against every row. Escaping itself is db.EscapeLike — shared with
+// contact.SearchFilter's identical LIKE search, not duplicated here.
 func likeQuery(q string) *string {
 	if q == "" {
 		return nil
 	}
-	escaped := escapeLike(q)
+	escaped := db.EscapeLike(q)
 	return &escaped
 }
 

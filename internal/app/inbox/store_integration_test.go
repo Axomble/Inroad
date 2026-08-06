@@ -596,6 +596,12 @@ func TestListThreadsSearchEscapesLikeMetacharactersAgainstPostgres(t *testing.T)
 	}); err != nil {
 		t.Fatalf("seed 2: %v", err)
 	}
+	if _, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<wild3@sender.test>",
+		Subject: "widget_pro release notes", LastReplyClass: "neutral",
+	}); err != nil {
+		t.Fatalf("seed 3: %v", err)
+	}
 
 	page, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox, Query: "%"})
 	if err != nil {
@@ -603,6 +609,18 @@ func TestListThreadsSearchEscapesLikeMetacharactersAgainstPostgres(t *testing.T)
 	}
 	if len(page.Items) != 1 || page.Items[0].Subject != "50% off this week" {
 		t.Fatalf("literal-%%-search page = %+v, want exactly the ONE subject containing a literal %%", page.Items)
+	}
+
+	// A bare "_" is likewise a literal character to match, not "match any one
+	// character": unescaped, it would match every subject at least one
+	// character long (i.e. all three seeded threads). Only the one subject
+	// that actually CONTAINS a "_" character comes back.
+	underscore, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox, Query: "_"})
+	if err != nil {
+		t.Fatalf("ListThreads(query=_): %v", err)
+	}
+	if len(underscore.Items) != 1 || underscore.Items[0].Subject != "widget_pro release notes" {
+		t.Fatalf("literal-_-search page = %+v, want exactly the ONE subject containing a literal _", underscore.Items)
 	}
 }
 

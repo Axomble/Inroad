@@ -204,13 +204,13 @@ type ListInboxThreadsRow struct {
 // Keyset on (last_message_at, id) DESC, newest first. sqlc.narg fields are
 // optional filters, omitted (NULL) when the caller doesn't set them.
 // contact_* columns come from a LEFT JOIN: a thread with no contact_id (a
-// legacy direct-send match) has nothing to join on and reports ” via
-// COALESCE, never NULL — the same "absent is empty string" convention
-// inbox_messages' own text columns already use. 'query' substring-matches
-// (case-insensitive) the thread's subject OR the joined contact's email; the
-// caller escapes LIKE metacharacters before this reaches Postgres (see
-// escapeLike in store.go) so a literal % or _ typed by a user is never
-// treated as a wildcard.
+// legacy direct-send match) has nothing to join on and reports an empty
+// string via COALESCE, never NULL — the same "absent is empty string"
+// convention inbox_messages' own text columns already use. The query
+// parameter substring-matches (case-insensitive) the thread's subject OR the
+// joined contact's email; the caller escapes LIKE metacharacters before this
+// reaches Postgres (see db.EscapeLike in platform/db) so a literal % or _ typed
+// by a user is never treated as a wildcard.
 func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsParams) ([]ListInboxThreadsRow, error) {
 	rows, err := q.db.Query(ctx, listInboxThreads,
 		arg.WorkspaceID,
