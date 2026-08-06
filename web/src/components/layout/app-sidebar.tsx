@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, type LucideIcon } from 'lucide-react'
+import { Building2, CircleCheckBig, CircleDollarSign, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { PulseCard } from './pulse-card'
@@ -41,7 +41,10 @@ interface NavGroup {
 
 const NAV: NavGroup[] = [
   {
-    items: [{ label: 'Overview', to: '/app', icon: LayoutDashboard }],
+    items: [
+      { label: 'Overview', to: '/app', icon: LayoutDashboard },
+      { label: 'Approvals', to: '/app/approvals', icon: CircleCheckBig },
+    ],
   },
   {
     label: 'Sending',
@@ -58,6 +61,8 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
       { label: 'Contacts', to: '/app/contacts', icon: Users },
+      { label: 'Deals', to: '/app/deals', icon: CircleDollarSign },
+      { label: 'CRM', to: '/app/crm', icon: Building2 },
     ],
   },
   {
@@ -67,9 +72,12 @@ const NAV: NavGroup[] = [
       { label: 'Security', to: '/app/settings/security', icon: ShieldCheck },
       { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound, adminOnly: true },
       { label: 'Connected apps', to: '/app/settings/oauth-apps', icon: Plug, adminOnly: true },
+      { label: 'AI', to: '/app/settings/ai', icon: Sparkles, adminOnly: true },
     ],
   },
 ]
+
+const noop = () => undefined
 
 function NavRow({ item, count }: { item: NavItem; count?: number }) {
   const Icon = item.icon
@@ -93,7 +101,7 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
   )
 }
 
-export function AppSidebar() {
+export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void }) {
   const counts = useNavCounts()
   const role = useAppSelector((s) => s.auth.role)
   const isAdmin = role === 'owner' || role === 'admin'
@@ -101,6 +109,15 @@ export function AppSidebar() {
   return (
     <div className="flex h-full w-64 flex-col overflow-y-auto bg-chrome px-3 pb-3 pt-4">
       <PulseCard />
+      <button
+        type="button"
+        onClick={onOpenAgent}
+        className="mb-4 flex h-9 items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/10 px-2.5 text-[13px] font-medium text-chrome-text transition-colors hover:border-primary/45 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      >
+        <Sparkles className="size-4 shrink-0 text-primary" strokeWidth={1.75} aria-hidden="true" />
+        <span>Ask Inroad</span>
+        <kbd className="ml-auto rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">@</kbd>
+      </button>
       <nav aria-label="Primary" className="flex flex-col gap-5">
         {NAV.map((group, index) => {
           const items = group.items.filter((item) => !item.adminOnly || isAdmin)

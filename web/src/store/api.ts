@@ -349,6 +349,201 @@ const injectedRtkApi = api.injectEndpoints({
     getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
       query: () => ({ url: `/pulse` }),
     }),
+    getAiSettings: build.query<GetAiSettingsApiResponse, GetAiSettingsApiArg>({
+      query: () => ({ url: `/ai/settings` }),
+    }),
+    updateAiSettings: build.mutation<
+      UpdateAiSettingsApiResponse,
+      UpdateAiSettingsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/settings`,
+        method: "PUT",
+        body: queryArg.aiSettingsUpdate,
+      }),
+    }),
+    listAiProviders: build.query<
+      ListAiProvidersApiResponse,
+      ListAiProvidersApiArg
+    >({
+      query: () => ({ url: `/ai/providers` }),
+    }),
+    createAiProvider: build.mutation<
+      CreateAiProviderApiResponse,
+      CreateAiProviderApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers`,
+        method: "POST",
+        body: queryArg.aiProviderCreateRequest,
+      }),
+    }),
+    updateAiProvider: build.mutation<
+      UpdateAiProviderApiResponse,
+      UpdateAiProviderApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.aiProviderUpdateRequest,
+      }),
+    }),
+    deleteAiProvider: build.mutation<
+      DeleteAiProviderApiResponse,
+      DeleteAiProviderApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    discoverAiProviderModels: build.mutation<
+      DiscoverAiProviderModelsApiResponse,
+      DiscoverAiProviderModelsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/providers/${queryArg.id}/discover`,
+        method: "POST",
+      }),
+    }),
+    listAiModels: build.query<ListAiModelsApiResponse, ListAiModelsApiArg>({
+      query: () => ({ url: `/ai/models` }),
+    }),
+    createAiModel: build.mutation<
+      CreateAiModelApiResponse,
+      CreateAiModelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/models`,
+        method: "POST",
+        body: queryArg.aiModelCreateRequest,
+      }),
+    }),
+    deleteAiModel: build.mutation<
+      DeleteAiModelApiResponse,
+      DeleteAiModelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/ai/models/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    listAgentThreads: build.query<
+      ListAgentThreadsApiResponse,
+      ListAgentThreadsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads`,
+        params: {
+          offset: queryArg.offset,
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    createAgentThread: build.mutation<
+      CreateAgentThreadApiResponse,
+      CreateAgentThreadApiArg
+    >({
+      query: () => ({ url: `/agent/threads`, method: "POST" }),
+    }),
+    getAgentThread: build.query<
+      GetAgentThreadApiResponse,
+      GetAgentThreadApiArg
+    >({
+      query: (queryArg) => ({ url: `/agent/threads/${queryArg.id}` }),
+    }),
+    renameAgentThread: build.mutation<
+      RenameAgentThreadApiResponse,
+      RenameAgentThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}`,
+        method: "PATCH",
+        body: queryArg.body,
+      }),
+    }),
+    deleteAgentThread: build.mutation<
+      DeleteAgentThreadApiResponse,
+      DeleteAgentThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    sendAgentMessage: build.mutation<
+      SendAgentMessageApiResponse,
+      SendAgentMessageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/messages`,
+        method: "POST",
+        body: queryArg.agentSendRequest,
+      }),
+    }),
+    listAgentQueue: build.query<
+      ListAgentQueueApiResponse,
+      ListAgentQueueApiArg
+    >({
+      query: (queryArg) => ({ url: `/agent/threads/${queryArg.id}/queue` }),
+    }),
+    deleteAgentQueuedMessage: build.mutation<
+      DeleteAgentQueuedMessageApiResponse,
+      DeleteAgentQueuedMessageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/queue/${queryArg.messageId}`,
+        method: "DELETE",
+      }),
+    }),
+    stopAgentRun: build.mutation<StopAgentRunApiResponse, StopAgentRunApiArg>({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/stop`,
+        method: "POST",
+      }),
+    }),
+    streamAgentThread: build.query<
+      StreamAgentThreadApiResponse,
+      StreamAgentThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/threads/${queryArg.id}/stream`,
+        headers: {
+          "Last-Event-ID": queryArg["Last-Event-ID"],
+        },
+        params: {
+          after_seq: queryArg.afterSeq,
+        },
+      }),
+    }),
+    listAgentApprovals: build.query<
+      ListAgentApprovalsApiResponse,
+      ListAgentApprovalsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/approvals`,
+        params: {
+          status: queryArg.status,
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    getAgentApproval: build.query<
+      GetAgentApprovalApiResponse,
+      GetAgentApprovalApiArg
+    >({
+      query: (queryArg) => ({ url: `/agent/approvals/${queryArg.actionId}` }),
+    }),
+    decideAgentApproval: build.mutation<
+      DecideAgentApprovalApiResponse,
+      DecideAgentApprovalApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/agent/approvals/${queryArg.actionId}/decision`,
+        method: "POST",
+        body: queryArg.agentApprovalDecisionRequest,
+      }),
+    }),
     listLists: build.query<ListListsApiResponse, ListListsApiArg>({
       query: () => ({ url: `/lists` }),
     }),
@@ -692,6 +887,312 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.oAuth2RevokeRequest,
       }),
     }),
+    crmListCompanies: build.query<
+      CrmListCompaniesApiResponse,
+      CrmListCompaniesApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/companies`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
+    crmCreateCompany: build.mutation<
+      CrmCreateCompanyApiResponse,
+      CrmCreateCompanyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/companies`,
+        method: "POST",
+        body: queryArg.crmCompanyInput,
+      }),
+    }),
+    crmGetCompany: build.query<CrmGetCompanyApiResponse, CrmGetCompanyApiArg>({
+      query: (queryArg) => ({ url: `/crm/companies/${queryArg.id}` }),
+    }),
+    crmUpdateCompany: build.mutation<
+      CrmUpdateCompanyApiResponse,
+      CrmUpdateCompanyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/companies/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.crmCompanyInput,
+      }),
+    }),
+    crmDeleteCompany: build.mutation<
+      CrmDeleteCompanyApiResponse,
+      CrmDeleteCompanyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/companies/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    crmListPipelines: build.query<
+      CrmListPipelinesApiResponse,
+      CrmListPipelinesApiArg
+    >({
+      query: () => ({ url: `/crm/pipelines` }),
+    }),
+    crmCreatePipeline: build.mutation<
+      CrmCreatePipelineApiResponse,
+      CrmCreatePipelineApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/pipelines`,
+        method: "POST",
+        body: queryArg.crmPipelineInput,
+      }),
+    }),
+    crmGetPipeline: build.query<
+      CrmGetPipelineApiResponse,
+      CrmGetPipelineApiArg
+    >({
+      query: (queryArg) => ({ url: `/crm/pipelines/${queryArg.id}` }),
+    }),
+    crmUpdatePipeline: build.mutation<
+      CrmUpdatePipelineApiResponse,
+      CrmUpdatePipelineApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/pipelines/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.crmPipelineInput,
+      }),
+    }),
+    crmDeletePipeline: build.mutation<
+      CrmDeletePipelineApiResponse,
+      CrmDeletePipelineApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/pipelines/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    crmCreateStage: build.mutation<
+      CrmCreateStageApiResponse,
+      CrmCreateStageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/pipelines/${queryArg.id}/stages`,
+        method: "POST",
+        body: queryArg.crmStageInput,
+      }),
+    }),
+    crmUpdateStage: build.mutation<
+      CrmUpdateStageApiResponse,
+      CrmUpdateStageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/pipelines/${queryArg.id}/stages/${queryArg.stageId}`,
+        method: "PUT",
+        body: queryArg.crmStageInput,
+      }),
+    }),
+    crmDeleteStage: build.mutation<
+      CrmDeleteStageApiResponse,
+      CrmDeleteStageApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/pipelines/${queryArg.id}/stages/${queryArg.stageId}`,
+        method: "DELETE",
+      }),
+    }),
+    crmListDeals: build.query<CrmListDealsApiResponse, CrmListDealsApiArg>({
+      query: (queryArg) => ({
+        url: `/crm/deals`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
+    crmCreateDeal: build.mutation<
+      CrmCreateDealApiResponse,
+      CrmCreateDealApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/deals`,
+        method: "POST",
+        body: queryArg.crmDealInput,
+      }),
+    }),
+    crmGetDeal: build.query<CrmGetDealApiResponse, CrmGetDealApiArg>({
+      query: (queryArg) => ({ url: `/crm/deals/${queryArg.id}` }),
+    }),
+    crmUpdateDeal: build.mutation<
+      CrmUpdateDealApiResponse,
+      CrmUpdateDealApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/deals/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.crmDealInput,
+      }),
+    }),
+    crmDeleteDeal: build.mutation<
+      CrmDeleteDealApiResponse,
+      CrmDeleteDealApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/deals/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    crmGetBoard: build.query<CrmGetBoardApiResponse, CrmGetBoardApiArg>({
+      query: (queryArg) => ({
+        url: `/crm/board`,
+        params: {
+          pipeline_id: queryArg.pipelineId,
+        },
+      }),
+    }),
+    crmMoveDeal: build.mutation<CrmMoveDealApiResponse, CrmMoveDealApiArg>({
+      query: (queryArg) => ({
+        url: `/crm/deals/${queryArg.id}/move`,
+        method: "POST",
+        body: queryArg.crmMoveDealInput,
+      }),
+    }),
+    crmListDealThreads: build.query<
+      CrmListDealThreadsApiResponse,
+      CrmListDealThreadsApiArg
+    >({
+      query: (queryArg) => ({ url: `/crm/deals/${queryArg.id}/threads` }),
+    }),
+    crmListEvents: build.query<CrmListEventsApiResponse, CrmListEventsApiArg>({
+      query: (queryArg) => ({
+        url: `/crm/events`,
+        params: {
+          target_type: queryArg.targetType,
+          target_id: queryArg.targetId,
+        },
+      }),
+    }),
+    crmGetSettings: build.query<
+      CrmGetSettingsApiResponse,
+      CrmGetSettingsApiArg
+    >({
+      query: () => ({ url: `/crm/settings` }),
+    }),
+    crmUpdateSettings: build.mutation<
+      CrmUpdateSettingsApiResponse,
+      CrmUpdateSettingsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/settings`,
+        method: "PUT",
+        body: queryArg.crmSettingsInput,
+      }),
+    }),
+    crmListNotes: build.query<CrmListNotesApiResponse, CrmListNotesApiArg>({
+      query: (queryArg) => ({
+        url: `/crm/notes`,
+        params: {
+          target_type: queryArg.targetType,
+          target_id: queryArg.targetId,
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
+    crmCreateNote: build.mutation<
+      CrmCreateNoteApiResponse,
+      CrmCreateNoteApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/notes`,
+        method: "POST",
+        body: queryArg.crmNoteInput,
+      }),
+    }),
+    crmUpdateNote: build.mutation<
+      CrmUpdateNoteApiResponse,
+      CrmUpdateNoteApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/notes/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.crmNoteUpdate,
+      }),
+    }),
+    crmDeleteNote: build.mutation<
+      CrmDeleteNoteApiResponse,
+      CrmDeleteNoteApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/notes/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    crmListTasks: build.query<CrmListTasksApiResponse, CrmListTasksApiArg>({
+      query: (queryArg) => ({
+        url: `/crm/tasks`,
+        params: {
+          target_type: queryArg.targetType,
+          target_id: queryArg.targetId,
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
+    crmCreateTask: build.mutation<
+      CrmCreateTaskApiResponse,
+      CrmCreateTaskApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/tasks`,
+        method: "POST",
+        body: queryArg.crmTaskInput,
+      }),
+    }),
+    crmUpdateTask: build.mutation<
+      CrmUpdateTaskApiResponse,
+      CrmUpdateTaskApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/tasks/${queryArg.id}`,
+        method: "PUT",
+        body: queryArg.crmTaskInput,
+      }),
+    }),
+    crmDeleteTask: build.mutation<
+      CrmDeleteTaskApiResponse,
+      CrmDeleteTaskApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/tasks/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    crmListContactEmails: build.query<
+      CrmListContactEmailsApiResponse,
+      CrmListContactEmailsApiArg
+    >({
+      query: (queryArg) => ({ url: `/crm/contacts/${queryArg.id}/emails` }),
+    }),
+    crmAddContactEmail: build.mutation<
+      CrmAddContactEmailApiResponse,
+      CrmAddContactEmailApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/contacts/${queryArg.id}/emails`,
+        method: "POST",
+        body: queryArg.crmContactEmailInput,
+      }),
+    }),
+    crmSetPrimaryContactEmail: build.mutation<
+      CrmSetPrimaryContactEmailApiResponse,
+      CrmSetPrimaryContactEmailApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/contacts/${queryArg.id}/emails/${queryArg.emailId}/primary`,
+        method: "PUT",
+      }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -886,6 +1387,116 @@ export type GetWarmupOverviewApiResponse =
 export type GetWarmupOverviewApiArg = void;
 export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
 export type GetPulseApiArg = void;
+export type GetAiSettingsApiResponse = /** status 200 AI settings */ AiSettings;
+export type GetAiSettingsApiArg = void;
+export type UpdateAiSettingsApiResponse =
+  /** status 200 Updated AI settings */ AiSettings;
+export type UpdateAiSettingsApiArg = {
+  aiSettingsUpdate: AiSettingsUpdate;
+};
+export type ListAiProvidersApiResponse =
+  /** status 200 Configured providers */ AiProviderList;
+export type ListAiProvidersApiArg = void;
+export type CreateAiProviderApiResponse =
+  /** status 201 Provider configured (masked) */ AiProvider;
+export type CreateAiProviderApiArg = {
+  aiProviderCreateRequest: AiProviderCreateRequest;
+};
+export type UpdateAiProviderApiResponse =
+  /** status 200 Updated provider (masked) */ AiProvider;
+export type UpdateAiProviderApiArg = {
+  id: string;
+  aiProviderUpdateRequest: AiProviderUpdateRequest;
+};
+export type DeleteAiProviderApiResponse = unknown;
+export type DeleteAiProviderApiArg = {
+  id: string;
+};
+export type DiscoverAiProviderModelsApiResponse =
+  /** status 200 Discovery result */ AiDiscoveryResult;
+export type DiscoverAiProviderModelsApiArg = {
+  id: string;
+};
+export type ListAiModelsApiResponse =
+  /** status 200 Merged model list */ AiModelList;
+export type ListAiModelsApiArg = void;
+export type CreateAiModelApiResponse = /** status 201 Created model */ AiModel;
+export type CreateAiModelApiArg = {
+  aiModelCreateRequest: AiModelCreateRequest;
+};
+export type DeleteAiModelApiResponse = unknown;
+export type DeleteAiModelApiArg = {
+  id: string;
+};
+export type ListAgentThreadsApiResponse =
+  /** status 200 Owner-scoped threads */ AgentThreadList;
+export type ListAgentThreadsApiArg = {
+  offset?: number;
+  limit?: number;
+};
+export type CreateAgentThreadApiResponse =
+  /** status 201 Empty thread */ AgentThread;
+export type CreateAgentThreadApiArg = void;
+export type GetAgentThreadApiResponse =
+  /** status 200 Thread and transcript */ AgentThread;
+export type GetAgentThreadApiArg = {
+  id: string;
+};
+export type RenameAgentThreadApiResponse =
+  /** status 200 Renamed thread */ AgentThread;
+export type RenameAgentThreadApiArg = {
+  id: string;
+  body: {
+    title: string;
+  };
+};
+export type DeleteAgentThreadApiResponse = unknown;
+export type DeleteAgentThreadApiArg = {
+  id: string;
+};
+export type SendAgentMessageApiResponse =
+  /** status 202 Run started or message queued */ AgentSendResult;
+export type SendAgentMessageApiArg = {
+  id: string;
+  agentSendRequest: AgentSendRequest;
+};
+export type ListAgentQueueApiResponse =
+  /** status 200 Pending messages */ AgentQueue;
+export type ListAgentQueueApiArg = {
+  id: string;
+};
+export type DeleteAgentQueuedMessageApiResponse = unknown;
+export type DeleteAgentQueuedMessageApiArg = {
+  id: string;
+  messageId: string;
+};
+export type StopAgentRunApiResponse = unknown;
+export type StopAgentRunApiArg = {
+  id: string;
+};
+export type StreamAgentThreadApiResponse = unknown;
+export type StreamAgentThreadApiArg = {
+  id: string;
+  afterSeq?: number;
+  "Last-Event-ID"?: string;
+};
+export type ListAgentApprovalsApiResponse =
+  /** status 200 Owner-scoped approval actions */ AgentApprovalList;
+export type ListAgentApprovalsApiArg = {
+  status?: AgentApprovalStatus;
+  limit?: number;
+};
+export type GetAgentApprovalApiResponse =
+  /** status 200 Approval action */ AgentApproval;
+export type GetAgentApprovalApiArg = {
+  actionId: string;
+};
+export type DecideAgentApprovalApiResponse =
+  /** status 200 Updated approval action */ AgentApproval;
+export type DecideAgentApprovalApiArg = {
+  actionId: string;
+  agentApprovalDecisionRequest: AgentApprovalDecisionRequest;
+};
 export type ListListsApiResponse = /** status 200 Lists */ List[];
 export type ListListsApiArg = void;
 export type CreateListApiResponse = /** status 200 Created list */ List;
@@ -1117,6 +1728,189 @@ export type Oauth2IntrospectApiArg = {
 export type Oauth2RevokeApiResponse = unknown;
 export type Oauth2RevokeApiArg = {
   oAuth2RevokeRequest: OAuth2RevokeRequest;
+};
+export type CrmListCompaniesApiResponse =
+  /** status 200 Workspace companies */ CrmCompanyList;
+export type CrmListCompaniesApiArg = {
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
+export type CrmCreateCompanyApiResponse =
+  /** status 201 Created company */ CrmCompany;
+export type CrmCreateCompanyApiArg = {
+  crmCompanyInput: CrmCompanyInput;
+};
+export type CrmGetCompanyApiResponse = /** status 200 Company */ CrmCompany;
+export type CrmGetCompanyApiArg = {
+  id: string;
+};
+export type CrmUpdateCompanyApiResponse =
+  /** status 200 Updated company */ CrmCompany;
+export type CrmUpdateCompanyApiArg = {
+  id: string;
+  crmCompanyInput: CrmCompanyInput;
+};
+export type CrmDeleteCompanyApiResponse = unknown;
+export type CrmDeleteCompanyApiArg = {
+  id: string;
+};
+export type CrmListPipelinesApiResponse =
+  /** status 200 Workspace pipelines */ CrmPipelineList;
+export type CrmListPipelinesApiArg = void;
+export type CrmCreatePipelineApiResponse =
+  /** status 201 Created pipeline with default stages */ CrmPipeline;
+export type CrmCreatePipelineApiArg = {
+  crmPipelineInput: CrmPipelineInput;
+};
+export type CrmGetPipelineApiResponse = /** status 200 Pipeline */ CrmPipeline;
+export type CrmGetPipelineApiArg = {
+  id: string;
+};
+export type CrmUpdatePipelineApiResponse =
+  /** status 200 Updated pipeline */ CrmPipeline;
+export type CrmUpdatePipelineApiArg = {
+  id: string;
+  crmPipelineInput: CrmPipelineInput;
+};
+export type CrmDeletePipelineApiResponse = unknown;
+export type CrmDeletePipelineApiArg = {
+  id: string;
+};
+export type CrmCreateStageApiResponse =
+  /** status 201 Created stage */ CrmStage;
+export type CrmCreateStageApiArg = {
+  id: string;
+  crmStageInput: CrmStageInput;
+};
+export type CrmUpdateStageApiResponse =
+  /** status 200 Updated stage */ CrmStage;
+export type CrmUpdateStageApiArg = {
+  id: string;
+  stageId: string;
+  crmStageInput: CrmStageInput;
+};
+export type CrmDeleteStageApiResponse = unknown;
+export type CrmDeleteStageApiArg = {
+  id: string;
+  stageId: string;
+};
+export type CrmListDealsApiResponse =
+  /** status 200 Workspace deals */ CrmDealList;
+export type CrmListDealsApiArg = {
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
+export type CrmCreateDealApiResponse = /** status 201 Created deal */ CrmDeal;
+export type CrmCreateDealApiArg = {
+  crmDealInput: CrmDealInput;
+};
+export type CrmGetDealApiResponse = /** status 200 Deal */ CrmDeal;
+export type CrmGetDealApiArg = {
+  id: string;
+};
+export type CrmUpdateDealApiResponse = /** status 200 Updated deal */ CrmDeal;
+export type CrmUpdateDealApiArg = {
+  id: string;
+  crmDealInput: CrmDealInput;
+};
+export type CrmDeleteDealApiResponse = unknown;
+export type CrmDeleteDealApiArg = {
+  id: string;
+};
+export type CrmGetBoardApiResponse =
+  /** status 200 Pipeline board with server-computed stage summaries */ CrmBoard;
+export type CrmGetBoardApiArg = {
+  pipelineId?: string;
+};
+export type CrmMoveDealApiResponse = /** status 200 Moved deal */ CrmDeal;
+export type CrmMoveDealApiArg = {
+  id: string;
+  crmMoveDealInput: CrmMoveDealInput;
+};
+export type CrmListDealThreadsApiResponse =
+  /** status 200 Threads linked to the deal */ CrmThreadList;
+export type CrmListDealThreadsApiArg = {
+  id: string;
+};
+export type CrmListEventsApiResponse =
+  /** status 200 Append-only activity feed with adjacent ten-minute groups */ CrmEventList;
+export type CrmListEventsApiArg = {
+  targetType: "contact" | "company" | "deal";
+  targetId: string;
+};
+export type CrmGetSettingsApiResponse =
+  /** status 200 CRM workspace settings */ CrmSettings;
+export type CrmGetSettingsApiArg = void;
+export type CrmUpdateSettingsApiResponse =
+  /** status 200 Updated settings */ CrmSettings;
+export type CrmUpdateSettingsApiArg = {
+  crmSettingsInput: CrmSettingsInput;
+};
+export type CrmListNotesApiResponse =
+  /** status 200 Notes attached to the target */ CrmNoteList;
+export type CrmListNotesApiArg = {
+  targetType: "contact" | "company" | "deal";
+  targetId: string;
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
+export type CrmCreateNoteApiResponse = /** status 201 Created note */ CrmNote;
+export type CrmCreateNoteApiArg = {
+  crmNoteInput: CrmNoteInput;
+};
+export type CrmUpdateNoteApiResponse = /** status 200 Updated note */ CrmNote;
+export type CrmUpdateNoteApiArg = {
+  id: string;
+  crmNoteUpdate: CrmNoteUpdate;
+};
+export type CrmDeleteNoteApiResponse = unknown;
+export type CrmDeleteNoteApiArg = {
+  id: string;
+};
+export type CrmListTasksApiResponse =
+  /** status 200 Tasks attached to the target */ CrmTaskList;
+export type CrmListTasksApiArg = {
+  targetType: "contact" | "company" | "deal";
+  targetId: string;
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
+export type CrmCreateTaskApiResponse = /** status 201 Created task */ CrmTask;
+export type CrmCreateTaskApiArg = {
+  crmTaskInput: CrmTaskInput;
+};
+export type CrmUpdateTaskApiResponse = /** status 200 Updated task */ CrmTask;
+export type CrmUpdateTaskApiArg = {
+  id: string;
+  crmTaskInput: CrmTaskInput;
+};
+export type CrmDeleteTaskApiResponse = unknown;
+export type CrmDeleteTaskApiArg = {
+  id: string;
+};
+export type CrmListContactEmailsApiResponse =
+  /** status 200 Contact email aliases */ CrmContactEmailList;
+export type CrmListContactEmailsApiArg = {
+  id: string;
+};
+export type CrmAddContactEmailApiResponse =
+  /** status 201 Added email alias */ CrmContactEmail;
+export type CrmAddContactEmailApiArg = {
+  id: string;
+  crmContactEmailInput: CrmContactEmailInput;
+};
+export type CrmSetPrimaryContactEmailApiResponse = unknown;
+export type CrmSetPrimaryContactEmailApiArg = {
+  id: string;
+  emailId: string;
 };
 export type Membership = {
   workspace_id: string;
@@ -1453,6 +2247,216 @@ export type Pulse = {
   };
   attention: PulseAttention[];
 };
+export type AiSettings = {
+  default_smart_model: string;
+  default_fast_model: string;
+  /** empty array = every listed model is enabled */
+  enabled_model_ids: string[];
+  /** workspace-specific instructions appended to the agent system prompt */
+  additional_instructions: string;
+};
+export type AiSettingsUpdate = {
+  default_smart_model?: string;
+  default_fast_model?: string;
+  enabled_model_ids?: string[];
+  additional_instructions?: string;
+};
+export type AiProviderKind =
+  | "anthropic"
+  | "bedrock"
+  | "vertex_anthropic"
+  | "openai"
+  | "azure_openai"
+  | "openai_compatible"
+  | "google"
+  | "vertex_google";
+export type AiProviderConfig = {
+  base_url?: string;
+  endpoint?: string;
+  api_version?: string;
+  region?: string;
+  project_id?: string;
+};
+export type AiProvider = {
+  id: string;
+  kind: AiProviderKind;
+  display_name: string;
+  config: AiProviderConfig;
+  /** always true for a stored row */
+  configured: boolean;
+  /** masked credential identifier for display */
+  key_prefix: string;
+  created_at: string;
+  updated_at: string;
+};
+export type AiProviderList = {
+  providers: AiProvider[];
+};
+export type AiProviderCredentials = {
+  api_key?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  service_account_json?: string;
+};
+export type AiProviderCreateRequest = {
+  kind: AiProviderKind;
+  display_name?: string;
+  credentials: AiProviderCredentials;
+  config?: AiProviderConfig;
+};
+export type AiProviderUpdateRequest = {
+  display_name?: string;
+  credentials?: AiProviderCredentials;
+  config?: AiProviderConfig;
+};
+export type AiDiscoveredModel = {
+  name: string;
+  label?: string;
+  context_window_tokens?: number;
+  max_output_tokens?: number;
+  input_cost_per_mtok?: number | null;
+  output_cost_per_mtok?: number | null;
+};
+export type AiDiscoveryResult = {
+  /** false = this kind has no discovery path yet; add models manually */
+  supported: boolean;
+  models: AiDiscoveredModel[];
+};
+export type AiModel = {
+  /** composite "<provider_id>/<name>" */
+  id: string;
+  provider_id: string;
+  kind: AiProviderKind;
+  /** the bare model id the provider SDK receives */
+  name: string;
+  label: string;
+  context_window_tokens: number;
+  max_output_tokens: number;
+  supports_reasoning: boolean;
+  source: "catalog" | "custom";
+  /** the deletable row id behind a source=custom entry (DELETE /ai/models/{id}); null for catalog entries */
+  custom_model_id: string | null;
+  /** informational USD per million input tokens */
+  input_cost_per_mtok: number | null;
+  output_cost_per_mtok: number | null;
+  /** enabled_model_ids is empty OR contains this id */
+  enabled: boolean;
+};
+export type AiModelList = {
+  models: AiModel[];
+};
+export type AiModelCreateRequest = {
+  provider_id: string;
+  name: string;
+  label: string;
+  context_window_tokens: number;
+  max_output_tokens: number;
+  supports_reasoning?: boolean;
+  input_cost_per_mtok?: number | null;
+  output_cost_per_mtok?: number | null;
+};
+export type AgentPart = {
+  id: string;
+  order_index: number;
+  type:
+    "text" | "reasoning" | "tool_call" | "tool_result" | "compaction_notice";
+  text?: string;
+  reasoning?: string;
+  tool_name?: string;
+  tool_call_id?: string;
+  tool_input?: {
+    [key: string]: any;
+  };
+  tool_output?: any;
+  state?: "" | "running" | "done" | "error" | "awaiting_approval";
+  error?: string;
+};
+export type AgentMessage = {
+  id: string;
+  turn_id: string;
+  role: "user" | "assistant";
+  status: "sent" | "queued" | "processing";
+  created_at: string;
+  parts: AgentPart[];
+};
+export type AgentThread = {
+  id: string;
+  title: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  context_window_tokens: number;
+  active_run_id: string | null;
+  created_at: string;
+  updated_at: string;
+  messages?: AgentMessage[];
+};
+export type AgentThreadList = {
+  threads: AgentThread[];
+};
+export type AgentSendResult = {
+  message_id: string;
+  run_id: string | null;
+  queued: boolean;
+};
+export type AgentBrowsingContext = {
+  type: "record_page" | "list_view";
+  object?: string;
+  record_id?: string;
+  url?: string;
+  view?: string;
+  filters?: {
+    [key: string]: string;
+  };
+};
+export type AgentSendRequest = {
+  text: string;
+  /** composite model id or default-smart-model */
+  model?: string;
+  browsing_context?: AgentBrowsingContext;
+};
+export type AgentQueuedMessage = {
+  id: string;
+  text: string;
+  model: string;
+  created_at: string;
+};
+export type AgentQueue = {
+  queued: AgentQueuedMessage[];
+};
+export type AgentApprovalStatus =
+  "pending" | "approved" | "rejected" | "expired" | "executed" | "failed";
+export type AgentApproval = {
+  id: string;
+  workspace_id: string;
+  thread_id: string;
+  run_id: string;
+  tool_name: string;
+  tool_call_id: string;
+  arguments: {
+    [key: string]: any;
+  };
+  edited_arguments?: {
+    [key: string]: any;
+  };
+  risk_tier: "read" | "write" | "consequential" | "irreversible";
+  status: AgentApprovalStatus;
+  decision_reason?: string;
+  expires_at: string;
+  result?: any;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+};
+export type AgentApprovalList = {
+  actions: AgentApproval[];
+};
+export type AgentApprovalDecisionRequest = {
+  decision: "approve" | "reject";
+  edited_arguments?: {
+    [key: string]: any;
+  };
+  reason?: string;
+};
 export type List = {
   id?: string;
   name?: string;
@@ -1466,6 +2470,12 @@ export type Contact = {
   id?: string;
   email?: string;
   first_name?: string;
+  last_name?: string;
+  company_id?: string | null;
+  company_name?: string;
+  job_title?: string;
+  linkedin_url?: string;
+  deal_count?: number;
 };
 export type ContactPage = {
   items: Contact[];
@@ -1863,6 +2873,225 @@ export type OAuth2RevokeRequest = {
   client_id?: string;
   client_secret?: string;
 };
+export type CrmCompanyInput = {
+  name: string;
+  domain: string;
+  owner_user_id?: string | null;
+  annual_revenue_micros?: number | null;
+  currency: string;
+};
+export type CrmCompany = CrmCompanyInput & {
+  id: string;
+  deal_count: number;
+  created_at: string;
+  updated_at: string;
+};
+export type CrmCompanyList = {
+  items: CrmCompany[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
+};
+export type CrmStageInput = {
+  label: string;
+  color: string;
+  position: number;
+  is_won: boolean;
+  is_lost: boolean;
+};
+export type CrmStage = CrmStageInput & {
+  id: string;
+  pipeline_id: string;
+  key: string;
+  created_at: string;
+  updated_at: string;
+};
+export type CrmPipeline = {
+  id: string;
+  name: string;
+  is_default: boolean;
+  stages: CrmStage[];
+  created_at: string;
+  updated_at: string;
+};
+export type CrmPipelineList = {
+  items: CrmPipeline[];
+};
+export type CrmPipelineInput = {
+  name: string;
+};
+export type CrmDealInput = {
+  pipeline_id: string;
+  stage_id: string;
+  company_id?: string | null;
+  primary_contact_id?: string | null;
+  owner_user_id?: string | null;
+  name: string;
+  amount_micros?: number | null;
+  currency: string;
+  close_date?: string | null;
+};
+export type CrmDeal = CrmDealInput & {
+  id: string;
+  /** Fractional board ordering within the stage. Server-computed; change it with the move operation, never by writing it. */
+  position: number;
+  source: string;
+  source_campaign_id?: string | null;
+  source_thread_ref?: string;
+  created_by_actor: {
+    [key: string]: any;
+  };
+  pipeline_name: string;
+  stage_label: string;
+  stage_color: string;
+  stage_is_won: boolean;
+  stage_is_lost: boolean;
+  company_name?: string;
+  contact_email?: string;
+  created_at: string;
+  updated_at: string;
+};
+export type CrmDealList = {
+  items: CrmDeal[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
+};
+export type CrmBoardStage = {
+  stage: CrmStage;
+  deals: CrmDeal[];
+  deal_count: number;
+  amount_micros: number;
+};
+export type CrmBoard = {
+  pipeline: CrmPipeline;
+  stages: CrmBoardStage[];
+};
+export type CrmMoveDealInput = {
+  stage_id: string;
+  before_deal_id?: string | null;
+  after_deal_id?: string | null;
+};
+export type CrmThreadParticipant = {
+  email: string;
+  display_name?: string;
+  contact_id?: string | null;
+};
+export type CrmThreadMessage = {
+  id: string;
+  direction: "inbound" | "outbound";
+  kind: "sent" | "reply";
+  message_id?: string;
+  sender_email?: string;
+  recipient_email?: string;
+  subject?: string;
+  reply_class?: string;
+  occurred_at: string;
+};
+export type CrmThread = {
+  id: string;
+  thread_ref: string;
+  subject?: string;
+  reply_class?: string;
+  campaign_id?: string | null;
+  contact_id?: string | null;
+  last_message_at: string;
+  participants: CrmThreadParticipant[];
+  messages: CrmThreadMessage[];
+};
+export type CrmThreadList = {
+  items: CrmThread[];
+};
+export type CrmEvent = {
+  id: string;
+  name: string;
+  kind: string;
+  object_type?: string;
+  object_id?: string | null;
+  contact_id?: string | null;
+  company_id?: string | null;
+  deal_id?: string | null;
+  actor: {
+    [key: string]: any;
+  };
+  data: {
+    [key: string]: any;
+  };
+  linked_record_cached_name?: string;
+  source_message_id?: string;
+  source_thread_ref?: string;
+  occurred_at: string;
+  merged_count?: number;
+};
+export type CrmEventList = {
+  items: CrmEvent[];
+};
+export type CrmSettingsInput = {
+  auto_capture_policy: "sent_and_received" | "sent" | "off";
+};
+export type CrmSettings = CrmSettingsInput & {
+  updated_at: string;
+};
+export type CrmNote = {
+  id: string;
+  title: string;
+  body: string;
+  created_by_actor: {
+    [key: string]: any;
+  };
+  created_at: string;
+  updated_at: string;
+};
+export type CrmNoteList = {
+  items: CrmNote[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
+};
+export type CrmNoteUpdate = {
+  title: string;
+  body: string;
+};
+export type CrmTargetFields = {
+  target_type: "contact" | "company" | "deal";
+  target_id: string;
+};
+export type CrmNoteInput = CrmNoteUpdate & CrmTargetFields;
+export type CrmTask = {
+  id: string;
+  title: string;
+  body: string;
+  due_at?: string | null;
+  status: "open" | "in_progress" | "done" | "cancelled";
+  assignee_user_id?: string | null;
+  created_by_actor: {
+    [key: string]: any;
+  };
+  created_at: string;
+  updated_at: string;
+};
+export type CrmTaskList = {
+  items: CrmTask[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
+};
+export type CrmTaskInput = CrmTargetFields & {
+  title: string;
+  body: string;
+  due_at?: string | null;
+  status: "open" | "in_progress" | "done" | "cancelled";
+  assignee_user_id?: string | null;
+};
+export type CrmContactEmail = {
+  id: string;
+  contact_id: string;
+  email: string;
+  is_primary: boolean;
+  created_at: string;
+};
+export type CrmContactEmailList = {
+  items: CrmContactEmail[];
+};
+export type CrmContactEmailInput = {
+  email: string;
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -1909,6 +3138,29 @@ export const {
   useDisableMailboxWarmupMutation,
   useGetWarmupOverviewQuery,
   useGetPulseQuery,
+  useGetAiSettingsQuery,
+  useUpdateAiSettingsMutation,
+  useListAiProvidersQuery,
+  useCreateAiProviderMutation,
+  useUpdateAiProviderMutation,
+  useDeleteAiProviderMutation,
+  useDiscoverAiProviderModelsMutation,
+  useListAiModelsQuery,
+  useCreateAiModelMutation,
+  useDeleteAiModelMutation,
+  useListAgentThreadsQuery,
+  useCreateAgentThreadMutation,
+  useGetAgentThreadQuery,
+  useRenameAgentThreadMutation,
+  useDeleteAgentThreadMutation,
+  useSendAgentMessageMutation,
+  useListAgentQueueQuery,
+  useDeleteAgentQueuedMessageMutation,
+  useStopAgentRunMutation,
+  useStreamAgentThreadQuery,
+  useListAgentApprovalsQuery,
+  useGetAgentApprovalQuery,
+  useDecideAgentApprovalMutation,
   useListListsQuery,
   useCreateListMutation,
   useImportContactsMutation,
@@ -1953,4 +3205,39 @@ export const {
   useOauth2TokenMutation,
   useOauth2IntrospectMutation,
   useOauth2RevokeMutation,
+  useCrmListCompaniesQuery,
+  useCrmCreateCompanyMutation,
+  useCrmGetCompanyQuery,
+  useCrmUpdateCompanyMutation,
+  useCrmDeleteCompanyMutation,
+  useCrmListPipelinesQuery,
+  useCrmCreatePipelineMutation,
+  useCrmGetPipelineQuery,
+  useCrmUpdatePipelineMutation,
+  useCrmDeletePipelineMutation,
+  useCrmCreateStageMutation,
+  useCrmUpdateStageMutation,
+  useCrmDeleteStageMutation,
+  useCrmListDealsQuery,
+  useCrmCreateDealMutation,
+  useCrmGetDealQuery,
+  useCrmUpdateDealMutation,
+  useCrmDeleteDealMutation,
+  useCrmGetBoardQuery,
+  useCrmMoveDealMutation,
+  useCrmListDealThreadsQuery,
+  useCrmListEventsQuery,
+  useCrmGetSettingsQuery,
+  useCrmUpdateSettingsMutation,
+  useCrmListNotesQuery,
+  useCrmCreateNoteMutation,
+  useCrmUpdateNoteMutation,
+  useCrmDeleteNoteMutation,
+  useCrmListTasksQuery,
+  useCrmCreateTaskMutation,
+  useCrmUpdateTaskMutation,
+  useCrmDeleteTaskMutation,
+  useCrmListContactEmailsQuery,
+  useCrmAddContactEmailMutation,
+  useCrmSetPrimaryContactEmailMutation,
 } = injectedRtkApi;

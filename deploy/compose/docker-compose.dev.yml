@@ -1,3 +1,41 @@
+# Full dev stack: Postgres, Redis, migrations, api, worker, and the SPA.
+#
+#   docker compose -f deploy/compose/docker-compose.dev.yml up
+#
+# No local Go, Node, or make required — the repo is bind-mounted and rebuilt
+# inside the containers on change (air for Go, Vite HMR for the SPA). Ctrl+C
+# stops everything.
+#
+# Dev credentials are hardcoded on purpose. This file must never run anything
+# reachable from the internet: the JWT secret and master key below are public
+# knowledge. Production is deploy/compose/docker-compose.yml, which takes every
+# secret from the environment and refuses to start without them.
+
+x-go-env: &go-env
+  INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
+  INROAD_REDIS_ADDR: redis:6379
+  # Dev-only fixed values so the stack boots with zero setup.
+  INROAD_JWT_SECRET: dev-jwt-secret-not-for-production-use
+  # base64 of exactly 32 bytes ("dev-master-key-for-local-only!!!").
+  INROAD_MASTER_KEY: ZGV2LW1hc3Rlci1rZXktZm9yLWxvY2FsLW9ubHkhISE=
+  INROAD_PUBLIC_URL: http://localhost:5173
+  INROAD_LOG_LEVEL: debug
+  # Reach a mail catcher or a local Ollama without extra config.
+  INROAD_MAIL_ALLOW_PRIVATE_HOSTS: "true"
+  INROAD_AI_ALLOW_PRIVATE_BASE_URL: "true"
+
+x-go-build: &go-build
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile.dev-go
+  volumes:
+    - ../..:/src
+    # Named volumes for the module and build caches. Without these, every
+    # container restart recompiles the whole dependency graph — the difference
+    # between a 5-second and a 3-minute restart.
+    - go-mod:/go/pkg/mod
+    - go-build:/root/.cache/go-build
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,11 +44,78 @@ services:
       POSTGRES_PASSWORD: inroad
       POSTGRES_DB: inroad
     ports: ["5433:5432"]   # host 5433 avoids clashing with a native Postgres on 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Integration tests expect a separate database; create it on first boot
+      # so `go test -tags=integration` works against this stack too.
+      - ./initdb-test-db.sh:/docker-entrypoint-initdb.d/10-test-db.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U inroad"]
       interval: 3s
       timeout: 3s
       retries: 10
+
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies migrations then exits 0. api and worker wait for it to
+  # complete, so neither ever starts against a schema behind the code.
+  migrate:
+    <<: *go-build
+    environment: *go-env
+    command: go run ./cmd/migrate up
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    <<: *go-build
+    environment: *go-env
+    # air only mkdirs one level, and tmp/ is gitignored so it may not exist.
+    command: sh -c "mkdir -p tmp/air-api && air -c .air.api.toml"
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    <<: *go-build
+    environment: *go-env
+    command: sh -c "mkdir -p tmp/air-worker && air -c .air.worker.toml"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.dev-web
+    volumes:
+      - ../../web:/web
+      - ../../api:/api          # openapi.yaml, for `npm run gen:api`
+      # Anonymous volume shadows the bind mount so the container keeps its own
+      # node_modules: host binaries are the wrong platform, and a bind-mounted
+      # node_modules is pathologically slow on Windows and macOS.
+      - /web/node_modules
+    ports: ["5173:5173"]
+    environment:
+      # Vite proxies /api to the api container rather than localhost.
+      VITE_API_PROXY_TARGET: http://api:8080
+      # Bind-mount file events are not delivered natively on Windows/macOS;
+      # polling is what actually makes HMR fire.
+      CHOKIDAR_USEPOLLING: "true"
+    depends_on:
+      api: { condition: service_started }
+
+volumes:
+  pgdata:
+  go-mod:
+  go-build:

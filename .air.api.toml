@@ -1,0 +1,28 @@
+# air config for the API server in the dev container.
+# Watches Go sources under /src and rebuilds cmd/inroad on change.
+root = "."
+tmp_dir = "tmp/air-api"
+
+[build]
+  cmd = "go build -o ./tmp/air-api/inroad ./cmd/inroad"
+  bin = "./tmp/air-api/inroad"
+  include_ext = ["go", "sql", "yaml"]
+  # web/ and its dist are the Vite container's business; tmp/ is our own output.
+  # Excluding test files keeps a `_test.go` edit from bouncing the server.
+  exclude_dir = ["web", "tmp", "bin", "dist", "node_modules", ".git", "docs"]
+  exclude_regex = ["_test\\.go"]
+  # Give a slow first compile room to finish before air declares it hung.
+  kill_delay = "2s"
+  send_interrupt = true
+  delay = 300
+  # Docker Desktop does not deliver inotify events through Windows/macOS bind
+  # mounts, so a native watcher silently never fires. Poll instead — this is
+  # what actually makes hot reload work off a host-mounted source tree.
+  poll = true
+  poll_interval = 1000
+
+[log]
+  main_only = false
+
+[misc]
+  clean_on_exit = true

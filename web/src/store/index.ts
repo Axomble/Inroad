@@ -6,11 +6,13 @@ import { PERSIST_KEY } from './persist-key'
 import { api } from './api'
 import ui from './slices/ui'
 import auth from './slices/auth'
+import agent from './slices/agent'
 
 const rootReducer = combineReducers({
   [api.reducerPath]: api.reducer,
   ui,
   auth,
+  agent,
 })
 
 // Persist the UI slice ONLY. The session lives in memory (restored from the

@@ -1,0 +1,41 @@
+package agenttool
+
+import (
+	"context"
+	"time"
+)
+
+// RateLimiter is the shared atomic fixed-window limiter seam. Production uses
+// Redis, while tests can inject a deterministic fake.
+type RateLimiter interface {
+	Allow(context.Context, string, int, time.Duration) (bool, error)
+}
+
+// Deps carries the domain capabilities the tools call. Every field is one of
+// this package's own narrow interfaces (declared beside the tools that use
+// them), never a concrete domain service: the registry is unit-testable
+// against fakes, and `app/*` packages still do not import each other — the
+// composition root in cmd/inroad supplies the adapters, exactly as it already
+// does for campaign.Checker and contact.ListChecker.
+//
+// A nil field means the deployment cannot serve that capability, and the
+// registry simply does not register the tools that need it. That is what lets
+// the surface grow one wiring at a time instead of failing closed on startup
+// or, worse, offering a tool that panics when the model picks it.
+type Deps struct {
+	Campaigns      CampaignReader
+	CampaignAdmin  CampaignController
+	Contacts       ContactReader
+	ContactWrites  ContactWriter
+	ContactImports ContactImporter
+	Mailboxes      MailboxReader
+	Lists          ListReader
+	ListWrites     ListWriter
+	Deliverability DeliverabilityReader
+	Warmup         WarmupReader
+	CRM            CRMService
+	// CRMErrors classifies CRM write failures for the model. Nil means every
+	// failure aborts the run rather than being offered back as a retry prompt.
+	CRMErrors       ErrorClassifier
+	CRMWriteLimiter RateLimiter
+}

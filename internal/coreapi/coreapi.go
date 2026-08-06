@@ -22,6 +22,27 @@ var ErrCrossTenant = errors.New("coreapi: cross-tenant access rejected")
 // workspace never sent).
 var ErrNoMatch = errors.New("coreapi: no matching send")
 
+// CRMCaptureClient is an optional execution-plane capability. Keeping it
+// separate from Client lets inbox workers feature-detect CRM capture without
+// forcing every worker fake and future remote client to implement it.
+type CRMCaptureClient interface {
+	CaptureCRMReply(context.Context, CRMReplyInput) error
+}
+
+type CRMReplyInput struct {
+	WorkspaceID       string
+	EnrollmentID      string
+	SendID            string
+	ThreadRef         string
+	MessageID         string
+	Subject           string
+	SenderEmail       string
+	RecipientEmail    string
+	SenderDisplayName string
+	ReplyClass        string
+	OccurredAt        time.Time
+}
+
 type Client interface {
 	// MailboxExists reports whether a mailbox is present and active.
 	MailboxExists(ctx context.Context, id string) (bool, error)

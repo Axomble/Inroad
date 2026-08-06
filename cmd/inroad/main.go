@@ -23,10 +23,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/inroad/inroad/internal/app/agentchat"
+	"github.com/inroad/inroad/internal/app/agentrun"
+	"github.com/inroad/inroad/internal/app/agenttool"
+	"github.com/inroad/inroad/internal/app/aisettings"
 	"github.com/inroad/inroad/internal/app/apikey"
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
+	"github.com/inroad/inroad/internal/app/crm"
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/idempotency"
@@ -42,6 +47,7 @@ import (
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
+	"github.com/inroad/inroad/internal/platform/ai"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -194,11 +200,13 @@ func run() error {
 	// Warmup control-plane. Its per-mailbox routes (/mailboxes/{id}/warmup)
 	// register as a sub-router under the mailbox mount; its workspace-level
 	// overview mounts at /api/v1/warmup below.
-	warmupHandler := warmup.NewHandler(warmup.NewService(warmup.NewPgStore(queries)))
+	warmupSvc := warmup.NewService(warmup.NewPgStore(queries))
+	warmupHandler := warmup.NewHandler(warmupSvc)
+	mailboxSvc := mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), keyring,
+		googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
+		msOAuth, mailbox.NewMicrosoftExchanger(msOAuth))
 	mbHandler := mailbox.NewHandler(
-		mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), keyring,
-			googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
-			msOAuth, mailbox.NewMicrosoftExchanger(msOAuth)),
+		mailboxSvc,
 		cfg.JWTSecret, cfg.AppBaseURL,
 		warmupHandler,
 	)
@@ -272,7 +280,8 @@ func run() error {
 	// contact takes only a small ListChecker interface (not the whole list
 	// service) so the contact package doesn't have to import app/list —
 	// keeps the "app packages don't import each other" invariant intact.
-	contactSvc := contact.NewService(contact.NewPgStore(pool), listCheckerAdapter{lists: listSvc})
+	contactStore := contact.NewPgStore(pool)
+	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc})
 	// Sending-domain authentication (SPF/DKIM/DMARC). Built here (not inline at
 	// its mount below) because campaign preflight's domain_auth check also
 	// reads it, through the narrow domainAuthAdapter — the domain list is
@@ -313,9 +322,64 @@ func run() error {
 	// Deliverability guardrails. One service backs BOTH the API endpoints and the
 	// worker's circuit breaker (through coreapi), so the number an operator reads
 	// and the verdict that stops a campaign come from one computation.
-	deliverabilityHandler := deliverability.NewHandler(
-		deliverability.NewService(deliverability.NewPgStore(pool)),
+	deliverabilitySvc := deliverability.NewService(deliverability.NewPgStore(pool))
+	deliverabilityHandler := deliverability.NewHandler(deliverabilitySvc)
+	pulseSvc := pulse.NewService(pulse.NewPgStore(queries))
+	crmSvc := crm.NewService(crm.NewPgStore(pool))
+	crmHandler := crm.NewHandler(crmSvc)
+	// AI settings (agent platform PR A1). No shipped model catalog: native
+	// model metadata comes from models.dev at runtime, cached in Postgres with
+	// serve-stale-on-failure. Provider credentials seal under the same
+	// per-workspace DEK keyring as mailbox credentials; user-supplied
+	// base_url/endpoint hosts vet through the mail package's SSRF classifier
+	// at write time AND through the guarded transport at discovery-dial time.
+	catalogSource := ai.NewCatalogSource(ai.NewPgCatalogCache(queries), "")
+	aiHandler := aisettings.NewHandler(aisettings.NewService(aisettings.ServiceDeps{
+		Store:               aisettings.NewPgStore(queries),
+		Keyring:             keyring,
+		Catalog:             catalogSource,
+		Discoverer:          ai.NewHTTPDiscoverer(cfg.AIAllowPrivateBaseURL, 0),
+		ClassifyHost:        mail.ClassifyHost,
+		AllowPrivateBaseURL: cfg.AIAllowPrivateBaseURL,
+	}))
+	agentStore := agentchat.NewPgStore(pool)
+	if recovered, err := agentStore.RecoverStuckRuns(ctx, "API restarted while the agent was running"); err != nil {
+		logger.Error("agent stuck-run recovery failed", "err", err)
+		return err
+	} else if recovered > 0 {
+		logger.Warn("recovered interrupted agent runs", "count", recovered)
+	}
+	agentStream := agentchat.NewRedisStream(cfg.RedisAddr)
+	defer func() { _ = agentStream.Close() }()
+	go func() {
+		if err := agentStream.ListenCancellations(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("agent cancellation listener stopped", "err", err)
+		}
+	}()
+	toolRegistry := agenttool.New(agenttool.Deps{
+		Campaigns:       campaignSvc,
+		Contacts:        contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactWrites:   contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactImports:  contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		Mailboxes:       mailboxTools{service: mailboxSvc},
+		Deliverability:  deliverabilityToolAdapter{deliverability: deliverabilitySvc, pulse: pulseSvc},
+		Lists:           listSvc,
+		ListWrites:      listSvc,
+		Warmup:          warmupTools{service: warmupSvc},
+		CRM:             crmTools{service: crmSvc},
+		CRMErrors:       crmErrors{},
+		CRMWriteLimiter: redisLimiter,
+	})
+	modelResolver := agentchat.NewPgModelResolver(
+		queries, keyring, catalogSource, ai.NewStreamerFactory(cfg.AIAllowPrivateBaseURL),
 	)
+	runtime := &agentrun.Runtime{
+		Store: agentStore, Models: modelResolver, Tools: runtimeTools{registry: toolRegistry},
+		Publisher: agentStream, Approvals: agentStore, Logger: logger,
+	}
+	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger, cfg.AgentMaxConcurrentRuns)
+	runManager.StartExpirySweep()
+	agentHandler := agentchat.NewHandler(agentchat.NewService(agentStore, runManager, agentStream))
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
 	// Deny-by-default routing. Two groups:
@@ -374,6 +438,7 @@ func run() error {
 		// overlap with /api/v1/lists that would otherwise 404 the import route.
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
+		{pattern: "/api/v1/crm", handler: crmHandler.Routes()},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
 		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
 		// Routes(identStore) additionally applies RequireVerified to /launch
@@ -404,7 +469,14 @@ func run() error {
 		// The console's aggregate read-model (pulse card / nav counts /
 		// overview tiles). Read-only, workspace-pinned, chrome-only — not part
 		// of the api-key contract.
-		{pattern: "/api/v1/pulse", handler: pulse.NewHandler(pulse.NewService(pulse.NewPgStore(queries))).Routes()},
+		{pattern: "/api/v1/pulse", handler: pulse.NewHandler(pulseSvc).Routes()},
+		// Workspace AI configuration (model defaults, sealed provider keys).
+		// Session-only: writes are further gated to admins/owners inside
+		// Routes(), and provider keys are never part of the api-key contract.
+		{pattern: "/api/v1/ai", handler: aiHandler.Routes()},
+		// The in-app agent always acts on behalf of a human session. API keys and
+		// OAuth clients cannot create threads or inherit a user's tool authority.
+		{pattern: "/api/v1/agent", handler: agentHandler.Routes()},
 	}
 	// Idempotency-Key replay cache: generic cross-cutting middleware, mounted
 	// inside every authenticated group (after RequireAuth resolves the

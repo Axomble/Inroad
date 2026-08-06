@@ -22,7 +22,7 @@ WITH deleted_idempotency_keys AS (
 SELECT count(*)::bigint AS deleted_rows FROM deleted_idempotency_keys
 `
 
-// The Idempotency-Key replay cache (migration 000040) has its own fixed 24h
+// The Idempotency-Key replay cache (migration 000045) has its own fixed 24h
 // retention window, independent of the security-artifact purge above: once a
 // key falls out of window, a client retrying it is simply treated as a brand
 // new request, and the row is free to be reclaimed. Kept as a SEPARATE query

@@ -9,7 +9,7 @@ func (c client) CleanupExpired(ctx context.Context) (int64, error) {
 }
 
 // PurgeIdempotencyKeys removes Idempotency-Key replay-cache rows past their
-// fixed 24h retention window (migration 000040). Kept separate from
+// fixed 24h retention window (migration 000045). Kept separate from
 // CleanupExpired: the idempotency cache is an HTTP-layer concern, not a
 // security artifact.
 func (c client) PurgeIdempotencyKeys(ctx context.Context) (int64, error) {

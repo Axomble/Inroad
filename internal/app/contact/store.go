@@ -40,11 +40,17 @@ type SearchParams struct {
 // SortEmail is lower(email) straight from Postgres so the cursor key is
 // byte-identical to what idx_contacts_ws_email_id ordered by.
 type SearchRow struct {
-	ID        uuid.UUID
-	Email     string
-	FirstName string
-	CreatedAt time.Time
-	SortEmail string
+	ID          uuid.UUID
+	Email       string
+	FirstName   string
+	LastName    string
+	CompanyID   *uuid.UUID
+	CompanyName string
+	JobTitle    string
+	LinkedInURL string
+	DealCount   int64
+	CreatedAt   time.Time
+	SortEmail   string
 }
 
 // Store is the repository interface this domain depends on. It is defined
@@ -103,7 +109,8 @@ func (s *PgStore) Search(ctx context.Context, ws uuid.UUID, p SearchParams) ([]S
 	out := make([]SearchRow, 0, p.Limit)
 	for rows.Next() {
 		var r SearchRow
-		if err := rows.Scan(&r.ID, &r.Email, &r.FirstName, &r.CreatedAt, &r.SortEmail); err != nil {
+		if err := rows.Scan(&r.ID, &r.Email, &r.FirstName, &r.LastName, &r.CompanyID, &r.CompanyName,
+			&r.JobTitle, &r.LinkedInURL, &r.DealCount, &r.CreatedAt, &r.SortEmail); err != nil {
 			return nil, fmt.Errorf("scan contact: %w", err)
 		}
 		out = append(out, r)

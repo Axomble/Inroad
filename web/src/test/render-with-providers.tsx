@@ -5,6 +5,7 @@ import type { ReactElement } from 'react'
 import { emptyApi } from '@/store/empty-api'
 import authReducer, { type AuthState } from '@/store/slices/auth'
 import uiReducer from '@/store/slices/ui'
+import agentReducer from '@/store/slices/agent'
 
 type PreloadedState = {
   auth?: Partial<AuthState>
@@ -15,6 +16,7 @@ function makeReducer() {
     [emptyApi.reducerPath]: emptyApi.reducer,
     auth: authReducer,
     ui: uiReducer,
+    agent: agentReducer,
   })
 }
 

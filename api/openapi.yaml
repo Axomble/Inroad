@@ -4,6 +4,8 @@ info:
   version: 0.1.0
 servers:
   - url: /api/v1
+security:
+  - bearerAuth: []
 paths:
   /auth/register:
     post:
@@ -738,6 +740,347 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Pulse' }
         '401': { description: Unauthorized }
+  /ai/settings:
+    get:
+      operationId: getAISettings
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Workspace AI settings (model defaults, enabled models, additional
+        instructions). Returns the sentinel defaults when the workspace has
+        never saved settings.
+      responses:
+        '200':
+          description: AI settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AISettings' }
+        '401': { description: Unauthorized }
+    put:
+      operationId: updateAISettings
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Update workspace AI settings. Omitted fields keep their current (or
+        default) value. Model references must be ids from GET /ai/models
+        ("<provider_id>/<name>") or the field's own sentinel. Requires
+        workspace admin/owner role.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AISettingsUpdate' }
+      responses:
+        '200':
+          description: Updated AI settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AISettings' }
+        '400': { description: Validation error (unavailable model id or wrong sentinel) }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+  /ai/providers:
+    get:
+      operationId: listAIProviders
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: The workspace's configured provider doors, masked (key prefix only).
+      responses:
+        '200':
+          description: Configured providers
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIProviderList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createAIProvider
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Configure a provider door. The credential object is sealed WHOLE under
+        the workspace's encryption key and never returned; responses carry only
+        configured=true and a display prefix (first 8 chars of the api key /
+        access key id, or the service account's client_email). config holds
+        non-secret connection settings and is validated per kind (see
+        AIProviderCreateRequest). User-supplied base_url/endpoint hosts must be
+        https for public hosts; private/loopback hosts are rejected unless the
+        operator set INROAD_AI_ALLOW_PRIVATE_BASE_URL=true. Requires workspace
+        admin/owner role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AIProviderCreateRequest' }
+      responses:
+        '201':
+          description: Provider configured (masked)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIProvider' }
+        '400': { description: 'Validation error (unknown kind, missing kind-required credentials/config, URL policy violation)' }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '409': { description: 'A provider with this (kind, target) already exists' }
+  /ai/providers/{id}:
+    put:
+      operationId: updateAIProvider
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Update a provider door. credentials absent = keep the sealed
+        credential; config absent = keep; display_name absent = keep. kind is
+        immutable.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AIProviderUpdateRequest' }
+      responses:
+        '200':
+          description: Updated provider (masked)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIProvider' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+        '409': { description: 'A provider with this (kind, target) already exists' }
+    delete:
+      operationId: deleteAIProvider
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: Remove a provider door; its custom models cascade with it.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Provider removed }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+  /ai/providers/{id}/discover:
+    post:
+      operationId: discoverAIProviderModels
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Best-effort model-list discovery against the provider's own endpoint
+        (OpenAI-compatible GET /models, Anthropic/Google list endpoints, Azure
+        deployments list). Returns CANDIDATES only — nothing is persisted;
+        create chosen ones via POST /ai/models. supported=false means the kind
+        has no discovery path yet (bedrock, vertex_*) and manual entry is the
+        way. The dial goes through the SSRF-guarded client with the same
+        private-host gating as config validation. Requires workspace
+        admin/owner role.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Discovery result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIDiscoveryResult' }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+        '502': { description: 'The provider endpoint could not be listed (dial refused, auth rejected, not a model list)' }
+  /ai/models:
+    get:
+      operationId: listAIModels
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace's merged model list: models.dev catalog entries for
+        native-kind doors (anthropic/openai/google) plus user-defined custom
+        models on any door. Every entry's id is the stable composite
+        "<provider_id>/<name>" — settings reference exactly these ids. When
+        models.dev is unreachable and no cached snapshot exists, catalog
+        entries are absent (custom models still listed).
+      responses:
+        '200':
+          description: Merged model list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIModelList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createAIModel
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Register a user-defined model under a provider door (from discovery
+        candidates or manual entry). Requires workspace admin/owner role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AIModelCreateRequest' }
+      responses:
+        '201':
+          description: Created model
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AIModel' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Provider not found }
+        '409': { description: A model with this name already exists on this provider }
+  /ai/models/{id}:
+    delete:
+      operationId: deleteAIModel
+      tags: [ai]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Delete a user-defined model by its custom_model_id (catalog entries
+        are not deletable — disable them via settings.enabled_model_ids).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Model removed }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+        '404': { description: Model not found }
+  /agent/threads:
+    get:
+      operationId: listAgentThreads
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200': { description: Owner-scoped threads, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThreadList' } } } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: Empty thread, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThread' } } } }
+        '401': { description: Unauthorized }
+  /agent/threads/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Thread and transcript, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThread' } } } }
+        '404': { description: Thread not found }
+    patch:
+      operationId: renameAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [title], properties: { title: { type: string, minLength: 1, maxLength: 120 } } } } }
+      responses:
+        '200': { description: Renamed thread, content: { application/json: { schema: { $ref: '#/components/schemas/AgentThread' } } } }
+        '404': { description: Thread not found }
+    delete:
+      operationId: deleteAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Thread archived }
+        '404': { description: Thread not found }
+  /agent/threads/{id}/messages:
+    post:
+      operationId: sendAgentMessage
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AgentSendRequest' } } }
+      responses:
+        '202': { description: Run started or message queued, content: { application/json: { schema: { $ref: '#/components/schemas/AgentSendResult' } } } }
+        '404': { description: Thread not found }
+  /agent/threads/{id}/queue:
+    get:
+      operationId: listAgentQueue
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Pending messages, content: { application/json: { schema: { $ref: '#/components/schemas/AgentQueue' } } } }
+  /agent/threads/{id}/queue/{messageID}:
+    delete:
+      operationId: deleteAgentQueuedMessage
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: messageID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Queued message removed }
+        '404': { description: Thread or queued message not found }
+  /agent/threads/{id}/stop:
+    post:
+      operationId: stopAgentRun
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '202': { description: Cancellation requested }
+        '409': { description: Thread has no active run }
+  /agent/threads/{id}/stream:
+    get:
+      operationId: streamAgentThread
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      description: Fetch-based SSE stream. Reconnect with Last-Event-ID or after_seq.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: after_seq, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: Last-Event-ID, in: header, schema: { type: string } }
+      responses:
+        '200': { description: Agent event stream, content: { text/event-stream: { schema: { type: string } } } }
+        '404': { description: Thread not found }
+        '429': { description: Too many concurrent streams for this user }
+  /agent/approvals:
+    get:
+      operationId: listAgentApprovals
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AgentApprovalStatus' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200': { description: Owner-scoped approval actions, content: { application/json: { schema: { $ref: '#/components/schemas/AgentApprovalList' } } } }
+        '401': { description: Unauthorized }
+  /agent/approvals/{actionID}:
+    parameters:
+      - { name: actionID, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getAgentApproval
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Approval action, content: { application/json: { schema: { $ref: '#/components/schemas/AgentApproval' } } } }
+        '404': { description: Approval not found }
+  /agent/approvals/{actionID}/decision:
+    parameters:
+      - { name: actionID, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: decideAgentApproval
+      tags: [agent]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AgentApprovalDecisionRequest' } } }
+      responses:
+        '200': { description: Updated approval action, content: { application/json: { schema: { $ref: '#/components/schemas/AgentApproval' } } } }
+        '400': { description: Invalid decision or edited arguments }
+        '404': { description: Approval not found }
+        '409': { description: Approval already decided or expired }
   /lists:
     get:
       operationId: listLists
@@ -1522,6 +1865,313 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/OAuth2TokenError' }
+  /crm/companies:
+    get:
+      operationId: crmListCompanies
+      tags: [crm]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200':
+          description: Workspace companies
+          content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompanyList' } } }
+    post:
+      operationId: crmCreateCompany
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompanyInput' } } }
+      responses:
+        '201':
+          description: Created company
+          content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompany' } } }
+        '422': { description: Validation error }
+  /crm/companies/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmGetCompany
+      tags: [crm]
+      responses:
+        '200': { description: Company, content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompany' } } } }
+        '404': { description: Company not found }
+    put:
+      operationId: crmUpdateCompany
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompanyInput' } } }
+      responses:
+        '200': { description: Updated company, content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompany' } } } }
+        '422': { description: Validation error }
+    delete:
+      operationId: crmDeleteCompany
+      tags: [crm]
+      responses:
+        '204': { description: Company deleted }
+        '409': { description: Company is still referenced }
+  /crm/pipelines:
+    get:
+      operationId: crmListPipelines
+      tags: [crm]
+      responses:
+        '200': { description: Workspace pipelines, content: { application/json: { schema: { $ref: '#/components/schemas/CRMPipelineList' } } } }
+    post:
+      operationId: crmCreatePipeline
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMPipelineInput' } } }
+      responses:
+        '201': { description: Created pipeline with default stages, content: { application/json: { schema: { $ref: '#/components/schemas/CRMPipeline' } } } }
+  /crm/pipelines/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmGetPipeline
+      tags: [crm]
+      responses:
+        '200': { description: Pipeline, content: { application/json: { schema: { $ref: '#/components/schemas/CRMPipeline' } } } }
+        '404': { description: Pipeline not found }
+    put:
+      operationId: crmUpdatePipeline
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMPipelineInput' } } }
+      responses:
+        '200': { description: Updated pipeline, content: { application/json: { schema: { $ref: '#/components/schemas/CRMPipeline' } } } }
+    delete:
+      operationId: crmDeletePipeline
+      tags: [crm]
+      responses:
+        '204': { description: Pipeline deleted }
+        '404': { description: Pipeline not found }
+        '409': { description: "The default pipeline cannot be deleted, or it is still referenced" }
+  /crm/pipelines/{id}/stages:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: crmCreateStage
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMStageInput' } } }
+      responses:
+        '201': { description: Created stage, content: { application/json: { schema: { $ref: '#/components/schemas/CRMStage' } } } }
+  /crm/pipelines/{id}/stages/{stageID}:
+    parameters:
+      - { $ref: '#/components/parameters/ID' }
+      - name: stageID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: crmUpdateStage
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMStageInput' } } }
+      responses:
+        '200': { description: Updated stage, content: { application/json: { schema: { $ref: '#/components/schemas/CRMStage' } } } }
+    delete:
+      operationId: crmDeleteStage
+      tags: [crm]
+      responses:
+        '204': { description: Stage deleted }
+        '404': { description: Stage not found }
+        '409': { description: Stage still has deals; move them to another stage first }
+  /crm/deals:
+    get:
+      operationId: crmListDeals
+      tags: [crm]
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: Workspace deals, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDealList' } } } }
+    post:
+      operationId: crmCreateDeal
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMDealInput' } } }
+      responses:
+        '201': { description: Created deal, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDeal' } } } }
+        '422': { description: Validation error }
+  /crm/deals/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmGetDeal
+      tags: [crm]
+      responses:
+        '200': { description: Deal, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDeal' } } } }
+        '404': { description: Deal not found }
+    put:
+      operationId: crmUpdateDeal
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMDealInput' } } }
+      responses:
+        '200': { description: Updated deal, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDeal' } } } }
+    delete:
+      operationId: crmDeleteDeal
+      tags: [crm]
+      responses: { '204': { description: Deal deleted } }
+  /crm/board:
+    get:
+      operationId: crmGetBoard
+      tags: [crm]
+      parameters:
+        - { name: pipeline_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Pipeline board with server-computed stage summaries, content: { application/json: { schema: { $ref: '#/components/schemas/CRMBoard' } } } }
+        '404': { description: Pipeline not found }
+  /crm/deals/{id}/move:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: crmMoveDeal
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMMoveDealInput' } } }
+      responses:
+        '200': { description: Moved deal, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDeal' } } } }
+        '404': { description: Deal not found }
+        '422': { description: Invalid stage or neighbors }
+  /crm/deals/{id}/threads:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmListDealThreads
+      tags: [crm]
+      description: Structured message metadata only; inbound bodies are never exposed.
+      responses:
+        '200': { description: Threads linked to the deal, content: { application/json: { schema: { $ref: '#/components/schemas/CRMThreadList' } } } }
+  /crm/events:
+    get:
+      operationId: crmListEvents
+      tags: [crm]
+      parameters:
+        - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
+        - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Append-only activity feed with adjacent ten-minute groups, content: { application/json: { schema: { $ref: '#/components/schemas/CRMEventList' } } } }
+  /crm/settings:
+    get:
+      operationId: crmGetSettings
+      tags: [crm]
+      responses:
+        '200': { description: CRM workspace settings, content: { application/json: { schema: { $ref: '#/components/schemas/CRMSettings' } } } }
+    put:
+      operationId: crmUpdateSettings
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMSettingsInput' } } }
+      responses:
+        '200': { description: Updated settings, content: { application/json: { schema: { $ref: '#/components/schemas/CRMSettings' } } } }
+        '422': { description: Invalid capture policy }
+  /crm/notes:
+    get:
+      operationId: crmListNotes
+      tags: [crm]
+      parameters:
+        - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
+        - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: Notes attached to the target, content: { application/json: { schema: { $ref: '#/components/schemas/CRMNoteList' } } } }
+    post:
+      operationId: crmCreateNote
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMNoteInput' } } }
+      responses:
+        '201': { description: Created note, content: { application/json: { schema: { $ref: '#/components/schemas/CRMNote' } } } }
+  /crm/notes/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: crmUpdateNote
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMNoteUpdate' } } }
+      responses:
+        '200': { description: Updated note, content: { application/json: { schema: { $ref: '#/components/schemas/CRMNote' } } } }
+    delete:
+      operationId: crmDeleteNote
+      tags: [crm]
+      responses: { '204': { description: Note deleted } }
+  /crm/tasks:
+    get:
+      operationId: crmListTasks
+      tags: [crm]
+      parameters:
+        - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
+        - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: Tasks attached to the target, content: { application/json: { schema: { $ref: '#/components/schemas/CRMTaskList' } } } }
+    post:
+      operationId: crmCreateTask
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMTaskInput' } } }
+      responses:
+        '201': { description: Created task, content: { application/json: { schema: { $ref: '#/components/schemas/CRMTask' } } } }
+  /crm/tasks/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: crmUpdateTask
+      tags: [crm]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMTaskInput' } } }
+      responses:
+        '200': { description: Updated task, content: { application/json: { schema: { $ref: '#/components/schemas/CRMTask' } } } }
+    delete:
+      operationId: crmDeleteTask
+      tags: [crm]
+      responses: { '204': { description: Task deleted } }
+  /crm/contacts/{id}/emails:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmListContactEmails
+      tags: [crm]
+      responses:
+        '200': { description: Contact email aliases, content: { application/json: { schema: { $ref: '#/components/schemas/CRMContactEmailList' } } } }
+    post:
+      operationId: crmAddContactEmail
+      tags: [crm]
+      description: >-
+        Requires BOTH crm:write and contacts:write. A contact's alias set decides
+        contacts.email, which is the recipient address on the send path.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CRMContactEmailInput' } } }
+      responses:
+        '201': { description: Added email alias, content: { application/json: { schema: { $ref: '#/components/schemas/CRMContactEmail' } } } }
+        '409': { description: Email already belongs to a contact in this workspace }
+  /crm/contacts/{id}/emails/{emailID}/primary:
+    parameters:
+      - { $ref: '#/components/parameters/ID' }
+      - name: emailID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: crmSetPrimaryContactEmail
+      tags: [crm]
+      description: >-
+        Requires BOTH crm:write and contacts:write - this rewrites contacts.email,
+        which is the address a running campaign sends to.
+      responses:
+        '204': { description: Primary email changed }
+        '403': { description: Insufficient scope }
+        '404': { description: Contact email not found }
 components:
   securitySchemes:
     bearerAuth:
@@ -1529,6 +2179,25 @@ components:
       scheme: bearer
       bearerFormat: JWT
   parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Defaults to 50, capped at 200.
+      schema: { type: integer, minimum: 1, maximum: 200 }
+    PageCursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque keyset cursor taken from the previous page's next_cursor.
+        Round-trip it untouched; never construct one.
+      schema: { type: string }
     CaptchaToken:
       name: X-Captcha-Token
       in: header
@@ -1885,6 +2554,12 @@ components:
         id: { type: string, format: uuid }
         email: { type: string }
         first_name: { type: string }
+        last_name: { type: string }
+        company_id: { type: string, format: uuid, nullable: true }
+        company_name: { type: string }
+        job_title: { type: string }
+        linkedin_url: { type: string, format: uri }
+        deal_count: { type: integer, format: int64 }
     Campaign:
       type: object
       properties:
@@ -2470,6 +3145,292 @@ components:
         count: { type: integer }
         reason: { type: string, description: human-readable explanation derived from real data }
         href: { type: string, description: console destination that shows/fixes the condition }
+    AISettings:
+      type: object
+      description: >-
+        Workspace AI settings. Model references are ids from GET /ai/models
+        ("<provider_id>/<name>") or the sentinels "default-smart-model" /
+        "default-fast-model", which resolve at run time against the
+        workspace's enabled models.
+      required: [default_smart_model, default_fast_model, enabled_model_ids, additional_instructions]
+      properties:
+        default_smart_model: { type: string, example: default-smart-model }
+        default_fast_model: { type: string, example: default-fast-model }
+        enabled_model_ids:
+          type: array
+          items: { type: string }
+          description: empty array = every listed model is enabled
+        additional_instructions: { type: string, description: workspace-specific instructions appended to the agent system prompt }
+    AgentThread:
+      type: object
+      required: [id, title, total_input_tokens, total_output_tokens, context_window_tokens, active_run_id, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        total_input_tokens: { type: integer, format: int64 }
+        total_output_tokens: { type: integer, format: int64 }
+        context_window_tokens: { type: integer }
+        active_run_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        messages: { type: array, items: { $ref: '#/components/schemas/AgentMessage' } }
+    AgentThreadList:
+      type: object
+      required: [threads]
+      properties:
+        threads: { type: array, items: { $ref: '#/components/schemas/AgentThread' } }
+    AgentMessage:
+      type: object
+      required: [id, turn_id, role, status, created_at, parts]
+      properties:
+        id: { type: string, format: uuid }
+        turn_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        status: { type: string, enum: [sent, queued, processing] }
+        created_at: { type: string, format: date-time }
+        parts: { type: array, items: { $ref: '#/components/schemas/AgentPart' } }
+    AgentPart:
+      type: object
+      required: [id, order_index, type]
+      properties:
+        id: { type: string, format: uuid }
+        order_index: { type: integer }
+        type: { type: string, enum: [text, reasoning, tool_call, tool_result, compaction_notice] }
+        text: { type: string }
+        reasoning: { type: string }
+        tool_name: { type: string }
+        tool_call_id: { type: string }
+        tool_input: { type: object, additionalProperties: true }
+        tool_output: {}
+        state: { type: string, enum: ['', running, done, error, awaiting_approval] }
+        error: { type: string }
+    AgentBrowsingContext:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [record_page, list_view] }
+        object: { type: string }
+        record_id: { type: string }
+        url: { type: string }
+        view: { type: string }
+        filters: { type: object, additionalProperties: { type: string } }
+    AgentSendRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 20000 }
+        model: { type: string, description: composite model id or default-smart-model }
+        browsing_context: { $ref: '#/components/schemas/AgentBrowsingContext' }
+    AgentSendResult:
+      type: object
+      required: [message_id, run_id, queued]
+      properties:
+        message_id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid, nullable: true }
+        queued: { type: boolean }
+    AgentQueuedMessage:
+      type: object
+      required: [id, text, model, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string }
+        model: { type: string }
+        created_at: { type: string, format: date-time }
+    AgentQueue:
+      type: object
+      required: [queued]
+      properties:
+        queued: { type: array, items: { $ref: '#/components/schemas/AgentQueuedMessage' } }
+    AgentApprovalStatus:
+      type: string
+      enum: [pending, approved, rejected, expired, executed, failed]
+    AgentApproval:
+      type: object
+      required: [id, workspace_id, thread_id, run_id, tool_name, tool_call_id, arguments, risk_tier, status, expires_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        thread_id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        tool_name: { type: string }
+        tool_call_id: { type: string }
+        arguments: { type: object, additionalProperties: true }
+        edited_arguments: { type: object, additionalProperties: true }
+        risk_tier: { type: string, enum: [read, write, consequential, irreversible] }
+        status: { $ref: '#/components/schemas/AgentApprovalStatus' }
+        decision_reason: { type: string }
+        expires_at: { type: string, format: date-time }
+        result: {}
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AgentApprovalList:
+      type: object
+      required: [actions]
+      properties:
+        actions: { type: array, items: { $ref: '#/components/schemas/AgentApproval' } }
+    AgentApprovalDecisionRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        edited_arguments: { type: object, additionalProperties: true }
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    AISettingsUpdate:
+      type: object
+      description: >-
+        Partial update — omitted fields keep their current (or default) value.
+        default_smart_model / default_fast_model accept a model id or the
+        field's own sentinel; enabled_model_ids entries must be ids from
+        GET /ai/models.
+      properties:
+        default_smart_model: { type: string }
+        default_fast_model: { type: string }
+        enabled_model_ids: { type: array, items: { type: string } }
+        additional_instructions: { type: string }
+    AIProviderKind:
+      type: string
+      enum: [anthropic, bedrock, vertex_anthropic, openai, azure_openai, openai_compatible, google, vertex_google]
+      description: >-
+        One kind per DOOR to a vendor — the same model may be reachable
+        natively, via Bedrock, and via Vertex as three separate providers.
+    AIProviderConfig:
+      type: object
+      description: >-
+        Non-secret connection settings; the valid keys depend on kind —
+        openai_compatible: base_url (required); azure_openai: endpoint +
+        api_version (required); bedrock: region (required); vertex_anthropic /
+        vertex_google: project_id + region (required); anthropic / openai /
+        google: none.
+      properties:
+        base_url: { type: string }
+        endpoint: { type: string }
+        api_version: { type: string }
+        region: { type: string }
+        project_id: { type: string }
+    AIProviderCredentials:
+      type: object
+      description: >-
+        Kind-variant secret object, sealed whole at rest and never returned.
+        anthropic / openai / google / azure_openai: api_key (required);
+        openai_compatible: api_key (optional — a local Ollama has none);
+        bedrock: access_key_id + secret_access_key; vertex_anthropic /
+        vertex_google: service_account_json (a service-account key file's
+        JSON content).
+      properties:
+        api_key: { type: string }
+        access_key_id: { type: string }
+        secret_access_key: { type: string }
+        service_account_json: { type: string }
+    AIProvider:
+      type: object
+      description: >-
+        A configured provider door, masked: credentials are sealed at rest and
+        never returned — key_prefix carries the first 8 characters of the api
+        key / access key id, or the service account's client_email. No
+        secret/ciphertext field exists on this shape by construction.
+      required: [id, kind, display_name, config, configured, key_prefix, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/AIProviderKind' }
+        display_name: { type: string }
+        config: { $ref: '#/components/schemas/AIProviderConfig' }
+        configured: { type: boolean, description: always true for a stored row }
+        key_prefix: { type: string, description: masked credential identifier for display }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AIProviderList:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items: { $ref: '#/components/schemas/AIProvider' }
+    AIProviderCreateRequest:
+      type: object
+      required: [kind, credentials]
+      properties:
+        kind: { $ref: '#/components/schemas/AIProviderKind' }
+        display_name: { type: string }
+        credentials: { $ref: '#/components/schemas/AIProviderCredentials' }
+        config: { $ref: '#/components/schemas/AIProviderConfig' }
+    AIProviderUpdateRequest:
+      type: object
+      description: >-
+        Partial update. credentials absent = keep the sealed credential;
+        config absent = keep current config (when present it REPLACES the
+        config object whole); display_name absent = keep. kind is immutable.
+      properties:
+        display_name: { type: string }
+        credentials: { $ref: '#/components/schemas/AIProviderCredentials' }
+        config: { $ref: '#/components/schemas/AIProviderConfig' }
+    AIModel:
+      type: object
+      description: >-
+        One entry of the merged model list. id is the stable composite
+        "<provider_id>/<name>" — the same model name via two doors never
+        collides, and settings store exactly these ids. source=catalog entries
+        come from models.dev (native kinds); source=custom entries are
+        workspace_ai_models rows.
+      required: [id, provider_id, kind, name, label, context_window_tokens, max_output_tokens, supports_reasoning, source, custom_model_id, input_cost_per_mtok, output_cost_per_mtok, enabled]
+      properties:
+        id: { type: string, description: composite "<provider_id>/<name>" }
+        provider_id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/AIProviderKind' }
+        name: { type: string, description: the bare model id the provider SDK receives }
+        label: { type: string }
+        context_window_tokens: { type: integer }
+        max_output_tokens: { type: integer }
+        supports_reasoning: { type: boolean }
+        source: { type: string, enum: [catalog, custom] }
+        custom_model_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: the deletable row id behind a source=custom entry (DELETE /ai/models/{id}); null for catalog entries
+        input_cost_per_mtok: { type: number, nullable: true, description: informational USD per million input tokens }
+        output_cost_per_mtok: { type: number, nullable: true }
+        enabled: { type: boolean, description: "enabled_model_ids is empty OR contains this id" }
+    AIModelList:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items: { $ref: '#/components/schemas/AIModel' }
+    AIModelCreateRequest:
+      type: object
+      required: [provider_id, name, label, context_window_tokens, max_output_tokens]
+      properties:
+        provider_id: { type: string, format: uuid }
+        name: { type: string }
+        label: { type: string }
+        context_window_tokens: { type: integer, minimum: 1 }
+        max_output_tokens: { type: integer, minimum: 1 }
+        supports_reasoning: { type: boolean }
+        input_cost_per_mtok: { type: number, nullable: true }
+        output_cost_per_mtok: { type: number, nullable: true }
+    AIDiscoveredModel:
+      type: object
+      description: >-
+        One discovery candidate. Only name is guaranteed; the rest is
+        best-effort (bare-id endpoints yield name-only entries).
+      required: [name]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        context_window_tokens: { type: integer }
+        max_output_tokens: { type: integer }
+        input_cost_per_mtok: { type: number, nullable: true }
+        output_cost_per_mtok: { type: number, nullable: true }
+    AIDiscoveryResult:
+      type: object
+      required: [supported, models]
+      properties:
+        supported: { type: boolean, description: false = this kind has no discovery path yet; add models manually }
+        models:
+          type: array
+          items: { $ref: '#/components/schemas/AIDiscoveredModel' }
     OAuth2RegisterRequest:
       type: object
       required: [client_name, redirect_uris]
@@ -2596,3 +3557,289 @@ components:
         token_type_hint: { type: string, enum: [access_token, refresh_token] }
         client_id: { type: string }
         client_secret: { type: string }
+    CRMCompanyInput:
+      type: object
+      required: [name, domain, currency]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        domain: { type: string }
+        owner_user_id: { type: string, format: uuid, nullable: true }
+        annual_revenue_micros: { type: integer, format: int64, minimum: 0, nullable: true }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+    CRMCompany:
+      allOf:
+        - $ref: '#/components/schemas/CRMCompanyInput'
+        - type: object
+          required: [id, deal_count, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            deal_count: { type: integer, format: int64 }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    CRMCompanyList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMCompany' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
+    CRMStageInput:
+      type: object
+      required: [label, color, position, is_won, is_lost]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 80 }
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+        position: { type: integer, minimum: 0 }
+        is_won: { type: boolean }
+        is_lost: { type: boolean }
+    CRMStage:
+      allOf:
+        - $ref: '#/components/schemas/CRMStageInput'
+        - type: object
+          required: [id, pipeline_id, key, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            pipeline_id: { type: string, format: uuid }
+            key: { type: string }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    CRMPipelineInput:
+      type: object
+      required: [name]
+      properties: { name: { type: string, minLength: 1, maxLength: 120 } }
+    CRMPipeline:
+      type: object
+      required: [id, name, is_default, stages, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        is_default: { type: boolean }
+        stages: { type: array, items: { $ref: '#/components/schemas/CRMStage' } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CRMPipelineList:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMPipeline' } } }
+    CRMDealInput:
+      type: object
+      required: [pipeline_id, stage_id, name, currency]
+      properties:
+        pipeline_id: { type: string, format: uuid }
+        stage_id: { type: string, format: uuid }
+        company_id: { type: string, format: uuid, nullable: true }
+        primary_contact_id: { type: string, format: uuid, nullable: true }
+        owner_user_id: { type: string, format: uuid, nullable: true }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        amount_micros: { type: integer, format: int64, minimum: 0, nullable: true }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        close_date: { type: string, format: date-time, nullable: true }
+    CRMDeal:
+      allOf:
+        - $ref: '#/components/schemas/CRMDealInput'
+        - type: object
+          required: [id, position, source, created_by_actor, pipeline_name, stage_label, stage_color, stage_is_won, stage_is_lost, created_at, updated_at]
+          properties:
+            id: { type: string, format: uuid }
+            position:
+              type: number
+              description: >-
+                Fractional board ordering within the stage. Server-computed;
+                change it with the move operation, never by writing it.
+            source: { type: string }
+            source_campaign_id: { type: string, format: uuid, nullable: true }
+            source_thread_ref: { type: string }
+            created_by_actor: { type: object, additionalProperties: true }
+            pipeline_name: { type: string }
+            stage_label: { type: string }
+            stage_color: { type: string }
+            stage_is_won: { type: boolean }
+            stage_is_lost: { type: boolean }
+            company_name: { type: string }
+            contact_email: { type: string }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    CRMDealList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMDeal' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
+    CRMMoveDealInput:
+      type: object
+      required: [stage_id]
+      properties:
+        stage_id: { type: string, format: uuid }
+        before_deal_id: { type: string, format: uuid, nullable: true }
+        after_deal_id: { type: string, format: uuid, nullable: true }
+    CRMBoardStage:
+      type: object
+      required: [stage, deals, deal_count, amount_micros]
+      properties:
+        stage: { $ref: '#/components/schemas/CRMStage' }
+        deals: { type: array, items: { $ref: '#/components/schemas/CRMDeal' } }
+        deal_count: { type: integer, format: int64 }
+        amount_micros: { type: integer, format: int64 }
+    CRMBoard:
+      type: object
+      required: [pipeline, stages]
+      properties:
+        pipeline: { $ref: '#/components/schemas/CRMPipeline' }
+        stages: { type: array, items: { $ref: '#/components/schemas/CRMBoardStage' } }
+    CRMSettingsInput:
+      type: object
+      required: [auto_capture_policy]
+      properties:
+        auto_capture_policy: { type: string, enum: [sent_and_received, sent, off] }
+    CRMSettings:
+      allOf:
+        - $ref: '#/components/schemas/CRMSettingsInput'
+        - type: object
+          required: [updated_at]
+          properties: { updated_at: { type: string, format: date-time } }
+    CRMThreadParticipant:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        display_name: { type: string }
+        contact_id: { type: string, format: uuid, nullable: true }
+    CRMThreadMessage:
+      type: object
+      required: [id, direction, kind, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        direction: { type: string, enum: [inbound, outbound] }
+        kind: { type: string, enum: [sent, reply] }
+        message_id: { type: string }
+        sender_email: { type: string }
+        recipient_email: { type: string }
+        subject: { type: string }
+        reply_class: { type: string }
+        occurred_at: { type: string, format: date-time }
+    CRMThread:
+      type: object
+      required: [id, thread_ref, last_message_at, participants, messages]
+      properties:
+        id: { type: string, format: uuid }
+        thread_ref: { type: string }
+        subject: { type: string }
+        reply_class: { type: string }
+        campaign_id: { type: string, format: uuid, nullable: true }
+        contact_id: { type: string, format: uuid, nullable: true }
+        last_message_at: { type: string, format: date-time }
+        participants: { type: array, items: { $ref: '#/components/schemas/CRMThreadParticipant' } }
+        messages: { type: array, items: { $ref: '#/components/schemas/CRMThreadMessage' } }
+    CRMThreadList:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMThread' } } }
+    CRMEvent:
+      type: object
+      required: [id, name, kind, actor, data, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        kind: { type: string }
+        object_type: { type: string }
+        object_id: { type: string, format: uuid, nullable: true }
+        contact_id: { type: string, format: uuid, nullable: true }
+        company_id: { type: string, format: uuid, nullable: true }
+        deal_id: { type: string, format: uuid, nullable: true }
+        actor: { type: object, additionalProperties: true }
+        data: { type: object, additionalProperties: true }
+        linked_record_cached_name: { type: string }
+        source_message_id: { type: string }
+        source_thread_ref: { type: string }
+        occurred_at: { type: string, format: date-time }
+        merged_count: { type: integer, minimum: 1 }
+    CRMEventList:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMEvent' } } }
+    CRMTargetFields:
+      type: object
+      required: [target_type, target_id]
+      properties:
+        target_type: { type: string, enum: [contact, company, deal] }
+        target_id: { type: string, format: uuid }
+    CRMNoteUpdate:
+      type: object
+      required: [title, body]
+      properties:
+        title: { type: string, maxLength: 200 }
+        body: { type: string, minLength: 1, maxLength: 20000 }
+    CRMNoteInput:
+      allOf:
+        - $ref: '#/components/schemas/CRMNoteUpdate'
+        - $ref: '#/components/schemas/CRMTargetFields'
+    CRMNote:
+      type: object
+      required: [id, title, body, created_by_actor, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string }
+        created_by_actor: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CRMNoteList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMNote' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
+    CRMTaskInput:
+      allOf:
+        - $ref: '#/components/schemas/CRMTargetFields'
+        - type: object
+          required: [title, body, status]
+          properties:
+            title: { type: string, minLength: 1, maxLength: 200 }
+            body: { type: string, maxLength: 20000 }
+            due_at: { type: string, format: date-time, nullable: true }
+            status: { type: string, enum: [open, in_progress, done, cancelled] }
+            assignee_user_id: { type: string, format: uuid, nullable: true }
+    CRMTask:
+      type: object
+      required: [id, title, body, status, created_by_actor, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        body: { type: string }
+        due_at: { type: string, format: date-time, nullable: true }
+        status: { type: string, enum: [open, in_progress, done, cancelled] }
+        assignee_user_id: { type: string, format: uuid, nullable: true }
+        created_by_actor: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CRMTaskList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMTask' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
+    CRMContactEmailInput:
+      type: object
+      required: [email]
+      properties: { email: { type: string, format: email } }
+    CRMContactEmail:
+      type: object
+      required: [id, contact_id, email, is_primary, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        contact_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        is_primary: { type: boolean }
+        created_at: { type: string, format: date-time }
+    CRMContactEmailList:
+      type: object
+      required: [items]
+      properties: { items: { type: array, items: { $ref: '#/components/schemas/CRMContactEmail' } } }

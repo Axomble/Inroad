@@ -1,0 +1,24 @@
+# air config for the worker in the dev container.
+# Same shape as .air.api.toml, different entrypoint binary.
+root = "."
+tmp_dir = "tmp/air-worker"
+
+[build]
+  cmd = "go build -o ./tmp/air-worker/worker ./cmd/worker"
+  bin = "./tmp/air-worker/worker"
+  include_ext = ["go", "sql", "yaml"]
+  exclude_dir = ["web", "tmp", "bin", "dist", "node_modules", ".git", "docs"]
+  exclude_regex = ["_test\\.go"]
+  kill_delay = "2s"
+  send_interrupt = true
+  delay = 300
+  # See .air.api.toml — bind-mount inotify events are not delivered on
+  # Windows/macOS, so the watcher must poll.
+  poll = true
+  poll_interval = 1000
+
+[log]
+  main_only = false
+
+[misc]
+  clean_on_exit = true
