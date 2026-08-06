@@ -42,6 +42,13 @@ test('shows the API keys nav item for an owner', () => {
   expect(screen.getByRole('link', { name: /api keys/i })).toBeInTheDocument()
 })
 
+test('the Inbox screen is reachable from the nav', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'member', status: 'authed' } },
+  })
+  expect(screen.getByRole('link', { name: /inbox/i })).toHaveAttribute('href', '/app/inbox')
+})
+
 test('the Deliverability screen is reachable from the nav, with no invented count', () => {
   renderWithProviders(<AppSidebar />, {
     preloadedState: { auth: { role: 'member', status: 'authed' } },

@@ -25,6 +25,7 @@ const selectNavCounts = (data: WorkspacePulse | undefined) => ({
   '/app/warmup': data?.warmup.pool,
   '/app/campaigns': data?.campaigns.total,
   '/app/contacts': data?.contacts.total,
+  '/app/inbox': data?.inbox.unread,
 })
 
 export function useNavCounts(): Record<string, number | undefined> {
