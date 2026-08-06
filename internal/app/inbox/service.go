@@ -13,6 +13,13 @@ import (
 // mailbox id, or a keyset cursor with only half its pair set.
 var ErrValidation = errors.New("inbox: invalid input")
 
+// errHalfSetCursor is the one message both Service.ListThreads and the
+// handler's own query-param parsing use for a half-set keyset cursor, so a
+// caller sees the SAME clear explanation regardless of which layer catches
+// it (the handler catches it first at the HTTP boundary; this Service check
+// is the belt-and-braces backstop for any other caller of ListThreads).
+const errHalfSetCursor = "before_last_message_at and before_id must be set together"
+
 // Service implements the unified-inbox use cases. It depends on the Store
 // interface (never the concrete PgStore), so it is unit-testable against a
 // fake without a database.
@@ -52,15 +59,18 @@ func (in RecordReplyInput) validate() error {
 // RecordReply upserts the thread for RootMessageID (creating it on the first
 // reply, refreshing last_reply_class/last_message_at/unread on every later
 // one — see the migration's partial unique index and the sqlc query it
-// backs) and appends the message to it. WorkspaceID always comes from
-// in.WorkspaceID, the trusted caller-supplied workspace — never from
-// in.Message, whose ThreadID/WorkspaceID this overwrites before it reaches
-// the store.
+// backs) and appends the message to it, atomically: a thin pass-through to
+// Store.RecordReply, which is the ONE call that does both writes in a single
+// transaction. Service does not call UpsertThread/InsertMessage separately —
+// doing so here would reopen the non-atomic gap RecordReply exists to close
+// (a dropped connection between the two leaving a thread whose
+// last_reply_class/last_message_at/unread reflect a reply with no
+// corresponding message row).
 func (s *Service) RecordReply(ctx context.Context, in RecordReplyInput) (Thread, error) {
 	if err := in.validate(); err != nil {
 		return Thread{}, err
 	}
-	th, err := s.store.UpsertThread(ctx, UpsertThreadInput{
+	return s.store.RecordReply(ctx, UpsertThreadInput{
 		WorkspaceID:    in.WorkspaceID,
 		MailboxID:      in.MailboxID,
 		CampaignID:     in.CampaignID,
@@ -68,17 +78,7 @@ func (s *Service) RecordReply(ctx context.Context, in RecordReplyInput) (Thread,
 		RootMessageID:  in.RootMessageID,
 		Subject:        in.Subject,
 		LastReplyClass: in.LastReplyClass,
-	})
-	if err != nil {
-		return Thread{}, err
-	}
-	msg := in.Message
-	msg.ThreadID = th.ID
-	msg.WorkspaceID = in.WorkspaceID
-	if err := s.store.InsertMessage(ctx, msg); err != nil {
-		return Thread{}, err
-	}
-	return th, nil
+	}, in.Message)
 }
 
 // ListThreads returns one page of the workspace's threads. A malformed
@@ -87,7 +87,7 @@ func (s *Service) RecordReply(ctx context.Context, in RecordReplyInput) (Thread,
 // a lost place in the list.
 func (s *Service) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter ListFilter) (ThreadPage, error) {
 	if (filter.BeforeLastMessageAt == nil) != (filter.BeforeID == nil) {
-		return ThreadPage{}, fmt.Errorf("%w: before_last_message_at and before_id must be set together", ErrValidation)
+		return ThreadPage{}, fmt.Errorf("%w: %s", ErrValidation, errHalfSetCursor)
 	}
 	return s.store.ListThreads(ctx, workspaceID, filter)
 }

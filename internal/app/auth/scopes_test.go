@@ -25,6 +25,17 @@ func TestOAuthGrantableScopesExcludeDangerous(t *testing.T) {
 	}
 }
 
+// ScopeInboxRead is excluded on purpose: reply bodies are free-text
+// correspondence content, more sensitive than the structured CRM/contact
+// data this set already grants. ScopeInboxWrite (a boolean read/unread
+// toggle, no content, no business-data mutation) is deliberately NOT in this
+// list — see TestOAuthGrantableScopesExactSet.
+func TestOAuthGrantableScopesExcludeInboxRead(t *testing.T) {
+	if IsOAuthGrantableScope(ScopeInboxRead) {
+		t.Error("ScopeInboxRead must NOT be OAuth-grantable (reply content is sensitive correspondence)")
+	}
+}
+
 func TestOAuthGrantableScopesExactSet(t *testing.T) {
 	// Pin the exact set so any change is a conscious, reviewed edit (and stays in sync
 	// with the frontend's OAUTH_GRANTABLE_SCOPES assertion).
@@ -37,6 +48,7 @@ func TestOAuthGrantableScopesExactSet(t *testing.T) {
 		ScopeCRMWrite:      true,
 		ScopeListsRead:     true,
 		ScopeListsWrite:    true,
+		ScopeInboxWrite:    true,
 	}
 	if len(OAuthGrantableScopes) != len(want) {
 		t.Fatalf("OAuthGrantableScopes has %d entries, want %d", len(OAuthGrantableScopes), len(want))

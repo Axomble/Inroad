@@ -164,7 +164,15 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 	}
 	beforeAt := q.Get("before_last_message_at")
 	beforeID := q.Get("before_id")
-	if beforeAt != "" || beforeID != "" {
+	// Checked BEFORE trying to parse either field: a half-set pair must
+	// always surface the SAME clear message Service.ListThreads uses for the
+	// identical case, not whichever field happened to fail time.Parse/
+	// uuid.Parse on its own empty string (e.g. "before_id must be a UUID"
+	// when the caller's real mistake was omitting before_last_message_at).
+	if (beforeAt == "") != (beforeID == "") {
+		return ListFilter{}, errors.New(errHalfSetCursor)
+	}
+	if beforeAt != "" && beforeID != "" {
 		at, err := time.Parse(time.RFC3339, beforeAt)
 		if err != nil {
 			return ListFilter{}, errors.New("before_last_message_at must be RFC3339")

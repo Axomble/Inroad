@@ -38,7 +38,7 @@ func newFixture(t *testing.T, ctx context.Context) *fixture {
 	}
 	t.Cleanup(pool.Close)
 	q := gen.New(pool)
-	f := &fixture{pool: pool, q: q, store: inbox.NewPgStore(q)}
+	f := &fixture{pool: pool, q: q, store: inbox.NewPgStore(pool)}
 	f.ws, f.mailbox = seedTenant(t, ctx, q)
 	return f
 }
@@ -135,6 +135,75 @@ func TestUpsertThreadRoundTripsAndCollapsesRepeatedRepliesAgainstPostgres(t *tes
 	// Still exactly one row: the second call updated, it did not insert.
 	if got := f.threadRowCount(t, ctx, root); got != 1 {
 		t.Fatalf("%d thread rows after the second upsert, want 1 (it must UPDATE, not INSERT)", got)
+	}
+}
+
+// The atomicity RecordReply exists for: a failure between the thread upsert
+// and the message insert must roll back BOTH, leaving neither row committed
+// — not a thread whose last_reply_class/last_message_at/unread reflect a
+// reply that was never actually recorded. The direction CHECK constraint
+// (inbox_messages_direction_check) is the forcing function: it fails only
+// AFTER the thread half of the transaction has already run, which is exactly
+// the mid-transaction failure window the fix closes. A caller reaching the
+// store with an invalid direction can't happen through Service (it validates
+// first), but Store is a seam other callers can reach directly, and the
+// database's own constraint is the backstop regardless.
+func TestRecordReplyRollsBackBothRowsOnMidTransactionFailureAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	root := "<rollback-" + uuid.NewString() + "@sender.test>"
+
+	_, err := f.store.RecordReply(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: root, Subject: "Hi", LastReplyClass: "neutral",
+	}, inbox.InsertMessageInput{
+		Direction:  "sideways", // violates inbox_messages_direction_check
+		BodyText:   "this must never land",
+		OccurredAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("want an error from the invalid direction, got nil")
+	}
+
+	if got := f.threadRowCount(t, ctx, root); got != 0 {
+		t.Fatalf("%d thread rows survive a rolled-back RecordReply, want 0 "+
+			"(the UpsertThread half must not commit alone)", got)
+	}
+	var messages int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM inbox_messages WHERE workspace_id = $1`, f.ws).Scan(&messages); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if messages != 0 {
+		t.Fatalf("%d message rows survive a rolled-back RecordReply, want 0", messages)
+	}
+}
+
+// The success path, for symmetry with the rollback test above: RecordReply
+// commits BOTH rows together, and the message is reachable through the
+// thread it was inserted under in the same transaction.
+func TestRecordReplyCommitsBothRowsTogetherAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	root := "<commit-" + uuid.NewString() + "@sender.test>"
+
+	th, err := f.store.RecordReply(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: root, Subject: "Hi", LastReplyClass: "neutral",
+	}, inbox.InsertMessageInput{
+		Direction: "inbound", FromEmail: "them@example.com", BodyText: "hello", OccurredAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("RecordReply: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if len(detail.Messages) != 1 || detail.Messages[0].BodyText != "hello" {
+		t.Fatalf("messages = %+v, want the one RecordReply just inserted", detail.Messages)
+	}
+	if detail.Messages[0].WorkspaceID != f.ws || detail.Messages[0].ThreadID != th.ID {
+		t.Fatalf("message = %+v, want it stamped with the transaction's own thread/workspace", detail.Messages[0])
 	}
 }
 

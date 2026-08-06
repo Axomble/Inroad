@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -123,7 +124,14 @@ type InsertMessageInput struct {
 // workspace id as an explicit argument (from auth.UserFromContext at the HTTP
 // boundary, or from the caller's own trusted context in the worker path) and
 // every query is filtered by it — see docs/security.md.
+//
+// RecordReply is the atomic combination of UpsertThread + InsertMessage: the
+// only write path Service.RecordReply uses. UpsertThread/InsertMessage remain
+// on the interface in their own right (Task 3/4's stated contract depends on
+// these exact names) but Service no longer calls them separately — a caller
+// that did would reopen the non-atomic gap RecordReply exists to close.
 type Store interface {
+	RecordReply(ctx context.Context, threadIn UpsertThreadInput, msgIn InsertMessageInput) (Thread, error)
 	UpsertThread(ctx context.Context, in UpsertThreadInput) (Thread, error)
 	InsertMessage(ctx context.Context, in InsertMessageInput) error
 	ListThreads(ctx context.Context, workspaceID uuid.UUID, filter ListFilter) (ThreadPage, error)
@@ -158,17 +166,22 @@ func NormalizeLimit(requested int32) int32 {
 
 // PgStore implements Store by wrapping sqlc-generated queries. It is the only
 // place in this domain that knows about gen.Queries or its param/row structs.
+// pool is kept alongside q so RecordReply can open its own transaction — every
+// other method flows through q (following campaign.PgStore's identical shape).
 type PgStore struct {
-	q *gen.Queries
+	pool *pgxpool.Pool
+	q    *gen.Queries
 }
 
-// NewPgStore builds a PgStore over q.
-func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
+// NewPgStore builds a PgStore over pool.
+func NewPgStore(pool *pgxpool.Pool) *PgStore { return &PgStore{pool: pool, q: gen.New(pool)} }
 
 var _ Store = (*PgStore)(nil)
 
-func (s *PgStore) UpsertThread(ctx context.Context, in UpsertThreadInput) (Thread, error) {
-	row, err := s.q.UpsertInboxThread(ctx, gen.UpsertInboxThreadParams{
+// upsertThreadParams maps UpsertThreadInput to the generated params, shared by
+// UpsertThread and RecordReply so the two never drift.
+func upsertThreadParams(in UpsertThreadInput) gen.UpsertInboxThreadParams {
+	return gen.UpsertInboxThreadParams{
 		WorkspaceID:    in.WorkspaceID,
 		MailboxID:      in.MailboxID,
 		CampaignID:     pgUUID(in.CampaignID),
@@ -176,15 +189,13 @@ func (s *PgStore) UpsertThread(ctx context.Context, in UpsertThreadInput) (Threa
 		RootMessageID:  in.RootMessageID,
 		Subject:        in.Subject,
 		LastReplyClass: in.LastReplyClass,
-	})
-	if err != nil {
-		return Thread{}, err
 	}
-	return threadFromRow(row), nil
 }
 
-func (s *PgStore) InsertMessage(ctx context.Context, in InsertMessageInput) error {
-	return s.q.InsertInboxMessage(ctx, gen.InsertInboxMessageParams{
+// insertMessageParams maps InsertMessageInput to the generated params, shared
+// by InsertMessage and RecordReply so the two never drift.
+func insertMessageParams(in InsertMessageInput) gen.InsertInboxMessageParams {
+	return gen.InsertInboxMessageParams{
 		ThreadID:    in.ThreadID,
 		WorkspaceID: in.WorkspaceID,
 		Direction:   in.Direction,
@@ -197,7 +208,57 @@ func (s *PgStore) InsertMessage(ctx context.Context, in InsertMessageInput) erro
 		BodyHtml:    in.BodyHTML,
 		ReplyClass:  in.ReplyClass,
 		OccurredAt:  pgtype.Timestamptz{Time: in.OccurredAt, Valid: true},
-	})
+	}
+}
+
+// RecordReply upserts the thread and inserts the message in ONE transaction:
+// without this, a connection dropped between the two separate calls would
+// leave a thread whose last_reply_class/last_message_at/unread reflect a
+// reply that was never actually recorded — and because UpsertThread's UPDATE
+// SET list only ever touches those three columns (never message content), a
+// later real reply to the same root_message_id would silently paper over the
+// gap with no way to tell a half-applied reply from a real one. Begin/defer
+// Rollback/Commit mirrors campaign.PgStore.DeleteDraft's shape.
+func (s *PgStore) RecordReply(ctx context.Context, threadIn UpsertThreadInput, msgIn InsertMessageInput) (Thread, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Thread{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := s.q.WithTx(tx)
+
+	row, err := qtx.UpsertInboxThread(ctx, upsertThreadParams(threadIn))
+	if err != nil {
+		return Thread{}, err
+	}
+	th := threadFromRow(row)
+
+	// ThreadID/WorkspaceID always come from the thread just upserted in THIS
+	// transaction and the caller's trusted threadIn, never from msgIn — same
+	// belt-and-braces the two-call path used to apply at the Service layer,
+	// relocated here now that only the store knows the thread id at the right
+	// moment.
+	msgIn.ThreadID = th.ID
+	msgIn.WorkspaceID = threadIn.WorkspaceID
+	if err := qtx.InsertInboxMessage(ctx, insertMessageParams(msgIn)); err != nil {
+		return Thread{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Thread{}, err
+	}
+	return th, nil
+}
+
+func (s *PgStore) UpsertThread(ctx context.Context, in UpsertThreadInput) (Thread, error) {
+	row, err := s.q.UpsertInboxThread(ctx, upsertThreadParams(in))
+	if err != nil {
+		return Thread{}, err
+	}
+	return threadFromRow(row), nil
+}
+
+func (s *PgStore) InsertMessage(ctx context.Context, in InsertMessageInput) error {
+	return s.q.InsertInboxMessage(ctx, insertMessageParams(in))
 }
 
 func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter ListFilter) (ThreadPage, error) {

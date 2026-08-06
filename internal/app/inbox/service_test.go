@@ -44,6 +44,25 @@ func (f *fakeStore) InsertMessage(_ context.Context, in inbox.InsertMessageInput
 	return nil
 }
 
+// RecordReply is the fake's analogue of PgStore's single-transaction method:
+// it calls its own UpsertThread + InsertMessage internally. No real
+// transaction is needed for an in-memory fake (there is nothing to roll back
+// to), but the call sequence — and the ThreadID/WorkspaceID override — mirror
+// PgStore.RecordReply exactly, so Service's thin pass-through is exercised
+// the same way here as against real Postgres.
+func (f *fakeStore) RecordReply(ctx context.Context, threadIn inbox.UpsertThreadInput, msgIn inbox.InsertMessageInput) (inbox.Thread, error) {
+	th, err := f.UpsertThread(ctx, threadIn)
+	if err != nil {
+		return inbox.Thread{}, err
+	}
+	msgIn.ThreadID = th.ID
+	msgIn.WorkspaceID = threadIn.WorkspaceID
+	if err := f.InsertMessage(ctx, msgIn); err != nil {
+		return inbox.Thread{}, err
+	}
+	return th, nil
+}
+
 func (f *fakeStore) ListThreads(_ context.Context, ws uuid.UUID, _ inbox.ListFilter) (inbox.ThreadPage, error) {
 	var items []inbox.Thread
 	for _, t := range f.threads {

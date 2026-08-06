@@ -133,11 +133,29 @@ func TestListBadLimitIs400(t *testing.T) {
 	}
 }
 
-func TestListHalfSetCursorIs400(t *testing.T) {
+// A half-set cursor must 400 with the SAME clear "must be set together"
+// message regardless of WHICH half was omitted — not a misleading
+// field-specific parse error (e.g. "before_id must be a UUID" when the
+// caller's real mistake was omitting before_last_message_at, because
+// uuid.Parse("") failed on the OTHER field's empty string).
+func TestListHalfSetCursorIs400WithTheClearMessage(t *testing.T) {
+	const wantMessage = "before_last_message_at and before_id must be set together"
 	h := inbox.NewHandler(inbox.NewService(newFakeStore()))
-	w := serve(t, h, http.MethodGet, "/inbox/threads?before_id="+uuid.NewString(), "")
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+
+	onlyBeforeID := serve(t, h, http.MethodGet, "/inbox/threads?before_id="+uuid.NewString(), "")
+	if onlyBeforeID.Code != http.StatusBadRequest {
+		t.Fatalf("only before_id set: want 400, got %d: %s", onlyBeforeID.Code, onlyBeforeID.Body.String())
+	}
+	if !strings.Contains(onlyBeforeID.Body.String(), wantMessage) {
+		t.Fatalf("only before_id set: body = %s, want it to contain %q", onlyBeforeID.Body.String(), wantMessage)
+	}
+
+	onlyBeforeAt := serve(t, h, http.MethodGet, "/inbox/threads?before_last_message_at=2026-01-01T00:00:00Z", "")
+	if onlyBeforeAt.Code != http.StatusBadRequest {
+		t.Fatalf("only before_last_message_at set: want 400, got %d: %s", onlyBeforeAt.Code, onlyBeforeAt.Body.String())
+	}
+	if !strings.Contains(onlyBeforeAt.Body.String(), wantMessage) {
+		t.Fatalf("only before_last_message_at set: body = %s, want it to contain %q", onlyBeforeAt.Body.String(), wantMessage)
 	}
 }
 

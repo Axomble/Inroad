@@ -1954,7 +1954,7 @@ export type ListInboxThreadsApiArg = {
   beforeLastMessageAt?: string;
   /** Keyset cursor. Must be set together with before_last_message_at, or not at all. */
   beforeId?: string;
-  /** Page size. Defaults to 25, capped at 200. */
+  /** Page size. Defaults to 25, capped at 200 (a larger request is clamped, not rejected). */
   limit?: number;
 };
 export type GetInboxThreadApiResponse =
