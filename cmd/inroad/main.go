@@ -37,6 +37,7 @@ import (
 	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/identity"
+	"github.com/inroad/inroad/internal/app/inbox"
 	"github.com/inroad/inroad/internal/app/list"
 	"github.com/inroad/inroad/internal/app/mailbox"
 	"github.com/inroad/inroad/internal/app/mcpserver"
@@ -329,6 +330,11 @@ func run() error {
 	pulseSvc := pulse.NewService(pulse.NewPgStore(queries))
 	crmSvc := crm.NewService(crm.NewPgStore(pool))
 	crmHandler := crm.NewHandler(crmSvc)
+	// Unified inbox (thread/message read model). The write path (RecordReply)
+	// is called by the reply-polling worker through its own coreapi seam
+	// (internal/coreapi/inprocess), not from here; this handler is the
+	// read/mark-read HTTP surface only.
+	inboxHandler := inbox.NewHandler(inbox.NewService(inbox.NewPgStore(pool)))
 	// AI settings (agent platform PR A1). No shipped model catalog: native
 	// model metadata comes from models.dev at runtime, cached in Postgres with
 	// serve-stale-on-failure. Provider credentials seal under the same
@@ -462,6 +468,10 @@ func run() error {
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
 		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
 		{pattern: "/api/v1/crm", handler: crmHandler.Routes()},
+		// Unified inbox: GET /threads, GET /threads/{id}, PUT /threads/{id}/read.
+		// Scope-gated per route inside Routes() (inbox:read / inbox:write); a
+		// session principal holds both implicitly.
+		{pattern: "/api/v1/inbox", handler: inboxHandler.Routes()},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
 		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
 		// Routes(identStore) additionally applies RequireVerified to /launch

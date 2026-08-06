@@ -12,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/enrollment"
+	"github.com/inroad/inroad/internal/app/inbox"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -50,6 +51,12 @@ type client struct {
 	// it through EvaluateCampaignBreaker, so there is exactly one implementation and
 	// the API and the execution plane cannot disagree about when a campaign stops.
 	breaker *deliverability.Service
+	// inbox owns unified-inbox thread/message storage. Composed here (needs
+	// nothing beyond pool, like enroll/breaker above) so the inbox poller's
+	// StoreInboundMessage writes through the SAME transactional
+	// Service.RecordReply the control-plane HTTP handler reads from, rather than
+	// re-deriving the upsert-thread-then-insert-message atomicity here.
+	inbox *inbox.Service
 }
 
 // New returns the in-process coreapi client backed by the given connection
@@ -73,6 +80,7 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		breaker:       deliverability.NewService(deliverability.NewPgStore(pool)),
 		warmupSecret:  warmupSecret,
 		warmupContent: warmupContent,
+		inbox:         inbox.NewService(inbox.NewPgStore(pool)),
 	}
 }
 
