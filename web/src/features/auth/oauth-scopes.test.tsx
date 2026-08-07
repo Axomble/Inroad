@@ -21,15 +21,20 @@ test('the grantable set mirrors the backend exactly: no send/write-campaign/writ
       'campaigns:read',
       'contacts:read',
       'contacts:write',
+      'crm:read',
+      'crm:write',
+      'inbox:write',
       'lists:read',
       'lists:write',
       'mailboxes:read',
     ].sort(),
   )
-  // The three dangerous scopes are structurally excluded.
+  // The dangerous scopes are structurally excluded.
   expect(OAUTH_GRANTABLE_SCOPES).not.toContain('campaigns:send')
   expect(OAUTH_GRANTABLE_SCOPES).not.toContain('campaigns:write')
   expect(OAUTH_GRANTABLE_SCOPES).not.toContain('mailboxes:write')
+  expect(OAUTH_GRANTABLE_SCOPES).not.toContain('inbox:read')
+  expect(OAUTH_GRANTABLE_SCOPES).not.toContain('deliverability:write')
   // Grantable scopes are a strict subset of the API-key scope vocabulary.
   for (const scope of OAUTH_GRANTABLE_SCOPES) {
     expect(API_KEY_SCOPES).toContain(scope)

@@ -86,7 +86,7 @@ function ThreadRow({
         </div>
         <div className="truncate text-[12px] text-muted-foreground">{thread.subject || '(no subject)'}</div>
       </div>
-      <ReplyClassPill replyClass={thread.last_reply_class} className="shrink-0" />
+      <ReplyClassPill replyClass={thread.last_reply_class} replyLabel={thread.reply_label} className="shrink-0" />
       <div className="flex w-28 shrink-0 flex-col items-end gap-0.5">
         <time className="font-mono text-[11px] text-muted-foreground" dateTime={thread.last_message_at}>
           {relativeTime(thread.last_message_at)}

@@ -98,6 +98,24 @@ func TestTestSendPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestInboxReplySendPayloadRoundTrip(t *testing.T) {
+	p := InboxReplySendPayload{ThreadID: "t1", BodyText: "thanks!", WorkspaceID: "w1", TaskID: "inboxreply:t1:1700000000"}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got InboxReplySendPayload
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got != p {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", got, p)
+	}
+	if TaskInboxReplySend != "inbox:reply_send" {
+		t.Errorf("task name drift: %q", TaskInboxReplySend)
+	}
+}
+
 // TestTestSendTaskID proves the dedup key collapses two enqueues for the SAME
 // (campaign, step, mailbox) within the same second (a double-submitted form),
 // while a later second yields a distinct key (a genuinely new test-send); a

@@ -837,6 +837,72 @@ func TestGetThreadWithNoCampaignOrContactReturnsInboundOnlyAgainstPostgres(t *te
 	}
 }
 
+// reply_label resolves last_reply_class to the workspace's label row (a
+// LEFT JOIN on (workspace_id, key)) for BOTH GetThread and ListThreads.
+// "positive" is one of the seven builtins the workspaces_seed_reply_labels
+// trigger seeds on every new workspace (migration 000047), so no extra setup
+// is needed to exercise a resolved label.
+func TestGetThreadAndListThreadsResolveReplyLabelAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	th, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<labeled@sender.test>",
+		Subject: "Hi", LastReplyClass: "positive",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if detail.Thread.ReplyLabel == nil || detail.Thread.ReplyLabel.Key != "positive" ||
+		detail.Thread.ReplyLabel.Label != "Interested" || detail.Thread.ReplyLabel.Color != "#22C55E" {
+		t.Fatalf("GetThread.Thread.ReplyLabel = %+v, want the seeded builtin 'positive' label", detail.Thread.ReplyLabel)
+	}
+
+	page, err := f.store.ListThreads(ctx, f.ws, inbox.ListFilter{MailboxID: &f.mailbox})
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	var got inbox.Thread
+	for _, it := range page.Items {
+		if it.ID == th.ID {
+			got = it
+		}
+	}
+	if got.ReplyLabel == nil || got.ReplyLabel.Key != "positive" || got.ReplyLabel.Label != "Interested" {
+		t.Fatalf("ListThreads item.ReplyLabel = %+v, want the seeded builtin 'positive' label", got.ReplyLabel)
+	}
+}
+
+// A last_reply_class with no matching label in the workspace (a deleted
+// custom label whose key survives on historical rows, or one that never
+// existed) resolves to a nil ReplyLabel, not a zero-value struct — the
+// "degrade to the raw key" contract the OpenAPI schema documents.
+func TestGetThreadWithUnresolvedReplyClassHasNilReplyLabelAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+
+	th, err := f.store.UpsertThread(ctx, inbox.UpsertThreadInput{
+		WorkspaceID: f.ws, MailboxID: f.mailbox, RootMessageID: "<unresolved@sender.test>",
+		Subject: "Hi", LastReplyClass: "some_deleted_custom_label",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	detail, err := f.store.GetThread(ctx, f.ws, th.ID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if detail.Thread.ReplyLabel != nil {
+		t.Fatalf("ReplyLabel = %+v, want nil for an unresolved last_reply_class", detail.Thread.ReplyLabel)
+	}
+}
+
 // seedMailbox adds a SECOND mailbox to the workspace, for the mailbox_id
 // filter test above.
 func seedMailbox(t *testing.T, ctx context.Context, q *gen.Queries, ws uuid.UUID) uuid.UUID {

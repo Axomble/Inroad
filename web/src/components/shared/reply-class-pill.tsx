@@ -43,9 +43,24 @@ function toReplyClass(value: string | null | undefined): ReplyClass | undefined 
   return value != null && value in classMeta ? (value as ReplyClass) : undefined
 }
 
+/** The server-resolved label a thread's `last_reply_class` maps to, per the workspace's reply-label taxonomy (see `InboxReplyLabelRef`). */
+export interface ReplyLabelRef {
+  label: string
+  /** Hex color, #RRGGBB. */
+  color: string
+}
+
 export interface ReplyClassPillProps {
   /** The enrollment's stored reply class, or null/undefined when none. */
   replyClass: string | null | undefined
+  /**
+   * The workspace's own label + color for `replyClass`, resolved server-side
+   * (`InboxThreadSummary.reply_label`). When present it takes priority over
+   * the legacy built-in mapping below, since labels can be renamed/recolored
+   * per workspace; when null (the key no longer matches a label, or the
+   * caller has no such data) this falls back to `classMeta`.
+   */
+  replyLabel?: ReplyLabelRef | null
   className?: string
 }
 
@@ -54,7 +69,22 @@ export interface ReplyClassPillProps {
  * returns null when there is no (recognized) class, so callers can render it
  * unconditionally in a row.
  */
-export function ReplyClassPill({ replyClass, className }: ReplyClassPillProps) {
+export function ReplyClassPill({ replyClass, replyLabel, className }: ReplyClassPillProps) {
+  if (replyLabel) {
+    return (
+      <span data-slot="reply-class-pill" className={cn('inline-flex items-center gap-1.5', className)}>
+        <span
+          className="size-1.5 rounded-full"
+          style={{ backgroundColor: replyLabel.color }}
+          aria-hidden="true"
+        />
+        <span className="font-mono text-[10.5px] font-medium uppercase tracking-[0.1em] text-foreground">
+          {replyLabel.label}
+        </span>
+      </span>
+    )
+  }
+
   const key = toReplyClass(replyClass)
   if (!key) return null
   const { label, tone } = classMeta[key]

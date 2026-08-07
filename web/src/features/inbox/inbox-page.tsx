@@ -11,6 +11,10 @@ import { useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-nav'
 import { useListMailboxesQuery } from '@/store/api'
+// Cross-feature query-hook imports are allowed for read-only reference data
+// (see features/campaigns/campaign-form.tsx). Cross-feature UI imports remain
+// forbidden.
+import { useListReplyLabelsQuery } from '@/features/reply-labels/api'
 import { useListInboxThreadsQuery, type InboxThreadSummary } from './api'
 import { ThreadList } from './thread-list'
 import {
@@ -24,17 +28,7 @@ import {
   type CursorStack,
 } from './inbox-search'
 
-/** The reply classes the backend can assign, per components/shared/reply-class-pill.tsx. */
-const REPLY_CLASS_FILTERS = [
-  { id: '', label: 'All replies' },
-  { id: 'positive', label: 'Positive' },
-  { id: 'negative', label: 'Negative' },
-  { id: 'neutral', label: 'Neutral' },
-  { id: 'out_of_office', label: 'Out of office' },
-  { id: 'auto_reply', label: 'Auto-reply' },
-  { id: 'unsubscribe', label: 'Unsubscribed' },
-  { id: 'unknown', label: 'Unknown' },
-] as const
+const ALL_REPLIES_FILTER = { id: '', label: 'All replies' }
 
 const PAGE_SIZE = 25
 
@@ -56,6 +50,17 @@ export function InboxPage() {
   const { data: mailboxes, error: mailboxesError } = useListMailboxesQuery()
   const mailboxesById = useMemo(() => new Map((mailboxes ?? []).map((m) => [m.id ?? '', m])), [mailboxes])
   const mailboxLabel = (id: string) => mailboxesById.get(id)?.email || id
+
+  // The filter's options are the workspace's own reply-label taxonomy (each
+  // filter value is the label's raw `key`, the same string stored on
+  // `last_reply_class` and sent as the `class` query param) — not a hardcoded
+  // set of the legacy built-in classes. While labels are still loading this
+  // degrades to just "All replies" rather than blocking the page on them.
+  const { data: replyLabelsData } = useListReplyLabelsQuery()
+  const replyClassFilters = useMemo(
+    () => [ALL_REPLIES_FILTER, ...(replyLabelsData?.labels.map((l) => ({ id: l.key, label: l.label })) ?? [])],
+    [replyLabelsData],
+  )
 
   // Unfiltered by mailbox/class on purpose: the scope rail's job is "how many
   // threads live in each mailbox", a question the currently-selected
@@ -216,7 +221,7 @@ export function InboxPage() {
         <div className="flex min-w-0 flex-1 flex-col">
           <SectionBar label={selectedMailbox ? mailboxLabel(selectedMailbox) : 'All mailboxes'}>
             <ListSearchInput value={typedQuery} onChange={setTypedQuery} placeholder="Search subject or contact email…" />
-            <SortMenu options={REPLY_CLASS_FILTERS} value={replyClass} onChange={selectClass} />
+            <SortMenu options={replyClassFilters} value={replyClass} onChange={selectClass} />
           </SectionBar>
 
           {recoveredFromStaleCursor && (

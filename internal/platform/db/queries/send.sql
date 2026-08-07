@@ -22,19 +22,54 @@ SELECT status, message_id FROM sends WHERE id = $1 AND workspace_id = $2;
 UPDATE sends SET claimed_at = 'epoch'
 WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
 -- name: CountSentToday :one
--- Sends today for a mailbox, counted over the UTC calendar day. The half-open
--- range is explicitly UTC (date_trunc on now() AT TIME ZONE 'utc'), so it counts
--- the UTC day unconditionally. This matches the old
+-- Sends today for a mailbox, counted over the UTC calendar day, PLUS today's
+-- manually-sent inbox replies (POST /inbox/threads/{id}/reply). A reply from
+-- the unified inbox is never itself a `sends` row -- sends.campaign_id/
+-- contact_id are NOT NULL with a UNIQUE(campaign_id, contact_id), which a
+-- reply on a legacy direct-send thread (no campaign/contact) cannot satisfy,
+-- and which would collide with the real send row on a threaded one -- but it
+-- still consumes the mailbox's real daily volume, so this gate (the daily-cap
+-- enforcement the sender pool and step-send job read, per docs/security.md's
+-- "a manual reply is never blocked by the cap, but it counts toward it")
+-- must see it too. Manual replies are stored as direction='outbound'
+-- inbox_messages rows (see internal/app/inbox.Service.Reply /
+-- RecordOutboundReply); found here via inbox_threads.mailbox_id, using the
+-- plain mailbox_id index migration 000049 added (this call has no
+-- workspace_id to use the existing composite one — see below).
+--
+-- The half-open range is explicitly UTC (date_trunc on now() AT TIME ZONE
+-- 'utc'), so it counts the UTC day unconditionally. This matches the old
 -- sent_at::date = (now() AT TIME ZONE 'utc')::date only when the session
 -- TimeZone is UTC; the new form is in fact more correct, being UTC-day
--- regardless of the session TimeZone. Expressed as a sargable half-open range on
--- sent_at so the partial index idx_sends_mailbox_sent
--- (mailbox_id, sent_at WHERE status='sent') can range-seek instead of casting
--- every row's sent_at. Runs on every advance/send.
-SELECT count(*) FROM sends
-WHERE mailbox_id = $1 AND status = 'sent'
-  AND sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
-  AND sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day';
+-- regardless of the session TimeZone. The sends half is expressed as a
+-- sargable half-open range on sent_at so the partial index
+-- idx_sends_mailbox_sent (mailbox_id, sent_at WHERE status='sent') can
+-- range-seek instead of casting every row's sent_at. Runs on every
+-- advance/send. Workspace-pinned (this query is not, being keyed on an
+-- unguessable mailbox id).
+--
+-- PERFORMANCE NOTE: the inbox_messages half is NOT as tight as the sends
+-- half — idx_inbox_threads_mailbox (migration 000049) narrows by mailbox_id
+-- but not by date, so the join's outer side is every thread the mailbox has
+-- EVER had, not just today's, before idx_inbox_messages_thread narrows each
+-- to today's occurred_at range. Fine at manual-reply volumes (an operator
+-- hand-sending replies, not a bulk campaign), but if that ever changes, the
+-- escape hatch is denormalizing mailbox_id onto inbox_messages directly (a
+-- migration + backfill + a partial index on (mailbox_id, occurred_at) WHERE
+-- direction='outbound'), which would make this half scale with reply volume
+-- instead of total thread history.
+SELECT (
+  (SELECT count(*) FROM sends s
+   WHERE s.mailbox_id = sqlc.arg('mailbox_id')::uuid AND s.status = 'sent'
+     AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+     AND s.sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day')
+  +
+  (SELECT count(*) FROM inbox_messages im
+   JOIN inbox_threads t ON t.id = im.thread_id
+   WHERE t.mailbox_id = sqlc.arg('mailbox_id')::uuid AND im.direction = 'outbound'
+     AND im.occurred_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+     AND im.occurred_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day')
+)::bigint;
 -- name: GetCampaignIDForSend :one
 SELECT campaign_id, workspace_id FROM sends WHERE id = $1;
 -- name: GetSendByMessageID :one

@@ -23,6 +23,17 @@ const (
 	ScopeCampaignsSend  = "campaigns:send"
 	ScopeInboxRead      = "inbox:read"
 	ScopeInboxWrite     = "inbox:write"
+	// ScopeInboxSend authorizes POST /inbox/threads/{id}/reply — sending a
+	// manual reply from the unified inbox. Deliberately its own scope rather
+	// than folded into ScopeInboxWrite: that scope authorizes only the
+	// boolean unread/read toggle, which mutates no business data and exposes
+	// no reply content, whereas sending mail is the campaigns:send-class
+	// highest-abuse capability (spam, sender-reputation damage, real cost).
+	// It is in AllScopes (a workspace-minted API key or a logged-in human may
+	// send a reply) but deliberately absent from OAuthGrantableScopes — see
+	// that list's own doc comment for why sending is never delegable to a
+	// third-party client.
+	ScopeInboxSend = "inbox:send"
 	// ScopeDeliverabilityWrite authorizes POST /deliverability/events — an
 	// external pipeline (an SES SNS subscriber, a provider webhook) reporting a
 	// complaint or bounce. It is its own scope rather than campaigns:write
@@ -49,6 +60,7 @@ var AllScopes = []string{
 	ScopeDeliverabilityWrite,
 	ScopeInboxRead,
 	ScopeInboxWrite,
+	ScopeInboxSend,
 }
 
 // IsKnownScope reports whether scope is part of the server's vocabulary.
@@ -70,9 +82,11 @@ func IsKnownScope(scope string) bool {
 // The set structurally EXCLUDES every dangerous capability so a delegated
 // third-party grant can never reach one:
 //
-//   - ScopeCampaignsSend — sending mail is the single highest-abuse capability
-//     (spam, sender-reputation damage, real cost); it must never be reachable via a
-//     delegated grant, only by a logged-in human or a workspace-minted API key.
+//   - ScopeCampaignsSend / ScopeInboxSend — sending mail is the single
+//     highest-abuse capability (spam, sender-reputation damage, real cost); it
+//     must never be reachable via a delegated grant, only by a logged-in human
+//     or a workspace-minted API key. ScopeInboxSend covers the same risk for a
+//     manual reply sent from the unified inbox.
 //   - ScopeCampaignsWrite — mutating a sequence/campaign is a step toward triggering
 //     sends and can destructively alter a live campaign.
 //   - ScopeMailboxesWrite — mutates mailbox connections/credentials, which is

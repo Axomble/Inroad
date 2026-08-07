@@ -19,6 +19,11 @@ type fakeStore struct {
 	// query param through to the Store without needing a real Postgres LIKE
 	// match to prove it.
 	lastListFilter inbox.ListFilter
+	// setUnreadErr, when non-nil, makes SetUnread fail regardless of the
+	// thread's real state — Reply's tests use this to pin the "enqueue
+	// succeeded, mark-read failed" behavior without needing a way to make a
+	// real Postgres UPDATE fail.
+	setUnreadErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -88,12 +93,35 @@ func (f *fakeStore) GetThread(_ context.Context, ws, id uuid.UUID) (inbox.Thread
 }
 
 func (f *fakeStore) SetUnread(_ context.Context, ws, id uuid.UUID, unread bool) error {
+	if f.setUnreadErr != nil {
+		return f.setUnreadErr
+	}
 	t, ok := f.threads[id]
 	if !ok || t.WorkspaceID != ws {
 		return inbox.ErrNotFound
 	}
 	t.Unread = unread
 	f.threads[id] = t
+	return nil
+}
+
+// RecordOutboundReply is the fake's analogue of PgStore's single-transaction
+// method: it appends the message and bumps last_message_at, mirroring
+// RecordReply's fake above but WITHOUT flipping unread — the real behavioral
+// difference Reply's tests rely on.
+func (f *fakeStore) RecordOutboundReply(_ context.Context, threadID, ws uuid.UUID, msgIn inbox.InsertMessageInput) error {
+	t, ok := f.threads[threadID]
+	if !ok || t.WorkspaceID != ws {
+		return inbox.ErrNotFound
+	}
+	f.messages[threadID] = append(f.messages[threadID], inbox.Message{
+		ThreadID: threadID, Direction: msgIn.Direction, MessageID: msgIn.MessageID,
+		FromEmail: msgIn.FromEmail, FromName: msgIn.FromName, ToEmail: msgIn.ToEmail,
+		Subject: msgIn.Subject, BodyText: msgIn.BodyText, BodyHTML: msgIn.BodyHTML,
+		ReplyClass: msgIn.ReplyClass, OccurredAt: msgIn.OccurredAt,
+	})
+	t.LastMessageAt = time.Now().UTC()
+	f.threads[threadID] = t
 	return nil
 }
 

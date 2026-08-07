@@ -12,13 +12,36 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bumpInboxThreadLastMessageAt = `-- name: BumpInboxThreadLastMessageAt :exec
+UPDATE inbox_threads SET last_message_at = now() WHERE id = $1 AND workspace_id = $2
+`
+
+type BumpInboxThreadLastMessageAtParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Advances a thread's last_message_at after an operator's manual reply is
+// recorded (Service.RecordOutboundReply), WITHOUT touching unread or
+// last_reply_class: unread was already cleared by Service.Reply when it
+// enqueued the send (POST /inbox/threads/{id}/reply marks the thread read),
+// and an operator's own outbound reply is not itself a classified inbound
+// reply. Mirrors UpsertInboxThread's bump but deliberately narrower.
+func (q *Queries) BumpInboxThreadLastMessageAt(ctx context.Context, arg BumpInboxThreadLastMessageAtParams) error {
+	_, err := q.db.Exec(ctx, bumpInboxThreadLastMessageAt, arg.ID, arg.WorkspaceID)
+	return err
+}
+
 const getInboxThread = `-- name: GetInboxThread :one
 SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
        COALESCE(c.email, '') AS contact_email,
        COALESCE(c.first_name, '') AS contact_first_name,
-       COALESCE(c.last_name, '') AS contact_last_name
+       COALESCE(c.last_name, '') AS contact_last_name,
+       rl.label AS reply_label_label,
+       rl.color AS reply_label_color
 FROM inbox_threads t
 LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+LEFT JOIN reply_labels rl ON rl.workspace_id = t.workspace_id AND rl.key = t.last_reply_class
 WHERE t.id = $1 AND t.workspace_id = $2
 `
 
@@ -42,9 +65,12 @@ type GetInboxThreadRow struct {
 	ContactEmail     string             `json:"contact_email"`
 	ContactFirstName string             `json:"contact_first_name"`
 	ContactLastName  string             `json:"contact_last_name"`
+	ReplyLabelLabel  *string            `json:"reply_label_label"`
+	ReplyLabelColor  *string            `json:"reply_label_color"`
 }
 
-// contact_* columns follow ListInboxThreads' LEFT JOIN convention above.
+// contact_* and reply_label_* columns follow ListInboxThreads' LEFT JOIN
+// conventions above.
 func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) (GetInboxThreadRow, error) {
 	row := q.db.QueryRow(ctx, getInboxThread, arg.ID, arg.WorkspaceID)
 	var i GetInboxThreadRow
@@ -63,6 +89,8 @@ func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) 
 		&i.ContactEmail,
 		&i.ContactFirstName,
 		&i.ContactLastName,
+		&i.ReplyLabelLabel,
+		&i.ReplyLabelColor,
 	)
 	return i, err
 }
@@ -159,9 +187,12 @@ const listInboxThreads = `-- name: ListInboxThreads :many
 SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
        COALESCE(c.email, '') AS contact_email,
        COALESCE(c.first_name, '') AS contact_first_name,
-       COALESCE(c.last_name, '') AS contact_last_name
+       COALESCE(c.last_name, '') AS contact_last_name,
+       rl.label AS reply_label_label,
+       rl.color AS reply_label_color
 FROM inbox_threads t
 LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+LEFT JOIN reply_labels rl ON rl.workspace_id = t.workspace_id AND rl.key = t.last_reply_class
 WHERE t.workspace_id = $1
   AND ($2::uuid IS NULL OR t.mailbox_id = $2)
   AND ($3::text IS NULL OR t.last_reply_class = $3)
@@ -199,6 +230,8 @@ type ListInboxThreadsRow struct {
 	ContactEmail     string             `json:"contact_email"`
 	ContactFirstName string             `json:"contact_first_name"`
 	ContactLastName  string             `json:"contact_last_name"`
+	ReplyLabelLabel  *string            `json:"reply_label_label"`
+	ReplyLabelColor  *string            `json:"reply_label_color"`
 }
 
 // Keyset on (last_message_at, id) DESC, newest first. sqlc.narg fields are
@@ -211,6 +244,13 @@ type ListInboxThreadsRow struct {
 // joined contact's email; the caller escapes LIKE metacharacters before this
 // reaches Postgres (see db.EscapeLike in platform/db) so a literal % or _ typed
 // by a user is never treated as a wildcard.
+//
+// reply_label_label/reply_label_color are a SECOND LEFT JOIN, on
+// (workspace_id, key), resolving last_reply_class to its current display
+// label — nullable columns (not COALESCE'd) so the Go layer can tell "no
+// label matches this key" (a deleted custom label, or a core that predates
+// the taxonomy) apart from "the key IS the empty string" and degrade to the
+// raw key, per the OpenAPI contract's InboxThreadSummary.reply_label doc.
 func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsParams) ([]ListInboxThreadsRow, error) {
 	rows, err := q.db.Query(ctx, listInboxThreads,
 		arg.WorkspaceID,
@@ -243,6 +283,8 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 			&i.ContactEmail,
 			&i.ContactFirstName,
 			&i.ContactLastName,
+			&i.ReplyLabelLabel,
+			&i.ReplyLabelColor,
 		); err != nil {
 			return nil, err
 		}

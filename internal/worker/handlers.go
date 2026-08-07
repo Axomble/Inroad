@@ -71,5 +71,5 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	mux.HandleFunc(queue.TaskSweepEnrollments, sequence.SweepHandler(core, enq))
 	// Reply & bounce detection: poll one mailbox's INBOX per task + reconcile.
 	// warmupSecret lets the poller verify + isolate warmup mail (spec §7/§9.4).
-	inbox.Register(mux, core, reader, enq, warmupSecret)
+	inbox.Register(mux, core, reader, sndr, enq, warmupSecret)
 }

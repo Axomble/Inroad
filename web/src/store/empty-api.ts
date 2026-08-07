@@ -102,6 +102,11 @@ export const emptyApi = createApi({
   // Tag types are declared centrally so every feature slice can add
   // providesTags/invalidatesTags in its own `enhanceEndpoints` block without
   // needing to redeclare them (and without silently typo'ing a new tag name).
-  tagTypes: ['Mailbox', 'Campaign', 'List', 'Contact', 'Session', 'Invite'] as const,
+  // A tag only needs to live here (rather than being added locally via that
+  // feature's own `addTagTypes`) when something outside the owning feature
+  // dispatches `invalidateTags` for it through the plain `api` import — e.g.
+  // this file's own email-verification refetch (`Session`), or the reply
+  // composer's delayed post-send refetch (`InboxThread`).
+  tagTypes: ['Mailbox', 'Campaign', 'List', 'Contact', 'Session', 'Invite', 'InboxThread'] as const,
   endpoints: () => ({}),
 })
