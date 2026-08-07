@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
+import { api } from '@/store/api'
 import { ReplyComposer } from '../reply-composer'
 
 const jsonHeaders = { 'content-type': 'application/json' }
@@ -29,6 +30,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  // Defensive: a failing assertion inside a fake-timers test must not leak
+  // fake time into the next test in the file.
+  vi.useRealTimers()
 })
 
 test('the send button is disabled with an empty or whitespace-only textarea', () => {
@@ -80,4 +84,60 @@ test('is replaced with an explanation, not an interactive composer, when the thr
   expect(screen.queryByRole('button', { name: /send/i })).not.toBeInTheDocument()
   expect(screen.queryByLabelText(/^reply$/i)).not.toBeInTheDocument()
   expect(screen.getByText(/you can reply once this contact has sent an inbound message/i)).toBeInTheDocument()
+})
+
+// MAX_BODY_LENGTH boundary: the component's own check is `length >
+// MAX_BODY_LENGTH`, so exactly 100,000 characters is still allowed and only
+// 100,001 crosses into "too long".
+test('exactly 100,000 characters is allowed; 100,001 shows the too-long alert and disables Send', () => {
+  renderWithProviders(<ReplyComposer threadId={THREAD_ID} hasInboundMessage />)
+  const textarea = screen.getByLabelText(/^reply$/i)
+  const send = screen.getByRole('button', { name: /send/i })
+
+  fireEvent.change(textarea, { target: { value: 'a'.repeat(100_000) } })
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(send).toBeEnabled()
+
+  fireEvent.change(textarea, { target: { value: 'a'.repeat(100_001) } })
+  expect(screen.getByRole('alert')).toHaveTextContent(/too long — max 100,000 characters \(100,001 so far\)/i)
+  expect(send).toBeDisabled()
+})
+
+// The 202 only means "queued" — DELAYED_REFETCH_MS covers the gap before the
+// worker has plausibly delivered the outbound message with one extra,
+// bounded cache-tag invalidation.
+test('a successful send schedules a delayed InboxThread invalidation that fires after 2s', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const invalidateSpy = vi.spyOn(api.util, 'invalidateTags')
+
+  renderWithProviders(<ReplyComposer threadId={THREAD_ID} hasInboundMessage />)
+  fireEvent.change(screen.getByLabelText(/^reply$/i), { target: { value: 'hi there' } })
+  fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+  await screen.findByRole('status')
+  // The mutation's own `invalidatesTags` already fires immediately on
+  // success — clear that call so the assertion below is specifically about
+  // the delayed one.
+  invalidateSpy.mockClear()
+
+  await vi.advanceTimersByTimeAsync(2000)
+
+  expect(invalidateSpy).toHaveBeenCalledWith([{ type: 'InboxThread', id: THREAD_ID }])
+})
+
+test('unmounting before the 2s delay elapses cancels the delayed invalidation', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const invalidateSpy = vi.spyOn(api.util, 'invalidateTags')
+
+  const { unmount } = renderWithProviders(<ReplyComposer threadId={THREAD_ID} hasInboundMessage />)
+  fireEvent.change(screen.getByLabelText(/^reply$/i), { target: { value: 'hi there' } })
+  fireEvent.click(screen.getByRole('button', { name: /send/i }))
+
+  await screen.findByRole('status')
+  invalidateSpy.mockClear()
+  unmount()
+
+  await vi.advanceTimersByTimeAsync(2000)
+
+  expect(invalidateSpy).not.toHaveBeenCalled()
 })
