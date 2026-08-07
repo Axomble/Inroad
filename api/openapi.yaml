@@ -2369,6 +2369,41 @@ paths:
         '404': { description: Not found }
         '409': { description: "The recipient is suppressed, or the thread has no inbound message to reply to" }
         '422': { description: Validation error (empty or oversized body) }
+  /inbox/threads/{id}/draft-reply:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: draftInboxReply
+      description: >-
+        Generate a suggested plain-text reply body for this thread using the
+        workspace's configured AI model, for a human to edit and then send via
+        POST /inbox/threads/{id}/reply. This endpoint NEVER sends mail and never
+        queues a send. The transcript is built server-side from this thread's own
+        message history; there is no request body. Requires the inbox:send scope
+        rather than inbox:read — drafting spends the workspace's AI budget and is
+        only useful as a step toward replying, so it sits behind the same
+        non-OAuth-grantable authority as the send itself. POST (not GET) because
+        each call has a billable side effect and must never be cached or
+        transparently retried. Rate-limited per IP and per workspace. An
+        Idempotency-Key header is IGNORED on this route: a repeated request is a
+        request for a fresh draft, and there is no duplicate side effect to
+        suppress (nothing is written and no mail is sent), so replaying a
+        recorded response would be the wrong answer. That also keeps 422
+        unambiguous here — see the 422 response.
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: A suggested reply body
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxDraftReply' }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: The thread has no inbound message to reply to }
+        '422': { description: "No AI model is configured for this workspace — configure one in Settings, AI. This is the ONLY meaning of 422 on this route (the endpoint takes no request body to validate, and the Idempotency-Key guard is skipped here), so a client may branch on the status alone. Not retryable: it needs a human to configure a provider, which is why this is not a 503." }
+        '429': { description: Too many draft requests for this IP or workspace }
+        '502': { description: "The AI provider call failed" }
+        '504': { description: The AI provider did not respond in time }
   /inbox/threads/{id}/read:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     put:
@@ -4166,6 +4201,16 @@ components:
       required: [body_text]
       properties:
         body_text: { type: string, minLength: 1, maxLength: 100000 }
+    InboxDraftReply:
+      type: object
+      required: [body_text]
+      properties:
+        body_text:
+          type: string
+          description: >-
+            Suggested reply body, plain text, never empty and never HTML. The
+            field name matches SendInboxReplyRequest.body_text so the client can
+            hand the edited text straight back to the reply endpoint.
     InboxThreadPage:
       type: object
       required: [items]

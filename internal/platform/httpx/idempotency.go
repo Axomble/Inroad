@@ -81,12 +81,30 @@ type IdempotencyStore interface {
 // group, so ok=false here is a programming error, not a normal user error.
 type WorkspaceIDFunc func(r *http.Request) (workspaceID string, ok bool)
 
+// SkipFunc reports that a request has no idempotency semantics to offer and
+// must pass through the guard untouched, exactly as if it carried no
+// Idempotency-Key.
+//
+// It exists for endpoints where REPLAYING a recorded response would be the
+// wrong answer — a generation endpoint asked for a fresh result, say — and
+// where the guard's 422 idempotency_key_reuse would collide with a status the
+// route already uses for a domain meaning, leaving a client that branches on
+// status alone unable to tell the two apart.
+//
+// This middleware mounts at the authenticated-group root, ahead of every
+// domain router, so a route cannot opt itself out from its own chain; the
+// decision is the composition root's (which is where the route table lives).
+// nil means "guard everything", the behavior before this seam existed.
+type SkipFunc func(r *http.Request) bool
+
 // Idempotency returns middleware that replays a previously-recorded response
 // for a repeated Idempotency-Key on a mutating request (POST/PUT/PATCH/
 // DELETE). It is a no-op for GET/HEAD or a request carrying no
 // Idempotency-Key header.
 //
 // Semantics:
+//  0. skip(r) reports true (see SkipFunc): pass through untouched, as if no
+//     header were present. A nil skip guards everything.
 //  1. No header, or a safe method: pass through untouched.
 //  2. Fresh key: run the handler with a capped (64 KiB) response recorder and
 //     persist status/body/content-type. A response over the cap still reaches
@@ -107,11 +125,15 @@ type WorkspaceIDFunc func(r *http.Request) (workspaceID string, ok bool)
 //  8. A >= 500 response is never cached: the claim row is deleted so a
 //     same-key retry re-executes (transient server errors must not be locked
 //     in for 24h).
-func Idempotency(store IdempotencyStore, workspaceID WorkspaceIDFunc) func(http.Handler) http.Handler {
+func Idempotency(store IdempotencyStore, workspaceID WorkspaceIDFunc, skip SkipFunc) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get(idempotencyHeader)
 			if key == "" || !isIdempotentGuardedMethod(r.Method) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if skip != nil && skip(r) {
 				next.ServeHTTP(w, r)
 				return
 			}

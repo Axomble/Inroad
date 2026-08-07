@@ -5,6 +5,7 @@ import {
   type FetchArgs,
   type FetchBaseQueryError,
 } from '@reduxjs/toolkit/query/react'
+import { withRetryAfter } from '@/lib/rtk-error'
 import { setSession, clearSession } from './slices/auth'
 
 // The generated api.ts injects endpoints into this base. Never hand-edit api.ts.
@@ -91,6 +92,14 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
   // of on its next natural poll.
   if (result.error?.status === 403 && (result.error.data as { error?: string } | undefined)?.error === 'email_not_verified') {
     api.dispatch(emptyApi.util.invalidateTags([{ type: 'Session', id: 'CURRENT' }]))
+  }
+
+  // Fold `Retry-After` onto the error payload. RTK keeps `meta` (which holds
+  // the raw Response, and so the headers) on the thunk action and hands
+  // components the payload alone — without this copy, no rate-limit message
+  // anywhere in the app can name the delay the server asked for.
+  if (result.error) {
+    return { ...result, error: withRetryAfter(result.error, result.meta?.response) }
   }
 
   return result

@@ -346,7 +346,10 @@ test('email-code: a rate-limited start surfaces a clear too-many-attempts messag
   fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'me@company.com' } })
   fireEvent.click(screen.getByRole('button', { name: /send code/i }))
 
-  expect(await screen.findByText(/too many attempts/i)).toBeInTheDocument()
+  // The 120s Retry-After above reaches the copy because the shared base query
+  // folds the header onto the error payload (store/empty-api.ts); rounded up,
+  // that reads as two minutes rather than a vague "wait a moment".
+  expect(await screen.findByText(/too many attempts.*try again in about 2 minutes/i)).toBeInTheDocument()
   // Still on the request step — no code field yet.
   expect(screen.queryByLabelText(/sign-in code/i)).not.toBeInTheDocument()
 })

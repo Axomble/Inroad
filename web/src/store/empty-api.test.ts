@@ -1,5 +1,6 @@
 import { configureStore } from '@reduxjs/toolkit'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { retryAfterSeconds } from '@/lib/rtk-error'
 import { emptyApi } from './empty-api'
 import authReducer from './slices/auth'
 
@@ -17,10 +18,10 @@ const testApi = emptyApi.injectEndpoints({
   overrideExisting: true,
 })
 
-function jsonResponse(body: unknown, status: number) {
+function jsonResponse(body: unknown, status: number, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   })
 }
 
@@ -89,6 +90,51 @@ describe('baseQueryWithReauth', () => {
     expect(b.data).toEqual({ ok: true })
     const refreshCalls = fetchMock.mock.calls.filter((call) => (call[0] as Request).url.includes('/auth/refresh'))
     expect(refreshCalls).toHaveLength(1)
+  })
+
+  // These drive a real request through the base query and then read the error
+  // exactly as a component does — off the dispatch result, with no `meta` in
+  // sight. That is the whole point: the header only reaches the UI because the
+  // base query copies it onto the payload.
+  test('a Retry-After delay in seconds is readable from the error a caller receives', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ error: 'rate_limited' }, 429, { 'retry-after': '120' })),
+    )
+
+    const result = await makeStore().dispatch(testApi.endpoints.ping.initiate())
+
+    expect(retryAfterSeconds(result.error)).toBe(120)
+  })
+
+  test('an HTTP-date Retry-After is converted to a delay in seconds', async () => {
+    const in90s = new Date(Date.now() + 90_000).toUTCString()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({}, 429, { 'retry-after': in90s })))
+
+    const result = await makeStore().dispatch(testApi.endpoints.ping.initiate())
+
+    const seconds = retryAfterSeconds(result.error)
+    // Slack for the clock ticking between building the header and reading it.
+    expect(seconds).toBeGreaterThanOrEqual(88)
+    expect(seconds).toBeLessThanOrEqual(90)
+  })
+
+  test('a 429 without the header leaves the error otherwise untouched', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ error: 'rate_limited' }, 429)))
+
+    const result = await makeStore().dispatch(testApi.endpoints.ping.initiate())
+
+    expect(retryAfterSeconds(result.error)).toBeNull()
+    expect(result.error).toMatchObject({ status: 429, data: { error: 'rate_limited' } })
+  })
+
+  test('a transport failure, which has no response to read a header from, still surfaces', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    const result = await makeStore().dispatch(testApi.endpoints.ping.initiate())
+
+    expect(result.error).toMatchObject({ status: 'FETCH_ERROR' })
+    expect(retryAfterSeconds(result.error)).toBeNull()
   })
 
   test('a failed refresh dispatches clearSession', async () => {

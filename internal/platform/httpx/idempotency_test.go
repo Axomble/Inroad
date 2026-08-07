@@ -171,7 +171,7 @@ func (alwaysConflictNeverFoundStore) Delete(context.Context, string, string) err
 func TestPassesThroughWithoutIdempotencyKey(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(countingHandler(&calls, http.StatusCreated, "ok"))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(countingHandler(&calls, http.StatusCreated, "ok"))
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 	rec := httptest.NewRecorder()
@@ -193,7 +193,7 @@ func TestPassesThroughForSafeMethodsEvenWithHeader(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			store := newFakeStore()
 			var calls int32
-			mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(countingHandler(&calls, http.StatusOK, "ok"))
+			mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(countingHandler(&calls, http.StatusOK, "ok"))
 
 			req := httptest.NewRequestWithContext(context.Background(), method, "/things", http.NoBody)
 			req.Header.Set("Idempotency-Key", "k1")
@@ -215,7 +215,7 @@ func TestPassesThroughForSafeMethodsEvenWithHeader(t *testing.T) {
 func TestFreshKeyRunsHandlerAndRecordsResponse(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 	req.Header.Set("Idempotency-Key", "k1")
@@ -253,7 +253,7 @@ func TestFreshKeyRunsHandlerAndRecordsResponse(t *testing.T) {
 func TestReplaysStoredResponseForSameHash(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
 
 	body := `{"a":1}`
 	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
@@ -299,7 +299,7 @@ func TestConcurrentInFlightRequestReturns409(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("done"))
 	})
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(slow)
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(slow)
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -340,7 +340,7 @@ func TestConcurrentInFlightRequestReturns409(t *testing.T) {
 func TestDifferentHashReturns422KeyReuse(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, "ok"))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusCreated, "ok"))
 
 	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 	first.Header.Set("Idempotency-Key", "k1")
@@ -379,7 +379,7 @@ func TestHashCoversMethodPathAndBody(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newFakeStore()
 			var calls int32
-			mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, "ok"))
+			mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusCreated, "ok"))
 
 			first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 			first.Header.Set("Idempotency-Key", "k1")
@@ -410,7 +410,7 @@ func TestResponseOverCapPassesThroughUnrecorded(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(big))
 	})
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(handler)
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(handler)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 	req.Header.Set("Idempotency-Key", "k1")
@@ -449,7 +449,7 @@ func TestResponseOverCapPassesThroughUnrecorded(t *testing.T) {
 func TestMissingPrincipalFailsClosed(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, noWorkspace())(countingHandler(&calls, http.StatusOK, "ok"))
+	mw := httpx.Idempotency(store, noWorkspace(), nil)(countingHandler(&calls, http.StatusOK, "ok"))
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{}`))
 	req.Header.Set("Idempotency-Key", "k1")
@@ -470,7 +470,7 @@ func TestMissingPrincipalFailsClosed(t *testing.T) {
 // closed rather than silently treat it as a fresh request.
 func TestConflictRowMissingFailsClosed(t *testing.T) {
 	var calls int32
-	mw := httpx.Idempotency(alwaysConflictNeverFoundStore{}, fixedWorkspace("ws-1"))(countingHandler(&calls, http.StatusOK, "ok"))
+	mw := httpx.Idempotency(alwaysConflictNeverFoundStore{}, fixedWorkspace("ws-1"), nil)(countingHandler(&calls, http.StatusOK, "ok"))
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{}`))
 	req.Header.Set("Idempotency-Key", "k1")
@@ -492,7 +492,7 @@ func TestConflictRowMissingFailsClosed(t *testing.T) {
 func TestExpiredSameHashRunsFresh(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusCreated, `{"id":1}`))
 
 	body := `{"a":1}`
 	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
@@ -526,7 +526,7 @@ func TestExpiredSameHashRunsFresh(t *testing.T) {
 func TestExpiredDifferentHashRunsFreshWithoutKeyReuseError(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusCreated, `{"id":2}`))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusCreated, `{"id":2}`))
 
 	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 	first.Header.Set("Idempotency-Key", "k1")
@@ -569,7 +569,7 @@ func TestOverCapRequestBodyPassesThroughUnrecorded(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(handler)
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(handler)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", bytes.NewReader(big))
 	req.Header.Set("Idempotency-Key", "k1")
@@ -603,7 +603,7 @@ func TestServerErrorReleasesClaimAndRetryReRuns(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(handler)
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(handler)
 
 	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(`{"a":1}`))
 	first.Header.Set("Idempotency-Key", "k1")
@@ -635,7 +635,7 @@ func TestServerErrorReleasesClaimAndRetryReRuns(t *testing.T) {
 func TestClientErrorIsCachedAndReplayed(t *testing.T) {
 	store := newFakeStore()
 	var calls int32
-	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"))(jsonHandler(&calls, http.StatusUnprocessableEntity, `{"error":"bad"}`))
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), nil)(jsonHandler(&calls, http.StatusUnprocessableEntity, `{"error":"bad"}`))
 
 	body := `{"a":1}`
 	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/things", strings.NewReader(body))
@@ -660,5 +660,80 @@ func TestClientErrorIsCachedAndReplayed(t *testing.T) {
 	}
 	if rec2.Header().Get("Idempotency-Replayed") != "true" {
 		t.Fatal(`expected "Idempotency-Replayed: true" header on replay of a cached 4xx`)
+	}
+}
+
+// Rule 0: a SkipFunc that matches makes the guard a no-op for that request —
+// the handler runs every time, the store is never touched, and none of the
+// guard's own statuses (notably 422 idempotency_key_reuse) can be produced.
+func TestSkipFuncBypassesTheGuard(t *testing.T) {
+	store := newFakeStore()
+	var calls int32
+	skip := func(r *http.Request) bool { return strings.HasSuffix(r.URL.Path, "/draft-reply") }
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), skip)(countingHandler(&calls, http.StatusOK, "draft"))
+
+	for i := 1; i <= 2; i++ {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/inbox/threads/t1/draft-reply", http.NoBody)
+		req.Header.Set("Idempotency-Key", "k1")
+		rec := httptest.NewRecorder()
+		mw.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i, rec.Code)
+		}
+		if rec.Header().Get("Idempotency-Replayed") != "" {
+			t.Fatalf("request %d: a skipped route must never replay", i)
+		}
+	}
+	// Both requests really ran: a skipped route generates afresh rather than
+	// serving a recorded response.
+	if calls != 2 {
+		t.Fatalf("handler calls = %d, want 2 (skip must not replay)", calls)
+	}
+	if n := store.rowCount(); n != 0 {
+		t.Fatalf("store rows = %d, want 0 (a skipped request must never touch the store)", n)
+	}
+}
+
+// The collision the skip exists to prevent: reusing one key across a DIFFERENT
+// request normally yields 422 idempotency_key_reuse, which on the draft route
+// would be indistinguishable from its own "no AI model configured" 422. With
+// the route skipped, that 422 is unreachable there — while still being produced
+// for a route that is NOT skipped, so the guard itself is unweakened.
+func TestSkipFuncPreventsKeyReuse422OnSkippedRouteOnly(t *testing.T) {
+	skip := func(r *http.Request) bool { return strings.HasSuffix(r.URL.Path, "/draft-reply") }
+
+	// Same key, two different paths. The guarded path claims the key first.
+	store := newFakeStore()
+	var calls int32
+	mw := httpx.Idempotency(store, fixedWorkspace("ws-1"), skip)(countingHandler(&calls, http.StatusOK, "ok"))
+
+	first := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/inbox/threads/t1/reply", strings.NewReader(`{"body_text":"hi"}`))
+	first.Header.Set("Idempotency-Key", "shared")
+	rec := httptest.NewRecorder()
+	mw.ServeHTTP(rec, first)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("guarded request: status = %d, want 200", rec.Code)
+	}
+
+	// The SKIPPED route reusing that key must NOT 422 — it just runs.
+	draft := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/inbox/threads/t1/draft-reply", http.NoBody)
+	draft.Header.Set("Idempotency-Key", "shared")
+	rec = httptest.NewRecorder()
+	mw.ServeHTTP(rec, draft)
+	if rec.Code == http.StatusUnprocessableEntity {
+		t.Fatal("skipped route returned 422 idempotency_key_reuse; it would be read as 'no AI model configured'")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("skipped route: status = %d, want 200", rec.Code)
+	}
+
+	// A NON-skipped route reusing the same key with a different hash still 422s:
+	// the skip narrows the guard to one route, it does not disable it.
+	other := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/inbox/threads/t1/read", strings.NewReader(`{"unread":true}`))
+	other.Header.Set("Idempotency-Key", "shared")
+	rec = httptest.NewRecorder()
+	mw.ServeHTTP(rec, other)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-skipped route: status = %d, want 422 idempotency_key_reuse", rec.Code)
 	}
 }

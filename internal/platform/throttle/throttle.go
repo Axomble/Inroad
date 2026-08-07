@@ -46,6 +46,16 @@ type Config struct {
 	Window    time.Duration
 	IPLimit   int
 	AcctLimit int
+	// AcctKey optionally derives the per-account key from the request instead of
+	// peeking an "email" out of the JSON body. Unset (nil) keeps the pre-auth
+	// behavior every existing caller relies on.
+	//
+	// It exists for AUTHENTICATED endpoints, whose body carries no email and
+	// whose real "account" is the principal the request already proved: they
+	// pass a resolver over the request context. Returning "" means "no account
+	// key for this request" — it is then IP-throttled only, exactly as an
+	// unparseable body is.
+	AcctKey func(*http.Request) string
 }
 
 // Middleware returns rate-limit middleware for one endpoint, keyed under bucket.
@@ -68,8 +78,8 @@ func (c Config) Middleware(bucket string) func(http.Handler) http.Handler {
 			}
 
 			if c.AcctLimit > 0 {
-				if email := peekEmail(r); email != "" {
-					if !c.check(ctx, bucket+":acct:"+email, c.AcctLimit) {
+				if acct := c.accountKey(r); acct != "" {
+					if !c.check(ctx, bucket+":acct:"+acct, c.AcctLimit) {
 						deny(w, retryAfter)
 						return
 					}
@@ -78,6 +88,15 @@ func (c Config) Middleware(bucket string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// accountKey resolves the per-account throttle key: AcctKey when configured,
+// otherwise the body's "email" (the pre-auth default).
+func (c Config) accountKey(r *http.Request) string {
+	if c.AcctKey != nil {
+		return c.AcctKey(r)
+	}
+	return peekEmail(r)
 }
 
 // check reports whether the request is allowed under key. It fails CLOSED: a
