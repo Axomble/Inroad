@@ -35,6 +35,7 @@ import { Route as AppInboxThreadIdRouteImport } from './routes/app.inbox.$thread
 import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
 import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.oauth-apps'
+import { Route as AppSettingsReplyLabelsRouteImport } from './routes/app.settings.reply-labels'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
 
@@ -168,6 +169,11 @@ const AppSettingsOauthAppsRoute = AppSettingsOauthAppsRouteImport.update({
   path: '/settings/oauth-apps',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsReplyLabelsRoute = AppSettingsReplyLabelsRouteImport.update({
+  id: '/settings/reply-labels',
+  path: '/settings/reply-labels',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsSecurityRoute = AppSettingsSecurityRouteImport.update({
   id: '/settings/security',
   path: '/settings/security',
@@ -203,6 +209,7 @@ export interface FileRoutesByFullPath {
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
+  '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
@@ -232,6 +239,7 @@ export interface FileRoutesByTo {
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
+  '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
@@ -263,6 +271,7 @@ export interface FileRoutesById {
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
+  '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
@@ -295,6 +304,7 @@ export interface FileRouteTypes {
     | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
+    | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
@@ -324,6 +334,7 @@ export interface FileRouteTypes {
     | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
+    | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns'
@@ -354,6 +365,7 @@ export interface FileRouteTypes {
     | '/app/settings/ai'
     | '/app/settings/api-keys'
     | '/app/settings/oauth-apps'
+    | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
@@ -557,6 +569,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsOauthAppsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/reply-labels': {
+      id: '/app/settings/reply-labels'
+      path: '/settings/reply-labels'
+      fullPath: '/app/settings/reply-labels'
+      preLoaderRoute: typeof AppSettingsReplyLabelsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/security': {
       id: '/app/settings/security'
       path: '/settings/security'
@@ -589,6 +608,7 @@ interface AppRouteChildren {
   AppSettingsAiRoute: typeof AppSettingsAiRoute
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
   AppSettingsOauthAppsRoute: typeof AppSettingsOauthAppsRoute
+  AppSettingsReplyLabelsRoute: typeof AppSettingsReplyLabelsRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
   AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
@@ -611,6 +631,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsAiRoute: AppSettingsAiRoute,
   AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
   AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
+  AppSettingsReplyLabelsRoute: AppSettingsReplyLabelsRoute,
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppCampaignsIndexRoute: AppCampaignsIndexRoute,
