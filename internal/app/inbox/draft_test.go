@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -529,5 +530,91 @@ func TestDraftReplyDoesNotLogACancelledCaller(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "inbox_reply_draft_failed") {
 		t.Fatalf("a cancelled caller was logged as a draft failure:\n%s", buf.String())
+	}
+}
+
+// A provider's error text is never logged, because some providers echo a snippet
+// of the offending input in a 4xx body. For *ai.ProviderStatusError the log
+// carries the kind/status/retryable facts instead — and this asserts the type
+// survives the REAL wrapping chain (provider -> agentrun's %w -> the domain's
+// %w), which is what makes errors.As reachable at all.
+func TestDraftReplyLogsProviderStatusNotProviderText(t *testing.T) {
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	// Wrapped exactly the way agentrun.DraftReply wraps a stream failure.
+	providerErr := &ai.ProviderStatusError{Kind: ai.KindOpenAI, StatusCode: http.StatusBadRequest}
+	wrapped := fmt.Errorf("agentrun: draft reply: %w", providerErr)
+
+	store := newFakeStore()
+	ws := uuid.New()
+	threadID := seedThreadWithConversation(store, ws)
+	svc := inbox.NewService(store, inbox.WithReplyDrafter(&fakeDrafter{err: wrapped}))
+
+	if _, err := svc.DraftReply(context.Background(), ws, threadID); !errors.Is(err, inbox.ErrDraftUpstream) {
+		t.Fatalf("DraftReply = %v, want ErrDraftUpstream", err)
+	}
+	logged := buf.String()
+	for _, want := range []string{`"reason":"provider_failed"`, `"provider_status":400`, `"provider_retryable":false`, ai.KindOpenAI} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("log missing %q:\n%s", want, logged)
+		}
+	}
+	// The provider's own message must not appear in any form.
+	if strings.Contains(logged, providerErr.Error()) || strings.Contains(logged, `"err":`) {
+		t.Fatalf("log quoted the provider error text:\n%s", logged)
+	}
+}
+
+// An upstream failure that is NOT a ProviderStatusError may be an SDK error
+// embedding a response body, so only its Go TYPE is logged — never its text.
+func TestDraftReplyWithholdsTextFromUnknownProviderErrors(t *testing.T) {
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	// Stands in for an SDK error that echoed request material back at us.
+	secret := "prompt fragment: Are you the right person?"
+	store := newFakeStore()
+	ws := uuid.New()
+	threadID := seedThreadWithConversation(store, ws)
+	svc := inbox.NewService(store, inbox.WithReplyDrafter(&fakeDrafter{err: errors.New(secret)}))
+
+	if _, err := svc.DraftReply(context.Background(), ws, threadID); !errors.Is(err, inbox.ErrDraftUpstream) {
+		t.Fatalf("DraftReply = %v, want ErrDraftUpstream", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, secret) || strings.Contains(logged, "right person") {
+		t.Fatalf("log leaked an untrusted provider error's text:\n%s", logged)
+	}
+	if !strings.Contains(logged, `"err_type":`) {
+		t.Fatalf("log omitted the error type, the one safe debugging signal:\n%s", logged)
+	}
+}
+
+// Our OWN errors keep their full value: a resolution failure names a model or
+// provider id, which is what makes the line actionable, and cannot carry
+// message content.
+func TestDraftReplyKeepsOurOwnErrorText(t *testing.T) {
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	store := newFakeStore()
+	ws := uuid.New()
+	threadID := seedThreadWithConversation(store, ws)
+	resolveErr := errors.Join(ai.ErrNoModel, errors.New("model openai-row/gpt-5.2 is not enabled"))
+	svc := inbox.NewService(store, inbox.WithReplyDrafter(&fakeDrafter{err: resolveErr}))
+
+	if _, err := svc.DraftReply(context.Background(), ws, threadID); !errors.Is(err, inbox.ErrDraftModelUnavailable) {
+		t.Fatalf("DraftReply = %v, want ErrDraftModelUnavailable", err)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "openai-row/gpt-5.2") {
+		t.Fatalf("our own resolution error lost its actionable detail:\n%s", logged)
 	}
 }

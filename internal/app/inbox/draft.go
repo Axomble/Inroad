@@ -129,10 +129,10 @@ func (s *Service) DraftReply(ctx context.Context, ws, threadID uuid.UUID) (strin
 // shows up (the enabled-model list is an operator allowlist, not a health
 // signal, so it keeps listing a model whose key no longer works).
 //
-// Ids, a reason token, and the error VALUE only — never the prompt, the
-// transcript, or any message content (docs/security.md invariants 21 and 48).
-// Logging the error value follows the same convention agentrun's manager uses
-// for a failed run.
+// Ids and a reason token always; an error value only where that value is OURS
+// and provably content-free — never the prompt, the transcript, or any message
+// content (docs/security.md invariants 21 and 48). See draftErrorAttrs for the
+// one class whose text is withheld and why.
 //
 // A caller that went away is not logged at all: a closed browser tab is not an
 // operational event, and logging it would bury the failures that are.
@@ -141,10 +141,49 @@ func logDraftFailure(ctx context.Context, ws, threadID uuid.UUID, reason string,
 		return
 	}
 	attrs := []any{"workspace_id", ws, "thread_id", threadID, "reason", reason}
-	if err != nil {
-		attrs = append(attrs, "err", err)
-	}
+	attrs = append(attrs, draftErrorAttrs(reason, err)...)
 	slog.WarnContext(ctx, "inbox_reply_draft_failed", attrs...)
+}
+
+// draftErrorAttrs describes err without ever quoting a PROVIDER's message.
+//
+// The two provider classes crossed an AI provider's HTTP boundary, and some
+// providers echo a snippet of the offending input back in a 4xx body — so that
+// text is not ours to trust, and logging it would make invariant 48's "no prompt
+// or message content is ever logged" merely mostly true. Those classes
+// contribute machine facts only:
+//
+//   - *ai.ProviderStatusError — the provider kind, its HTTP status, and whether
+//     that status is retryable. That type carries no body BY CONSTRUCTION (see
+//     its own doc), which is exactly why it is the shape worth reaching for, and
+//     the status is strictly more useful to an operator than a message anyway.
+//   - any other shape (a provider SDK error, which may embed a response body) —
+//     its Go type and nothing else. A type name is a real debugging signal that
+//     cannot carry content.
+//
+// Every other class is ours and provably content-free: a resolution failure
+// names a model or provider id, and drafter_not_wired / empty_draft carry no
+// error at all. Those keep their full error value, which is what makes the line
+// actionable.
+//
+// Deliberately NOT a length cap on all error text: truncating still leaks a
+// prefix, and it would mangle our own legible errors to no benefit.
+func draftErrorAttrs(reason string, err error) []any {
+	if err == nil {
+		return nil
+	}
+	if reason != "provider_failed" && reason != "provider_timeout" {
+		return []any{"err", err}
+	}
+	var status *ai.ProviderStatusError
+	if errors.As(err, &status) {
+		return []any{
+			"provider_kind", status.Kind,
+			"provider_status", status.StatusCode,
+			"provider_retryable", status.Retryable(),
+		}
+	}
+	return []any{"err_type", fmt.Sprintf("%T", err)}
 }
 
 // draftFailureReason maps a classified failure to its stable log token. ""
