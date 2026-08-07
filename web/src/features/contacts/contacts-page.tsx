@@ -44,6 +44,7 @@ import {
 } from './contacts-search'
 import { NewListForm } from './new-list-form'
 import { ImportCsvForm } from './import-csv-form'
+import { ListRowActions } from './list-row-actions'
 
 const activityActorSchema = z.object({ type: z.string().optional(), client_id: z.string().optional() }).passthrough()
 
@@ -132,12 +133,25 @@ export function ContactsPage() {
           ) : (
             <ul className="grid grid-cols-2 sm:grid-cols-3 md:block">
               {lists.map((list) => (
-                <li key={list.id}>
-                  <ScopeButton
-                    label={list.name ?? 'Untitled list'}
-                    active={selectedListId === list.id}
-                    onSelect={() => selectList(list.id ?? '')}
-                  />
+                <li key={list.id} className="group flex items-center">
+                  <div className="min-w-0 flex-1">
+                    <ScopeButton
+                      label={list.name ?? 'Untitled list'}
+                      active={selectedListId === list.id}
+                      onSelect={() => selectList(list.id ?? '')}
+                    />
+                  </div>
+                  {list.id && (
+                    <ListRowActions
+                      id={list.id}
+                      name={list.name ?? 'Untitled list'}
+                      // A deleted list can't stay the URL's scope: fall back to
+                      // "All contacts" (which also drops the now-dangling cursor).
+                      onDeleted={() => {
+                        if (selectedListId === list.id) selectList('')
+                      }}
+                    />
+                  )}
                 </li>
               ))}
             </ul>
