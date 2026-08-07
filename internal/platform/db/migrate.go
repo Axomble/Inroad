@@ -18,7 +18,7 @@ func Migrate(url string) error {
 	if err != nil {
 		return err
 	}
-	m, err := migrate.NewWithSourceInstance("iofs", src, "pgx5://"+trimScheme(url))
+	m, err := migrate.NewWithSourceInstance("iofs", src, "pgx5://"+trimScheme(WithoutPoolParams(url)))
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ func MigrateDown(url string) error {
 	if err != nil {
 		return err
 	}
-	m, err := migrate.NewWithSourceInstance("iofs", src, "pgx5://"+trimScheme(url))
+	m, err := migrate.NewWithSourceInstance("iofs", src, "pgx5://"+trimScheme(WithoutPoolParams(url)))
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,10 @@ func MigrateDown(url string) error {
 	return nil
 }
 
-// trimScheme converts a postgres:// URL into the driver-prefixed form migrate expects.
+// trimScheme converts a postgres:// URL into the driver-prefixed form migrate
+// expects. Callers pass the URL through WithoutPoolParams first: migrate's driver
+// is not pgxpool and would forward pgxpool's own keys to the server as unknown
+// configuration parameters.
 func trimScheme(url string) string {
 	for _, p := range []string{"postgres://", "postgresql://"} {
 		if len(url) >= len(p) && url[:len(p)] == p {
