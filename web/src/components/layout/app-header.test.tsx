@@ -4,6 +4,16 @@ import { renderWithProviders } from '@/test/render-with-providers'
 import type { WorkspacePulse } from '@/features/pulse/api'
 import { AppHeader } from './app-header'
 
+// The header renders a router <Link>; stub it to a plain anchor so we can
+// assert on the rendered header without a real router.
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({ to, children, activeProps: _activeProps, ...props }: { to: string; children: React.ReactNode; activeProps?: unknown }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
+}))
+
 const jsonHeaders = { 'content-type': 'application/json' }
 
 function pulseWith(attention: WorkspacePulse['attention']): WorkspacePulse {

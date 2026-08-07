@@ -17,6 +17,13 @@ const OAUTH_EXCLUDED_SCOPES = new Set<string>([
   'campaigns:send',
   'campaigns:write',
   'mailboxes:write',
+  // Reply content is materially more sensitive than structured CRM/contact
+  // data, so reading the inbox is not delegable; the read/unread toggle
+  // (inbox:write) is. Mirrors the backend's rationale in scopes.go.
+  'inbox:read',
+  // An ingested complaint suppresses an address workspace-wide and can trip a
+  // campaign's circuit breaker — never delegable to a third-party client.
+  'deliverability:write',
 ])
 
 /** The domain-grouped, OAuth-grantable subset of the API-key scope picker. */
@@ -48,6 +55,7 @@ const SCOPE_CONSENT_LABELS: Record<string, string> = {
   'lists:write': 'Create and edit your contact lists',
   'crm:read': 'Read your CRM companies, deals, pipelines, activities, and threads',
   'crm:write': 'Create and edit your CRM companies, deals, and pipelines',
+  'inbox:write': 'Mark your inbox threads as read or unread',
 }
 
 /** A human-readable consent sentence for a scope, or the raw value if unmapped. */

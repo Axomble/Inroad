@@ -51,6 +51,19 @@ export const API_KEY_SCOPE_GROUPS: readonly ScopeGroup[] = [
       { value: 'crm:write', label: 'Write', description: 'Create, update, and move companies, deals, and pipelines' },
     ],
   },
+  {
+    domain: 'Inbox',
+    scopes: [
+      { value: 'inbox:read', label: 'Read', description: 'View inbox threads and reply content' },
+      { value: 'inbox:write', label: 'Write', description: 'Mark inbox threads read or unread' },
+    ],
+  },
+  {
+    domain: 'Deliverability',
+    scopes: [
+      { value: 'deliverability:write', label: 'Write', description: 'Report bounce and complaint events from an external pipeline' },
+    ],
+  },
 ] as const
 
 /** Every grantable scope value, flattened — for validation/labelling. */
