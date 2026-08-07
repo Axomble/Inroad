@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -17,6 +18,12 @@ type Store interface {
 	List(ctx context.Context, workspaceID uuid.UUID) ([]gen.List, error)
 	Get(ctx context.Context, workspaceID, id uuid.UUID) (gen.List, error)
 	CountMembers(ctx context.Context, id uuid.UUID) (int64, error)
+	// Rename returns pgx.ErrNoRows when the list does not exist in the
+	// workspace; Delete reports the same, and surfaces the FK violation
+	// (campaigns.list_id ON DELETE RESTRICT) unchanged for the service to
+	// translate.
+	Rename(ctx context.Context, workspaceID, id uuid.UUID, name string) (gen.List, error)
+	Delete(ctx context.Context, workspaceID, id uuid.UUID) error
 }
 
 // PgStore implements Store by wrapping sqlc-generated queries.
@@ -35,4 +42,20 @@ func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.List, error) {
 }
 func (s *PgStore) CountMembers(ctx context.Context, id uuid.UUID) (int64, error) {
 	return s.q.CountListMembers(ctx, id)
+}
+func (s *PgStore) Rename(ctx context.Context, ws, id uuid.UUID, name string) (gen.List, error) {
+	return s.q.RenameList(ctx, gen.RenameListParams{ID: id, WorkspaceID: ws, Name: name})
+}
+func (s *PgStore) Delete(ctx context.Context, ws, id uuid.UUID) error {
+	n, err := s.q.DeleteList(ctx, gen.DeleteListParams{ID: id, WorkspaceID: ws})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// Zero rows means the list does not exist in this workspace; report it
+		// the same way RenameList's :one does so the service has ONE not-found
+		// signal to translate.
+		return pgx.ErrNoRows
+	}
+	return nil
 }

@@ -15,6 +15,8 @@ import (
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.With(auth.RequireScope(auth.ScopeListsWrite)).Post("/", h.create)
+	r.With(auth.RequireScope(auth.ScopeListsWrite)).Patch("/{id}", h.rename)
+	r.With(auth.RequireScope(auth.ScopeListsWrite)).Delete("/{id}", h.delete)
 	r.With(auth.RequireScope(auth.ScopeListsRead)).Get("/", h.list)
 	return r
 }

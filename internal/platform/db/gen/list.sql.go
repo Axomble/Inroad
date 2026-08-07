@@ -43,6 +43,25 @@ func (q *Queries) CreateList(ctx context.Context, arg CreateListParams) (List, e
 	return i, err
 }
 
+const deleteList = `-- name: DeleteList :execrows
+DELETE FROM lists WHERE id = $1 AND workspace_id = $2
+`
+
+type DeleteListParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// list_members cascades (ON DELETE CASCADE); a list still referenced by a
+// campaign is blocked by campaigns.list_id ON DELETE RESTRICT (23503).
+func (q *Queries) DeleteList(ctx context.Context, arg DeleteListParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteList, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getList = `-- name: GetList :one
 SELECT id, workspace_id, name, created_at FROM lists WHERE id = $1 AND workspace_id = $2
 `
@@ -91,4 +110,26 @@ func (q *Queries) ListLists(ctx context.Context, workspaceID uuid.UUID) ([]List,
 		return nil, err
 	}
 	return items, nil
+}
+
+const renameList = `-- name: RenameList :one
+UPDATE lists SET name = $3 WHERE id = $1 AND workspace_id = $2 RETURNING id, workspace_id, name, created_at
+`
+
+type RenameListParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+}
+
+func (q *Queries) RenameList(ctx context.Context, arg RenameListParams) (List, error) {
+	row := q.db.QueryRow(ctx, renameList, arg.ID, arg.WorkspaceID, arg.Name)
+	var i List
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.CreatedAt,
+	)
+	return i, err
 }
