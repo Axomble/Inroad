@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/identity"
@@ -184,17 +185,82 @@ func TestBuildRouterIdentityMeStaysGuarded(t *testing.T) {
 // own "no AI model configured" 422 for a client branching on status alone.
 func TestSkipIdempotencyGuardMatchesOnlyDraftReply(t *testing.T) {
 	tests := map[string]bool{
-		"/api/v1/inbox/threads/2f1c/draft-reply": true,
-		"/api/v1/inbox/threads/2f1c/reply":       false,
-		"/api/v1/inbox/threads/2f1c/read":        false,
-		"/api/v1/inbox/threads":                  false,
-		"/api/v1/campaigns/2f1c/test-send":       false,
+		"/api/v1/inbox/threads/2f1c/draft-reply":                     true,
+		"/api/v1/inbox/threads/" + uuid.NewString() + "/draft-reply": true,
+
+		// Other routes on the same domain keep the guard.
+		"/api/v1/inbox/threads/2f1c/reply": false,
+		"/api/v1/inbox/threads/2f1c/read":  false,
+		"/api/v1/inbox/threads":            false,
+		"/api/v1/campaigns/2f1c/test-send": false,
+
+		// The collision a suffix match would silently hand the bypass to. If
+		// someone loosens this back to strings.HasSuffix, this row fails.
+		"/api/v1/campaigns/2f1c/draft-reply":       false,
+		"/api/v1/agent/threads/2f1c/draft-reply":   false,
+		"/api/v1/some/future/domain/draft-reply":   false,
+		"/draft-reply":                             false,
+		"/api/v1/inbox/threads/2f1c/draft-replies": false,
+
+		// Anchoring: no extra segments before, inside, or after the pattern.
+		"/evil/api/v1/inbox/threads/2f1c/draft-reply":  false,
+		"/api/v1/inbox/threads/2f1c/draft-reply/extra": false,
+		"/api/v1/inbox/threads/2f1c/draft-reply/":      false,
+		"/api/v1/inbox/threads/2f1c/sub/draft-reply":   false,
+		"/api/v1/inbox/threads//draft-reply":           false,
 	}
 	for path, want := range tests {
 		t.Run(path, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, path, http.NoBody)
 			if got := skipIdempotencyGuard(r); got != want {
 				t.Fatalf("skipIdempotencyGuard(%q) = %v, want %v", path, got, want)
+			}
+		})
+	}
+}
+
+// The anchored matcher depends on WHICH path the guard sees. It is installed
+// with pr.Use at the authenticated-group root, ahead of the domain mounts (see
+// buildRouter), so it must see the full path including the /api/v1/inbox prefix.
+// This drives a request through that exact router shape rather than calling the
+// predicate with a hand-written string: if chi ever rewrote r.URL.Path under
+// Mount, the anchored pattern would stop matching and the guard would silently
+// re-engage on this route. Belt and braces on the one assumption the regex makes.
+func TestSkipIdempotencyGuardSeesTheFullMountedPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		route    string
+		request  string
+		wantSkip bool
+	}{
+		{name: "draft-reply", route: "/threads/{id}/draft-reply", request: "/draft-reply", wantSkip: true},
+		{name: "reply keeps the guard", route: "/threads/{id}/reply", request: "/reply", wantSkip: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawSkip, reachedHandler bool
+			inboxRouter := chi.NewRouter()
+			inboxRouter.Post(tc.route, func(http.ResponseWriter, *http.Request) { reachedHandler = true })
+
+			root := chi.NewRouter()
+			root.Group(func(pr chi.Router) {
+				pr.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						sawSkip = skipIdempotencyGuard(r)
+						next.ServeHTTP(w, r)
+					})
+				})
+				pr.Mount("/api/v1/inbox", inboxRouter)
+			})
+
+			target := "/api/v1/inbox/threads/" + uuid.NewString() + tc.request
+			root.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, target, http.NoBody))
+
+			if !reachedHandler {
+				t.Fatalf("request to %q never reached the handler; the test's own routing is wrong", target)
+			}
+			if sawSkip != tc.wantSkip {
+				t.Fatalf("skipIdempotencyGuard(%q) = %v, want %v", target, sawSkip, tc.wantSkip)
 			}
 		})
 	}

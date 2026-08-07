@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -720,10 +721,26 @@ func (a replyLabelAdapter) CapturesDeal(ctx context.Context, ws uuid.UUID, key s
 	return label.CapturesDeal, true, nil
 }
 
-// draftReplyPathSuffix is the one route the Idempotency-Key guard skips. Matched
-// on the path suffix because this predicate runs at the authenticated-group
-// root, BEFORE any domain router has resolved a chi route pattern.
-const draftReplyPathSuffix = "/draft-reply"
+// draftReplyPath matches the ONE route the Idempotency-Key guard skips:
+// POST /api/v1/inbox/threads/{id}/draft-reply.
+//
+// Anchored at both ends with the id constrained to a single segment ([^/]+),
+// deliberately NOT a suffix match: a suffix would hand the bypass to any future
+// ".../draft-reply" route in any other domain, and a replay guard that is
+// silently skipped is not something anyone notices until it matters.
+//
+// A regex rather than a chi route pattern because this predicate runs at the
+// authenticated-group root, BEFORE any domain router has resolved a pattern. It
+// therefore matches the full path INCLUDING the /api/v1/inbox mount prefix,
+// which is what the guard sees: it is installed with pr.Use ahead of the mounts,
+// and chi's Mount does not rewrite r.URL.Path.
+//
+// Anchoring on that prefix fails in the SAFE direction if the mount ever moves —
+// the pattern stops matching, the guard re-engages, and idempotency is enforced
+// rather than silently dropped.
+//
+// Compiled once at init, since this runs on every authenticated request.
+var draftReplyPath = regexp.MustCompile(`^/api/v1/inbox/threads/[^/]+/draft-reply$`)
 
 // skipIdempotencyGuard opts POST .../draft-reply out of the Idempotency-Key
 // replay cache (httpx.SkipFunc). Two independent reasons, either sufficient:
@@ -741,7 +758,7 @@ const draftReplyPathSuffix = "/draft-reply"
 // behind one status would have the UI offer "configure a model in Settings → AI"
 // for what is actually a client bug.
 func skipIdempotencyGuard(r *http.Request) bool {
-	return strings.HasSuffix(r.URL.Path, draftReplyPathSuffix)
+	return draftReplyPath.MatchString(r.URL.Path)
 }
 
 // replyDrafterAdapter satisfies inbox.ReplyDrafter over the agent runtime's

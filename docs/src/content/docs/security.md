@@ -544,6 +544,19 @@ limit / abuse control here is tracked in the Deferred list below.
     response carries only the domain's own sentinel message, because an upstream
     string can echo request detail back.
 
+    A FAILED draft (`inbox.logDraftFailure`) logs ids plus a stable reason token
+    — `no_model_configured`, `provider_timeout`, `provider_failed`,
+    `drafter_not_wired`, `empty_draft` — so an operator can ask "is anyone
+    hitting this, and why" without reading correspondence. For the same reason
+    the 502 body is a sentinel, a PROVIDER's error text is not logged either:
+    that class contributes machine facts only (kind, HTTP status and
+    retryability off `*ai.ProviderStatusError`, which carries no body by
+    construction; a Go type name for any other shape, since a provider SDK error
+    may embed a response body). Our own errors — model resolution, and the two
+    that carry no error at all — keep their full value, which is what makes a
+    line actionable. This is what keeps this invariant's claim literal rather
+    than approximate.
+
 49. **AI provider credentials are a different class from mailbox credentials,
     with a deliberately different posture.** This is documented here for the
     first time; it describes the design the agent platform has always had, which
