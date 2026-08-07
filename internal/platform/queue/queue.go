@@ -119,6 +119,30 @@ type TestSendPayload struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// TaskInboxReplySend sends one manual reply queued from the unified inbox
+// (POST /inbox/threads/{id}/reply). One task per reply.
+const TaskInboxReplySend = "inbox:reply_send"
+
+// InboxReplySendPayload is the body of an inbox:reply_send task. WorkspaceID
+// travels alongside ThreadID so the worker can pin workspace_id in its
+// coreapi lookups (defense in depth on the unguessable thread UUID).
+// BodyText is the operator's free-text reply content — never logged by the
+// handler that consumes it, like every other piece of business
+// correspondence in this domain. TaskID carries the SAME id set as this
+// task's asynq.TaskID (below) — stable across retries AND a crash-induced
+// lease redelivery of this exact task, which is what makes it usable as the
+// claim-before-send key (internal/worker/inbox.ReplySendHandler). Carried in
+// the payload rather than read from the handler's context via
+// asynq.GetTaskID (which would work identically in production but is opaque
+// to construct in a unit test that builds a task directly) — this way the
+// SAME value is trivially assertable in tests.
+type InboxReplySendPayload struct {
+	ThreadID    string `json:"thread_id"`
+	BodyText    string `json:"body_text"`
+	WorkspaceID string `json:"workspace_id"`
+	TaskID      string `json:"task_id"`
+}
+
 // TaskDeliverabilityEvaluate re-evaluates one campaign's circuit breaker. It is
 // enqueued AFTER a send is finalised, never inside the send transaction, so a
 // scoring bug cannot fail a delivery.
@@ -316,6 +340,38 @@ func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID 
 	}
 	return c.enqueue(asynq.NewTask(TaskTestSend, b),
 		asynq.TaskID(testSendTaskID(campaignID, stepID, mailboxID, time.Now())),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Retention(taskRetention),
+	)
+}
+
+// inboxReplySendTaskID keys an inbox:reply_send on (thread, due-second),
+// mirroring testSendTaskID's dedup discipline: a double-submitted "send
+// reply" click within the same second collapses to one send, while a
+// genuinely distinct reply a moment later still enqueues. There is no
+// downstream row-claim backing this as a correctness guarantee (unlike
+// enqueueAdvance) — this key only cuts an accidental double-click. The reply
+// body is deliberately NOT part of the key (free-text business
+// correspondence, kept out of a Redis-visible identifier).
+func inboxReplySendTaskID(threadID string, now time.Time) string {
+	return fmt.Sprintf("inboxreply:%s:%d", threadID, now.Unix())
+}
+
+// EnqueueInboxReplySend enqueues an inbox:reply_send task for immediate
+// processing. The SAME generated id is set as both the payload's TaskID
+// field and the task's own asynq.TaskID, so the handler's claim key and
+// asynq's own dedup/retry identity are always the one value — see
+// InboxReplySendPayload.TaskID's doc for why the payload carries it at all.
+func (c *Client) EnqueueInboxReplySend(threadID, bodyText, workspaceID string) error {
+	taskID := inboxReplySendTaskID(threadID, time.Now())
+	b, err := json.Marshal(InboxReplySendPayload{
+		ThreadID: threadID, BodyText: bodyText, WorkspaceID: workspaceID, TaskID: taskID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueue(asynq.NewTask(TaskInboxReplySend, b),
+		asynq.TaskID(taskID),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Retention(taskRetention),
 	)

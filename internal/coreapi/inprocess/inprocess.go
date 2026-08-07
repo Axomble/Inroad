@@ -12,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/enrollment"
+	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/inbox"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -57,6 +58,14 @@ type client struct {
 	// Service.RecordReply the control-plane HTTP handler reads from, rather than
 	// re-deriving the upsert-thread-then-insert-message atomicity here.
 	inbox *inbox.Service
+	// replyClaims backs ClaimInboxReply/ReleaseInboxReply's claim-before-send
+	// guard (worker/inbox.ReplyCore) — a DELIBERATE reuse of the generic HTTP
+	// Idempotency-Key replay cache (migration 000045): right shape (claim a
+	// key once, release it on a retryable failure), right retention (rows
+	// age out via the SAME 24h maintenance sweep, idempotency_keys needs no
+	// dedicated one), no new schema for what is structurally the identical
+	// problem (see ClaimInboxReply's own doc).
+	replyClaims *idempotency.PgStore
 }
 
 // New returns the in-process coreapi client backed by the given connection
@@ -81,6 +90,7 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		warmupSecret:  warmupSecret,
 		warmupContent: warmupContent,
 		inbox:         inbox.NewService(inbox.NewPgStore(pool)),
+		replyClaims:   idempotency.NewPgStore(pool),
 	}
 }
 

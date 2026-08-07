@@ -1270,6 +1270,16 @@ const injectedRtkApi = api.injectEndpoints({
     >({
       query: (queryArg) => ({ url: `/inbox/threads/${queryArg.id}` }),
     }),
+    sendInboxReply: build.mutation<
+      SendInboxReplyApiResponse,
+      SendInboxReplyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/reply`,
+        method: "POST",
+        body: queryArg.sendInboxReplyRequest,
+      }),
+    }),
     setInboxThreadRead: build.mutation<
       SetInboxThreadReadApiResponse,
       SetInboxThreadReadApiArg
@@ -2053,6 +2063,11 @@ export type GetInboxThreadApiResponse =
   /** status 200 Thread with its full message history, oldest first */ InboxThreadDetail;
 export type GetInboxThreadApiArg = {
   id: string;
+};
+export type SendInboxReplyApiResponse = unknown;
+export type SendInboxReplyApiArg = {
+  id: string;
+  sendInboxReplyRequest: SendInboxReplyRequest;
 };
 export type SetInboxThreadReadApiResponse = unknown;
 export type SetInboxThreadReadApiArg = {
@@ -3260,6 +3275,12 @@ export type ReplyLabelReorderInput = {
   /** every label in the workspace, exactly once, in the new order */
   ids: string[];
 };
+export type InboxReplyLabelRef = {
+  key: string;
+  label: string;
+  /** Hex color, #RRGGBB */
+  color: string;
+};
 export type InboxThreadSummary = {
   id: string;
   mailbox_id: string;
@@ -3273,6 +3294,8 @@ export type InboxThreadSummary = {
   contact_last_name: string;
   subject: string;
   last_reply_class: string;
+  /** The workspace reply label resolved from last_reply_class for display, or null when the key no longer matches a label (readers degrade to the raw last_reply_class key). */
+  reply_label: InboxReplyLabelRef | null;
   unread: boolean;
   last_message_at: string;
 };
@@ -3293,6 +3316,9 @@ export type InboxMessage = {
 };
 export type InboxThreadDetail = InboxThreadSummary & {
   messages: InboxMessage[];
+};
+export type SendInboxReplyRequest = {
+  body_text: string;
 };
 export type SetInboxThreadReadRequest = {
   unread: boolean;
@@ -3454,5 +3480,6 @@ export const {
   useDeleteReplyLabelMutation,
   useListInboxThreadsQuery,
   useGetInboxThreadQuery,
+  useSendInboxReplyMutation,
   useSetInboxThreadReadMutation,
 } = injectedRtkApi;

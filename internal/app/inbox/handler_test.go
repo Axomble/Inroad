@@ -226,6 +226,80 @@ func TestListThreadWithNoContactLinkHasEmptyContactFields(t *testing.T) {
 	}
 }
 
+// reply_label resolves last_reply_class to the workspace's label row, for
+// both the list and detail endpoints.
+func TestListAndGetThreadIncludeReplyLabel(t *testing.T) {
+	store := newFakeStore()
+	th := seedThread(store, testWS, uuid.New(), "Re: Hi", "positive")
+	th.ReplyLabel = &inbox.ReplyLabelRef{Key: "positive", Label: "Interested", Color: "#22C55E"}
+	store.threads[th.ID] = th
+	h := inbox.NewHandler(inbox.NewService(store))
+
+	list := serve(t, h, http.MethodGet, "/inbox/threads", "")
+	var listResp struct {
+		Items []struct {
+			ReplyLabel *struct {
+				Key   string `json:"key"`
+				Label string `json:"label"`
+				Color string `json:"color"`
+			} `json:"reply_label"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listResp.Items) != 1 || listResp.Items[0].ReplyLabel == nil {
+		t.Fatalf("list items = %+v, want a resolved reply_label", listResp.Items)
+	}
+	replyLabel := *listResp.Items[0].ReplyLabel
+	if replyLabel.Key != "positive" || replyLabel.Label != "Interested" || replyLabel.Color != "#22C55E" {
+		t.Fatalf("reply_label = %+v, want the seeded label", replyLabel)
+	}
+
+	get := serve(t, h, http.MethodGet, "/inbox/threads/"+th.ID.String(), "")
+	var getResp struct {
+		ReplyLabel *struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+			Color string `json:"color"`
+		} `json:"reply_label"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if getResp.ReplyLabel == nil || *getResp.ReplyLabel != replyLabel {
+		t.Fatalf("get detail reply_label = %+v, want %+v", getResp.ReplyLabel, replyLabel)
+	}
+}
+
+// A last_reply_class with no matching label in the workspace (a deleted
+// custom label whose key survives on historical rows) must serialize
+// reply_label as null, not omitted or an empty object — readers degrade to
+// the raw last_reply_class key.
+func TestListThreadWithUnresolvedReplyClassHasNullReplyLabel(t *testing.T) {
+	store := newFakeStore()
+	seedThread(store, testWS, uuid.New(), "Re: Hi", "deleted_custom_label")
+	h := inbox.NewHandler(inbox.NewService(store))
+
+	w := serve(t, h, http.MethodGet, "/inbox/threads", "")
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %+v, want exactly one", resp.Items)
+	}
+	v, ok := resp.Items[0]["reply_label"]
+	if !ok {
+		t.Fatal("reply_label missing from response entirely, want present and null")
+	}
+	if v != nil {
+		t.Fatalf("reply_label = %v, want null", v)
+	}
+}
+
 func TestListBadLimitIs400(t *testing.T) {
 	h := inbox.NewHandler(inbox.NewService(newFakeStore()))
 	w := serve(t, h, http.MethodGet, "/inbox/threads?limit=notanumber", "")
@@ -332,5 +406,85 @@ func TestSetReadInvalidJSONIs400(t *testing.T) {
 	w := serve(t, h, http.MethodPut, "/inbox/threads/"+th.ID.String()+"/read", `not json`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- POST /inbox/threads/{id}/reply status-mapping ---------------------------
+
+func TestReplyHappyPathIs202(t *testing.T) {
+	store := newFakeStore()
+	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
+	enq := &fakeReplyEnqueuer{}
+	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(enq)))
+
+	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `{"body_text":"thanks!"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d: %s", w.Code, w.Body.String())
+	}
+	if enq.calls != 1 {
+		t.Fatalf("enqueue called %d times, want 1", enq.calls)
+	}
+}
+
+func TestReplyUnknownThreadIs404(t *testing.T) {
+	h := inbox.NewHandler(inbox.NewService(newFakeStore(), inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+
+	w := serve(t, h, http.MethodPost, "/inbox/threads/"+uuid.New().String()+"/reply", `{"body_text":"hi"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplyWithNoInboundMessageIs409(t *testing.T) {
+	store := newFakeStore()
+	th := seedThread(store, testWS, uuid.New(), "Re: Hi", "neutral") // no messages seeded
+	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+
+	w := serve(t, h, http.MethodPost, "/inbox/threads/"+th.ID.String()+"/reply", `{"body_text":"hi"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplyToSuppressedRecipientIs409(t *testing.T) {
+	store := newFakeStore()
+	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
+	h := inbox.NewHandler(inbox.NewService(store,
+		inbox.WithSuppressionChecker(&fakeSuppressionChecker{suppressed: true}),
+		inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+
+	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `{"body_text":"hi"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplyEmptyBodyIs422(t *testing.T) {
+	store := newFakeStore()
+	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
+	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+
+	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `{"body_text":""}`)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplyMalformedJSONIs400(t *testing.T) {
+	store := newFakeStore()
+	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
+	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+
+	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `not json`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplyUnauthenticatedIs401(t *testing.T) {
+	h := inbox.NewHandler(inbox.NewService(newFakeStore(), inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+	w := do(t, h, http.MethodPost, "/inbox/threads/"+uuid.New().String()+"/reply", `{"body_text":"hi"}`, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d: %s", w.Code, w.Body.String())
 	}
 }

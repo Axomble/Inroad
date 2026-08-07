@@ -29,6 +29,10 @@ func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrNoInboundMessage), errors.Is(err, ErrRecipientSuppressed):
+		httpx.Error(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrReplyBodyInvalid):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrValidation):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 	default:
@@ -65,20 +69,36 @@ func toMessageResponse(m Message) messageResponse {
 	}
 }
 
+// replyLabelRefResponse is the wire shape of Thread.ReplyLabel — the
+// InboxReplyLabelRef schema.
+type replyLabelRefResponse struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Color string `json:"color"`
+}
+
+func toReplyLabelRefResponse(l *ReplyLabelRef) *replyLabelRefResponse {
+	if l == nil {
+		return nil
+	}
+	return &replyLabelRefResponse{Key: l.Key, Label: l.Label, Color: l.Color}
+}
+
 // threadSummaryResponse is the wire shape of one Thread — the ThreadSummary
 // schema shared by the list and detail endpoints.
 type threadSummaryResponse struct {
-	ID               string  `json:"id"`
-	MailboxID        string  `json:"mailbox_id"`
-	CampaignID       *string `json:"campaign_id"`
-	ContactID        *string `json:"contact_id"`
-	ContactEmail     string  `json:"contact_email"`
-	ContactFirstName string  `json:"contact_first_name"`
-	ContactLastName  string  `json:"contact_last_name"`
-	Subject          string  `json:"subject"`
-	LastReplyClass   string  `json:"last_reply_class"`
-	Unread           bool    `json:"unread"`
-	LastMessageAt    string  `json:"last_message_at"`
+	ID               string                 `json:"id"`
+	MailboxID        string                 `json:"mailbox_id"`
+	CampaignID       *string                `json:"campaign_id"`
+	ContactID        *string                `json:"contact_id"`
+	ContactEmail     string                 `json:"contact_email"`
+	ContactFirstName string                 `json:"contact_first_name"`
+	ContactLastName  string                 `json:"contact_last_name"`
+	Subject          string                 `json:"subject"`
+	LastReplyClass   string                 `json:"last_reply_class"`
+	ReplyLabel       *replyLabelRefResponse `json:"reply_label"`
+	Unread           bool                   `json:"unread"`
+	LastMessageAt    string                 `json:"last_message_at"`
 }
 
 func toThreadSummaryResponse(t Thread) threadSummaryResponse {
@@ -92,6 +112,7 @@ func toThreadSummaryResponse(t Thread) threadSummaryResponse {
 		ContactLastName:  t.ContactLastName,
 		Subject:          t.Subject,
 		LastReplyClass:   t.LastReplyClass,
+		ReplyLabel:       toReplyLabelRefResponse(t.ReplyLabel),
 		Unread:           t.Unread,
 		LastMessageAt:    t.LastMessageAt.UTC().Format(time.RFC3339),
 	}
@@ -218,6 +239,41 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, toThreadDetailResponse(detail))
+}
+
+// sendReplyRequest is the wire shape for POST /inbox/threads/{id}/reply
+// (SendInboxReplyRequest in the OpenAPI contract).
+type sendReplyRequest struct {
+	BodyText string `json:"body_text"`
+}
+
+// reply handles POST /inbox/threads/{id}/reply. It decodes strictly
+// (unknown fields rejected — the same house style as replylabel's decode) so
+// a typo'd field is a 400 rather than a silently-ignored one. A successful
+// enqueue returns 202: the send itself happens asynchronously in the
+// execution plane (see internal/worker/inbox.ReplySendHandler).
+func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
+	wid, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var req sendReplyRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := h.svc.Reply(r.Context(), wid, id, req.BodyText); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // setReadRequest is the wire shape for PUT /inbox/threads/{id}/read.

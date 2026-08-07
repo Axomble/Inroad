@@ -32,4 +32,23 @@ describe('ReplyClassPill', () => {
     const { container } = render(<ReplyClassPill replyClass={'bogus'} />)
     expect(container).toBeEmptyDOMElement()
   })
+
+  // The workspace's own reply-label taxonomy (server-resolved `reply_label`)
+  // takes priority over the legacy built-in mapping, since labels can be
+  // renamed/recolored per workspace.
+  test('a server-resolved label renders its own text and color, not the legacy mapping', () => {
+    render(<ReplyClassPill replyClass="positive" replyLabel={{ label: 'Meeting booked', color: '#8b5cf6' }} />)
+    expect(screen.getByText('Meeting booked')).toBeInTheDocument()
+    expect(screen.queryByText('Positive')).not.toBeInTheDocument()
+  })
+
+  test('a null reply_label falls back to the legacy classMeta mapping', () => {
+    render(<ReplyClassPill replyClass="positive" replyLabel={null} />)
+    expect(screen.getByText('Positive')).toBeInTheDocument()
+  })
+
+  test('an unrecognized class with a null label renders nothing', () => {
+    const { container } = render(<ReplyClassPill replyClass="bogus" replyLabel={null} />)
+    expect(container).toBeEmptyDOMElement()
+  })
 })

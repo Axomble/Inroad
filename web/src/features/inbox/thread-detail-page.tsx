@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { useGetInboxThreadQuery, useSetInboxThreadReadMutation, type InboxMessage } from './api'
 import { contactLabel } from './contact-label'
 import { MessageBody } from './message-body'
+import { ReplyComposer } from './reply-composer'
 
 const routeApi = getRouteApi('/app/inbox/$threadId')
 
@@ -55,7 +56,7 @@ export function ThreadDetailPage() {
         }
         title={isLoading ? <Skeleton className="h-5 w-48" /> : data && contactLabel(data)}
         subtitle={data ? data.subject || '(no subject)' : undefined}
-        actions={data ? <ReplyClassPill replyClass={data.last_reply_class} /> : undefined}
+        actions={data ? <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} /> : undefined}
       />
 
       <PageBody className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6 sm:px-6">
@@ -87,6 +88,8 @@ export function ThreadDetailPage() {
             <MessageBubble key={`${message.occurred_at}-${index}`} message={message} />
           ))
         )}
+
+        {data && <ReplyComposer threadId={threadId} hasInboundMessage={data.messages.some((m) => m.direction === 'inbound')} />}
       </PageBody>
     </Page>
   )

@@ -53,6 +53,26 @@ type Thread struct {
 	ContactEmail     string
 	ContactFirstName string
 	ContactLastName  string
+	// ReplyLabel is the workspace's reply-label row resolved from
+	// LastReplyClass (a LEFT JOIN on (workspace_id, key)), for display. nil
+	// when no label in the workspace claims the key — a deleted custom
+	// label whose key survives on historical rows, or a row from before a
+	// join populated this (threadFromRow, backing UpsertThread/RecordReply's
+	// return value, never joins reply_labels at all). Callers degrade to
+	// the raw LastReplyClass key, per the OpenAPI contract's
+	// InboxThreadSummary.reply_label doc.
+	ReplyLabel *ReplyLabelRef
+}
+
+// ReplyLabelRef is a reply label's display fields, resolved for one thread's
+// LastReplyClass. Key is deliberately duplicated from Thread.LastReplyClass
+// (rather than requiring the caller to already have it) so a ReplyLabelRef
+// is self-contained wherever it travels, mirroring coreapi.ReplyLabel's
+// identical "flatten to what the caller needs" shape.
+type ReplyLabelRef struct {
+	Key   string
+	Label string
+	Color string
 }
 
 // Message is one inbound or outbound email on a Thread.
@@ -152,6 +172,11 @@ type Store interface {
 	ListThreads(ctx context.Context, workspaceID uuid.UUID, filter ListFilter) (ThreadPage, error)
 	GetThread(ctx context.Context, workspaceID, id uuid.UUID) (ThreadDetail, error)
 	SetUnread(ctx context.Context, workspaceID, id uuid.UUID, unread bool) error
+	// RecordOutboundReply appends an OUTBOUND message to an existing thread and
+	// bumps its last_message_at, in ONE transaction — see Service.
+	// RecordOutboundReply's doc for why this never flips unread or
+	// last_reply_class the way RecordReply's inbound path does.
+	RecordOutboundReply(ctx context.Context, threadID, workspaceID uuid.UUID, msgIn InsertMessageInput) error
 }
 
 // DefaultThreadPageLimit is the page size ListThreads uses when the caller
@@ -262,6 +287,35 @@ func (s *PgStore) RecordReply(ctx context.Context, threadIn UpsertThreadInput, m
 		return Thread{}, err
 	}
 	return th, nil
+}
+
+// RecordOutboundReply inserts the manual reply's outbound message and bumps
+// the thread's last_message_at in ONE transaction, the same rationale as
+// RecordReply: a connection dropped between the two separate writes would
+// leave a thread whose last_message_at reflects a reply that was never
+// actually recorded. Deliberately does NOT upsert the thread the way
+// RecordReply does (there is nothing to create — the thread already exists,
+// or GetThread in Service.Reply would already have 404'd) and does not touch
+// unread/last_reply_class — see the Store interface's doc comment.
+func (s *PgStore) RecordOutboundReply(ctx context.Context, threadID, workspaceID uuid.UUID, msgIn InsertMessageInput) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := s.q.WithTx(tx)
+
+	msgIn.ThreadID = threadID
+	msgIn.WorkspaceID = workspaceID
+	if err := qtx.InsertInboxMessage(ctx, insertMessageParams(msgIn)); err != nil {
+		return err
+	}
+	if err := qtx.BumpInboxThreadLastMessageAt(ctx, gen.BumpInboxThreadLastMessageAtParams{
+		ID: threadID, WorkspaceID: workspaceID,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PgStore) UpsertThread(ctx context.Context, in UpsertThreadInput) (Thread, error) {
@@ -418,6 +472,10 @@ type threadFields struct {
 	ContactEmail     string
 	ContactFirstName string
 	ContactLastName  string
+	// ReplyLabelLabel/ReplyLabelColor are nil for threadFromRow (no
+	// reply_labels join either) and whenever the join misses.
+	ReplyLabelLabel *string
+	ReplyLabelColor *string
 }
 
 // threadFromRow maps a generated inbox_threads row (no contact join — the
@@ -444,6 +502,7 @@ func threadFromListRow(row gen.ListInboxThreadsRow) Thread {
 		Subject: row.Subject, LastReplyClass: row.LastReplyClass, Unread: row.Unread,
 		LastMessageAt: row.LastMessageAt, CreatedAt: row.CreatedAt,
 		ContactEmail: row.ContactEmail, ContactFirstName: row.ContactFirstName, ContactLastName: row.ContactLastName,
+		ReplyLabelLabel: row.ReplyLabelLabel, ReplyLabelColor: row.ReplyLabelColor,
 	})
 }
 
@@ -456,6 +515,7 @@ func threadFromGetRow(row gen.GetInboxThreadRow) Thread {
 		Subject: row.Subject, LastReplyClass: row.LastReplyClass, Unread: row.Unread,
 		LastMessageAt: row.LastMessageAt, CreatedAt: row.CreatedAt,
 		ContactEmail: row.ContactEmail, ContactFirstName: row.ContactFirstName, ContactLastName: row.ContactLastName,
+		ReplyLabelLabel: row.ReplyLabelLabel, ReplyLabelColor: row.ReplyLabelColor,
 	})
 }
 
@@ -479,7 +539,31 @@ func thread(f threadFields) Thread {
 		ContactEmail:     f.ContactEmail,
 		ContactFirstName: f.ContactFirstName,
 		ContactLastName:  f.ContactLastName,
+		ReplyLabel:       replyLabelRef(f.LastReplyClass, f.ReplyLabelLabel, f.ReplyLabelColor),
 	}
+}
+
+// replyLabelRef builds a *ReplyLabelRef from the reply_labels LEFT JOIN's
+// nullable columns. nil when the join missed (no label in the workspace
+// claims key) — label/color are set together by the query (both come from
+// the same joined row), so checking either is equivalent; label is checked
+// as the representative.
+func replyLabelRef(key string, label, color *string) *ReplyLabelRef {
+	if label == nil {
+		return nil
+	}
+	return &ReplyLabelRef{Key: key, Label: *label, Color: derefOrEmpty(color)}
+}
+
+// derefOrEmpty dereferences a possibly-nil *string, defensively: label/color
+// are always set together by the join this backs, so color should never be
+// nil when label isn't, but this avoids a nil-pointer panic if that ever
+// changes.
+func derefOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // messageFromRow maps a generated inbox_messages row to the domain type.

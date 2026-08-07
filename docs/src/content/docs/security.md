@@ -444,6 +444,63 @@ limit / abuse control here is tracked in the Deferred list below.
     matching uses label-boundary suffix checks (`hasHostSuffix`), so
     `notgoogle.com` never matches `google.com`.
 
+## Manual reply from the unified inbox
+47. **A manual reply is workspace-pinned end-to-end, suppression-checked
+    twice, and its scope is deliberately not delegable.** `POST
+    /inbox/threads/{id}/reply` (`internal/app/inbox.Service.Reply`) resolves
+    the thread via `Store.GetThread`, which pins `workspace_id` from
+    `auth.WorkspaceID` (never the body or path) the same way every other
+    inbox read does; a cross-tenant or unknown thread id is indistinguishable
+    404, per the "never leak a foreign row's existence" rule. Suppression is
+    checked BEFORE enqueuing (`inbox.SuppressionChecker`, backed by
+    `suppression.Store`) and re-checked by
+    `internal/worker/inbox.ReplySendHandler` immediately before dialing (the
+    same defense-in-depth the test-send/warmup paths use against a race with
+    an incoming unsubscribe) — suppression is never bypassed, in either
+    direction. The credential is decrypted ONLY in the execution plane
+    (`ReplyCore.ResolveSenderTransport`, invariant 1): the control plane only
+    ever enqueues an `inbox:reply_send` task carrying ids and the free-text
+    body, never a credential. The new `inbox:send` scope is in
+    `auth.AllScopes` (a workspace-minted API key or a session may send a
+    reply) but deliberately absent from `OAuthGrantableScopes` — sending mail
+    is never delegable to a third-party client, the same rule
+    `campaigns:send` follows. A manual reply bypasses the mailbox's daily cap
+    and minimum send interval (product decision: an operator's own reply is
+    not automation) but is still counted toward the mailbox's daily sent
+    volume — `queries/send.sql`'s `CountSentToday` sums both `sends` and
+    same-day outbound `inbox_messages` for the mailbox, so campaign
+    scheduling sees true volume even though no `sends` row is ever written
+    for a reply (`sends.campaign_id`/`contact_id` are `NOT NULL` with a
+    `UNIQUE(campaign_id, contact_id)`, which a legacy direct-send thread's
+    reply cannot satisfy and a threaded one would collide with).
+
+    **Claim-before-send.** `ReplySendHandler` claims the task (workspace-
+    pinned, keyed on the enqueue-time `asynq.TaskID` — stable across every
+    retry/redelivery of that ONE enqueued task, carried in
+    `InboxReplySendPayload.TaskID`) immediately before `ResolveSenderTransport`,
+    the same claim-before-dial discipline `ClaimStepSend`/`ClaimWarmupSend`
+    apply to a sequence/warmup send — without it, a worker crashing between
+    the provider ACK and the handler returning would leave asynq's lease to
+    expire and redeliver the identical task to another worker as a full
+    re-run, re-dialing and double-sending. The claim reuses the EXISTING
+    generic Idempotency-Key replay cache (`idempotency_keys`, migration
+    000045) rather than a new table — a namespaced key
+    (`"inbox-reply:" + taskID`) inserted via the same atomic
+    `InsertIdempotencyKey`/`DeleteIdempotencyKey` pair the HTTP layer uses,
+    aging out via the SAME 24h maintenance sweep, no dedicated retention job.
+    A failed claim (`claimed=false`) means a prior attempt at this exact task
+    already reached the dial: skip, never send again — "never double,
+    occasionally drop a rare ambiguous send" (the same accepted posture as
+    invariant 4a). A claim taken but never dialed (a transient
+    transport-resolve or send failure) is released BEFORE the handler
+    returns its error, so the retry's own claim attempt can re-claim rather
+    than seeing its own abandoned claim and dropping the reply forever; if
+    the release itself fails, the original error is still returned and the
+    retry simply skips (drop, never double — the fail-safe direction, not
+    the failure-avoiding one). Post-ACK bookkeeping (`RecordInboxReply`) is
+    unaffected by any of this: its own failure is logged, never retried, for
+    the reason above the claim exists in the first place.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
