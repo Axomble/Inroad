@@ -89,6 +89,33 @@ let mailboxes: Mailbox[]
 let threads: Thread[]
 let threadRequests: URL[]
 
+/** The reply-class filter's options now come from GET /reply-labels, not a
+ * hardcoded list — the fixture mirrors the built-in taxonomy so filter tests
+ * written against those keys/labels keep working. */
+function replyLabel(key: string, label: string, position: number) {
+  return {
+    id: `label-${key}`,
+    key,
+    label,
+    color: '#888888',
+    position,
+    is_builtin: true,
+    stops_enrollment: false,
+    is_automated: false,
+    suppresses_contact: false,
+    captures_deal: false,
+    created_at: '',
+    updated_at: '',
+  }
+}
+const REPLY_LABELS = {
+  labels: [
+    replyLabel('positive', 'Positive', 0),
+    replyLabel('negative', 'Negative', 1),
+    replyLabel('neutral', 'Neutral', 2),
+  ],
+}
+
 function lastThreadRequest(): URL {
   const last = threadRequests[threadRequests.length - 1]
   if (!last) throw new Error('no /inbox/threads request was made')
@@ -167,6 +194,7 @@ beforeEach(() => {
       const method = (isRequest ? input.method : init?.method ?? 'GET').toUpperCase()
 
       if (url.pathname.endsWith('/mailboxes')) return json(mailboxes)
+      if (url.pathname.endsWith('/reply-labels')) return json(REPLY_LABELS)
 
       if (url.pathname.endsWith('/inbox/threads') && method === 'GET') {
         threadRequests.push(url)
@@ -327,6 +355,43 @@ test('Next is disabled on a partial page, enabled on a full one, and paging forw
   expect(page2.searchParams.get('before_last_message_at')).toBe(threads[24]?.last_message_at)
   // A single-item page is definitively the last one.
   expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled()
+})
+
+test('the reply-class filter options are the workspace reply labels, not a hardcoded legacy list', async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Jamie Lin')
+
+  fireEvent.keyDown(screen.getByRole('button', { name: /^sort by all replies$/i }), { key: 'Enter' })
+
+  expect(await screen.findByRole('menuitem', { name: /^positive$/i })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: /^negative$/i })).toBeInTheDocument()
+  expect(screen.getByRole('menuitem', { name: /^neutral$/i })).toBeInTheDocument()
+  // "Out of office" is one of the old hardcoded built-ins but isn't in this
+  // workspace's own /reply-labels fixture, so it must not appear.
+  expect(screen.queryByRole('menuitem', { name: /out of office/i })).not.toBeInTheDocument()
+})
+
+test('while reply labels are still loading, the filter degrades to just "All replies" rather than blocking the page', async () => {
+  const pendingReplyLabels = new Promise<Response>(() => {})
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const isRequest = input instanceof Request
+      const href = isRequest ? input.url : typeof input === 'string' ? input : (input as URL).href
+      const url = new URL(href, 'http://localhost')
+      if (url.pathname.endsWith('/mailboxes')) return json(mailboxes)
+      if (url.pathname.endsWith('/reply-labels')) return pendingReplyLabels
+      if (url.pathname.endsWith('/inbox/threads')) return json({ items: threads })
+      return json({ error: 'unhandled' }, 404)
+    }),
+  )
+
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Jamie Lin')
+
+  fireEvent.keyDown(screen.getByRole('button', { name: /^sort by all replies$/i }), { key: 'Enter' })
+  expect(await screen.findByRole('menuitem', { name: 'All replies' })).toBeInTheDocument()
+  expect(screen.queryByRole('menuitem', { name: /^positive$/i })).not.toBeInTheDocument()
 })
 
 test('Previous pops back to the exact prior page', async () => {
