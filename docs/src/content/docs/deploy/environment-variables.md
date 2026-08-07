@@ -19,8 +19,7 @@ description: Complete reference guide for all backend configuration environment 
 | :--- | :--- | :--- |
 | `INROAD_LOG_LEVEL` | Logging level (`debug`, `info`, `warn`, `error`) | `info` |
 | `INROAD_MAIL_ALLOW_PRIVATE_HOSTS` | Allow loopback/private RFC1918 mail server dials | `false` |
-| `INROAD_KEY_PROVIDER` | Key Encryption Key provider (`local` or `aws-kms`) | `local` |
-| `INROAD_STORAGE_PROVIDER` | File storage provider (`local` or `s3`) | `local` |
+| `INROAD_KEY_PROVIDER` | Key Encryption Key provider — only `local` is implemented today (an AWS KMS backend exists behind the same seam but is not yet selectable) | `local` |
 
 ## Worker Tuning
 
