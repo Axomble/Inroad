@@ -3265,11 +3265,11 @@ export type InboxThreadSummary = {
   mailbox_id: string;
   campaign_id: string | null;
   contact_id: string | null;
-  /** The linked contact's email */
+  /** The linked contact's email, or "" when contact_id is null (e.g. a legacy direct-send match). */
   contact_email: string;
-  /** The linked contact's first name */
+  /** The linked contact's first name, or "" when contact_id is null. */
   contact_first_name: string;
-  /** The linked contact's last name */
+  /** The linked contact's last name, or "" when contact_id is null. */
   contact_last_name: string;
   subject: string;
   last_reply_class: string;

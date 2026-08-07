@@ -2326,7 +2326,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InboxThreadPage' }
-        '400': { description: Malformed filter (bad UUID/timestamp, or a half-set keyset cursor) }
+        '400': { description: "Malformed filter (bad UUID/timestamp, or a half-set keyset cursor)" }
         '401': { description: Unauthorized }
   /inbox/threads/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -4111,9 +4111,9 @@ components:
         mailbox_id: { type: string, format: uuid }
         campaign_id: { type: string, format: uuid, nullable: true }
         contact_id: { type: string, format: uuid, nullable: true }
-        contact_email: { type: string, description: The linked contact's email, or "" when contact_id is null (e.g. a legacy direct-send match). }
-        contact_first_name: { type: string, description: The linked contact's first name, or "" when contact_id is null. }
-        contact_last_name: { type: string, description: The linked contact's last name, or "" when contact_id is null. }
+        contact_email: { type: string, description: "The linked contact's email, or \"\" when contact_id is null (e.g. a legacy direct-send match)." }
+        contact_first_name: { type: string, description: "The linked contact's first name, or \"\" when contact_id is null." }
+        contact_last_name: { type: string, description: "The linked contact's last name, or \"\" when contact_id is null." }
         subject: { type: string }
         last_reply_class: { type: string }
         unread: { type: boolean }
