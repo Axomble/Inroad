@@ -44,8 +44,8 @@ type itFixture struct {
 }
 
 // seedSend seeds a workspace, mailbox, list, contact, and campaign, then
-// creates a sends row the same way production does (EnqueueSends, off a real
-// list member), and marks it 'sent'. sent_at is then backdated an hour so
+// inserts a sends row directly (the step path creates these via its claim
+// insert) and marks it 'sent'. sent_at is then backdated an hour so
 // CountHumanOpens' "fires more than 2s after sent_at" prefetch filter always
 // passes deterministically, regardless of how quickly the test fires its
 // open request after seeding.
@@ -69,7 +69,8 @@ func seedSend(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.Quer
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	ct, err := q.UpsertContact(ctx, gen.UpsertContactParams{WorkspaceID: ws.ID, Email: "alice-" + uuid.NewString() + "@x.test", FirstName: "Alice"})
+	email := "alice-" + uuid.NewString() + "@x.test"
+	ct, err := q.UpsertContact(ctx, gen.UpsertContactParams{WorkspaceID: ws.ID, Email: email, FirstName: "Alice"})
 	if err != nil {
 		t.Fatalf("contact: %v", err)
 	}
@@ -83,17 +84,21 @@ func seedSend(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.Quer
 	if err != nil {
 		t.Fatalf("campaign: %v", err)
 	}
-	sendIDs, err := q.EnqueueSends(ctx, gen.EnqueueSendsParams{ID: cam.ID, WorkspaceID: ws.ID})
-	if err != nil || len(sendIDs) != 1 {
-		t.Fatalf("enqueue sends: %v ids=%d", err, len(sendIDs))
+	var sendID uuid.UUID
+	err = pool.QueryRow(ctx,
+		`INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email)
+		 VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		ws.ID, cam.ID, ct.ID, mb.ID, email).Scan(&sendID)
+	if err != nil {
+		t.Fatalf("insert send: %v", err)
 	}
-	if err := q.SetSendResult(ctx, gen.SetSendResultParams{ID: sendIDs[0], Status: "sent", WorkspaceID: ws.ID}); err != nil {
+	if err := q.SetSendResult(ctx, gen.SetSendResultParams{ID: sendID, Status: "sent", WorkspaceID: ws.ID}); err != nil {
 		t.Fatalf("set send result: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE sends SET sent_at = now() - interval '1 hour' WHERE id = $1`, sendIDs[0]); err != nil {
+	if _, err := pool.Exec(ctx, `UPDATE sends SET sent_at = now() - interval '1 hour' WHERE id = $1`, sendID); err != nil {
 		t.Fatalf("backdate sent_at: %v", err)
 	}
-	return itFixture{ws: ws.ID, campaignID: cam.ID, sendID: sendIDs[0]}
+	return itFixture{ws: ws.ID, campaignID: cam.ID, sendID: sendID}
 }
 
 // mountHandler wires a real Handler (PgStore backed) mounted at "/t", the
@@ -329,6 +334,5 @@ func TestCampaignMetrics_FromSeededEvents(t *testing.T) {
 // sequence worker's advance handler and a real SMTP-shaped Sender into this
 // domain's integration test, which is redundant with the coverage that
 // already exists at the unit level: internal/worker/sequence/advance_test.go
-// (TestAdvanceSkipsTrackingWhenDisabled) and internal/worker/sender/sender_test.go
-// (TestHandlerSkipsTrackingWhenDisabled) both assert TrackingEnabled=false
+// (TestAdvanceSkipsTrackingWhenDisabled) asserts TrackingEnabled=false
 // leaves the body untouched (RewriteHTML/injection never called).

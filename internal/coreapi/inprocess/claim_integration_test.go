@@ -137,6 +137,15 @@ func TestClaimStepSendStateMachine(t *testing.T) {
 		t.Fatalf("stale reclaim: id=%v err=%v", got, err)
 	}
 
+	// Release (retryable failure, ReleaseStepSend) expires the lease so a
+	// retry reclaims it immediately, without waiting out the lease.
+	if err := q.ReleaseSend(ctx, gen.ReleaseSendParams{ID: wantID, WorkspaceID: fx.ws}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if got, err := q.ClaimStepSend(ctx, p); err != nil || got != wantID {
+		t.Fatalf("reclaim after release: id=%v err=%v", got, err)
+	}
+
 	// Finalized 'sent' is terminal: never re-claimed, even if aged.
 	if err := q.SetSendResult(ctx, gen.SetSendResultParams{
 		ID: wantID, Status: "sent", MessageID: "<m@x>", Error: "", WorkspaceID: fx.ws,
@@ -235,70 +244,5 @@ func TestReserveMailboxSendSlotEnforcesSpacingAndWorkspace(t *testing.T) {
 	}
 	if _, err := q.ReserveMailboxSendSlot(ctx, owner); err != nil {
 		t.Fatalf("reservation after interval: %v", err)
-	}
-}
-
-// insertQueuedSend inserts one direct-path send row in 'queued' (as EnqueueSends
-// would), returning its id.
-func insertQueuedSend(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx claimFixture) uuid.UUID {
-	t.Helper()
-	var id uuid.UUID
-	// step_order defaults to 1 (NOT NULL) — as EnqueueSends relies on; the direct
-	// path claims by id, so the value is immaterial here.
-	err := pool.QueryRow(ctx,
-		`INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email, status)
-		 VALUES ($1,$2,$3,$4,$5,'queued') RETURNING id`,
-		fx.ws, fx.campaignID, fx.contactID, fx.mailboxID, fx.email).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert queued send: %v", err)
-	}
-	return id
-}
-
-func TestClaimSendDirectStateMachine(t *testing.T) {
-	ctx := context.Background()
-	pool, q := claimConnect(t)
-	fx := seedForClaim(t, ctx, q)
-	id := insertQueuedSend(t, ctx, pool, fx)
-	p := gen.ClaimSendParams{ID: id, WorkspaceID: fx.ws, LeaseSeconds: claimLeaseSeconds}
-
-	// queued -> sending (claim wins).
-	if got, err := q.ClaimSend(ctx, p); err != nil || got != id {
-		t.Fatalf("queued claim: id=%v err=%v", got, err)
-	}
-	// fresh sending -> lose.
-	if _, err := q.ClaimSend(ctx, p); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("fresh sending must not re-claim, got %v", err)
-	}
-	// Release (retryable failure) expires the lease -> immediately reclaimable.
-	if err := q.ReleaseSend(ctx, gen.ReleaseSendParams{ID: id, WorkspaceID: fx.ws}); err != nil {
-		t.Fatalf("release: %v", err)
-	}
-	if got, err := q.ClaimSend(ctx, p); err != nil || got != id {
-		t.Fatalf("reclaim after release: id=%v err=%v", got, err)
-	}
-	// Finalize -> terminal, never reclaimed.
-	if err := q.SetSendResult(ctx, gen.SetSendResultParams{ID: id, Status: "sent", MessageID: "<m>", WorkspaceID: fx.ws}); err != nil {
-		t.Fatalf("finalize: %v", err)
-	}
-	makeStale(t, ctx, pool, id)
-	if _, err := q.ClaimSend(ctx, p); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("sent row must never re-claim, got %v", err)
-	}
-}
-
-func TestClaimSendDirectWorkspaceScoping(t *testing.T) {
-	ctx := context.Background()
-	pool, q := claimConnect(t)
-	fx := seedForClaim(t, ctx, q)
-	id := insertQueuedSend(t, ctx, pool, fx)
-
-	// A foreign workspace cannot claim a 'queued' row it doesn't own.
-	if _, err := q.ClaimSend(ctx, gen.ClaimSendParams{ID: id, WorkspaceID: fx.foreignWS, LeaseSeconds: claimLeaseSeconds}); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("foreign ws must claim zero rows, got err=%v", err)
-	}
-	// The owner still can.
-	if got, err := q.ClaimSend(ctx, gen.ClaimSendParams{ID: id, WorkspaceID: fx.ws, LeaseSeconds: claimLeaseSeconds}); err != nil || got != id {
-		t.Fatalf("owner claim after foreign attempt: id=%v err=%v", got, err)
 	}
 }

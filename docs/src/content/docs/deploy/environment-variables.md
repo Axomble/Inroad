@@ -19,5 +19,21 @@ description: Complete reference guide for all backend configuration environment 
 | :--- | :--- | :--- |
 | `INROAD_LOG_LEVEL` | Logging level (`debug`, `info`, `warn`, `error`) | `info` |
 | `INROAD_MAIL_ALLOW_PRIVATE_HOSTS` | Allow loopback/private RFC1918 mail server dials | `false` |
-| `INROAD_KEY_PROVIDER` | Key Encryption Key provider (`local` or `aws-kms`) | `local` |
-| `INROAD_STORAGE_PROVIDER` | File storage provider (`local` or `s3`) | `local` |
+| `INROAD_KEY_PROVIDER` | Key Encryption Key provider — only `local` is implemented today (an AWS KMS backend exists behind the same seam but is not yet selectable) | `local` |
+
+## Worker Tuning
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_WORKER_CONCURRENCY` | Number of concurrent asynq worker goroutines per worker process | `10` |
+
+The default of `10` is sized for small deployments. Every per-mailbox send and
+inbox-poll task shares this pool, so with many active mailboxes the queue backs
+up behind it and sending looks slow even though nothing is wrong. As a rule of
+thumb, raise it to at least `25` once you run **50 or more active mailboxes**
+on one worker node.
+
+When raising concurrency, keep the API server's database pool larger than
+worker concurrency plus headroom for the periodic sweepers and HTTP handlers —
+the pool already enforces a floor of 25 connections, sized to exceed the
+default concurrency of 10.

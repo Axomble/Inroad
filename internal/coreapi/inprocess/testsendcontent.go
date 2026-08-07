@@ -74,8 +74,8 @@ func (c client) GetTestSendContent(ctx context.Context, workspaceID, campaignID,
 }
 
 // IsSuppressed reports whether `to` is on workspaceID's suppression list --
-// the SAME (workspace_id, lower(email))-indexed lookup GetSendJob and
-// GetStepSendJob use for a real send. Consumed through the narrow
+// the SAME (workspace_id, lower(email))-indexed lookup GetStepSendJob
+// uses for a real send. Consumed through the narrow
 // testsend.Core interface (defense-in-depth re-check right before the
 // testsend:send task dials, since the control-plane check in
 // campaign.Service.TestSend can race an incoming unsubscribe).

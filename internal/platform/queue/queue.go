@@ -71,21 +71,6 @@ const TaskDomainAuthSweep = "domainauth:sweep"
 // sender selection never resolves DNS on the send path.
 const TaskRecipientESPSweep = "recipientesp:sweep"
 
-const TaskSendEmail = "send:email"
-
-// SendEmailPayload is the body of a send:email task. WorkspaceID is
-// included so the worker's DB lookups can pin `workspace_id` in the WHERE
-// clause — defense in depth on top of the unguessable SendID UUID.
-type SendEmailPayload struct {
-	SendID      string `json:"send_id"`
-	WorkspaceID string `json:"workspace_id"`
-}
-
-// TaskSweepStuck is the periodic reconcile task that re-enqueues sends left
-// in 'queued' longer than the reconcile window. Scheduled by the worker's
-// asynq.Scheduler every 2 minutes.
-const TaskSweepStuck = "send:sweep_stuck"
-
 // TaskSequenceAdvance drives one step of a contact's enrollment: send the due
 // step, then (lazy chain) schedule the next. One task per enrollment per step.
 const TaskSequenceAdvance = "sequence:advance"
@@ -243,36 +228,6 @@ func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 	return nil
 }
 
-// EnqueueSend enqueues a send:email task for immediate processing. Both
-// ids travel in the payload so the worker can pin workspace_id in its
-// DB lookups (defense in depth on top of the UUID sendID). The TaskID keys on
-// the send id so a sweeper re-enqueue of an already-pending send dedups.
-func (c *Client) EnqueueSend(sendID, workspaceID string) error {
-	b, err := json.Marshal(SendEmailPayload{SendID: sendID, WorkspaceID: workspaceID})
-	if err != nil {
-		return err
-	}
-	return c.enqueue(asynq.NewTask(TaskSendEmail, b), sendOpts(sendID)...)
-}
-
-// EnqueueSendIn enqueues a send:email task to be processed after delay d.
-func (c *Client) EnqueueSendIn(sendID, workspaceID string, d time.Duration) error {
-	b, err := json.Marshal(SendEmailPayload{SendID: sendID, WorkspaceID: workspaceID})
-	if err != nil {
-		return err
-	}
-	return c.enqueue(asynq.NewTask(TaskSendEmail, b), append(sendOpts(sendID), asynq.ProcessIn(d))...)
-}
-
-// sendOpts are the shared idempotency options for a send:email task.
-func sendOpts(sendID string) []asynq.Option {
-	return []asynq.Option{
-		asynq.TaskID("send:" + sendID),
-		asynq.MaxRetry(sendMaxRetry),
-		asynq.Retention(taskRetention),
-	}
-}
-
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.
 func (c *Client) EnqueueAdvance(enrollmentID, workspaceID string) error {
 	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now())
@@ -339,7 +294,7 @@ func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) e
 // testSendTaskID keys a testsend:send on (campaign, step, mailbox,
 // due-second) so a double-submitted form within the same second collapses to
 // one send, while a genuinely distinct test-send a moment later still
-// enqueues. Unlike sendOpts/enqueueAdvance, there is no downstream row-claim
+// enqueues. Unlike enqueueAdvance, there is no downstream row-claim
 // backing this as a correctness guarantee (a test-send writes no sends row) --
 // the per-workspace rate limiter (campaign.Service.TestSend) is the abuse
 // guard; this key only cuts an accidental double-click. The recipient address
@@ -445,13 +400,6 @@ func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
 		asynq.RedisClientOpt{Addr: redisAddr},
 		&asynq.SchedulerOpts{Logger: newAsynqLogger(logger)},
 	)
-}
-
-// RegisterSweepStuck registers the periodic stuck-send sweep on the
-// scheduler. Runs every 2 minutes to match the "stuck > 2 minutes" query.
-func RegisterSweepStuck(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 2m", asynq.NewTask(TaskSweepStuck, nil))
-	return err
 }
 
 // RegisterSweepEnrollments registers the periodic due-enrollment reconcile.

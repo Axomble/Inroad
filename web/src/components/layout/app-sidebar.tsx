@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Building2, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
+import { Building2, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, BookOpen, Tags, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppSelector } from '@/store/hooks'
 import { PulseCard } from './pulse-card'
@@ -71,6 +71,10 @@ const NAV: NavGroup[] = [
     items: [
       { label: 'Team', to: '/app/settings/team', icon: Settings },
       { label: 'Security', to: '/app/settings/security', icon: ShieldCheck },
+      // Not adminOnly: reply-label writes are campaigns:write on the backend, a
+      // scope every logged-in member holds (like Campaigns itself) — only API
+      // keys / OAuth grants are scope-attenuated.
+      { label: 'Reply labels', to: '/app/settings/reply-labels', icon: Tags },
       { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound, adminOnly: true },
       { label: 'Connected apps', to: '/app/settings/oauth-apps', icon: Plug, adminOnly: true },
       { label: 'AI', to: '/app/settings/ai', icon: Sparkles, adminOnly: true },

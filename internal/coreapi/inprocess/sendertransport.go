@@ -19,7 +19,7 @@ import (
 //
 // Decrypting the credential — and, for a gmail/m365 mailbox, refreshing the
 // OAuth access token — reuses the SAME oauthAccessToken/keyring path every
-// other worker send job uses (GetSendJob, GetStepSendJob), so there is exactly
+// other worker send job uses (GetStepSendJob, GetWarmupSendJob), so there is exactly
 // ONE implementation of "how a mailbox's credential is opened" (security
 // invariants 8/9). This runs ONLY in the execution plane (cmd/worker), never
 // in cmd/inroad (docs/security.md invariant 1).

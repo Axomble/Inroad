@@ -95,8 +95,8 @@ func Handler(core Core, sender Mailer) func(context.Context, *asynq.Task) error 
 		if err != nil {
 			return fmt.Errorf("resolve sender transport: %w", err)
 		}
-		// Zeroize the decrypted secret(s) before returning, mirroring every other
-		// send handler (internal/worker/sender, internal/worker/sequence): the
+		// Zeroize the decrypted secret(s) before returning, mirroring the
+		// sequence send handler (internal/worker/sequence): the
 		// primary long-lived buffer this handler allocated should not linger past
 		// it in memory.
 		defer zeroize(transport.SMTPPassword)

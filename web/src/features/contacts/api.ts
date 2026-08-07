@@ -22,6 +22,18 @@ const contactsApi = api
       createList: {
         invalidatesTags: [{ type: 'List', id: 'LIST' }],
       },
+      renameList: {
+        invalidatesTags: [{ type: 'List', id: 'LIST' }],
+      },
+      // Also drops the contacts cache: the deleted list's members leave the
+      // all-contacts scope semantics unchanged, but a view still filtered to it
+      // must not replay cached rows for a list that no longer exists.
+      deleteList: {
+        invalidatesTags: [
+          { type: 'List', id: 'LIST' },
+          { type: 'Contact', id: 'LIST' },
+        ],
+      },
       // One coarse tag for every page: `list` is now optional, and a page is
       // also keyed by q/sort/cursor/limit, so per-list tags would leave the
       // all-contacts view and every other search stale after an import.
@@ -47,6 +59,8 @@ const contactsApi = api
 export const {
   useListListsQuery,
   useCreateListMutation,
+  useRenameListMutation,
+  useDeleteListMutation,
   useListContactsQuery,
   useImportContactsCsvMutation,
 } = contactsApi

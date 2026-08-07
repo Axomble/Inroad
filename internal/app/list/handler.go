@@ -2,7 +2,11 @@ package list
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/httpx"
@@ -62,4 +66,62 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		out = append(out, listResponse{ID: l.ID.String(), Name: l.Name})
 	}
 	httpx.JSON(w, http.StatusOK, out)
+}
+
+// renameRequest is decode-only; name constraints are enforced by the
+// service's renameInput validation, not a handler-level validate call.
+type renameRequest struct {
+	Name string `json:"name"`
+}
+
+// rename handles PATCH /lists/{id}.
+func (h *Handler) rename(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	var req renameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	l, err := h.svc.Rename(r.Context(), ws, id, req.Name)
+	switch {
+	case errors.Is(err, ErrValidation):
+		httpx.Error(w, http.StatusBadRequest, "invalid name")
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not rename list")
+	default:
+		httpx.JSON(w, http.StatusOK, listResponse{ID: l.ID.String(), Name: l.Name})
+	}
+}
+
+// delete handles DELETE /lists/{id}.
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	ws, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	switch err := h.svc.Delete(r.Context(), ws, id); {
+	case errors.Is(err, ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "not found")
+	case errors.Is(err, ErrInUse):
+		httpx.Error(w, http.StatusConflict, "list is used by a campaign")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "could not delete list")
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

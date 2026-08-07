@@ -29,7 +29,7 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
 - **Identifiers:** language-idiomatic. Go = `MixedCaps` (exported `PascalCase`, local `camelCase`). TS/React = `camelCase` vars/functions, `PascalCase` components & types. snake_case is used ONLY at boundaries — JSON API fields, DB columns, env vars. Never snake_case Go/TS identifiers.
 - **Architecture: SOLID + pragmatic Clean.** Each domain defines its own repository interface (e.g. `mailbox.Store`); services depend on the interface, not the concrete sqlc-backed struct (dependency inversion, trivially unit-testable). Keep interfaces small and at seams (`coreapi.Client`, `mail.ConnectionTester`). No full entity/DTO duplication — sqlc models are the persistence type; the interface boundary is where the decoupling lives.
 - **Backend layering:** `app/*` may import `platform/*`, never the reverse; `app/*` packages don't import each other; workers use `coreapi` only; routes registered per-domain via `Routes() http.Handler`.
-- **Frontend:** `routes/*` compose from `features/*`; `features/*` never import each other; redux-persist whitelists UI slices only (never the RTK Query `api` reducer); `store/api.ts` is generated, never hand-edited.
+- **Frontend:** `routes/*` compose from `features/*`; `features/*` never import each other's UI. One deliberate exception: a feature may import *read-only RTK Query hooks* from another feature's `api.ts` (hooks only, never components/state) — mark the import with a comment. redux-persist whitelists UI slices only (never the RTK Query `api` reducer); `store/api.ts` is generated, never hand-edited.
 - **Secrets:** never commit; `.env` is gitignored, `.env.example` holds placeholders.
 - **Commits:** conventional (`feat:`, `chore:`, `test:`, `docs:`).
 - **Branches:** prefix by type — `feature/…`, `fix/…`, `chore/…`. Never commit feature work directly to `main`; branch, then merge.
@@ -76,8 +76,11 @@ Tests: `make test` (unit) · `make test-integration` (needs the DB up).
 Lint: `make lint` (Go + web) · `make lint-go` · `make lint-web`. Needs `golangci-lint` on PATH (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`).
 
 ## More docs
-- `docs/security.md` — security invariants that must never be broken (read before touching creds, outbound dials, or tenant queries).
-- `docs/architecture.md` — architecture notes. `docs/self-hosting.md` — deploy guide.
+
+The `docs/` directory is an Astro/Starlight docs site; content lives under `docs/src/content/docs/`.
+
+- `docs/src/content/docs/security.md` — security invariants that must never be broken (read before touching creds, outbound dials, or tenant queries).
+- `docs/src/content/docs/architecture.md` — architecture notes. `docs/src/content/docs/deploy/` — self-hosting/deploy guides (compose, Terraform, Helm, env vars).
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and implementation plans.
 
 ## Environment note (this machine)

@@ -114,33 +114,6 @@ type InboxMessageInput struct {
 type Client interface {
 	// MailboxExists reports whether a mailbox is present and active.
 	MailboxExists(ctx context.Context, id string) (bool, error)
-	// GetSendJob loads everything the worker needs to send one email.
-	// WorkspaceID is pinned in the SQL WHERE clause (defense in depth on top
-	// of the unguessable send UUID); mismatch yields a not-found error.
-	GetSendJob(ctx context.Context, sendID, workspaceID string) (SendJob, error)
-	// ClaimSend claims a direct-send for delivery (claim-before-send): the
-	// pre-existing 'queued' sends row is moved to 'sending' with a fresh lease,
-	// or a STALE 'sending' lease is reclaimed after a crash. Reports whether the
-	// claim was won; a false result means another worker owns it or it is already
-	// terminal, so the caller must NOT send. Same workspace pinning as GetSendJob.
-	ClaimSend(ctx context.Context, sendID, workspaceID string) (claimed bool, err error)
-	// ReleaseSend releases a claimed-but-unfinalized send after a RETRYABLE
-	// failure, expiring the lease so the asynq retry reclaims it promptly. Only
-	// touches a row still in 'sending'. Same workspace pinning.
-	ReleaseSend(ctx context.Context, sendID, workspaceID string) error
-	// MarkSend finalizes a send to its terminal state (sent/failed/skipped).
-	// Same workspace pinning as GetSendJob.
-	MarkSend(ctx context.Context, sendID, workspaceID string, res SendResult) error
-	// ListStuckQueuedSends returns send ids (with their workspace) that are
-	// still 'queued' more than the reconcile window (currently 2 minutes)
-	// after creation. Consumed by the periodic sweeper to re-enqueue
-	// anything the launcher missed.
-	ListStuckQueuedSends(ctx context.Context) ([]StuckSend, error)
-	// IncrementSendAttempts bumps the send's attempts counter and returns
-	// the new value. Used by the cap-exceeded re-enqueue path to break out
-	// of the loop when a send keeps hitting a daily cap it will never
-	// clear.
-	IncrementSendAttempts(ctx context.Context, sendID, workspaceID string) (int, error)
 
 	// --- Multi-step sequencing (sequence:advance path) ---
 
@@ -213,9 +186,8 @@ type Client interface {
 	// from firing into the stated absence; this method only moves the date.
 	DeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error
 	// IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter
-	// and returns the new value. Mirrors IncrementSendAttempts on the direct-send
-	// path: the advance handler uses it to break out of the cap-defer loop when a
-	// mailbox cap is never clearing.
+	// and returns the new value. The advance handler uses it to break out of the
+	// cap-defer loop when a mailbox cap is never clearing.
 	IncrementEnrollmentCapDeferrals(ctx context.Context, enrollmentID, workspaceID string) (int, error)
 	// ListDueEnrollments returns active enrollments whose next_due_at passed the
 	// reconcile window. Consumed by the periodic enrollment sweeper.
@@ -605,12 +577,6 @@ type DueEnrollment struct {
 	WorkspaceID  string
 }
 
-// StuckSend is a (send id, workspace id) pair from the reconciler query.
-type StuckSend struct {
-	SendID      string
-	WorkspaceID string
-}
-
 // MailboxRef is a (mailbox id, workspace id) pair from ListActiveMailboxes.
 type MailboxRef struct {
 	ID          string
@@ -657,59 +623,10 @@ type SendRef struct {
 	MessageID    string
 }
 
-// SendJob is everything the worker needs to send one email — including the
-// decrypted SMTP password (in-memory only, never logged). SMTPPassword is
-// a []byte so the worker can zeroize it after use; a Go string would be
-// immutable and hang around in memory until GC.
-type SendJob struct {
-	SendID      string
-	WorkspaceID string
-	Attempts    int
-	Suppressed  bool
-	// CampaignPaused means the campaign is not 'running'. Same gate as
-	// StepSendJob.CampaignPaused; see there for why it is not expressed as Skip.
-	// This (direct) path is dormant, so the flag is insurance for whoever revives
-	// it rather than a live guard.
-	CampaignPaused    bool
-	EffectiveDailyCap int
-	SentToday         int
-	ToEmail           string
-	FirstName         string
-	Subject           string
-	BodyText          string
-	BodyHTML          string
-	UnsubURL          string
-	FromEmail         string
-	FromName          string
-	SMTPHost          string
-	SMTPPort          int
-	SMTPUsername      string
-	SMTPPassword      []byte
-	// AllowPlaintext is the persisted per-mailbox cleartext opt-out (mailboxes.
-	// allow_plaintext), threaded into OutboundJob so the send applies the SAME
-	// TLS policy the connect-test validated; false keeps TLS enforced.
-	AllowPlaintext bool
-	// TrackingEnabled mirrors the campaign's tracking_enabled column; see
-	// StepSendJob.TrackingEnabled for the injection contract.
-	TrackingEnabled bool
-	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
-	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
-	// SMTPPassword. For gmail the SMTP* fields are empty.
-	Provider    string
-	AccessToken []byte
-}
-
-// SendResult is the outcome of a single send attempt.
-type SendResult struct {
-	Status    string // "sent" | "failed"
-	MessageID string
-	Err       string
-}
-
 // SenderTransport is one resolved mailbox's send identity plus its decrypted
 // credential, for a control-plane-triggered ad hoc send with no existing
 // sends/enrollment row (currently: the testsend:send task only). Mirrors the
-// transport fields on SendJob/StepSendJob/WarmupSendJob rather than embedding
+// transport fields on StepSendJob/WarmupSendJob rather than embedding
 // platform/mail's OutboundJob, so this package stays free of that dependency
 // like every other job type here; the worker maps it onto mail.OutboundJob.
 //

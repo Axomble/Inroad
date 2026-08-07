@@ -154,14 +154,11 @@ func run() error {
 	defer cancelHeartbeat()
 	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, logger)
 
-	// Start the periodic scheduler alongside the worker. It enqueues
-	// send:sweep_stuck every 2 minutes so orphaned sends (launch committed
-	// DB rows but Redis enqueue failed) get retried without operator action.
+	// Start the periodic scheduler alongside the worker. It enqueues the
+	// reconcile sweeps (enrollments, inbox, warmup, …) so work whose live
+	// task was lost (launch committed DB rows but Redis enqueue failed)
+	// gets retried without operator action.
 	sch := queue.NewScheduler(cfg.RedisAddr, logger)
-	if err := queue.RegisterSweepStuck(sch); err != nil {
-		logger.Error("scheduler register failed", "err", err)
-		return err
-	}
 	if err := queue.RegisterSweepEnrollments(sch); err != nil {
 		logger.Error("scheduler register (enrollments) failed", "err", err)
 		return err

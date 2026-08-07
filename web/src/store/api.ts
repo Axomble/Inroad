@@ -554,6 +554,16 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.body,
       }),
     }),
+    renameList: build.mutation<RenameListApiResponse, RenameListApiArg>({
+      query: (queryArg) => ({
+        url: `/lists/${queryArg.id}`,
+        method: "PATCH",
+        body: queryArg.body,
+      }),
+    }),
+    deleteList: build.mutation<DeleteListApiResponse, DeleteListApiArg>({
+      query: (queryArg) => ({ url: `/lists/${queryArg.id}`, method: "DELETE" }),
+    }),
     importContacts: build.mutation<
       ImportContactsApiResponse,
       ImportContactsApiArg
@@ -1581,6 +1591,17 @@ export type CreateListApiArg = {
   body: {
     name: string;
   };
+};
+export type RenameListApiResponse = /** status 200 Renamed list */ List;
+export type RenameListApiArg = {
+  id: string;
+  body: {
+    name: string;
+  };
+};
+export type DeleteListApiResponse = unknown;
+export type DeleteListApiArg = {
+  id: string;
 };
 export type ImportContactsApiResponse =
   /** status 200 Import result */ ImportResult;
@@ -3215,7 +3236,7 @@ export type ReplyLabelInput = {
   stops_enrollment: boolean;
   /** machine-generated mail (out-of-office / auto-reply); never a human reply */
   is_automated: boolean;
-  /** suppress the address */
+  /** suppress the address, then stop (compliance) */
   suppresses_contact: boolean;
   /** open or update a CRM deal from this reply */
   captures_deal: boolean;
@@ -3244,11 +3265,11 @@ export type InboxThreadSummary = {
   mailbox_id: string;
   campaign_id: string | null;
   contact_id: string | null;
-  /** The linked contact's email */
+  /** The linked contact's email, or "" when contact_id is null (e.g. a legacy direct-send match). */
   contact_email: string;
-  /** The linked contact's first name */
+  /** The linked contact's first name, or "" when contact_id is null. */
   contact_first_name: string;
-  /** The linked contact's last name */
+  /** The linked contact's last name, or "" when contact_id is null. */
   contact_last_name: string;
   subject: string;
   last_reply_class: string;
@@ -3347,6 +3368,8 @@ export const {
   useDecideAgentApprovalMutation,
   useListListsQuery,
   useCreateListMutation,
+  useRenameListMutation,
+  useDeleteListMutation,
   useImportContactsMutation,
   useListContactsQuery,
   useListSendingDomainsQuery,

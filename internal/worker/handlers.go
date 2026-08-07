@@ -15,7 +15,6 @@ import (
 	"github.com/inroad/inroad/internal/worker/inbox"
 	"github.com/inroad/inroad/internal/worker/maintenance"
 	"github.com/inroad/inroad/internal/worker/recipientesp"
-	"github.com/inroad/inroad/internal/worker/sender"
 	"github.com/inroad/inroad/internal/worker/sequence"
 	"github.com/inroad/inroad/internal/worker/testsend"
 	"github.com/inroad/inroad/internal/worker/warmup"
@@ -58,8 +57,6 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.SendHandler(core, sndr, enq, mtx))
 	mux.HandleFunc(queue.TaskWarmupSweep, warmup.SweepHandler(core, enq))
 	mux.HandleFunc(queue.TaskWarmupEngage, warmup.EngageHandler(core, engager, sndr))
-	mux.HandleFunc(queue.TaskSendEmail, sender.Handler(core, sndr, enq, publicURL, trackingSecret))
-	mux.HandleFunc(queue.TaskSweepStuck, sender.SweepStuckHandler(core, enq))
 	// Test-send preview (POST /campaigns/{id}/test-send): registered by type
 	// assertion for the same reason as the cleaner/breaker above -- the
 	// capability (load raw step content + resolve a mailbox's decrypted

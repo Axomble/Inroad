@@ -1100,6 +1100,34 @@ paths:
         '200': { description: Created list, content: { application/json: { schema: { $ref: '#/components/schemas/List' } } } }
         '400': { description: Validation error }
         '401': { description: Unauthorized }
+  /lists/{id}:
+    patch:
+      operationId: renameList
+      tags: [lists]
+      security: [{ bearerAuth: [] }]
+      description: Renames the list.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string } } } } }
+      responses:
+        '200': { description: Renamed list, content: { application/json: { schema: { $ref: '#/components/schemas/List' } } } }
+        '400': { description: "Invalid JSON, or name is missing/too long" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+    delete:
+      operationId: deleteList
+      tags: [lists]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Deletes a list and its memberships. A list a campaign still references
+        cannot be deleted.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: List is used by a campaign }
   /contacts/import:
     post:
       operationId: importContacts
@@ -2298,7 +2326,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InboxThreadPage' }
-        '400': { description: Malformed filter (bad UUID/timestamp, or a half-set keyset cursor) }
+        '400': { description: "Malformed filter (bad UUID/timestamp, or a half-set keyset cursor)" }
         '401': { description: Unauthorized }
   /inbox/threads/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -4083,9 +4111,9 @@ components:
         mailbox_id: { type: string, format: uuid }
         campaign_id: { type: string, format: uuid, nullable: true }
         contact_id: { type: string, format: uuid, nullable: true }
-        contact_email: { type: string, description: The linked contact's email, or "" when contact_id is null (e.g. a legacy direct-send match). }
-        contact_first_name: { type: string, description: The linked contact's first name, or "" when contact_id is null. }
-        contact_last_name: { type: string, description: The linked contact's last name, or "" when contact_id is null. }
+        contact_email: { type: string, description: "The linked contact's email, or \"\" when contact_id is null (e.g. a legacy direct-send match)." }
+        contact_first_name: { type: string, description: "The linked contact's first name, or \"\" when contact_id is null." }
+        contact_last_name: { type: string, description: "The linked contact's last name, or \"\" when contact_id is null." }
         subject: { type: string }
         last_reply_class: { type: string }
         unread: { type: boolean }
