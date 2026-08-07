@@ -244,8 +244,7 @@ type IncrementEnrollmentCapDeferralsParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-// Bump the cap-deferral counter and return the new value, mirroring
-// IncrementSendAttempts on the direct-send path. The advance handler uses it to
+// Bump the cap-deferral counter and return the new value. The advance handler uses it to
 // bail out of the cap-defer loop (stop 'failed') when a mailbox cap is never
 // clearing, so a mis-set cap can't re-enqueue an enrollment forever.
 func (q *Queries) IncrementEnrollmentCapDeferrals(ctx context.Context, arg IncrementEnrollmentCapDeferralsParams) (int32, error) {

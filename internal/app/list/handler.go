@@ -68,8 +68,10 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, out)
 }
 
+// renameRequest is decode-only; name constraints are enforced by the
+// service's renameInput validation, not a handler-level validate call.
 type renameRequest struct {
-	Name string `json:"name" validate:"required,min=1,max=200"`
+	Name string `json:"name"`
 }
 
 // rename handles PATCH /lists/{id}.

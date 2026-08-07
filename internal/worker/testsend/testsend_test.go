@@ -212,7 +212,7 @@ func TestHandlerPropagatesTheSendError(t *testing.T) {
 }
 
 // TestHandlerZeroizesTheCredentialAfterSend proves the decrypted secret is
-// wiped after use, mirroring internal/worker/sender's identical defer.
+// wiped after use, mirroring internal/worker/sequence's identical defer.
 func TestHandlerZeroizesTheCredentialAfterSend(t *testing.T) {
 	password := []byte("supersecret")
 	token := []byte("oauth-token")
@@ -234,7 +234,7 @@ func TestHandlerZeroizesTheCredentialAfterSend(t *testing.T) {
 	}
 	// The Mailer's own copy (a string, taken before the deferred zeroize runs)
 	// must be unaffected -- the same "string copy is immutable, only our buffer
-	// is wiped" rationale as internal/worker/sender.Handler.
+	// is wiped" rationale as the sequence advance handler.
 	if mailer.tj.Password != "supersecret" {
 		t.Errorf("mailer's password copy = %q, want it unaffected by the later zeroize", mailer.tj.Password)
 	}

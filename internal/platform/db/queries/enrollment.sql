@@ -84,8 +84,7 @@ SET next_due_at = $3
 WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 
 -- name: IncrementEnrollmentCapDeferrals :one
--- Bump the cap-deferral counter and return the new value, mirroring
--- IncrementSendAttempts on the direct-send path. The advance handler uses it to
+-- Bump the cap-deferral counter and return the new value. The advance handler uses it to
 -- bail out of the cap-defer loop (stop 'failed') when a mailbox cap is never
 -- clearing, so a mis-set cap can't re-enqueue an enrollment forever.
 UPDATE sequence_enrollments SET cap_deferrals = cap_deferrals + 1
