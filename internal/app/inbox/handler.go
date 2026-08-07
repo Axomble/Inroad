@@ -33,6 +33,27 @@ func writeErr(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrReplyBodyInvalid):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// The three draft failures get three DISTINCT statuses, none of which the
+	// draft route can produce for any other reason, so the UI can branch on the
+	// status alone without parsing the body:
+	// 422 = configure a model in Settings → AI (a fix the user owns), 504 =
+	// the provider was too slow (retrying may work), 502 = the provider failed.
+	//
+	// 422 rather than 503 for the missing model: 503 conventionally means
+	// "temporarily unavailable, retry later" and invites intermediaries to retry
+	// automatically, but this is the ONE draft failure retrying can never fix —
+	// it needs a human to configure a provider. 422 reads correctly as
+	// non-retryable, and 409 was unavailable here (already taken on this route
+	// by ErrNoInboundMessage; two different 409s would force the UI to parse
+	// the body instead of branching on status).
+	case errors.Is(err, ErrDraftModelUnavailable):
+		httpx.Error(w, http.StatusUnprocessableEntity, ErrDraftModelUnavailable.Error())
+	case errors.Is(err, ErrDraftTimeout):
+		httpx.Error(w, http.StatusGatewayTimeout, ErrDraftTimeout.Error())
+	case errors.Is(err, ErrDraftUpstream):
+		// Only the sentinel's own text: the wrapped cause can carry provider
+		// detail that does not belong in a response body.
+		httpx.Error(w, http.StatusBadGateway, ErrDraftUpstream.Error())
 	case errors.Is(err, ErrValidation):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 	default:
@@ -274,6 +295,39 @@ func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// draftReplyResponse is POST /inbox/threads/{id}/draft-reply: suggested
+// plain-text reply body for a human to edit. Deliberately the same field name
+// SendInboxReplyRequest uses, so the client can hand it straight back.
+type draftReplyResponse struct {
+	BodyText string `json:"body_text"`
+}
+
+// draftReply handles POST /inbox/threads/{id}/draft-reply. It takes no request
+// body (the transcript is read server-side from the caller's own thread), and
+// it sends NOTHING: the returned text goes into the composer, and the human
+// sends it via POST /inbox/threads/{id}/reply.
+//
+// POST rather than GET despite being a read of the thread, because generating a
+// draft is a non-idempotent, billable side effect on the workspace's AI budget
+// — it must never be retried by a proxy or served from an HTTP cache.
+func (h *Handler) draftReply(w http.ResponseWriter, r *http.Request) {
+	wid, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	bodyText, err := h.svc.DraftReply(r.Context(), wid, id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, draftReplyResponse{BodyText: bodyText})
 }
 
 // setReadRequest is the wire shape for PUT /inbox/threads/{id}/read.

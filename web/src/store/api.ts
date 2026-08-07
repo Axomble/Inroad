@@ -1280,6 +1280,15 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.sendInboxReplyRequest,
       }),
     }),
+    draftInboxReply: build.mutation<
+      DraftInboxReplyApiResponse,
+      DraftInboxReplyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/draft-reply`,
+        method: "POST",
+      }),
+    }),
     setInboxThreadRead: build.mutation<
       SetInboxThreadReadApiResponse,
       SetInboxThreadReadApiArg
@@ -2068,6 +2077,11 @@ export type SendInboxReplyApiResponse = unknown;
 export type SendInboxReplyApiArg = {
   id: string;
   sendInboxReplyRequest: SendInboxReplyRequest;
+};
+export type DraftInboxReplyApiResponse =
+  /** status 200 A suggested reply body */ InboxDraftReply;
+export type DraftInboxReplyApiArg = {
+  id: string;
 };
 export type SetInboxThreadReadApiResponse = unknown;
 export type SetInboxThreadReadApiArg = {
@@ -3320,6 +3334,10 @@ export type InboxThreadDetail = InboxThreadSummary & {
 export type SendInboxReplyRequest = {
   body_text: string;
 };
+export type InboxDraftReply = {
+  /** Suggested reply body, plain text, never empty and never HTML. The field name matches SendInboxReplyRequest.body_text so the client can hand the edited text straight back to the reply endpoint. */
+  body_text: string;
+};
 export type SetInboxThreadReadRequest = {
   unread: boolean;
 };
@@ -3481,5 +3499,6 @@ export const {
   useListInboxThreadsQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,
+  useDraftInboxReplyMutation,
   useSetInboxThreadReadMutation,
 } = injectedRtkApi;

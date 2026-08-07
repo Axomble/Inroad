@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -341,21 +342,6 @@ func run() error {
 	// capturing positives.
 	crmSvc := crm.NewService(crm.NewPgStore(pool), crm.WithReplyLabels(replyLabelAdapter{labels: replyLabelSvc}))
 	crmHandler := crm.NewHandler(crmSvc)
-	// Unified inbox (thread/message read model). The write path (RecordReply)
-	// is called by the reply-polling worker through its own coreapi seam
-	// (internal/coreapi/inprocess), not from here; this handler is the
-	// read/mark-read HTTP surface, PLUS POST /threads/{id}/reply, which only
-	// enqueues (internal/worker/inbox does the actual decrypt+dial —
-	// docs/security.md invariant 1).
-	inboxHandler := inbox.NewHandler(inbox.NewService(inbox.NewPgStore(pool),
-		// A manual reply must never go to an address the workspace has
-		// explicitly unsubscribed or bounced — the SAME suppression table a
-		// real send checks. internal/worker/inbox re-checks independently
-		// before dialing (defense in depth against a race with an incoming
-		// unsubscribe between enqueue and the task running).
-		inbox.WithSuppressionChecker(suppStore),
-		inbox.WithReplyEnqueuer(enq),
-	))
 	// AI settings (agent platform PR A1). No shipped model catalog: native
 	// model metadata comes from models.dev at runtime, cached in Postgres with
 	// serve-stale-on-failure. Provider credentials seal under the same
@@ -425,6 +411,44 @@ func run() error {
 	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger, cfg.AgentMaxConcurrentRuns)
 	runManager.StartExpirySweep()
 	agentHandler := agentchat.NewHandler(agentchat.NewService(agentStore, runManager, agentStream))
+
+	// Unified inbox (thread/message read model). The write path (RecordReply)
+	// is called by the reply-polling worker through its own coreapi seam
+	// (internal/coreapi/inprocess), not from here; this handler is the
+	// read/mark-read HTTP surface, PLUS POST /threads/{id}/reply, which only
+	// enqueues (internal/worker/inbox does the actual decrypt+dial —
+	// docs/security.md invariant 1), and POST /threads/{id}/draft-reply, which
+	// generates suggested reply text and sends nothing at all (invariant 48).
+	//
+	// Built here, after the agent runtime, because the draft path reuses THAT
+	// runtime's model resolver rather than constructing a second one — one
+	// workspace AI configuration, one credential-unsealing path.
+	inboxHandler := inbox.NewHandler(inbox.NewService(inbox.NewPgStore(pool),
+		// A manual reply must never go to an address the workspace has
+		// explicitly unsubscribed or bounced — the SAME suppression table a
+		// real send checks. internal/worker/inbox re-checks independently
+		// before dialing (defense in depth against a race with an incoming
+		// unsubscribe between enqueue and the task running).
+		inbox.WithSuppressionChecker(suppStore),
+		inbox.WithReplyEnqueuer(enq),
+		inbox.WithReplyDrafter(replyDrafterAdapter{runtime: runtime}),
+	))
+	// Per-IP and per-WORKSPACE cap on reply drafting. Unlike the pre-auth
+	// throttles above, the account key comes from the authenticated principal
+	// rather than a body "email": this endpoint's body is empty, and the budget a
+	// draft spends belongs to the workspace, not to whichever member clicked.
+	draftReplyThrottle := throttle.Config{
+		Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
+		IPLimit: cfg.RateLimitDraftReplyIP, AcctLimit: cfg.RateLimitDraftReplyWorkspace,
+		AcctKey: func(r *http.Request) string {
+			p, ok := auth.UserFromContext(r.Context())
+			if !ok {
+				return "" // unreachable behind RequireAuth; IP-throttle only if it happens
+			}
+			return p.WorkspaceID
+		},
+	}.Middleware("inbox-draft-reply")
+
 	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
 
 	// Deny-by-default routing. Two groups:
@@ -495,7 +519,7 @@ func run() error {
 		// Unified inbox: GET /threads, GET /threads/{id}, PUT /threads/{id}/read.
 		// Scope-gated per route inside Routes() (inbox:read / inbox:write); a
 		// session principal holds both implicitly.
-		{pattern: "/api/v1/inbox", handler: inboxHandler.Routes()},
+		{pattern: "/api/v1/inbox", handler: inboxHandler.Routes(draftReplyThrottle)},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
 		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
 		// Routes(identStore) additionally applies RequireVerified to /launch
@@ -550,7 +574,7 @@ func run() error {
 			return "", false
 		}
 		return p.WorkspaceID, true
-	})
+	}, skipIdempotencyGuard)
 
 	router := buildRouter(logger, mtx, public, []protectedGroup{
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
@@ -695,6 +719,67 @@ func (a replyLabelAdapter) CapturesDeal(ctx context.Context, ws uuid.UUID, key s
 		return false, false, err
 	}
 	return label.CapturesDeal, true, nil
+}
+
+// draftReplyPath matches the ONE route the Idempotency-Key guard skips:
+// POST /api/v1/inbox/threads/{id}/draft-reply.
+//
+// Anchored at both ends with the id constrained to a single segment ([^/]+),
+// deliberately NOT a suffix match: a suffix would hand the bypass to any future
+// ".../draft-reply" route in any other domain, and a replay guard that is
+// silently skipped is not something anyone notices until it matters.
+//
+// A regex rather than a chi route pattern because this predicate runs at the
+// authenticated-group root, BEFORE any domain router has resolved a pattern. It
+// therefore matches the full path INCLUDING the /api/v1/inbox mount prefix,
+// which is what the guard sees: it is installed with pr.Use ahead of the mounts,
+// and chi's Mount does not rewrite r.URL.Path.
+//
+// Anchoring on that prefix fails in the SAFE direction if the mount ever moves —
+// the pattern stops matching, the guard re-engages, and idempotency is enforced
+// rather than silently dropped.
+//
+// Compiled once at init, since this runs on every authenticated request.
+var draftReplyPath = regexp.MustCompile(`^/api/v1/inbox/threads/[^/]+/draft-reply$`)
+
+// skipIdempotencyGuard opts POST .../draft-reply out of the Idempotency-Key
+// replay cache (httpx.SkipFunc). Two independent reasons, either sufficient:
+//
+// Replaying is the wrong answer. A draft is a generation, not a state change:
+// a caller repeating the request wants a NEW draft, and there is no duplicate
+// side effect for the cache to prevent — the endpoint writes nothing and sends
+// no mail. Cost is bounded by the endpoint's own per-IP/per-workspace rate
+// limit, which is the right instrument for spend.
+//
+// It would also make an error misleading. The guard answers a key reused across
+// a DIFFERENT request with 422 idempotency_key_reuse, and this route already
+// uses 422 for "no AI model is configured for this workspace" — the one status
+// its client is told it can branch on without reading the body. Two meanings
+// behind one status would have the UI offer "configure a model in Settings → AI"
+// for what is actually a client bug.
+func skipIdempotencyGuard(r *http.Request) bool {
+	return draftReplyPath.MatchString(r.URL.Path)
+}
+
+// replyDrafterAdapter satisfies inbox.ReplyDrafter over the agent runtime's
+// one-shot draft call, so the inbox domain can ask for suggested reply text
+// without importing agentrun/agentchat (app/* packages never import each other).
+// It only translates shapes: the runtime owns the prompt, the caps, the timeout
+// and the output normalization, and the inbox domain owns the thread it is
+// allowed to read. Nothing here can send mail.
+type replyDrafterAdapter struct{ runtime *agentrun.Runtime }
+
+func (a replyDrafterAdapter) DraftReply(ctx context.Context, ws uuid.UUID, in inbox.DraftReplyInput) (string, error) {
+	turns := make([]agentrun.DraftTurn, 0, len(in.Turns))
+	for _, t := range in.Turns {
+		turns = append(turns, agentrun.DraftTurn{FromContact: t.FromContact, Text: t.Text})
+	}
+	return a.runtime.DraftReply(ctx, ws, agentrun.DraftReplyInput{
+		ContactFirstName: in.ContactFirstName,
+		Subject:          in.Subject,
+		FromCampaign:     in.FromCampaign,
+		Turns:            turns,
+	})
 }
 
 // campaignStatusChecker adapts the campaign store to sequencestep.CampaignChecker

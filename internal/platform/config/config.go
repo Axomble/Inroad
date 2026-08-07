@@ -167,6 +167,13 @@ type Config struct {
 	RateLimitVerifyAccount    int // email-OTP verify per email
 	RateLimitSensitiveIP      int // password/forgot + email-OTP start per IP
 	RateLimitSensitiveAccount int // password/forgot + email-OTP start per email
+
+	// AI reply drafting, in requests per minute (fixed window). Unlike the caps
+	// above this endpoint is AUTHENTICATED — it is throttled not against abuse of
+	// an open door but because every call spends real money at an AI provider, so
+	// the "account" key is the WORKSPACE (which owns the budget), not an email.
+	RateLimitDraftReplyIP        int // POST /inbox/threads/{id}/draft-reply per IP
+	RateLimitDraftReplyWorkspace int // POST /inbox/threads/{id}/draft-reply per workspace
 }
 
 func Load() (*Config, error) {
@@ -293,6 +300,12 @@ func Load() (*Config, error) {
 	cfg.RateLimitVerifyAccount = getenvInt("INROAD_RATELIMIT_VERIFY_ACCOUNT", 5)
 	cfg.RateLimitSensitiveIP = getenvInt("INROAD_RATELIMIT_SENSITIVE_IP", 5)
 	cfg.RateLimitSensitiveAccount = getenvInt("INROAD_RATELIMIT_SENSITIVE_ACCOUNT", 3)
+	// Generous enough that a human clicking "Draft a reply" never notices, tight
+	// enough that a scripted loop cannot run up a provider bill. The per-IP cap is
+	// the higher-tolerance one because a whole office can share one NAT address,
+	// while the per-workspace cap is what actually bounds spend.
+	cfg.RateLimitDraftReplyIP = getenvInt("INROAD_RATELIMIT_DRAFT_REPLY_IP", 20)
+	cfg.RateLimitDraftReplyWorkspace = getenvInt("INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE", 60)
 
 	return cfg, nil
 }
