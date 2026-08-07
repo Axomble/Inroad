@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"time"
 
@@ -100,7 +99,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	}
 	days := int(now.Sub(b.StartedAt.Time).Hours() / 24)
 	target := warmup.RampTarget(int(b.StartVolume), int(b.MaxVolume), int(b.RampIncrement), days)
-	effective := int(math.Round(float64(target) * warmup.DailyVolumeFactor(mailboxID, now)))
+	effective := warmup.EffectiveDailyVolume(target, mailboxID, now)
 	if int(sentToday) >= effective {
 		return coreapi.WarmupSendJob{Skip: true}, nil
 	}

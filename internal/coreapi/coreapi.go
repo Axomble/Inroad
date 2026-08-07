@@ -750,8 +750,12 @@ type WarmupEngagePlan struct {
 	// DoReply sends a threaded reply, decided by the recipient's reply_rate via the
 	// deterministic seeded ReplyDecision.
 	DoReply bool
-	// EngageAfter is the humanized dwell before the recipient acts (heavy-tailed,
-	// deterministic in the receipt id).
+	// EngageAfter is the humanized delay before the recipient acts — heavy-tailed and
+	// deterministic in the receipt id, but drawn from a distribution matched to what
+	// the engagement will DO. A passive-only engagement (DoReply false) uses the short
+	// read dwell, on the order of a minute or two. An engagement that replies uses the
+	// much longer reply latency (tens of minutes to hours) kept inside waking hours,
+	// because one asynq task delivers the whole engagement as one human sitting.
 	EngageAfter time.Duration
 }
 

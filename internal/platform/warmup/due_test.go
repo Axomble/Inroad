@@ -21,9 +21,26 @@ func baseInputs(now time.Time) DueInputs {
 }
 
 // noon keeps Now inside the [07:00,22:00) waking window so window logic doesn't
-// confound the target/pause assertions.
+// confound the target/pause assertions. It is deliberately a MONDAY and, for
+// baseInputs' mailbox, not one of the deterministically skipped weekdays — see
+// TestNoonIsAnOrdinarySendingDay. Otherwise DailyVolumeFactor's coarse day shape
+// would quietly shrink (or zero) the target these tests assume is comfortable.
 func noon() time.Time {
-	return time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	return time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+}
+
+// TestNoonIsAnOrdinarySendingDay guards the fixture itself. Every test below reasons
+// about a "comfortable target", which only holds on a full-volume weekday; if a
+// retuning of the weekend/skip-day shape ever moves this date into a quiet day, this
+// fails with a clear reason instead of the target assertions failing mysteriously.
+func TestNoonIsAnOrdinarySendingDay(t *testing.T) {
+	now := noon()
+	if wd := now.Weekday(); wd == time.Saturday || wd == time.Sunday {
+		t.Fatalf("fixture date %s is a %s; these tests assume a full-volume weekday", now.Format("2006-01-02"), wd)
+	}
+	if f := DailyVolumeFactor(baseInputs(now).MailboxID, now); f < 0.8 {
+		t.Fatalf("fixture day factor %f < 0.8 — %s is a quiet/skipped day for this mailbox", f, now.Format("2006-01-02"))
+	}
 }
 
 func TestNextDueSendsNowWhenUnderTargetInWindow(t *testing.T) {
