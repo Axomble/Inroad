@@ -43,21 +43,49 @@ export function serverDetail(err: unknown): string | undefined {
 }
 
 /**
- * The `Retry-After` value (in seconds) from a rate-limited RTK Query error, or
- * `null` when the header is absent/unparseable. The header rides on the raw
- * `Response` that `fetchBaseQuery` stashes on `error.meta` — this encapsulates
- * that guarded reach so callers inspect it through the one error seam rather
- * than an inline structural cast. Accepts both forms the spec allows: a delay
- * in seconds (`"120"`) or an HTTP date (`"Wed, 21 Oct 2026 07:28:00 GMT"`).
+ * An RTK error once the base query has folded a `Retry-After` delay onto it.
+ *
+ * The header lives on the raw `Response`, which `fetchBaseQuery` stashes on the
+ * base query result's `meta` — and `meta` is attached to the dispatched thunk
+ * action, *not* to the error payload. A component's `error` is therefore only
+ * ever `{status, data}`, so the delay has to be copied into the payload at the
+ * one seam every request already passes through (`store/empty-api.ts`).
  */
-export function retryAfterSeconds(err: unknown): number | null {
-  if (!isFetchBaseQueryError(err) || !('meta' in err)) return null
-  const meta = (err as { meta?: { response?: { headers?: Headers } } }).meta
-  const header = meta?.response?.headers?.get('retry-after')
+export type FetchErrorWithRetryAfter = FetchBaseQueryError & { retryAfter?: number }
+
+/**
+ * Parses a `Retry-After` header value into whole seconds, accepting both forms
+ * the spec allows: a delay in seconds (`"120"`) or an HTTP date
+ * (`"Wed, 21 Oct 2026 07:28:00 GMT"`). `null` when absent or unparseable.
+ */
+export function parseRetryAfter(header: string | null | undefined): number | null {
   if (!header) return null
   const asNumber = Number(header)
   if (Number.isFinite(asNumber)) return Math.max(0, Math.round(asNumber))
   const asDate = new Date(header).getTime()
   if (Number.isFinite(asDate)) return Math.max(0, Math.round((asDate - Date.now()) / 1000))
   return null
+}
+
+/**
+ * Copies the response's `Retry-After` delay onto the error payload so it
+ * survives the trip to a component. Called once, by the shared base query;
+ * returns the error untouched when the server sent no usable header.
+ */
+export function withRetryAfter<E extends FetchBaseQueryError>(error: E, response?: Response): E {
+  const seconds = parseRetryAfter(response?.headers.get('retry-after'))
+  if (seconds === null) return error
+  return { ...error, retryAfter: seconds }
+}
+
+/**
+ * The `Retry-After` delay (in seconds) a rate-limited request came back with,
+ * or `null` when the server sent none. Reads the field the shared base query
+ * folded on via `withRetryAfter` — callers get this through the one error seam
+ * rather than reaching for `meta`, which never reaches them anyway.
+ */
+export function retryAfterSeconds(err: unknown): number | null {
+  if (!isFetchBaseQueryError(err)) return null
+  const { retryAfter } = err as FetchErrorWithRetryAfter
+  return typeof retryAfter === 'number' ? retryAfter : null
 }

@@ -50,6 +50,18 @@ test('a transport failure is never reported as an HTTP refusal', () => {
   )
 })
 
+// The delay reaches this function as a `retryAfter` field on the error, folded
+// on by the shared base query (store/empty-api.ts) — `meta` never gets this far.
+test('a rate limit names the delay the server asked for, and stays vague without one', () => {
+  expect(crmErrorMessage({ status: 429, data: undefined, retryAfter: 30 }, fallback)).toBe(
+    'Too many requests. Try again in 30 seconds.',
+  )
+  expect(crmErrorMessage({ status: 429, data: undefined, retryAfter: 1 }, fallback)).toBe(
+    'Too many requests. Try again in 1 second.',
+  )
+  expect(crmErrorMessage(http(429, undefined), fallback)).toBe('Too many requests. Try again in a moment.')
+})
+
 test('a server fault is generic, never the server’s internals', () => {
   expect(crmErrorMessage(http(500, { error: 'pq: deadlock detected on relation crm_deals' }), fallback)).toBe(
     'The server had a problem loading CRM data. Try again in a moment.',
