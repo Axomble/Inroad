@@ -1,0 +1,165 @@
+package inbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/hibiken/asynq"
+
+	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/queue"
+)
+
+// ReplyCore is the narrow coreapi capability ReplySendHandler needs: load one
+// manual reply's job (mailbox, recipient, threading headers), re-check
+// suppression, resolve the sending mailbox's decrypted transport, and record
+// the delivered reply. Defined here (consumer side) — the same "avoid
+// widening coreapi.Client's ~40-method surface for one call site" trade as
+// testsend.Core — and satisfied by the in-process client via type assertion
+// at the composition root (internal/worker/handlers.go). IsSuppressed and
+// ResolveSenderTransport are the SAME methods testsend.Core already declares
+// (client implements them once; Go's structural typing needs no duplicate
+// implementation).
+type ReplyCore interface {
+	// GetInboxReplyJob loads one thread's reply job, workspace-pinned.
+	GetInboxReplyJob(ctx context.Context, threadID, workspaceID string) (coreapi.InboxReplyJob, error)
+	// IsSuppressed reports whether `to` is on the workspace's suppression
+	// list. This is the defense-in-depth half of the fix in
+	// internal/app/inbox.Service.Reply's own suppression check: that API-side
+	// check can race an incoming unsubscribe between enqueue and this task
+	// running, so the worker re-checks the SAME table right before dialing,
+	// workspace-pinned.
+	IsSuppressed(ctx context.Context, workspaceID, to string) (bool, error)
+	// ResolveSenderTransport decrypts the resolved mailbox's send credential
+	// (refreshing an OAuth token for gmail/m365), workspace-pinned.
+	ResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error)
+	// RecordInboxReply persists one delivered reply's outbound message row
+	// and last_message_at bump, workspace-pinned.
+	RecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error
+}
+
+// Mailer sends one email through whichever transport the resolved
+// SenderTransport selects. Satisfied by *mail.MultiSender in production;
+// defined here so tests inject a fake instead of dialing a real server.
+// Mirrors testsend.Mailer.
+type Mailer interface {
+	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
+}
+
+// rePrefix is the idempotent "Re: " reply subject prefix. Comparison is
+// case-insensitive so "RE: " / "re: " from a prior client is also recognized
+// and never doubled.
+const rePrefix = "Re: "
+
+// reSubject prefixes subject with a single "Re: " — idempotent, so a reply on
+// a thread whose subject already carries one (e.g. a synthesized follow-up
+// step subject, see internal/app/inbox's own replySubject) is never doubled
+// to "Re: Re: ".
+func reSubject(subject string) string {
+	if strings.HasPrefix(strings.ToLower(subject), strings.ToLower(rePrefix)) {
+		return subject
+	}
+	return rePrefix + subject
+}
+
+// ReplySendHandler returns an asynq handler for inbox:reply_send tasks: the
+// execution-plane half of POST /inbox/threads/{id}/reply. The API
+// (internal/app/inbox) does every synchronous validation (thread ownership,
+// an inbound message exists, the recipient is not suppressed) and enqueues;
+// decrypting the mailbox credential and dialing the provider happen ONLY
+// here (docs/security.md invariant 1).
+func ReplySendHandler(core ReplyCore, sender Mailer) func(context.Context, *asynq.Task) error {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var p queue.InboxReplySendPayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return err
+		}
+
+		job, err := core.GetInboxReplyJob(ctx, p.ThreadID, p.WorkspaceID)
+		if err != nil {
+			if errors.Is(err, coreapi.ErrInboxNoInbound) {
+				// The API-side check in Service.Reply already rejects this
+				// before enqueuing; seeing it here means the thread changed
+				// shape between enqueue and this task running (or a direct
+				// enqueue bypassed the API). Permanent — retrying cannot fix
+				// a thread with no inbound message. Log and drop.
+				slog.WarnContext(ctx, "inbox_reply_no_inbound_message",
+					"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID)
+				return nil
+			}
+			return fmt.Errorf("load inbox reply job: %w", err)
+		}
+
+		// Defense in depth (docs/security.md): re-check suppression right
+		// here, before any credential is decrypted. The API-side check in
+		// Service.Reply can race an incoming unsubscribe between enqueue and
+		// this task running; a suppressed recipient is skipped (not an error
+		// — the task should not retry) and logged at WARN so a persistent
+		// hit is observable. The raw recipient address is deliberately not
+		// logged.
+		suppressed, err := core.IsSuppressed(ctx, p.WorkspaceID, job.ToEmail)
+		if err != nil {
+			return fmt.Errorf("check suppression: %w", err)
+		}
+		if suppressed {
+			slog.WarnContext(ctx, "inbox_reply_recipient_suppressed",
+				"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID)
+			return nil
+		}
+
+		transport, err := core.ResolveSenderTransport(ctx, p.WorkspaceID, job.MailboxID)
+		if err != nil {
+			return fmt.Errorf("resolve sender transport: %w", err)
+		}
+		// Zeroize the decrypted secret(s) before returning, mirroring
+		// testsend/sequence: the primary long-lived buffer this handler
+		// allocated should not linger past it in memory.
+		defer zeroize(transport.SMTPPassword)
+		defer zeroize(transport.AccessToken)
+
+		subject := reSubject(job.Subject)
+		messageID, err := sender.Send(ctx,
+			mail.OutboundJob{
+				Provider: transport.Provider, Host: transport.SMTPHost, Port: transport.SMTPPort,
+				Username: transport.SMTPUsername, Password: string(transport.SMTPPassword),
+				AllowPlaintext: transport.AllowPlaintext, AccessToken: string(transport.AccessToken),
+			},
+			mail.Message{
+				FromEmail: transport.FromEmail, FromName: transport.FromName, To: job.ToEmail,
+				Subject: subject, BodyText: p.BodyText,
+				InReplyTo: job.InReplyTo, References: job.References,
+				// ListUnsubscribe / BodyHTML deliberately left empty: a
+				// conversational reply is not subject to the campaign
+				// unsubscribe/tracking machinery.
+			},
+		)
+		if err != nil {
+			// Transient send failure: return the error so asynq retries. The
+			// enqueue-time unix-second dedup id (queue.inboxReplySendTaskID)
+			// only guards a duplicate ENQUEUE, not this in-flight retry, but a
+			// retry here is safe because nothing has been recorded yet.
+			return fmt.Errorf("send reply: %w", err)
+		}
+
+		// The reply is now DELIVERED. From here, returning an error would make
+		// asynq retry the WHOLE handler — including sender.Send — and risk a
+		// double-send to the recipient. A bookkeeping failure after a
+		// successful send is logged, not retried: the mail already went out,
+		// so re-running this handler is strictly worse than a thread whose
+		// history is briefly missing one row.
+		if err := core.RecordInboxReply(ctx, coreapi.RecordInboxReplyInput{
+			WorkspaceID: p.WorkspaceID, ThreadID: p.ThreadID, MessageID: messageID,
+			FromEmail: transport.FromEmail, FromName: transport.FromName, ToEmail: job.ToEmail,
+			Subject: subject, BodyText: p.BodyText,
+		}); err != nil {
+			slog.ErrorContext(ctx, "inbox_reply_record_failed",
+				"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID, "err", err)
+		}
+		return nil
+	}
+}

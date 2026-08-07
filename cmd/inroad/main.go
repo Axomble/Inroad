@@ -344,8 +344,18 @@ func run() error {
 	// Unified inbox (thread/message read model). The write path (RecordReply)
 	// is called by the reply-polling worker through its own coreapi seam
 	// (internal/coreapi/inprocess), not from here; this handler is the
-	// read/mark-read HTTP surface only.
-	inboxHandler := inbox.NewHandler(inbox.NewService(inbox.NewPgStore(pool)))
+	// read/mark-read HTTP surface, PLUS POST /threads/{id}/reply, which only
+	// enqueues (internal/worker/inbox does the actual decrypt+dial —
+	// docs/security.md invariant 1).
+	inboxHandler := inbox.NewHandler(inbox.NewService(inbox.NewPgStore(pool),
+		// A manual reply must never go to an address the workspace has
+		// explicitly unsubscribed or bounced — the SAME suppression table a
+		// real send checks. internal/worker/inbox re-checks independently
+		// before dialing (defense in depth against a race with an incoming
+		// unsubscribe between enqueue and the task running).
+		inbox.WithSuppressionChecker(suppStore),
+		inbox.WithReplyEnqueuer(enq),
+	))
 	// AI settings (agent platform PR A1). No shipped model catalog: native
 	// model metadata comes from models.dev at runtime, cached in Postgres with
 	// serve-stale-on-failure. Provider credentials seal under the same

@@ -444,6 +444,36 @@ limit / abuse control here is tracked in the Deferred list below.
     matching uses label-boundary suffix checks (`hasHostSuffix`), so
     `notgoogle.com` never matches `google.com`.
 
+## Manual reply from the unified inbox
+47. **A manual reply is workspace-pinned end-to-end, suppression-checked
+    twice, and its scope is deliberately not delegable.** `POST
+    /inbox/threads/{id}/reply` (`internal/app/inbox.Service.Reply`) resolves
+    the thread via `Store.GetThread`, which pins `workspace_id` from
+    `auth.WorkspaceID` (never the body or path) the same way every other
+    inbox read does; a cross-tenant or unknown thread id is indistinguishable
+    404, per the "never leak a foreign row's existence" rule. Suppression is
+    checked BEFORE enqueuing (`inbox.SuppressionChecker`, backed by
+    `suppression.Store`) and re-checked by
+    `internal/worker/inbox.ReplySendHandler` immediately before dialing (the
+    same defense-in-depth the test-send/warmup paths use against a race with
+    an incoming unsubscribe) — suppression is never bypassed, in either
+    direction. The credential is decrypted ONLY in the execution plane
+    (`ReplyCore.ResolveSenderTransport`, invariant 1): the control plane only
+    ever enqueues an `inbox:reply_send` task carrying ids and the free-text
+    body, never a credential. The new `inbox:send` scope is in
+    `auth.AllScopes` (a workspace-minted API key or a session may send a
+    reply) but deliberately absent from `OAuthGrantableScopes` — sending mail
+    is never delegable to a third-party client, the same rule
+    `campaigns:send` follows. A manual reply bypasses the mailbox's daily cap
+    and minimum send interval (product decision: an operator's own reply is
+    not automation) but is still counted toward the mailbox's daily sent
+    volume — `queries/send.sql`'s `CountSentToday` sums both `sends` and
+    same-day outbound `inbox_messages` for the mailbox, so campaign
+    scheduling sees true volume even though no `sends` row is ever written
+    for a reply (`sends.campaign_id`/`contact_id` are `NOT NULL` with a
+    `UNIQUE(campaign_id, contact_id)`, which a legacy direct-send thread's
+    reply cannot satisfy and a threaded one would collide with).
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

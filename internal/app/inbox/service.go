@@ -23,12 +23,27 @@ const errHalfSetCursor = "before_last_message_at and before_id must be set toget
 // Service implements the unified-inbox use cases. It depends on the Store
 // interface (never the concrete PgStore), so it is unit-testable against a
 // fake without a database.
+//
+// suppression/replyEnq back Reply (see reply.go) and are both OPTIONAL
+// (nil-safe — see checkRecipientNotSuppressed and Reply's own nil check),
+// injected via ServiceOption rather than added as NewService parameters, so
+// every existing caller of NewService(store) — and every existing unit test —
+// keeps compiling unchanged. Mirrors campaign.Service's identical shape.
 type Service struct {
-	store Store
+	store       Store
+	suppression SuppressionChecker
+	replyEnq    ReplyEnqueuer
 }
 
-// NewService builds a Service over store.
-func NewService(store Store) *Service { return &Service{store: store} }
+// NewService builds a Service over store, applying any ServiceOptions (see
+// WithSuppressionChecker / WithReplyEnqueuer in reply.go).
+func NewService(store Store, opts ...ServiceOption) *Service {
+	s := &Service{store: store}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
 
 // RecordReply carries one matched (or legacy) reply: the thread it belongs to
 // (created or refreshed) and the message itself.

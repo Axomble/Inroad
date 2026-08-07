@@ -30,12 +30,22 @@ ON CONFLICT (workspace_id, message_id) WHERE message_id <> '' DO NOTHING;
 -- joined contact's email; the caller escapes LIKE metacharacters before this
 -- reaches Postgres (see db.EscapeLike in platform/db) so a literal % or _ typed
 -- by a user is never treated as a wildcard.
+--
+-- reply_label_label/reply_label_color are a SECOND LEFT JOIN, on
+-- (workspace_id, key), resolving last_reply_class to its current display
+-- label — nullable columns (not COALESCE'd) so the Go layer can tell "no
+-- label matches this key" (a deleted custom label, or a core that predates
+-- the taxonomy) apart from "the key IS the empty string" and degrade to the
+-- raw key, per the OpenAPI contract's InboxThreadSummary.reply_label doc.
 SELECT t.*,
        COALESCE(c.email, '') AS contact_email,
        COALESCE(c.first_name, '') AS contact_first_name,
-       COALESCE(c.last_name, '') AS contact_last_name
+       COALESCE(c.last_name, '') AS contact_last_name,
+       rl.label AS reply_label_label,
+       rl.color AS reply_label_color
 FROM inbox_threads t
 LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+LEFT JOIN reply_labels rl ON rl.workspace_id = t.workspace_id AND rl.key = t.last_reply_class
 WHERE t.workspace_id = @workspace_id
   AND (sqlc.narg('mailbox_id')::uuid IS NULL OR t.mailbox_id = sqlc.narg('mailbox_id'))
   AND (sqlc.narg('reply_class')::text IS NULL OR t.last_reply_class = sqlc.narg('reply_class'))
@@ -48,17 +58,30 @@ ORDER BY t.last_message_at DESC, t.id DESC
 LIMIT @page_limit;
 
 -- name: GetInboxThread :one
--- contact_* columns follow ListInboxThreads' LEFT JOIN convention above.
+-- contact_* and reply_label_* columns follow ListInboxThreads' LEFT JOIN
+-- conventions above.
 SELECT t.*,
        COALESCE(c.email, '') AS contact_email,
        COALESCE(c.first_name, '') AS contact_first_name,
-       COALESCE(c.last_name, '') AS contact_last_name
+       COALESCE(c.last_name, '') AS contact_last_name,
+       rl.label AS reply_label_label,
+       rl.color AS reply_label_color
 FROM inbox_threads t
 LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+LEFT JOIN reply_labels rl ON rl.workspace_id = t.workspace_id AND rl.key = t.last_reply_class
 WHERE t.id = @id AND t.workspace_id = @workspace_id;
 
 -- name: ListInboxMessagesByThread :many
 SELECT * FROM inbox_messages WHERE thread_id = @thread_id AND workspace_id = @workspace_id ORDER BY occurred_at;
+
+-- name: BumpInboxThreadLastMessageAt :exec
+-- Advances a thread's last_message_at after an operator's manual reply is
+-- recorded (Service.RecordOutboundReply), WITHOUT touching unread or
+-- last_reply_class: unread was already cleared by Service.Reply when it
+-- enqueued the send (POST /inbox/threads/{id}/reply marks the thread read),
+-- and an operator's own outbound reply is not itself a classified inbound
+-- reply. Mirrors UpsertInboxThread's bump but deliberately narrower.
+UPDATE inbox_threads SET last_message_at = now() WHERE id = @id AND workspace_id = @workspace_id;
 
 -- name: SetInboxThreadUnread :execrows
 -- :execrows (not :exec) so the store can tell "matched and updated" apart
