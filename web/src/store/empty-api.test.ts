@@ -2,7 +2,7 @@ import { configureStore } from '@reduxjs/toolkit'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { retryAfterSeconds } from '@/lib/rtk-error'
 import { emptyApi } from './empty-api'
-import authReducer from './slices/auth'
+import authReducer, { clearSession } from './slices/auth'
 
 // A throwaway endpoint injected purely to exercise baseQueryWithReauth —
 // the generated api.ts endpoints aren't needed for this.
@@ -14,6 +14,9 @@ const testApi = emptyApi.injectEndpoints({
     // own subscription cache (which would otherwise collapse two identical
     // `ping.initiate()` calls into a single fetch before reauth ever sees them).
     pingAs: build.query<{ ok: boolean }, string>({ query: (who) => ({ url: `/ping/${who}` }) }),
+    // A real unauthenticated auth endpoint, to prove a 401 from one of these
+    // (a wrong password) is not treated as an expired session.
+    login: build.mutation<unknown, void>({ query: () => ({ url: '/auth/login', method: 'POST' }) }),
   }),
   overrideExisting: true,
 })
@@ -66,6 +69,36 @@ describe('baseQueryWithReauth', () => {
     const state = store.getState()
     expect(state.auth.status).toBe('authed')
     expect(state.auth.accessToken).toBe('new-access-token')
+  })
+
+  test('a 401 from an unauthenticated auth endpoint does not attempt a refresh', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: 'invalid credentials' }, 401))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const store = makeStore()
+    const result = await store.dispatch(testApi.endpoints.login.initiate())
+
+    // Exactly the login POST: a wrong password is not an expired session, so
+    // there is nothing to refresh (this fired a doomed /auth/refresh on every
+    // failed login attempt, which is what users saw on the login screen).
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect((fetchMock.mock.calls[0]![0] as Request).url).toContain('/auth/login')
+    expect('error' in result && result.error).toBeTruthy()
+    // Untouched: no session existed to clear, so the bootstrap's `idle` stands.
+    expect(store.getState().auth.status).toBe('idle')
+  })
+
+  test('a 401 does not attempt a refresh once the session is known to be gone', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: 'unauthorized' }, 401))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const store = makeStore()
+    // `anon` is what a failed bootstrap or a failed refresh leaves behind.
+    store.dispatch(clearSession())
+    await store.dispatch(testApi.endpoints.ping.initiate())
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls.some((call) => (call[0] as Request).url.includes('/auth/refresh'))).toBe(false)
   })
 
   test('concurrent 401s share a single refresh call (single-flight)', async () => {

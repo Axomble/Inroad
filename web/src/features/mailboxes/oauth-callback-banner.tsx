@@ -95,33 +95,45 @@ export function OauthCallbackBanner() {
   )
 }
 
+const BANNER_TONE = {
+  ok: 'border-ok/30 bg-ok/10',
+  warn: 'border-warm/30 bg-warm/10',
+  danger: 'border-danger/30 bg-danger/10',
+} as const
+
 /**
- * Shared alert chrome (border + tinted background + dismiss button) for both
- * the OAuth callback banner and the Gmail "start" error banner on the
- * mailboxes page, so there is a single alert surface to style and reason about.
- * Callers supply the icon and message as `children`.
+ * Shared alert chrome (border + tinted background + optional dismiss button) for
+ * every full-width notice on the mailboxes page — the OAuth callback outcome,
+ * the OAuth "start" error, the post-connect warmup warning, and the standing
+ * "pool needs two mailboxes" note — so there is a single alert surface to style
+ * and reason about. Callers supply the icon and message as `children`.
+ *
+ * `onDismiss` is optional: a notice reporting a one-off event is dismissible,
+ * but one stating a standing fact about the workspace isn't, since dismissing it
+ * wouldn't make it untrue.
  */
 export function BannerShell({
   tone,
   onDismiss,
   children,
 }: {
-  tone: 'ok' | 'danger'
-  onDismiss: () => void
+  tone: keyof typeof BANNER_TONE
+  onDismiss?: () => void
   children: React.ReactNode
 }) {
   return (
     <div
+      // Only a failure interrupts; `ok`/`warn` are polite so they don't preempt
+      // whatever the user is doing.
       role={tone === 'danger' ? 'alert' : 'status'}
-      className={cn(
-        'flex items-center gap-3 border-b px-5 py-2 text-[13px] text-foreground',
-        tone === 'ok' ? 'border-ok/30 bg-ok/10' : 'border-danger/30 bg-danger/10',
-      )}
+      className={cn('flex items-center gap-3 border-b px-5 py-2 text-[13px] text-foreground', BANNER_TONE[tone])}
     >
       {children}
-      <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Dismiss" onClick={onDismiss}>
-        <X className="size-4" />
-      </Button>
+      {onDismiss && (
+        <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Dismiss" onClick={onDismiss}>
+          <X className="size-4" />
+        </Button>
+      )}
     </div>
   )
 }

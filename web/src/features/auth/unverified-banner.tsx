@@ -27,9 +27,16 @@ export function UnverifiedBanner() {
     >
       <MailWarning className="size-4 shrink-0 text-warm" aria-hidden="true" />
       <span className="min-w-0 flex-1 truncate">
-        Please verify your email address — sending campaigns and connecting mailboxes are blocked until you do.
+        Please verify your email address — connecting a mailbox, launching a campaign, and test sends stay
+        blocked until you do.
       </span>
-      {isSuccess && <span className="shrink-0 text-xs text-ok">Verification email sent</span>}
+      {/* Feedback for both outcomes, as text (never colour alone). No nested
+          live region: this whole banner is already `role="status"`, so content
+          appearing inside it is announced once, not twice. */}
+      {isSuccess && (
+        <span className="shrink-0 text-xs text-ok">Verification email sent — check your inbox</span>
+      )}
+      {isError && <span className="shrink-0 text-xs text-danger">Couldn&rsquo;t send the email</span>}
       <Button
         variant="chip"
         size="xs"
@@ -40,7 +47,7 @@ export function UnverifiedBanner() {
         }}
       >
         {isLoading && <Loader2 className="animate-spin" />}
-        {isError ? 'Try again' : isSuccess ? 'Resend' : 'Resend email'}
+        {isLoading ? 'Sending…' : isError ? 'Try again' : isSuccess ? 'Resend' : 'Resend email'}
       </Button>
     </div>
   )

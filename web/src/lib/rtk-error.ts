@@ -43,6 +43,21 @@ export function serverDetail(err: unknown): string | undefined {
 }
 
 /**
+ * True for the API's "this account's email address isn't confirmed yet" gate: a
+ * 403 whose envelope carries the machine code `email_not_verified` (written by
+ * `auth.RequireVerified`). `serverDetail` deliberately drops machine codes, so
+ * this is the one seam that recognises this particular one — every gated
+ * action's error copy narrows through here instead of re-reading
+ * `error.data.error` itself.
+ */
+export function isEmailNotVerified(err: unknown): boolean {
+  if (httpStatus(err) !== 403 || !isFetchBaseQueryError(err)) return false
+  const { data } = err
+  if (typeof data !== 'object' || data === null) return false
+  return (data as { error?: unknown }).error === 'email_not_verified'
+}
+
+/**
  * An RTK error once the base query has folded a `Retry-After` delay onto it.
  *
  * The header lives on the raw `Response`, which `fetchBaseQuery` stashes on the
