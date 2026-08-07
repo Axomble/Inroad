@@ -60,6 +60,24 @@ or SSRF. (Not a full threat model; that's future work.)
    path and contradicted `allow_plaintext`). IMAP is unchanged (already
    TLS-by-default).
 
+   The **transactional** sender (`platform/notify`, system email: verification,
+   password reset, login codes, invites) follows the same rule with its own
+   explicit opt-out, `INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` (default **false**;
+   any value that isn't an explicit `true`/`1`/`yes` stays false). Unset, empty,
+   or misspelled all keep TLS mandatory — the reasoning is identical to the
+   per-mailbox flag above: a configuration mistake must never be able to
+   downgrade a send to cleartext, so cleartext has to be *chosen*, never
+   defaulted into. It exists so the dev stack can reach a local mail catcher
+   (Mailpit, plaintext and no AUTH); it must never be set in production. Auth is
+   offered only when a system SMTP username is configured, which is orthogonal:
+   omitting credentials never relaxes transport security.
+
+   Related: transactional email bodies carry single-use bearer credentials
+   (verify/reset links, login codes), so **no driver logs a message body**. The
+   console driver logs the recipient and subject only. Reading a link in
+   development is what the mail catcher is for — do not add body or token
+   logging as a debugging shortcut.
+
 ## Auth
 7. **JWT is HS256 and the signing method is verified on parse** (`auth.ParseToken`
    rejects non-HMAC alg). Tokens carry `sub` (user) and `wid` (workspace) only.

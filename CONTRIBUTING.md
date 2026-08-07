@@ -15,6 +15,23 @@ make run-worker   # go run ./cmd/worker          (separate shell)
 ```
 Frontend: `cd web && npm install && npm run dev`.
 
+### Reading transactional email locally
+The full dev stack (`docker compose -f deploy/compose/docker-compose.dev.yml up`)
+runs Mailpit and points the API at it, so verification, password-reset, login-code,
+and invite emails are delivered and readable at **http://localhost:8025** — click
+the link straight out of the message. Nothing leaves the machine.
+
+Running the API natively instead? The default `console` driver only logs the
+recipient and subject; message bodies are never logged, because they carry
+single-use links and login codes. To see a real one, point the API at a catcher:
+```
+INROAD_TRANSACTIONAL_DRIVER=smtp INROAD_SYSTEM_SMTP_HOST=localhost \
+INROAD_SYSTEM_SMTP_PORT=1025 INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT=true \
+INROAD_SYSTEM_EMAIL_FROM=no-reply@inroad.test go run ./cmd/inroad
+```
+`INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` is dev-only and defaults to false — TLS is
+mandatory unless it is explicitly set (see invariant 6). Never set it in production.
+
 ## Tests
 ```
 make test                       # unit tests (no external services)

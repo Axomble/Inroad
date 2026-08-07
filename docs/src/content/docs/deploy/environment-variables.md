@@ -21,6 +21,34 @@ description: Complete reference guide for all backend configuration environment 
 | `INROAD_MAIL_ALLOW_PRIVATE_HOSTS` | Allow loopback/private RFC1918 mail server dials | `false` |
 | `INROAD_KEY_PROVIDER` | Key Encryption Key provider — only `local` is implemented today (an AWS KMS backend exists behind the same seam but is not yet selectable) | `local` |
 
+## Transactional Email
+
+System-originated email: address verification, password reset, passwordless
+login codes, and workspace invites. Separate from campaign mailboxes — this is
+the operator's own sending identity.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_TRANSACTIONAL_DRIVER` | `console` (logs recipient + subject, delivers nothing) or `smtp` | `console` |
+| `INROAD_SYSTEM_SMTP_HOST` | System mailbox SMTP host (required for `smtp`) | — |
+| `INROAD_SYSTEM_SMTP_PORT` | System mailbox SMTP port | `587` |
+| `INROAD_SYSTEM_SMTP_USERNAME` | SMTP username; blank means no authentication is attempted | — |
+| `INROAD_SYSTEM_SMTP_PASSWORD` | SMTP password | — |
+| `INROAD_SYSTEM_EMAIL_FROM` | From address (required for `smtp`) | — |
+| `INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` | **Dev only.** Send over cleartext instead of requiring TLS | `false` |
+| `INROAD_APP_BASE_URL` | Frontend origin that emailed links point at | `http://localhost:5173` |
+
+The `console` driver never logs message bodies, because they contain single-use
+bearer credentials (verify/reset links, login codes). To read a real message in
+development, use a mail catcher — the dev compose stack runs Mailpit and serves
+the caught mail at `http://localhost:8025`.
+
+`INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` exists only so a local catcher (plaintext,
+no AUTH) can be reached. TLS is mandatory unless it is set to an explicit
+`true`/`1`/`yes`; unset, empty, or misspelled all keep TLS on, so a
+configuration mistake cannot downgrade delivery to cleartext. Do not set it in
+production.
+
 ## Worker Tuning
 
 | Variable | Description | Default |

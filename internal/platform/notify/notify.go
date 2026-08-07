@@ -34,6 +34,15 @@ type Config struct {
 	SMTPPassword string
 	From         string
 	Logger       *slog.Logger
+
+	// AllowPlaintext is the explicit cleartext opt-out for the smtp driver,
+	// mirroring the per-mailbox opt-out on the campaign sender (security
+	// Invariant 6). Its zero value REQUIRES TLS, so an absent or false setting
+	// can never silently downgrade the connection; only an operator explicitly
+	// setting it true relaxes the policy. It exists so a local mail catcher
+	// (Mailpit/MailHog, plaintext and no AUTH) can be used in development —
+	// never for production delivery.
+	AllowPlaintext bool
 }
 
 // requireRecipient rejects an unaddressed Message before it reaches the
@@ -60,7 +69,8 @@ func New(cfg Config) (Sender, error) {
 		}
 		// Deliberately logs only the recipient and subject: the bodies carry
 		// verify/reset links and login codes, which are bearer credentials and
-		// must never reach the logs.
+		// must never reach the logs. To read a message body in development, use
+		// the mail catcher wired into the dev compose stack, not the log.
 		return requireRecipient{next: &consoleSender{sink: func(m Message) {
 			lg.Info("transactional email (console)", "to", m.To, "subject", m.Subject)
 		}}}, nil

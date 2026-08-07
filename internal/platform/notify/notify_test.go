@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	gomail "github.com/wneessen/go-mail"
 )
 
 func TestConsoleSenderCaptures(t *testing.T) {
@@ -114,6 +116,74 @@ func TestNewGuardsEveryDriver(t *testing.T) {
 		}
 		if err := s.Send(context.Background(), Message{Subject: "x", TextBody: "y"}); !errors.Is(err, ErrNoRecipient) {
 			t.Errorf("driver %q: Send with empty To got %v, want ErrNoRecipient", cfg.Driver, err)
+		}
+	}
+}
+
+// TestSMTPRequiresTLSUnlessExplicitlyOptedOut is the security assertion for the
+// new dev-only opt-out: TLS is mandatory for the zero value, so neither an
+// absent setting nor a false one can downgrade a production send to cleartext.
+// Only an explicit true relaxes it (security Invariant 6).
+func TestSMTPRequiresTLSUnlessExplicitlyOptedOut(t *testing.T) {
+	base := Config{Driver: "smtp", SMTPHost: "smtp.test", SMTPPort: 587, From: "sys@acme.test"}
+
+	if _, got := smtpPolicy(base); got != gomail.TLSMandatory {
+		t.Errorf("default (AllowPlaintext unset): TLS policy = %v, want TLSMandatory", got)
+	}
+
+	explicitFalse := base
+	explicitFalse.AllowPlaintext = false
+	if _, got := smtpPolicy(explicitFalse); got != gomail.TLSMandatory {
+		t.Errorf("AllowPlaintext=false: TLS policy = %v, want TLSMandatory", got)
+	}
+
+	optedOut := base
+	optedOut.AllowPlaintext = true
+	if _, got := smtpPolicy(optedOut); got != gomail.NoTLS {
+		t.Errorf("AllowPlaintext=true: TLS policy = %v, want NoTLS", got)
+	}
+}
+
+// TestSMTPOmitsAuthWithoutUsername covers the other half of talking to a local
+// catcher: a server advertising no AUTH mechanism rejects PLAIN, so auth is
+// offered only when a username is actually configured. This is independent of
+// the TLS policy — omitting auth never relaxes transport security.
+func TestSMTPOmitsAuthWithoutUsername(t *testing.T) {
+	withUser := Config{Driver: "smtp", SMTPHost: "smtp.test", SMTPPort: 587, From: "sys@acme.test",
+		SMTPUsername: "operator", SMTPPassword: "pw"}
+	auth, tlsPolicy := smtpPolicy(withUser)
+	if auth != gomail.SMTPAuthPlain {
+		t.Errorf("with username: auth = %v, want %v", auth, gomail.SMTPAuthPlain)
+	}
+	if tlsPolicy != gomail.TLSMandatory {
+		t.Errorf("with username: TLS policy = %v, want TLSMandatory", tlsPolicy)
+	}
+
+	noUser := Config{Driver: "smtp", SMTPHost: "smtp.test", SMTPPort: 1025, From: "sys@acme.test"}
+	if auth, _ := smtpPolicy(noUser); auth != gomail.SMTPAuthNoAuth {
+		t.Errorf("without username: auth = %v, want %v", auth, gomail.SMTPAuthNoAuth)
+	}
+}
+
+// TestSMTPClientOptionsApplyThePolicy confirms the decision above is actually
+// wired into the client that gets dialed — smtpPolicy could be correct while
+// clientOptions dropped it on the floor.
+func TestSMTPClientOptionsApplyThePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want gomail.TLSPolicy
+	}{
+		{"secure default", Config{SMTPHost: "smtp.test", SMTPPort: 587}, gomail.TLSMandatory},
+		{"explicit opt-out", Config{SMTPHost: "smtp.test", SMTPPort: 1025, AllowPlaintext: true}, gomail.NoTLS},
+	} {
+		s := &smtpSender{cfg: tc.cfg}
+		c, err := gomail.NewClient(tc.cfg.SMTPHost, s.clientOptions()...)
+		if err != nil {
+			t.Fatalf("%s: NewClient: %v", tc.name, err)
+		}
+		if got := c.TLSPolicy(); got != tc.want.String() {
+			t.Errorf("%s: client TLS policy = %q, want %q", tc.name, got, tc.want.String())
 		}
 	}
 }

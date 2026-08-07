@@ -29,6 +29,39 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+// TestSystemSMTPAllowPlaintextFailsClosed pins the default for the
+// transactional cleartext opt-out. Only an explicitly truthy value may relax
+// TLS; unset, empty, false, and anything unparseable must all stay false, so a
+// typo in production configuration cannot downgrade system email to cleartext.
+func TestSystemSMTPAllowPlaintextFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		want        bool
+	}{
+		{"unset", "", false},
+		{"false", "false", false},
+		{"zero", "0", false},
+		{"garbage", "sure-why-not", false},
+		{"true", "true", true},
+		{"one", "1", true},
+		{"yes", "yes", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+			t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+			t.Setenv("INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT", tc.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.SystemSMTPAllowPlaintext != tc.want {
+				t.Fatalf("SystemSMTPAllowPlaintext with %q = %v, want %v", tc.value, cfg.SystemSMTPAllowPlaintext, tc.want)
+			}
+		})
+	}
+}
+
 func TestWebauthnDefaults(t *testing.T) {
 	cases := []struct {
 		name       string
