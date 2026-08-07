@@ -177,3 +177,25 @@ func TestBuildRouterIdentityMeStaysGuarded(t *testing.T) {
 		t.Fatalf("identity /me without token: got %d, want 401 (inner self-guard removed?)", code)
 	}
 }
+
+// The Idempotency-Key guard must skip exactly the draft-reply route and nothing
+// else. Pins the composition root's wiring: the guard's 422
+// idempotency_key_reuse would otherwise be indistinguishable from that route's
+// own "no AI model configured" 422 for a client branching on status alone.
+func TestSkipIdempotencyGuardMatchesOnlyDraftReply(t *testing.T) {
+	tests := map[string]bool{
+		"/api/v1/inbox/threads/2f1c/draft-reply": true,
+		"/api/v1/inbox/threads/2f1c/reply":       false,
+		"/api/v1/inbox/threads/2f1c/read":        false,
+		"/api/v1/inbox/threads":                  false,
+		"/api/v1/campaigns/2f1c/test-send":       false,
+	}
+	for path, want := range tests {
+		t.Run(path, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, path, http.NoBody)
+			if got := skipIdempotencyGuard(r); got != want {
+				t.Fatalf("skipIdempotencyGuard(%q) = %v, want %v", path, got, want)
+			}
+		})
+	}
+}

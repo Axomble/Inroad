@@ -13,6 +13,7 @@ export type {
   InboxThreadDetail,
   InboxMessage,
   InboxReplyLabelRef,
+  InboxDraftReply,
   SendInboxReplyRequest,
   SetInboxThreadReadRequest,
 } from '@/store/api'
@@ -55,9 +56,18 @@ const inboxApi = api.enhanceEndpoints({
   },
 })
 
+// `draftInboxReply` is generated now (the interim injection this file carried
+// under a TODO(codegen) has been deleted — the generated endpoint claims the
+// name, which would have silently no-op'd the injection anyway). It stays
+// without `invalidatesTags`, deliberately: drafting reads the thread and
+// returns generated text, it persists nothing. Invalidating `InboxThread`
+// would refetch the thread (and the list) for a server state that did not
+// change, and the refetch would land while the user is editing the draft in
+// the textarea — cost with no correctness gain.
 export const {
   useListInboxThreadsQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,
+  useDraftInboxReplyMutation,
   useSetInboxThreadReadMutation,
 } = inboxApi

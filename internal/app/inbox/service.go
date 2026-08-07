@@ -24,8 +24,9 @@ const errHalfSetCursor = "before_last_message_at and before_id must be set toget
 // interface (never the concrete PgStore), so it is unit-testable against a
 // fake without a database.
 //
-// suppression/replyEnq back Reply (see reply.go) and are both OPTIONAL
-// (nil-safe — see checkRecipientNotSuppressed and Reply's own nil check),
+// suppression/replyEnq back Reply (see reply.go) and drafter backs DraftReply
+// (see draft.go). All three are OPTIONAL (nil-safe — see
+// checkRecipientNotSuppressed, Reply's own nil check, and DraftReply's),
 // injected via ServiceOption rather than added as NewService parameters, so
 // every existing caller of NewService(store) — and every existing unit test —
 // keeps compiling unchanged. Mirrors campaign.Service's identical shape.
@@ -33,6 +34,7 @@ type Service struct {
 	store       Store
 	suppression SuppressionChecker
 	replyEnq    ReplyEnqueuer
+	drafter     ReplyDrafter
 }
 
 // NewService builds a Service over store, applying any ServiceOptions (see

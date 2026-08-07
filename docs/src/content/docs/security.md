@@ -501,6 +501,77 @@ limit / abuse control here is tracked in the Deferred list below.
     unaffected by any of this: its own failure is logged, never retried, for
     the reason above the claim exists in the first place.
 
+## AI-drafted replies
+48. **Drafting a reply can never send one, and it reads only the caller's own
+    workspace.** `POST /inbox/threads/{id}/draft-reply`
+    (`internal/app/inbox.Service.DraftReply`) returns suggested text and nothing
+    else: it enqueues no task, opens no mailbox credential, and dials no mail
+    provider. Sending stays a separate call a human makes deliberately
+    (`POST /inbox/threads/{id}/reply`, invariant 47), so a draft is inert until
+    someone acts on it — and because drafting is not a send, no agent or MCP
+    tool gains send authority by being able to draft. The suppression checks of
+    invariant 47 are unchanged and still the only gate on actually sending; the
+    draft path deliberately does not consult them (nothing is going anywhere
+    yet).
+
+    **Tenancy.** The transcript is built ONLY from `Store.GetThread`, which pins
+    `workspace_id` from `auth.WorkspaceID` (never the body or a path param), so
+    the prompt can only ever contain the caller's own conversation; an unknown
+    or cross-tenant thread id is the same indistinguishable 404 every other
+    inbox read returns. The workspace id handed to the drafter is that same
+    JWT-derived value, so a draft cannot be generated against another tenant's
+    AI configuration.
+
+    **Scope.** Gated on `inbox:send`, NOT `inbox:read`. It exposes no more
+    thread content than `inbox:read` already does, but every call spends the
+    workspace's AI budget and is useful only as a step toward replying, so it
+    belongs behind the same authority as the send. `inbox:send` is absent from
+    `OAuthGrantableScopes`, so a delegated third-party integration cannot burn a
+    workspace's tokens. Spend is additionally bounded by a per-IP and
+    per-WORKSPACE rate limit (`throttle.Config` with an `AcctKey` resolving the
+    principal's workspace — the budget owner — rather than the pre-auth body
+    `email`), configured via `INROAD_RATELIMIT_DRAFT_REPLY_IP` /
+    `INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE` and fail-closed on a Redis outage
+    like every other throttle.
+
+    **No prompt or message content is ever logged.** `Runtime.DraftReply` emits
+    only ids, the resolved model id, turn count, token counts, draft LENGTH and
+    duration — extending the discipline invariant 21 states for the reply
+    classifier ("never logs PII or secrets; it emits a class/source/confidence,
+    not message content") to prompts. `agentrun/manager.go` follows the same
+    habit for runs, logging error values rather than message content. The
+    provider error text is likewise never returned to the caller: the 502
+    response carries only the domain's own sentinel message, because an upstream
+    string can echo request detail back.
+
+49. **AI provider credentials are a different class from mailbox credentials,
+    with a deliberately different posture.** This is documented here for the
+    first time; it describes the design the agent platform has always had, which
+    the draft endpoint reuses without changing.
+
+    Invariant 1 governs MAILBOX credentials and says to open them only in the
+    worker/send path. That rule exists because their consumer is an outbound
+    SMTP/IMAP/API dial that delivers mail on a tenant's behalf, so the blast
+    radius of a leak is a tenant's mail being sent or read, and the execution
+    plane is where that dial belongs.
+
+    AI provider credentials have no execution-plane consumer at all. The agent
+    run loop runs IN the API server process — `agentrun.Manager.Start` simply
+    does `go m.run(...)`; there is no worker hop and no `internal/worker/agent*`
+    package — so `agentchat.PgModelResolver.Resolve` unseals the provider blob in
+    the control plane via `keyring.SealerFor`, hands the plaintext to the
+    streamer factory, and lets it go out of scope within that call. Nothing above
+    that seam can hold or log a provider key: `ResolvedModel` has no credential
+    field, by construction (see its doc comment). No mail is sent and no
+    SMTP/IMAP connection is opened on this path, so none of the reasoning behind
+    invariant 1's execution-plane rule applies. This is a distinct rule for a
+    distinct credential class, not an exception carved out of invariant 1.
+
+    The draft endpoint adds no new credential handling and no new SSRF surface:
+    it receives an already-built streamer from that same resolver, whose
+    user-supplied `base_url`/endpoint hosts were vetted at write time by the mail
+    package's SSRF classifier and again by the guarded transport at dial time.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

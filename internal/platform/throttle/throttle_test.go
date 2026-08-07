@@ -240,3 +240,56 @@ func TestBodyPeek_OversizedBody(t *testing.T) {
 		t.Fatalf("restored oversized body = %d bytes, want %d (truncated at peek cap)", len(seen), maxBodyPeek+1)
 	}
 }
+
+// TestAcctKeyOverridesBodyPeek asserts an authenticated endpoint keys its
+// per-account window on the configured resolver (the principal's workspace)
+// instead of a body "email" — and that the body is NEVER read when AcctKey is
+// set, so a resolver-backed throttle cannot consume a handler's request body.
+func TestAcctKeyOverridesBodyPeek(t *testing.T) {
+	limiter := newFakeLimiter()
+	c := cfg(limiter, 100, 1)
+	c.AcctKey = func(*http.Request) string { return "workspace-1" }
+	h := c.Middleware("draft")(okNext())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req("someone@example.test"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request: got %d, want 200", rec.Code)
+	}
+	// A DIFFERENT body email must still hit the same workspace window.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req("other@example.test"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: got %d, want 429 (same account key regardless of body)", rec.Code)
+	}
+	if _, keyed := limiter.counts["draft:acct:workspace-1"]; !keyed {
+		t.Fatalf("account window not keyed on the resolver's value: %v", limiter.counts)
+	}
+	for key := range limiter.counts {
+		if strings.Contains(key, "@example.test") {
+			t.Fatalf("body email %q was used as an account key despite AcctKey being set", key)
+		}
+	}
+}
+
+// An AcctKey that cannot identify an account (returns "") degrades to IP-only
+// throttling rather than sharing one global account window.
+func TestAcctKeyEmptyFallsBackToIPOnly(t *testing.T) {
+	limiter := newFakeLimiter()
+	c := cfg(limiter, 100, 1)
+	c.AcctKey = func(*http.Request) string { return "" }
+	h := c.Middleware("draft")(okNext())
+
+	for i := 1; i <= 3; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req(""))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: got %d, want 200 (no account key = IP-only)", i, rec.Code)
+		}
+	}
+	for key := range limiter.counts {
+		if strings.Contains(key, ":acct:") {
+			t.Fatalf("an account window was opened for an empty key: %q", key)
+		}
+	}
+}
