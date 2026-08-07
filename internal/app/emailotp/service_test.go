@@ -51,6 +51,28 @@ func TestStartThenVerifySuccess(t *testing.T) {
 	}
 }
 
+// TestStartAddressesTheLoginCodeToTheRequester confirms the login code is
+// actually addressed to the account that requested it. Without this the code
+// email renders correctly and is delivered nowhere - a total lockout of
+// passwordless login that no other assertion in this file would catch.
+func TestStartAddressesTheLoginCodeToTheRequester(t *testing.T) {
+	store := newFakeStore()
+	store.addUser("user@example.test")
+	sender := &captureSender{}
+	svc := newTestService(store, sender, time.Now())
+
+	if err := svc.Start(context.Background(), "user@example.test"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m, ok := sender.last()
+	if !ok {
+		t.Fatal("no login-code email was sent")
+	}
+	if m.To != "user@example.test" {
+		t.Fatalf("login code addressed to %q, want user@example.test", m.To)
+	}
+}
+
 func TestVerifyWrongCodeRejected(t *testing.T) {
 	store := newFakeStore()
 	store.addUser("user@example.test")

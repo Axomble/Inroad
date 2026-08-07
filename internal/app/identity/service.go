@@ -199,7 +199,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (Session, erro
 		slog.Error("identity: failed to issue verification token", "err", err, "user_id", res.UserID)
 	} else {
 		link := s.appBaseURL + "/verify-email?token=" + url.QueryEscape(tokRaw)
-		if err := s.sender.Send(ctx, notify.VerifyEmail(link)); err != nil {
+		if err := s.sender.Send(ctx, notify.VerifyEmail(in.Email, link)); err != nil {
 			slog.Error("identity: failed to send verification email", "err", err, "user_id", res.UserID)
 		}
 	}
@@ -271,12 +271,18 @@ func (s *Service) ResendVerification(ctx context.Context, userID uuid.UUID) erro
 	if limited {
 		return ErrRateLimited
 	}
+	// The recipient is the account's own address, read from the user row - the
+	// caller supplies only the authenticated user id, never an address.
+	user, err := s.store.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
 	raw, err := s.store.IssueUserToken(ctx, userID, "email_verify", s.verifyTTL)
 	if err != nil {
 		return err
 	}
 	link := s.appBaseURL + "/verify-email?token=" + url.QueryEscape(raw)
-	return s.sender.Send(ctx, notify.VerifyEmail(link))
+	return s.sender.Send(ctx, notify.VerifyEmail(user.Email, link))
 }
 
 // ForgotPassword issues a password_reset token and emails a reset link, but
@@ -321,7 +327,7 @@ func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 			return
 		}
 		link := s.appBaseURL + "/reset-password?token=" + url.QueryEscape(raw)
-		if err := s.sender.Send(bgCtx, notify.ResetEmail(link)); err != nil {
+		if err := s.sender.Send(bgCtx, notify.ResetEmail(user.Email, link)); err != nil {
 			slog.Error("identity: failed to send reset email", "err", err, "user_id", user.ID)
 		}
 	})

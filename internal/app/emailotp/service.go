@@ -110,7 +110,7 @@ func (s *Service) Start(ctx context.Context, email string) error {
 			slog.Error("emailotp: failed to store login code", "err", err, "user_id", userID)
 			return
 		}
-		if err := s.sender.Send(bgCtx, notify.LoginCodeEmail(code)); err != nil {
+		if err := s.sender.Send(bgCtx, notify.LoginCodeEmail(email, code)); err != nil {
 			slog.Error("emailotp: failed to send login code", "err", err, "user_id", userID)
 		}
 	})
