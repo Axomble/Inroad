@@ -41,6 +41,20 @@ type ReplyCore interface {
 	// RecordInboxReply persists one delivered reply's outbound message row
 	// and last_message_at bump, workspace-pinned.
 	RecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error
+	// ClaimInboxReply attempts to claim taskID for delivery — claim-before-
+	// send, called immediately before ResolveSenderTransport (see
+	// ReplySendHandler). claimed=false means a prior attempt at this EXACT
+	// task already reached the dial (most likely a worker crash between the
+	// provider ACK and this handler returning, which asynq's lease then
+	// redelivers to another worker as a full re-run): the caller must skip,
+	// not send again.
+	ClaimInboxReply(ctx context.Context, workspaceID, taskID string) (claimed bool, err error)
+	// ReleaseInboxReply releases a claim taken by ClaimInboxReply. Called
+	// ONLY after a TRANSIENT send failure, before returning err for asynq to
+	// retry — without releasing, the retry's own claim attempt would see its
+	// own abandoned claim and skip forever, permanently dropping a reply
+	// that never actually sent.
+	ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error
 }
 
 // Mailer sends one email through whichever transport the resolved
@@ -112,8 +126,37 @@ func ReplySendHandler(core ReplyCore, sender Mailer) func(context.Context, *asyn
 			return nil
 		}
 
+		// Claim-before-send (docs/security.md invariant 4a's "never double,
+		// occasionally drop a rare ambiguous send" posture, applied here the
+		// same way ClaimStepSend/ClaimWarmupSend apply it to a sequence/warmup
+		// send): a worker that crashes AFTER the provider ACK but before this
+		// handler returns leaves asynq's lease to expire and redeliver the
+		// SAME task (same p.TaskID) to another worker as a full re-run, which
+		// would otherwise re-dial and double-send. Placed immediately before
+		// the credential is decrypted — no point claiming a send this
+		// handler hasn't yet decided to attempt (the job-load/suppression
+		// checks above may still skip it entirely).
+		claimed, err := core.ClaimInboxReply(ctx, p.WorkspaceID, p.TaskID)
+		if err != nil {
+			return fmt.Errorf("claim inbox reply: %w", err)
+		}
+		if !claimed {
+			slog.WarnContext(ctx, "inbox_reply_already_claimed",
+				"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID)
+			return nil
+		}
+
 		transport, err := core.ResolveSenderTransport(ctx, p.WorkspaceID, job.MailboxID)
 		if err != nil {
+			// The claim was already taken; a transport-resolve failure is
+			// treated as transient (like every other coreapi call in this
+			// handler) but, unlike the send itself below, nothing was ever
+			// dialed, so releasing first is still correct: a retry must be
+			// able to re-claim.
+			if relErr := core.ReleaseInboxReply(ctx, p.WorkspaceID, p.TaskID); relErr != nil {
+				slog.ErrorContext(ctx, "inbox_reply_release_claim_failed",
+					"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID, "err", relErr)
+			}
 			return fmt.Errorf("resolve sender transport: %w", err)
 		}
 		// Zeroize the decrypted secret(s) before returning, mirroring
@@ -139,10 +182,18 @@ func ReplySendHandler(core ReplyCore, sender Mailer) func(context.Context, *asyn
 			},
 		)
 		if err != nil {
-			// Transient send failure: return the error so asynq retries. The
-			// enqueue-time unix-second dedup id (queue.inboxReplySendTaskID)
-			// only guards a duplicate ENQUEUE, not this in-flight retry, but a
-			// retry here is safe because nothing has been recorded yet.
+			// Transient send failure: release the claim BEFORE returning err
+			// for asynq to retry — the retry's own ClaimInboxReply call must
+			// be able to re-claim, or a failed send before it ever reached
+			// the provider would be permanently (and silently) dropped
+			// rather than retried. If the release itself fails, log it and
+			// still return the send error: the retry will then see the
+			// claim as already taken and skip rather than double-send — the
+			// fail-safe direction (drop, never double).
+			if relErr := core.ReleaseInboxReply(ctx, p.WorkspaceID, p.TaskID); relErr != nil {
+				slog.ErrorContext(ctx, "inbox_reply_release_claim_failed",
+					"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID, "err", relErr)
+			}
 			return fmt.Errorf("send reply: %w", err)
 		}
 

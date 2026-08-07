@@ -95,3 +95,41 @@ func (c client) RecordInboxReply(ctx context.Context, in coreapi.RecordInboxRepl
 		OccurredAt: time.Now().UTC(),
 	})
 }
+
+// inboxReplyClaimKeyPrefix namespaces the claim inside idempotency_keys —
+// that table's primary key is only (workspace_id, key), with no domain
+// discriminator, so a namespaced key is what keeps a reply's claim from ever
+// colliding with an HTTP Idempotency-Key a client happened to choose the
+// identical raw value for.
+const inboxReplyClaimKeyPrefix = "inbox-reply:"
+
+// ClaimInboxReply attempts to claim taskID for delivery — claim-before-send
+// for a manual reply, the SAME correctness problem ClaimStepSend/
+// ClaimWarmupSend solve for a sequence/warmup send, solved here by reusing
+// the EXISTING generic Idempotency-Key replay cache (migration 000045)
+// rather than inventing a THIRD claim table: taskID is stable across every
+// retry/redelivery of one enqueued inbox:reply_send task (see
+// queue.InboxReplySendPayload.TaskID's doc), so claiming (workspace_id,
+// "inbox-reply:"+taskID) once and skipping every later attempt at the SAME
+// task is exactly the claim semantics this needs. claimed=false means
+// another attempt at this exact task already reached the dial (a prior
+// worker crashed AFTER sending but before this claim would have been
+// released) — the caller must skip, not send again: "never double,
+// occasionally drop a rare ambiguous send" (docs/security.md invariant 4a's
+// accepted posture, reused here for the identical reason). The request_hash
+// column is meaningless for this reuse (there is no request to replay); it
+// is populated with taskID itself only to satisfy the column's NOT NULL.
+// Claim rows age out via the SAME 24h maintenance sweep as HTTP idempotency
+// rows — no dedicated retention job.
+func (c client) ClaimInboxReply(ctx context.Context, workspaceID, taskID string) (bool, error) {
+	return c.replyClaims.TryInsert(ctx, workspaceID, inboxReplyClaimKeyPrefix+taskID, []byte(taskID))
+}
+
+// ReleaseInboxReply releases a claim taken by ClaimInboxReply, called ONLY
+// after a TRANSIENT send failure (the handler is about to return err for
+// asynq to retry): without releasing first, the retry's own ClaimInboxReply
+// call would see its own abandoned claim as "already sent" and skip
+// forever, permanently dropping a reply that never actually went out.
+func (c client) ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error {
+	return c.replyClaims.Delete(ctx, workspaceID, inboxReplyClaimKeyPrefix+taskID)
+}

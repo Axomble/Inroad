@@ -28,6 +28,8 @@ import (
 type replyCore interface {
 	GetInboxReplyJob(ctx context.Context, threadID, workspaceID string) (coreapi.InboxReplyJob, error)
 	RecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error
+	ClaimInboxReply(ctx context.Context, workspaceID, taskID string) (bool, error)
+	ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error
 }
 
 func newInboxReplyClient(t *testing.T, pool *pgxpool.Pool, q *gen.Queries) replyCore {
@@ -157,5 +159,72 @@ func TestGetInboxReplyJobIsWorkspacePinned(t *testing.T) {
 
 	if _, err := client.GetInboxReplyJob(ctx, threadID.String(), fx.foreignWS.String()); err == nil {
 		t.Fatal("want an error for a foreign workspace reading another tenant's thread, got nil")
+	}
+}
+
+// ClaimInboxReply/ReleaseInboxReply (worker/inbox.ReplyCore's claim-before-
+// send guard) against the REAL idempotency_keys table this reuses (migration
+// 000045): a fresh claim succeeds, a second claim of the SAME (workspace,
+// task id) fails (claimed=false, not an error) until released, and releasing
+// lets a subsequent claim of the identical key succeed again — exactly the
+// insert/delete pair the claim reuses.
+func TestClaimInboxReplyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	fx := seedForClaim(t, ctx, q)
+	client := newInboxReplyClient(t, pool, q)
+	taskID := "inboxreply:" + uuid.NewString() + ":1700000000"
+
+	claimed, err := client.ClaimInboxReply(ctx, fx.ws.String(), taskID)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("first claim of a fresh task id must succeed")
+	}
+
+	claimed, err = client.ClaimInboxReply(ctx, fx.ws.String(), taskID)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("a second claim of the SAME task id must fail while the first is still held")
+	}
+
+	if err := client.ReleaseInboxReply(ctx, fx.ws.String(), taskID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	claimed, err = client.ClaimInboxReply(ctx, fx.ws.String(), taskID)
+	if err != nil {
+		t.Fatalf("re-claim after release: %v", err)
+	}
+	if !claimed {
+		t.Fatal("a claim after release must succeed again — the retry's own re-claim")
+	}
+}
+
+// A workspace can never see, let alone conflict with, another workspace's
+// claim on the identical raw task id — the (workspace_id, key) primary key
+// is what makes this hold, exactly as it does for the generic HTTP
+// idempotency cache this reuses.
+func TestClaimInboxReplyIsWorkspacePinned(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	fx := seedForClaim(t, ctx, q)
+	client := newInboxReplyClient(t, pool, q)
+	taskID := "inboxreply:" + uuid.NewString() + ":1700000000"
+
+	claimed, err := client.ClaimInboxReply(ctx, fx.ws.String(), taskID)
+	if err != nil || !claimed {
+		t.Fatalf("claim in ws: claimed=%v err=%v, want true/nil", claimed, err)
+	}
+
+	claimed, err = client.ClaimInboxReply(ctx, fx.foreignWS.String(), taskID)
+	if err != nil {
+		t.Fatalf("claim in foreign ws: %v", err)
+	}
+	if !claimed {
+		t.Fatal("a foreign workspace's claim on the identical raw task id must succeed independently")
 	}
 }

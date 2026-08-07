@@ -128,11 +128,19 @@ const TaskInboxReplySend = "inbox:reply_send"
 // coreapi lookups (defense in depth on the unguessable thread UUID).
 // BodyText is the operator's free-text reply content — never logged by the
 // handler that consumes it, like every other piece of business
-// correspondence in this domain.
+// correspondence in this domain. TaskID carries the SAME id set as this
+// task's asynq.TaskID (below) — stable across retries AND a crash-induced
+// lease redelivery of this exact task, which is what makes it usable as the
+// claim-before-send key (internal/worker/inbox.ReplySendHandler). Carried in
+// the payload rather than read from the handler's context via
+// asynq.GetTaskID (which would work identically in production but is opaque
+// to construct in a unit test that builds a task directly) — this way the
+// SAME value is trivially assertable in tests.
 type InboxReplySendPayload struct {
 	ThreadID    string `json:"thread_id"`
 	BodyText    string `json:"body_text"`
 	WorkspaceID string `json:"workspace_id"`
+	TaskID      string `json:"task_id"`
 }
 
 // TaskDeliverabilityEvaluate re-evaluates one campaign's circuit breaker. It is
@@ -350,14 +358,20 @@ func inboxReplySendTaskID(threadID string, now time.Time) string {
 }
 
 // EnqueueInboxReplySend enqueues an inbox:reply_send task for immediate
-// processing.
+// processing. The SAME generated id is set as both the payload's TaskID
+// field and the task's own asynq.TaskID, so the handler's claim key and
+// asynq's own dedup/retry identity are always the one value — see
+// InboxReplySendPayload.TaskID's doc for why the payload carries it at all.
 func (c *Client) EnqueueInboxReplySend(threadID, bodyText, workspaceID string) error {
-	b, err := json.Marshal(InboxReplySendPayload{ThreadID: threadID, BodyText: bodyText, WorkspaceID: workspaceID})
+	taskID := inboxReplySendTaskID(threadID, time.Now())
+	b, err := json.Marshal(InboxReplySendPayload{
+		ThreadID: threadID, BodyText: bodyText, WorkspaceID: workspaceID, TaskID: taskID,
+	})
 	if err != nil {
 		return err
 	}
 	return c.enqueue(asynq.NewTask(TaskInboxReplySend, b),
-		asynq.TaskID(inboxReplySendTaskID(threadID, time.Now())),
+		asynq.TaskID(taskID),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Retention(taskRetention),
 	)

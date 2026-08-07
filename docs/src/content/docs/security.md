@@ -474,6 +474,33 @@ limit / abuse control here is tracked in the Deferred list below.
     `UNIQUE(campaign_id, contact_id)`, which a legacy direct-send thread's
     reply cannot satisfy and a threaded one would collide with).
 
+    **Claim-before-send.** `ReplySendHandler` claims the task (workspace-
+    pinned, keyed on the enqueue-time `asynq.TaskID` — stable across every
+    retry/redelivery of that ONE enqueued task, carried in
+    `InboxReplySendPayload.TaskID`) immediately before `ResolveSenderTransport`,
+    the same claim-before-dial discipline `ClaimStepSend`/`ClaimWarmupSend`
+    apply to a sequence/warmup send — without it, a worker crashing between
+    the provider ACK and the handler returning would leave asynq's lease to
+    expire and redeliver the identical task to another worker as a full
+    re-run, re-dialing and double-sending. The claim reuses the EXISTING
+    generic Idempotency-Key replay cache (`idempotency_keys`, migration
+    000045) rather than a new table — a namespaced key
+    (`"inbox-reply:" + taskID`) inserted via the same atomic
+    `InsertIdempotencyKey`/`DeleteIdempotencyKey` pair the HTTP layer uses,
+    aging out via the SAME 24h maintenance sweep, no dedicated retention job.
+    A failed claim (`claimed=false`) means a prior attempt at this exact task
+    already reached the dial: skip, never send again — "never double,
+    occasionally drop a rare ambiguous send" (the same accepted posture as
+    invariant 4a). A claim taken but never dialed (a transient
+    transport-resolve or send failure) is released BEFORE the handler
+    returns its error, so the retry's own claim attempt can re-claim rather
+    than seeing its own abandoned claim and dropping the reply forever; if
+    the release itself fails, the original error is still returned and the
+    retry simply skips (drop, never double — the fail-safe direction, not
+    the failure-avoiding one). Post-ACK bookkeeping (`RecordInboxReply`) is
+    unaffected by any of this: its own failure is logged, never retried, for
+    the reason above the claim exists in the first place.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

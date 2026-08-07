@@ -155,6 +155,27 @@ func TestReplyEnqueuesAndMarksThreadRead(t *testing.T) {
 	}
 }
 
+// A SetUnread failure AFTER a successful enqueue must be swallowed (logged,
+// not returned): the send is already queued, so a 500 here would make the
+// caller retry and risk a second reply actually going out — the enqueue's
+// unix-second dedup key does not catch a retry seconds later. This mirrors
+// how the worker treats a post-send RecordInboxReply failure.
+func TestReplySwallowsAMarkReadFailureAfterASuccessfulEnqueue(t *testing.T) {
+	store := newFakeStore()
+	ws := uuid.New()
+	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
+	store.setUnreadErr = errors.New("db down")
+	enq := &fakeReplyEnqueuer{}
+	svc := inbox.NewService(store, inbox.WithReplyEnqueuer(enq))
+
+	if err := svc.Reply(context.Background(), ws, threadID, "hello"); err != nil {
+		t.Fatalf("Reply: %v, want nil (the send is queued; a mark-read failure must not surface as an error)", err)
+	}
+	if enq.calls != 1 {
+		t.Fatalf("enqueue called %d times, want 1 (the enqueue itself must still have happened)", enq.calls)
+	}
+}
+
 // Without a ReplyEnqueuer wired, Reply must fail rather than silently drop
 // the reply -- unlike the optional SuppressionChecker, there is no safe
 // "unwired" default for actually sending mail.

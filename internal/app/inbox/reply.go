@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 )
@@ -116,7 +117,18 @@ func (s *Service) Reply(ctx context.Context, ws, threadID uuid.UUID, bodyText st
 	if err := s.replyEnq.EnqueueInboxReplySend(threadID.String(), bodyText, ws.String()); err != nil {
 		return err
 	}
-	return s.store.SetUnread(ctx, ws, threadID, false)
+	// The send is now QUEUED. From here, returning an error would surface as a
+	// 500 to the caller, who would reasonably retry — and the enqueue's
+	// unix-second dedup key does NOT catch a retry seconds later, so a
+	// SetUnread failure propagated here would risk a second reply actually
+	// going out. Marking read is cosmetic (an optimistic UI update the caller
+	// already knows the value of — see the handler's own doc), so a failure
+	// here is logged, not retried, mirroring how the worker treats a
+	// post-send RecordInboxReply failure for the identical reason.
+	if err := s.store.SetUnread(ctx, ws, threadID, false); err != nil {
+		slog.ErrorContext(ctx, "inbox_reply_mark_read_failed", "workspace_id", ws, "thread_id", threadID, "err", err)
+	}
+	return nil
 }
 
 // checkRecipientNotSuppressed mirrors campaign.Service's identical helper: a

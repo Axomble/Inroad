@@ -19,6 +19,11 @@ type fakeStore struct {
 	// query param through to the Store without needing a real Postgres LIKE
 	// match to prove it.
 	lastListFilter inbox.ListFilter
+	// setUnreadErr, when non-nil, makes SetUnread fail regardless of the
+	// thread's real state — Reply's tests use this to pin the "enqueue
+	// succeeded, mark-read failed" behavior without needing a way to make a
+	// real Postgres UPDATE fail.
+	setUnreadErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -88,6 +93,9 @@ func (f *fakeStore) GetThread(_ context.Context, ws, id uuid.UUID) (inbox.Thread
 }
 
 func (f *fakeStore) SetUnread(_ context.Context, ws, id uuid.UUID, unread bool) error {
+	if f.setUnreadErr != nil {
+		return f.setUnreadErr
+	}
 	t, ok := f.threads[id]
 	if !ok || t.WorkspaceID != ws {
 		return inbox.ErrNotFound

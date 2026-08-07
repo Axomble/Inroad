@@ -47,6 +47,17 @@ WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
 -- range-seek instead of casting every row's sent_at. Runs on every
 -- advance/send. Workspace-pinned (this query is not, being keyed on an
 -- unguessable mailbox id).
+--
+-- PERFORMANCE NOTE: the inbox_messages half is NOT as tight as the sends
+-- half — idx_inbox_threads_mailbox (migration 000049) narrows by mailbox_id
+-- but not by date, so the join's outer side is every thread the mailbox has
+-- EVER had, not just today's, before idx_inbox_messages_thread narrows each
+-- to today's occurred_at range. Fine at manual-reply volumes (an operator
+-- hand-sending replies, not a bulk campaign), but if that ever changes, the
+-- escape hatch is denormalizing mailbox_id onto inbox_messages directly (a
+-- migration + backfill + a partial index on (mailbox_id, occurred_at) WHERE
+-- direction='outbound'), which would make this half scale with reply volume
+-- instead of total thread history.
 SELECT (
   (SELECT count(*) FROM sends s
    WHERE s.mailbox_id = sqlc.arg('mailbox_id')::uuid AND s.status = 'sent'

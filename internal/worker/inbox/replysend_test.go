@@ -28,9 +28,21 @@ type stubReplyCore struct {
 
 	recordErr error
 
+	// claimTaken models the claim row's real existence: false (the default,
+	// so every test that never sets it exercises a fresh claim unchanged)
+	// means ClaimInboxReply succeeds and flips it to true; a successful
+	// ReleaseInboxReply flips it back to false, so a SECOND handler
+	// invocation in the same test (simulating a retry) can re-claim, mirroring
+	// the real idempotency_keys insert/delete pair.
+	claimTaken bool
+	claimErr   error
+	releaseErr error
+
 	jobCalls        [][2]string // {threadID, workspaceID}
 	transportCalls  [][2]string // {workspaceID, mailboxID}
 	suppressedCalls [][2]string // {workspaceID, to}
+	claimCalls      [][2]string // {workspaceID, taskID}
+	releaseCalls    [][2]string // {workspaceID, taskID}
 	recordCalls     []coreapi.RecordInboxReplyInput
 }
 
@@ -52,6 +64,27 @@ func (s *stubReplyCore) ResolveSenderTransport(_ context.Context, workspaceID, m
 func (s *stubReplyCore) RecordInboxReply(_ context.Context, in coreapi.RecordInboxReplyInput) error {
 	s.recordCalls = append(s.recordCalls, in)
 	return s.recordErr
+}
+
+func (s *stubReplyCore) ClaimInboxReply(_ context.Context, workspaceID, taskID string) (bool, error) {
+	s.claimCalls = append(s.claimCalls, [2]string{workspaceID, taskID})
+	if s.claimErr != nil {
+		return false, s.claimErr
+	}
+	if s.claimTaken {
+		return false, nil
+	}
+	s.claimTaken = true
+	return true, nil
+}
+
+func (s *stubReplyCore) ReleaseInboxReply(_ context.Context, workspaceID, taskID string) error {
+	s.releaseCalls = append(s.releaseCalls, [2]string{workspaceID, taskID})
+	if s.releaseErr != nil {
+		return s.releaseErr
+	}
+	s.claimTaken = false
+	return nil
 }
 
 // stubMailer is the mocked mail sender seam: it never dials out, it just
@@ -82,7 +115,9 @@ func replySendTask(t *testing.T, p queue.InboxReplySendPayload) *asynq.Task {
 }
 
 func defaultReplyPayload() queue.InboxReplySendPayload {
-	return queue.InboxReplySendPayload{ThreadID: "thread-1", BodyText: "thanks for reaching out", WorkspaceID: "ws-1"}
+	return queue.InboxReplySendPayload{
+		ThreadID: "thread-1", BodyText: "thanks for reaching out", WorkspaceID: "ws-1", TaskID: "task-1",
+	}
 }
 
 func defaultReplyJob() coreapi.InboxReplyJob {
@@ -157,6 +192,9 @@ func TestReplySendHandlerPassesWorkspacePinnedIDsToCore(t *testing.T) {
 	}
 	if len(core.jobCalls) != 1 || core.jobCalls[0] != [2]string{"thread-1", "ws-1"} {
 		t.Errorf("job calls = %+v, want [{thread-1 ws-1}]", core.jobCalls)
+	}
+	if len(core.claimCalls) != 1 || core.claimCalls[0] != [2]string{"ws-1", "task-1"} {
+		t.Errorf("claim calls = %+v, want [{ws-1 task-1}]", core.claimCalls)
 	}
 	if len(core.transportCalls) != 1 || core.transportCalls[0] != [2]string{"ws-1", "mbox-1"} {
 		t.Errorf("transport calls = %+v, want [{ws-1 mbox-1}]", core.transportCalls)
@@ -234,6 +272,109 @@ func TestReplySendHandlerPropagatesTheSendError(t *testing.T) {
 	}
 	if len(core.recordCalls) != 0 {
 		t.Error("a failed send must not be recorded")
+	}
+}
+
+// --- Claim-before-send ------------------------------------------------------
+//
+// A fresh claim is exercised by every happy-path test above (stubReplyCore's
+// claimTaken defaults to false). These tests cover the rest: a duplicate
+// claim skips without dialing, a claim-check failure propagates, a transient
+// send failure releases the claim so a retry can re-claim, and a
+// release failure still returns the original send error (fail-safe: drop,
+// never double).
+
+func TestReplySendHandlerSkipsWhenAlreadyClaimed(t *testing.T) {
+	core := &stubReplyCore{job: defaultReplyJob(), transport: coreapi.SenderTransport{Provider: "smtp"}, claimTaken: true}
+	mailer := &stubMailer{}
+
+	if err := ReplySendHandler(core, mailer)(context.Background(), replySendTask(t, defaultReplyPayload())); err != nil {
+		t.Fatalf("ReplySendHandler: %v, want nil (already claimed by a prior attempt — skip, don't retry)", err)
+	}
+	if mailer.calls != 0 {
+		t.Error("an already-claimed task must not dial the provider")
+	}
+	if len(core.transportCalls) != 0 {
+		t.Error("an already-claimed task must not resolve (decrypt) a sender transport")
+	}
+}
+
+func TestReplySendHandlerPropagatesClaimError(t *testing.T) {
+	boom := errors.New("db down")
+	core := &stubReplyCore{job: defaultReplyJob(), claimErr: boom}
+	mailer := &stubMailer{}
+
+	err := ReplySendHandler(core, mailer)(context.Background(), replySendTask(t, defaultReplyPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated claim error", err)
+	}
+	if mailer.calls != 0 {
+		t.Error("a claim-check failure must not send anything")
+	}
+}
+
+// A transient send failure must release the claim BEFORE returning err, so a
+// retry of the SAME task (same task id) can re-claim rather than seeing its
+// own abandoned claim and skipping forever.
+func TestReplySendHandlerReleasesClaimOnTransientFailureThenRetryReClaims(t *testing.T) {
+	core := &stubReplyCore{job: defaultReplyJob(), transport: coreapi.SenderTransport{Provider: "smtp"}}
+	boom := errors.New("smtp: connection refused")
+	mailer := &stubMailer{err: boom}
+
+	if err := ReplySendHandler(core, mailer)(context.Background(), replySendTask(t, defaultReplyPayload())); !errors.Is(err, boom) {
+		t.Fatalf("first attempt err = %v, want %v", err, boom)
+	}
+	if len(core.releaseCalls) != 1 {
+		t.Fatalf("release calls = %d, want 1 after the transient send failure", len(core.releaseCalls))
+	}
+
+	// The retry: asynq redelivers the identical task/payload, now succeeding.
+	mailer.err = nil
+	if err := ReplySendHandler(core, mailer)(context.Background(), replySendTask(t, defaultReplyPayload())); err != nil {
+		t.Fatalf("retry: %v, want nil (the release must have let the retry re-claim)", err)
+	}
+	if len(core.claimCalls) != 2 {
+		t.Fatalf("claim calls = %d, want 2 (the original attempt + the retry)", len(core.claimCalls))
+	}
+	if mailer.calls != 2 {
+		t.Fatalf("mailer calls = %d, want 2 (the failed attempt + the successful retry)", mailer.calls)
+	}
+}
+
+// If the release itself fails, the send error must still be returned (fail
+// safe: a stuck claim only ever drops a retry, never risks a double send).
+func TestReplySendHandlerSendFailureReturnsErrEvenIfReleaseFails(t *testing.T) {
+	core := &stubReplyCore{
+		job: defaultReplyJob(), transport: coreapi.SenderTransport{Provider: "smtp"},
+		releaseErr: errors.New("db down"),
+	}
+	boom := errors.New("smtp: connection refused")
+	mailer := &stubMailer{err: boom}
+
+	err := ReplySendHandler(core, mailer)(context.Background(), replySendTask(t, defaultReplyPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated send error even though the release failed", err)
+	}
+}
+
+// A transport-resolve failure happens AFTER the claim but BEFORE anything is
+// dialed, so it must release the claim exactly like a send failure does —
+// otherwise a transient keyring/DB blip here would permanently (and
+// silently) drop every retry rather than letting one eventually succeed.
+func TestReplySendHandlerReleasesClaimOnTransportResolveFailure(t *testing.T) {
+	boom := errors.New("keyring unavailable")
+	core := &stubReplyCore{job: defaultReplyJob(), transportErr: boom}
+	mailer := &stubMailer{}
+
+	err := ReplySendHandler(core, mailer)(context.Background(), replySendTask(t, defaultReplyPayload()))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the propagated transport-resolve error", err)
+	}
+	if len(core.releaseCalls) != 1 {
+		t.Fatalf("release calls = %d, want 1", len(core.releaseCalls))
+	}
+	if mailer.calls != 0 {
+		t.Error("a transport-resolve failure must not send anything")
 	}
 }
 
