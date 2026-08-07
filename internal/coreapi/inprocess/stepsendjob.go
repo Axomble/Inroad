@@ -364,7 +364,7 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{}, err
 	}
 
-	// Transport dispatch on the mailbox provider (see GetSendJob): API providers
+	// Transport dispatch on the mailbox provider: API providers
 	// (gmail, m365) return a refreshed short-lived access token and no password
 	// (the provider's oauth2 config selects the refresh endpoint); smtp unseals
 	// the stored password unchanged.

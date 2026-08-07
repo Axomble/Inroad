@@ -17,20 +17,6 @@ type stubCore struct{}
 var _ coreapi.Client = stubCore{}
 
 func (stubCore) MailboxExists(context.Context, string) (bool, error) { return false, nil }
-func (stubCore) GetSendJob(context.Context, string, string) (coreapi.SendJob, error) {
-	return coreapi.SendJob{}, nil
-}
-func (stubCore) ClaimSend(context.Context, string, string) (bool, error) { return false, nil }
-func (stubCore) ReleaseSend(context.Context, string, string) error       { return nil }
-func (stubCore) MarkSend(context.Context, string, string, coreapi.SendResult) error {
-	return nil
-}
-func (stubCore) ListStuckQueuedSends(context.Context) ([]coreapi.StuckSend, error) {
-	return nil, nil
-}
-func (stubCore) IncrementSendAttempts(context.Context, string, string) (int, error) {
-	return 0, nil
-}
 func (stubCore) GetStepSendJob(context.Context, string, string) (coreapi.StepSendJob, error) {
 	return coreapi.StepSendJob{}, nil
 }

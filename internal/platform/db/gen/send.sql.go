@@ -12,34 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const claimSend = `-- name: ClaimSend :one
-UPDATE sends SET status = 'sending', claimed_at = now()
-WHERE id = $1 AND workspace_id = $2
-  AND (status = 'queued'
-       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => $3::int)))
-RETURNING id
-`
-
-type ClaimSendParams struct {
-	ID           uuid.UUID `json:"id"`
-	WorkspaceID  uuid.UUID `json:"workspace_id"`
-	LeaseSeconds int32     `json:"lease_seconds"`
-}
-
-// Claim one direct-send ('send:email' path) for delivery. Unlike the step path,
-// the row pre-exists as 'queued' (EnqueueSends), so the claim is an UPDATE: win
-// it from 'queued', or reclaim a STALE 'sending' lease (a crashed worker).
-// RETURNING id yields a row iff we won the claim; zero rows (pgx.ErrNoRows) mean
-// another worker owns it or it is already terminal — skip the send. Staleness is
-// claimed_at older than lease_seconds. workspace_id pinned so a foreign id claims
-// zero rows.
-func (q *Queries) ClaimSend(ctx context.Context, arg ClaimSendParams) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, claimSend, arg.ID, arg.WorkspaceID, arg.LeaseSeconds)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
 const countCampaignSentToday = `-- name: CountCampaignSentToday :one
 SELECT count(*) FROM sends
 WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'sent'
@@ -69,22 +41,6 @@ func (q *Queries) CountCampaignSentToday(ctx context.Context, arg CountCampaignS
 	return count, err
 }
 
-const countQueuedByCampaign = `-- name: CountQueuedByCampaign :one
-SELECT count(*) FROM sends WHERE campaign_id = $1 AND workspace_id = $2 AND status = 'queued'
-`
-
-type CountQueuedByCampaignParams struct {
-	CampaignID  uuid.UUID `json:"campaign_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) CountQueuedByCampaign(ctx context.Context, arg CountQueuedByCampaignParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countQueuedByCampaign, arg.CampaignID, arg.WorkspaceID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const countSentToday = `-- name: CountSentToday :one
 SELECT count(*) FROM sends
 WHERE mailbox_id = $1 AND status = 'sent'
@@ -108,42 +64,6 @@ func (q *Queries) CountSentToday(ctx context.Context, mailboxID uuid.UUID) (int6
 	return count, err
 }
 
-const enqueueSends = `-- name: EnqueueSends :many
-INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email)
-SELECT cam.workspace_id, cam.id, lm.contact_id, cam.mailbox_id, ct.email
-FROM campaigns cam
-JOIN list_members lm ON lm.list_id = cam.list_id
-JOIN contacts ct ON ct.id = lm.contact_id
-WHERE cam.id = $1 AND cam.workspace_id = $2
-ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL DO NOTHING
-RETURNING id
-`
-
-type EnqueueSendsParams struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-}
-
-func (q *Queries) EnqueueSends(ctx context.Context, arg EnqueueSendsParams) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, enqueueSends, arg.ID, arg.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		items = append(items, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const getCampaignIDForSend = `-- name: GetCampaignIDForSend :one
 SELECT campaign_id, workspace_id FROM sends WHERE id = $1
 `
@@ -157,96 +77,6 @@ func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCa
 	row := q.db.QueryRow(ctx, getCampaignIDForSend, id)
 	var i GetCampaignIDForSendRow
 	err := row.Scan(&i.CampaignID, &i.WorkspaceID)
-	return i, err
-}
-
-const getSendBundle = `-- name: GetSendBundle :one
-SELECT s.id AS send_id, s.workspace_id, s.to_email, s.mailbox_id, s.attempts,
-       cam.status AS campaign_status,
-       ct.first_name, cam.subject, cam.body_text, cam.body_html, cam.tracking_enabled,
-       m.provider, m.email AS from_email, m.display_name AS from_name,
-       m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext,
-       m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days, m.created_at AS mailbox_created_at
-FROM sends s
-JOIN campaigns cam ON cam.id = s.campaign_id
-JOIN contacts ct ON ct.id = s.contact_id
-JOIN mailboxes m ON m.id = s.mailbox_id
-WHERE s.id = $1 AND s.workspace_id = $2
-`
-
-type GetSendBundleParams struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-}
-
-type GetSendBundleRow struct {
-	SendID           uuid.UUID          `json:"send_id"`
-	WorkspaceID      uuid.UUID          `json:"workspace_id"`
-	ToEmail          string             `json:"to_email"`
-	MailboxID        uuid.UUID          `json:"mailbox_id"`
-	Attempts         int32              `json:"attempts"`
-	CampaignStatus   string             `json:"campaign_status"`
-	FirstName        string             `json:"first_name"`
-	Subject          string             `json:"subject"`
-	BodyText         string             `json:"body_text"`
-	BodyHtml         string             `json:"body_html"`
-	TrackingEnabled  bool               `json:"tracking_enabled"`
-	Provider         string             `json:"provider"`
-	FromEmail        string             `json:"from_email"`
-	FromName         string             `json:"from_name"`
-	SmtpHost         string             `json:"smtp_host"`
-	SmtpPort         int32              `json:"smtp_port"`
-	SmtpUsername     string             `json:"smtp_username"`
-	SecretCiphertext string             `json:"secret_ciphertext"`
-	AllowPlaintext   bool               `json:"allow_plaintext"`
-	DailyCap         int32              `json:"daily_cap"`
-	RampEnabled      bool               `json:"ramp_enabled"`
-	RampStartCap     int32              `json:"ramp_start_cap"`
-	RampDays         int32              `json:"ramp_days"`
-	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
-}
-
-// Bundle is workspace-scoped: even though sendID is a UUID (unguessable in
-// practice), pinning workspace_id in the WHERE clause forces a not-found
-// verdict if a worker somehow processes a send id from another tenant.
-// Defense in depth on top of the queue-side ownership.
-//
-// campaign_status gates the send: only a 'running' campaign may send. This path is
-// DORMANT (EnqueueSends, the only writer of 'queued' campaign sends, has no
-// production callers — the live sender is the step path), so the gate is not
-// currently load-bearing. It exists so the invariant "a campaign that is not
-// running does not send" is a property of the CODEBASE rather than of one path:
-// whoever revives this path will not remember that the step path grew the check
-// separately.
-func (q *Queries) GetSendBundle(ctx context.Context, arg GetSendBundleParams) (GetSendBundleRow, error) {
-	row := q.db.QueryRow(ctx, getSendBundle, arg.ID, arg.WorkspaceID)
-	var i GetSendBundleRow
-	err := row.Scan(
-		&i.SendID,
-		&i.WorkspaceID,
-		&i.ToEmail,
-		&i.MailboxID,
-		&i.Attempts,
-		&i.CampaignStatus,
-		&i.FirstName,
-		&i.Subject,
-		&i.BodyText,
-		&i.BodyHtml,
-		&i.TrackingEnabled,
-		&i.Provider,
-		&i.FromEmail,
-		&i.FromName,
-		&i.SmtpHost,
-		&i.SmtpPort,
-		&i.SmtpUsername,
-		&i.SecretCiphertext,
-		&i.AllowPlaintext,
-		&i.DailyCap,
-		&i.RampEnabled,
-		&i.RampStartCap,
-		&i.RampDays,
-		&i.MailboxCreatedAt,
-	)
 	return i, err
 }
 
@@ -326,64 +156,6 @@ func (q *Queries) GetSendState(ctx context.Context, arg GetSendStateParams) (Get
 	return i, err
 }
 
-const incrementSendAttempts = `-- name: IncrementSendAttempts :one
-UPDATE sends SET attempts = attempts + 1
-WHERE id = $1 AND workspace_id = $2
-RETURNING attempts
-`
-
-type IncrementSendAttemptsParams struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-}
-
-// Bumps the attempts counter and returns the new value so the worker can
-// decide whether to fail the send instead of re-enqueuing indefinitely.
-func (q *Queries) IncrementSendAttempts(ctx context.Context, arg IncrementSendAttemptsParams) (int32, error) {
-	row := q.db.QueryRow(ctx, incrementSendAttempts, arg.ID, arg.WorkspaceID)
-	var attempts int32
-	err := row.Scan(&attempts)
-	return attempts, err
-}
-
-const listStuckQueuedSends = `-- name: ListStuckQueuedSends :many
-SELECT id, workspace_id FROM sends
-WHERE status = 'queued' AND created_at < now() - interval '2 minutes'
-ORDER BY created_at ASC
-LIMIT 500
-`
-
-type ListStuckQueuedSendsRow struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-}
-
-// ListStuckQueuedSends returns sends that are still 'queued' more than two
-// minutes after creation. The sweeper re-enqueues these — a launch that
-// failed to enqueue partway (or a redis blip) would otherwise leave them
-// orphaned. Capped so a single sweep tick can't monopolize the worker.
-// workspace_id travels along so the re-enqueued task carries the pin the
-// worker will use in its subsequent DB lookups.
-func (q *Queries) ListStuckQueuedSends(ctx context.Context) ([]ListStuckQueuedSendsRow, error) {
-	rows, err := q.db.Query(ctx, listStuckQueuedSends)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListStuckQueuedSendsRow
-	for rows.Next() {
-		var i ListStuckQueuedSendsRow
-		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const releaseSend = `-- name: ReleaseSend :exec
 UPDATE sends SET claimed_at = 'epoch'
 WHERE id = $1 AND workspace_id = $2 AND status = 'sending'
@@ -397,7 +169,7 @@ type ReleaseSendParams struct {
 // Release a claimed-but-not-finalized send after a RETRYABLE failure: expire the
 // lease (claimed_at='epoch') so the asynq retry reclaims promptly. Guarded on
 // status='sending' so it never touches a row already finalized by this or
-// another worker. Shared by the step and direct paths. workspace_id pinned.
+// another worker. Used by the step path (ReleaseStepSend). workspace_id pinned.
 func (q *Queries) ReleaseSend(ctx context.Context, arg ReleaseSendParams) error {
 	_, err := q.db.Exec(ctx, releaseSend, arg.ID, arg.WorkspaceID)
 	return err
