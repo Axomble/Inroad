@@ -25,17 +25,19 @@ func (h *Handler) setRefreshCookie(w http.ResponseWriter, raw string) {
 // setCSRFCookie sets a readable (non-httpOnly) CSRF cookie the frontend must
 // echo back via the X-CSRF-Token header on cookie-authenticated requests
 // (double-submit pattern; see auth.RequireCSRF).
-func (h *Handler) setCSRFCookie(w http.ResponseWriter) (string, error) {
+// The minted value is deliberately not returned: no caller needs it. The client
+// reads it from the (non-httpOnly) cookie and echoes it back as a header.
+func (h *Handler) setCSRFCookie(w http.ResponseWriter) error {
 	tok, err := auth.NewCSRFToken()
 	if err != nil {
-		return "", err
+		return err
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: auth.CSRFCookieName, Value: tok, Path: "/",
 		Domain: h.cookieDomain, HttpOnly: false, Secure: h.cookieSecure,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(h.refreshTTL.Seconds()),
 	})
-	return tok, nil
+	return nil
 }
 
 // clearCookies expires both the refresh and CSRF cookies (logout / failed refresh).

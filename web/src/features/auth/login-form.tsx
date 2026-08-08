@@ -12,6 +12,9 @@ import { useAppDispatch } from '@/store/hooks'
 import { setSession, setUserIdentity, type SessionResponse } from '@/store/slices/auth'
 import { httpStatus, isFetchBaseQueryError, retryAfterSeconds } from '@/lib/rtk-error'
 import { AuthLayout } from './auth-layout'
+import { safeReturnTo } from './return-to'
+import { GoogleSigninButton } from './google-signin-button'
+import { GoogleCallbackBanner } from './google-callback-banner'
 import {
   isWebAuthnAvailable,
   runAuthenticationCeremony,
@@ -42,35 +45,8 @@ type FormValues = z.infer<typeof schema>
  */
 type Pending = { challenge: string; email: string }
 
-/**
- * A `return_to` is only honoured when it resolves to a same-origin target. We
- * resolve it against `window.location.origin` and compare origins, then return
- * the NORMALIZED same-origin path (`pathname + search + hash`) — never the raw
- * string. This blocks the login form from being turned into an open redirect:
- * a prefix check isn't enough (`/\evil.com` and `/\/evil.com` pass a `//` guard
- * but WHATWG-normalize backslashes to `//`, so a browser would navigate to
- * `https://evil.com/`). Resolving-then-verifying rejects protocol-relative
- * (`//evil.com`), backslash (`/\evil.com`), absolute (`https://evil.com`), and
- * scheme (`javascript:`, `data:`) inputs — they resolve off-origin or throw —
- * while allowing a legitimate same-origin path including the API's
- * `/oauth2/authorize?...` resume. Returning `pathname + search + hash` strips any
- * authority so the validated path can't smuggle an off-origin target. Callers
- * then navigate via `window.location.assign`, because the target may be the API's
- * `/oauth2/authorize` (not an SPA route) as well as an SPA path.
- */
-function safeReturnTo(raw: string | undefined): string | null {
-  if (!raw) return null
-  try {
-    const u = new URL(raw, window.location.origin)
-    if (u.origin !== window.location.origin) return null
-    return u.pathname + u.search + u.hash
-  } catch {
-    return null
-  }
-}
-
 export function LoginForm() {
-  const { return_to: returnTo } = routeApi.useSearch()
+  const { return_to: returnTo, google_error: googleError } = routeApi.useSearch()
   const dispatch = useAppDispatch()
   const navigate = useNavigate()
   const [pending, setPending] = useState<Pending | null>(null)
@@ -104,6 +80,17 @@ export function LoginForm() {
     setPending({ challenge, email })
   }
 
+  // Drop `?google_error` once the banner has snapshotted it, so a refresh doesn't
+  // re-show a failure the user already read. `return_to` is preserved: blanking
+  // the whole search object would lose the resume target the user is mid-flow on.
+  function clearGoogleError() {
+    void navigate({
+      to: '/',
+      search: (prev: Record<string, unknown>) => ({ ...prev, google_error: undefined }),
+      replace: true,
+    })
+  }
+
   if (pending) {
     return (
       <AuthLayout>
@@ -135,6 +122,9 @@ export function LoginForm() {
     <AuthLayout>
       <CredentialsStep
         returnNotice={returnNotice}
+        googleError={googleError}
+        onClearGoogleError={clearGoogleError}
+        returnTo={returnTo}
         onSession={completeLogin}
         onChallenge={onChallenge}
         onUseEmailCode={() => {
@@ -148,11 +138,17 @@ export function LoginForm() {
 
 function CredentialsStep({
   returnNotice,
+  googleError,
+  onClearGoogleError,
+  returnTo,
   onSession,
   onChallenge,
   onUseEmailCode,
 }: {
   returnNotice: string | null
+  googleError: string | undefined
+  onClearGoogleError: () => void
+  returnTo: string | undefined
   onSession: (session: SessionResponse, email?: string) => void
   onChallenge: (challenge: string, email: string) => void
   onUseEmailCode: () => void
@@ -187,6 +183,8 @@ function CredentialsStep({
         <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Sign in to your workspace</h1>
       </div>
 
+      <GoogleCallbackBanner reason={googleError} onClear={onClearGoogleError} />
+
       {returnNotice && (
         <p
           role="status"
@@ -196,7 +194,21 @@ function CredentialsStep({
         </p>
       )}
 
-      <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
+      {/* Google first: it's the fastest path for most operators, so it leads.
+          The labelled rule below it says what the fields underneath are for —
+          without a label the two halves read as unrelated forms. */}
+      <div className="auth-rise" style={{ animationDelay: '150ms' }}>
+        <GoogleSigninButton label="Continue with Google" returnTo={returnTo} />
+        <div className="mt-5 flex items-center gap-3">
+          <span className="h-px flex-1 bg-border" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+            or use your password
+          </span>
+          <span className="h-px flex-1 bg-border" />
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="mt-5 flex flex-col gap-4">
         <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '180ms' }}>
           <Label htmlFor={emailId}>Email</Label>
           <Input

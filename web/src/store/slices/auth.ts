@@ -10,6 +10,15 @@ export interface Membership {
   workspace_id: string
   workspace_name: string
   role: string
+  /**
+   * When THIS workspace finished first-run onboarding, or null while pending.
+   * Per-workspace, so switching into a freshly created one can gate the onboarding
+   * overlay without an extra request. Optional here (unlike the generated
+   * `Membership`, where the API always sends it) so a session from an API that
+   * predates onboarding still populates the slice instead of failing to type-check
+   * at the boundary.
+   */
+  onboarding_completed_at?: string | null
 }
 
 /** Shape of a login/register/refresh/switch-workspace response body. */
@@ -21,11 +30,11 @@ export interface SessionResponse {
   role: string
   memberships: Membership[]
   /**
-   * Optional identity fields. The current openapi schema doesn't include them
-   * yet; the slice stores them if a future /auth/me / session response starts
-   * returning them, so the avatar/menu can show something friendlier than a
-   * role initial. `email` also survives client-side because we set it from
-   * the login/register form input (see setUserIdentity).
+   * Identity fields, kept optional here even though the API now always sends
+   * `email` on a session: a discoverable passkey login and the login form both
+   * seed identity from other sources (see setUserIdentity), and `name` still has
+   * no server-side home. Optional means this slice accepts a session body from
+   * any of those paths without a widening cast at the boundary.
    */
   email?: string
   name?: string
@@ -96,6 +105,18 @@ const authSlice = createSlice({
       state.memberships = []
       state.status = 'anon'
     },
+    /**
+     * Renames the active workspace in the membership list. The session body is
+     * the only source of workspace names in the client (the header's workspace
+     * switcher reads them straight off `memberships`), so a rename that only
+     * lands server-side leaves the switcher showing the old name until the next
+     * full session refresh — which for the onboarding overlay is the very name
+     * the user just replaced.
+     */
+    renameActiveWorkspace: (state, action: PayloadAction<{ name: string }>) => {
+      const active = state.memberships.find((m) => m.workspace_id === state.activeWorkspaceId)
+      if (active) active.workspace_name = action.payload.name
+    },
     setActiveWorkspace: (
       state,
       action: PayloadAction<{ activeWorkspaceId: string; role: string; accessToken: string }>,
@@ -107,5 +128,6 @@ const authSlice = createSlice({
   },
 })
 
-export const { setSession, setUserIdentity, clearSession, setActiveWorkspace } = authSlice.actions
+export const { setSession, setUserIdentity, clearSession, renameActiveWorkspace, setActiveWorkspace } =
+  authSlice.actions
 export default authSlice.reducer

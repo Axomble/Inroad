@@ -4,6 +4,7 @@ import { AppShell } from '@/components/layout/app-shell'
 import { AuthHeader } from '@/features/auth/auth-header'
 import { useAuthGuard } from '@/features/auth/use-auth-guard'
 import { UnverifiedBanner } from '@/features/auth/unverified-banner'
+import { WorkspaceOnboardingOverlay } from '@/features/auth/workspace-onboarding-overlay'
 
 /**
  * Authenticated app layout. Guards every /app/* route: no in-memory session ->
@@ -42,6 +43,10 @@ function AppLayout() {
   useAuthGuard()
   return (
     <div className="flex h-dvh flex-col">
+      {/* Sits alongside the unverified banner rather than inside a page: an
+          un-named workspace blocks every /app route, not one of them. Renders
+          nothing (and costs nothing) once the workspace has been named. */}
+      <WorkspaceOnboardingOverlay />
       <UnverifiedBanner />
       {/* AppShell fills whatever height remains below the banner (h-full,
           not h-dvh — this wrapper owns the viewport height so the banner

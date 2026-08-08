@@ -643,6 +643,17 @@ type OauthConsent struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
+type OauthLoginState struct {
+	NonceHash       []byte             `json:"nonce_hash"`
+	Purpose         string             `json:"purpose"`
+	CodeVerifier    string             `json:"code_verifier"`
+	InviteTokenHash []byte             `json:"invite_token_hash"`
+	ReturnTo        *string            `json:"return_to"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt      pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type OauthRefreshToken struct {
 	ID          uuid.UUID          `json:"id"`
 	TokenHash   []byte             `json:"token_hash"`
@@ -882,8 +893,16 @@ type TwoFactorChallenge struct {
 type User struct {
 	ID              uuid.UUID          `json:"id"`
 	Email           string             `json:"email"`
-	PasswordHash    string             `json:"password_hash"`
+	PasswordHash    *string            `json:"password_hash"`
 	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type UserIdentity struct {
+	ID              uuid.UUID          `json:"id"`
+	UserID          uuid.UUID          `json:"user_id"`
+	Provider        string             `json:"provider"`
+	ProviderSubject string             `json:"provider_subject"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -1015,9 +1034,10 @@ type Worker struct {
 }
 
 type Workspace struct {
-	ID        uuid.UUID          `json:"id"`
-	Name      string             `json:"name"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID                    uuid.UUID          `json:"id"`
+	Name                  string             `json:"name"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	OnboardingCompletedAt pgtype.Timestamptz `json:"onboarding_completed_at"`
 }
 
 type WorkspaceAiModel struct {

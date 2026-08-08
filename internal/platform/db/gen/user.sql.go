@@ -16,8 +16,8 @@ INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, pa
 `
 
 type CreateUserParams struct {
-	Email        string `json:"email"`
-	PasswordHash string `json:"password_hash"`
+	Email        string  `json:"email"`
+	PasswordHash *string `json:"password_hash"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
@@ -31,6 +31,29 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const createUserIdentity = `-- name: CreateUserIdentity :exec
+INSERT INTO user_identities (user_id, provider, provider_subject)
+VALUES ($1, $2, $3)
+`
+
+type CreateUserIdentityParams struct {
+	UserID          uuid.UUID `json:"user_id"`
+	Provider        string    `json:"provider"`
+	ProviderSubject string    `json:"provider_subject"`
+}
+
+// Link an external identity to a local user. Deliberately NOT upsert-or-ignore:
+// every caller inserts only after confirming no row exists for this
+// (provider, subject), so a conflict means a concurrent request already claimed
+// this provider identity for SOME user -- possibly a different one. The
+// UNIQUE (provider, provider_subject) violation must surface as an error and fail
+// the sign-in, rather than being swallowed into a silent no-op that would hand out
+// a session with no link (or with someone else's link) behind it.
+func (q *Queries) CreateUserIdentity(ctx context.Context, arg CreateUserIdentityParams) error {
+	_, err := q.db.Exec(ctx, createUserIdentity, arg.UserID, arg.Provider, arg.ProviderSubject)
+	return err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
@@ -67,6 +90,30 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 	return i, err
 }
 
+const getUserIdentity = `-- name: GetUserIdentity :one
+SELECT id, user_id, provider, provider_subject, created_at FROM user_identities WHERE provider = $1 AND provider_subject = $2
+`
+
+type GetUserIdentityParams struct {
+	Provider        string `json:"provider"`
+	ProviderSubject string `json:"provider_subject"`
+}
+
+// Resolve an external identity to its local user. Keyed on the provider's
+// immutable subject id, never on email (see migration 000051).
+func (q *Queries) GetUserIdentity(ctx context.Context, arg GetUserIdentityParams) (UserIdentity, error) {
+	row := q.db.QueryRow(ctx, getUserIdentity, arg.Provider, arg.ProviderSubject)
+	var i UserIdentity
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Provider,
+		&i.ProviderSubject,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const setEmailVerified = `-- name: SetEmailVerified :exec
 UPDATE users SET email_verified_at = now() WHERE id = $1
 `
@@ -82,7 +129,7 @@ UPDATE users SET password_hash = $2 WHERE id = $1
 
 type UpdatePasswordHashParams struct {
 	ID           uuid.UUID `json:"id"`
-	PasswordHash string    `json:"password_hash"`
+	PasswordHash *string   `json:"password_hash"`
 }
 
 func (q *Queries) UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error {

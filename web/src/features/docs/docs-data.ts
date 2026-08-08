@@ -170,6 +170,8 @@ export interface EnvVar {
 
 export interface EnvGroup {
   title: string
+  /** Guidance that applies to the group as a whole, not to one variable. */
+  note?: string
   vars: EnvVar[]
 }
 
@@ -205,6 +207,28 @@ export const ENV_GROUPS: EnvGroup[] = [
       { name: 'INROAD_TURNSTILE_SECRET', description: 'Cloudflare Turnstile secret guarding register/login; blank disables the captcha gate.' },
       { name: 'INROAD_RP_ID', description: 'WebAuthn relying-party domain when the SPA origin differs from the API’s public URL.', example: 'app.example.com' },
       { name: 'INROAD_TRACKING_SECRET', description: 'Signs open/click tracking tokens; falls back to the JWT secret when unset.' },
+    ],
+  },
+  {
+    title: 'Google sign-in',
+    note: 'A dedicated sign-in client is worth setting up: the mailbox-connect client below requests Gmail scopes, which Google puts through a restricted-scope verification review — and you do not want the ability to log in blocked behind that review.',
+    vars: [
+      {
+        name: 'INROAD_GOOGLE_SIGNIN_CLIENT_ID',
+        description:
+          'Google OAuth client for “Continue with Google” sign-in. Falls back to INROAD_GOOGLE_CLIENT_ID when blank, so one client can power both sign-in and Gmail connect.',
+      },
+      {
+        name: 'INROAD_GOOGLE_SIGNIN_CLIENT_SECRET',
+        description:
+          'Secret for the sign-in client. Set it together with the id; an id without a secret leaves sign-in disabled rather than borrowing the mailbox secret.',
+      },
+      {
+        name: 'INROAD_GOOGLE_SIGNIN_REDIRECT_URL',
+        description:
+          'Never falls back — always add this exact URL to the authorized redirect URIs of whichever client is used. Defaults to the public URL’s /api/v1/auth/oauth/google/callback.',
+        example: 'https://app.example.com/api/v1/auth/oauth/google/callback',
+      },
     ],
   },
   {

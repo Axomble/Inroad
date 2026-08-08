@@ -240,8 +240,12 @@ func (h *Handler) startGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// State signing stays here (the handler holds jwtSecret); the oauth2 details
-	// live behind the service seam.
-	state := oauthstate.Sign(h.jwtSecret, wid.String(), time.Now(), 10*time.Minute)
+	// live behind the service seam. PurposeMailboxConnect is part of the signed
+	// payload, so this state can never be presented at the SIGN-IN callback. The
+	// nonce is ignored: mailbox connect has no server-side state store, so its
+	// replay window stays bounded by the 10-minute TTL alone (the residual risk
+	// documented in security invariant 10).
+	state, _ := oauthstate.Sign(h.jwtSecret, oauthstate.PurposeMailboxConnect, wid.String(), time.Now(), 10*time.Minute)
 	authURL, err := h.svc.GoogleAuthCodeURL(state)
 	if err != nil {
 		if errors.Is(err, ErrOAuthDisabled) {
@@ -287,7 +291,9 @@ func (h *Handler) oauthCallback(
 		redirect("oauth_error=denied")
 		return
 	}
-	wid, err := oauthstate.Verify(h.jwtSecret, q.Get("state"), time.Now())
+	// PurposeMailboxConnect is required, so a SIGN-IN state cannot be replayed here
+	// to bind a mailbox. The nonce is unused: see startGoogleOAuth.
+	wid, _, err := oauthstate.Verify(h.jwtSecret, oauthstate.PurposeMailboxConnect, q.Get("state"), time.Now())
 	if err != nil {
 		redirect("oauth_error=bad_state")
 		return
@@ -326,7 +332,7 @@ func (h *Handler) startMicrosoftOAuth(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	state := oauthstate.Sign(h.jwtSecret, wid.String(), time.Now(), 10*time.Minute)
+	state, _ := oauthstate.Sign(h.jwtSecret, oauthstate.PurposeMailboxConnect, wid.String(), time.Now(), 10*time.Minute)
 	authURL, err := h.svc.MicrosoftAuthCodeURL(state)
 	if err != nil {
 		if errors.Is(err, ErrOAuthDisabled) {

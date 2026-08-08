@@ -145,6 +145,17 @@ type Config struct {
 	GoogleClientSecret string
 	GoogleRedirectURL  string
 
+	// Google sign-in (Inroad LOGIN via Google). A different flow from mailbox
+	// connect above -- its own redirect URL, and only the openid/email/profile
+	// scopes, never Gmail -- but it may share the same OAuth client: when
+	// GoogleSignInClientID is unset it falls back to GoogleClientID/Secret, so one
+	// configured Google client makes both features work. With neither set, federated
+	// sign-in is off: the start endpoint returns 501 and the SPA hides the button.
+	// See Load for why the pair falls back together and the redirect URL does not.
+	GoogleSignInClientID     string
+	GoogleSignInClientSecret string
+	GoogleSignInRedirectURL  string
+
 	// Microsoft OAuth (mailbox connect via M365 / Graph). Empty client id/secret
 	// disables M365 OAuth: the start endpoint returns 501 and m365 jobs fail
 	// cleanly. MSTenant selects the Azure AD authority (default "common").
@@ -171,7 +182,7 @@ type Config struct {
 	RateLimitLoginAccount     int // POST /login per email
 	RateLimitVerifyIP         int // 2fa/passkey/email-OTP verify per IP
 	RateLimitVerifyAccount    int // email-OTP verify per email
-	RateLimitSensitiveIP      int // password/forgot + email-OTP start per IP
+	RateLimitSensitiveIP      int // password/forgot, email-OTP start, OAuth register, Google sign-in start per IP
 	RateLimitSensitiveAccount int // password/forgot + email-OTP start per email
 
 	// AI reply drafting, in requests per minute (fixed window). Unlike the caps
@@ -292,6 +303,30 @@ func Load() (*Config, error) {
 	cfg.GoogleClientID = getenv("INROAD_GOOGLE_CLIENT_ID", "")
 	cfg.GoogleClientSecret = getenv("INROAD_GOOGLE_CLIENT_SECRET", "")
 	cfg.GoogleRedirectURL = getenv("INROAD_GOOGLE_REDIRECT_URL", cfg.PublicURL+"/oauth/google/callback")
+	cfg.GoogleSignInClientID = getenv("INROAD_GOOGLE_SIGNIN_CLIENT_ID", "")
+	cfg.GoogleSignInClientSecret = getenv("INROAD_GOOGLE_SIGNIN_CLIENT_SECRET", "")
+	// Fall back to the mailbox-connect client so ONE configured Google client makes
+	// both features work: a self-hoster shouldn't have to register two OAuth clients
+	// to log in. Operators who WANT the separation set the dedicated pair, and the
+	// reason to want it is that the mailbox client requests restricted Gmail scopes
+	// subject to Google's verification review — on its own client, a pending review
+	// can never block people signing in.
+	//
+	// Falls back as a PAIR, keyed on the id: a sign-in id with no sign-in secret
+	// leaves both empty rather than pairing that id with the MAILBOX secret, which
+	// would fail at Google in a way nothing here could explain. (An id without a
+	// secret then just leaves sign-in disabled — mail.GoogleOAuth-style Enabled()
+	// requires both.)
+	//
+	// The redirect URL deliberately does NOT fall back: sign-in and mailbox connect
+	// have different callback paths even on the same client, so this always defaults
+	// to the sign-in callback. Whichever client is used must list that exact URL in
+	// its Authorized redirect URIs.
+	if cfg.GoogleSignInClientID == "" {
+		cfg.GoogleSignInClientID = cfg.GoogleClientID
+		cfg.GoogleSignInClientSecret = cfg.GoogleClientSecret
+	}
+	cfg.GoogleSignInRedirectURL = getenv("INROAD_GOOGLE_SIGNIN_REDIRECT_URL", cfg.PublicURL+"/api/v1/auth/oauth/google/callback")
 	cfg.MSClientID = getenv("INROAD_MS_CLIENT_ID", "")
 	cfg.MSClientSecret = getenv("INROAD_MS_CLIENT_SECRET", "")
 	cfg.MSRedirectURL = getenv("INROAD_MS_REDIRECT_URL", cfg.PublicURL+"/oauth/microsoft/callback")

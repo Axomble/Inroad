@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { useAppDispatch } from '@/store/hooks'
 import { setSession, setUserIdentity } from '@/store/slices/auth'
 import { AuthLayout } from './auth-layout'
+import { GoogleSigninButton } from './google-signin-button'
 import { useAuthRegisterMutation } from './api'
 
 // Field names match the API DTO snake_case wire shape (see RegisterRequest in
@@ -75,7 +76,21 @@ export function RegisterForm() {
         <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">Create your workspace</h1>
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
+      {/* Google leads here too. Signing up with Google skips this form entirely —
+          the workspace is created server-side from the Google account's domain and
+          named in the onboarding overlay, so there is nothing to type. */}
+      <div className="auth-rise" style={{ animationDelay: '140ms' }}>
+        <GoogleSigninButton label="Sign up with Google" />
+        <div className="mt-5 flex items-center gap-3">
+          <span className="h-px flex-1 bg-border" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
+            or use your email
+          </span>
+          <span className="h-px flex-1 bg-border" />
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="mt-5 flex flex-col gap-4">
         <div className="auth-rise flex flex-col gap-1.5" style={{ animationDelay: '160ms' }}>
           <Label htmlFor={workspaceId}>Workspace name</Label>
           <Input

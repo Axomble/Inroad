@@ -49,6 +49,12 @@ type fakeStore struct {
 	tokens         map[string]*fakeUserToken // hashKey(hash) -> token
 	invites        map[uuid.UUID]gen.WorkspaceInvite
 	workspaces     map[uuid.UUID]gen.Workspace
+	// identities is keyed by identityKey(provider, subject) - the same
+	// (provider, subject) uniqueness the real UNIQUE constraint enforces.
+	identities map[string]gen.UserIdentity
+	// loginStates is keyed by hex(nonce hash); consuming one removes it, which is
+	// how the fake reproduces the real query's single-use UPDATE.
+	loginStates map[string]LoginState
 
 	registerErr error
 
@@ -70,6 +76,8 @@ func newFakeStore() *fakeStore {
 		tokens:         map[string]*fakeUserToken{},
 		invites:        map[uuid.UUID]gen.WorkspaceInvite{},
 		workspaces:     map[uuid.UUID]gen.Workspace{},
+		identities:     map[string]gen.UserIdentity{},
+		loginStates:    map[string]LoginState{},
 	}
 }
 
@@ -80,7 +88,10 @@ func (f *fakeStore) RegisterTx(ctx context.Context, arg RegisterTxParams) (Regis
 	wsID := uuid.New()
 	userID := uuid.New()
 	sessionID := uuid.New()
-	user := gen.User{ID: userID, Email: arg.Email, PasswordHash: arg.PasswordHash}
+	// The real tx inserts the workspace row too, and code that reads it back
+	// (SwitchWorkspace, onboarding) depends on it existing.
+	f.workspaces[wsID] = gen.Workspace{ID: wsID, Name: arg.WorkspaceName}
+	user := gen.User{ID: userID, Email: arg.Email, PasswordHash: &arg.PasswordHash}
 	f.users[arg.Email] = user
 	f.usersByID[userID] = user
 	member := gen.WorkspaceMember{ID: uuid.New(), WorkspaceID: wsID, UserID: userID, Role: gen.MemberRoleOwner}
@@ -271,7 +282,7 @@ func (f *fakeStore) UpdatePasswordHash(ctx context.Context, id uuid.UUID, hash s
 	if !ok {
 		return errors.New("not found")
 	}
-	u.PasswordHash = hash
+	u.PasswordHash = &hash
 	f.usersByID[id] = u
 	f.users[u.Email] = u
 	return nil
@@ -341,7 +352,7 @@ func TestLoginWrongPassword(t *testing.T) {
 		t.Fatalf("HashPassword: %v", err)
 	}
 	userID := uuid.New()
-	store.users["user@acme.test"] = gen.User{ID: userID, Email: "user@acme.test", PasswordHash: hash}
+	store.users["user@acme.test"] = gen.User{ID: userID, Email: "user@acme.test", PasswordHash: &hash}
 
 	svc := newTestService(store)
 	_, err = svc.Login(context.Background(), "user@acme.test", "wrong-password", "ua", "1.2.3.4")
@@ -470,7 +481,7 @@ func TestSwitchWorkspaceNonMember(t *testing.T) {
 	sessionID := uuid.New()
 	target := uuid.New() // no membership registered for this workspace
 
-	_, _, _, err := svc.SwitchWorkspace(context.Background(), sessionID, userID, target)
+	_, err := svc.SwitchWorkspace(context.Background(), sessionID, userID, target)
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("expected ErrNotMember, got %v", err)
 	}
@@ -511,7 +522,7 @@ func TestSwitchWorkspaceForeignSessionIDRejected(t *testing.T) {
 	// Attacker attempts to repoint victim.SessionID (which they somehow
 	// guessed / stole) — attacker.UserID doesn't own it, so the store must
 	// treat this as a non-membership event.
-	_, _, _, err = svc.SwitchWorkspace(context.Background(), victim.SessionID, attacker.UserID, target)
+	_, err = svc.SwitchWorkspace(context.Background(), victim.SessionID, attacker.UserID, target)
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("expected ErrNotMember on foreign session repoint, got %v", err)
 	}
@@ -768,7 +779,7 @@ func TestResetPasswordSetsHashAndRevokesSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test", PasswordHash: oldHash}
+	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test", PasswordHash: &oldHash}
 	store.users["owner@acme.test"] = store.usersByID[userID]
 
 	// An active session that must be revoked by ResetPassword.
@@ -783,7 +794,11 @@ func TestResetPasswordSetsHashAndRevokesSessions(t *testing.T) {
 	if _, err := svc.ResetPassword(context.Background(), raw, "brand-new-password-456"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
-	if !auth.CheckPassword(store.usersByID[userID].PasswordHash, "brand-new-password-456") {
+	updated := store.usersByID[userID].PasswordHash
+	if updated == nil {
+		t.Fatal("expected password_hash to still be set after reset")
+	}
+	if !auth.CheckPassword(*updated, "brand-new-password-456") {
 		t.Fatal("expected password_hash to be updated to the new password")
 	}
 	if !store.sessions[sessionID].RevokedAt.Valid {

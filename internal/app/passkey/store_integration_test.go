@@ -48,7 +48,7 @@ func mkUser(t *testing.T, q *gen.Queries) uuid.UUID {
 	t.Helper()
 	u, err := q.CreateUser(context.Background(), gen.CreateUserParams{
 		Email:        "pk-" + uuid.NewString() + "@example.test",
-		PasswordHash: "x",
+		PasswordHash: ptrTo("x"),
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -172,3 +172,7 @@ func TestDuplicateCredentialRejected(t *testing.T) {
 		t.Fatalf("duplicate credential id: got %v, want unique violation", err)
 	}
 }
+
+// ptrTo takes the address of a literal, for the nullable columns sqlc models as
+// *T (users.password_hash became nullable with federated sign-in, migration 000051).
+func ptrTo[T any](v T) *T { return &v }

@@ -84,6 +84,18 @@ deleted_oauth_refresh AS (
         ORDER BY expires_at LIMIT 5000
     )
     RETURNING 1
+),
+-- Federated sign-in states are single-use and live ~10 minutes; a 7-day window
+-- matches the other short-lived challenge artifacts above. Batched on nonce_hash
+-- (the primary key) rather than an id column, which this table doesn't have.
+deleted_oauth_login_states AS (
+    DELETE FROM oauth_login_states
+    WHERE nonce_hash IN (
+        SELECT nonce_hash FROM oauth_login_states
+        WHERE expires_at < now() - interval '7 days'
+        ORDER BY expires_at LIMIT 5000
+    )
+    RETURNING 1
 )
 SELECT (
     (SELECT count(*) FROM deleted_sessions) +
@@ -94,7 +106,8 @@ SELECT (
     (SELECT count(*) FROM deleted_oauth_requests) +
     (SELECT count(*) FROM deleted_oauth_codes) +
     (SELECT count(*) FROM deleted_oauth_access) +
-    (SELECT count(*) FROM deleted_oauth_refresh)
+    (SELECT count(*) FROM deleted_oauth_refresh) +
+    (SELECT count(*) FROM deleted_oauth_login_states)
 )::bigint AS deleted_rows;
 
 -- name: PurgeExpiredIdempotencyKeys :one

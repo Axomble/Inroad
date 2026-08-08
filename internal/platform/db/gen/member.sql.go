@@ -61,7 +61,7 @@ func (q *Queries) GetMember(ctx context.Context, arg GetMemberParams) (Workspace
 }
 
 const listMembersByUser = `-- name: ListMembersByUser :many
-SELECT m.id, m.workspace_id, m.user_id, m.role, m.created_at, m.last_seen_at, w.name AS workspace_name
+SELECT m.id, m.workspace_id, m.user_id, m.role, m.created_at, m.last_seen_at, w.name AS workspace_name, w.onboarding_completed_at
 FROM workspace_members m
 JOIN workspaces w ON w.id = m.workspace_id
 WHERE m.user_id = $1
@@ -69,15 +69,19 @@ ORDER BY m.last_seen_at DESC NULLS LAST, m.created_at ASC
 `
 
 type ListMembersByUserRow struct {
-	ID            uuid.UUID          `json:"id"`
-	WorkspaceID   uuid.UUID          `json:"workspace_id"`
-	UserID        uuid.UUID          `json:"user_id"`
-	Role          MemberRole         `json:"role"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	LastSeenAt    pgtype.Timestamptz `json:"last_seen_at"`
-	WorkspaceName string             `json:"workspace_name"`
+	ID                    uuid.UUID          `json:"id"`
+	WorkspaceID           uuid.UUID          `json:"workspace_id"`
+	UserID                uuid.UUID          `json:"user_id"`
+	Role                  MemberRole         `json:"role"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt            pgtype.Timestamptz `json:"last_seen_at"`
+	WorkspaceName         string             `json:"workspace_name"`
+	OnboardingCompletedAt pgtype.Timestamptz `json:"onboarding_completed_at"`
 }
 
+// w.onboarding_completed_at rides along so every auth response can tell the SPA,
+// per workspace, whether onboarding is still pending -- switching into a freshly
+// created workspace then needs no extra round trip.
 func (q *Queries) ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]ListMembersByUserRow, error) {
 	rows, err := q.db.Query(ctx, listMembersByUser, userID)
 	if err != nil {
@@ -95,6 +99,7 @@ func (q *Queries) ListMembersByUser(ctx context.Context, userID uuid.UUID) ([]Li
 			&i.CreatedAt,
 			&i.LastSeenAt,
 			&i.WorkspaceName,
+			&i.OnboardingCompletedAt,
 		); err != nil {
 			return nil, err
 		}

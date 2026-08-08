@@ -6,7 +6,10 @@ VALUES ($1, $2, $3) RETURNING *;
 SELECT * FROM workspace_members WHERE workspace_id = $1 AND user_id = $2;
 
 -- name: ListMembersByUser :many
-SELECT m.*, w.name AS workspace_name
+-- w.onboarding_completed_at rides along so every auth response can tell the SPA,
+-- per workspace, whether onboarding is still pending -- switching into a freshly
+-- created workspace then needs no extra round trip.
+SELECT m.*, w.name AS workspace_name, w.onboarding_completed_at
 FROM workspace_members m
 JOIN workspaces w ON w.id = m.workspace_id
 WHERE m.user_id = $1

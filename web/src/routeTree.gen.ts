@@ -41,6 +41,7 @@ import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.
 import { Route as AppSettingsReplyLabelsRouteImport } from './routes/app.settings.reply-labels'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
+import { Route as AuthGoogleCallbackRouteImport } from './routes/auth.google.callback'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -202,6 +203,11 @@ const AppSettingsTeamRoute = AppSettingsTeamRouteImport.update({
   path: '/settings/team',
   getParentRoute: () => AppRoute,
 } as any)
+const AuthGoogleCallbackRoute = AuthGoogleCallbackRouteImport.update({
+  id: '/auth/google/callback',
+  path: '/auth/google/callback',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -231,6 +237,7 @@ export interface FileRoutesByFullPath {
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/app/companies/': typeof AppCompaniesIndexRoute
   '/app/contacts/': typeof AppContactsIndexRoute
@@ -264,6 +271,7 @@ export interface FileRoutesByTo {
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
   '/app/companies': typeof AppCompaniesIndexRoute
   '/app/contacts': typeof AppContactsIndexRoute
@@ -299,6 +307,7 @@ export interface FileRoutesById {
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/app/companies/': typeof AppCompaniesIndexRoute
   '/app/contacts/': typeof AppContactsIndexRoute
@@ -335,6 +344,7 @@ export interface FileRouteTypes {
     | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
+    | '/auth/google/callback'
     | '/app/campaigns/'
     | '/app/companies/'
     | '/app/contacts/'
@@ -368,6 +378,7 @@ export interface FileRouteTypes {
     | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
+    | '/auth/google/callback'
     | '/app/campaigns'
     | '/app/companies'
     | '/app/contacts'
@@ -402,6 +413,7 @@ export interface FileRouteTypes {
     | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
+    | '/auth/google/callback'
     | '/app/campaigns/'
     | '/app/companies/'
     | '/app/contacts/'
@@ -419,6 +431,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
   OauthConsentRoute: typeof OauthConsentRoute
+  AuthGoogleCallbackRoute: typeof AuthGoogleCallbackRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -647,6 +660,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsTeamRouteImport
       parentRoute: typeof AppRoute
     }
+    '/auth/google/callback': {
+      id: '/auth/google/callback'
+      path: '/auth/google/callback'
+      fullPath: '/auth/google/callback'
+      preLoaderRoute: typeof AuthGoogleCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -714,6 +734,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   OauthConsentRoute: OauthConsentRoute,
+  AuthGoogleCallbackRoute: AuthGoogleCallbackRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

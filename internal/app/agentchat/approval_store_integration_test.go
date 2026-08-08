@@ -35,7 +35,7 @@ func setupApprovalStore(t *testing.T) (context.Context, *PgStore, *gen.Queries, 
 		t.Fatalf("create workspace: %v", err)
 	}
 	user, err := q.CreateUser(ctx, gen.CreateUserParams{
-		Email: "approval-" + uuid.NewString() + "@example.com", PasswordHash: "test",
+		Email: "approval-" + uuid.NewString() + "@example.com", PasswordHash: ptrTo("test"),
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -86,7 +86,7 @@ func TestApprovalDecisionIsTenantScopedAuditedAndSingleUse(t *testing.T) {
 	action, _ := pauseTestAction(t, ctx, store, actor, time.Now().Add(time.Hour))
 
 	other, err := q.CreateUser(ctx, gen.CreateUserParams{
-		Email: "approval-other-" + uuid.NewString() + "@example.com", PasswordHash: "test",
+		Email: "approval-other-" + uuid.NewString() + "@example.com", PasswordHash: ptrTo("test"),
 	})
 	if err != nil {
 		t.Fatalf("create other user: %v", err)
@@ -309,3 +309,7 @@ func TestExpiredApprovalDeniesAndResumes(t *testing.T) {
 		t.Fatalf("expired action=%+v", updated)
 	}
 }
+
+// ptrTo takes the address of a literal, for the nullable columns sqlc models as
+// *T (users.password_hash became nullable with federated sign-in, migration 000051).
+func ptrTo[T any](v T) *T { return &v }
