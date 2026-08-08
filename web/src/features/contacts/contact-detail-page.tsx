@@ -18,6 +18,7 @@ import {
   Section,
 } from '@/components/shared/record-page'
 import { useGetContactQuery, type ContactDetail } from './api'
+import { CompanyLinkForm } from './company-link-form'
 import { EngagementPanel } from './engagement-panel'
 import { SuppressionNotice } from './suppression-notice'
 
@@ -125,19 +126,7 @@ export function ContactDetailPage({ contactId }: { contactId: string }) {
                 />
                 <Detail
                   label="Company"
-                  value={
-                    contact.company ? (
-                      <Link
-                        to="/app/companies/$id"
-                        params={{ id: contact.company.id }}
-                        className="text-accent-ink underline-offset-2 hover:underline"
-                      >
-                        {contact.company.name}
-                      </Link>
-                    ) : (
-                      'Not linked'
-                    )
-                  }
+                  value={<CompanyLinkForm contactId={contactId} company={contact.company} />}
                 />
                 <Detail label="Job title" value={contact.job_title || 'Not set'} />
                 <Detail

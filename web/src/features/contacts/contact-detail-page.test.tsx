@@ -1,4 +1,4 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { ContactDetailPage } from './contact-detail-page'
@@ -86,22 +86,47 @@ const engagement = (overrides: Partial<ContactEngagement> = {}): ContactEngageme
 
 let contactResponse: () => Response
 let engagementResponse: () => Response
+/** Every GET of the contact record, so a needless refetch is detectable. */
+let detailGets: number
 
 beforeEach(() => {
   contactResponse = () => json(contact())
   engagementResponse = () => json(engagement())
+  detailGets = 0
 
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = new URL(input instanceof Request ? input.url : String(input))
+      const request = input instanceof Request ? input : new Request(input)
+      const url = new URL(request.url)
       const { pathname } = url
       if (pathname.endsWith('/contacts/c-1/engagement')) return Promise.resolve(engagementResponse())
-      if (pathname.endsWith('/contacts/c-1')) return Promise.resolve(contactResponse())
+      if (pathname.endsWith('/contacts/c-1/company')) {
+        // The endpoint answers with the whole updated record.
+        return Promise.resolve(json(contact({ company: { id: 'co-2', name: 'Globex', domain: 'globex.test' } })))
+      }
+      if (pathname.endsWith('/contacts/c-1')) {
+        if (request.method === 'GET') detailGets += 1
+        return Promise.resolve(contactResponse())
+      }
+      if (pathname.endsWith('/crm/companies')) {
+        return Promise.resolve(json({
+          items: [{
+            id: 'co-2',
+            name: 'Globex',
+            domain: 'globex.test',
+            currency: 'USD',
+            deal_count: 0,
+            created_at: '2026-08-01T00:00:00Z',
+            updated_at: '2026-08-01T00:00:00Z',
+          }],
+        }))
+      }
+      if (pathname.endsWith('/contacts')) return Promise.resolve(json({ items: [], total: 0, total_is_capped: false }))
       if (pathname.endsWith('/crm/notes')) return Promise.resolve(json({ items: [] }))
       if (pathname.endsWith('/crm/tasks')) return Promise.resolve(json({ items: [] }))
       if (pathname.endsWith('/crm/events')) return Promise.resolve(json({ items: [] }))
-      throw new Error(`unexpected request: ${pathname}`)
+      throw new Error(`unexpected request: ${request.method} ${pathname}`)
     }),
   )
 })
@@ -428,8 +453,31 @@ test('an unlinked contact with no deals states both, rather than looking broken'
   renderWithProviders(<ContactDetailPage contactId="c-1" />)
 
   expect(await screen.findByText('No deals name this contact yet.')).toBeInTheDocument()
-  expect(within(await panel('Details')).getByText('Not linked')).toBeInTheDocument()
-  expect(within(await panel('Details')).getAllByText('Not set')).toHaveLength(2)
+  const details = await panel('Details')
+  expect(within(details).getByText('Not linked')).toBeInTheDocument()
+  expect(within(details).getAllByText('Not set')).toHaveLength(2)
+  // An unlinked contact is only unlinked because nothing has stated the link yet,
+  // so the record has to offer that — CSV-imported contacts all arrive this way.
+  expect(within(details).getByRole('button', { name: /link this contact to a company/i })).toBeInTheDocument()
+})
+
+test('linking a company updates the record from the response, without refetching it', async () => {
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+  const details = await panel('Details')
+  await waitFor(() => expect(detailGets).toBe(1))
+
+  fireEvent.click(within(details).getByRole('button', { name: /change the company/i }))
+  const select = await within(details).findByLabelText('Company')
+  await waitFor(() => expect(within(details).getByRole('option', { name: 'Globex' })).toBeInTheDocument())
+  fireEvent.change(select, { target: { value: 'co-2' } })
+  fireEvent.click(within(details).getByRole('button', { name: 'Save' }))
+
+  // The new company is on screen, linked to its record...
+  expect(await within(details).findByRole('link', { name: 'Globex' })).toHaveAttribute('href', '/app/companies/co-2')
+  // ...and it came from the mutation's own response. The endpoint returns the
+  // whole updated ContactDetail, so a second GET would be a round trip for bytes
+  // already in hand.
+  expect(detailGets).toBe(1)
 })
 
 test('a deleted contact reads as missing, without hinting the id is real', async () => {

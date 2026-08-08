@@ -8,7 +8,11 @@ import type { ImportResult } from '@/store/api'
 
 const contactsApi = api
   .enhanceEndpoints({
-    addTagTypes: ['List', 'Contact'],
+    // `CRMCompany` is declared by `features/crm/api.ts` and repeated here because
+    // linking a contact to a company changes that company's roster. Tag types are
+    // one global namespace on the shared api instance, so naming another module's
+    // tag is a cache dependency, not an import — none of its code comes with it.
+    addTagTypes: ['List', 'Contact', 'ContactEngagement', 'CRMCompany'],
     endpoints: {
       listLists: {
         providesTags: (result) =>
@@ -45,10 +49,35 @@ const contactsApi = api
       },
       // The engagement rollup is deliberately a second request: the detail read is
       // two index seeks, this one is four aggregates, so keeping them apart lets
-      // the record header paint without waiting on the aggregates. They share a
-      // tag because anything that invalidates one invalidates the other.
+      // the record header paint without waiting on the aggregates.
+      //
+      // It carries its own tag rather than sharing the contact's: linking a
+      // company changes the record but cannot change a single send, open or
+      // reply, and one shared tag would re-run all four aggregates for it.
       getContactEngagement: {
-        providesTags: (_result, _error, { id }) => [{ type: 'Contact', id }],
+        providesTags: (_result, _error, { id }) => [{ type: 'ContactEngagement', id }],
+      },
+      // One write, four stale reads, handled three different ways.
+      //
+      // The contact's own record is *written from the response* — the endpoint
+      // returns the whole updated `ContactDetail`, so refetching it would be a
+      // round trip for bytes we already hold. This runs on success only; a failed
+      // link leaves the cache untouched, so the UI can never claim a link the
+      // server refused.
+      //
+      // The contacts list is invalidated because its rows carry `company_name`.
+      //
+      // Both company rosters — the one joined and the one left — are covered by
+      // invalidating the whole `CRMCompany` family. The *previous* company is in
+      // neither the arguments nor the response (only the caller knew it), and at
+      // most one company page is mounted at a time, so a family invalidation costs
+      // one refetch and cannot miss the old roster.
+      setContactCompany: {
+        async onQueryStarted({ id }, { dispatch, queryFulfilled }) {
+          const { data } = await queryFulfilled
+          dispatch(contactsApi.util.upsertQueryData('getContact', { id }, data))
+        },
+        invalidatesTags: [{ type: 'Contact', id: 'LIST' }, 'CRMCompany'],
       },
     },
   })
@@ -74,10 +103,13 @@ export type {
   ContactDeal,
   ContactEngagement,
   ContactCampaignEnrollment,
+  ContactCompany,
+  ContactCompanyLink,
 } from '@/store/api'
 
 export const {
   useGetContactQuery,
+  useSetContactCompanyMutation,
   useGetContactEngagementQuery,
   useListListsQuery,
   useCreateListMutation,
