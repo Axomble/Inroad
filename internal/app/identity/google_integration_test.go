@@ -373,7 +373,7 @@ func TestIntegrationOnboardingCompletionIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first complete: %v", err)
 	}
-	if first.Name != "Axomble Inc" || !first.Completed() {
+	if first.Name != "Axomble Inc" || first.CompletedAt.IsZero() {
 		t.Fatalf("want renamed + stamped, got %+v", first)
 	}
 

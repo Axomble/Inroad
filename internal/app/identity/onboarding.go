@@ -26,9 +26,6 @@ type Onboarding struct {
 	CompletedAt time.Time // zero when onboarding is still pending
 }
 
-// Completed reports whether onboarding has been finished.
-func (o Onboarding) Completed() bool { return !o.CompletedAt.IsZero() }
-
 // CompleteOnboarding names a workspace and marks its onboarding finished. The
 // rename and the stamp happen in ONE statement (Store.CompleteOnboarding), so
 // there is no window in which a workspace could be renamed but left unstamped, or

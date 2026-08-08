@@ -88,7 +88,7 @@ func TestCompleteOnboardingSetsNameAndStamp(t *testing.T) {
 	if res.Name != "Axomble Inc" {
 		t.Fatalf("want the workspace renamed, got %q", res.Name)
 	}
-	if !res.Completed() {
+	if res.CompletedAt.IsZero() {
 		t.Fatal("want onboarding stamped complete")
 	}
 }
