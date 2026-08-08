@@ -20,11 +20,12 @@ const OnboardingDialog = lazy(() => import('./workspace-onboarding-dialog'))
  * never by "did this user just register": someone invited into an already-named
  * workspace joins straight into the app.
  *
- * The check is `=== null` rather than a falsiness test on purpose. An API that
- * predates onboarding sends no such field, and `undefined` must not open an
- * un-dismissible screen in front of every existing user — the two failure modes are
- * not symmetric, so only an explicit `null` ("this workspace exists and has never
- * been named") opens it.
+ * DO NOT "simplify" the guard below to a falsiness test. It compares against `null`
+ * exactly so that only an explicit `null` — "this workspace exists and has never
+ * been named" — opens the overlay. An API that predates onboarding sends no such
+ * field at all, and `undefined` must not be read as "not onboarded": the two failure
+ * modes are not symmetric. Wrongly hiding this costs one workspace its prompt;
+ * wrongly showing it puts an un-dismissible screen in front of every existing user.
  */
 export function WorkspaceOnboardingOverlay() {
   const authed = useAppSelector((state) => state.auth.status === 'authed')

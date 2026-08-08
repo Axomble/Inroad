@@ -60,9 +60,9 @@ const authApi = api.enhanceEndpoints({
     authAcceptInvite: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
     },
-    // Naming a workspace flips `onboarding_completed` on the session, and that
-    // flag is what dismisses the first-run overlay — so refetch `authMe` rather
-    // than letting the overlay close itself on a local success flag.
+    // Naming a workspace sets `onboarding_completed_at` on the session, and that
+    // timestamp is what dismisses the first-run overlay — so refetch `authMe`
+    // rather than letting the overlay close itself on a local success flag.
     completeWorkspaceOnboarding: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
     },

@@ -170,6 +170,8 @@ export interface EnvVar {
 
 export interface EnvGroup {
   title: string
+  /** Guidance that applies to the group as a whole, not to one variable. */
+  note?: string
   vars: EnvVar[]
 }
 
@@ -209,17 +211,22 @@ export const ENV_GROUPS: EnvGroup[] = [
   },
   {
     title: 'Google sign-in',
+    note: 'A dedicated sign-in client is worth setting up: the mailbox-connect client below requests Gmail scopes, which Google puts through a restricted-scope verification review — and you do not want the ability to log in blocked behind that review.',
     vars: [
       {
         name: 'INROAD_GOOGLE_SIGNIN_CLIENT_ID',
         description:
-          'Google OAuth client for “Continue with Google” on login/signup; blank disables it and the button hides itself. Deliberately separate from the mailbox-connect client below — this one requests only openid/email/profile, never Gmail scopes.',
+          'Google OAuth client for “Continue with Google” sign-in. Falls back to INROAD_GOOGLE_CLIENT_ID when blank, so one client can power both sign-in and Gmail connect.',
       },
-      { name: 'INROAD_GOOGLE_SIGNIN_CLIENT_SECRET', description: 'Google sign-in client secret.' },
+      {
+        name: 'INROAD_GOOGLE_SIGNIN_CLIENT_SECRET',
+        description:
+          'Secret for the sign-in client. Set it together with the id; an id without a secret leaves sign-in disabled rather than borrowing the mailbox secret.',
+      },
       {
         name: 'INROAD_GOOGLE_SIGNIN_REDIRECT_URL',
         description:
-          'Add this exact URL to the OAuth client’s authorized redirect URIs. Defaults to the public URL’s /api/v1/auth/oauth/google/callback.',
+          'Never falls back — always add this exact URL to the authorized redirect URIs of whichever client is used. Defaults to the public URL’s /api/v1/auth/oauth/google/callback.',
         example: 'https://app.example.com/api/v1/auth/oauth/google/callback',
       },
     ],

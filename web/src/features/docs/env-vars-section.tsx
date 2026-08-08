@@ -26,6 +26,11 @@ export function EnvVarsSection() {
           <div className="border-b border-border bg-surface-2/60 px-5 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
             {group.title}
           </div>
+          {group.note && (
+            <p className="max-w-2xl border-b border-border px-5 py-2.5 text-[12.5px] leading-relaxed text-muted-foreground">
+              {group.note}
+            </p>
+          )}
           {group.vars.map((v) => (
             <div key={v.name} className="flex flex-col gap-1 border-b border-border px-5 py-2.5 sm:flex-row sm:items-baseline sm:gap-4">
               <code className="w-72 shrink-0 font-mono text-[12px] text-foreground">{v.name}</code>
