@@ -428,7 +428,7 @@ func TestContactEngagementResponseShape(t *testing.T) {
 	}
 	for _, key := range []string{"contact_id", "emails_sent", "opens_indicative", "clicks",
 		"replies", "bounces", "unsubscribes", "open_rate", "click_rate", "campaigns_enrolled",
-		"last_activity_at", "campaigns", "campaigns_truncated"} {
+		"opens_measurable", "last_activity_at", "campaigns", "campaigns_truncated"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("response is missing required field %q", key)
 		}
@@ -585,5 +585,66 @@ func TestContactEngagementReportsTrackingPerCampaign(t *testing.T) {
 	// it does not correct it (campaign.Metrics behaves the same way).
 	if body["opens_indicative"] != float64(0) {
 		t.Fatalf("opens_indicative = %v, want 0 left as-is", body["opens_indicative"])
+	}
+}
+
+// opens_measurable comes from the send aggregate, NOT from the capped campaigns
+// list. This is the case that makes the difference: every enrollment visible to
+// the client has tracking off and the list is truncated, yet the contact WAS
+// tracked on an older campaign — so a client-side some(tracking_enabled) would
+// answer false and explain away a real zero. The server must say true.
+func TestEngagementOpensMeasurableIgnoresTheCampaignCap(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{}
+	store.record.get = Record{ID: id}
+	store.record.sends = SendStats{EmailsSent: 40, OpensMeasurable: true}
+	// Every visible enrollment is untracked, and there are more than fit.
+	store.record.campaigns = make([]CampaignEnrollment, CampaignCap+1)
+	for i := range store.record.campaigns {
+		store.record.campaigns[i] = CampaignEnrollment{CampaignID: uuid.New(), TrackingEnabled: false}
+	}
+
+	got, err := recordService(store).Engagement(context.Background(), testWS, id)
+	if err != nil {
+		t.Fatalf("Engagement: %v", err)
+	}
+	if !got.CampaignsTruncated {
+		t.Fatal("fixture did not truncate; the case under test needs a capped list")
+	}
+	visibleSuggests := false
+	for _, c := range got.Campaigns {
+		if c.TrackingEnabled {
+			visibleSuggests = true
+		}
+	}
+	if visibleSuggests {
+		t.Fatal("fixture leaked a tracked campaign into the visible window")
+	}
+	if !got.OpensMeasurable {
+		t.Fatal("opens_measurable was inferred from the capped list, not the full history")
+	}
+}
+
+// The flag is a passthrough of the send aggregate in both directions, so a
+// genuinely never-tracked contact still reads false.
+func TestEngagementOpensMeasurableFollowsTheSendAggregate(t *testing.T) {
+	for _, measurable := range []bool{true, false} {
+		t.Run(map[bool]string{true: "tracked", false: "never tracked"}[measurable], func(t *testing.T) {
+			store := &fakeStore{}
+			store.record.sends = SendStats{EmailsSent: 3, OpensMeasurable: measurable}
+
+			got, err := recordService(store).Engagement(context.Background(), testWS, uuid.New())
+			if err != nil {
+				t.Fatalf("Engagement: %v", err)
+			}
+			if got.OpensMeasurable != measurable {
+				t.Fatalf("opens_measurable = %v, want %v", got.OpensMeasurable, measurable)
+			}
+			// The counts are never adjusted by the flag either way.
+			if got.OpensIndicative != 0 || got.Clicks != 0 {
+				t.Fatalf("counts = %d/%d, want the raw zeros left alone",
+					got.OpensIndicative, got.Clicks)
+			}
+		})
 	}
 }

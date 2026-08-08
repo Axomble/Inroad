@@ -97,7 +97,10 @@ func (s *PgStore) SendStats(ctx context.Context, ws, contactID uuid.UUID) (SendS
 	if err != nil {
 		return SendStats{}, fmt.Errorf("contact send stats: %w", err)
 	}
-	return SendStats{EmailsSent: row.EmailsSent, LastSentAt: timeValue(row.LastSentAt)}, nil
+	return SendStats{
+		EmailsSent: row.EmailsSent, LastSentAt: timeValue(row.LastSentAt),
+		OpensMeasurable: row.OpensMeasurable,
+	}, nil
 }
 
 func (s *PgStore) TrackingStats(ctx context.Context, ws, contactID uuid.UUID) (TrackingStats, error) {

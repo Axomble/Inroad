@@ -2727,11 +2727,17 @@ export type ContactPage = {
 };
 export type ContactSort = "newest" | "oldest" | "email";
 export type ContactSuppression = {
-  /** The suppression list's own reason literal. `complaint` (they reported us as spam) is deliberately distinct from `unsubscribe` (they asked to stop) and is never collapsed into it. */
+  /** The suppression list's own reason literal. `complaint` (they reported us as spam) is deliberately distinct from `unsubscribe` (they asked to stop) and is never collapsed into it. `bounce` here means a HARD bounce classified by the inbox poller - an ingested provider bounce feed does not suppress at all, because those include soft bounces (full mailbox, greylisting) and suppressing forever on a temporary failure is not recoverable. So a `bounce` on this list is a permanent delivery failure, not "a message bounced once". */
   reason: "unsubscribe" | "bounce" | "complaint" | "manual";
   /** The suppressed address, which is not necessarily the one sends would use. */
   email: string;
-  /** True when the suppressed address is the contact's primary one - the address the send path actually resolves - so this person cannot be emailed at all. False means only a secondary alias is suppressed: sending still works today, but promoting that alias would stop it. */
+  /** Which of TWO different operational states this is - do not simplify it away to "an address is suppressed".
+    
+    True: the suppressed address is the contact's primary one, the address the send path actually resolves, so this person cannot be emailed at all. A hard stop, now.
+    
+    False: only a secondary alias is suppressed. Sending works today because it does not use that address - but promoting the alias to primary (PUT /crm/contacts/{id}/emails/{emailID}/primary) would silently stop sending. Reachable now, breakable by a routine edit.
+    
+    A boolean "suppressed" flag would merge those two into one answer that is wrong for whichever case it is not describing. */
   is_primary_email: boolean;
   suppressed_at: string;
 };
@@ -2785,7 +2791,7 @@ export type ContactCampaignEnrollment = {
   status: "active" | "completed" | "stopped";
   /** 0 means enrolled but not yet sent to; N means step N was the last one sent. */
   current_step: number;
-  /** Why the sequence stopped - one of replied, bounced, suppressed, manual. Null while the enrollment is still active or completed normally. */
+  /** Why the sequence stopped - one of replied, bounced, suppressed, manual, failed. `failed` is real (added by migration 000008 for a degenerate or exhausted send cap) and is deliberately NOT counted as a bounce or an unsubscribe in the rollup above. Null while the enrollment is still active or completed normally. Treat this as an open set: render an unrecognised literal verbatim rather than dropping it, so a future reason degrades visibly instead of vanishing. */
   stop_reason?: string | null;
   enrolled_at: string;
   last_sent_at?: string | null;
