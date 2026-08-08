@@ -361,7 +361,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		"user_id": claims.UserID, "active_workspace_id": claims.WorkspaceID,
 		"role": claims.Role, "memberships": toMembershipDTOs(mems),
 		"email": email, "email_verified": verified,
-		// Read out of the memberships already loaded above � no extra query.
+		// Read out of the memberships already loaded above — no extra query.
 		"onboarding_completed_at": rfc3339OrNil(onboardingFor(mems, activeWS)),
 	})
 }
