@@ -60,6 +60,13 @@ services:
       POSTGRES_PASSWORD: inroad
       POSTGRES_DB: inroad
     ports: ["5433:5432"]   # host 5433 avoids clashing with a native Postgres on 5432
+    # Stock max_connections is 100, and this stack already spends ~50 of them on
+    # the api and worker pools before a developer runs anything. The integration
+    # suite then adds four packages' worth of pools against the same server; at
+    # the default it ran out and failed as "sorry, too many clients already" in
+    # whichever package asked last. `command` must repeat `postgres` because the
+    # image's entrypoint passes it through to the server.
+    command: postgres -c max_connections=300
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Integration tests expect a separate database; create it on first boot

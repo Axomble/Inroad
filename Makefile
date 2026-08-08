@@ -56,11 +56,11 @@ test: ## Run unit tests
 # demand — see internal/platform/db/dbtest. They used to default to the dev
 # database and bury the demo data under thousands of fixture rows.
 test-integration: ## Run integration tests against inroad_test (needs make db-up)
-	# -p 4 bounds how many packages run at once. db.Connect raises an unpinned pool
-	# to 25 connections, which is right for a server and wrong here: unbounded, the
-	# suite exceeds a stock max_connections=100 and fails with "sorry, too many
-	# clients already" in whichever package asked last -- reading as a defect in
-	# code nobody touched.
+	# -p 4 bounds how many packages run at once, and dbtest caps each package's pool
+	# at 8 connections (db.Connect's 25-connection floor is for a server, not a test
+	# process). Both matter: at the floor, four packages reached a stock
+	# max_connections=100 exactly and the suite failed at random with "sorry, too
+	# many clients already" in whichever package asked last.
 	go test -p 4 -tags=integration ./...
 
 tidy: ## Tidy go.mod

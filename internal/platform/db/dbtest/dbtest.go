@@ -18,11 +18,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/inroad/inroad/internal/platform/db"
 )
 
 // defaultDSN is the dev-machine fallback: the compose Postgres (host port 5433,
@@ -33,6 +36,22 @@ const defaultDSN = "postgres://inroad:inroad@localhost:5433/inroad_test?sslmode=
 // duplicateDatabase is Postgres's SQLSTATE for "database already exists". Two
 // packages' tests can race to create it, and losing that race is success.
 const duplicateDatabase = "42P04"
+
+// testPoolMaxConns caps the pool each integration package opens.
+//
+// db.Connect raises an unpinned pool to a server-sized floor (25 connections: the
+// worker's concurrency plus its sweepers). Four test packages at once — what both
+// CI and `make test-integration` run — made that 100, exactly the stock
+// max_connections of postgres:16, so the suite sat on the ceiling and tipped over
+// at random with "sorry, too many clients already" in whichever package asked
+// last. It read as a defect in code nobody had touched.
+//
+// A test package runs one case at a time. The busiest cases fire up to 20
+// goroutines at a single row to prove a race is handled atomically; 8 connections
+// keeps that contention real at the database (where the test is looking) rather
+// than queueing it in the pool, while four packages together stay well under any
+// server's limit.
+const testPoolMaxConns = 8
 
 // DSN returns the connection string for integration tests, in precedence order:
 //
@@ -45,13 +64,57 @@ const duplicateDatabase = "42P04"
 // The database is created if it does not exist, so there is no setup step to
 // forget and no failure that reads as "the suite is broken" when it means "you
 // haven't made the database yet".
+//
+// The returned DSN pins the pgxpool sizing keys, so db.Connect leaves its
+// production floor out of the suite — see testPoolMaxConns.
 func DSN(t *testing.T) string {
 	t.Helper()
 	dsn := resolve()
-	if err := ensureDatabase(dsn); err != nil {
+	if err := ensureDatabaseOnce(dsn); err != nil {
 		t.Fatalf("dbtest: preparing %s: %v", redact(dsn), err)
 	}
-	return dsn
+	return withPoolLimits(dsn)
+}
+
+// withPoolLimits pins the pool size in the DSN so db.Connect's server-sized floor
+// does not apply to a test process. pool_min_conns=0 on top of the cap means a
+// package holds only the connections it is actually using, instead of keeping
+// warm ones for a latency budget no test has.
+//
+// A DSN that already pins the size is returned untouched: someone who set it in
+// INROAD_TEST_DATABASE_URL meant it, and a duplicated key would be ambiguous.
+func withPoolLimits(dsn string) string {
+	if strings.Contains(dsn, "pool_max_conns") {
+		return dsn
+	}
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	return fmt.Sprintf("%s%spool_max_conns=%d&pool_min_conns=0", dsn, separator, testPoolMaxConns)
+}
+
+// ensured memoises ensureDatabase per DSN. Every test in a package calls DSN, and
+// each call otherwise opened a maintenance connection to retry a CREATE DATABASE
+// that can only succeed once — short-lived connections, but they still count
+// against max_connections while four packages run at once.
+var ensured struct {
+	mu sync.Mutex
+	by map[string]error
+}
+
+func ensureDatabaseOnce(dsn string) error {
+	ensured.mu.Lock()
+	defer ensured.mu.Unlock()
+	if err, done := ensured.by[dsn]; done {
+		return err
+	}
+	err := ensureDatabase(dsn)
+	if ensured.by == nil {
+		ensured.by = make(map[string]error)
+	}
+	ensured.by[dsn] = err
+	return err
 }
 
 func resolve() string {
@@ -110,7 +173,11 @@ func ensureDatabase(dsn string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	adminDSN := replaceDatabase(dsn, "postgres")
+	// A single connection, not a pool, and WithoutPoolParams because pgx.Connect
+	// would forward pgxpool's keys to the server as unknown configuration
+	// parameters. It is closed before this function returns, so it never overlaps
+	// with the package's own pool.
+	adminDSN := db.WithoutPoolParams(replaceDatabase(dsn, "postgres"))
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		// Nothing to create against — surface the real reason (server down,
