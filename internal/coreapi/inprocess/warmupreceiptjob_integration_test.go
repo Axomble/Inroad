@@ -73,14 +73,13 @@ func TestRecordWarmupReceiptUnengagedDuplicateSelfHeals(t *testing.T) {
 	}
 
 	// The duplicate is still unengaged (C5b never ran), so the engage may have been
-	// lost — the plan is re-returned IDENTICALLY so the poller re-enqueues.
+	// lost — the plan is re-returned so the poller re-enqueues.
+	before := time.Now().UTC()
 	plan2, err := f.core.RecordWarmupReceipt(ctx, in)
 	if err != nil {
 		t.Fatalf("second RecordWarmupReceipt: %v", err)
 	}
-	if plan2 != plan1 {
-		t.Fatalf("unengaged duplicate plan = %+v, want the SAME plan as the first (%+v)", plan2, plan1)
-	}
+	assertSelfHealedPlan(t, plan1, plan2, before)
 
 	rb, _ := uuid.Parse(recipient)
 	if received, _, _, _ := todayStats(t, ctx, f, rb); received != 1 {
@@ -108,12 +107,37 @@ func TestRecordWarmupReceiptSpamDuplicateSelfHeals(t *testing.T) {
 		t.Fatalf("first spam plan = %+v, want ReceiptID set + DoRescue", plan1)
 	}
 
+	before := time.Now().UTC()
 	plan2, err := f.core.RecordWarmupReceipt(ctx, in)
 	if err != nil {
 		t.Fatalf("second RecordWarmupReceipt: %v", err)
 	}
-	if plan2 != plan1 {
-		t.Fatalf("unengaged spam duplicate plan = %+v, want the SAME plan (%+v)", plan2, plan1)
+	assertSelfHealedPlan(t, plan1, plan2, before)
+}
+
+// assertSelfHealedPlan checks that a plan rebuilt for a still-unengaged DUPLICATE
+// receipt matches the original. Every DECISION must be re-derived identically from the
+// stored row — that IS the self-heal, and it is what lets the poller safely re-enqueue.
+//
+// EngageAfter is compared as a target instant rather than for equality, because it is a
+// delay relative to NOW and is deliberately re-derived on every call: a plan rebuilt
+// long after the receipt fires at the next waking instant instead of waiting out the
+// full reply latency a second time. Two calls a moment apart therefore return delays
+// that differ by that moment. `before` is a timestamp taken just before the second
+// call, bounding how much shrinkage is legitimate.
+func assertSelfHealedPlan(t *testing.T, plan1, plan2 coreapi.WarmupEngagePlan, before time.Time) {
+	t.Helper()
+
+	if plan2.ReceiptID != plan1.ReceiptID || plan2.DoRescue != plan1.DoRescue ||
+		plan2.DoMarkRead != plan1.DoMarkRead || plan2.DoReply != plan1.DoReply {
+		t.Fatalf("duplicate plan = %+v, want the same decisions as the first (%+v)", plan2, plan1)
+	}
+	// Tolerance: the wall-clock time the two calls were separated by, plus slack for
+	// scheduling. The delay may only shrink, never grow.
+	tolerance := time.Since(before) + time.Second
+	if diff := plan1.EngageAfter - plan2.EngageAfter; diff < 0 || diff > tolerance {
+		t.Fatalf("EngageAfter drifted by %v between calls (tolerance %v): %v then %v",
+			diff, tolerance, plan1.EngageAfter, plan2.EngageAfter)
 	}
 }
 

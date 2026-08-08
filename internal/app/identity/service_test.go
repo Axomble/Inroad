@@ -539,6 +539,11 @@ func TestRegisterSendsVerifyEmail(t *testing.T) {
 	if !strings.Contains(sender.last.TextBody, "https://app.example.test/verify-email?token=") {
 		t.Fatalf("expected verify link in sent email body, got %q", sender.last.TextBody)
 	}
+	// The recipient, not just the body: an unaddressed message is delivered
+	// nowhere, and the console driver swallows that silently.
+	if sender.last.To != "owner@acme.test" {
+		t.Fatalf("verify email addressed to %q, want the registering user owner@acme.test", sender.last.To)
+	}
 	user, ok := store.usersByID[sess.UserID]
 	if !ok {
 		t.Fatal("expected user row to exist")
@@ -580,6 +585,29 @@ func TestVerifyEmailInvalidTokenReturnsErrTokenInvalid(t *testing.T) {
 
 	if err := svc.VerifyEmail(context.Background(), "not-a-real-token"); !errors.Is(err, ErrTokenInvalid) {
 		t.Fatalf("expected ErrTokenInvalid, got %v", err)
+	}
+}
+
+// TestResendVerificationAddressesTheAccountOwner confirms the resent
+// verification email goes to the address on the user row identified by the
+// authenticated user id - the caller supplies no address, so this is the only
+// thing that can make it deliverable.
+func TestResendVerificationAddressesTheAccountOwner(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeSender{}
+	svc := NewService(store, time.Hour, sender, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+
+	userID := uuid.New()
+	store.usersByID[userID] = gen.User{ID: userID, Email: "owner@acme.test"}
+
+	if err := svc.ResendVerification(context.Background(), userID); err != nil {
+		t.Fatalf("ResendVerification: %v", err)
+	}
+	if sender.last.To != "owner@acme.test" {
+		t.Fatalf("resent verify email addressed to %q, want owner@acme.test", sender.last.To)
+	}
+	if !strings.Contains(sender.last.TextBody, "https://app.example.test/verify-email?token=") {
+		t.Fatalf("expected verify link in resent email body, got %q", sender.last.TextBody)
 	}
 }
 
@@ -660,6 +688,9 @@ func TestForgotPasswordKnownSendsReset(t *testing.T) {
 	}
 	if !strings.Contains(sender.last.TextBody, "https://app.example.test/reset-password?token=") {
 		t.Fatalf("expected reset link in sent email body, got %q", sender.last.TextBody)
+	}
+	if sender.last.To != "owner@acme.test" {
+		t.Fatalf("reset email addressed to %q, want the requesting account owner@acme.test", sender.last.To)
 	}
 }
 

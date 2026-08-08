@@ -1,7 +1,6 @@
 package warmup
 
 import (
-	"math"
 	"time"
 )
 
@@ -48,12 +47,11 @@ func NextDue(in DueInputs) DuePlan {
 
 	days := int(in.Now.Sub(in.StartedAt).Hours() / 24)
 	target := RampTarget(in.StartVolume, in.MaxVolume, in.Increment, days)
-	effective := int(math.Round(float64(target) * DailyVolumeFactor(in.MailboxID, in.Now)))
-	if effective < 0 {
-		effective = 0
-	}
+	effective := EffectiveDailyVolume(target, in.MailboxID, in.Now)
 
-	// Today's quota met → next send is tomorrow morning.
+	// Today's quota met → next send is tomorrow morning. A weekend or skipped day
+	// can make that quota 0, in which case this fires immediately and the chain
+	// rolls forward to the next morning rather than stalling.
 	if in.SentToday >= effective {
 		return DuePlan{NextDue: DeferToWakingHours(in.Now.AddDate(0, 0, 1), in.Loc), SendNow: false}
 	}

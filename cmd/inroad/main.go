@@ -136,7 +136,8 @@ func run() error {
 	sender, err := notify.New(notify.Config{
 		Driver: cfg.TransactionalDriver, SMTPHost: cfg.SystemSMTPHost, SMTPPort: cfg.SystemSMTPPort,
 		SMTPUsername: cfg.SystemSMTPUsername, SMTPPassword: cfg.SystemSMTPPassword, From: cfg.SystemEmailFrom,
-		Logger: logger,
+		AllowPlaintext: cfg.SystemSMTPAllowPlaintext,
+		Logger:         logger,
 	})
 	if err != nil {
 		logger.Error("transactional sender init failed", "err", err)

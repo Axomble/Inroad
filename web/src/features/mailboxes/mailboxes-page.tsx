@@ -65,6 +65,7 @@ import {
   useDeleteMailboxMutation,
   useStartGoogleOauthMutation,
   useStartMicrosoftOauthMutation,
+  useListSendingDomainsQuery,
 } from './api'
 import { mailboxTone, mailboxStatusLabel } from './status'
 import { ConnectMailboxForm } from './connect-mailbox-form'
@@ -72,7 +73,8 @@ import { GoogleIcon } from './google-icon'
 import { MicrosoftIcon } from './microsoft-icon'
 import { mailboxProviderLabel } from './provider'
 import { BannerShell, OauthCallbackBanner } from './oauth-callback-banner'
-import { DomainAuthPanel } from './domain-auth-panel'
+import { DomainAuthHeader, DomainAuthNotice } from './domain-auth-header'
+import { domainGroupLabel, groupMailboxesByDomain } from './domain-group'
 import {
   startErrorCopy,
   startErrorKind,
@@ -109,6 +111,10 @@ export function MailboxesPage() {
   // has closed by then, so the notice belongs to the page.
   const [warmupNotEnabled, setWarmupNotEnabled] = useState(false)
   const { data, isLoading, error: listError, refetch } = useListMailboxesQuery()
+  // Domain authentication is read here rather than in a section of its own: the
+  // verdict belongs on the domain heading above the mailboxes it governs, so a
+  // workspace with ten domains costs ten lines instead of ten stacked blocks.
+  const { data: domains, isLoading: isLoadingDomains, error: domainsError } = useListSendingDomainsQuery()
   // Warmup state belongs on the mailbox row: the mailbox is the unit of trust,
   // so its identity, sending status, and reputation must be answerable on one
   // screen instead of forcing a page switch to /app/warmup. Read-only, and the
@@ -138,6 +144,9 @@ export function MailboxesPage() {
     sorts: SORTS,
   })
 
+  // Grouping never drops a mailbox, so the flat row count keyboard nav walks is
+  // still the filtered list's length; only the visual order changes.
+  const groups = groupMailboxesByDomain(controls.items, domains ?? [])
   const nav = useListKeyboardNav({ count: controls.items.length })
 
   const count = (s: string) => mailboxes.filter((m) => m.status === s).length
@@ -241,10 +250,9 @@ export function MailboxesPage() {
         />
       )}
 
-      {/* Above the list: the domain is the layer everything below it assumes.
-          Warmup and rotation don't help a domain with no SPF record. */}
-      <DomainAuthPanel />
-
+      {/* A failed domains load can't be told on the group headings themselves,
+          so it says so once here rather than reading as "nothing to fix". */}
+      {!isEmpty && domainsError && <DomainAuthNotice error={domainsError} />}
 
       {!isEmpty && (
         <SectionBar
@@ -318,16 +326,26 @@ export function MailboxesPage() {
               />
             ) : (
               <ul>
-                {controls.items.map((m, index) => (
-                  <MailboxRow
-                    key={m.id}
-                    mailbox={m}
-                    warmup={warmupByMailbox.get(m.id ?? '')}
-                    poolIdle={poolIdle}
-                    index={index}
-                    active={nav.isActive(index)}
-                    onHover={nav.onRowHover}
-                  />
+                {groups.map((group) => (
+                  <li key={group.domain}>
+                    <DomainAuthHeader group={group} isLoadingAuth={isLoadingDomains} />
+                    <ul aria-label={`Mailboxes on ${domainGroupLabel(group)}`}>
+                      {group.mailboxes.map((m, offset) => {
+                        const index = group.startIndex + offset
+                        return (
+                          <MailboxRow
+                            key={m.id}
+                            mailbox={m}
+                            warmup={warmupByMailbox.get(m.id ?? '')}
+                            poolIdle={poolIdle}
+                            index={index}
+                            active={nav.isActive(index)}
+                            onHover={nav.onRowHover}
+                          />
+                        )
+                      })}
+                    </ul>
+                  </li>
                 ))}
               </ul>
             )}
