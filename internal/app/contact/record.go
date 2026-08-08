@@ -12,6 +12,12 @@ import (
 // exactly this error, so the two cases are indistinguishable to a client.
 var ErrNotFound = errors.New("contact not found")
 
+// ErrCompanyNotFound is the 404 for a company id that is not in the caller's
+// workspace. Kept distinct from ErrNotFound so the two 404s can say which record
+// was missing: both are workspace-scoped, so naming your own missing record
+// leaks nothing.
+var ErrCompanyNotFound = errors.New("company not found")
+
 // Record-page bounds. Neither list paginates: a record page renders a roster,
 // and the cap is what stops a contact with a pathological number of rows from
 // turning one page load into a scan. The caller asks the store for cap+1 rows

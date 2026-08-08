@@ -27,6 +27,27 @@ func (q *Queries) AddListMember(ctx context.Context, arg AddListMemberParams) er
 	return err
 }
 
+const companyExistsInWorkspace = `-- name: CompanyExistsInWorkspace :one
+SELECT EXISTS(SELECT 1 FROM companies WHERE workspace_id = $1 AND id = $2)
+`
+
+type CompanyExistsInWorkspaceParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Ownership pre-check for the company link. The composite FK
+// (company_id, workspace_id) -> companies(id, workspace_id) would refuse a
+// foreign company anyway, but only as a 23503 the caller cannot act on; this
+// turns it into a clean 404. The FK stays the backstop for the race where the
+// company is deleted between this check and the UPDATE.
+func (q *Queries) CompanyExistsInWorkspace(ctx context.Context, arg CompanyExistsInWorkspaceParams) (bool, error) {
+	row := q.db.QueryRow(ctx, companyExistsInWorkspace, arg.WorkspaceID, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const contactEnrollmentCounts = `-- name: ContactEnrollmentCounts :many
 SELECT COALESCE(stop_reason, '') AS stop_reason, count(*)::bigint AS n
 FROM sequence_enrollments
@@ -386,6 +407,28 @@ func (q *Queries) ListContactDeals(ctx context.Context, arg ListContactDealsPara
 		return nil, err
 	}
 	return items, nil
+}
+
+const setContactCompany = `-- name: SetContactCompany :execrows
+UPDATE contacts SET company_id = $1
+WHERE workspace_id = $2 AND id = $3
+`
+
+type SetContactCompanyParams struct {
+	CompanyID   pgtype.UUID `json:"company_id"`
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	ID          uuid.UUID   `json:"id"`
+}
+
+// Links a contact to a company, or unlinks it when company_id is NULL. Zero
+// affected rows means the contact is not in this workspace, which the caller
+// reports as 404 — the workspace pin is what makes that safe to say.
+func (q *Queries) SetContactCompany(ctx context.Context, arg SetContactCompanyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setContactCompany, arg.CompanyID, arg.WorkspaceID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertContact = `-- name: UpsertContact :one

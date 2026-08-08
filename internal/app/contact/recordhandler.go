@@ -1,7 +1,9 @@
 package contact
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -102,6 +104,40 @@ func (h *Handler) getContact(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, detailPayload(record))
 }
 
+// companyLinkRequest is the PUT /contacts/{id}/company body. CompanyID is a
+// pointer so an explicit null means "unlink" — a single-value PUT makes that
+// unambiguous, which is exactly why this is not a PATCH on the contact (a PATCH
+// would have to tell an ABSENT company_id apart from a null one, and getting
+// that wrong silently either unlinks or refuses to unlink).
+type companyLinkRequest struct {
+	CompanyID *uuid.UUID `json:"company_id"`
+}
+
+func (h *Handler) putContactCompany(w http.ResponseWriter, r *http.Request) {
+	ws, id, ok := workspaceAndID(w, r)
+	if !ok {
+		return
+	}
+	var req companyLinkRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "body must be {\"company_id\": \"<uuid>\"} or {\"company_id\": null}")
+		return
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		httpx.Error(w, http.StatusBadRequest, "body must contain one JSON object")
+		return
+	}
+	record, err := h.svc.SetCompany(r.Context(), ws, id, req.CompanyID)
+	if err != nil {
+		writeRecordError(w, err, "could not link contact to company")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, detailPayload(record))
+}
+
 func (h *Handler) getContactEngagement(w http.ResponseWriter, r *http.Request) {
 	ws, id, ok := workspaceAndID(w, r)
 	if !ok {
@@ -132,11 +168,14 @@ func workspaceAndID(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUI
 }
 
 func writeRecordError(w http.ResponseWriter, err error, message string) {
-	if errors.Is(err, ErrNotFound) {
+	switch {
+	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "contact not found")
-		return
+	case errors.Is(err, ErrCompanyNotFound):
+		httpx.Error(w, http.StatusNotFound, "company not found")
+	default:
+		httpx.Error(w, http.StatusInternalServerError, message)
 	}
-	httpx.Error(w, http.StatusInternalServerError, message)
 }
 
 func detailPayload(record Record) detailResponse {

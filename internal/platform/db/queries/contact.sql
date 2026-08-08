@@ -29,6 +29,21 @@ FROM contacts c
 LEFT JOIN companies co ON co.workspace_id = c.workspace_id AND co.id = c.company_id
 WHERE c.workspace_id = $1 AND c.id = $2;
 
+-- name: CompanyExistsInWorkspace :one
+-- Ownership pre-check for the company link. The composite FK
+-- (company_id, workspace_id) -> companies(id, workspace_id) would refuse a
+-- foreign company anyway, but only as a 23503 the caller cannot act on; this
+-- turns it into a clean 404. The FK stays the backstop for the race where the
+-- company is deleted between this check and the UPDATE.
+SELECT EXISTS(SELECT 1 FROM companies WHERE workspace_id = $1 AND id = $2);
+
+-- name: SetContactCompany :execrows
+-- Links a contact to a company, or unlinks it when company_id is NULL. Zero
+-- affected rows means the contact is not in this workspace, which the caller
+-- reports as 404 — the workspace pin is what makes that safe to say.
+UPDATE contacts SET company_id = sqlc.narg(company_id)
+WHERE workspace_id = sqlc.arg(workspace_id) AND id = sqlc.arg(id);
+
 -- name: GetContactSuppression :one
 -- "May this person be emailed at all" — the record page's first question.
 --

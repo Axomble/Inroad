@@ -592,6 +592,16 @@ const injectedRtkApi = api.injectEndpoints({
     getContact: build.query<GetContactApiResponse, GetContactApiArg>({
       query: (queryArg) => ({ url: `/contacts/${queryArg.id}` }),
     }),
+    setContactCompany: build.mutation<
+      SetContactCompanyApiResponse,
+      SetContactCompanyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/contacts/${queryArg.id}/company`,
+        method: "PUT",
+        body: queryArg.contactCompanyLink,
+      }),
+    }),
     getContactEngagement: build.query<
       GetContactEngagementApiResponse,
       GetContactEngagementApiArg
@@ -1679,6 +1689,12 @@ export type GetContactApiResponse =
   /** status 200 The contact record */ ContactDetail;
 export type GetContactApiArg = {
   id: string;
+};
+export type SetContactCompanyApiResponse =
+  /** status 200 The updated contact record */ ContactDetail;
+export type SetContactCompanyApiArg = {
+  id: string;
+  contactCompanyLink: ContactCompanyLink;
 };
 export type GetContactEngagementApiResponse =
   /** status 200 The contact's engagement rollup */ ContactEngagement;
@@ -2783,6 +2799,10 @@ export type ContactDetail = {
   created_at: string;
   updated_at: string;
 };
+export type ContactCompanyLink = {
+  /** The company to link this contact to, or null to unlink. Must be a company in the caller's workspace; anything else is 404. */
+  company_id: string | null;
+};
 export type ContactCampaignEnrollment = {
   campaign_id: string;
   campaign_name: string;
@@ -3599,6 +3619,7 @@ export const {
   useImportContactsMutation,
   useListContactsQuery,
   useGetContactQuery,
+  useSetContactCompanyMutation,
   useGetContactEngagementQuery,
   useListSendingDomainsQuery,
   useCheckSendingDomainMutation,

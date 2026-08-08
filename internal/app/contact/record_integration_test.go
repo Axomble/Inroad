@@ -6,11 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
 // recordFixture is one workspace with a full outreach history for a single
@@ -693,5 +697,126 @@ func TestEngagementOpensMeasurableIgnoresUnsentTrackedCampaigns(t *testing.T) {
 	}
 	if got.OpensMeasurable {
 		t.Fatal("a queued send on a tracked campaign made opens look measurable")
+	}
+}
+
+// companyRoster runs the EXACT query crm.PgStore.ListCompanyContacts runs, via the
+// shared generated package. The crm domain's store cannot be called from here
+// (app packages do not import each other), but the SQL is the real seam between
+// this write and that read — so driving the generated query directly proves the
+// round trip QA had to do by hand, without duplicating the statement.
+func (f recordFixture) companyRoster(t *testing.T, ctx context.Context, ws, companyID uuid.UUID) []string {
+	t.Helper()
+	rows, err := gen.New(f.pool).ListCompanyContacts(ctx, gen.ListCompanyContactsParams{
+		WorkspaceID: ws,
+		CompanyID:   pgtype.UUID{Bytes: companyID, Valid: true},
+		PageLimit:   50,
+	})
+	if err != nil {
+		t.Fatalf("company roster: %v", err)
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Email)
+	}
+	return out
+}
+
+// The end-to-end gap QA found: before this write path existed, contacts.company_id
+// was readable in three places and writable in none, so the company roster and
+// ContactDetail.company were structurally always empty. This test fails on the
+// code as it shipped.
+func TestSetCompanyMakesTheContactVisibleToBothReads(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+	// A contact inserted with company_id NULL, so the precondition is established
+	// by SQL rather than by the code under test — using SetCompany to set up
+	// "unlinked" would make the mutation that breaks SetCompany break the fixture
+	// instead of the assertion, and the test would stop testing the round trip.
+	contactID := f.contact(t, ctx, f.ws, "unlinked@acme.test", nil)
+	if roster := f.companyRoster(t, ctx, f.ws, f.companyID); len(roster) != 1 {
+		t.Fatalf("roster = %v, want only recordSetup's own contact before the link", roster)
+	}
+
+	linked, err := f.svc.SetCompany(ctx, f.ws, contactID, &f.companyID)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	// Read 1: the contact record's own company field.
+	if linked.Company == nil || linked.Company.ID != f.companyID || linked.Company.Name != "Acme" {
+		t.Fatalf("company = %+v, want the linked Acme row", linked.Company)
+	}
+	// Re-read through GET rather than trusting the write's return value.
+	fetched, err := f.svc.Record(ctx, f.ws, contactID)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if fetched.Company == nil || fetched.Company.ID != f.companyID {
+		t.Fatalf("re-read company = %+v, want the link to have persisted", fetched.Company)
+	}
+	// Read 2: the company's contact roster, via the crm domain's own SQL. This is
+	// the read that could never return this contact before the write path existed.
+	roster := f.companyRoster(t, ctx, f.ws, f.companyID)
+	if !slices.Contains(roster, "unlinked@acme.test") {
+		t.Fatalf("roster = %v, want it to include the newly linked contact", roster)
+	}
+
+	// And unlinking removes it from both again.
+	if _, err := f.svc.SetCompany(ctx, f.ws, contactID, nil); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	after, err := f.svc.Record(ctx, f.ws, contactID)
+	if err != nil {
+		t.Fatalf("Record after unlink: %v", err)
+	}
+	if after.Company != nil {
+		t.Fatalf("company = %+v, want nil after unlinking", after.Company)
+	}
+	if roster := f.companyRoster(t, ctx, f.ws, f.companyID); slices.Contains(roster, "unlinked@acme.test") {
+		t.Fatalf("roster = %v, want the unlinked contact gone", roster)
+	}
+}
+
+// A company from another workspace is refused, and the tenant FK is never even
+// reached — the pre-check turns it into a clean 404 instead of a 23503.
+func TestSetCompanyRefusesAnotherWorkspacesCompany(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+	foreign := f.company(t, ctx, f.other, "Foreign Inc", "foreign.test")
+
+	_, err := f.svc.SetCompany(ctx, f.ws, f.contactID, &foreign)
+	if !errors.Is(err, ErrCompanyNotFound) {
+		t.Fatalf("err = %v, want ErrCompanyNotFound", err)
+	}
+	// The contact's original link is untouched.
+	got, err := f.svc.Record(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got.Company == nil || got.Company.ID != f.companyID {
+		t.Fatalf("company = %+v, want the original link intact", got.Company)
+	}
+	// And the foreign company's roster never saw this contact.
+	if roster := f.companyRoster(t, ctx, f.other, foreign); len(roster) != 0 {
+		t.Fatalf("foreign roster = %v, want empty", roster)
+	}
+}
+
+// Writing a contact from the wrong workspace affects zero rows and is a 404, not
+// a silent no-op that reports success.
+func TestSetCompanyIsWorkspacePinnedOnTheContact(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+
+	if _, err := f.svc.SetCompany(ctx, f.other, f.contactID, nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-workspace write err = %v, want ErrNotFound", err)
+	}
+	// The contact still belongs to its company: nothing was written.
+	got, err := f.svc.Record(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if got.Company == nil {
+		t.Fatal("a cross-workspace write unlinked the contact")
 	}
 }

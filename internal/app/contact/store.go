@@ -71,6 +71,14 @@ type Store interface {
 	// Get returns the contact and its company link, without any child list.
 	// A contact outside workspaceID yields ErrNotFound.
 	Get(ctx context.Context, workspaceID, contactID uuid.UUID) (Record, error)
+	// CompanyExists reports whether companyID is a company in workspaceID. The
+	// contact domain reads the companies table directly through sqlc rather than
+	// calling the crm domain: app packages do not import each other, and this is
+	// a one-column ownership check, not a use of another domain's behaviour.
+	CompanyExists(ctx context.Context, workspaceID, companyID uuid.UUID) (bool, error)
+	// SetCompany links the contact to companyID, or unlinks it when companyID is
+	// nil. ErrNotFound when the contact is not in workspaceID.
+	SetCompany(ctx context.Context, workspaceID, contactID uuid.UUID, companyID *uuid.UUID) error
 	// Suppression reports why the contact may not be emailed, or nil when no
 	// address of theirs is on the workspace suppression list.
 	Suppression(ctx context.Context, workspaceID, contactID uuid.UUID) (*RecordSuppression, error)
