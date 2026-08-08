@@ -2,7 +2,7 @@ import { fireEvent, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { ContactDetailPage } from './contact-detail-page'
-import type { ContactDetail, ContactEngagement } from './api'
+import type { ContactDetail, ContactEngagement, ContactSuppression } from './api'
 
 // The contact record answers two questions in order: may we email this person,
 // and what have they done with the mail we sent. The first outranks everything
@@ -48,6 +48,7 @@ const contact = (overrides: Partial<ContactDetail> = {}): ContactDetail => ({
       updated_at: '2026-08-01T00:00:00Z',
     },
   ],
+  deal_count: 1,
   deals_truncated: false,
   created_at: '2026-08-01T00:00:00Z',
   updated_at: '2026-08-01T00:00:00Z',
@@ -65,11 +66,13 @@ const engagement = (overrides: Partial<ContactEngagement> = {}): ContactEngageme
   open_rate: 0.5,
   click_rate: 0.25,
   campaigns_enrolled: 1,
+  opens_measurable: true,
   last_activity_at: '2026-08-05T09:15:00Z',
   campaigns: [
     {
       campaign_id: 'ca-1',
       campaign_name: 'Q3 outbound',
+      tracking_enabled: true,
       status: 'stopped',
       current_step: 3,
       stop_reason: 'replied',
@@ -126,7 +129,7 @@ test('a contact who may be emailed carries no suppression warning', async () => 
 test('a suppressed primary address says plainly that this person must not be emailed', async () => {
   contactResponse = () =>
     json(contact({
-      suppression: { reason: 'complaint', email: 'dana@acme.test', is_primary_email: true, since: '2026-07-04T00:00:00Z' },
+      suppression: { reason: 'complaint', email: 'dana@acme.test', is_primary_email: true, suppressed_at: '2026-07-04T00:00:00Z' },
     }))
   renderWithProviders(<ContactDetailPage contactId="c-1" />)
 
@@ -142,15 +145,40 @@ test('a suppressed primary address says plainly that this person must not be ema
 test('a suppressed secondary address is a warning, not a block, and reads differently', async () => {
   contactResponse = () =>
     json(contact({
-      suppression: { reason: 'bounce', email: 'old@acme.test', is_primary_email: false, since: '2026-07-04T00:00:00Z' },
+      suppression: { reason: 'bounce', email: 'old@acme.test', is_primary_email: false, suppressed_at: '2026-07-04T00:00:00Z' },
     }))
   renderWithProviders(<ContactDetailPage contactId="c-1" />)
 
   const notice = await panel(/one of this contact’s addresses is suppressed/i)
   expect(within(notice).getByText('old@acme.test')).toBeInTheDocument()
   expect(within(notice).getByText(/primary address is still deliverable/i)).toBeInTheDocument()
+  // Only a hard bounce reaches the suppression list — a soft one never suppresses
+  // — so the copy has to say permanent rather than merely "it bounced".
+  expect(within(notice).getByText(/permanently rejected mail/i)).toBeInTheDocument()
   // Explicitly not the hard-stop wording.
   expect(screen.queryByRole('heading', { name: /do not email this contact/i })).not.toBeInTheDocument()
+})
+
+test('a suppression reason this UI has never heard of is still stated', async () => {
+  // A suppression notice that states no reason is the worst failure on this page,
+  // so an unrecognised literal is shown verbatim rather than dropped. The cast is
+  // the point of the test: it simulates the API adding a reason before the UI
+  // learns about it.
+  contactResponse = () =>
+    json(contact({
+      suppression: {
+        reason: 'quarantined_by_provider' as ContactSuppression['reason'],
+        email: 'dana@acme.test',
+        is_primary_email: true,
+        suppressed_at: '2026-07-04T00:00:00Z',
+      },
+    }))
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+
+  const notice = await panel(/do not email this contact/i)
+  expect(within(notice).getByText(/suppressed for: quarantined_by_provider/i)).toBeInTheDocument()
+  // The hard-stop consequence does not depend on knowing the reason.
+  expect(within(notice).getByText(/campaigns will skip this contact/i)).toBeInTheDocument()
 })
 
 test('engagement shows lifetime counts, with opens hedged rather than stated flatly', async () => {
@@ -174,6 +202,164 @@ test('an enrollment explains why the sequence stopped, which is often the questi
   expect(await within(engagementPanel).findByRole('link', { name: 'Q3 outbound' })).toHaveAttribute('href', '/app/campaigns/ca-1')
   expect(within(engagementPanel).getByText(/step 3 was the last sent/i)).toBeInTheDocument()
   expect(within(engagementPanel).getByText(/stopped: they replied/i)).toBeInTheDocument()
+})
+
+test('an unmeasured zero is labelled unmeasured, not reported as nobody opening', async () => {
+  // Tracking off contributes to emails_sent but structurally cannot contribute an
+  // open or a click, so its zero is an absence of measurement, not a result.
+  engagementResponse = () =>
+    json(engagement({
+      opens_indicative: 0,
+      clicks: 0,
+      open_rate: 0,
+      click_rate: 0,
+      opens_measurable: false,
+      campaigns: [{
+        campaign_id: 'ca-1',
+        campaign_name: 'Untracked run',
+        tracking_enabled: false,
+        status: 'completed',
+        current_step: 2,
+        stop_reason: null,
+        enrolled_at: '2026-07-01T00:00:00Z',
+        last_sent_at: '2026-08-04T00:00:00Z',
+      }],
+    }))
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+
+  const engagementPanel = await panel('Email engagement')
+  expect(await within(engagementPanel).findAllByText('Not measured')).toHaveLength(2)
+  // Present tense: the flag reports the campaigns' current setting, and nothing
+  // records what it was at send time, so the copy must not assert about the past.
+  expect(within(engagementPanel).getByText(/tracking is off for this contact's campaigns/i)).toBeInTheDocument()
+  expect(within(engagementPanel).queryByText(/never measured/i)).not.toBeInTheDocument()
+  // A rate computed over an unmeasured zero would be a fabricated 0%.
+  expect(within(engagementPanel).queryByText(/of sent/)).not.toBeInTheDocument()
+  // And the campaign responsible is named, for whoever drills in.
+  expect(within(engagementPanel).getByText(/no open or click tracking on this campaign/i)).toBeInTheDocument()
+  // Replies do not depend on tracking, so that number stands.
+  expect(within(engagementPanel).getByText('Replies')).toBeInTheDocument()
+})
+
+test('a real zero is not explained away when the visible enrolments only look untracked', async () => {
+  // The scenario the server's `opens_measurable` exists for: every enrolment
+  // inside the 20-row window has tracking off, but an older campaign outside it
+  // was tracked and did send — so the zero is genuine. Deriving the hedge from
+  // `campaigns[].tracking_enabled` here would answer false and explain away a real
+  // result, which is worse than a bare zero: uninformative beats misleading.
+  engagementResponse = () =>
+    json(engagement({
+      opens_indicative: 0,
+      clicks: 0,
+      open_rate: 0,
+      click_rate: 0,
+      opens_measurable: true,
+      campaigns_enrolled: 37,
+      campaigns_truncated: true,
+      campaigns: [{
+        campaign_id: 'ca-1',
+        campaign_name: 'Untracked run',
+        tracking_enabled: false,
+        status: 'completed',
+        current_step: 2,
+        stop_reason: null,
+        enrolled_at: '2026-07-01T00:00:00Z',
+        last_sent_at: '2026-08-04T00:00:00Z',
+      }],
+    }))
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+
+  const engagementPanel = await panel('Email engagement')
+  expect(await within(engagementPanel).findByText(/prefetch images/i)).toBeInTheDocument()
+  expect(within(engagementPanel).queryByText('Not measured')).not.toBeInTheDocument()
+  expect(within(engagementPanel).queryByText(/tracking is off for this contact's campaigns/i)).not.toBeInTheDocument()
+  // The visible row is still marked, because which campaign was untracked is a
+  // real detail — it just doesn't get to decide the summary.
+  expect(within(engagementPanel).getByText(/no open or click tracking on this campaign/i)).toBeInTheDocument()
+  // The cap itself is stated, against the true total the counts keep exact.
+  expect(within(engagementPanel).getByText(/showing the 1 most recent of 37 enrolments/i)).toBeInTheDocument()
+})
+
+test('the unmeasured hedge no longer depends on the enrolment window', async () => {
+  // The complement of the test above, and the reason the client-side guard could
+  // go: same truncated, all-untracked window, but `opens_measurable: false`. The
+  // server computed that over the whole send history, so the hedge must still fire
+  // — under the old `campaigns_truncated` guard this case stayed silent, which is
+  // exactly the contact it was least able to help.
+  engagementResponse = () =>
+    json(engagement({
+      opens_indicative: 0,
+      clicks: 0,
+      open_rate: 0,
+      click_rate: 0,
+      opens_measurable: false,
+      campaigns_enrolled: 37,
+      campaigns_truncated: true,
+      campaigns: [{
+        campaign_id: 'ca-1',
+        campaign_name: 'Untracked run',
+        tracking_enabled: false,
+        status: 'completed',
+        current_step: 2,
+        stop_reason: null,
+        enrolled_at: '2026-07-01T00:00:00Z',
+        last_sent_at: '2026-08-04T00:00:00Z',
+      }],
+    }))
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+
+  const engagementPanel = await panel('Email engagement')
+  expect(await within(engagementPanel).findAllByText('Not measured')).toHaveLength(2)
+  expect(within(engagementPanel).getByText(/tracking is off for this contact's campaigns/i)).toBeInTheDocument()
+  expect(within(engagementPanel).queryByText(/of sent/)).not.toBeInTheDocument()
+})
+
+test('a stop reason no counter reflects is still made visible', async () => {
+  // `failed` — a degenerate send cap, or an exhausted cap-defer ceiling — is
+  // deliberately counted in neither `bounces` nor `unsubscribes`, so this row is
+  // the only place it surfaces at all.
+  engagementResponse = () =>
+    json(engagement({
+      bounces: 0,
+      unsubscribes: 0,
+      campaigns: [{
+        campaign_id: 'ca-2',
+        campaign_name: 'Capped run',
+        tracking_enabled: true,
+        status: 'stopped',
+        current_step: 1,
+        stop_reason: 'failed',
+        enrolled_at: '2026-07-01T00:00:00Z',
+        last_sent_at: null,
+      }],
+    }))
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+
+  const engagementPanel = await panel('Email engagement')
+  expect(await within(engagementPanel).findByText(/stopped: sending failed/i)).toBeInTheDocument()
+})
+
+test('an unrecognised stop reason is shown verbatim rather than swallowed', async () => {
+  // `stop_reason` is an open string in the contract. A reason this UI has never
+  // heard of must still reach the reader — silently dropping it would hide the
+  // one fact they came for.
+  engagementResponse = () =>
+    json(engagement({
+      campaigns: [{
+        campaign_id: 'ca-3',
+        campaign_name: 'Future run',
+        tracking_enabled: true,
+        status: 'stopped',
+        current_step: 2,
+        stop_reason: 'quarantined_by_provider',
+        enrolled_at: '2026-07-01T00:00:00Z',
+        last_sent_at: null,
+      }],
+    }))
+  renderWithProviders(<ContactDetailPage contactId="c-1" />)
+
+  const engagementPanel = await panel('Email engagement')
+  expect(await within(engagementPanel).findByText(/stopped: quarantined_by_provider/i)).toBeInTheDocument()
 })
 
 test('a contact never sent to gets facts, not zeroes dressed as rates', async () => {
@@ -221,11 +407,16 @@ test('the record links out to the company and to each deal', async () => {
   expect(within(await panel('Deals')).getByText('Qualified')).toBeInTheDocument()
 })
 
-test('a capped deal list admits it was capped', async () => {
-  contactResponse = () => json(contact({ deals_truncated: true }))
+test('a capped deal list names the true total rather than hinting at more', async () => {
+  // `deal_count` is counted uncapped, so the notice can be specific — and the stat
+  // strip shows the real number even though only one deal is listed below it.
+  contactResponse = () => json(contact({ deals_truncated: true, deal_count: 38 }))
   renderWithProviders(<ContactDetailPage contactId="c-1" />)
 
-  expect(await screen.findByText(/showing the first 1 deals in board order/i)).toBeInTheDocument()
+  expect(await screen.findByText(/showing the first 1 of 38 deals, in board order/i)).toBeInTheDocument()
+  const stat = screen.getAllByText('Deals').map((node) => node.closest('[data-slot="stat"]')).find(Boolean)
+  expect(stat?.textContent).toContain('38')
+  expect(stat?.textContent).toContain('1 shown below')
 })
 
 test('an unlinked contact with no deals states both, rather than looking broken', async () => {

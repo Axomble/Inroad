@@ -76,10 +76,12 @@ export function ContactDetailPage({ contactId }: { contactId: string }) {
           outranks any number on the page. */}
       {contact.suppression ? <SuppressionNotice suppression={contact.suppression} /> : null}
       <StatStrip>
+        {/* `deal_count` is counted independently of the 25-deal cap, so this is
+            the true total even when the list below it is short. */}
         <Stat
           label="Deals"
-          value={`${contact.deals.length}${contact.deals_truncated ? '+' : ''}`}
-          sub={contact.deals_truncated ? 'first 25 shown' : 'on this contact'}
+          value={contact.deal_count}
+          sub={contact.deals_truncated ? `${contact.deals.length} shown below` : 'on this contact'}
         />
         <Stat label="Next actions" value={openTasks.length} sub="Open or in progress" />
       </StatStrip>
@@ -95,11 +97,12 @@ export function ContactDetailPage({ contactId }: { contactId: string }) {
                   {contact.deals.map((deal) => <DealRow key={deal.id} deal={deal} />)}
                 </ul>
               )}
-              {/* The cap is a property of the response, so say so rather than let
-                  25 deals read as all of them. */}
+              {/* The cap is a property of the response, so say so — and name the
+                  true total, which the server counts uncapped, rather than
+                  leaving "and some more" to the reader's imagination. */}
               {contact.deals_truncated ? (
                 <p role="status" className="pt-2 text-xs text-muted-foreground">
-                  Showing the first {contact.deals.length} deals in board order. This contact has more.
+                  Showing the first {contact.deals.length} of {contact.deal_count} deals, in board order.
                 </p>
               ) : null}
             </Section>

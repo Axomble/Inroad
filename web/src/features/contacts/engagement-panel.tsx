@@ -46,6 +46,7 @@ export function EngagementPanel({ contactId }: { contactId: string }) {
 
 function Engagement({ engagement }: { engagement: ContactEngagement }) {
   const sentAnything = engagement.emails_sent > 0
+  const unmeasured = opensUnmeasured(engagement)
 
   return (
     <>
@@ -56,20 +57,31 @@ function Engagement({ engagement }: { engagement: ContactEngagement }) {
             mail, so an open is a hint and a click is evidence. */}
         <Metric
           label="Opens (indicative)"
-          value={engagement.opens_indicative}
-          sub={sentAnything ? `${percent(engagement.open_rate)} of sent` : undefined}
+          value={unmeasured && engagement.opens_indicative === 0 ? 'Not measured' : engagement.opens_indicative}
+          sub={sentAnything && !unmeasured ? `${percent(engagement.open_rate)} of sent` : undefined}
         />
         <Metric
           label="Clicks"
-          value={engagement.clicks}
-          sub={sentAnything ? `${percent(engagement.click_rate)} of sent` : undefined}
+          value={unmeasured && engagement.clicks === 0 ? 'Not measured' : engagement.clicks}
+          sub={sentAnything && !unmeasured ? `${percent(engagement.click_rate)} of sent` : undefined}
         />
         <Metric label="Replies" value={engagement.replies} />
       </dl>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Opens are approximate — mail providers prefetch images, which registers as an open nobody made. Clicks and
-        replies are the reliable signals.
-      </p>
+      {unmeasured ? (
+        // Present tense, deliberately. The flag reflects each campaign's *current*
+        // tracking setting — nothing records what it was at send time — so
+        // "tracking is off" is defensible where "this was never measured" would be
+        // a claim about the past that a later toggle could falsify.
+        <p className="mt-2 text-xs text-muted-foreground">
+          Open and click tracking is off for this contact's campaigns, so there is nothing to measure here — these are
+          not zeroes. Replies are counted either way.
+        </p>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Opens are approximate — mail providers prefetch images, which registers as an open nobody made. Clicks and
+          replies are the reliable signals.
+        </p>
+      )}
       <dl className="mt-4 grid gap-3 sm:grid-cols-3">
         <Metric label="Bounced" value={engagement.bounces} />
         <Metric label="Unsubscribed" value={engagement.unsubscribes} />
@@ -131,6 +143,11 @@ function Enrollment({ enrollment }: { enrollment: ContactCampaignEnrollment }) {
         </Link>
         <span className="text-xs font-medium text-muted-foreground">{statusLabel(enrollment.status)}</span>
       </div>
+      {/* Which campaign had tracking off is the detail someone drills into after
+          the summary above tells them the opens look wrong. */}
+      {!enrollment.tracking_enabled ? (
+        <p className="mt-1 text-xs text-muted-foreground">No open or click tracking on this campaign.</p>
+      ) : null}
       <p className="mt-1 text-xs text-muted-foreground">
         {enrollment.current_step === 0 ? 'Enrolled, not yet sent to' : `Step ${enrollment.current_step} was the last sent`}
         {' · '}
@@ -196,4 +213,20 @@ function stopReasonLabel(reason: string): string {
 /** The API sends 0..1 fractions, never percentages, and never NaN. */
 function percent(rate: number): string {
   return `${(Math.round(rate * 1000) / 10).toLocaleString()}%`
+}
+
+/**
+ * True when a zero in opens or clicks means "nothing to measure" rather than
+ * "nobody did it". A campaign with tracking off still contributes to
+ * `emails_sent`, but cannot contribute an open or a click.
+ *
+ * This reads the server's `opens_measurable`, which is computed over the whole
+ * send history. It must NOT be derived from `campaigns[].tracking_enabled`: that
+ * list is capped at 20 newest-first, so for a contact whose newest enrolments are
+ * untracked and whose older ones were tracked, a client-side `some()` answers
+ * false and explains away a genuine zero — a wrong hedge is worse than an
+ * uninformative one.
+ */
+function opensUnmeasured(engagement: ContactEngagement): boolean {
+  return engagement.emails_sent > 0 && !engagement.opens_measurable
 }
