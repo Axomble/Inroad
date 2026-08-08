@@ -2,7 +2,12 @@
 // a hook (not a component) and co-exporting hooks with components from one
 // file trips `react/only-export-components`'s fast-refresh warning.
 import { useState } from 'react'
-import { httpStatus, isFetchBaseQueryError } from '@/lib/rtk-error'
+import { httpStatus, isEmailNotVerified, isFetchBaseQueryError } from '@/lib/rtk-error'
+// Read-only cross-feature reuse of the auth feature's copy helper —
+// component-free module, the established exception (see mailboxes-page.tsx
+// pulling the warmup query). Keeps the gate's explanation and the 403's error
+// message a single sentence defined once.
+import { emailVerificationHint } from '@/features/auth/use-email-verified'
 import type { Campaign } from '@/store/api'
 import { usePauseCampaignMutation, useResumeCampaignMutation } from './api'
 
@@ -31,6 +36,23 @@ export function lifecycleErrorMessage(action: 'pause' | 'resume' | 'delete', err
   if (status === 409) return reason ?? `This campaign can't be ${pastTense(action)} from its current status.`
   if (status === 404) return 'This campaign no longer exists — refresh the page.'
   return `Couldn't ${action} this campaign. Please try again.`
+}
+
+/** Completes `emailVerificationHint`'s sentence; one wording for gate + error. */
+export const LAUNCH_GATED_ACTION = 'launch a campaign'
+
+/**
+ * Copy for a failed launch. Unlike pause/resume/delete, launch sits behind
+ * `auth.RequireVerified`, so its 403 gets the actionable verification sentence
+ * — the client-side gate makes that 403 unlikely, never impossible (a stale
+ * `/auth/me`, or a second tab).
+ */
+export function launchErrorMessage(error: unknown): string {
+  if (isEmailNotVerified(error)) return emailVerificationHint(LAUNCH_GATED_ACTION)
+  const status = httpStatus(error)
+  if (status === 409) return 'Already launched.'
+  if (status === 422) return 'Target list is empty.'
+  return 'Launch failed.'
 }
 
 /**

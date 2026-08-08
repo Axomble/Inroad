@@ -20,11 +20,16 @@ function makeStep(overrides: Partial<SequenceStep> = {}): SequenceStep {
 }
 
 let testSendResponder: () => Response
+let authMeResponder: () => Response
 let requests: Array<{ method: string; url: string; body: unknown }>
+
+/** Signed in, so the form's `useEmailVerified` actually queries /auth/me. */
+const AUTHED = { auth: { status: 'authed' as const, accessToken: 'token', userEmail: 'operator@inroad.dev' } }
 
 beforeEach(() => {
   requests = []
   testSendResponder = () => jsonResponse({ queued: true }, 202)
+  authMeResponder = () => jsonResponse({ user_id: 'u-1', email: 'operator@inroad.dev', email_verified: true })
 
   vi.stubGlobal(
     'fetch',
@@ -35,6 +40,7 @@ beforeEach(() => {
       const body = isRequest ? await input.clone().json().catch(() => undefined) : undefined
       requests.push({ method, url, body })
 
+      if (url.includes('/auth/me')) return authMeResponder()
       if (url.endsWith('/test-send') && method === 'POST') return testSendResponder()
       return jsonResponse({})
     }),
@@ -117,6 +123,46 @@ test('a 429 test-send error surfaces the rate-limit copy', async () => {
   fireEvent.click(await screen.findByRole('button', { name: /^send test$/i }))
 
   expect(await screen.findByText(/too many test sends/i)).toBeInTheDocument()
+})
+
+// Email verification: POST /campaigns/{id}/test-send is behind
+// `auth.RequireVerified`. Saving the step itself is not, so only this control
+// is gated — over-gating would be its own bug.
+test('an unverified account cannot send a test, and the control says why', async () => {
+  authMeResponder = () => jsonResponse({ user_id: 'u-1', email: 'operator@inroad.dev', email_verified: false })
+
+  renderWithProviders(
+    <StepForm campaignId="c-1" step={makeStep()} isFirstStep onDone={vi.fn()} onCancel={vi.fn()} />,
+    { preloadedState: AUTHED },
+  )
+
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: /^send test$/i })).toHaveAttribute('aria-disabled', 'true'),
+  )
+  const button = screen.getByRole('button', { name: /^send test$/i })
+  const hintId = button.getAttribute('aria-describedby')
+  expect(document.getElementById(hintId ?? '')).toHaveTextContent(
+    /Verify your email address to send a test email\./,
+  )
+
+  fireEvent.click(button)
+  expect(requests.some((r) => r.url.endsWith('/test-send'))).toBe(false)
+
+  // The step's own Save is untouched — the server doesn't gate it.
+  expect(screen.getByRole('button', { name: /save step/i })).toBeEnabled()
+})
+
+test('a 403 email_not_verified test-send surfaces the verification copy', async () => {
+  testSendResponder = () => jsonResponse({ error: 'email_not_verified' }, 403)
+
+  renderWithProviders(
+    <StepForm campaignId="c-1" step={makeStep()} isFirstStep onDone={vi.fn()} onCancel={vi.fn()} />,
+    { preloadedState: { auth: { userEmail: 'operator@inroad.dev' } } },
+  )
+  fireEvent.click(await screen.findByRole('button', { name: /^send test$/i }))
+
+  expect(await screen.findByText(/Verify your email address to send a test email\./i)).toBeInTheDocument()
+  expect(screen.queryByText(/Couldn’t send the test email/i)).not.toBeInTheDocument()
 })
 
 test('the Send test button is disabled while the address field is empty', async () => {

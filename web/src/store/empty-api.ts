@@ -5,7 +5,7 @@ import {
   type FetchArgs,
   type FetchBaseQueryError,
 } from '@reduxjs/toolkit/query/react'
-import { withRetryAfter } from '@/lib/rtk-error'
+import { isEmailNotVerified, withRetryAfter } from '@/lib/rtk-error'
 import { setSession, clearSession } from './slices/auth'
 
 // The generated api.ts injects endpoints into this base. Never hand-edit api.ts.
@@ -57,6 +57,54 @@ const rawBaseQuery = fetchBaseQuery({
 let refreshing: Promise<Awaited<ReturnType<typeof rawBaseQuery>>> | null = null
 
 /**
+ * Endpoints that are reachable *without* a session. A 401 from one of these
+ * means "these credentials are wrong", never "your access token expired", so
+ * refreshing in response is pointless — and visible: a mistyped password on the
+ * login screen used to fire a doomed POST /auth/refresh on every attempt.
+ *
+ * Kept as an explicit list (rather than "anything under /auth") because plenty
+ * of /auth routes — /auth/me, /auth/sessions, /auth/api-keys, … — are ordinary
+ * authenticated requests whose 401 *should* be reauthed. Paths mirror
+ * `api/openapi.yaml`; the `status === 'anon'` guard below is the backstop that
+ * keeps a missed entry from being user-visible.
+ */
+const unauthenticatedPaths: ReadonlySet<string> = new Set([
+  '/auth/register',
+  '/auth/login',
+  '/auth/refresh',
+  '/auth/verify-email',
+  '/auth/verify-email/resend',
+  '/auth/password/forgot',
+  '/auth/password/reset',
+  '/auth/invites/accept',
+  '/auth/2fa/verify',
+  '/auth/passkeys/login/begin',
+  '/auth/passkeys/login/finish',
+  '/auth/email-otp/start',
+  '/auth/email-otp/verify',
+])
+
+/** The request path an RTK Query arg targets, query string stripped. */
+function requestPath(args: string | FetchArgs): string {
+  const url = typeof args === 'string' ? args : args.url
+  return url.split('?')[0] ?? url
+}
+
+/**
+ * Whether a 401 from this request is worth attempting a session refresh for.
+ * Two independent reasons to say no, so neither one carries the whole rule:
+ * the request is itself an unauthenticated endpoint (no session is implied by
+ * calling it), or the auth slice already concluded there is no session
+ * (`anon` — set by `clearSession`, i.e. by a failed bootstrap or a failed
+ * refresh). `idle` still refreshes: that's the pre-bootstrap window, where a
+ * 401 is exactly the expired-access-token case reauth exists for.
+ */
+function shouldAttemptReauth(args: string | FetchArgs, state: unknown): boolean {
+  if (unauthenticatedPaths.has(requestPath(args))) return false
+  return (state as { auth?: { status?: string } }).auth?.status !== 'anon'
+}
+
+/**
  * Wraps the raw base query with reauth-on-401: on a 401, refresh the session
  * once (via the httpOnly refresh cookie), replay the original request, and
  * fall back to clearing the session if the refresh itself fails.
@@ -68,7 +116,7 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
 ) => {
   let result = await rawBaseQuery(args, api, extra)
 
-  if (result.error?.status === 401) {
+  if (result.error?.status === 401 && shouldAttemptReauth(args, api.getState())) {
     refreshing ??= (async () => {
       try {
         return await rawBaseQuery({ url: '/auth/refresh', method: 'POST' }, api, extra)
@@ -90,7 +138,7 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
   // email_not_verified — refetch `authMe` everywhere it's subscribed (the
   // app-wide unverified banner) so the prompt shows up immediately instead
   // of on its next natural poll.
-  if (result.error?.status === 403 && (result.error.data as { error?: string } | undefined)?.error === 'email_not_verified') {
+  if (isEmailNotVerified(result.error)) {
     api.dispatch(emptyApi.util.invalidateTags([{ type: 'Session', id: 'CURRENT' }]))
   }
 

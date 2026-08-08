@@ -4,7 +4,17 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setSession, clearSession } from '@/store/slices/auth'
 import { api } from '@/store/api'
 
-let bootstrapPromise: Promise<void> | null = null
+/**
+ * Vite HMR re-evaluates this module when it (or a dependency) is edited, which
+ * resets a plain module-level guard and fires a second bootstrap mid-session —
+ * one of the stray `/auth/refresh` calls seen in dev. `import.meta.hot.data`
+ * survives the module swap, so the once-per-tab guarantee holds in dev too.
+ * `import.meta.hot` is undefined in a production build, so this reads as a
+ * plain module-level singleton there.
+ */
+const hotData = import.meta.hot?.data as { bootstrapPromise?: Promise<void> } | undefined
+
+let bootstrapPromise: Promise<void> | null = hotData?.bootstrapPromise ?? null
 
 /**
  * Runs the silent-refresh bootstrap exactly once for the lifetime of the tab:
@@ -23,6 +33,7 @@ export function runAuthBootstrap(dispatch: AppDispatch): Promise<void> {
       dispatch(clearSession())
     }
   })()
+  if (hotData) hotData.bootstrapPromise = bootstrapPromise
   return bootstrapPromise
 }
 
