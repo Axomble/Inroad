@@ -67,6 +67,30 @@ type Store interface {
 	// CountMatches counts matching contacts, stopping at capAt. A result equal
 	// to capAt means "at least capAt", never "exactly capAt".
 	CountMatches(ctx context.Context, workspaceID uuid.UUID, f SearchFilter, capAt int) (int64, error)
+
+	// Get returns the contact and its company link, without any child list.
+	// A contact outside workspaceID yields ErrNotFound.
+	Get(ctx context.Context, workspaceID, contactID uuid.UUID) (Record, error)
+	// CompanyExists reports whether companyID is a company in workspaceID. The
+	// contact domain reads the companies table directly through sqlc rather than
+	// calling the crm domain: app packages do not import each other, and this is
+	// a one-column ownership check, not a use of another domain's behaviour.
+	CompanyExists(ctx context.Context, workspaceID, companyID uuid.UUID) (bool, error)
+	// SetCompany links the contact to companyID, or unlinks it when companyID is
+	// nil. ErrNotFound when the contact is not in workspaceID.
+	SetCompany(ctx context.Context, workspaceID, contactID uuid.UUID, companyID *uuid.UUID) error
+	// Suppression reports why the contact may not be emailed, or nil when no
+	// address of theirs is on the workspace suppression list.
+	Suppression(ctx context.Context, workspaceID, contactID uuid.UUID) (*RecordSuppression, error)
+	// ListDeals returns up to limit deals the contact is primary on, in board
+	// order. The service asks for one more than the cap to detect truncation.
+	ListDeals(ctx context.Context, workspaceID, contactID uuid.UUID, limit int32) ([]RecordDeal, error)
+	SendStats(ctx context.Context, workspaceID, contactID uuid.UUID) (SendStats, error)
+	TrackingStats(ctx context.Context, workspaceID, contactID uuid.UUID) (TrackingStats, error)
+	// EnrollmentCounts returns enrollment counts keyed by stop_reason, with ""
+	// for an enrollment that has not stopped.
+	EnrollmentCounts(ctx context.Context, workspaceID, contactID uuid.UUID) (map[string]int64, error)
+	ListCampaigns(ctx context.Context, workspaceID, contactID uuid.UUID, limit int32) ([]CampaignEnrollment, error)
 }
 
 // PgStore implements Store by wrapping sqlc-generated queries plus, for the

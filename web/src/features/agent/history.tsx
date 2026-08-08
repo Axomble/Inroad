@@ -3,6 +3,7 @@ import { Archive, Check, MessageSquarePlus, Pencil, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { formatMonthYear, formatShortDateTime } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import { AgentAlert } from './alert'
 import { agentErrorMessage } from './error-copy'
@@ -22,7 +23,7 @@ function dateGroup(value: string): string {
   if (days === 0) return 'Today'
   if (days === 1) return 'Yesterday'
   if (days < 7) return 'This week'
-  return date.toLocaleDateString([], { month: 'long', year: 'numeric' })
+  return formatMonthYear(date)
 }
 
 function grouped(threads: AgentThread[]): Array<[string, AgentThread[]]> {
@@ -121,7 +122,7 @@ function HistoryRow({
           {thread.title || 'New conversation'}
         </span>
         <span className="mt-0.5 block text-[9px] text-faint">
-          {new Date(thread.updated_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+          {formatShortDateTime(thread.updated_at)}
         </span>
       </button>
       <div className="mr-1 flex opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">

@@ -60,6 +60,29 @@ test('the Deliverability screen is reachable from the nav, with no invented coun
   expect(link).toHaveTextContent(/^Deliverability$/)
 })
 
+test('groups the three CRM record types under one CRM heading', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'member', status: 'authed' } },
+  })
+  expect(screen.getByText('CRM')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: /contacts/i })).toHaveAttribute('href', '/app/contacts')
+  expect(screen.getByRole('link', { name: /companies/i })).toHaveAttribute('href', '/app/companies')
+  expect(screen.getByRole('link', { name: /deals/i })).toHaveAttribute('href', '/app/deals')
+  // Campaigns is outbound, not a CRM record type, so it stays under Outreach.
+  expect(screen.getByRole('link', { name: /campaigns/i })).toHaveAttribute('href', '/app/campaigns')
+})
+
+test('lists Deals exactly once, and no longer offers a row called CRM', () => {
+  renderWithProviders(<AppSidebar />, {
+    preloadedState: { auth: { role: 'member', status: 'authed' } },
+  })
+  // The old nav had a Deals row *and* a "CRM" row whose page opened on a deals
+  // tab. Two ways to the same records is the bug this grouping fixes.
+  expect(screen.getAllByRole('link', { name: /deals/i })).toHaveLength(1)
+  expect(screen.queryByRole('link', { name: /^CRM$/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: /revenue workspace/i })).not.toBeInTheDocument()
+})
+
 test('hides the API keys nav item from a non-admin member', () => {
   renderWithProviders(<AppSidebar />, {
     preloadedState: { auth: { role: 'member', status: 'authed' } },

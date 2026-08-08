@@ -129,6 +129,23 @@ func (s *Service) UpdateCompanyWithActor(ctx context.Context, workspaceID, id uu
 	return company, nil
 }
 
+// ListCompanyContacts and ListCompanyDeals resolve the company first, so an
+// unknown or cross-workspace id is 404 rather than an empty page that reads like
+// a company with no relations.
+func (s *Service) ListCompanyContacts(ctx context.Context, workspaceID, companyID uuid.UUID, page PageRequest) (Page[CompanyContact], error) {
+	if _, err := s.store.GetCompany(ctx, workspaceID, companyID); err != nil {
+		return Page[CompanyContact]{}, err
+	}
+	return s.store.ListCompanyContacts(ctx, workspaceID, companyID, normalizePage(page))
+}
+
+func (s *Service) ListCompanyDeals(ctx context.Context, workspaceID, companyID uuid.UUID, page PageRequest) (Page[Deal], error) {
+	if _, err := s.store.GetCompany(ctx, workspaceID, companyID); err != nil {
+		return Page[Deal]{}, err
+	}
+	return s.store.ListCompanyDeals(ctx, workspaceID, companyID, normalizePage(page))
+}
+
 func (s *Service) DeleteCompany(ctx context.Context, workspaceID, id uuid.UUID) error {
 	return translateDeleteError(s.store.DeleteCompany(ctx, workspaceID, id))
 }

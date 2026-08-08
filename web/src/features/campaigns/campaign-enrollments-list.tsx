@@ -2,20 +2,22 @@ import { useEffect, useState } from 'react'
 import { EmptyBlock, SectionBar } from '@/components/layout/page'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { formatDate } from '@/lib/datetime'
 import { httpStatus } from '@/lib/rtk-error'
 import { ReplyClassPill } from '@/components/shared/reply-class-pill'
 import { useListCampaignEnrollmentsQuery, type CampaignEnrollment } from './api'
 
 /**
- * A short, human date for an enrollment's reply timestamp, or an em-dash when
- * the contact hasn't replied (or the timestamp is unparseable). Kept
- * locale-aware but stable — no time-of-day noise in a dense list.
+ * An enrollment's reply timestamp, or an em-dash when the contact hasn't replied
+ * (or the timestamp is unparseable). Date only: no time-of-day noise in a dense
+ * list. The guard is the reason this wraps `formatDate` rather than calling it
+ * inline — an unparseable value would otherwise throw out of a render.
  */
 function formatRepliedAt(iso: string | null): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  return formatDate(d)
 }
 
 /**

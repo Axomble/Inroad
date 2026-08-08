@@ -23,6 +23,12 @@ const (
 	cursorDeals     cursorKind = "deals"
 	cursorNotes     cursorKind = "notes"
 	cursorTasks     cursorKind = "tasks"
+	// The company sub-resources get their own kinds even though the deal
+	// ordering is identical to cursorDeals: a cursor names a position in ONE
+	// listing, and replaying a whole-workspace deal cursor against a single
+	// company's deals lands on a row that may not be in that listing at all.
+	cursorCompanyContacts cursorKind = "company_contacts"
+	cursorCompanyDeals    cursorKind = "company_deals"
 )
 
 func encodeCursor(kind cursorKind, keys ...string) string {

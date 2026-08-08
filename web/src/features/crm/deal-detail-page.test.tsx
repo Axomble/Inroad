@@ -2,7 +2,8 @@ import { screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { DealDetailPage } from './deal-detail-page'
-import type { CrmDeal, CrmNote, CrmTask } from './api'
+import type { CrmDeal } from './api'
+import type { CrmNote, CrmTask } from '@/features/records/api'
 
 // The detail page is where a reader decides whether to trust a record. Every
 // row it shows — the deal, its notes, its tasks, its events — has to say who

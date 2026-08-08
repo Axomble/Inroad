@@ -35,16 +35,10 @@ function detectOs(ua: string): string | null {
   return null
 }
 
-// Relative phrasing moved to `@/lib/relative-time` once the campaign sender pool
-// needed it too — features may not import each other, so the one implementation
-// lives in lib. Re-exported here so this module stays the auth screens' single
+// Both time formatters live in `lib` — relative phrasing once the campaign sender
+// pool needed it too, and absolute date+time once the CRM record pages did.
+// Features may not import each other, so `lib` holds the one implementation of
+// each; they are re-exported here so this module stays the auth screens' single
 // formatting import.
 export { relativeTime } from '@/lib/relative-time'
-
-/** Absolute, locale-aware date+time for the "started" column. */
-export function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  })
-}
+export { formatDateTime } from '@/lib/datetime'

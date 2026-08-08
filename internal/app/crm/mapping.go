@@ -42,6 +42,10 @@ func dealFromList(row gen.ListDealsRow) Deal {
 	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.PositionKey, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
 }
 
+func dealFromCompanyList(row gen.ListCompanyDealsRow) Deal {
+	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.PositionKey, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
+}
+
 func dealFromGet(row gen.GetDealRow) Deal {
 	return deal(row.ID, row.WorkspaceID, row.PipelineID, row.StageID, row.CompanyID, row.PrimaryContactID, row.OwnerUserID, row.Name, row.AmountMicros, row.Currency, row.CloseDate, row.PositionKey, row.Source, row.SourceCampaignID, row.SourceThreadRef, row.CreatedByActor, row.PipelineName, row.StageLabel, row.StageColor, row.StageIsWon, row.StageIsLost, row.CompanyName, row.ContactEmail, row.CreatedAt, row.UpdatedAt)
 }

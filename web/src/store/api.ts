@@ -589,6 +589,25 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    getContact: build.query<GetContactApiResponse, GetContactApiArg>({
+      query: (queryArg) => ({ url: `/contacts/${queryArg.id}` }),
+    }),
+    setContactCompany: build.mutation<
+      SetContactCompanyApiResponse,
+      SetContactCompanyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/contacts/${queryArg.id}/company`,
+        method: "PUT",
+        body: queryArg.contactCompanyLink,
+      }),
+    }),
+    getContactEngagement: build.query<
+      GetContactEngagementApiResponse,
+      GetContactEngagementApiArg
+    >({
+      query: (queryArg) => ({ url: `/contacts/${queryArg.id}/engagement` }),
+    }),
     listSendingDomains: build.query<
       ListSendingDomainsApiResponse,
       ListSendingDomainsApiArg
@@ -939,6 +958,30 @@ const injectedRtkApi = api.injectEndpoints({
       query: (queryArg) => ({
         url: `/crm/companies/${queryArg.id}`,
         method: "DELETE",
+      }),
+    }),
+    crmListCompanyContacts: build.query<
+      CrmListCompanyContactsApiResponse,
+      CrmListCompanyContactsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/companies/${queryArg.id}/contacts`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
+    crmListCompanyDeals: build.query<
+      CrmListCompanyDealsApiResponse,
+      CrmListCompanyDealsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/crm/companies/${queryArg.id}/deals`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
       }),
     }),
     crmListPipelines: build.query<
@@ -1642,6 +1685,22 @@ export type ListContactsApiArg = {
   cursor?: string;
   limit?: number;
 };
+export type GetContactApiResponse =
+  /** status 200 The contact record */ ContactDetail;
+export type GetContactApiArg = {
+  id: string;
+};
+export type SetContactCompanyApiResponse =
+  /** status 200 The updated contact record */ ContactDetail;
+export type SetContactCompanyApiArg = {
+  id: string;
+  contactCompanyLink: ContactCompanyLink;
+};
+export type GetContactEngagementApiResponse =
+  /** status 200 The contact's engagement rollup */ ContactEngagement;
+export type GetContactEngagementApiArg = {
+  id: string;
+};
 export type ListSendingDomainsApiResponse =
   /** status 200 One row per sending domain */ SendingDomain[];
 export type ListSendingDomainsApiArg = void;
@@ -1872,6 +1931,24 @@ export type CrmUpdateCompanyApiArg = {
 export type CrmDeleteCompanyApiResponse = unknown;
 export type CrmDeleteCompanyApiArg = {
   id: string;
+};
+export type CrmListCompanyContactsApiResponse =
+  /** status 200 A page of the company's contacts */ CrmCompanyContactList;
+export type CrmListCompanyContactsApiArg = {
+  id: string;
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
+export type CrmListCompanyDealsApiResponse =
+  /** status 200 A page of the company's deals */ CrmDealList;
+export type CrmListCompanyDealsApiArg = {
+  id: string;
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
 };
 export type CrmListPipelinesApiResponse =
   /** status 200 Workspace pipelines */ CrmPipelineList;
@@ -2665,6 +2742,117 @@ export type ContactPage = {
   total_is_capped: boolean;
 };
 export type ContactSort = "newest" | "oldest" | "email";
+export type ContactSuppression = {
+  /** The suppression list's own reason literal. `complaint` (they reported us as spam) is deliberately distinct from `unsubscribe` (they asked to stop) and is never collapsed into it. `bounce` here means a HARD bounce classified by the inbox poller - an ingested provider bounce feed does not suppress at all, because those include soft bounces (full mailbox, greylisting) and suppressing forever on a temporary failure is not recoverable. So a `bounce` on this list is a permanent delivery failure, not "a message bounced once". */
+  reason: "unsubscribe" | "bounce" | "complaint" | "manual";
+  /** The suppressed address, which is not necessarily the one sends would use. */
+  email: string;
+  /** Which of TWO different operational states this is - do not simplify it away to "an address is suppressed".
+    
+    True: the suppressed address is the contact's primary one, the address the send path actually resolves, so this person cannot be emailed at all. A hard stop, now.
+    
+    False: only a secondary alias is suppressed. Sending works today because it does not use that address - but promoting the alias to primary (PUT /crm/contacts/{id}/emails/{emailID}/primary) would silently stop sending. Reachable now, breakable by a routine edit.
+    
+    A boolean "suppressed" flag would merge those two into one answer that is wrong for whichever case it is not describing. */
+  is_primary_email: boolean;
+  suppressed_at: string;
+};
+export type ContactCompany = {
+  id: string;
+  name: string;
+  /** Empty when the company has no domain on file. */
+  domain: string;
+};
+export type ContactDeal = {
+  id: string;
+  name: string;
+  pipeline_id: string;
+  stage_id: string;
+  stage_label: string;
+  stage_color: string;
+  stage_is_won: boolean;
+  stage_is_lost: boolean;
+  amount_micros?: number | null;
+  currency: string;
+  close_date?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type ContactDetail = {
+  id: string;
+  /** The address the send path resolves for this contact. */
+  email: string;
+  first_name: string;
+  last_name: string;
+  job_title: string;
+  linkedin_url: string;
+  /** Null when no address of this contact is suppressed - i.e. they may be emailed. */
+  suppression: ContactSuppression | null;
+  /** Null when the contact is not linked to a company record. */
+  company: ContactCompany | null;
+  /** Deals in board order, capped at 25. A record page shows a roster, not a paginated list; the cap is what keeps this response bounded. */
+  deals: ContactDeal[];
+  /** The contact's TRUE deal total, counted independently of the capped `deals` list. Render "25 of 38" from this rather than treating the cap as the whole set. */
+  deal_count: number;
+  /** True when the contact has more deals than the cap and `deals` was cut short. */
+  deals_truncated: boolean;
+  created_at: string;
+  updated_at: string;
+};
+export type ContactCompanyLink = {
+  /** The company to link this contact to, or null to unlink. Must be a company in the caller's workspace; anything else is 404. */
+  company_id: string | null;
+};
+export type ContactCampaignEnrollment = {
+  campaign_id: string;
+  campaign_name: string;
+  /** Whether this campaign injected open/click tracking. This is the only thing that tells "nobody opened" apart from "opens were never recorded": a campaign with tracking off contributes to `emails_sent` but structurally cannot contribute to `opens_indicative` or `clicks`. The rollup's counts deliberately do not adjust for it - use this to explain a zero rather than to correct one.
+    
+    This is the PER-ENROLLMENT detail, for marking individual rows. Do not aggregate it to decide whether the summary's zeros were measured: the list is capped, so use the top-level `opens_measurable` for that. */
+  tracking_enabled: boolean;
+  status: "active" | "completed" | "stopped";
+  /** 0 means enrolled but not yet sent to; N means step N was the last one sent. */
+  current_step: number;
+  /** Why the sequence stopped - one of replied, bounced, suppressed, manual, failed. `failed` is real (added by migration 000008 for a degenerate or exhausted send cap) and is deliberately NOT counted as a bounce or an unsubscribe in the rollup above. Null while the enrollment is still active or completed normally. Treat this as an open set: render an unrecognised literal verbatim rather than dropping it, so a future reason degrades visibly instead of vanishing. */
+  stop_reason?: string | null;
+  enrolled_at: string;
+  last_sent_at?: string | null;
+};
+export type ContactEngagement = {
+  contact_id: string;
+  /** Sends with status 'sent' - the same numerator as the campaign rollup's stats.sent. */
+  emails_sent: number;
+  /** Distinct sends with an open event that is not a known prefetch (image proxy UA, or a fetch within two seconds of the send). Approximate by nature - clicks are the reliable signal. */
+  opens_indicative: number;
+  /** Distinct sends with at least one click event. */
+  clicks: number;
+  /** Enrollments stopped with reason 'replied'. */
+  replies: number;
+  /** Enrollments stopped with reason 'bounced'. */
+  bounces: number;
+  /** Enrollments stopped with reason 'suppressed'. */
+  unsubscribes: number;
+  /** opens_indicative / emails_sent, or 0 when nothing was sent. */
+  open_rate: number;
+  /** clicks / emails_sent, or 0 when nothing was sent. */
+  click_rate: number;
+  /** Enrollments over the contact's lifetime - active, completed, and stopped. */
+  campaigns_enrolled: number;
+  /** Whether an open COULD have been recorded for this contact: true when at least one send that actually went out belonged to a campaign with tracking enabled.
+    
+    Use it as `emails_sent > 0 && !opens_measurable` to render `opens_indicative` and `clicks` as "not measured" instead of 0. Do NOT derive this from `campaigns[].tracking_enabled`: that list is capped at 20, so for a contact with more enrollments whose newest are untracked and whose older ones were tracked, a client-side `some()` answers false and explains away a genuine zero. This field is computed over the whole send history and is correct at any enrollment count.
+    
+    Caveat: `campaigns.tracking_enabled` is mutable (PUT /campaigns/{id}/tracking), and no per-send record of the flag at send time exists, so this reflects each campaign's CURRENT setting. Toggling tracking off after a send can therefore turn a measured zero into an "unmeasured" one retroactively. Reporting the current setting is the best available answer, not a perfect one.
+    
+    When a non-zero count coexists with `opens_measurable: false`, trust the count - a recorded event outranks an inference about whether it could have been recorded. */
+  opens_measurable: boolean;
+  /** The most recent of the contact's last send and last tracking event. Null when neither has ever happened. */
+  last_activity_at: string | null;
+  /** The 20 most recently enrolled campaigns, newest first. */
+  campaigns: ContactCampaignEnrollment[];
+  /** True when the contact has more enrollments than the cap. The counts above stay exact regardless. */
+  campaigns_truncated: boolean;
+};
 export type DomainAuthState = "unknown" | "passing" | "failing";
 export type SpfStatus = {
   found: boolean;
@@ -3057,33 +3245,19 @@ export type CrmCompanyList = {
   /** Cursor for the next page. Absent on the last page. */
   next_cursor?: string;
 };
-export type CrmStageInput = {
-  label: string;
-  color: string;
-  position: number;
-  is_won: boolean;
-  is_lost: boolean;
-};
-export type CrmStage = CrmStageInput & {
+export type CrmCompanyContact = {
   id: string;
-  pipeline_id: string;
-  key: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  job_title: string;
+  linkedin_url: string;
   created_at: string;
-  updated_at: string;
 };
-export type CrmPipeline = {
-  id: string;
-  name: string;
-  is_default: boolean;
-  stages: CrmStage[];
-  created_at: string;
-  updated_at: string;
-};
-export type CrmPipelineList = {
-  items: CrmPipeline[];
-};
-export type CrmPipelineInput = {
-  name: string;
+export type CrmCompanyContactList = {
+  items: CrmCompanyContact[];
+  /** Cursor for the next page. Absent on the last page. */
+  next_cursor?: string;
 };
 export type CrmDealInput = {
   pipeline_id: string;
@@ -3120,6 +3294,34 @@ export type CrmDealList = {
   items: CrmDeal[];
   /** Cursor for the next page. Absent on the last page. */
   next_cursor?: string;
+};
+export type CrmStageInput = {
+  label: string;
+  color: string;
+  position: number;
+  is_won: boolean;
+  is_lost: boolean;
+};
+export type CrmStage = CrmStageInput & {
+  id: string;
+  pipeline_id: string;
+  key: string;
+  created_at: string;
+  updated_at: string;
+};
+export type CrmPipeline = {
+  id: string;
+  name: string;
+  is_default: boolean;
+  stages: CrmStage[];
+  created_at: string;
+  updated_at: string;
+};
+export type CrmPipelineList = {
+  items: CrmPipeline[];
+};
+export type CrmPipelineInput = {
+  name: string;
 };
 export type CrmBoardStage = {
   stage: CrmStage;
@@ -3416,6 +3618,9 @@ export const {
   useDeleteListMutation,
   useImportContactsMutation,
   useListContactsQuery,
+  useGetContactQuery,
+  useSetContactCompanyMutation,
+  useGetContactEngagementQuery,
   useListSendingDomainsQuery,
   useCheckSendingDomainMutation,
   useGetWorkspaceDeliverabilityQuery,
@@ -3461,6 +3666,8 @@ export const {
   useCrmGetCompanyQuery,
   useCrmUpdateCompanyMutation,
   useCrmDeleteCompanyMutation,
+  useCrmListCompanyContactsQuery,
+  useCrmListCompanyDealsQuery,
   useCrmListPipelinesQuery,
   useCrmCreatePipelineMutation,
   useCrmGetPipelineQuery,

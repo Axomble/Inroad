@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Activity, Bot, Loader2, Plus, UserRound } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import { Link, useSearch } from '@tanstack/react-router'
-import { z } from 'zod'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -20,12 +18,11 @@ import {
 } from '@/components/layout/page'
 import { ListSearchInput } from '@/components/shared/list-search-input'
 import { SortMenu } from '@/components/shared/sort-menu'
-import type { ImportResult } from '@/store/api'
+import type { Contact, ImportResult } from '@/store/api'
 import { httpStatus } from '@/lib/rtk-error'
 import { useUrlState, useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListListsQuery, useListContactsQuery } from './api'
-import { useCrmListEventsQuery, type CrmEvent } from '@/features/crm/api'
 import {
   CONTACT_SORTS,
   MIN_QUERY_LENGTH,
@@ -45,8 +42,6 @@ import {
 import { NewListForm } from './new-list-form'
 import { ImportCsvForm } from './import-csv-form'
 import { ListRowActions } from './list-row-actions'
-
-const activityActorSchema = z.object({ type: z.string().optional(), client_id: z.string().optional() }).passthrough()
 
 export function ContactsPage() {
   const [showNewList, setShowNewList] = useState(false)
@@ -170,42 +165,17 @@ export function ContactsPage() {
   )
 }
 
-function ContactActivity({ contactId }: { contactId: string }) {
-  const query = useCrmListEventsQuery({ targetType: 'contact', targetId: contactId })
+/** One contact's cells, shared by the linked row and the id-less fallback. */
+function ContactCells({ contact }: { contact: Contact }) {
   return (
-    <section className="bg-surface-2 px-5 py-4" aria-label="Contact activity">
-      <h3 className="flex items-center gap-2 text-sm font-semibold"><Activity className="size-4" aria-hidden="true" />Activity</h3>
-      {query.isLoading ? <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" aria-hidden="true" />Loading activity</p> : null}
-      {query.isError ? <p role="alert" className="mt-3 text-xs text-danger">Activity could not be loaded. Try closing and reopening this contact.</p> : null}
-      {query.data?.items.length ? (
-        <ol className="mt-3 space-y-2">
-          {query.data.items.map((event) => <ContactActivityEvent key={event.id} event={event} />)}
-        </ol>
-      ) : !query.isLoading && !query.isError ? <p className="mt-3 text-xs text-muted-foreground">No CRM activity has been recorded for this contact.</p> : null}
-    </section>
-  )
-}
-
-function ContactActivityEvent({ event }: { event: CrmEvent }) {
-  const parsed = activityActorSchema.safeParse(event.actor)
-  const actor = parsed.success ? parsed.data : { type: 'system' }
-  const isAgent = actor.type === 'agent'
-  const label = event.name.split('.').map((part) => part.replaceAll('_', ' ')).join(' ')
-  return (
-    <li className="rounded-lg border border-border bg-background p-3 text-xs">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-medium capitalize text-foreground">{label}</p>
-        <time className="text-muted-foreground" dateTime={event.occurred_at}>{new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(event.occurred_at))}</time>
-      </div>
-      <p className="mt-2 flex flex-wrap items-center gap-2 text-muted-foreground">
-        <Badge variant="secondary">
-          {isAgent ? <Bot className="size-3" aria-hidden="true" /> : <UserRound className="size-3" aria-hidden="true" />}
-          {isAgent ? `Agent${actor.client_id ? ` / ${actor.client_id}` : ''}` : actor.type === 'user' ? 'Workspace member' : 'Inroad automation'}
-        </Badge>
-        {event.deal_id ? <Button asChild variant="outline" size="sm"><Link to="/app/deals/$id" params={{ id: event.deal_id }}>Open deal</Link></Button> : null}
-      </p>
-      {event.source_thread_ref || event.source_message_id ? <p className="mt-2 break-all text-muted-foreground">Source: {event.source_thread_ref || event.source_message_id}</p> : null}
-    </li>
+    <>
+      <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{contact.email}</span>
+      <span className="hidden w-40 truncate text-xs text-muted-foreground sm:block">{contact.first_name || '—'}</span>
+      <span className="hidden w-44 truncate text-xs text-muted-foreground md:block">{contact.company_name || '—'}</span>
+      <span className="hidden w-16 text-right font-mono text-xs tabular-nums text-muted-foreground lg:block">
+        {contact.deal_count ?? 0}
+      </span>
+    </>
   )
 }
 
@@ -249,7 +219,6 @@ function ContactsPane({
   const limit = limitOrDefault(search.limit)
   const cursor = search.cursor
   const appliedQuery = search.q
-  const selectedContactId = search.contact
 
   // Keyset pagination can name the next page but not "page N back", so the pages
   // already visited are stacked as they're left. The stack is component state,
@@ -441,31 +410,27 @@ function ContactsPane({
           )
         ) : (
           <ul>
-            {items.map((c) => {
-              const selected = c.id !== undefined && c.id === selectedContactId
-              return (
-              <li key={c.id} className="border-b border-border">
-                <Button
-                  variant="ghost"
-                  className="h-auto min-h-11 w-full justify-start rounded-none px-5 py-2.5 text-left font-normal hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-inset"
-                  aria-expanded={selected}
-                  onClick={() => patch({ contact: selected ? undefined : c.id })}
-                >
-                <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{c.email}</span>
-                <span className="hidden w-40 truncate text-xs text-muted-foreground sm:block">
-                  {c.first_name || '—'}
-                </span>
-                <span className="hidden w-44 truncate text-xs text-muted-foreground md:block">
-                  {c.company_name || '-'}
-                </span>
-                <span className="hidden w-16 text-right font-mono text-xs tabular-nums text-muted-foreground lg:block">
-                  {c.deal_count ?? 0}
-                </span>
-                </Button>
-                {selected && c.id ? <ContactActivity contactId={c.id} /> : null}
+            {items.map((c) => (
+              <li key={c.id ?? c.email} className="border-b border-border">
+                {/* The row opens the contact's record page, where their company,
+                    deals and engagement history live. It used to expand an
+                    inline activity strip, which showed a fraction of that and
+                    could not be linked to. */}
+                {c.id ? (
+                  <Link
+                    to="/app/contacts/$id"
+                    params={{ id: c.id }}
+                    className="flex min-h-11 items-center gap-4 px-5 py-2.5 hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                  >
+                    <ContactCells contact={c} />
+                  </Link>
+                ) : (
+                  <div className="flex min-h-11 items-center gap-4 px-5 py-2.5">
+                    <ContactCells contact={c} />
+                  </div>
+                )}
               </li>
-              )
-            })}
+            ))}
           </ul>
         )}
       </div>
