@@ -5,6 +5,7 @@ package contact
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -577,5 +578,120 @@ func TestEngagementReportsTrackingEnabledPerCampaign(t *testing.T) {
 	}
 	if flags["No tracking"] {
 		t.Error("the untracked campaign reports tracking_enabled true")
+	}
+}
+
+// campaignWithTracking creates a campaign and returns its id.
+func (f recordFixture) campaignWithTracking(t *testing.T, ctx context.Context, name string, tracking bool) uuid.UUID {
+	t.Helper()
+	list := f.scalar(t, ctx, `INSERT INTO lists(workspace_id,name) VALUES($1,$2) RETURNING id`, f.ws, name)
+	return f.scalar(t, ctx, `INSERT INTO campaigns
+	 (workspace_id,name,mailbox_id,list_id,subject,status,tracking_enabled)
+	 VALUES($1,$2,$3,$4,'S','running',$5) RETURNING id`, f.ws, name, f.mailbox, list, tracking)
+}
+
+// sendFor writes a send for an arbitrary campaign at a given step.
+func (f recordFixture) sendFor(t *testing.T, ctx context.Context, campaign uuid.UUID, step int, status string, sentAt *time.Time) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO sends(workspace_id,campaign_id,contact_id,mailbox_id,to_email,status,step_order,sent_at)
+		 VALUES($1,$2,$3,$4,'dana@acme.test',$5,$6,$7)`,
+		f.ws, campaign, f.contactID, f.mailbox, status, step, sentAt); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+}
+
+// opens_measurable reflects the whole send history, not the visible enrollment
+// window. This is the exact shape that makes a client-side inference wrong: more
+// enrollments than the cap, every one in the newest CampaignCap untracked, and a
+// single OLDER tracked campaign that actually sent. A `some(tracking_enabled)`
+// over the returned rows says false; the truth is true.
+func TestEngagementOpensMeasurableSeesPastTheCampaignCap(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+
+	// The oldest enrollment: tracked, and it really sent.
+	tracked := f.campaignWithTracking(t, ctx, "Tracked old", true)
+	oldest := f.sentAt.Add(-365 * 24 * time.Hour)
+	if _, err := f.pool.Exec(ctx, `INSERT INTO sequence_enrollments
+	 (workspace_id,campaign_id,contact_id,enrolled_at) VALUES($1,$2,$3,$4)`,
+		f.ws, tracked, f.contactID, oldest); err != nil {
+		t.Fatalf("tracked enrollment: %v", err)
+	}
+	f.sendFor(t, ctx, tracked, 1, "sent", &oldest)
+
+	// Then CampaignCap newer, untracked enrollments, which is all a client sees.
+	for i := 0; i < CampaignCap; i++ {
+		untracked := f.campaignWithTracking(t, ctx, fmt.Sprintf("Untracked %d", i), false)
+		at := f.sentAt.Add(time.Duration(i) * time.Hour)
+		if _, err := f.pool.Exec(ctx, `INSERT INTO sequence_enrollments
+		 (workspace_id,campaign_id,contact_id,enrolled_at) VALUES($1,$2,$3,$4)`,
+			f.ws, untracked, f.contactID, at); err != nil {
+			t.Fatalf("untracked enrollment %d: %v", i, err)
+		}
+	}
+
+	got, err := f.svc.Engagement(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Engagement: %v", err)
+	}
+	if !got.CampaignsTruncated || len(got.Campaigns) != CampaignCap {
+		t.Fatalf("campaigns = %d (truncated %v), want the cap %d and true — the "+
+			"scenario needs the tracked campaign pushed out of the window",
+			len(got.Campaigns), got.CampaignsTruncated, CampaignCap)
+	}
+	for _, c := range got.Campaigns {
+		if c.TrackingEnabled {
+			t.Fatalf("campaign %q is tracked and visible; the tracked one must be "+
+				"outside the window for this test to mean anything", c.CampaignName)
+		}
+	}
+	if !got.OpensMeasurable {
+		t.Fatal("opens_measurable = false, but an older tracked campaign did send — " +
+			"a client inferring this from campaigns[] would explain away a real zero")
+	}
+}
+
+// A contact only ever sent to through untracked campaigns reports false, so the
+// flag is not simply hardcoded true.
+func TestEngagementOpensMeasurableFalseWhenNothingWasTracked(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+	untracked := f.campaignWithTracking(t, ctx, "Untracked only", false)
+	f.sendFor(t, ctx, untracked, 1, "sent", &f.sentAt)
+
+	got, err := f.svc.Engagement(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Engagement: %v", err)
+	}
+	if got.EmailsSent != 1 {
+		t.Fatalf("emails_sent = %d, want 1", got.EmailsSent)
+	}
+	if got.OpensMeasurable {
+		t.Fatal("opens_measurable = true with no tracked send")
+	}
+}
+
+// A tracked campaign the contact was enrolled in but never SENT to cannot have
+// produced an open, so it must not make the zero look measured.
+func TestEngagementOpensMeasurableIgnoresUnsentTrackedCampaigns(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+	tracked := f.campaignWithTracking(t, ctx, "Tracked never sent", true)
+	// Queued, not sent.
+	f.sendFor(t, ctx, tracked, 1, "queued", nil)
+	// And a real send on an untracked campaign, so emails_sent is non-zero.
+	untracked := f.campaignWithTracking(t, ctx, "Untracked sent", false)
+	f.sendFor(t, ctx, untracked, 1, "sent", &f.sentAt)
+
+	got, err := f.svc.Engagement(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Engagement: %v", err)
+	}
+	if got.EmailsSent != 1 {
+		t.Fatalf("emails_sent = %d, want only the untracked send", got.EmailsSent)
+	}
+	if got.OpensMeasurable {
+		t.Fatal("a queued send on a tracked campaign made opens look measurable")
 	}
 }

@@ -83,6 +83,7 @@ type engagementResponse struct {
 	OpenRate           float64              `json:"open_rate"`
 	ClickRate          float64              `json:"click_rate"`
 	CampaignsEnrolled  int64                `json:"campaigns_enrolled"`
+	OpensMeasurable    bool                 `json:"opens_measurable"`
 	LastActivityAt     *time.Time           `json:"last_activity_at"`
 	Campaigns          []enrollmentResponse `json:"campaigns"`
 	CampaignsTruncated bool                 `json:"campaigns_truncated"`
@@ -174,7 +175,8 @@ func engagementPayload(e Engagement) engagementResponse {
 		OpensIndicative: e.OpensIndicative, Clicks: e.Clicks, Replies: e.Replies,
 		Bounces: e.Bounces, Unsubscribes: e.Unsubscribes, OpenRate: e.OpenRate,
 		ClickRate: e.ClickRate, CampaignsEnrolled: e.CampaignsEnrolled,
-		LastActivityAt: e.LastActivityAt, CampaignsTruncated: e.CampaignsTruncated,
+		OpensMeasurable: e.OpensMeasurable,
+		LastActivityAt:  e.LastActivityAt, CampaignsTruncated: e.CampaignsTruncated,
 		Campaigns: make([]enrollmentResponse, 0, len(e.Campaigns)),
 	}
 	for _, c := range e.Campaigns {

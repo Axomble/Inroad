@@ -116,9 +116,14 @@ type Record struct {
 }
 
 // SendStats is the sends half of the engagement rollup.
+//
+// OpensMeasurable is computed over the contact's WHOLE send history, which is why
+// it lives here rather than being inferred from the (capped) Campaigns list — see
+// Engagement.OpensMeasurable.
 type SendStats struct {
-	EmailsSent int64
-	LastSentAt *time.Time
+	EmailsSent      int64
+	LastSentAt      *time.Time
+	OpensMeasurable bool
 }
 
 // TrackingStats is the tracking-events half of the engagement rollup. Both
@@ -159,16 +164,28 @@ type CampaignEnrollment struct {
 // denominator is CampaignsEnrolled, which is not a rate anyone reads for one
 // person.
 type Engagement struct {
-	ContactID          uuid.UUID
-	EmailsSent         int64
-	OpensIndicative    int64
-	Clicks             int64
-	Replies            int64
-	Bounces            int64
-	Unsubscribes       int64
-	OpenRate           float64
-	ClickRate          float64
-	CampaignsEnrolled  int64
+	ContactID         uuid.UUID
+	EmailsSent        int64
+	OpensIndicative   int64
+	Clicks            int64
+	Replies           int64
+	Bounces           int64
+	Unsubscribes      int64
+	OpenRate          float64
+	ClickRate         float64
+	CampaignsEnrolled int64
+	// OpensMeasurable reports whether an open COULD have been recorded for this
+	// contact: true when at least one send that actually went out belonged to a
+	// campaign with tracking on. False with EmailsSent > 0 means the zero opens
+	// and clicks above are unmeasured, not observed.
+	//
+	// It is computed server-side over the whole history on purpose. A client can
+	// only see Campaigns, which is capped at CampaignCap — so for a contact with
+	// more enrollments than that, whose newest are untracked and whose older ones
+	// were tracked, any client-side `some(tracking_enabled)` would answer false
+	// and explain away a genuine zero. The cap makes that inference unsound
+	// exactly for the heavily-enrolled contacts whose numbers matter most.
+	OpensMeasurable    bool
 	LastActivityAt     *time.Time
 	Campaigns          []CampaignEnrollment
 	CampaignsTruncated bool
@@ -189,6 +206,7 @@ func computeEngagement(contactID uuid.UUID, sends SendStats, tracking TrackingSt
 		Bounces:            stopReasons[stopReasonBounced],
 		Unsubscribes:       stopReasons[stopReasonSuppressed],
 		CampaignsEnrolled:  sumCounts(stopReasons),
+		OpensMeasurable:    sends.OpensMeasurable,
 		LastActivityAt:     latest(sends.LastSentAt, tracking.LastEventAt),
 		Campaigns:          campaigns,
 		CampaignsTruncated: truncated,

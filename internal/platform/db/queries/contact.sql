@@ -68,10 +68,25 @@ LIMIT $3;
 -- Sent count and last send. 'sent' is the same numerator the campaign rollup's
 -- stats.sent uses (queries/campaign.sql CountSendsByStatus), so a contact's
 -- number rolls up to the campaign's.
-SELECT count(*) FILTER (WHERE status = 'sent')::bigint AS emails_sent,
-       (max(sent_at) FILTER (WHERE status = 'sent'))::timestamptz AS last_sent_at
-FROM sends
-WHERE workspace_id = $1 AND contact_id = $2;
+--
+-- opens_measurable answers "could an open have been recorded at all" over the
+-- contact's WHOLE history, which is the question the capped enrollment list
+-- cannot answer: a client seeing only the 20 newest enrollments would conclude
+-- "never tracked" for a contact whose 21st was tracked, and explain away a real
+-- zero. It is scoped to sends that actually went out (status = 'sent') because a
+-- campaign the contact was enrolled in but never sent to could not have produced
+-- an open regardless of its tracking flag.
+--
+-- LEFT JOIN so this addition provably cannot change emails_sent: a send whose
+-- campaign row is missing still counts. sends.campaign_id is NOT NULL with an
+-- ON DELETE CASCADE FK, so that cannot actually happen — the outer join is here
+-- to make the count independent of the join rather than to handle a real case.
+SELECT count(*) FILTER (WHERE s.status = 'sent')::bigint AS emails_sent,
+       (max(s.sent_at) FILTER (WHERE s.status = 'sent'))::timestamptz AS last_sent_at,
+       COALESCE(bool_or(s.status = 'sent' AND c.tracking_enabled), false)::bool AS opens_measurable
+FROM sends s
+LEFT JOIN campaigns c ON c.workspace_id = s.workspace_id AND c.id = s.campaign_id
+WHERE s.workspace_id = $1 AND s.contact_id = $2;
 
 -- name: ContactTrackingStats :one
 -- Per-send engagement numerators, defined exactly as the campaign rollup defines
