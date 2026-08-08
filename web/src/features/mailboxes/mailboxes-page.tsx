@@ -69,7 +69,7 @@ import {
 } from './api'
 import { mailboxTone, mailboxStatusLabel } from './status'
 import { ConnectMailboxForm } from './connect-mailbox-form'
-import { GoogleIcon } from './google-icon'
+import { GoogleIcon } from '@/components/shared/google-icon'
 import { MicrosoftIcon } from './microsoft-icon'
 import { mailboxProviderLabel } from './provider'
 import { BannerShell, OauthCallbackBanner } from './oauth-callback-banner'

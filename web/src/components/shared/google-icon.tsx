@@ -2,6 +2,10 @@
  * The official Google "G" mark (4-color), from Google's Sign-in branding
  * guidelines. Purely decorative when paired with a text label, so it defaults
  * to aria-hidden; callers rendering it alone must pass an accessible name.
+ *
+ * Lives in `components/shared` because two features need it — the mailboxes
+ * connect menu and the auth screens' "Continue with Google" — and features must
+ * not import each other.
  */
 export function GoogleIcon({ className, ...props }: React.SVGProps<SVGSVGElement>) {
   return (

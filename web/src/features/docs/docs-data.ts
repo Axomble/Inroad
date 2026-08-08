@@ -208,6 +208,23 @@ export const ENV_GROUPS: EnvGroup[] = [
     ],
   },
   {
+    title: 'Google sign-in',
+    vars: [
+      {
+        name: 'INROAD_GOOGLE_SIGNIN_CLIENT_ID',
+        description:
+          'Google OAuth client for “Continue with Google” on login/signup; blank disables it and the button hides itself. Deliberately separate from the mailbox-connect client below — this one requests only openid/email/profile, never Gmail scopes.',
+      },
+      { name: 'INROAD_GOOGLE_SIGNIN_CLIENT_SECRET', description: 'Google sign-in client secret.' },
+      {
+        name: 'INROAD_GOOGLE_SIGNIN_REDIRECT_URL',
+        description:
+          'Add this exact URL to the OAuth client’s authorized redirect URIs. Defaults to the public URL’s /api/v1/auth/oauth/google/callback.',
+        example: 'https://app.example.com/api/v1/auth/oauth/google/callback',
+      },
+    ],
+  },
+  {
     title: 'Mailbox OAuth connect',
     vars: [
       { name: 'INROAD_GOOGLE_CLIENT_ID', description: 'Google OAuth client for connecting Gmail mailboxes; blank disables Gmail connect.' },

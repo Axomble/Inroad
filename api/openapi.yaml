@@ -224,6 +224,78 @@ paths:
         '400': { description: Validation error }
         '404': { description: Invalid or expired invite }
         '422': { description: Password required to create an account }
+  /auth/oauth/google/start:
+    get:
+      operationId: authGoogleSignInRedirect
+      tags: [auth]
+      security: []
+      description: >-
+        Begin a Google sign-in/sign-up as a TOP-LEVEL BROWSER NAVIGATION: the SPA
+        does window.location.assign on this URL and reads no body. Responds 302 to
+        Google's consent screen, or 302 back to the login page with
+        `google_error=disabled` when this deployment has no Google credentials.
+        Distinct from POST /mailboxes/oauth/google/start, which is authenticated and
+        requests Gmail scopes to connect a mailbox; this flow requests only
+        openid/email/profile.
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          description: >-
+            In-app path to land on after sign-in. Validated server-side as a
+            same-origin path (anything else is silently dropped) and remembered
+            against the state nonce rather than echoed through Google.
+          schema: { type: string }
+      responses:
+        '302': { description: "Redirect to Google's consent screen, or back to the login page with google_error=disabled" }
+    post:
+      operationId: authGoogleSignInStart
+      tags: [auth]
+      security: []
+      description: >-
+        The same flow for a caller that wants the consent URL WITHOUT being
+        navigated. Answers 501 when Google sign-in is unconfigured, so a client can
+        hide the button instead of offering one that only redirects to an error, and
+        it is the only way to pass an invite token (which must not sit in a URL the
+        browser records in history).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GoogleSignInStartRequest' }
+      responses:
+        '200':
+          description: Google consent URL
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GoogleSignInStartResponse' }
+        '400': { description: Validation error }
+        '501': { description: Google sign-in is not configured on this deployment }
+  /auth/oauth/google/callback:
+    get:
+      operationId: authGoogleSignInCallback
+      tags: [auth]
+      security: []
+      description: >-
+        The top-level browser navigation Google redirects to after consent. Not
+        callable with fetch. It authenticates from the signed, single-use `state`
+        (no cookie is available on a cross-site redirect) and derives the workspace
+        server-side from the provider identity, never from a query parameter. It
+        never returns JSON and never returns a 5xx.
+
+
+        On SUCCESS it 302s to `{APP_BASE_URL}/auth/google/callback?signin=ok` with
+        the refresh + CSRF cookies set (call POST /auth/refresh for the access
+        token), plus `&return_to=<path>` when one was requested at start. On FAILURE
+        it 302s to the SPA login route `{APP_BASE_URL}/?google_error=<reason>`, where
+        reason is one of: denied, bad_state, no_email, email_unverified, disabled,
+        invite_invalid, exchange_failed, server_error.
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string } }
+        - { name: state, in: query, required: false, schema: { type: string } }
+        - { name: error, in: query, required: false, schema: { type: string } }
+      responses:
+        '302': { description: "Redirect to the SPA: signin=ok on success, google_error=<reason> on failure" }
   /auth/2fa:
     get:
       operationId: authTwoFactorStatus
@@ -538,6 +610,33 @@ paths:
         '400': { description: Invalid id }
         '401': { description: Unauthorized }
         '404': { description: API key not found }
+  /workspaces/{id}/onboarding/complete:
+    post:
+      operationId: completeWorkspaceOnboarding
+      tags: [workspaces]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Name the caller's workspace and mark onboarding finished, in one atomic
+        statement. Owner/admin only, and `{id}` must equal the active workspace in
+        the caller's token. Idempotent: on an already-completed workspace it
+        returns the stored name and original timestamp WITHOUT renaming, so it is
+        not a rename endpoint.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteOnboardingRequest' }
+      responses:
+        '200':
+          description: Onboarding state after the call
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OnboardingResponse' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '403': { description: "Not an admin of this workspace, or workspace mismatch" }
+        '404': { description: No such workspace }
   /workspaces/{id}/invites:
     post:
       operationId: createWorkspaceInvite
@@ -2604,7 +2703,7 @@ components:
         password: { type: string }
     SessionResponse:
       type: object
-      required: [access_token, expires_in, user_id, active_workspace_id, role, memberships, email]
+      required: [access_token, expires_in, user_id, active_workspace_id, role, memberships, email, onboarding_completed_at]
       properties:
         access_token: { type: string }
         expires_in: { type: integer }
@@ -2615,16 +2714,33 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Membership' }
         email: { type: string, description: The signed-in user's email — the SPA's identity source after a silent refresh. }
+        onboarding_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the ACTIVE workspace finished onboarding, or null while it is still
+            pending. Present on the session response so the SPA can gate its
+            onboarding modal on first paint without a second round trip. A nullable
+            timestamp rather than a boolean beside it, so a response can never claim
+            to be complete with no completion time.
     Membership:
       type: object
-      required: [workspace_id, workspace_name, role]
+      required: [workspace_id, workspace_name, role, onboarding_completed_at]
       properties:
         workspace_id: { type: string }
         workspace_name: { type: string }
         role: { type: string }
+        onboarding_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When THIS workspace finished onboarding, or null while pending, so
+            switching into a freshly created one needs no extra request.
     MeResponse:
       type: object
-      required: [user_id, active_workspace_id, role, memberships, email, email_verified]
+      required: [user_id, active_workspace_id, role, memberships, email, email_verified, onboarding_completed_at]
       properties:
         user_id: { type: string }
         active_workspace_id: { type: string }
@@ -2634,6 +2750,11 @@ components:
           items: { $ref: '#/components/schemas/Membership' }
         email: { type: string, description: The caller's email address. }
         email_verified: { type: boolean, description: Whether the caller has confirmed their email address. }
+        onboarding_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: "When the caller's ACTIVE workspace finished onboarding, or null while pending."
     SwitchWorkspaceRequest:
       type: object
       required: [workspace_id]
@@ -2664,12 +2785,58 @@ components:
         revoked: { type: integer, description: Number of other sessions revoked. }
     SwitchWorkspaceResponse:
       type: object
-      required: [access_token, expires_in, active_workspace_id, role]
+      required: [access_token, expires_in, active_workspace_id, role, onboarding_completed_at]
       properties:
         access_token: { type: string }
         expires_in: { type: integer }
         active_workspace_id: { type: string }
         role: { type: string }
+        onboarding_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the workspace just switched into finished onboarding, or null while pending.
+    GoogleSignInStartRequest:
+      type: object
+      properties:
+        invite_token:
+          type: string
+          nullable: true
+          description: >-
+            Raw token from an invite link, when the invitee chose to accept it with
+            Google rather than by setting a password. Only its hash is persisted
+            server-side; it is never placed in the OAuth `state` parameter.
+        return_to:
+          type: string
+          nullable: true
+          description: >-
+            In-app path to land on after sign-in. Validated server-side as a
+            same-origin path; anything else is silently dropped.
+    GoogleSignInStartResponse:
+      type: object
+      required: [auth_url]
+      properties:
+        auth_url: { type: string, description: The Google consent URL to navigate the browser to. }
+    CompleteOnboardingRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: The workspace's real name, replacing the one derived at signup.
+    OnboardingResponse:
+      type: object
+      required: [workspace_id, name, onboarding_completed_at]
+      properties:
+        workspace_id: { type: string, format: uuid }
+        name: { type: string }
+        onboarding_completed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When onboarding was completed. Always set on a successful response.
     TwoFactorRequiredResponse:
       type: object
       required: [two_factor_required, challenge]

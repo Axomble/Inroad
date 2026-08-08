@@ -48,7 +48,7 @@ function enablePasskeys() {
 // (`return_to`); stub them and capture navigation. Default search is empty, so
 // completeLogin falls through to the operational overview.
 const navigate = vi.fn()
-let loginSearch: { return_to?: string } = {}
+let loginSearch: { return_to?: string; google_error?: string } = {}
 vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => navigate,
   getRouteApi: () => ({ useSearch: () => loginSearch }),
@@ -398,6 +398,66 @@ test('passkey login: a 501 from finish retires the passkey button', async () => 
   await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1))
   await waitFor(() => expect(passkeyButton()).not.toBeInTheDocument())
   expect(navigate).not.toHaveBeenCalled()
+})
+
+// ── Google sign-in entry point ────────────────────────────────────────────────
+
+test('google: the button leads the screen, above the password fields', () => {
+  renderWithProviders(<LoginForm />)
+
+  const google = screen.getByRole('button', { name: /continue with google/i })
+  expect(google).toBeInTheDocument()
+  // Position is what makes it the primary path (the lime fill stays with "Log
+  // in"), so assert it actually precedes the form rather than joining the
+  // passkey / email-code stack below it.
+  expect(google.compareDocumentPosition(screen.getByLabelText('Email'))).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING,
+  )
+})
+
+test('google: clicking it navigates the browser to the start route, with no mutation', () => {
+  const assign = stubAssign()
+  renderWithProviders(<LoginForm />)
+
+  fireEvent.click(screen.getByRole('button', { name: /continue with google/i }))
+
+  expect(assign).toHaveBeenCalledTimes(1)
+  expect(String(assign.mock.calls[0]?.[0])).toContain('/auth/oauth/google/start')
+  // Completion is a redirect through the backend's callback, so no session was set
+  // here and the SPA router was never used.
+  expect(navigate).not.toHaveBeenCalled()
+})
+
+test('google: a return_to on the login screen is carried into the sign-in flow', () => {
+  loginSearch = { return_to: '/oauth/consent?consent_id=c-1' }
+  const assign = stubAssign()
+  renderWithProviders(<LoginForm />)
+
+  fireEvent.click(screen.getByRole('button', { name: /continue with google/i }))
+
+  // Google is no longer the one method that can't finish an OAuth consent resume.
+  expect(String(assign.mock.calls[0]?.[0])).toContain('return_to=%2Foauth%2Fconsent%3Fconsent_id%3Dc-1')
+})
+
+test('google: a failed callback surfaces its reason and strips the param', async () => {
+  loginSearch = { google_error: 'denied', return_to: '/app/mailboxes' }
+  renderWithProviders(<LoginForm />)
+
+  expect(await screen.findByText(/cancelled google sign-in/i)).toBeInTheDocument()
+  // The param is cleared so a refresh doesn't re-show it — but `return_to` is
+  // preserved, since the user may still be mid-resume.
+  await waitFor(() => expect(navigate).toHaveBeenCalled())
+  const call = navigate.mock.calls[0]?.[0] as {
+    to: string
+    replace?: boolean
+    search: (prev: Record<string, unknown>) => Record<string, unknown>
+  }
+  expect(call.to).toBe('/')
+  expect(call.replace).toBe(true)
+  expect(call.search({ return_to: '/app/mailboxes', google_error: 'denied' })).toEqual({
+    return_to: '/app/mailboxes',
+    google_error: undefined,
+  })
 })
 
 test('passkey login: a user-cancelled ceremony shows an inline error, keeps the button, no stuck spinner', async () => {

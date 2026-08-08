@@ -60,6 +60,12 @@ const authApi = api.enhanceEndpoints({
     authAcceptInvite: {
       invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
     },
+    // Naming a workspace flips `onboarding_completed` on the session, and that
+    // flag is what dismisses the first-run overlay — so refetch `authMe` rather
+    // than letting the overlay close itself on a local success flag.
+    completeWorkspaceOnboarding: {
+      invalidatesTags: [{ type: 'Session', id: 'CURRENT' }],
+    },
     // Two-factor (P2 auth hardening). The status query is the single source of
     // truth for the settings panel; confirm (activate) and disable both flip
     // `totp_enabled`, so they invalidate the `TwoFactor` tag to refetch it.
@@ -168,4 +174,11 @@ export const {
   useAuthApiKeyCreateMutation,
   useAuthApiKeyListQuery,
   useAuthApiKeyRevokeMutation,
+  // The generated client also carries `authGoogleSignInRedirect`,
+  // `authGoogleSignInStart` and `authGoogleSignInCallback`. None is re-exported:
+  // the redirect and the callback are browser navigations (fetching them from the
+  // SPA does nothing useful — see `google-signin-url.ts` and
+  // `google-callback-page.tsx`), and the POST start exists only for the
+  // invite-with-Google flow and a 501 capability probe, neither of which is wired.
+  useCompleteWorkspaceOnboardingMutation,
 } = authApi
