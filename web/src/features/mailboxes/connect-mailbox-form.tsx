@@ -2,14 +2,27 @@ import { useId } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
-import { Loader2 } from 'lucide-react'
+import { Flame, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { httpStatus } from '@/lib/rtk-error'
+import { httpStatus, isEmailNotVerified } from '@/lib/rtk-error'
+// The email-verification gate is the auth feature's own concern: its button
+// wrapper for the submit, and the raw flag for the Enter-key guard below.
+import { emailVerificationHint, useEmailVerified } from '@/features/auth/use-email-verified'
+import { VerifiedGateButton } from '@/features/auth/verified-gate-button'
+// Cross-feature hook reuse, the established exception (see mailboxes-page.tsx
+// pulling the warmup overview) — extended here to warmup's enable MUTATION,
+// because warming a mailbox is part of connecting one, and the alternative is
+// duplicating the endpoint. Warmup still owns its own screens, settings form and
+// cache tags; this only fires the default-settings enable.
+import { useEnableMailboxWarmupMutation } from '@/features/warmup/api'
 import { useConnectMailboxMutation } from './api'
 
 const PORT_ERROR = 'Port must be between 1 and 65535'
+
+/** Names the gated action once, for the control and the 403's copy alike. */
+const GATED_ACTION = 'connect a mailbox'
 
 const schema = z.object({
   email: z.email('Enter a valid email'),
@@ -22,10 +35,17 @@ const schema = z.object({
   imap_username: z.string().optional(),
   secret: z.string().min(1, 'Required'),
   allow_plaintext: z.boolean(),
+  // Client-only: warmup is enabled by a separate PUT once the mailbox exists,
+  // so this is stripped from the connect body (see onSubmit).
+  start_warmup: z.boolean(),
 })
 type Values = z.infer<typeof schema>
 
 function connectErrorMessage(error: unknown): string {
+  // Before the status ladder: POST /mailboxes sits behind
+  // `auth.RequireVerified`, and this 403 has an answer the operator can act on,
+  // which "couldn't connect the mailbox" hid.
+  if (isEmailNotVerified(error)) return emailVerificationHint(GATED_ACTION)
   const status = httpStatus(error)
   if (status === 409) return 'A mailbox with this email is already connected.'
   if (status === 422) return 'Connection test failed — check host, port, and credentials.'
@@ -33,21 +53,55 @@ function connectErrorMessage(error: unknown): string {
   return "Couldn't connect the mailbox. Please try again."
 }
 
-export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
+/**
+ * Reports how a connect finished. `warmupFailed` means the mailbox IS connected
+ * but the follow-up warmup enable didn't land — the caller owns that copy,
+ * because this form has already closed by the time it needs saying.
+ */
+export type ConnectOutcome = { warmupFailed: boolean }
+
+export function ConnectMailboxForm({
+  onDone,
+  onCancel,
+}: {
+  onDone: (outcome: ConnectOutcome) => void
+  onCancel: () => void
+}) {
   const {
     register,
     handleSubmit,
     formState: { errors },
   } = useForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: { smtp_port: 587, imap_port: 993, allow_plaintext: false },
+    // Warming is on by default: for cold email it's the default-correct action
+    // for a new mailbox, not an extra. Opting out stays one click.
+    defaultValues: { smtp_port: 587, imap_port: 993, allow_plaintext: false, start_warmup: true },
   })
   const [connect, { isLoading, error }] = useConnectMailboxMutation()
+  const [enableWarmup] = useEnableMailboxWarmupMutation()
+  const { verified } = useEmailVerified()
   const plaintextId = useId()
+  const warmupId = useId()
 
   async function onSubmit(values: Values) {
-    const result = await connect({ connectMailboxRequest: values })
-    if ('data' in result && result.data) onDone()
+    // The submit button is gated, but a form also submits on Enter from inside
+    // a field, which never reaches the button's own click guard.
+    if (!verified) return
+    // `start_warmup` is a form field, not part of the connect contract.
+    const { start_warmup, ...connectMailboxRequest } = values
+    const result = await connect({ connectMailboxRequest })
+    if (!('data' in result) || !result.data) return
+
+    const id = result.data.id
+    if (!start_warmup || !id) {
+      onDone({ warmupFailed: false })
+      return
+    }
+    // Empty settings = the server's defaults (every WarmupSettings field is
+    // optional); the generated arg type requires the key, not its contents.
+    // A failure here must not read as a failed connect — the mailbox exists.
+    const warmup = await enableWarmup({ id, warmupSettings: {} })
+    onDone({ warmupFailed: 'error' in warmup })
   }
 
   return (
@@ -171,6 +225,21 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
           </div>
         </FieldGroup>
 
+        <FieldGroup label="Deliverability">
+          <div>
+            <label htmlFor={warmupId} className="flex items-center gap-2 text-[13px] text-foreground">
+              <input id={warmupId} type="checkbox" className="size-4 accent-warm" {...register('start_warmup')} />
+              <Flame className="size-3.5 text-warm" aria-hidden="true" />
+              Start warming this mailbox
+            </label>
+            <p className="mt-1 pl-6 text-xs text-faint">
+              Warmup exchanges a small, ramping volume of real mail between your own connected mailboxes, so this
+              address builds a sending reputation before it touches a campaign. Recommended for any new mailbox; you
+              can turn it off per mailbox later.
+            </p>
+          </div>
+        </FieldGroup>
+
         {error && (
           <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
             {connectErrorMessage(error)}
@@ -181,10 +250,16 @@ export function ConnectMailboxForm({ onDone, onCancel }: { onDone: () => void; o
           <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary" size="sm" disabled={isLoading}>
+          <VerifiedGateButton
+            action={GATED_ACTION}
+            type="submit"
+            variant="primary"
+            size="sm"
+            disabled={isLoading}
+          >
             {isLoading && <Loader2 className="animate-spin" />}
             {isLoading ? 'Testing connection…' : 'Connect mailbox'}
-          </Button>
+          </VerifiedGateButton>
         </div>
       </form>
     </div>

@@ -37,7 +37,11 @@ type CapturedRequest = { method: string; url: string }
 let campaigns: Array<{ id: string; name: string; subject: string; status: string }>
 let launchResponder: () => Response
 let preflightResponder: () => Response
+let authMeResponder: () => Response
 let requests: CapturedRequest[]
+
+/** Signed in, so a row's `useEmailVerified` actually queries /auth/me. */
+const AUTHED = { auth: { status: 'authed' as const, accessToken: 'token' } }
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: jsonHeaders })
@@ -52,6 +56,7 @@ beforeEach(() => {
   // The preflight gate the Launch button now opens through — all-pass by
   // default so these tests exercise the same launch-mutation branches they
   // did before the dialog existed.
+  authMeResponder = () => jsonResponse({ user_id: 'u-1', email: 'me@company.com', email_verified: true })
   preflightResponder = () =>
     jsonResponse({
       ready: true,
@@ -69,6 +74,7 @@ beforeEach(() => {
       const method = (isRequest ? input.method : init?.method ?? 'GET').toUpperCase()
       requests.push({ method, url })
 
+      if (url.includes('/auth/me')) return authMeResponder()
       if (url.endsWith('/preflight')) return preflightResponder()
       if (url.endsWith('/launch') && method === 'POST') return launchResponder()
       if (method === 'DELETE') return new Response(null, { status: 204 })
@@ -94,6 +100,40 @@ async function clickLaunch() {
   await waitFor(() => expect(confirm).toBeEnabled())
   fireEvent.click(confirm)
 }
+
+// Email verification: POST /campaigns/{id}/launch is behind
+// `auth.RequireVerified`, so the row's Launch control is gated — and because
+// the gate is only an affordance, the 403 keeps its own copy too.
+test('an unverified account cannot start a launch, and the Launch control says why', async () => {
+  authMeResponder = () => jsonResponse({ user_id: 'u-1', email: 'me@company.com', email_verified: false })
+
+  renderWithProviders(<CampaignsPage />, { preloadedState: AUTHED })
+
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: /^launch$/i })).toHaveAttribute('aria-disabled', 'true'),
+  )
+  const launch = screen.getByRole('button', { name: /^launch$/i })
+  const hintId = launch.getAttribute('aria-describedby')
+  expect(document.getElementById(hintId ?? '')).toHaveTextContent(
+    /Verify your email address to launch a campaign\./,
+  )
+
+  fireEvent.click(launch)
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  expect(requests.some((r) => r.url.endsWith('/preflight'))).toBe(false)
+  expect(requests.some((r) => r.method === 'POST' && r.url.endsWith('/launch'))).toBe(false)
+})
+
+test('a 403 email_not_verified launch surfaces the verification copy, not "Launch failed."', async () => {
+  launchResponder = () => jsonResponse({ error: 'email_not_verified' }, 403)
+
+  renderWithProviders(<CampaignsPage />)
+  await clickLaunch()
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/Verify your email address to launch a campaign\./)
+  expect(alert).not.toHaveTextContent(/Launch failed\./)
+})
 
 test('clicking Launch opens the preflight dialog instead of firing the launch mutation immediately', async () => {
   renderWithProviders(<CampaignsPage />)

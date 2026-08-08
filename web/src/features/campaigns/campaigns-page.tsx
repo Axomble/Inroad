@@ -22,12 +22,15 @@ import { cn } from '@/lib/utils'
 import { httpStatus } from '@/lib/rtk-error'
 import { useListControls, byText, byRank, type SortOption } from '@/hooks/use-list-controls'
 import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-nav'
+// The email-verification gate is the auth feature's own concern — it owns both
+// the state and the copy, so a call site names only the action.
+import { VerifiedGateButton } from '@/features/auth/verified-gate-button'
 import type { Campaign } from '@/store/api'
 import { useListCampaignsQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
 import { LifecycleMenu, PauseResumeDialog } from './lifecycle-menu'
-import { usePauseResume } from './lifecycle-actions'
+import { LAUNCH_GATED_ACTION, launchErrorMessage, usePauseResume } from './lifecycle-actions'
 import { PreflightDialog } from './preflight-dialog'
 import { StopClickBubble } from './stop-click-bubble'
 
@@ -227,10 +230,7 @@ function CampaignRow({
   async function onLaunch() {
     setError(null)
     const res = await launch({ id })
-    if ('error' in res) {
-      const status = httpStatus(res.error)
-      setError(status === 409 ? 'Already launched.' : status === 422 ? 'Target list is empty.' : 'Launch failed.')
-    }
+    if ('error' in res) setError(launchErrorMessage(res.error))
   }
 
   return (
@@ -247,10 +247,16 @@ function CampaignRow({
     >
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13.5px] font-medium text-foreground">{campaign.name}</div>
-        <div className="truncate font-mono text-[11px] text-faint">
-          {campaign.subject}
-          {error && <span className="text-danger"> · {error}</span>}
-        </div>
+        <div className="truncate font-mono text-[11px] text-faint">{campaign.subject}</div>
+        {/* Its own line, not a suffix on the truncated subject: a launch failure
+            now carries actionable copy (the verification gate's is a whole
+            sentence), and truncation would swallow the actionable half. Mirrors
+            MailboxRow's inline action error. */}
+        {error && (
+          <div role="alert" className="mt-0.5 text-[11px] text-danger">
+            {error}
+          </div>
+        )}
       </div>
 
       <div className="hidden w-16 justify-end md:flex">
@@ -266,10 +272,17 @@ function CampaignRow({
       <div className="flex w-36 shrink-0 items-center justify-end gap-1">
         {campaign.status === 'draft' && (
           <StopClickBubble>
-            <Button variant="secondary" size="xs" disabled={isLoading} onClick={() => setPreflightOpen(true)}>
+            {/* POST /campaigns/{id}/launch is behind `auth.RequireVerified`. */}
+            <VerifiedGateButton
+              action={LAUNCH_GATED_ACTION}
+              variant="secondary"
+              size="xs"
+              disabled={isLoading}
+              onClick={() => setPreflightOpen(true)}
+            >
               <Rocket className="size-3.5" />
               Launch
-            </Button>
+            </VerifiedGateButton>
             <PreflightDialog
               open={preflightOpen}
               onOpenChange={setPreflightOpen}

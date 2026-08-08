@@ -8,6 +8,9 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppSelector } from '@/store/hooks'
+// The email-verification gate is the auth feature's own concern — it owns both
+// the state and the copy, so a call site names only the action.
+import { VerifiedGateButton } from '@/features/auth/verified-gate-button'
 import {
   useCreateStepMutation,
   useUpdateStepMutation,
@@ -15,7 +18,7 @@ import {
   type SequenceStep,
 } from './api'
 import { delayToSeconds, secondsToDelay } from './step-delay'
-import { stepErrorMessage, testSendErrorMessage } from './step-error'
+import { TEST_SEND_GATED_ACTION, stepErrorMessage, testSendErrorMessage } from './step-error'
 
 /**
  * Two schemas, not one: the first step's subject opens the thread, so it is
@@ -219,7 +222,10 @@ export function StepForm({
               }}
             />
           </div>
-          <Button
+          {/* POST /campaigns/{id}/test-send is behind `auth.RequireVerified`.
+              Saving the step itself is not, so Save stays enabled. */}
+          <VerifiedGateButton
+            action={TEST_SEND_GATED_ACTION}
             type="button"
             variant="ghost"
             size="sm"
@@ -228,7 +234,7 @@ export function StepForm({
           >
             {testSendState.isLoading && <Loader2 className="animate-spin" />}
             Send test
-          </Button>
+          </VerifiedGateButton>
           {sentTo && (
             <p role="status" className="text-xs text-ok">
               Test queued for {sentTo} — it should arrive shortly.

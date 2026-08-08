@@ -42,7 +42,20 @@ import { useListKeyboardNav, LIST_NAV_HINTS_NO_OPEN } from '@/hooks/use-list-key
 // Read-only cross-feature query-hook reuse is the established pattern here (see
 // features/warmup/warmup-page.tsx pulling the mailbox list); cross-feature *UI*
 // imports are not, which is why the warmup badge now lives in components/shared.
-import { useGetWarmupOverviewQuery } from '@/features/warmup/api'
+// Extended to warmup's enable/disable mutations so a mailbox's warmup can be
+// flipped where the mailbox lives, instead of forcing a trip to /app/warmup.
+// Warmup still owns the fleet dashboard, the ramp settings form and its cache
+// tags — the tags are what make this row's flip refetch both screens.
+import {
+  useGetWarmupOverviewQuery,
+  useEnableMailboxWarmupMutation,
+  useDisableMailboxWarmupMutation,
+} from '@/features/warmup/api'
+// The exception: the email-verification gate is the auth feature's own concern,
+// and it owns both halves (state + copy). Re-deriving it here would mean every
+// feature repeating the same three-line dance.
+import { useEmailVerified } from '@/features/auth/use-email-verified'
+import { VerifiedGateButton } from '@/features/auth/verified-gate-button'
 import type { Mailbox, WarmupMailbox } from '@/store/api'
 import type { StartOauthResponse } from './api'
 import {
@@ -94,6 +107,9 @@ export function MailboxesPage() {
   // Track which provider's start failed so the banner shows provider-correct
   // copy from the single shared mapping.
   const [startError, setStartError] = useState<{ provider: OauthProvider; kind: StartErrorKind } | null>(null)
+  // Set when a mailbox connected but its opted-in warmup enable didn't. The form
+  // has closed by then, so the notice belongs to the page.
+  const [warmupNotEnabled, setWarmupNotEnabled] = useState(false)
   const { data, isLoading, error: listError, refetch } = useListMailboxesQuery()
   // Domain authentication is read here rather than in a section of its own: the
   // verdict belongs on the domain heading above the mailboxes it governs, so a
@@ -112,6 +128,15 @@ export function MailboxesPage() {
   // identity (rows read through `.get()`), and building it is one pass over a
   // few dozen entries. Memoizing would buy nothing but a dependency array.
   const warmupByMailbox = new Map((warmup?.mailboxes ?? []).map((entry) => [entry.mailbox_id, entry]))
+
+  // Warmup mail is exchanged BETWEEN a workspace's own mailboxes, so a pool of
+  // one has no partner: the worker marks every job skipped and the mailbox sits
+  // "enabled" doing nothing (internal/worker/warmup/send.go). Saying so is the
+  // difference between a user waiting and a user filing a bug. Derived from the
+  // server's own pool accounting — `active` is `pool_size >= 2` — rather than
+  // from the mailbox count, so two mailboxes with only one warming still reads
+  // as idle, which is the truth.
+  const poolIdle = warmup ? warmup.pool_size > 0 && !warmup.active : false
 
   const controls = useListControls({
     items: mailboxes,
@@ -174,6 +199,25 @@ export function MailboxesPage() {
         </BannerShell>
       )}
 
+      {warmupNotEnabled && (
+        <BannerShell tone="warn" onDismiss={() => setWarmupNotEnabled(false)}>
+          <Flame className="size-4 shrink-0 text-warm" aria-hidden="true" />
+          <span className="min-w-0 flex-1">
+            Mailbox connected, but warmup couldn&rsquo;t be enabled. Turn it on from the mailbox&rsquo;s actions menu.
+          </span>
+        </BannerShell>
+      )}
+
+      {poolIdle && (
+        <BannerShell tone="warn">
+          <Flame className="size-4 shrink-0 text-warm" aria-hidden="true" />
+          <span className="min-w-0 flex-1">
+            Warmup is on, but idle: warmup mail is exchanged between your own mailboxes, so warming starts once a
+            second mailbox is connected and warming too.
+          </span>
+        </BannerShell>
+      )}
+
       <StatStrip>
         <Stat label="Total" value={listError ? '\u2014' : mailboxes.length} sub="connected" />
         <Stat
@@ -197,7 +241,13 @@ export function MailboxesPage() {
       </StatStrip>
 
       {showConnect && (
-        <ConnectMailboxForm onDone={() => setShowConnect(false)} onCancel={() => setShowConnect(false)} />
+        <ConnectMailboxForm
+          onDone={({ warmupFailed }) => {
+            setShowConnect(false)
+            setWarmupNotEnabled(warmupFailed)
+          }}
+          onCancel={() => setShowConnect(false)}
+        />
       )}
 
       {/* A failed domains load can't be told on the group headings themselves,
@@ -287,6 +337,7 @@ export function MailboxesPage() {
                             key={m.id}
                             mailbox={m}
                             warmup={warmupByMailbox.get(m.id ?? '')}
+                            poolIdle={poolIdle}
                             index={index}
                             active={nav.isActive(index)}
                             onHover={nav.onRowHover}
@@ -312,6 +363,13 @@ export function MailboxesPage() {
  * The "Connect mailbox" primary action, split by provider: Gmail or Microsoft
  * 365 (one-click OAuth) or SMTP/IMAP (the credentialled inline form). Same
  * trigger button is reused in the topbar and the empty state.
+ *
+ * An unverified account gets one gated button instead of the menu, rather than
+ * three disabled items: all three post to a route behind
+ * `auth.RequireVerified`, and an explanation attached to an item would be
+ * sealed inside a menu the user has to open to find out why nothing works.
+ * Owning that decision here (not taking it as a prop) keeps both render sites —
+ * the topbar and the empty state — free of gate wiring.
  */
 function ConnectMenu({
   startingGmail,
@@ -337,6 +395,17 @@ function ConnectMenu({
   // menu stays open (onSelect is prevented) and covers the full-width error
   // banner that renders underneath it.
   const [open, setOpen] = useState(false)
+  const { verified } = useEmailVerified()
+
+  if (!verified) {
+    return (
+      <VerifiedGateButton action="connect a mailbox" variant="primary" size="sm" aria-label={triggerLabel}>
+        <Plus className="size-4" />
+        Connect mailbox
+      </VerifiedGateButton>
+    )
+  }
+
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
@@ -411,6 +480,7 @@ function OauthMenuItem({
 function MailboxRow({
   mailbox,
   warmup,
+  poolIdle,
   index,
   active,
   onHover,
@@ -418,6 +488,8 @@ function MailboxRow({
   mailbox: Mailbox
   /** This mailbox's warmup row, present only when it's enrolled in the pool. */
   warmup?: WarmupMailbox
+  /** Warmup is enabled somewhere but the pool is too small to exchange mail. */
+  poolIdle: boolean
   index: number
   active: boolean
   onHover: (index: number) => void
@@ -425,13 +497,21 @@ function MailboxRow({
   const [pause, pauseState] = usePauseMailboxMutation()
   const [resume, resumeState] = useResumeMailboxMutation()
   const [remove, removeState] = useDeleteMailboxMutation()
+  const [enableWarmup, enableWarmupState] = useEnableMailboxWarmupMutation()
+  const [disableWarmup, disableWarmupState] = useDisableMailboxWarmupMutation()
   const [confirmDelete, setConfirmDelete] = useState(false)
   // A failed pause/resume/delete was previously silent — surface it inline on
   // the row (the menu/dialog has already closed by the time this shows, so the
   // error isn't hidden underneath either).
   const [actionError, setActionError] = useState<string | null>(null)
   const id = mailbox.id ?? ''
-  const busy = pauseState.isLoading || resumeState.isLoading || removeState.isLoading
+  const warming = !!warmup?.enabled
+  const busy =
+    pauseState.isLoading ||
+    resumeState.isLoading ||
+    removeState.isLoading ||
+    enableWarmupState.isLoading ||
+    disableWarmupState.isLoading
   // Both OAuth providers send via a hosted API rather than SMTP; the row's
   // secondary line reads "<Provider> · API" for them (SMTP has no label here).
   const oauthLabel = mailboxProviderLabel(mailbox.provider)
@@ -445,6 +525,15 @@ function MailboxRow({
     setActionError(null)
     const res = await resume({ id })
     if ('error' in res) setActionError(mailboxActionErrorMessage('resume', httpStatus(res.error)))
+  }
+  // One control, both directions: the current state decides which call fires, so
+  // there's no way for an "enable" and a "disable" trigger to disagree about it.
+  // Enabling sends empty settings, i.e. the server's default ramp — tuning it is
+  // still the warmup page's job.
+  async function onToggleWarmup() {
+    setActionError(null)
+    const res = warming ? await disableWarmup({ id }) : await enableWarmup({ id, warmupSettings: {} })
+    if ('error' in res) setActionError(warmupToggleErrorMessage(warming, httpStatus(res.error)))
   }
   async function onDelete() {
     setActionError(null)
@@ -480,7 +569,7 @@ function MailboxRow({
       </div>
 
       <div className="hidden w-40 shrink-0 xl:block">
-        <WarmupCell entry={warmup} />
+        <WarmupCell entry={warmup} poolIdle={poolIdle} />
       </div>
 
       <div className="hidden w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground lg:block">
@@ -507,6 +596,9 @@ function MailboxRow({
               Pause
             </DropdownMenuItem>
           )}
+          <DropdownMenuItem disabled={busy} onClick={() => void onToggleWarmup()}>
+            {warming ? 'Stop warming up' : 'Start warming up'}
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             className="text-danger"
@@ -555,6 +647,12 @@ function mailboxActionErrorMessage(action: 'pause' | 'resume' | 'delete', status
   return `Couldn't ${action} this mailbox. Please try again.`
 }
 
+/** Human copy for a failed warmup flip. `warming` is the state we tried to leave. */
+function warmupToggleErrorMessage(warming: boolean, status?: number): string {
+  if (status === 404) return 'This mailbox no longer exists — refresh the page.'
+  return warming ? "Couldn't stop warmup. Please try again." : "Couldn't start warmup. Please try again."
+}
+
 function LoadingRows() {
   return (
     <ul>
@@ -580,9 +678,20 @@ function LoadingRows() {
  * "can I trust this mailbox to send today?" is answerable without leaving the
  * page, not to duplicate the warmup feature's controls here.
  */
-function WarmupCell({ entry }: { entry?: WarmupMailbox }) {
+function WarmupCell({ entry, poolIdle }: { entry?: WarmupMailbox; poolIdle: boolean }) {
   if (!entry?.enabled) {
     return <span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-faint">Off</span>
+  }
+  // Enabled but with nobody to exchange with: show that instead of a ramp
+  // counter frozen at 0, which reads as a broken mailbox rather than an
+  // incomplete pool. The page-level banner explains the fix.
+  if (poolIdle) {
+    return (
+      <span className="flex items-center gap-1 font-mono text-[11px] text-warm">
+        <Flame className="size-3" aria-hidden="true" />
+        Idle — needs 2
+      </span>
+    )
   }
   return (
     <div className="flex min-w-0 items-center gap-2">
