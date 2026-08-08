@@ -389,7 +389,11 @@ test('a failed engagement read leaves the rest of the record usable', async () =
   renderWithProviders(<ContactDetailPage contactId="c-1" />)
 
   const alert = await screen.findByRole('alert')
-  expect(alert).toHaveTextContent('The server had a problem loading CRM data.')
+  // Neutral wording, not the CRM copy: `/contacts/{id}/engagement` is a contacts
+  // endpoint, so a message naming CRM data — or the crm:read scope — would send
+  // the reader after the wrong permission.
+  expect(alert).toHaveTextContent('The server had a problem. Try again in a moment.')
+  expect(alert).not.toHaveTextContent('CRM')
   // The cheap half of the page rendered regardless — the two are separate requests.
   expect(screen.getByRole('link', { name: 'Acme' })).toHaveAttribute('href', '/app/companies/co-1')
   expect(screen.getByRole('link', { name: 'Acme renewal' })).toHaveAttribute('href', '/app/deals/d-1')

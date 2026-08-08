@@ -1,8 +1,10 @@
 import { memo } from 'react'
 import { Skeleton } from '@/components/ui/skeleton'
+import { crmErrorMessage } from './error-copy'
+import { QueryErrorBanner } from '@/components/shared/record-page'
 import { EmptyBlock } from '@/components/layout/page'
 import { useCrmListPipelinesQuery, type CrmPipeline } from './api'
-import { QueryErrorBanner } from './record-parts'
+
 
 /**
  * The stage definitions deals move through. Configuration for deals, so it
@@ -13,8 +15,7 @@ export function PipelinesPanel() {
   if (pipelinesQuery.isError) {
     return (
       <QueryErrorBanner
-        error={pipelinesQuery.error}
-        fallback="Pipelines could not be loaded."
+        message={crmErrorMessage(pipelinesQuery.error, "Pipelines could not be loaded.")}
         onRetry={() => void pipelinesQuery.refetch()}
         retrying={pipelinesQuery.isFetching}
       />

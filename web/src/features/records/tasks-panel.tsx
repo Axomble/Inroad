@@ -6,11 +6,11 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useCrmCreateTaskMutation, type CrmTargetType } from './api'
-import { crmErrorMessage } from './error-copy'
+import { recordErrorMessage } from './error-copy'
 import { formatDateTime } from '@/lib/datetime'
 import { parseActor } from './actor'
 import { ActorBadge } from './actor-badge'
-import { InlineLoading, MoreExist, MutedEmpty, QueryErrorBanner, Section } from './record-parts'
+import { InlineLoading, MoreExist, MutedEmpty, QueryErrorBanner, Section } from '@/components/shared/record-page'
 import { useOpenTasks } from './use-open-tasks'
 
 const taskSchema = z.object({
@@ -31,8 +31,7 @@ export function TasksPanel({ targetType, targetId }: { targetType: CrmTargetType
       {query.isError ? (
         <QueryErrorBanner
           className="mt-4"
-          error={query.error}
-          fallback="Tasks could not be loaded."
+          message={recordErrorMessage(query.error, 'Tasks could not be loaded.')}
           onRetry={() => void query.refetch()}
           retrying={query.isFetching}
         />
@@ -80,7 +79,7 @@ function TaskComposer({ targetType, targetId }: { targetType: CrmTargetType; tar
       }).unwrap()
       form.reset()
     } catch (error) {
-      form.setError('root', { message: crmErrorMessage(error, 'The task could not be saved. Try again.') })
+      form.setError('root', { message: recordErrorMessage(error, 'The task could not be saved. Try again.') })
     }
   })
   const titleId = `task-title-${targetId}`

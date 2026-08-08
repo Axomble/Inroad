@@ -1,7 +1,9 @@
 import { Link } from '@tanstack/react-router'
 import { Skeleton } from '@/components/ui/skeleton'
+import { recordErrorMessage } from '@/features/records/error-copy'
 import { formatDateTime } from '@/lib/datetime'
-import { QueryErrorBanner, Section } from '@/features/crm/record-parts'
+import { QueryErrorBanner, Section } from '@/components/shared/record-page'
+
 import { useGetContactEngagementQuery, type ContactCampaignEnrollment, type ContactEngagement } from './api'
 
 /**
@@ -33,8 +35,7 @@ export function EngagementPanel({ contactId }: { contactId: string }) {
       {query.isError ? (
         <QueryErrorBanner
           className=""
-          error={query.error}
-          fallback="This contact's engagement could not be loaded."
+          message={recordErrorMessage(query.error, "This contact's engagement could not be loaded.")}
           onRetry={() => void query.refetch()}
           retrying={query.isFetching}
         />

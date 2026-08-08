@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { useCrmCreateCompanyMutation } from './api'
 import { Field, FormShell } from './form-shell'
 import { currencyField, optionalMoney } from './form-schema'
-import { toMicros } from './money'
+import { toMicros } from '@/lib/money'
 
 const companySchema = z.object({
   name: z.string().trim().min(1, 'Company name is required').max(200),

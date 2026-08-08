@@ -1,14 +1,16 @@
 import { memo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import { crmErrorMessage } from './error-copy'
 import { Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
 import { useCrmListCompaniesQuery, type CrmCompany } from './api'
 import { CompanyForm } from './company-form'
-import { formatMoney } from './money'
-import { listPageSize } from './query-args'
-import { QueryErrorBanner, TruncationNotice } from './record-parts'
+import { formatMoney } from '@/lib/money'
+import { listPageSize } from '@/features/records/query-args'
+import { QueryErrorBanner, TruncationNotice } from '@/components/shared/record-page'
+
 
 // `data?.items ?? []` would hand every render a fresh array while the query is
 // uninitialised or erroring, which defeats the `memo()` on the list.
@@ -70,8 +72,7 @@ export function CompaniesPage() {
       <PageBody>
         {companiesQuery.isError ? (
           <QueryErrorBanner
-            error={companiesQuery.error}
-            fallback="Companies could not be loaded."
+            message={crmErrorMessage(companiesQuery.error, "Companies could not be loaded.")}
             onRetry={() => void companiesQuery.refetch()}
             retrying={companiesQuery.isFetching}
           />

@@ -2,13 +2,16 @@ import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { EmptyBlock, Page, PageBody } from '@/components/layout/page'
 import { cn } from '@/lib/utils'
-import { crmErrorMessage } from './error-copy'
 
 /**
- * The pieces a CRM record page is built from. Contacts, companies and deals are
- * all hubs onto the same related-record graph, so they share one panel, one
- * loading line, one empty line and one alert surface rather than each screen
- * re-inventing them slightly differently.
+ * The presentational vocabulary a record page is built from — panels, field rows,
+ * loading and empty lines, truncation notices, and the inline alert.
+ *
+ * Every record type is a hub onto the same related-record graph, so they share one
+ * of each rather than re-inventing them slightly differently per screen. Nothing
+ * here fetches, and nothing knows about contacts, companies or deals: that is what
+ * lets it live in `components/shared`, where any feature may use it without
+ * importing another feature's UI.
  */
 
 /** A record page still fetching the record it is named after. */
@@ -114,16 +117,22 @@ export function TruncationNotice({ noun, shown }: { noun: string; shown: number 
   )
 }
 
-/** The one alert surface for a failed CRM read, with the retry the user needs. */
+/**
+ * The inline alert for a panel that could not load, with the retry the user needs.
+ *
+ * Takes a finished `message` rather than an RTK error, which is what keeps this
+ * file free of any feature: each domain narrows its own failures through its own
+ * `error-copy` module — the scope a 403 is about differs by record type — and
+ * passes the sentence in. (A page-level *mutation* outcome uses `NoticeBanner`;
+ * this one is a read that failed.)
+ */
 export function QueryErrorBanner({
-  error,
-  fallback,
+  message,
   onRetry,
   retrying = false,
   className = 'm-5',
 }: {
-  error: unknown
-  fallback: string
+  message: string
   onRetry?: () => void
   retrying?: boolean
   className?: string
@@ -136,7 +145,7 @@ export function QueryErrorBanner({
         className,
       )}
     >
-      <span className="min-w-0 flex-1">{crmErrorMessage(error, fallback)}</span>
+      <span className="min-w-0 flex-1">{message}</span>
       {onRetry && (
         <Button size="sm" onClick={onRetry} disabled={retrying}>
           {retrying ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}

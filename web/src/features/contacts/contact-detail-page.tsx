@@ -4,19 +4,19 @@ import { Button } from '@/components/ui/button'
 import { Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
 import { formatDateTime } from '@/lib/datetime'
 import { httpStatus } from '@/lib/rtk-error'
-import { ActivityPanel } from '@/features/crm/activity-panel'
-import { DealRow } from '@/features/crm/deal-row'
-import { NotesPanel } from '@/features/crm/notes-panel'
-import { TasksPanel } from '@/features/crm/tasks-panel'
-import { useOpenTasks } from '@/features/crm/use-open-tasks'
-import { crmErrorMessage } from '@/features/crm/error-copy'
+import { ActivityPanel } from '@/features/records/activity-panel'
+import { ContactDealRow } from './contact-deal-row'
+import { NotesPanel } from '@/features/records/notes-panel'
+import { TasksPanel } from '@/features/records/tasks-panel'
+import { useOpenTasks } from '@/features/records/use-open-tasks'
+import { recordErrorMessage } from '@/features/records/error-copy'
 import {
   Detail,
   MutedEmpty,
   RecordPageMessage,
   RecordPageSkeleton,
   Section,
-} from '@/features/crm/record-parts'
+} from '@/components/shared/record-page'
 import { useGetContactQuery, type ContactDetail } from './api'
 import { EngagementPanel } from './engagement-panel'
 import { SuppressionNotice } from './suppression-notice'
@@ -42,7 +42,7 @@ export function ContactDetailPage({ contactId }: { contactId: string }) {
     return (
       <RecordPageMessage
         title="This contact could not be loaded"
-        description={crmErrorMessage(contactQuery.error, 'Try again in a moment.')}
+        description={recordErrorMessage(contactQuery.error, 'Try again in a moment.')}
         action={<Button onClick={() => void contactQuery.refetch()} disabled={contactQuery.isFetching}>Try again</Button>}
       />
     )
@@ -94,7 +94,7 @@ export function ContactDetailPage({ contactId }: { contactId: string }) {
                 <MutedEmpty text="No deals name this contact yet." />
               ) : (
                 <ul className="space-y-2">
-                  {contact.deals.map((deal) => <DealRow key={deal.id} deal={deal} />)}
+                  {contact.deals.map((deal) => <ContactDealRow key={deal.id} deal={deal} />)}
                 </ul>
               )}
               {/* The cap is a property of the response, so say so — and name the

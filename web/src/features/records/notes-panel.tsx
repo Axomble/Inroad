@@ -6,12 +6,12 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useCrmCreateNoteMutation, useCrmListNotesQuery, type CrmTargetType } from './api'
-import { crmErrorMessage } from './error-copy'
+import { recordErrorMessage } from './error-copy'
 import { formatDateTime } from '@/lib/datetime'
 import { listPageSize } from './query-args'
 import { parseActor } from './actor'
 import { ActorBadge } from './actor-badge'
-import { InlineLoading, MoreExist, MutedEmpty, QueryErrorBanner, Section } from './record-parts'
+import { InlineLoading, MoreExist, MutedEmpty, QueryErrorBanner, Section } from '@/components/shared/record-page'
 
 const noteSchema = z.object({
   title: z.string().trim().max(200),
@@ -36,8 +36,7 @@ export function NotesPanel({ targetType, targetId }: { targetType: CrmTargetType
         {notesQuery.isError ? (
           <QueryErrorBanner
             className=""
-            error={notesQuery.error}
-            fallback="Notes could not be loaded."
+            message={recordErrorMessage(notesQuery.error, 'Notes could not be loaded.')}
             onRetry={() => void notesQuery.refetch()}
             retrying={notesQuery.isFetching}
           />
@@ -71,7 +70,7 @@ function NoteComposer({ targetType, targetId }: { targetType: CrmTargetType; tar
       await createNote({ crmNoteInput: { title, body, target_type: targetType, target_id: targetId } }).unwrap()
       form.reset()
     } catch (error) {
-      form.setError('root', { message: crmErrorMessage(error, 'The note could not be saved. Try again.') })
+      form.setError('root', { message: recordErrorMessage(error, 'The note could not be saved. Try again.') })
     }
   })
   const titleId = `note-title-${targetId}`

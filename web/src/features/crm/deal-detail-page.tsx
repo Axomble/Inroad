@@ -4,16 +4,17 @@ import { Button } from '@/components/ui/button'
 import { Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
 import { useCrmGetDealQuery, useCrmListDealThreadsQuery } from './api'
-import { ActivityPanel } from './activity-panel'
-import { NotesPanel } from './notes-panel'
-import { TasksPanel } from './tasks-panel'
-import { useOpenTasks } from './use-open-tasks'
-import { parseActor } from './actor'
-import { ActorBadge } from './actor-badge'
+import { ActivityPanel } from '@/features/records/activity-panel'
+import { NotesPanel } from '@/features/records/notes-panel'
+import { RevertStageChange } from './revert-stage-change'
+import { TasksPanel } from '@/features/records/tasks-panel'
+import { useOpenTasks } from '@/features/records/use-open-tasks'
+import { parseActor } from '@/features/records/actor'
+import { ActorBadge } from '@/features/records/actor-badge'
 import { crmErrorMessage } from './error-copy'
 import { formatDateTime } from '@/lib/datetime'
-import { formatMoney } from './money'
-import { Detail, InlineLoading, MutedEmpty, RecordPageMessage, RecordPageSkeleton, Section } from './record-parts'
+import { formatMoney } from '@/lib/money'
+import { Detail, InlineLoading, MutedEmpty, RecordPageMessage, RecordPageSkeleton, Section } from '@/components/shared/record-page'
 
 /**
  * A deal as a hub: its own fields, the account and person it belongs to, the
@@ -70,7 +71,13 @@ export function DealDetailPage({ dealId }: { dealId: string }) {
       <PageBody>
         <div className="grid min-w-0 gap-5 p-4 sm:p-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(18rem,0.75fr)]">
           <div className="min-w-0 space-y-5">
-            <ActivityPanel targetType="deal" targetId={dealId} revertDealId={dealId} />
+            {/* The revert is deal-only, so it is handed to the feed as a slot
+                rather than living inside a panel contacts also uses. */}
+            <ActivityPanel
+              targetType="deal"
+              targetId={dealId}
+              renderEventAction={(event) => <RevertStageChange dealId={dealId} event={event} />}
+            />
             <Section title="Conversation context" description="Structured headers and participants only; inbound message bodies are not exposed.">
               {threadsQuery.isLoading ? <InlineLoading /> : null}
               <div className="space-y-3">

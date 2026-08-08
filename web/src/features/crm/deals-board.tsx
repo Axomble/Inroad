@@ -18,10 +18,10 @@ import { Select } from '@/components/ui/select'
 import { EmptyBlock } from '@/components/layout/page'
 import { cn } from '@/lib/utils'
 import { useCrmGetBoardQuery, useCrmMoveDealMutation, type CrmBoardStage, type CrmDeal } from './api'
-import { parseActor } from './actor'
-import { ActorBadge } from './actor-badge'
+import { parseActor } from '@/features/records/actor'
+import { ActorBadge } from '@/features/records/actor-badge'
 import { crmErrorMessage } from './error-copy'
-import { formatMoney, formatTotal } from './money'
+import { formatMoney, formatTotal } from '@/lib/money'
 import { defaultBoardArg } from './query-args'
 
 /** The kanban itself. Its page shell (topbar, stats, tabs) is `DealsPage`. */

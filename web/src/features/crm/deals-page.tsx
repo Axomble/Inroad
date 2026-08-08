@@ -9,7 +9,7 @@ import { DealForm } from './deal-form'
 import { DealsBoard } from './deals-board'
 import { PipelineForm } from './pipeline-form'
 import { PipelinesPanel } from './pipelines-panel'
-import { formatTotal } from './money'
+import { formatTotal } from '@/lib/money'
 import { defaultBoardArg } from './query-args'
 import { ViewTabs, type ViewTab } from './view-tabs'
 

@@ -1,9 +1,11 @@
 import { Link } from '@tanstack/react-router'
 import { Skeleton } from '@/components/ui/skeleton'
+import { crmErrorMessage } from './error-copy'
 import { useCrmListCompanyContactsQuery, useCrmListCompanyDealsQuery, type CrmCompanyContact } from './api'
 import { DealRow } from './deal-row'
-import { listPageSize } from './query-args'
-import { MutedEmpty, QueryErrorBanner, Section } from './record-parts'
+import { listPageSize } from '@/features/records/query-args'
+import { MutedEmpty, QueryErrorBanner, Section } from '@/components/shared/record-page'
+
 
 /**
  * A company's related records. Both are keyset-paginated sub-resources rather
@@ -21,8 +23,7 @@ export function CompanyContactsPanel({ companyId }: { companyId: string }) {
       {query.isError ? (
         <QueryErrorBanner
           className=""
-          error={query.error}
-          fallback="This company's contacts could not be loaded."
+          message={crmErrorMessage(query.error, "This company's contacts could not be loaded.")}
           onRetry={() => void query.refetch()}
           retrying={query.isFetching}
         />
@@ -76,8 +77,7 @@ export function CompanyDealsPanel({ companyId }: { companyId: string }) {
       {query.isError ? (
         <QueryErrorBanner
           className=""
-          error={query.error}
-          fallback="This company's deals could not be loaded."
+          message={crmErrorMessage(query.error, "This company's deals could not be loaded.")}
           onRetry={() => void query.refetch()}
           retrying={query.isFetching}
         />

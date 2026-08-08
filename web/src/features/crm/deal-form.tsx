@@ -1,16 +1,18 @@
 import { useId } from 'react'
 import { useForm } from 'react-hook-form'
+import { crmErrorMessage } from './error-copy'
+import { QueryErrorBanner } from '@/components/shared/record-page'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useCrmCreateDealMutation, useCrmListCompaniesQuery, useCrmListPipelinesQuery } from './api'
-import { QueryErrorBanner } from './record-parts'
+
 import { Field, FormShell } from './form-shell'
 import { currencyField, optionalMoney } from './form-schema'
-import { listPageSize } from './query-args'
-import { toMicros } from './money'
+import { listPageSize } from '@/features/records/query-args'
+import { toMicros } from '@/lib/money'
 
 const dealSchema = z.object({
   name: z.string().trim().min(1, 'Deal name is required').max(200),
@@ -70,8 +72,7 @@ export function DealForm({ companyId = '', onDone }: { companyId?: string; onDon
   if (pipelinesQuery.isError) {
     return (
       <QueryErrorBanner
-        error={pipelinesQuery.error}
-        fallback="Pipelines could not be loaded, so a deal cannot be created yet."
+        message={crmErrorMessage(pipelinesQuery.error, "Pipelines could not be loaded, so a deal cannot be created yet.")}
         onRetry={() => void pipelinesQuery.refetch()}
         retrying={pipelinesQuery.isFetching}
       />

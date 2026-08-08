@@ -23,29 +23,24 @@ export type {
   CrmBoard,
   CrmBoardStage,
   CrmMoveDealInput,
-  CrmEvent,
   CrmThread,
-  CrmNote,
-  CrmTask,
   CrmSettings,
-  CrmTargetFields,
   CrmCompanyContact,
 } from '@/store/api'
 
-import type { CrmDeal, CrmSettings, CrmTargetFields } from '@/store/api'
+import type { CrmDeal, CrmSettings } from '@/store/api'
 
 /** The capture policy union, derived from the generated settings shape. */
 export type AutoCapturePolicy = CrmSettings['auto_capture_policy']
 
-/**
- * Which record a note, task or event hangs off. Notes and tasks are polymorphic
- * in the API, which is what lets contacts, companies and deals share one panel.
- */
-export type CrmTargetType = CrmTargetFields['target_type']
-
 const crmApi = api
   .enhanceEndpoints({
-    addTagTypes: ['CRMCompany', 'CRMPipeline', 'CRMDeal', 'CRMActivity', 'CRMTask', 'CRMSettings'],
+    // `RecordActivity` is declared by `features/records/api.ts` and repeated here
+    // because moving a deal produces an activity event, and that feed belongs to
+    // the records module. Tag types are one global namespace on the shared api
+    // instance, so naming another module's tag is a cache dependency rather than
+    // an import — nothing of that module's code comes with it.
+    addTagTypes: ['CRMCompany', 'CRMPipeline', 'CRMDeal', 'CRMThread', 'CRMSettings', 'RecordActivity'],
     endpoints: {
       crmListCompanies: {
         providesTags: (result) =>
@@ -193,47 +188,13 @@ const crmApi = api
         // caches (detail page, list, activity feed) need refetching. On failure
         // nothing changed server-side, so nothing is invalidated.
         invalidatesTags: (_result, error, { id }) =>
-          error ? [] : [{ type: 'CRMDeal', id }, { type: 'CRMDeal', id: 'LIST' }, { type: 'CRMActivity', id }],
+          error ? [] : [{ type: 'CRMDeal', id }, { type: 'CRMDeal', id: 'LIST' }, { type: 'RecordActivity', id }],
       },
 
+      // Conversation context is deal-only (campaign threads linked to a deal), so
+      // unlike notes/tasks/activity it stays here.
       crmListDealThreads: {
-        providesTags: (_result, _error, { id }) => [{ type: 'CRMActivity', id }],
-      },
-      crmListEvents: {
-        providesTags: (_result, _error, { targetId }) => [{ type: 'CRMActivity', id: targetId }],
-      },
-      crmListNotes: {
-        providesTags: (_result, _error, { targetId }) => [{ type: 'CRMActivity', id: targetId }],
-      },
-      crmCreateNote: {
-        invalidatesTags: (_result, _error, { crmNoteInput }) => [{ type: 'CRMActivity', id: crmNoteInput.target_id }],
-      },
-      // Note update/delete take an id only — the target is unknown here, so the
-      // whole activity tag family is refetched rather than guessing wrong.
-      crmUpdateNote: {
-        invalidatesTags: ['CRMActivity'],
-      },
-      crmDeleteNote: {
-        invalidatesTags: ['CRMActivity'],
-      },
-
-      crmListTasks: {
-        providesTags: (_result, _error, { targetId }) => [{ type: 'CRMTask', id: targetId }],
-      },
-      crmCreateTask: {
-        invalidatesTags: (_result, _error, { crmTaskInput }) => [
-          { type: 'CRMTask', id: crmTaskInput.target_id },
-          { type: 'CRMActivity', id: crmTaskInput.target_id },
-        ],
-      },
-      crmUpdateTask: {
-        invalidatesTags: (_result, _error, { crmTaskInput }) => [
-          { type: 'CRMTask', id: crmTaskInput.target_id },
-          { type: 'CRMActivity', id: crmTaskInput.target_id },
-        ],
-      },
-      crmDeleteTask: {
-        invalidatesTags: ['CRMTask', 'CRMActivity'],
+        providesTags: (_result, _error, { id }) => [{ type: 'CRMThread', id }],
       },
 
       // A company's roster and its deals are genuinely unbounded, so they are
@@ -271,11 +232,6 @@ export const {
   useCrmGetBoardQuery,
   useCrmMoveDealMutation,
   useCrmListDealThreadsQuery,
-  useCrmListEventsQuery,
-  useCrmListNotesQuery,
-  useCrmCreateNoteMutation,
-  useCrmListTasksQuery,
-  useCrmCreateTaskMutation,
   useCrmGetSettingsQuery,
   useCrmUpdateSettingsMutation,
 } = crmApi
