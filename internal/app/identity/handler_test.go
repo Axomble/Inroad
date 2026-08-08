@@ -62,7 +62,7 @@ func TestLoginBadCredentialsReturns401(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	store.users["user@acme.test"] = gen.User{ID: uuid.New(), Email: "user@acme.test", PasswordHash: hash}
+	store.users["user@acme.test"] = gen.User{ID: uuid.New(), Email: "user@acme.test", PasswordHash: &hash}
 
 	h := newTestHandler(store)
 	w := doRequest(h.login, http.MethodPost, "/login", map[string]string{
@@ -269,8 +269,11 @@ func TestSwitchWorkspaceUsesSessionIDFromJWTNotBody(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	// Give the same user membership in a second workspace to switch into.
+	// Give the same user membership in a second workspace to switch into. The
+	// workspace row itself matters: switching reads it back for the target's
+	// onboarding state (a real membership always implies the row exists, by FK).
 	otherWS := uuid.New()
+	store.workspaces[otherWS] = gen.Workspace{ID: otherWS, Name: "Other"}
 	member := gen.WorkspaceMember{ID: uuid.New(), WorkspaceID: otherWS, UserID: reg.UserID, Role: gen.MemberRoleMember}
 	store.memberByPair[[2]uuid.UUID{otherWS, reg.UserID}] = member
 	store.members[reg.UserID] = append(store.members[reg.UserID], gen.ListMembersByUserRow{

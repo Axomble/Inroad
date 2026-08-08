@@ -113,6 +113,40 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.acceptInviteRequest,
       }),
     }),
+    authGoogleSignInRedirect: build.query<
+      AuthGoogleSignInRedirectApiResponse,
+      AuthGoogleSignInRedirectApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/oauth/google/start`,
+        params: {
+          return_to: queryArg.returnTo,
+        },
+      }),
+    }),
+    authGoogleSignInStart: build.mutation<
+      AuthGoogleSignInStartApiResponse,
+      AuthGoogleSignInStartApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/oauth/google/start`,
+        method: "POST",
+        body: queryArg.googleSignInStartRequest,
+      }),
+    }),
+    authGoogleSignInCallback: build.query<
+      AuthGoogleSignInCallbackApiResponse,
+      AuthGoogleSignInCallbackApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/auth/oauth/google/callback`,
+        params: {
+          code: queryArg.code,
+          state: queryArg.state,
+          error: queryArg.error,
+        },
+      }),
+    }),
     authTwoFactorStatus: build.query<
       AuthTwoFactorStatusApiResponse,
       AuthTwoFactorStatusApiArg
@@ -248,6 +282,16 @@ const injectedRtkApi = api.injectEndpoints({
       query: (queryArg) => ({
         url: `/auth/api-keys/${queryArg.id}`,
         method: "DELETE",
+      }),
+    }),
+    completeWorkspaceOnboarding: build.mutation<
+      CompleteWorkspaceOnboardingApiResponse,
+      CompleteWorkspaceOnboardingApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/workspaces/${queryArg.id}/onboarding/complete`,
+        method: "POST",
+        body: queryArg.completeOnboardingRequest,
       }),
     }),
     createWorkspaceInvite: build.mutation<
@@ -1408,6 +1452,22 @@ export type AuthAcceptInviteApiResponse =
 export type AuthAcceptInviteApiArg = {
   acceptInviteRequest: AcceptInviteRequest;
 };
+export type AuthGoogleSignInRedirectApiResponse = unknown;
+export type AuthGoogleSignInRedirectApiArg = {
+  /** In-app path to land on after sign-in. Validated server-side as a same-origin path (anything else is silently dropped) and remembered against the state nonce rather than echoed through Google. */
+  returnTo?: string;
+};
+export type AuthGoogleSignInStartApiResponse =
+  /** status 200 Google consent URL */ GoogleSignInStartResponse;
+export type AuthGoogleSignInStartApiArg = {
+  googleSignInStartRequest: GoogleSignInStartRequest;
+};
+export type AuthGoogleSignInCallbackApiResponse = unknown;
+export type AuthGoogleSignInCallbackApiArg = {
+  code?: string;
+  state?: string;
+  error?: string;
+};
 export type AuthTwoFactorStatusApiResponse =
   /** status 200 2FA status for the caller */ TwoFactorStatusResponse;
 export type AuthTwoFactorStatusApiArg = void;
@@ -1474,6 +1534,12 @@ export type AuthApiKeyListApiArg = void;
 export type AuthApiKeyRevokeApiResponse = unknown;
 export type AuthApiKeyRevokeApiArg = {
   id: string;
+};
+export type CompleteWorkspaceOnboardingApiResponse =
+  /** status 200 Onboarding state after the call */ OnboardingResponse;
+export type CompleteWorkspaceOnboardingApiArg = {
+  id: string;
+  completeOnboardingRequest: CompleteOnboardingRequest;
 };
 export type CreateWorkspaceInviteApiResponse =
   /** status 201 Created invite */ Invite;
@@ -2169,6 +2235,8 @@ export type Membership = {
   workspace_id: string;
   workspace_name: string;
   role: string;
+  /** When THIS workspace finished onboarding, or null while pending, so switching into a freshly created one needs no extra request. */
+  onboarding_completed_at: string | null;
 };
 export type SessionResponse = {
   access_token: string;
@@ -2179,6 +2247,8 @@ export type SessionResponse = {
   memberships: Membership[];
   /** The signed-in user's email — the SPA's identity source after a silent refresh. */
   email: string;
+  /** When the ACTIVE workspace finished onboarding, or null while it is still pending. Present on the session response so the SPA can gate its onboarding modal on first paint without a second round trip. A nullable timestamp rather than a boolean beside it, so a response can never claim to be complete with no completion time. */
+  onboarding_completed_at: string | null;
 };
 export type RegisterRequest = {
   workspace_name: string;
@@ -2204,12 +2274,16 @@ export type MeResponse = {
   email: string;
   /** Whether the caller has confirmed their email address. */
   email_verified: boolean;
+  /** When the caller's ACTIVE workspace finished onboarding, or null while pending. */
+  onboarding_completed_at: string | null;
 };
 export type SwitchWorkspaceResponse = {
   access_token: string;
   expires_in: number;
   active_workspace_id: string;
   role: string;
+  /** When the workspace just switched into finished onboarding, or null while pending. */
+  onboarding_completed_at: string | null;
 };
 export type SwitchWorkspaceRequest = {
   workspace_id: string;
@@ -2244,6 +2318,16 @@ export type ResetPasswordRequest = {
 export type AcceptInviteRequest = {
   token: string;
   password?: string;
+};
+export type GoogleSignInStartResponse = {
+  /** The Google consent URL to navigate the browser to. */
+  auth_url: string;
+};
+export type GoogleSignInStartRequest = {
+  /** Raw token from an invite link, when the invitee chose to accept it with Google rather than by setting a password. Only its hash is persisted server-side; it is never placed in the OAuth `state` parameter. */
+  invite_token?: string | null;
+  /** In-app path to land on after sign-in. Validated server-side as a same-origin path; anything else is silently dropped. */
+  return_to?: string | null;
 };
 export type TwoFactorStatusResponse = {
   totp_enabled: boolean;
@@ -2343,6 +2427,16 @@ export type ApiKeyCreateRequest = {
 };
 export type ApiKeyListResponse = {
   api_keys: ApiKey[];
+};
+export type OnboardingResponse = {
+  workspace_id: string;
+  name: string;
+  /** When onboarding was completed. Always set on a successful response. */
+  onboarding_completed_at: string | null;
+};
+export type CompleteOnboardingRequest = {
+  /** The workspace's real name, replacing the one derived at signup. */
+  name: string;
 };
 export type Invite = {
   id?: string;
@@ -3559,6 +3653,9 @@ export const {
   useAuthForgotPasswordMutation,
   useAuthResetPasswordMutation,
   useAuthAcceptInviteMutation,
+  useAuthGoogleSignInRedirectQuery,
+  useAuthGoogleSignInStartMutation,
+  useAuthGoogleSignInCallbackQuery,
   useAuthTwoFactorStatusQuery,
   useAuthTwoFactorEnrollMutation,
   useAuthTwoFactorDisableMutation,
@@ -3575,6 +3672,7 @@ export const {
   useAuthApiKeyCreateMutation,
   useAuthApiKeyListQuery,
   useAuthApiKeyRevokeMutation,
+  useCompleteWorkspaceOnboardingMutation,
   useCreateWorkspaceInviteMutation,
   useListWorkspaceInvitesQuery,
   useRevokeWorkspaceInviteMutation,

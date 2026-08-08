@@ -46,6 +46,15 @@ type Membership struct {
 	WorkspaceID   uuid.UUID
 	WorkspaceName string
 	Role          string
+	// OnboardingCompletedAt is the zero time while onboarding is still pending. It
+	// rides along per workspace so the SPA can decide whether to show the onboarding
+	// modal on first paint, and on a workspace switch, without a second round trip -
+	// same reasoning as Email on Session below.
+	//
+	// The TIMESTAMP rather than a derived boolean, deliberately: two fields carrying
+	// one fact would make {completed: true, at: null} representable, and the flag is
+	// just `!at.IsZero()` anyway.
+	OnboardingCompletedAt time.Time
 }
 
 // Session is the result of any operation that establishes or rotates a
@@ -63,6 +72,9 @@ type Session struct {
 	// source on a hard reload (users have no display name column; email IS the
 	// identity).
 	Email string
+	// OnboardingCompletedAt is the ACTIVE workspace's onboarding stamp (zero while
+	// pending), so the SPA knows on first paint whether to show the onboarding modal.
+	OnboardingCompletedAt time.Time
 }
 
 // RegisterInput carries the fields needed to create a brand-new workspace,
@@ -73,7 +85,11 @@ type RegisterInput struct {
 
 // storeIface lists exactly the Store methods the service depends on, so
 // tests can inject an in-memory fake (dependency inversion; see CLAUDE.md).
+// The federated sign-in methods live in googleStoreIface (google.go), embedded
+// here so that flow's data needs read as one list of their own.
 type storeIface interface {
+	googleStoreIface
+
 	RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterTxResult, error)
 	GetUserByEmail(ctx context.Context, email string) (gen.User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error)
@@ -114,6 +130,13 @@ type Service struct {
 	resetTTL   time.Duration
 	inviteTTL  time.Duration
 
+	// google (nil unless WithGoogleSignIn is applied) is the Google provider seam;
+	// stateSecret signs the sign-in `state` parameter. Both come from the
+	// composition root, so a self-hoster without Google credentials simply has the
+	// sign-in surface off (ErrGoogleDisabled) rather than a half-wired flow.
+	google      GoogleAuthenticator
+	stateSecret []byte
+
 	// dispatch runs a func off the request path. ForgotPassword uses it to
 	// defer everything past the initial user lookup (rate-limit check, token
 	// issuance, send) so a known email doesn't cost measurably more wall-clock
@@ -127,11 +150,31 @@ type Service struct {
 // (verify/reset/invite); appBaseURL is the frontend origin links are built
 // against; verifyTTL/resetTTL/inviteTTL size the lifetime of each single-use
 // token kind.
-func NewService(store storeIface, refreshTTL time.Duration, sender notify.Sender, appBaseURL string, verifyTTL, resetTTL, inviteTTL time.Duration) *Service {
-	return &Service{
+// Optional collaborators are applied through opts (see WithGoogleSignIn) rather
+// than added to this already-long parameter list.
+func NewService(store storeIface, refreshTTL time.Duration, sender notify.Sender, appBaseURL string, verifyTTL, resetTTL, inviteTTL time.Duration, opts ...Option) *Service {
+	s := &Service{
 		store: store, refreshTTL: refreshTTL, sender: sender, appBaseURL: appBaseURL,
 		verifyTTL: verifyTTL, resetTTL: resetTTL, inviteTTL: inviteTTL,
 		dispatch: func(f func()) { go f() },
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// Option configures an optional Service collaborator at construction.
+type Option func(*Service)
+
+// WithGoogleSignIn enables the federated Google sign-in/sign-up flow.
+// stateSecret signs the `state` parameter. Without this option the flow reports
+// ErrGoogleDisabled, which the handler maps to 501 — the shape for a self-hoster
+// who configured no Google credentials.
+func WithGoogleSignIn(a GoogleAuthenticator, stateSecret []byte) Option {
+	return func(s *Service) {
+		s.google = a
+		s.stateSecret = stateSecret
 	}
 }
 
@@ -207,7 +250,7 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (Session, erro
 	return Session{
 		UserID: res.UserID, WorkspaceID: res.WorkspaceID, Role: "owner",
 		SessionID: res.SessionID, RawRefresh: raw, Memberships: mems,
-		Email: in.Email,
+		Email: in.Email, OnboardingCompletedAt: onboardingFor(mems, res.WorkspaceID),
 	}, nil
 }
 
@@ -382,7 +425,19 @@ func (s *Service) Authenticate(ctx context.Context, email, pw string) (uuid.UUID
 		auth.CheckPassword(dummyHash, pw)
 		return uuid.Nil, ErrInvalidCredentials
 	}
-	if !auth.CheckPassword(user.PasswordHash, pw) {
+	// A NULL password_hash means a federated-only account (Google sign-up): there
+	// is no password, so there is nothing a presented one could match. This must
+	// stay an explicit nil check that rejects — NOT a comparison against "" or a
+	// dereference of a nil pointer — since the whole point of the nullable column
+	// is that "no password" can never be something a caller supplies the other
+	// half of. The dummy comparison keeps the wall-clock cost identical to a wrong
+	// password on a password account, so response time doesn't reveal which kind of
+	// account an address is.
+	if user.PasswordHash == nil {
+		auth.CheckPassword(dummyHash, pw)
+		return uuid.Nil, ErrInvalidCredentials
+	}
+	if !auth.CheckPassword(*user.PasswordHash, pw) {
 		return uuid.Nil, ErrInvalidCredentials
 	}
 	mems, err := s.memberships(ctx, user.ID)
@@ -413,7 +468,11 @@ func (s *Service) StartSessionForUser(ctx context.Context, userID uuid.UUID, ua,
 	if err != nil {
 		return Session{}, err
 	}
-	return Session{UserID: userID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid, RawRefresh: raw, Memberships: mems, Email: user.Email}, nil
+	return Session{
+		UserID: userID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid,
+		RawRefresh: raw, Memberships: mems, Email: user.Email,
+		OnboardingCompletedAt: active.OnboardingCompletedAt,
+	}, nil
 }
 
 // Refresh rotates a refresh token: the presented token is looked up by
@@ -463,7 +522,11 @@ func (s *Service) Refresh(ctx context.Context, raw, ua, ip string) (Session, err
 	if err != nil {
 		return Session{}, err
 	}
-	return Session{UserID: row.UserID, WorkspaceID: row.WorkspaceID, Role: string(member.Role), SessionID: sid, RawRefresh: newRaw, Memberships: mems, Email: user.Email}, nil
+	return Session{
+		UserID: row.UserID, WorkspaceID: row.WorkspaceID, Role: string(member.Role), SessionID: sid,
+		RawRefresh: newRaw, Memberships: mems, Email: user.Email,
+		OnboardingCompletedAt: onboardingFor(mems, row.WorkspaceID),
+	}, nil
 }
 
 // Logout revokes the entire refresh-token family for the presented token,
@@ -528,17 +591,40 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID, keepSID uuid.
 // does not belong to target, or if the session id isn't owned by the caller
 // (the SQL WHERE clause binds session id + user id together — a mismatched pair
 // yields 0 rows affected, surfaced here as ErrNotMember).
-func (s *Service) SwitchWorkspace(ctx context.Context, sessionID, userID, target uuid.UUID) (uuid.UUID, string, int, error) {
+func (s *Service) SwitchWorkspace(ctx context.Context, sessionID, userID, target uuid.UUID) (SwitchResult, error) {
 	m, err := s.store.GetMember(ctx, target, userID)
 	if err != nil {
-		return uuid.Nil, "", 0, ErrNotMember
+		return SwitchResult{}, ErrNotMember
 	}
 	tokenVersion, err := s.store.RepointSessionWorkspace(ctx, sessionID, userID, target)
 	if err != nil {
-		return uuid.Nil, "", 0, err
+		return SwitchResult{}, err
+	}
+	// Read AFTER membership is confirmed, so this never discloses anything about a
+	// workspace the caller doesn't belong to.
+	ws, err := s.store.GetWorkspace(ctx, target)
+	if err != nil {
+		return SwitchResult{}, err
 	}
 	_ = s.store.TouchMemberLastSeen(ctx, target, userID)
-	return target, string(m.Role), tokenVersion, nil
+	return SwitchResult{
+		WorkspaceID:           target,
+		Role:                  string(m.Role),
+		TokenVersion:          tokenVersion,
+		OnboardingCompletedAt: pgxTime(ws.OnboardingCompletedAt),
+	}, nil
+}
+
+// SwitchResult is the outcome of a workspace switch: the new active workspace, the
+// caller's role there, the session's LIVE token_version (the access-token re-mint
+// must use this, never 0 — see Handler.mintAccessToken), and that workspace's
+// onboarding stamp (zero while pending) so the SPA can gate its modal without a
+// second request.
+type SwitchResult struct {
+	WorkspaceID           uuid.UUID
+	Role                  string
+	TokenVersion          int
+	OnboardingCompletedAt time.Time
 }
 
 // Memberships returns every workspace the user belongs to.
@@ -570,7 +656,10 @@ func (s *Service) memberships(ctx context.Context, userID uuid.UUID) ([]Membersh
 	}
 	out := make([]Membership, len(rows))
 	for i, r := range rows {
-		out[i] = Membership{WorkspaceID: r.WorkspaceID, WorkspaceName: r.WorkspaceName, Role: string(r.Role)}
+		out[i] = Membership{
+			WorkspaceID: r.WorkspaceID, WorkspaceName: r.WorkspaceName, Role: string(r.Role),
+			OnboardingCompletedAt: pgxTime(r.OnboardingCompletedAt),
+		}
 	}
 	return out, nil
 }

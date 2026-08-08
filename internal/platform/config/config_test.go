@@ -279,3 +279,78 @@ func TestLoadMetricsAddrOverride(t *testing.T) {
 		t.Fatalf("MetricsAddr = %q, want :9091", cfg.MetricsAddr)
 	}
 }
+
+// TestGoogleSignInCredentialsFallBackToMailboxClient pins the one-client-configures-
+// both behavior. A self-hoster registering a single Google OAuth client must get
+// working sign-in AND mailbox connect; an operator who wants them separate (so a
+// pending Gmail restricted-scope verification review can never block logins) sets
+// the dedicated pair and it wins.
+//
+// The pair falls back TOGETHER, keyed on the id: a sign-in id with no sign-in
+// secret must not be paired with the MAILBOX secret, which would fail at Google
+// with nothing here able to explain why.
+func TestGoogleSignInCredentialsFallBackToMailboxClient(t *testing.T) {
+	for _, tc := range []struct {
+		name                                     string
+		signinID, signinSecret, mbxID, mbxSecret string
+		wantID, wantSecret                       string
+	}{
+		{
+			name:  "only the mailbox client configured falls back",
+			mbxID: "mbx-id", mbxSecret: "mbx-secret",
+			wantID: "mbx-id", wantSecret: "mbx-secret",
+		},
+		{
+			name:     "dedicated sign-in client wins over the mailbox one",
+			signinID: "signin-id", signinSecret: "signin-secret",
+			mbxID: "mbx-id", mbxSecret: "mbx-secret",
+			wantID: "signin-id", wantSecret: "signin-secret",
+		},
+		{
+			name:     "dedicated sign-in client with no mailbox client at all",
+			signinID: "signin-id", signinSecret: "signin-secret",
+			wantID: "signin-id", wantSecret: "signin-secret",
+		},
+		{
+			// Sign-in stays on its own (incomplete) credentials rather than borrowing
+			// the mailbox secret: Enabled() needs both, so this leaves sign-in off,
+			// which is the honest outcome for a half-configured client.
+			name:     "sign-in id without its secret does not borrow the mailbox secret",
+			signinID: "signin-id",
+			mbxID:    "mbx-id", mbxSecret: "mbx-secret",
+			wantID: "signin-id", wantSecret: "",
+		},
+		{
+			name:   "nothing configured leaves sign-in disabled",
+			wantID: "", wantSecret: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+			t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+			t.Setenv("INROAD_GOOGLE_CLIENT_ID", tc.mbxID)
+			t.Setenv("INROAD_GOOGLE_CLIENT_SECRET", tc.mbxSecret)
+			t.Setenv("INROAD_GOOGLE_SIGNIN_CLIENT_ID", tc.signinID)
+			t.Setenv("INROAD_GOOGLE_SIGNIN_CLIENT_SECRET", tc.signinSecret)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.GoogleSignInClientID != tc.wantID {
+				t.Errorf("GoogleSignInClientID = %q, want %q", cfg.GoogleSignInClientID, tc.wantID)
+			}
+			if cfg.GoogleSignInClientSecret != tc.wantSecret {
+				t.Errorf("GoogleSignInClientSecret = %q, want %q", cfg.GoogleSignInClientSecret, tc.wantSecret)
+			}
+			// Falling back on credentials must never borrow the mailbox CALLBACK: the
+			// two flows have different callback paths even on one shared client.
+			if cfg.GoogleSignInRedirectURL == cfg.GoogleRedirectURL {
+				t.Errorf("sign-in redirect URL must differ from the mailbox one, both are %q", cfg.GoogleSignInRedirectURL)
+			}
+			if want := cfg.PublicURL + "/api/v1/auth/oauth/google/callback"; cfg.GoogleSignInRedirectURL != want {
+				t.Errorf("GoogleSignInRedirectURL = %q, want %q", cfg.GoogleSignInRedirectURL, want)
+			}
+		})
+	}
+}

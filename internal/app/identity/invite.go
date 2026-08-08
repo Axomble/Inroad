@@ -123,15 +123,12 @@ func (s *Service) AcceptInvite(ctx context.Context, rawToken string, password *s
 		return Session{}, err
 	}
 	res, err := s.store.AcceptInviteTx(ctx, AcceptInviteTxParams{
-		RawToken:     rawToken,
-		PasswordHash: hash,
-		SessionParams: gen.CreateSessionParams{
-			TokenHash: tokHash,
-			FamilyID:  uuid.New(),
-			ExpiresAt: pgxTimestamp(time.Now().Add(s.refreshTTL)),
-			UserAgent: ptr(ua),
-			Ip:        parseIP(ip),
-		},
+		// Hashed here rather than in the store, so the store never has to know the
+		// token's wire format - and so the federated path, which only ever holds the
+		// hash, can call the same transaction.
+		TokenHash:     auth.HashToken(rawToken),
+		PasswordHash:  hash,
+		SessionParams: s.sessionParams(tokHash, ua, ip),
 	})
 	if err != nil {
 		return Session{}, err // ErrTokenInvalid or ErrPasswordRequired
@@ -140,5 +137,6 @@ func (s *Service) AcceptInvite(ctx context.Context, rawToken string, password *s
 	return Session{
 		UserID: res.UserID, WorkspaceID: res.WorkspaceID, Role: res.Role,
 		SessionID: res.SessionID, RawRefresh: raw, Memberships: mems,
+		OnboardingCompletedAt: onboardingFor(mems, res.WorkspaceID),
 	}, nil
 }

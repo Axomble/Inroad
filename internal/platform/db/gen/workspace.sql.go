@@ -11,24 +11,67 @@ import (
 	"github.com/google/uuid"
 )
 
+const completeWorkspaceOnboarding = `-- name: CompleteWorkspaceOnboarding :one
+UPDATE workspaces
+SET name = CASE WHEN onboarding_completed_at IS NULL THEN $2 ELSE name END,
+    onboarding_completed_at = COALESCE(onboarding_completed_at, now())
+WHERE id = $1
+RETURNING id, name, created_at, onboarding_completed_at
+`
+
+type CompleteWorkspaceOnboardingParams struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+// Set the workspace's real name and stamp onboarding complete. ONE statement, so
+// the rename and the stamp are inherently atomic -- there is no window in which a
+// crash could leave a renamed-but-unstamped (or stamped-but-unrenamed) workspace.
+//
+// Idempotent by construction: on an already-completed workspace both CASE and
+// COALESCE keep the stored values, so a replayed request returns the existing row
+// unchanged rather than silently renaming a workspace someone has since renamed
+// deliberately. A missing id affects 0 rows -> pgx.ErrNoRows -> 404.
+func (q *Queries) CompleteWorkspaceOnboarding(ctx context.Context, arg CompleteWorkspaceOnboardingParams) (Workspace, error) {
+	row := q.db.QueryRow(ctx, completeWorkspaceOnboarding, arg.ID, arg.Name)
+	var i Workspace
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.CreatedAt,
+		&i.OnboardingCompletedAt,
+	)
+	return i, err
+}
+
 const createWorkspace = `-- name: CreateWorkspace :one
-INSERT INTO workspaces (name) VALUES ($1) RETURNING id, name, created_at
+INSERT INTO workspaces (name) VALUES ($1) RETURNING id, name, created_at, onboarding_completed_at
 `
 
 func (q *Queries) CreateWorkspace(ctx context.Context, name string) (Workspace, error) {
 	row := q.db.QueryRow(ctx, createWorkspace, name)
 	var i Workspace
-	err := row.Scan(&i.ID, &i.Name, &i.CreatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.CreatedAt,
+		&i.OnboardingCompletedAt,
+	)
 	return i, err
 }
 
 const getWorkspace = `-- name: GetWorkspace :one
-SELECT id, name, created_at FROM workspaces WHERE id = $1
+SELECT id, name, created_at, onboarding_completed_at FROM workspaces WHERE id = $1
 `
 
 func (q *Queries) GetWorkspace(ctx context.Context, id uuid.UUID) (Workspace, error) {
 	row := q.db.QueryRow(ctx, getWorkspace, id)
 	var i Workspace
-	err := row.Scan(&i.ID, &i.Name, &i.CreatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.CreatedAt,
+		&i.OnboardingCompletedAt,
+	)
 	return i, err
 }
