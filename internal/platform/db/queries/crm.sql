@@ -41,6 +41,46 @@ RETURNING *;
 -- name: DeleteCompany :execrows
 DELETE FROM companies WHERE workspace_id = $1 AND id = $2;
 
+-- name: ListCompanyContacts :many
+SELECT c.id, c.email, c.first_name, c.last_name, c.job_title, c.linkedin_url,
+       c.created_at, lower(c.email) AS email_key
+FROM contacts c
+WHERE c.workspace_id = sqlc.arg(workspace_id) AND c.company_id = sqlc.arg(company_id)
+  AND (sqlc.arg(seek)::bool = false
+       OR (lower(c.email), c.id) > (sqlc.arg(cursor_email)::text, sqlc.arg(cursor_id)::uuid))
+ORDER BY lower(c.email), c.id
+LIMIT sqlc.arg(page_limit);
+
+-- ListCompanyDeals is ListDeals narrowed to one company. It is spelled out
+-- rather than folded into ListDeals behind a nullable company filter: a
+-- `$n IS NULL OR company_id = $n` guard survives into the plan and stops
+-- Postgres from using idx_deals_company as an index condition, which is the
+-- whole reason this query is separate. The projection is deliberately identical
+-- so both lists map through one row converter.
+-- name: ListCompanyDeals :many
+SELECT d.*,
+       p.name AS pipeline_name,
+       s.label AS stage_label,
+       s.color AS stage_color,
+       s.is_won AS stage_is_won,
+       s.is_lost AS stage_is_lost,
+       s.position AS stage_position,
+       d.position::text AS position_key,
+       COALESCE(c.name, '') AS company_name,
+       COALESCE(ct.email, '') AS contact_email
+FROM deals d
+JOIN pipelines p ON p.workspace_id = d.workspace_id AND p.id = d.pipeline_id
+JOIN pipeline_stages s ON s.workspace_id = d.workspace_id AND s.id = d.stage_id
+LEFT JOIN companies c ON c.workspace_id = d.workspace_id AND c.id = d.company_id
+LEFT JOIN contacts ct ON ct.workspace_id = d.workspace_id AND ct.id = d.primary_contact_id
+WHERE d.workspace_id = sqlc.arg(workspace_id) AND d.company_id = sqlc.arg(company_id)
+  AND (sqlc.arg(seek)::bool = false
+       OR (s.position, d.position, d.id) > (sqlc.arg(cursor_stage_position)::int,
+                                            (sqlc.arg(cursor_position)::text)::numeric,
+                                            sqlc.arg(cursor_id)::uuid))
+ORDER BY s.position, d.position, d.id
+LIMIT sqlc.arg(page_limit);
+
 -- name: ListPipelines :many
 SELECT * FROM pipelines
 WHERE workspace_id = $1

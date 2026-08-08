@@ -166,3 +166,131 @@ func hasEvent(events []Event, name string) bool {
 	}
 	return false
 }
+
+// The company sub-resources against Postgres: the roster and the deal list are
+// scoped to the company AND the workspace, they page without repeating or
+// skipping a row, and a company from another workspace is not readable at all.
+func TestCompanySubResourcesPageAndStayWorkspacePinned(t *testing.T) {
+	ctx := context.Background()
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	pool, err := db.Connect(ctx, dbtest.DSN(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	queries := gen.New(pool)
+	owner, err := queries.CreateWorkspace(ctx, "CRM relations "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("owner workspace: %v", err)
+	}
+	neighbour, err := queries.CreateWorkspace(ctx, "CRM relations other "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("neighbour workspace: %v", err)
+	}
+	service := NewService(NewPgStore(pool))
+
+	company, err := service.CreateCompany(ctx, owner.ID, CompanyInput{Name: "Acme", Domain: "acme.test", Currency: "USD"})
+	if err != nil {
+		t.Fatalf("company: %v", err)
+	}
+	// A second company in the same workspace, to prove the filter is the company
+	// and not merely the workspace.
+	sibling, err := service.CreateCompany(ctx, owner.ID, CompanyInput{Name: "Globex", Domain: "globex.test", Currency: "USD"})
+	if err != nil {
+		t.Fatalf("sibling company: %v", err)
+	}
+	for _, email := range []string{"cara@acme.test", "abe@acme.test", "bea@acme.test"} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO contacts(workspace_id,email,first_name,company_id) VALUES($1,$2,'X',$3)`,
+			owner.ID, email, company.ID); err != nil {
+			t.Fatalf("contact %s: %v", email, err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO contacts(workspace_id,email,first_name,company_id) VALUES($1,'zed@globex.test','X',$2)`,
+		owner.ID, sibling.ID); err != nil {
+		t.Fatalf("sibling contact: %v", err)
+	}
+
+	pipelines, err := service.ListPipelines(ctx, owner.ID)
+	if err != nil || len(pipelines) == 0 {
+		t.Fatalf("pipelines = %+v, %v", pipelines, err)
+	}
+	stage := pipelines[0].Stages[0]
+	actor := Actor{Type: "user", ID: uuid.NewString()}
+	for _, name := range []string{"Rollout", "Renewal"} {
+		if _, err := service.CreateDeal(ctx, owner.ID, DealInput{
+			Name: name, PipelineID: pipelines[0].ID, StageID: stage.ID,
+			CompanyID: &company.ID, Currency: "USD", Source: "manual", Actor: actor,
+		}); err != nil {
+			t.Fatalf("deal %s: %v", name, err)
+		}
+	}
+	if _, err := service.CreateDeal(ctx, owner.ID, DealInput{
+		Name: "Not Acme's", PipelineID: pipelines[0].ID, StageID: stage.ID,
+		CompanyID: &sibling.ID, Currency: "USD", Source: "manual", Actor: actor,
+	}); err != nil {
+		t.Fatalf("sibling deal: %v", err)
+	}
+
+	// The roster orders by email and pages one row at a time; walking every page
+	// must visit each of the company's three contacts exactly once.
+	var seen []string
+	cursor := ""
+	for page := 0; page < 5; page++ {
+		got, err := service.ListCompanyContacts(ctx, owner.ID, company.ID, PageRequest{Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("page %d: %v", page, err)
+		}
+		for _, c := range got.Items {
+			seen = append(seen, c.Email)
+		}
+		if got.NextCursor == "" {
+			break
+		}
+		cursor = got.NextCursor
+	}
+	want := []string{"abe@acme.test", "bea@acme.test", "cara@acme.test"}
+	if len(seen) != len(want) {
+		t.Fatalf("paged contacts = %v, want %v", seen, want)
+	}
+	for i, email := range want {
+		if seen[i] != email {
+			t.Fatalf("paged contacts = %v, want %v", seen, want)
+		}
+	}
+
+	deals, err := service.ListCompanyDeals(ctx, owner.ID, company.ID, PageRequest{})
+	if err != nil {
+		t.Fatalf("company deals: %v", err)
+	}
+	if len(deals.Items) != 2 {
+		t.Fatalf("company deals = %d, want the company's 2", len(deals.Items))
+	}
+	for _, deal := range deals.Items {
+		if deal.CompanyID == nil || *deal.CompanyID != company.ID {
+			t.Fatalf("deal %s belongs to %v, not the requested company", deal.Name, deal.CompanyID)
+		}
+		if deal.StageLabel == "" || deal.PipelineName == "" {
+			t.Fatalf("deal joins not populated: %+v", deal)
+		}
+	}
+
+	// Read from the neighbouring workspace: the company does not exist there, so
+	// neither sub-resource is reachable — and neither leaks a row.
+	if _, err := service.ListCompanyContacts(ctx, neighbour.ID, company.ID, PageRequest{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-workspace contacts err = %v, want ErrNotFound", err)
+	}
+	if _, err := service.ListCompanyDeals(ctx, neighbour.ID, company.ID, PageRequest{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-workspace deals err = %v, want ErrNotFound", err)
+	}
+
+	// A cursor minted by the whole-workspace deal list is rejected here rather
+	// than silently seeking into a different listing.
+	foreign := encodeCursor(cursorDeals, "0", "1000", uuid.Nil.String())
+	if _, err := service.ListCompanyDeals(ctx, owner.ID, company.ID, PageRequest{Cursor: foreign}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("foreign cursor err = %v, want ErrValidation", err)
+	}
+}

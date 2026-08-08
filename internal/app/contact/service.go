@@ -99,6 +99,78 @@ func (s *Service) Search(ctx context.Context, ws uuid.UUID, req SearchRequest) (
 	return page, nil
 }
 
+// Record loads one contact's page: its own fields, its company link, and the
+// deals it is primary on (capped — see DealCap). Engagement is a separate call
+// on purpose: it aggregates over sends and tracking_events, so bundling it here
+// would make the cheap half of the page pay for the expensive half on every
+// load, and would tie two things that change on different schedules to one
+// cache entry.
+func (s *Service) Record(ctx context.Context, ws, contactID uuid.UUID) (Record, error) {
+	record, err := s.store.Get(ctx, ws, contactID)
+	if err != nil {
+		return Record{}, err
+	}
+	// This error is propagated, never swallowed, and must stay that way.
+	//
+	// Suppression is the load-bearing fact on this page: invariants 20 and 42
+	// make it the load-bearing WRITE on the ingest side, ordered ahead of
+	// everything else precisely so a downstream failure can never skip honouring
+	// an opt-out. The read side owes the same fail-safe direction. Degrading a
+	// failed lookup to a nil Suppression would render the contact as "clear to
+	// email" on the strength of a query that never answered — turning an
+	// infrastructure blip into a compliance decision, and the exact mistake
+	// invariant 20's ordering exists to prevent. Fail the request instead: a
+	// record page that will not load is recoverable, an opt-out silently
+	// overridden is not.
+	suppression, err := s.store.Suppression(ctx, ws, contactID)
+	if err != nil {
+		return Record{}, err
+	}
+	record.Suppression = suppression
+	// One row past the cap: its presence is what proves there are more, without
+	// a count query.
+	deals, err := s.store.ListDeals(ctx, ws, contactID, DealCap+1)
+	if err != nil {
+		return Record{}, err
+	}
+	record.DealsTruncated = len(deals) > DealCap
+	if record.DealsTruncated {
+		deals = deals[:DealCap]
+	}
+	record.Deals = deals
+	return record, nil
+}
+
+// Engagement rolls up the contact's outreach history. Ownership is resolved
+// first, so an unknown or cross-workspace id is ErrNotFound before any
+// aggregate runs — a foreign id can neither read counts nor cost a scan.
+func (s *Service) Engagement(ctx context.Context, ws, contactID uuid.UUID) (Engagement, error) {
+	if _, err := s.store.Get(ctx, ws, contactID); err != nil {
+		return Engagement{}, err
+	}
+	sends, err := s.store.SendStats(ctx, ws, contactID)
+	if err != nil {
+		return Engagement{}, err
+	}
+	tracking, err := s.store.TrackingStats(ctx, ws, contactID)
+	if err != nil {
+		return Engagement{}, err
+	}
+	stopReasons, err := s.store.EnrollmentCounts(ctx, ws, contactID)
+	if err != nil {
+		return Engagement{}, err
+	}
+	campaigns, err := s.store.ListCampaigns(ctx, ws, contactID, CampaignCap+1)
+	if err != nil {
+		return Engagement{}, err
+	}
+	truncated := len(campaigns) > CampaignCap
+	if truncated {
+		campaigns = campaigns[:CampaignCap]
+	}
+	return computeEngagement(contactID, sends, tracking, stopReasons, campaigns, truncated), nil
+}
+
 // buildPage trims the lookahead row, restores display order for a backward
 // page, and derives the two cursors.
 func buildPage(rows []SearchRow, sort cursor.Sort, cur *cursor.Cursor, limit int) Page {

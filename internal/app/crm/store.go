@@ -21,6 +21,8 @@ type Store interface {
 	CreateCompany(context.Context, uuid.UUID, CompanyInput) (Company, error)
 	UpdateCompany(context.Context, uuid.UUID, uuid.UUID, CompanyInput) (Company, error)
 	DeleteCompany(context.Context, uuid.UUID, uuid.UUID) error
+	ListCompanyContacts(context.Context, uuid.UUID, uuid.UUID, PageRequest) (Page[CompanyContact], error)
+	ListCompanyDeals(context.Context, uuid.UUID, uuid.UUID, PageRequest) (Page[Deal], error)
 
 	ListPipelines(context.Context, uuid.UUID, int32) ([]Pipeline, error)
 	GetPipeline(context.Context, uuid.UUID, uuid.UUID) (Pipeline, error)
@@ -137,6 +139,87 @@ func (s *PgStore) UpdateCompany(ctx context.Context, workspaceID, id uuid.UUID, 
 func (s *PgStore) DeleteCompany(ctx context.Context, workspaceID, id uuid.UUID) error {
 	n, err := s.q.DeleteCompany(ctx, gen.DeleteCompanyParams{WorkspaceID: workspaceID, ID: id})
 	return affected(n, err)
+}
+
+func (s *PgStore) ListCompanyContacts(ctx context.Context, workspaceID, companyID uuid.UUID, page PageRequest) (Page[CompanyContact], error) {
+	params := gen.ListCompanyContactsParams{
+		WorkspaceID: workspaceID,
+		CompanyID:   pgtype.UUID{Bytes: companyID, Valid: true},
+		PageLimit:   page.Limit,
+	}
+	if page.Cursor != "" {
+		keys, err := decodeCursor(cursorCompanyContacts, page.Cursor, 2)
+		if err != nil {
+			return Page[CompanyContact]{}, err
+		}
+		id, err := uuid.Parse(keys[1])
+		if err != nil {
+			return Page[CompanyContact]{}, validation("cursor is malformed")
+		}
+		params.Seek, params.CursorEmail, params.CursorID = true, keys[0], id
+	}
+	rows, err := s.q.ListCompanyContacts(ctx, params)
+	if err != nil {
+		return Page[CompanyContact]{}, err
+	}
+	out := Page[CompanyContact]{Items: make([]CompanyContact, len(rows))}
+	for i, row := range rows {
+		out.Items[i] = CompanyContact{
+			ID: row.ID, Email: row.Email, FirstName: row.FirstName, LastName: row.LastName,
+			JobTitle: row.JobTitle, LinkedInURL: row.LinkedinUrl, CreatedAt: row.CreatedAt.Time,
+		}
+	}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorCompanyContacts, last.EmailKey, last.ID.String())
+	}
+	return out, nil
+}
+
+func (s *PgStore) ListCompanyDeals(ctx context.Context, workspaceID, companyID uuid.UUID, page PageRequest) (Page[Deal], error) {
+	params := gen.ListCompanyDealsParams{
+		WorkspaceID: workspaceID,
+		CompanyID:   pgtype.UUID{Bytes: companyID, Valid: true},
+		PageLimit:   page.Limit,
+	}
+	if page.Cursor != "" {
+		stagePosition, position, id, err := decodeDealCursor(cursorCompanyDeals, page.Cursor)
+		if err != nil {
+			return Page[Deal]{}, err
+		}
+		params.Seek = true
+		params.CursorStagePosition, params.CursorPosition, params.CursorID = stagePosition, position, id
+	}
+	rows, err := s.q.ListCompanyDeals(ctx, params)
+	if err != nil {
+		return Page[Deal]{}, err
+	}
+	out := Page[Deal]{Items: make([]Deal, len(rows))}
+	for i, row := range rows {
+		out.Items[i] = dealFromCompanyList(row)
+	}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorCompanyDeals,
+			strconv.FormatInt(int64(last.StagePosition), 10), last.PositionKey, last.ID.String())
+	}
+	return out, nil
+}
+
+// decodeDealCursor reads the (stage position, deal position, id) cursor the two
+// deal listings share. kind keeps them non-interchangeable.
+func decodeDealCursor(kind cursorKind, raw string) (int32, string, uuid.UUID, error) {
+	keys, err := decodeCursor(kind, raw, 3)
+	if err != nil {
+		return 0, "", uuid.Nil, err
+	}
+	stagePosition, err := strconv.ParseInt(keys[0], 10, 32)
+	if err != nil {
+		return 0, "", uuid.Nil, validation("cursor is malformed")
+	}
+	id, err := uuid.Parse(keys[2])
+	if err != nil {
+		return 0, "", uuid.Nil, validation("cursor is malformed")
+	}
+	return int32(stagePosition), keys[1], id, nil
 }
 
 func (s *PgStore) ListPipelines(ctx context.Context, workspaceID uuid.UUID, limit int32) ([]Pipeline, error) {
@@ -265,20 +348,12 @@ func (s *PgStore) DeleteStage(ctx context.Context, workspaceID, pipelineID, id u
 func (s *PgStore) ListDeals(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Deal], error) {
 	params := gen.ListDealsParams{WorkspaceID: workspaceID, PageLimit: page.Limit}
 	if page.Cursor != "" {
-		keys, err := decodeCursor(cursorDeals, page.Cursor, 3)
+		stagePosition, position, id, err := decodeDealCursor(cursorDeals, page.Cursor)
 		if err != nil {
 			return Page[Deal]{}, err
 		}
-		stagePosition, err := strconv.ParseInt(keys[0], 10, 32)
-		if err != nil {
-			return Page[Deal]{}, validation("cursor is malformed")
-		}
-		id, err := uuid.Parse(keys[2])
-		if err != nil {
-			return Page[Deal]{}, validation("cursor is malformed")
-		}
 		params.Seek = true
-		params.CursorStagePosition, params.CursorPosition, params.CursorID = int32(stagePosition), keys[1], id
+		params.CursorStagePosition, params.CursorPosition, params.CursorID = stagePosition, position, id
 	}
 	rows, err := s.q.ListDeals(ctx, params)
 	if err != nil {

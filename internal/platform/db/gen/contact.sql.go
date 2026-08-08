@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const addListMember = `-- name: AddListMember :exec
@@ -24,6 +25,351 @@ type AddListMemberParams struct {
 func (q *Queries) AddListMember(ctx context.Context, arg AddListMemberParams) error {
 	_, err := q.db.Exec(ctx, addListMember, arg.ListID, arg.ContactID)
 	return err
+}
+
+const contactEnrollmentCounts = `-- name: ContactEnrollmentCounts :many
+SELECT COALESCE(stop_reason, '') AS stop_reason, count(*)::bigint AS n
+FROM sequence_enrollments
+WHERE workspace_id = $1 AND contact_id = $2
+GROUP BY 1
+`
+
+type ContactEnrollmentCountsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+}
+
+type ContactEnrollmentCountsRow struct {
+	StopReason string `json:"stop_reason"`
+	N          int64  `json:"n"`
+}
+
+// One row per stop reason (” for an enrollment that has not stopped). The
+// caller sums them for the lifetime enrollment count, so the total and the
+// per-reason counts cannot disagree.
+func (q *Queries) ContactEnrollmentCounts(ctx context.Context, arg ContactEnrollmentCountsParams) ([]ContactEnrollmentCountsRow, error) {
+	rows, err := q.db.Query(ctx, contactEnrollmentCounts, arg.WorkspaceID, arg.ContactID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ContactEnrollmentCountsRow
+	for rows.Next() {
+		var i ContactEnrollmentCountsRow
+		if err := rows.Scan(&i.StopReason, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const contactSendStats = `-- name: ContactSendStats :one
+SELECT count(*) FILTER (WHERE status = 'sent')::bigint AS emails_sent,
+       (max(sent_at) FILTER (WHERE status = 'sent'))::timestamptz AS last_sent_at
+FROM sends
+WHERE workspace_id = $1 AND contact_id = $2
+`
+
+type ContactSendStatsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+}
+
+type ContactSendStatsRow struct {
+	EmailsSent int64              `json:"emails_sent"`
+	LastSentAt pgtype.Timestamptz `json:"last_sent_at"`
+}
+
+// Sent count and last send. 'sent' is the same numerator the campaign rollup's
+// stats.sent uses (queries/campaign.sql CountSendsByStatus), so a contact's
+// number rolls up to the campaign's.
+func (q *Queries) ContactSendStats(ctx context.Context, arg ContactSendStatsParams) (ContactSendStatsRow, error) {
+	row := q.db.QueryRow(ctx, contactSendStats, arg.WorkspaceID, arg.ContactID)
+	var i ContactSendStatsRow
+	err := row.Scan(&i.EmailsSent, &i.LastSentAt)
+	return i, err
+}
+
+const contactTrackingStats = `-- name: ContactTrackingStats :one
+SELECT count(DISTINCT te.send_id) FILTER (
+           WHERE te.kind = 'open'
+             AND te.user_agent NOT ILIKE '%GoogleImageProxy%'
+             AND (s.sent_at IS NULL OR te.created_at > s.sent_at + interval '2 seconds')
+       )::bigint AS opens_indicative,
+       count(DISTINCT te.send_id) FILTER (WHERE te.kind = 'click')::bigint AS clicks,
+       max(te.created_at)::timestamptz AS last_event_at
+FROM tracking_events te
+JOIN sends s ON s.id = te.send_id AND s.workspace_id = te.workspace_id
+WHERE te.workspace_id = $1 AND s.contact_id = $2
+`
+
+type ContactTrackingStatsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+}
+
+type ContactTrackingStatsRow struct {
+	OpensIndicative int64              `json:"opens_indicative"`
+	Clicks          int64              `json:"clicks"`
+	LastEventAt     pgtype.Timestamptz `json:"last_event_at"`
+}
+
+// Per-send engagement numerators, defined exactly as the campaign rollup defines
+// them: an indicative open is a distinct send with an open event that is neither
+// from a known image proxy nor within two seconds of the send (CountHumanOpens),
+// and a click is a distinct send with a click event (CountEngagedSendsByKind).
+// Both tenancy filters are explicit -- te.workspace_id serves the pin and
+// s.workspace_id keeps the join from ever pairing rows across workspaces.
+func (q *Queries) ContactTrackingStats(ctx context.Context, arg ContactTrackingStatsParams) (ContactTrackingStatsRow, error) {
+	row := q.db.QueryRow(ctx, contactTrackingStats, arg.WorkspaceID, arg.ContactID)
+	var i ContactTrackingStatsRow
+	err := row.Scan(&i.OpensIndicative, &i.Clicks, &i.LastEventAt)
+	return i, err
+}
+
+const getContactRecord = `-- name: GetContactRecord :one
+
+SELECT c.id, c.email, c.first_name, c.last_name, c.job_title, c.linkedin_url,
+       c.company_id, co.name AS company_name, co.domain AS company_domain,
+       (SELECT count(*) FROM deals d
+         WHERE d.workspace_id = c.workspace_id AND d.primary_contact_id = c.id)::bigint AS deal_count,
+       c.created_at, c.updated_at
+FROM contacts c
+LEFT JOIN companies co ON co.workspace_id = c.workspace_id AND co.id = c.company_id
+WHERE c.workspace_id = $1 AND c.id = $2
+`
+
+type GetContactRecordParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+type GetContactRecordRow struct {
+	ID            uuid.UUID          `json:"id"`
+	Email         string             `json:"email"`
+	FirstName     string             `json:"first_name"`
+	LastName      string             `json:"last_name"`
+	JobTitle      string             `json:"job_title"`
+	LinkedinUrl   string             `json:"linkedin_url"`
+	CompanyID     pgtype.UUID        `json:"company_id"`
+	CompanyName   *string            `json:"company_name"`
+	CompanyDomain *string            `json:"company_domain"`
+	DealCount     int64              `json:"deal_count"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+// The record-page queries below read tables the crm app package owns
+// (companies, deals, pipeline_stages) and the send/sequence tables the campaign
+// package owns. They read the shared schema through sqlc rather than calling
+// another domain's service: app packages do not import each other, and routing a
+// read through another domain's HTTP-shaped service would be the worse coupling
+// (same reasoning as agentchat.PgModelResolver).
+// deal_count is the TRUE total, counted independently of the capped deals list,
+// so a truncated list stays honest ("25 of 38") instead of implying the cap is
+// the whole set. Same correlated-subquery shape the contact search already uses
+// (see internal/app/contact/search.go searchColumns), served by idx_deals_contact.
+func (q *Queries) GetContactRecord(ctx context.Context, arg GetContactRecordParams) (GetContactRecordRow, error) {
+	row := q.db.QueryRow(ctx, getContactRecord, arg.WorkspaceID, arg.ID)
+	var i GetContactRecordRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.FirstName,
+		&i.LastName,
+		&i.JobTitle,
+		&i.LinkedinUrl,
+		&i.CompanyID,
+		&i.CompanyName,
+		&i.CompanyDomain,
+		&i.DealCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getContactSuppression = `-- name: GetContactSuppression :one
+SELECT s.reason, ce.email::text AS email, ce.is_primary, s.created_at
+FROM contact_emails ce
+JOIN suppression s
+  ON s.workspace_id = ce.workspace_id AND lower(s.email) = lower(ce.email::text)
+WHERE ce.workspace_id = $1 AND ce.contact_id = $2
+ORDER BY ce.is_primary DESC, s.created_at, ce.id
+LIMIT 1
+`
+
+type GetContactSuppressionParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+}
+
+type GetContactSuppressionRow struct {
+	Reason    string             `json:"reason"`
+	Email     string             `json:"email"`
+	IsPrimary bool               `json:"is_primary"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// "May this person be emailed at all" — the record page's first question.
+//
+// Matched against the contact's whole ALIAS set, not just contacts.email: the
+// 000042 trigger keeps a contact_emails row (is_primary = true) in lockstep with
+// contacts.email, so driving off contact_emails covers the send-path address AND
+// every secondary alias in one lookup. A suppressed secondary matters because
+// promoting it (PUT /crm/contacts/{id}/emails/{emailID}/primary) would silently
+// stop sending; is_primary tells the caller which of the two situations it has.
+//
+// Ordered is_primary DESC so that when several of a contact's addresses are
+// suppressed, the answer is about the address sends actually use, then oldest
+// first for a stable pick among aliases.
+func (q *Queries) GetContactSuppression(ctx context.Context, arg GetContactSuppressionParams) (GetContactSuppressionRow, error) {
+	row := q.db.QueryRow(ctx, getContactSuppression, arg.WorkspaceID, arg.ContactID)
+	var i GetContactSuppressionRow
+	err := row.Scan(
+		&i.Reason,
+		&i.Email,
+		&i.IsPrimary,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listContactCampaigns = `-- name: ListContactCampaigns :many
+SELECT e.campaign_id, c.name AS campaign_name, c.tracking_enabled, e.status, e.current_step,
+       e.stop_reason, e.enrolled_at, e.last_sent_at
+FROM sequence_enrollments e
+JOIN campaigns c ON c.workspace_id = e.workspace_id AND c.id = e.campaign_id
+WHERE e.workspace_id = $1 AND e.contact_id = $2
+ORDER BY e.enrolled_at DESC, e.campaign_id
+LIMIT $3
+`
+
+type ListContactCampaignsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+	Limit       int32     `json:"limit"`
+}
+
+type ListContactCampaignsRow struct {
+	CampaignID      uuid.UUID          `json:"campaign_id"`
+	CampaignName    string             `json:"campaign_name"`
+	TrackingEnabled bool               `json:"tracking_enabled"`
+	Status          string             `json:"status"`
+	CurrentStep     int32              `json:"current_step"`
+	StopReason      *string            `json:"stop_reason"`
+	EnrolledAt      pgtype.Timestamptz `json:"enrolled_at"`
+	LastSentAt      pgtype.Timestamptz `json:"last_sent_at"`
+}
+
+// tracking_enabled travels with each enrollment because it is the only thing
+// that distinguishes "nobody opened" from "opens were never recorded": a
+// campaign with tracking off contributes sends but structurally cannot
+// contribute opens or clicks. The rollup's counts deliberately do NOT adjust for
+// it (campaign.Metrics does not either, and the two must agree), so this flag is
+// how a caller explains a zero instead of guessing at it.
+func (q *Queries) ListContactCampaigns(ctx context.Context, arg ListContactCampaignsParams) ([]ListContactCampaignsRow, error) {
+	rows, err := q.db.Query(ctx, listContactCampaigns, arg.WorkspaceID, arg.ContactID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListContactCampaignsRow
+	for rows.Next() {
+		var i ListContactCampaignsRow
+		if err := rows.Scan(
+			&i.CampaignID,
+			&i.CampaignName,
+			&i.TrackingEnabled,
+			&i.Status,
+			&i.CurrentStep,
+			&i.StopReason,
+			&i.EnrolledAt,
+			&i.LastSentAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listContactDeals = `-- name: ListContactDeals :many
+SELECT d.id, d.name, d.pipeline_id, d.stage_id,
+       s.label AS stage_label, s.color AS stage_color,
+       s.is_won AS stage_is_won, s.is_lost AS stage_is_lost,
+       d.amount_micros, d.currency, d.close_date, d.created_at, d.updated_at
+FROM deals d
+JOIN pipeline_stages s ON s.workspace_id = d.workspace_id AND s.id = d.stage_id
+WHERE d.workspace_id = $1 AND d.primary_contact_id = $2
+ORDER BY s.position, d.position, d.id
+LIMIT $3
+`
+
+type ListContactDealsParams struct {
+	WorkspaceID      uuid.UUID   `json:"workspace_id"`
+	PrimaryContactID pgtype.UUID `json:"primary_contact_id"`
+	Limit            int32       `json:"limit"`
+}
+
+type ListContactDealsRow struct {
+	ID           uuid.UUID          `json:"id"`
+	Name         string             `json:"name"`
+	PipelineID   uuid.UUID          `json:"pipeline_id"`
+	StageID      uuid.UUID          `json:"stage_id"`
+	StageLabel   string             `json:"stage_label"`
+	StageColor   string             `json:"stage_color"`
+	StageIsWon   bool               `json:"stage_is_won"`
+	StageIsLost  bool               `json:"stage_is_lost"`
+	AmountMicros *int64             `json:"amount_micros"`
+	Currency     string             `json:"currency"`
+	CloseDate    pgtype.Date        `json:"close_date"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// ListContactDeals is capped, not paginated: a contact page renders a roster.
+// The caller asks for one row beyond the cap and uses the surplus to report
+// deals_truncated.
+func (q *Queries) ListContactDeals(ctx context.Context, arg ListContactDealsParams) ([]ListContactDealsRow, error) {
+	rows, err := q.db.Query(ctx, listContactDeals, arg.WorkspaceID, arg.PrimaryContactID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListContactDealsRow
+	for rows.Next() {
+		var i ListContactDealsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.PipelineID,
+			&i.StageID,
+			&i.StageLabel,
+			&i.StageColor,
+			&i.StageIsWon,
+			&i.StageIsLost,
+			&i.AmountMicros,
+			&i.Currency,
+			&i.CloseDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const upsertContact = `-- name: UpsertContact :one

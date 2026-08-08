@@ -764,6 +764,202 @@ func (q *Queries) ListCompanies(ctx context.Context, arg ListCompaniesParams) ([
 	return items, nil
 }
 
+const listCompanyContacts = `-- name: ListCompanyContacts :many
+SELECT c.id, c.email, c.first_name, c.last_name, c.job_title, c.linkedin_url,
+       c.created_at, lower(c.email) AS email_key
+FROM contacts c
+WHERE c.workspace_id = $1 AND c.company_id = $2
+  AND ($3::bool = false
+       OR (lower(c.email), c.id) > ($4::text, $5::uuid))
+ORDER BY lower(c.email), c.id
+LIMIT $6
+`
+
+type ListCompanyContactsParams struct {
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	CompanyID   pgtype.UUID `json:"company_id"`
+	Seek        bool        `json:"seek"`
+	CursorEmail string      `json:"cursor_email"`
+	CursorID    uuid.UUID   `json:"cursor_id"`
+	PageLimit   int32       `json:"page_limit"`
+}
+
+type ListCompanyContactsRow struct {
+	ID          uuid.UUID          `json:"id"`
+	Email       string             `json:"email"`
+	FirstName   string             `json:"first_name"`
+	LastName    string             `json:"last_name"`
+	JobTitle    string             `json:"job_title"`
+	LinkedinUrl string             `json:"linkedin_url"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	EmailKey    string             `json:"email_key"`
+}
+
+func (q *Queries) ListCompanyContacts(ctx context.Context, arg ListCompanyContactsParams) ([]ListCompanyContactsRow, error) {
+	rows, err := q.db.Query(ctx, listCompanyContacts,
+		arg.WorkspaceID,
+		arg.CompanyID,
+		arg.Seek,
+		arg.CursorEmail,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCompanyContactsRow
+	for rows.Next() {
+		var i ListCompanyContactsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.FirstName,
+			&i.LastName,
+			&i.JobTitle,
+			&i.LinkedinUrl,
+			&i.CreatedAt,
+			&i.EmailKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCompanyDeals = `-- name: ListCompanyDeals :many
+SELECT d.id, d.workspace_id, d.pipeline_id, d.stage_id, d.company_id, d.primary_contact_id, d.owner_user_id, d.name, d.amount_micros, d.currency, d.close_date, d.position, d.source, d.source_campaign_id, d.source_thread_ref, d.created_by_actor, d.created_at, d.updated_at, d.source_message_id,
+       p.name AS pipeline_name,
+       s.label AS stage_label,
+       s.color AS stage_color,
+       s.is_won AS stage_is_won,
+       s.is_lost AS stage_is_lost,
+       s.position AS stage_position,
+       d.position::text AS position_key,
+       COALESCE(c.name, '') AS company_name,
+       COALESCE(ct.email, '') AS contact_email
+FROM deals d
+JOIN pipelines p ON p.workspace_id = d.workspace_id AND p.id = d.pipeline_id
+JOIN pipeline_stages s ON s.workspace_id = d.workspace_id AND s.id = d.stage_id
+LEFT JOIN companies c ON c.workspace_id = d.workspace_id AND c.id = d.company_id
+LEFT JOIN contacts ct ON ct.workspace_id = d.workspace_id AND ct.id = d.primary_contact_id
+WHERE d.workspace_id = $1 AND d.company_id = $2
+  AND ($3::bool = false
+       OR (s.position, d.position, d.id) > ($4::int,
+                                            ($5::text)::numeric,
+                                            $6::uuid))
+ORDER BY s.position, d.position, d.id
+LIMIT $7
+`
+
+type ListCompanyDealsParams struct {
+	WorkspaceID         uuid.UUID   `json:"workspace_id"`
+	CompanyID           pgtype.UUID `json:"company_id"`
+	Seek                bool        `json:"seek"`
+	CursorStagePosition int32       `json:"cursor_stage_position"`
+	CursorPosition      string      `json:"cursor_position"`
+	CursorID            uuid.UUID   `json:"cursor_id"`
+	PageLimit           int32       `json:"page_limit"`
+}
+
+type ListCompanyDealsRow struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	PipelineID       uuid.UUID          `json:"pipeline_id"`
+	StageID          uuid.UUID          `json:"stage_id"`
+	CompanyID        pgtype.UUID        `json:"company_id"`
+	PrimaryContactID pgtype.UUID        `json:"primary_contact_id"`
+	OwnerUserID      pgtype.UUID        `json:"owner_user_id"`
+	Name             string             `json:"name"`
+	AmountMicros     *int64             `json:"amount_micros"`
+	Currency         string             `json:"currency"`
+	CloseDate        pgtype.Date        `json:"close_date"`
+	Position         pgtype.Numeric     `json:"position"`
+	Source           string             `json:"source"`
+	SourceCampaignID pgtype.UUID        `json:"source_campaign_id"`
+	SourceThreadRef  string             `json:"source_thread_ref"`
+	CreatedByActor   []byte             `json:"created_by_actor"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SourceMessageID  string             `json:"source_message_id"`
+	PipelineName     string             `json:"pipeline_name"`
+	StageLabel       string             `json:"stage_label"`
+	StageColor       string             `json:"stage_color"`
+	StageIsWon       bool               `json:"stage_is_won"`
+	StageIsLost      bool               `json:"stage_is_lost"`
+	StagePosition    int32              `json:"stage_position"`
+	PositionKey      string             `json:"position_key"`
+	CompanyName      string             `json:"company_name"`
+	ContactEmail     string             `json:"contact_email"`
+}
+
+// ListCompanyDeals is ListDeals narrowed to one company. It is spelled out
+// rather than folded into ListDeals behind a nullable company filter: a
+// `$n IS NULL OR company_id = $n` guard survives into the plan and stops
+// Postgres from using idx_deals_company as an index condition, which is the
+// whole reason this query is separate. The projection is deliberately identical
+// so both lists map through one row converter.
+func (q *Queries) ListCompanyDeals(ctx context.Context, arg ListCompanyDealsParams) ([]ListCompanyDealsRow, error) {
+	rows, err := q.db.Query(ctx, listCompanyDeals,
+		arg.WorkspaceID,
+		arg.CompanyID,
+		arg.Seek,
+		arg.CursorStagePosition,
+		arg.CursorPosition,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCompanyDealsRow
+	for rows.Next() {
+		var i ListCompanyDealsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.PipelineID,
+			&i.StageID,
+			&i.CompanyID,
+			&i.PrimaryContactID,
+			&i.OwnerUserID,
+			&i.Name,
+			&i.AmountMicros,
+			&i.Currency,
+			&i.CloseDate,
+			&i.Position,
+			&i.Source,
+			&i.SourceCampaignID,
+			&i.SourceThreadRef,
+			&i.CreatedByActor,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SourceMessageID,
+			&i.PipelineName,
+			&i.StageLabel,
+			&i.StageColor,
+			&i.StageIsWon,
+			&i.StageIsLost,
+			&i.StagePosition,
+			&i.PositionKey,
+			&i.CompanyName,
+			&i.ContactEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listContactEmails = `-- name: ListContactEmails :many
 SELECT id, contact_id, workspace_id, email, is_primary, created_at FROM contact_emails
 WHERE workspace_id = $1 AND contact_id = $2

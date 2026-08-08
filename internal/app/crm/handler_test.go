@@ -28,6 +28,13 @@ type fakeStore struct {
 	stageDeal map[uuid.UUID]int64
 	err       error
 	primary   struct{ contact, email uuid.UUID }
+	// companyRelations records what the company sub-resources were asked for, so
+	// a test can assert the company id and page reached the store rather than
+	// only that a status code came back.
+	companyRelations struct {
+		contacts, deals []uuid.UUID
+		page            PageRequest
+	}
 }
 
 func newFakeStore() *fakeStore {
@@ -88,6 +95,28 @@ func (f *fakeStore) DeleteCompany(_ context.Context, _, id uuid.UUID) error {
 	}
 	delete(f.companies, id)
 	return f.err
+}
+
+func (f *fakeStore) ListCompanyContacts(_ context.Context, _, companyID uuid.UUID, page PageRequest) (Page[CompanyContact], error) {
+	f.companyRelations.contacts = append(f.companyRelations.contacts, companyID)
+	f.companyRelations.page = page
+	if page.Cursor != "" {
+		if _, err := decodeCursor(cursorCompanyContacts, page.Cursor, 2); err != nil {
+			return Page[CompanyContact]{}, err
+		}
+	}
+	return Page[CompanyContact]{Items: []CompanyContact{}}, f.err
+}
+
+func (f *fakeStore) ListCompanyDeals(_ context.Context, _, companyID uuid.UUID, page PageRequest) (Page[Deal], error) {
+	f.companyRelations.deals = append(f.companyRelations.deals, companyID)
+	f.companyRelations.page = page
+	if page.Cursor != "" {
+		if _, err := decodeCursor(cursorCompanyDeals, page.Cursor, 3); err != nil {
+			return Page[Deal]{}, err
+		}
+	}
+	return Page[Deal]{Items: []Deal{}}, f.err
 }
 
 func (f *fakeStore) ListPipelines(context.Context, uuid.UUID, int32) ([]Pipeline, error) {
@@ -391,6 +420,99 @@ func TestListsCarryPaginationAndOmitWorkspaceID(t *testing.T) {
 	for _, item := range page.Items {
 		if _, leaked := item["workspace_id"]; leaked {
 			t.Fatalf("workspace_id leaked into a CRM DTO: %v", item)
+		}
+	}
+}
+
+// The company sub-resources resolve the company before listing anything, so an
+// unknown or cross-workspace id is 404 rather than an empty page that reads like
+// a company with no contacts and no deals.
+func TestCompanySubResourceStatusMapping(t *testing.T) {
+	store := newFakeStore()
+	company, err := store.CreateCompany(context.Background(), uuid.New(), CompanyInput{Name: "Acme", Currency: "USD"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	router, authz := sessionRouter(t, NewHandler(NewService(store)))
+	foreign := uuid.NewString()
+
+	for name, tc := range map[string]struct {
+		path string
+		want int
+	}{
+		"contacts":                       {"/crm/companies/" + company.ID.String() + "/contacts", http.StatusOK},
+		"deals":                          {"/crm/companies/" + company.ID.String() + "/deals", http.StatusOK},
+		"contacts of a foreign company":  {"/crm/companies/" + foreign + "/contacts", http.StatusNotFound},
+		"deals of a foreign company":     {"/crm/companies/" + foreign + "/deals", http.StatusNotFound},
+		"company id that is not a uuid":  {"/crm/companies/nope/contacts", http.StatusUnprocessableEntity},
+		"non-positive limit":             {"/crm/companies/" + company.ID.String() + "/contacts?limit=0", http.StatusUnprocessableEntity},
+		"cursor from the workspace list": {"/crm/companies/" + company.ID.String() + "/deals?cursor=" + encodeCursor(cursorDeals, "0", "1000", uuid.Nil.String()), http.StatusUnprocessableEntity},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if w := do(t, router, http.MethodGet, tc.path, authz, ""); w.Code != tc.want {
+				t.Fatalf("want %d, got %d: %s", tc.want, w.Code, w.Body.String())
+			}
+		})
+	}
+	// A refused request must not have reached the listing at all.
+	for _, id := range append(store.companyRelations.contacts, store.companyRelations.deals...) {
+		if id != company.ID {
+			t.Fatalf("listed relations for %s, want only %s", id, company.ID)
+		}
+	}
+}
+
+// The caller-supplied page size is clamped by the service, not trusted: a
+// request for more than the ceiling gets the ceiling, and no limit gets the
+// default.
+func TestCompanySubResourceClampsPageSize(t *testing.T) {
+	for name, tc := range map[string]struct {
+		query string
+		want  int32
+	}{
+		"no limit is the default": {"", defaultPageLimit},
+		"over the ceiling":        {"?limit=100000", maxPageLimit},
+		"inside the range":        {"?limit=7", 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newFakeStore()
+			company, err := store.CreateCompany(context.Background(), uuid.New(), CompanyInput{Name: "Acme", Currency: "USD"})
+			if err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			router, authz := sessionRouter(t, NewHandler(NewService(store)))
+			path := "/crm/companies/" + company.ID.String() + "/contacts" + tc.query
+			if w := do(t, router, http.MethodGet, path, authz, ""); w.Code != http.StatusOK {
+				t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+			}
+			if store.companyRelations.page.Limit != tc.want {
+				t.Fatalf("store limit = %d, want %d", store.companyRelations.page.Limit, tc.want)
+			}
+		})
+	}
+}
+
+// A company page is read-only data: crm:read must reach both sub-resources, and
+// a key with no CRM scope must reach neither.
+func TestCompanySubResourcesAreGatedOnCRMRead(t *testing.T) {
+	store := newFakeStore()
+	company, err := store.CreateCompany(context.Background(), uuid.New(), CompanyInput{Name: "Acme", Currency: "USD"})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	handler := NewHandler(NewService(store))
+	paths := []string{
+		"/crm/companies/" + company.ID.String() + "/contacts",
+		"/crm/companies/" + company.ID.String() + "/deals",
+	}
+	readOnly := newRouter(handler, scopedVerifier{workspaceID: uuid.New(), scopes: []string{auth.ScopeCRMRead}})
+	none := newRouter(handler, scopedVerifier{workspaceID: uuid.New()})
+	for _, path := range paths {
+		if w := do(t, readOnly, http.MethodGet, path, "x", ""); w.Code != http.StatusOK {
+			t.Errorf("GET %s with crm:read: want 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		if w := do(t, none, http.MethodGet, path, "x", ""); w.Code != http.StatusForbidden {
+			t.Errorf("GET %s with no scope: want 403, got %d", path, w.Code)
 		}
 	}
 }
