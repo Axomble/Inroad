@@ -52,9 +52,9 @@ beforeEach(() => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
       if (url.includes('/mailboxes/oauth/google/start')) return startGoogleResponder()
       if (url.includes('/mailboxes/oauth/microsoft/start')) return startMicrosoftResponder()
-      // The page also mounts DomainAuthPanel; no domains keeps it off-screen so
-      // these tests stay about the mailbox list. domain-auth-panel.test.tsx
-      // covers the panel itself.
+      // The list is grouped by sending domain; returning no verdicts keeps those
+      // headings bare so these tests stay about the mailbox rows.
+      // domain-auth-header.test.tsx covers the heading itself.
       if (url.includes('/sending-domains')) return new Response('[]', { status: 200, headers: jsonHeaders })
       return listResponder()
     }),
