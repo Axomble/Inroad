@@ -47,6 +47,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      # Headroom for the integration suite, which runs four packages at once, each
+      # with its own pool, alongside the app's own connections. Stock
+      # max_connections is 100 and the suite used to land exactly on it (4 x the
+      # 25-connection pool floor db.Connect applies), failing at random with
+      # "sorry, too many clients already" in whichever unrelated package asked
+      # last. The pools are small now (internal/platform/db/dbtest), and this is
+      # the other half: a future parallelism bump must not walk back into the
+      # ceiling silently.
+      # A service container accepts no command arguments, so the limit is set on
+      # the running server and a restart applies it.
+      - name: Raise Postgres max_connections
+        run: |
+          psql "$INROAD_DATABASE_URL" -c 'ALTER SYSTEM SET max_connections = 300'
+          docker restart "$(docker ps --filter ancestor=postgres:16-alpine --format '{{.ID}}')"
+          for _ in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U inroad && break
+            sleep 2
+          done
+          limit=$(psql "$INROAD_DATABASE_URL" -tAc 'SHOW max_connections')
+          test "$limit" = "300" || { echo "max_connections is $limit, want 300"; exit 1; }
       # cmd/migrate loads the full config, so the crypto secrets must be
       # present even for a migrate-only step. Generated fresh every run and
       # exported to $GITHUB_ENV rather than committed as a fixed value —
@@ -119,8 +139,8 @@ jobs:
           # live schema, so on an unmigrated database it fails on every query that
           # touches a new table rather than on the one that is actually wrong.
           sqlc vet
-          # -p 4 matches make test-integration: unbounded package parallelism
-          # exhausts max_connections, since each package's pool floor is 25.
+          # -p 4 matches make test-integration. Each package's pool is capped by
+          # dbtest (8 connections), so this is ~32 against max_connections=300.
           go test -race -p 4 -tags=integration ./...
       - name: Verify API contract
         working-directory: web

@@ -3,7 +3,6 @@ package db
 
 import (
 	"context"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,21 +20,31 @@ const poolMaxConnsFloor = 25
 // full connection-establishment latency from cold.
 const poolMinConns = 4
 
-// Connect opens a pgx connection pool, registers the google/uuid codec so
-// sqlc's uuid.UUID columns scan correctly, sizes the pool for worker
-// concurrency, and verifies connectivity.
-func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
+// poolConfig parses a DSN and applies this application's pool sizing: the floors
+// above, unless the DSN pins the corresponding key. Pinning is how a caller that
+// is not a server opts out — the integration suite pins both so four packages
+// under `go test -p 4` cannot add up to the server's max_connections.
+func poolConfig(url string) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, err
 	}
-	// Respect an explicit pool_max_conns in the DSN; otherwise raise a sane floor
-	// so workers don't starve on Acquire under concurrency.
-	if !strings.Contains(url, "pool_max_conns") && cfg.MaxConns < poolMaxConnsFloor {
+	if !pinsPoolParam(url, "pool_max_conns") && cfg.MaxConns < poolMaxConnsFloor {
 		cfg.MaxConns = poolMaxConnsFloor
 	}
-	if cfg.MinConns < poolMinConns {
+	if !pinsPoolParam(url, "pool_min_conns") && cfg.MinConns < poolMinConns {
 		cfg.MinConns = poolMinConns
+	}
+	return cfg, nil
+}
+
+// Connect opens a pgx connection pool, registers the google/uuid codec so
+// sqlc's uuid.UUID columns scan correctly, sizes the pool for worker
+// concurrency, and verifies connectivity.
+func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
+	cfg, err := poolConfig(url)
+	if err != nil {
+		return nil, err
 	}
 	cfg.AfterConnect = func(_ context.Context, conn *pgx.Conn) error {
 		pgxuuid.Register(conn.TypeMap())
