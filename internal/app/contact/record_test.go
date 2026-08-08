@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,13 @@ type recordFake struct {
 
 	suppression    *RecordSuppression
 	suppressionErr error
+
+	companyExists    bool
+	companyExistsErr error
+	setCompanyErr    error
+	// setCompanyCalls records every link/unlink the service asked for, so a test
+	// can prove a rejected request never reached the write.
+	setCompanyCalls []*uuid.UUID
 
 	deals    []RecordDeal
 	dealsErr error
@@ -53,6 +61,23 @@ func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (Record, error) {
 
 func (f *fakeStore) Suppression(context.Context, uuid.UUID, uuid.UUID) (*RecordSuppression, error) {
 	return f.record.suppression, f.record.suppressionErr
+}
+
+func (f *fakeStore) CompanyExists(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return f.record.companyExists, f.record.companyExistsErr
+}
+
+func (f *fakeStore) SetCompany(_ context.Context, _, _ uuid.UUID, companyID *uuid.UUID) error {
+	f.record.setCompanyCalls = append(f.record.setCompanyCalls, companyID)
+	if f.record.setCompanyErr != nil {
+		return f.record.setCompanyErr
+	}
+	if companyID == nil {
+		f.record.get.Company = nil
+		return nil
+	}
+	f.record.get.Company = &RecordCompany{ID: *companyID, Name: "Acme"}
+	return nil
 }
 
 func (f *fakeStore) ListDeals(_ context.Context, _, _ uuid.UUID, limit int32) ([]RecordDeal, error) {
@@ -646,5 +671,145 @@ func TestEngagementOpensMeasurableFollowsTheSendAggregate(t *testing.T) {
 					got.OpensIndicative, got.Clicks)
 			}
 		})
+	}
+}
+
+// serveLink runs one PUT /contacts/{id}/company through the real auth middleware
+// and chi router, so {id} and the scope gate behave as they do in production.
+func serveLink(t *testing.T, h *Handler, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	tok, err := auth.IssueToken(testSecret, auth.Claims{
+		UserID: uuid.NewString(), WorkspaceID: testWS.String(), Role: "owner", SessionID: uuid.NewString(),
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueToken: %v", err)
+	}
+	router := chi.NewRouter()
+	router.Put("/{id}/company", h.putContactCompany)
+
+	r := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	auth.RequireAuth(auth.NewJWTVerifier(testSecret))(router).ServeHTTP(w, r)
+	return w
+}
+
+// Linking and unlinking are the same operation with a present or null company_id,
+// which is the whole reason this is a PUT on a sub-resource and not a PATCH.
+func TestSetContactCompanyLinksAndUnlinks(t *testing.T) {
+	companyID := uuid.New()
+	store := &fakeStore{}
+	store.record.get = Record{ID: uuid.New()}
+	store.record.companyExists = true
+
+	linked, err := recordService(store).SetCompany(context.Background(), testWS, store.record.get.ID, &companyID)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if linked.Company == nil || linked.Company.ID != companyID {
+		t.Fatalf("company = %+v, want the linked company", linked.Company)
+	}
+
+	unlinked, err := recordService(store).SetCompany(context.Background(), testWS, store.record.get.ID, nil)
+	if err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	if unlinked.Company != nil {
+		t.Fatalf("company = %+v, want nil after unlinking", unlinked.Company)
+	}
+	if len(store.record.setCompanyCalls) != 2 || store.record.setCompanyCalls[1] != nil {
+		t.Fatalf("store calls = %v, want a link then an explicit nil", store.record.setCompanyCalls)
+	}
+}
+
+// A company outside the workspace is refused BEFORE the write, so the tenant FK
+// never has to reject it and no partial state is possible.
+func TestSetContactCompanyRejectsForeignCompanyBeforeWriting(t *testing.T) {
+	companyID := uuid.New()
+	store := &fakeStore{}
+	store.record.get = Record{ID: uuid.New()}
+	store.record.companyExists = false
+
+	_, err := recordService(store).SetCompany(context.Background(), testWS, store.record.get.ID, &companyID)
+	if !errors.Is(err, ErrCompanyNotFound) {
+		t.Fatalf("err = %v, want ErrCompanyNotFound", err)
+	}
+	if len(store.record.setCompanyCalls) != 0 {
+		t.Fatalf("the write ran for a company the caller does not own: %v", store.record.setCompanyCalls)
+	}
+}
+
+// Unlinking must not require a company to exist — there is no company id to check.
+func TestSetContactCompanyUnlinkSkipsTheOwnershipCheck(t *testing.T) {
+	store := &fakeStore{}
+	store.record.get = Record{ID: uuid.New(), Company: &RecordCompany{ID: uuid.New()}}
+	store.record.companyExists = false // would refuse a link
+
+	got, err := recordService(store).SetCompany(context.Background(), testWS, store.record.get.ID, nil)
+	if err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	if got.Company != nil {
+		t.Fatalf("company = %+v, want nil", got.Company)
+	}
+}
+
+func TestSetContactCompanyStatusMapping(t *testing.T) {
+	id, companyID := uuid.New(), uuid.New()
+
+	tests := []struct {
+		name          string
+		path          string
+		body          string
+		companyExists bool
+		setErr        error
+		want          int
+	}{
+		{"link", "/" + id.String() + "/company", `{"company_id":"` + companyID.String() + `"}`, true, nil, http.StatusOK},
+		{"unlink", "/" + id.String() + "/company", `{"company_id":null}`, false, nil, http.StatusOK},
+		{"foreign company", "/" + id.String() + "/company", `{"company_id":"` + companyID.String() + `"}`, false, nil, http.StatusNotFound},
+		{"unknown contact", "/" + id.String() + "/company", `{"company_id":null}`, true, ErrNotFound, http.StatusNotFound},
+		{"company deleted mid-write", "/" + id.String() + "/company", `{"company_id":"` + companyID.String() + `"}`, true, ErrCompanyNotFound, http.StatusNotFound},
+		{"id is not a uuid", "/nope/company", `{"company_id":null}`, true, nil, http.StatusBadRequest},
+		{"unknown field", "/" + id.String() + "/company", `{"company_id":null,"typo":1}`, true, nil, http.StatusBadRequest},
+		{"trailing json", "/" + id.String() + "/company", `{"company_id":null} {}`, true, nil, http.StatusBadRequest},
+		{"not an object", "/" + id.String() + "/company", `[]`, true, nil, http.StatusBadRequest},
+		{"company_id not a uuid", "/" + id.String() + "/company", `{"company_id":"nope"}`, true, nil, http.StatusBadRequest},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{}
+			store.record.get = Record{ID: id}
+			store.record.companyExists = tc.companyExists
+			store.record.setCompanyErr = tc.setErr
+			w := serveLink(t, NewHandler(recordService(store)), tc.path, tc.body)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}
+
+// The two 404s say which record was missing. Both are workspace-scoped, so naming
+// your own missing record leaks nothing, and a client needs to know which id to fix.
+func TestSetContactCompanyDistinguishesTheTwo404s(t *testing.T) {
+	id, companyID := uuid.New(), uuid.New()
+
+	store := &fakeStore{}
+	store.record.get = Record{ID: id}
+	store.record.companyExists = false
+	w := serveLink(t, NewHandler(recordService(store)), "/"+id.String()+"/company",
+		`{"company_id":"`+companyID.String()+`"}`)
+	if !strings.Contains(w.Body.String(), "company not found") {
+		t.Fatalf("body = %s, want it to name the company", w.Body.String())
+	}
+
+	store = &fakeStore{}
+	store.record.get = Record{ID: id}
+	store.record.companyExists = true
+	store.record.setCompanyErr = ErrNotFound
+	w = serveLink(t, NewHandler(recordService(store)), "/"+id.String()+"/company", `{"company_id":null}`)
+	if !strings.Contains(w.Body.String(), "contact not found") {
+		t.Fatalf("body = %s, want it to name the contact", w.Body.String())
 	}
 }

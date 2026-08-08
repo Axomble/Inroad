@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -50,6 +51,42 @@ func recordCompany(id pgtype.UUID, name, domain *string) *RecordCompany {
 		out.Domain = *domain
 	}
 	return &out
+}
+
+func (s *PgStore) CompanyExists(ctx context.Context, ws, companyID uuid.UUID) (bool, error) {
+	exists, err := s.q.CompanyExistsInWorkspace(ctx, gen.CompanyExistsInWorkspaceParams{WorkspaceID: ws, ID: companyID})
+	if err != nil {
+		return false, fmt.Errorf("company exists: %w", err)
+	}
+	return exists, nil
+}
+
+// SetCompany translates the tenant FK's own refusal (23503) into
+// ErrCompanyNotFound. The service checks ownership first, so reaching this branch
+// means the company was deleted between the check and the write — a race, not a
+// caller error, but the caller still gets an actionable 404 rather than a 500.
+func (s *PgStore) SetCompany(ctx context.Context, ws, contactID uuid.UUID, companyID *uuid.UUID) error {
+	rows, err := s.q.SetContactCompany(ctx, gen.SetContactCompanyParams{
+		WorkspaceID: ws, ID: contactID, CompanyID: optionalUUID(companyID),
+	})
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return ErrCompanyNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("set contact company: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func optionalUUID(id *uuid.UUID) pgtype.UUID {
+	if id == nil {
+		return pgtype.UUID{}
+	}
+	return pgtype.UUID{Bytes: *id, Valid: true}
 }
 
 // Suppression returns nil, nil for a contact with no suppressed address: "not

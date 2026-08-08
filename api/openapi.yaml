@@ -1201,6 +1201,44 @@ paths:
         '400': { description: id is not a uuid }
         '401': { description: Unauthorized }
         '404': { description: "Contact not found. A contact in another workspace is indistinguishable from one that does not exist." }
+  /contacts/{id}/company:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: setContactCompany
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Link a contact to a company, or unlink it by sending an explicit null. This
+        is the only write path for `contacts.company_id`, which is what populates
+        `ContactDetail.company` and the company's contact roster.
+
+
+        A PUT on a single-value sub-resource rather than a PATCH on the contact,
+        because unlinking has to be expressible: a PATCH would have to distinguish
+        an ABSENT company_id from a null one, and getting that wrong silently
+        either unlinks or refuses to. Here null means unlink, always.
+
+
+        Deliberately NOT done implicitly: creating a deal that names both a company
+        and a contact does not link them. A deal's company is who the money is
+        with, which is not necessarily who the contact works for, and a link that
+        appeared as a side effect would reappear after a user removed it.
+
+
+        Requires the contacts:write scope. It does not additionally require
+        crm:write (unlike the contact-alias writes) because company_id is CRM
+        metadata with no effect on the send path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactCompanyLink' }
+      responses:
+        '200': { description: The updated contact record, content: { application/json: { schema: { $ref: '#/components/schemas/ContactDetail' } } } }
+        '400': { description: "id is not a uuid, or the body is not a single JSON object with a company_id" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: "Contact not found, or the company is not in this workspace. The message says which." }
   /contacts/{id}/engagement:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     get:
@@ -3174,6 +3212,17 @@ components:
         id: { type: string, format: uuid }
         name: { type: string }
         domain: { type: string, description: "Empty when the company has no domain on file." }
+    ContactCompanyLink:
+      type: object
+      required: [company_id]
+      properties:
+        company_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The company to link this contact to, or null to unlink. Must be a
+            company in the caller's workspace; anything else is 404.
     ContactSuppression:
       type: object
       required: [reason, email, is_primary_email, suppressed_at]
