@@ -2786,7 +2786,9 @@ export type ContactDetail = {
 export type ContactCampaignEnrollment = {
   campaign_id: string;
   campaign_name: string;
-  /** Whether this campaign injected open/click tracking. This is the only thing that tells "nobody opened" apart from "opens were never recorded": a campaign with tracking off contributes to `emails_sent` but structurally cannot contribute to `opens_indicative` or `clicks`. The rollup's counts deliberately do not adjust for it - use this to explain a zero rather than to correct one. */
+  /** Whether this campaign injected open/click tracking. This is the only thing that tells "nobody opened" apart from "opens were never recorded": a campaign with tracking off contributes to `emails_sent` but structurally cannot contribute to `opens_indicative` or `clicks`. The rollup's counts deliberately do not adjust for it - use this to explain a zero rather than to correct one.
+    
+    This is the PER-ENROLLMENT detail, for marking individual rows. Do not aggregate it to decide whether the summary's zeros were measured: the list is capped, so use the top-level `opens_measurable` for that. */
   tracking_enabled: boolean;
   status: "active" | "completed" | "stopped";
   /** 0 means enrolled but not yet sent to; N means step N was the last one sent. */
@@ -2816,6 +2818,14 @@ export type ContactEngagement = {
   click_rate: number;
   /** Enrollments over the contact's lifetime - active, completed, and stopped. */
   campaigns_enrolled: number;
+  /** Whether an open COULD have been recorded for this contact: true when at least one send that actually went out belonged to a campaign with tracking enabled.
+    
+    Use it as `emails_sent > 0 && !opens_measurable` to render `opens_indicative` and `clicks` as "not measured" instead of 0. Do NOT derive this from `campaigns[].tracking_enabled`: that list is capped at 20, so for a contact with more enrollments whose newest are untracked and whose older ones were tracked, a client-side `some()` answers false and explains away a genuine zero. This field is computed over the whole send history and is correct at any enrollment count.
+    
+    Caveat: `campaigns.tracking_enabled` is mutable (PUT /campaigns/{id}/tracking), and no per-send record of the flag at send time exists, so this reflects each campaign's CURRENT setting. Toggling tracking off after a send can therefore turn a measured zero into an "unmeasured" one retroactively. Reporting the current setting is the best available answer, not a perfect one.
+    
+    When a non-zero count coexists with `opens_measurable: false`, trust the count - a recorded event outranks an inference about whether it could have been recorded. */
+  opens_measurable: boolean;
   /** The most recent of the contact's last send and last tracking event. Null when neither has ever happened. */
   last_activity_at: string | null;
   /** The 20 most recently enrolled campaigns, newest first. */
