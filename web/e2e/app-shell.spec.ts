@@ -116,10 +116,22 @@ test('mobile navigation and core screens stay within the viewport', async ({ pag
   // Domain authentication renders on the narrow viewport with its nuances
   // intact: DMARC published but not enforcing, DKIM undetected rather than
   // broken. Long DNS guidance is the most likely thing to blow the layout out.
-  const domainAuth = page.getByRole('region', { name: 'Domain authentication' })
-  await expect(domainAuth.getByText('DMARC Monitoring only')).toBeVisible()
-  await expect(domainAuth.getByText('DKIM Not detected')).toBeVisible()
-  await expect(domainAuth.getByRole('button', { name: 'Recheck DNS for atlas.test' })).toBeVisible()
+  //
+  // It is now a per-domain header above that domain's own mailboxes, not one
+  // panel above the whole list, so there is no 'Domain authentication' region to
+  // scope to. On a narrow viewport the per-record pills are deliberately hidden
+  // (`hidden md:flex` in DomainAuthHeader) — the domain-level verdict plus the
+  // disclosure carry the same answer without wrapping the header onto a second
+  // line. So the nuance is asserted where a phone user actually reads it: behind
+  // the disclosure, which is also where the long guidance that threatens the
+  // layout lives.
+  await expect(page.getByText('atlas.test', { exact: true })).toBeVisible()
+  await expect(page.getByText('Authenticated')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Recheck DNS for atlas.test' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Show DNS records for atlas.test' }).click()
+  await expect(page.getByText('Monitoring only.')).toBeVisible()
+  await expect(page.getByText('Not detected.')).toBeVisible()
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false)
   await page.screenshot({ path: testInfo.outputPath('overview-mobile.png'), fullPage: true })
