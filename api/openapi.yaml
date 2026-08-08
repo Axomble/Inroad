@@ -2168,6 +2168,14 @@ paths:
     get:
       operationId: crmListNotes
       tags: [crm]
+      description: >-
+        Notes attached to one contact, company, or deal. Note the deliberate
+        asymmetry with the company sub-resources: this endpoint does NOT resolve
+        the target first, so an unknown or cross-workspace target_id returns an
+        empty page rather than 404. That is not a bug - the SQL is workspace-pinned
+        either way, so nothing leaks and it is not an existence oracle. Kept as-is
+        because changing a shipped endpoint's status codes would break clients for
+        no gain.
       parameters:
         - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
         - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
@@ -2201,6 +2209,10 @@ paths:
     get:
       operationId: crmListTasks
       tags: [crm]
+      description: >-
+        Tasks attached to one contact, company, or deal. Same deliberate asymmetry
+        as crmListNotes: an unknown or cross-workspace target_id yields an empty
+        page, not 404. See that operation's description.
       parameters:
         - { name: target_type, in: query, required: true, schema: { type: string, enum: [contact, company, deal] } }
         - { name: target_id, in: query, required: true, schema: { type: string, format: uuid } }
@@ -3164,11 +3176,24 @@ components:
         domain: { type: string, description: "Empty when the company has no domain on file." }
     ContactSuppression:
       type: object
-      required: [reason, email, is_primary_email, since]
+      required: [reason, email, is_primary_email, suppressed_at]
       description: >-
         Why this person may not be emailed. Present when any address of theirs is
         on the workspace suppression list; the record page's first question is
         "may I email this person at all", which outranks every engagement number.
+
+
+        Exactly ONE reason is reported, never a set of flags: the suppression list
+        is unique per (workspace, address), so an address has one reason. A contact
+        with several addresses could have a different reason on each - this reports
+        the one that matters, preferring the primary address, so a client renders a
+        single unambiguous label and never has to invent a precedence rule.
+
+
+        This is NOT the same fact as the engagement rollup's `bounces` and
+        `unsubscribes`, which count stopped ENROLLMENTS (one campaign ended). This
+        is the authoritative, workspace-wide answer to whether the person may be
+        contacted at all.
       properties:
         reason:
           type: string
@@ -3183,11 +3208,24 @@ components:
         is_primary_email:
           type: boolean
           description: >-
-            True when the suppressed address is the contact's primary one - the
-            address the send path actually resolves - so this person cannot be
-            emailed at all. False means only a secondary alias is suppressed:
-            sending still works today, but promoting that alias would stop it.
-        since: { type: string, format: date-time }
+            Which of TWO different operational states this is - do not simplify it
+            away to "an address is suppressed".
+
+
+            True: the suppressed address is the contact's primary one, the address
+            the send path actually resolves, so this person cannot be emailed at
+            all. A hard stop, now.
+
+
+            False: only a secondary alias is suppressed. Sending works today
+            because it does not use that address - but promoting the alias to
+            primary (PUT /crm/contacts/{id}/emails/{emailID}/primary) would
+            silently stop sending. Reachable now, breakable by a routine edit.
+
+
+            A boolean "suppressed" flag would merge those two into one answer that
+            is wrong for whichever case it is not describing.
+        suppressed_at: { type: string, format: date-time }
     ContactDeal:
       type: object
       required: [id, name, pipeline_id, stage_id, stage_label, stage_color, stage_is_won, stage_is_lost, currency, created_at, updated_at]
@@ -3208,7 +3246,7 @@ components:
         updated_at: { type: string, format: date-time }
     ContactDetail:
       type: object
-      required: [id, email, first_name, last_name, job_title, linkedin_url, suppression, company, deals, deals_truncated, created_at, updated_at]
+      required: [id, email, first_name, last_name, job_title, linkedin_url, suppression, company, deals, deal_count, deals_truncated, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         email: { type: string, description: The address the send path resolves for this contact. }
@@ -3232,6 +3270,13 @@ components:
             Deals in board order, capped at 25. A record page shows a roster, not a
             paginated list; the cap is what keeps this response bounded.
           items: { $ref: '#/components/schemas/ContactDeal' }
+        deal_count:
+          type: integer
+          format: int64
+          description: >-
+            The contact's TRUE deal total, counted independently of the capped
+            `deals` list. Render "25 of 38" from this rather than treating the cap
+            as the whole set.
         deals_truncated:
           type: boolean
           description: True when the contact has more deals than the cap and `deals` was cut short.
@@ -3239,10 +3284,19 @@ components:
         updated_at: { type: string, format: date-time }
     ContactCampaignEnrollment:
       type: object
-      required: [campaign_id, campaign_name, status, current_step, enrolled_at]
+      required: [campaign_id, campaign_name, tracking_enabled, status, current_step, enrolled_at]
       properties:
         campaign_id: { type: string, format: uuid }
         campaign_name: { type: string }
+        tracking_enabled:
+          type: boolean
+          description: >-
+            Whether this campaign injected open/click tracking. This is the only
+            thing that tells "nobody opened" apart from "opens were never
+            recorded": a campaign with tracking off contributes to `emails_sent`
+            but structurally cannot contribute to `opens_indicative` or `clicks`.
+            The rollup's counts deliberately do not adjust for it - use this to
+            explain a zero rather than to correct one.
         status: { type: string, enum: [active, completed, stopped] }
         current_step:
           type: integer
@@ -3251,8 +3305,13 @@ components:
           type: string
           nullable: true
           description: >-
-            Why the sequence stopped - one of replied, bounced, suppressed, manual.
-            Null while the enrollment is still active or completed normally.
+            Why the sequence stopped - one of replied, bounced, suppressed, manual,
+            failed. `failed` is real (added by migration 000008 for a degenerate or
+            exhausted send cap) and is deliberately NOT counted as a bounce or an
+            unsubscribe in the rollup above. Null while the enrollment is still
+            active or completed normally. Treat this as an open set: render an
+            unrecognised literal verbatim rather than dropping it, so a future
+            reason degrades visibly instead of vanishing.
         enrolled_at: { type: string, format: date-time }
         last_sent_at: { type: string, format: date-time, nullable: true }
     ContactEngagement:
@@ -3266,6 +3325,12 @@ components:
         zero. Reply/bounce/unsubscribe are reported as counts only: their
         per-contact denominator is `campaigns_enrolled`, which is not a rate anyone
         reads for one person.
+
+
+        Every counter is always a number and never null: nothing-happened is 0. The
+        one case a 0 does not distinguish is a campaign with tracking disabled,
+        which contributes sends but cannot contribute opens or clicks - read
+        `campaigns[].tracking_enabled` to tell an unmeasured zero from a real one.
       properties:
         contact_id: { type: string, format: uuid }
         emails_sent: { type: integer, format: int64, description: "Sends with status 'sent' - the same numerator as the campaign rollup's stats.sent." }

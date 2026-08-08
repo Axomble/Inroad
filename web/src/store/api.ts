@@ -2733,7 +2733,7 @@ export type ContactSuppression = {
   email: string;
   /** True when the suppressed address is the contact's primary one - the address the send path actually resolves - so this person cannot be emailed at all. False means only a secondary alias is suppressed: sending still works today, but promoting that alias would stop it. */
   is_primary_email: boolean;
-  since: string;
+  suppressed_at: string;
 };
 export type ContactCompany = {
   id: string;
@@ -2770,6 +2770,8 @@ export type ContactDetail = {
   company: ContactCompany | null;
   /** Deals in board order, capped at 25. A record page shows a roster, not a paginated list; the cap is what keeps this response bounded. */
   deals: ContactDeal[];
+  /** The contact's TRUE deal total, counted independently of the capped `deals` list. Render "25 of 38" from this rather than treating the cap as the whole set. */
+  deal_count: number;
   /** True when the contact has more deals than the cap and `deals` was cut short. */
   deals_truncated: boolean;
   created_at: string;
@@ -2778,6 +2780,8 @@ export type ContactDetail = {
 export type ContactCampaignEnrollment = {
   campaign_id: string;
   campaign_name: string;
+  /** Whether this campaign injected open/click tracking. This is the only thing that tells "nobody opened" apart from "opens were never recorded": a campaign with tracking off contributes to `emails_sent` but structurally cannot contribute to `opens_indicative` or `clicks`. The rollup's counts deliberately do not adjust for it - use this to explain a zero rather than to correct one. */
+  tracking_enabled: boolean;
   status: "active" | "completed" | "stopped";
   /** 0 means enrolled but not yet sent to; N means step N was the last one sent. */
   current_step: number;

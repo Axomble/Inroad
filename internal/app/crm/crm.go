@@ -74,6 +74,19 @@ type Company struct {
 	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
+// CompanyContact is one person at a company, as the company page's roster
+// renders them. Deliberately narrower than the contact domain's own record
+// shape: this is a link target, not a record.
+type CompanyContact struct {
+	ID          uuid.UUID `json:"id"`
+	Email       string    `json:"email"`
+	FirstName   string    `json:"first_name"`
+	LastName    string    `json:"last_name"`
+	JobTitle    string    `json:"job_title"`
+	LinkedInURL string    `json:"linkedin_url"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type Stage struct {
 	ID          uuid.UUID `json:"id"`
 	PipelineID  uuid.UUID `json:"pipeline_id"`

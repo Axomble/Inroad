@@ -85,6 +85,8 @@ func (h *Handler) Routes() http.Handler {
 		read.Use(auth.RequireScope(auth.ScopeCRMRead))
 		read.Get("/companies", h.listCompanies)
 		read.Get("/companies/{id}", h.getCompany)
+		read.Get("/companies/{id}/contacts", h.listCompanyContacts)
+		read.Get("/companies/{id}/deals", h.listCompanyDeals)
 		read.Get("/pipelines", h.listPipelines)
 		read.Get("/pipelines/{id}", h.getPipeline)
 		read.Get("/deals", h.listDeals)
@@ -143,6 +145,26 @@ func (h *Handler) listCompanies(w http.ResponseWriter, r *http.Request) {
 }
 func (h *Handler) getCompany(w http.ResponseWriter, r *http.Request) {
 	h.get(w, r, func(ws, id uuid.UUID) (any, error) { return h.svc.GetCompany(r.Context(), ws, id) })
+}
+func (h *Handler) listCompanyContacts(w http.ResponseWriter, r *http.Request) {
+	page, err := queryPage(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h.get(w, r, func(ws, id uuid.UUID) (any, error) {
+		return h.svc.ListCompanyContacts(r.Context(), ws, id, page)
+	})
+}
+func (h *Handler) listCompanyDeals(w http.ResponseWriter, r *http.Request) {
+	page, err := queryPage(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h.get(w, r, func(ws, id uuid.UUID) (any, error) {
+		return h.svc.ListCompanyDeals(r.Context(), ws, id, page)
+	})
 }
 func (h *Handler) createCompany(w http.ResponseWriter, r *http.Request) {
 	var req companyRequest

@@ -21,6 +21,9 @@ type fakeStore struct {
 	countN     int64
 	countErr   error
 	lastFilter SearchFilter
+
+	// record holds the record-page reads; its methods live in record_test.go.
+	record recordFake
 }
 
 func (f *fakeStore) Upsert(_ context.Context, _ uuid.UUID, _ UpsertInput) (uuid.UUID, bool, error) {
