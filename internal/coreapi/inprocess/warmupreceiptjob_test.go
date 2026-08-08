@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -17,6 +18,24 @@ const (
 	tDay       = "2026-07-27"
 )
 
+// tReceivedAt is a mid-morning receipt instant on tDay: inside waking hours, so a
+// reply delay short enough to stay in the window is neither deferred nor truncated.
+var tReceivedAt = time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+
+// planFor builds an engage plan for the shared test receipt at the given reply rate
+// and placement, anchored on tReceivedAt with now == receivedAt (the fresh-insert case).
+func planFor(rate float64, placement string) coreapi.WarmupEngagePlan {
+	return warmupEngagePlan(engagePlanInputs{
+		ReceiptID:        tReceiptID,
+		RecipientMailbox: tRecipient,
+		DayKey:           tDay,
+		ReplyRate:        rate,
+		Placement:        placement,
+		ReceivedAt:       tReceivedAt,
+		Now:              tReceivedAt,
+	})
+}
+
 // TestEngagePlanRescueOnlyOnSpam pins DoRescue to the spam placement and DoMarkRead
 // to always-on, across all three placements.
 func TestEngagePlanRescueOnlyOnSpam(t *testing.T) {
@@ -29,7 +48,7 @@ func TestEngagePlanRescueOnlyOnSpam(t *testing.T) {
 		{placementOther, false},
 	}
 	for _, tc := range cases {
-		plan := warmupEngagePlan(tReceiptID, tRecipient, tDay, 0.3, tc.placement)
+		plan := planFor(0.3, tc.placement)
 		if plan.DoRescue != tc.wantRescue {
 			t.Errorf("placement %q: DoRescue = %v, want %v", tc.placement, plan.DoRescue, tc.wantRescue)
 		}
@@ -49,16 +68,47 @@ func TestEngagePlanReplyMatchesDecision(t *testing.T) {
 	seed := warmupReceiptSeed(tReceiptID, tRecipient, tDay)
 	for _, rate := range []float64{0, 0.3, 0.75, 1} {
 		want := warmup.ReplyDecision(seed, rate)
-		got := warmupEngagePlan(tReceiptID, tRecipient, tDay, rate, placementInbox).DoReply
+		got := planFor(rate, placementInbox).DoReply
 		if got != want {
 			t.Errorf("reply_rate %.2f: DoReply = %v, want ReplyDecision = %v", rate, got, want)
 		}
 	}
-	if warmupEngagePlan(tReceiptID, tRecipient, tDay, 0, placementInbox).DoReply {
+	if planFor(0, placementInbox).DoReply {
 		t.Error("reply_rate 0: DoReply = true, want never")
 	}
-	if !warmupEngagePlan(tReceiptID, tRecipient, tDay, 1, placementInbox).DoReply {
+	if !planFor(1, placementInbox).DoReply {
 		t.Error("reply_rate 1: DoReply = false, want always")
+	}
+}
+
+// TestEngagePlanDelayMatchesWhatItWillDo is the "traffic feels instant" regression at
+// the coreapi seam: a passive-only engagement keeps the short read dwell, while an
+// engagement that WILL reply is delayed by the far longer reply latency. Getting these
+// two crossed is exactly the bug that made replies arrive 30 seconds after their
+// trigger, so both directions are pinned.
+func TestEngagePlanDelayMatchesWhatItWillDo(t *testing.T) {
+	passive := planFor(0, placementInbox) // rate 0 ⇒ never replies
+	if passive.DoReply {
+		t.Fatal("rate 0 must not reply")
+	}
+	if want := warmup.EngageDwell(tReceiptID); passive.EngageAfter != want {
+		t.Errorf("passive EngageAfter = %v, want EngageDwell = %v", passive.EngageAfter, want)
+	}
+
+	replying := planFor(1, placementInbox) // rate 1 ⇒ always replies
+	if !replying.DoReply {
+		t.Fatal("rate 1 must reply")
+	}
+	want := warmup.ReplyEngageAfter(tReceiptID, tReceivedAt, tReceivedAt, nil)
+	if replying.EngageAfter != want {
+		t.Errorf("replying EngageAfter = %v, want ReplyEngageAfter = %v", replying.EngageAfter, want)
+	}
+	if replying.EngageAfter < 3*time.Minute {
+		t.Errorf("replying EngageAfter = %v, want at least the 3-minute human floor", replying.EngageAfter)
+	}
+	if replying.EngageAfter <= passive.EngageAfter {
+		t.Errorf("a reply (%v) is not slower than a passive engagement (%v)",
+			replying.EngageAfter, passive.EngageAfter)
 	}
 }
 
@@ -66,16 +116,20 @@ func TestEngagePlanReplyMatchesDecision(t *testing.T) {
 // (reproducible across a re-poll) and a different receipt id yields an independent
 // dwell — the plan is a pure function of its seed.
 func TestEngagePlanDeterministic(t *testing.T) {
-	a := warmupEngagePlan(tReceiptID, tRecipient, tDay, 0.5, placementSpam)
-	b := warmupEngagePlan(tReceiptID, tRecipient, tDay, 0.5, placementSpam)
+	a := planFor(0.5, placementSpam)
+	b := planFor(0.5, placementSpam)
 	if a != b {
 		t.Fatalf("plan not deterministic: %+v vs %+v", a, b)
 	}
-	if a.EngageAfter != warmup.EngageDwell(tReceiptID) {
-		t.Errorf("EngageAfter = %v, want EngageDwell(receipt) = %v", a.EngageAfter, warmup.EngageDwell(tReceiptID))
+	// Whichever branch this receipt's seeded decision takes, the delay is bounded by
+	// that branch's distribution: [5s, 1h] passive, [3m, 8h] plus waking-hours deferral
+	// for a reply.
+	lo, hi := 5*time.Second, time.Hour
+	if a.DoReply {
+		lo, hi = 3*time.Minute, 24*time.Hour
 	}
-	if a.EngageAfter < 5*time.Second || a.EngageAfter > time.Hour {
-		t.Errorf("EngageAfter = %v, want within [5s, 1h]", a.EngageAfter)
+	if a.EngageAfter < lo || a.EngageAfter > hi {
+		t.Errorf("EngageAfter = %v (DoReply=%v), want within [%v, %v]", a.EngageAfter, a.DoReply, lo, hi)
 	}
 }
 

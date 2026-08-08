@@ -38,6 +38,11 @@ func itKeyring(t *testing.T, q *gen.Queries) *crypto.Keyring {
 }
 
 // itMailbox seeds one smtp mailbox with a real sealed credential + enables warmup.
+//
+// StartVolume MUST stay at or below warmup.EffectiveDailyVolume's anti-stall floor
+// threshold (8). GetWarmupSendJob reads the real clock, so a higher start volume would
+// let DailyVolumeFactor's weekend/skip-day shape drive today's quota to zero and make
+// every "expect a send" test below fail depending on the calendar date.
 func itMailbox(t *testing.T, ctx context.Context, q *gen.Queries, sealer *crypto.Sealer, wsID uuid.UUID, email string) uuid.UUID {
 	t.Helper()
 	ct, err := sealer.Seal([]byte("smtp-app-password"))

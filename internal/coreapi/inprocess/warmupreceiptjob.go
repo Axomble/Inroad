@@ -39,19 +39,51 @@ func warmupReceiptSeed(receiptID, recipientMailbox, dayKey string) string {
 	return receiptID + ":" + recipientMailbox + ":" + dayKey
 }
 
+// engagePlanInputs is the pure snapshot warmupEngagePlan reasons over — the
+// receipt's identity, the recipient's configured reply rate, the observed
+// placement, and the two instants the delay is computed between. Passed as a
+// struct rather than seven positional arguments so a call site can't silently
+// transpose two strings.
+type engagePlanInputs struct {
+	ReceiptID        string
+	RecipientMailbox string
+	DayKey           string
+	ReplyRate        float64
+	Placement        string
+	ReceivedAt       time.Time // when the message was observed (the delay's anchor)
+	Now              time.Time // the delay is returned relative to this
+}
+
 // warmupEngagePlan builds the deterministic recipient action set from the receipt.
 // It is pure (seeded hash, no rand, no I/O) so it is unit-testable without a DB and
 // reproducible across a re-poll: rescue only when the message landed in spam,
-// always mark-read, reply per the recipient's reply_rate via the seeded decision,
-// and a heavy-tailed humanized dwell keyed on the receipt id.
-func warmupEngagePlan(receiptID, recipientMailbox, dayKey string, replyRate float64, placement string) coreapi.WarmupEngagePlan {
-	seed := warmupReceiptSeed(receiptID, recipientMailbox, dayKey)
+// always mark-read, and reply per the recipient's reply_rate via the seeded decision.
+//
+// EngageAfter is drawn from whichever distribution matches what this engagement will
+// actually DO. A passive-only engagement (no reply) uses the short EngageDwell —
+// opening and un-spamming a message genuinely is quick. An engagement that WILL reply
+// uses the far longer, waking-hours-bounded ReplyEngageAfter, because the whole
+// engagement is one asynq task and therefore one sitting: a human opens the message
+// and answers it in the same pass, tens of minutes to hours after it arrived. Reusing
+// the 90s dwell for replies is what made warmup traffic feel instant.
+//
+// Warmup has no per-mailbox timezone in the v1 schema, so the waking window is UTC
+// (nil loc) — the same convention warmup.NextDue's scheduling already uses.
+func warmupEngagePlan(in engagePlanInputs) coreapi.WarmupEngagePlan {
+	seed := warmupReceiptSeed(in.ReceiptID, in.RecipientMailbox, in.DayKey)
+	doReply := warmup.ReplyDecision(seed, in.ReplyRate)
+
+	engageAfter := warmup.EngageDwell(in.ReceiptID)
+	if doReply {
+		engageAfter = warmup.ReplyEngageAfter(in.ReceiptID, in.ReceivedAt, in.Now, nil)
+	}
+
 	return coreapi.WarmupEngagePlan{
-		ReceiptID:   receiptID,
-		DoRescue:    placement == placementSpam,
+		ReceiptID:   in.ReceiptID,
+		DoRescue:    in.Placement == placementSpam,
 		DoMarkRead:  true,
-		DoReply:     warmup.ReplyDecision(seed, replyRate),
-		EngageAfter: warmup.EngageDwell(receiptID),
+		DoReply:     doReply,
+		EngageAfter: engageAfter,
 	}
 }
 
@@ -150,10 +182,20 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 			}
 			return coreapi.WarmupEngagePlan{}, perr
 		}
-		// Rebuild against the STORED placement + received_at so DoRescue/DoReply/EngageAfter
-		// match what the fresh insert returned and what GetWarmupEngageJob will recompute.
-		dayKey := dup.ReceivedAt.Time.UTC().Format("2006-01-02")
-		return warmupEngagePlan(dup.ID.String(), recipient.String(), dayKey, float64(p.ReplyRate), dup.Placement), nil
+		// Rebuild against the STORED placement + received_at so DoRescue/DoReply match
+		// what the fresh insert returned and what GetWarmupEngageJob will recompute.
+		// EngageAfter is re-derived relative to NOW, so a reply whose original target
+		// has already passed fires at the next waking instant instead of waiting the
+		// full delay a second time.
+		return warmupEngagePlan(engagePlanInputs{
+			ReceiptID:        dup.ID.String(),
+			RecipientMailbox: recipient.String(),
+			DayKey:           dup.ReceivedAt.Time.UTC().Format("2006-01-02"),
+			ReplyRate:        float64(p.ReplyRate),
+			Placement:        dup.Placement,
+			ReceivedAt:       dup.ReceivedAt.Time,
+			Now:              time.Now().UTC(),
+		}), nil
 	}
 
 	// New receipt. Read the recipient's participant config INSIDE the tx so plan
@@ -190,8 +232,15 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	// Build the deterministic plan (pure). The recipient's reply_rate (read in-tx
 	// above) drives the reply decision; the seed is anchored on the just-committed
 	// received_at so a later GetWarmupEngageJob reproduces the same decision.
-	dayKey := row.ReceivedAt.Time.UTC().Format("2006-01-02")
-	return warmupEngagePlan(row.ID.String(), recipient.String(), dayKey, float64(p.ReplyRate), in.Placement), nil
+	return warmupEngagePlan(engagePlanInputs{
+		ReceiptID:        row.ID.String(),
+		RecipientMailbox: recipient.String(),
+		DayKey:           row.ReceivedAt.Time.UTC().Format("2006-01-02"),
+		ReplyRate:        float64(p.ReplyRate),
+		Placement:        in.Placement,
+		ReceivedAt:       row.ReceivedAt.Time,
+		Now:              time.Now().UTC(),
+	}), nil
 }
 
 // GetWarmupEngageJob loads the transport + reply content for one receipt. See the
