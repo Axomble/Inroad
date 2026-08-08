@@ -57,6 +57,26 @@ const VERDICT_TONE: Record<CheckVerdict, StatusTone> = {
   unknown: 'draft',
 }
 
+/**
+ * The one- or two-word form of a verdict, for the collapsed domain line where
+ * three records share a row with the domain name and its coverage. The full
+ * `status` and `detail` are one disclosure away, so this only has to be
+ * unambiguous, not complete — which is why `advisory` reads "no signal" rather
+ * than borrowing a word that implies a fault.
+ */
+const VERDICT_SHORT: Record<CheckVerdict, string> = {
+  pass: 'ok',
+  attention: 'missing',
+  monitoring: 'monitor',
+  advisory: 'no signal',
+  unknown: 'unchecked',
+}
+
+/** Compact status token for a verdict. Rendered uppercase by StatusPill. */
+export function shortStatus(verdict: CheckVerdict): string {
+  return VERDICT_SHORT[verdict]
+}
+
 function check(
   id: DomainCheck['id'],
   label: string,
