@@ -34,6 +34,14 @@ vi.mock('@tanstack/react-router', async () => {
     // Stable across renders, as TanStack's own `useNavigate` is — an unstable
     // one would hide effect-dependency bugs this suite is meant to catch.
     useNavigate: () => router.navigate,
+    // Rows link to the contact's record page; a plain anchor is enough to assert
+    // where a row goes without standing a real router up.
+    Link: ({ children, ...props }: { children: React.ReactNode; to?: string; params?: unknown }) => {
+      const { to, params, ...rest } = props as Record<string, unknown>
+      const id = (params as { id?: string } | undefined)?.id
+      const href = typeof to === 'string' ? (id ? to.replace('$id', id) : to) : '#'
+      return <a href={href} {...rest}>{children}</a>
+    },
   }
 })
 
@@ -117,6 +125,19 @@ test('reads the whole view out of the URL on first render', async () => {
   expect(params.get('sort')).toBe('email')
   expect(params.get('limit')).toBe('25')
   expect(params.get('list')).toBe('list-1')
+})
+
+test('a row opens the contact record, and the list keeps its own affordances', async () => {
+  renderWithProviders(<ContactsPage />)
+
+  // The row used to expand an inline activity strip; it now links to the record
+  // page, where the company, deals and engagement history live.
+  expect((await screen.findByText('jo@acme.test')).closest('a')).toHaveAttribute('href', '/app/contacts/c-1')
+  // Contacts are still bulk-imported campaign targets, so search, the list
+  // sidebar and the pager stay on this page.
+  expect(screen.getByRole('searchbox', { name: /search all contacts/i })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'All contacts' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Next page' })).toBeInTheDocument()
 })
 
 test('typing issues one request per pause, not one per keystroke, and lands in the URL', async () => {

@@ -14,6 +14,17 @@ describe('AgentMarkdown', () => {
     expect(screen.getByRole('link', { name: 'docs' })).toHaveAttribute('rel', 'noopener noreferrer')
   })
 
+  it('points a contact reference at the contact record page', () => {
+    render(<AgentMarkdown text={'Spoke to [[contact:123e4567-e89b-12d3-a456-426614174000:Dana]] today.'} />)
+
+    // Not `/app/contacts?contact=<id>`: the person has a record page now, and
+    // that is where the agent should send the reader.
+    expect(screen.getByRole('link', { name: 'Dana' })).toHaveAttribute(
+      'href',
+      '/app/contacts/123e4567-e89b-12d3-a456-426614174000',
+    )
+  })
+
   it('treats a protocol-relative link as external even though it starts with a slash', () => {
     render(<AgentMarkdown text={'[offsite](//evil.example.com/x)'} />)
 

@@ -28,12 +28,20 @@ export type {
   CrmNote,
   CrmTask,
   CrmSettings,
+  CrmTargetFields,
+  CrmCompanyContact,
 } from '@/store/api'
 
-import type { CrmDeal, CrmSettings } from '@/store/api'
+import type { CrmDeal, CrmSettings, CrmTargetFields } from '@/store/api'
 
 /** The capture policy union, derived from the generated settings shape. */
 export type AutoCapturePolicy = CrmSettings['auto_capture_policy']
+
+/**
+ * Which record a note, task or event hangs off. Notes and tasks are polymorphic
+ * in the API, which is what lets contacts, companies and deals share one panel.
+ */
+export type CrmTargetType = CrmTargetFields['target_type']
 
 const crmApi = api
   .enhanceEndpoints({
@@ -100,12 +108,6 @@ const crmApi = api
         ],
       },
 
-      crmListDeals: {
-        providesTags: (result) =>
-          result
-            ? [...result.items.map(({ id }) => ({ type: 'CRMDeal' as const, id })), { type: 'CRMDeal', id: 'LIST' }]
-            : [{ type: 'CRMDeal', id: 'LIST' }],
-      },
       crmGetDeal: {
         providesTags: (_result, _error, { id }) => [{ type: 'CRMDeal', id }],
       },
@@ -234,6 +236,19 @@ const crmApi = api
         invalidatesTags: ['CRMTask', 'CRMActivity'],
       },
 
+      // A company's roster and its deals are genuinely unbounded, so they are
+      // sub-resources rather than embedded. The deals page also carries the deal
+      // LIST tag, so creating, moving or deleting a deal refreshes it.
+      crmListCompanyContacts: {
+        providesTags: (_result, _error, { id }) => [{ type: 'CRMCompany', id }],
+      },
+      crmListCompanyDeals: {
+        providesTags: (_result, _error, { id }) => [
+          { type: 'CRMCompany', id },
+          { type: 'CRMDeal', id: 'LIST' },
+        ],
+      },
+
       crmGetSettings: {
         providesTags: [{ type: 'CRMSettings', id: 'WORKSPACE' }],
       },
@@ -245,10 +260,12 @@ const crmApi = api
 
 export const {
   useCrmListCompaniesQuery,
+  useCrmGetCompanyQuery,
   useCrmCreateCompanyMutation,
+  useCrmListCompanyContactsQuery,
+  useCrmListCompanyDealsQuery,
   useCrmListPipelinesQuery,
   useCrmCreatePipelineMutation,
-  useCrmListDealsQuery,
   useCrmCreateDealMutation,
   useCrmGetDealQuery,
   useCrmGetBoardQuery,

@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { Flame } from 'lucide-react'
+import { formatClock24 } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { PulseAttentionItem, PulseSeverity, WorkspacePulse } from '@/features/pulse/api'
@@ -60,9 +61,6 @@ function linkProps(href: string): { to: string; search?: Record<string, string> 
   }
 }
 
-function formatTick(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
-}
 
 const rowClass =
   '-mx-1 flex items-center gap-2 rounded-md px-1 py-0.5 outline-none transition-colors hover:bg-chrome-hover focus-visible:ring-2 focus-visible:ring-primary'
@@ -133,7 +131,8 @@ export function PulseCard() {
         <span className="ml-auto flex items-center gap-1 font-mono text-[10px] tabular-nums text-chrome-muted">
           <span className={cn('size-1.5 rounded-full', isError ? 'bg-danger' : 'bg-ok')} aria-hidden="true" />
           <span className="sr-only">{isError ? 'Last successful update' : 'Updated'}</span>
-          {fulfilledTimeStamp !== undefined ? formatTick(fulfilledTimeStamp) : '—'}
+          {/* 24-hour: this card has no room for an AM/PM suffix. */}
+          {fulfilledTimeStamp !== undefined ? formatClock24(fulfilledTimeStamp) : '—'}
         </span>
       </div>
 

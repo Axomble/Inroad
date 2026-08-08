@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, CornerDownLeft, Sparkles } from 'lucide-react'
+import { Building2, CircleDollarSign, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, CornerDownLeft, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface Command {
@@ -21,7 +21,9 @@ const COMMANDS: readonly Command[] = [
   { id: 'warmup', label: 'Warmup', group: 'Sending', icon: Flame, to: '/app/warmup', keywords: 'reputation ramp health pool deliverability' },
   { id: 'deliverability', label: 'Deliverability', group: 'Sending', icon: Gauge, to: '/app/deliverability', keywords: 'score bounce complaint spam placement guardrail reputation' },
   { id: 'campaigns', label: 'Campaigns', group: 'Outreach', icon: Megaphone, to: '/app/campaigns', keywords: 'sequence steps send launch' },
-  { id: 'contacts', label: 'Contacts', group: 'Outreach', icon: Users, to: '/app/contacts', keywords: 'lists import csv leads' },
+  { id: 'contacts', label: 'Contacts', group: 'CRM', icon: Users, to: '/app/contacts', keywords: 'lists import csv leads people' },
+  { id: 'companies', label: 'Companies', group: 'CRM', icon: Building2, to: '/app/companies', keywords: 'accounts crm organisations domains' },
+  { id: 'deals', label: 'Deals', group: 'CRM', icon: CircleDollarSign, to: '/app/deals', keywords: 'crm pipeline stages board opportunities revenue' },
   { id: 'team', label: 'Team', group: 'Workspace', icon: Settings, to: '/app/settings/team', keywords: 'invites members roles settings' },
 ]
 

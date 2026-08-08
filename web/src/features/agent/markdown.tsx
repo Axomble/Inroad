@@ -27,7 +27,7 @@ function recordHref(type: string, id: string): string | undefined {
     case 'campaign':
       return `/app/campaigns/${id}`
     case 'contact':
-      return `/app/contacts?contact=${id}`
+      return `/app/contacts/${id}`
     case 'list':
       return `/app/contacts?list=${id}`
     case 'mailbox':

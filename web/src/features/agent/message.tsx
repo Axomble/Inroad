@@ -1,5 +1,6 @@
 import { lazy, memo, Suspense, useEffect, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Info, Wrench } from 'lucide-react'
+import { formatTime } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { AgentApproval, AgentMessage, AgentPart } from './api'
@@ -192,7 +193,7 @@ export const AgentMessageBubble = memo(function AgentMessageBubble({
       </div>
       <footer className="mt-1 flex h-5 items-center gap-1.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
         <time className="text-[9px] text-faint">
-          {createdAt ? new Date(createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+          {createdAt ? formatTime(createdAt) : ''}
         </time>
         {text && (
           <>

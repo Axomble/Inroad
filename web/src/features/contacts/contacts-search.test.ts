@@ -18,14 +18,21 @@ import {
 // request the API will accept, or the page 422s on arrival.
 
 test('parses a well-formed URL into the search contract', () => {
-  expect(parseContactsSearch({ contact: 'contact-1', list: 'l-1', q: 'acme', sort: 'email', cursor: 'c1', limit: 25 })).toEqual({
-    contact: 'contact-1',
+  expect(parseContactsSearch({ list: 'l-1', q: 'acme', sort: 'email', cursor: 'c1', limit: 25 })).toEqual({
     list: 'l-1',
     q: 'acme',
     sort: 'email',
     cursor: 'c1',
     limit: 25,
   })
+})
+
+test('still parses the legacy ?contact= param, which the route redirects on', () => {
+  // Agent conversations already in the database link to `?contact=<id>`. The
+  // validator has to return the param for `beforeLoad` to see it at all — a param
+  // this parser drops is stripped before the route ever runs.
+  expect(parseContactsSearch({ contact: 'c-1' }).contact).toBe('c-1')
+  expect(parseContactsSearch({ contact: '' }).contact).toBeUndefined()
 })
 
 test('drops params the API would reject, so a hand-edited URL falls back to defaults', () => {

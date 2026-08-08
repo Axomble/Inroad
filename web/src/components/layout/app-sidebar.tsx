@@ -60,10 +60,22 @@ const NAV: NavGroup[] = [
   {
     label: 'Outreach',
     items: [
+      // Campaigns is outbound sequencing, not a CRM record type — it stays here
+      // even though the people it mails are CRM contacts.
       { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
+    ],
+  },
+  {
+    // The three CRM record types, in the order a deal is built: a person, the
+    // account they belong to, the opportunity that comes out of it. Each appears
+    // exactly once — the old nav listed Deals twice (its own row plus a "CRM"
+    // row whose page opened on a deals tab) and left Contacts outside the CRM
+    // it is part of.
+    label: 'CRM',
+    items: [
       { label: 'Contacts', to: '/app/contacts', icon: Users },
+      { label: 'Companies', to: '/app/companies', icon: Building2 },
       { label: 'Deals', to: '/app/deals', icon: CircleDollarSign },
-      { label: 'CRM', to: '/app/crm', icon: Building2 },
     ],
   },
   {

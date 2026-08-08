@@ -12,22 +12,20 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, RefreshCw } from 'lucide-react'
+import { GripVertical } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select } from '@/components/ui/select'
-import { EmptyBlock, Page, PageBody, PageTopbar, Stat, StatStrip } from '@/components/layout/page'
+import { EmptyBlock } from '@/components/layout/page'
 import { cn } from '@/lib/utils'
 import { useCrmGetBoardQuery, useCrmMoveDealMutation, type CrmBoardStage, type CrmDeal } from './api'
 import { parseActor } from './actor'
 import { ActorBadge } from './actor-badge'
 import { crmErrorMessage } from './error-copy'
 import { formatMoney, formatTotal } from './money'
+import { defaultBoardArg } from './query-args'
 
-// The board endpoint takes an optional `pipelineId`; C1 always shows the
-// default pipeline, so one constant arg keeps every reader on one cache entry.
-const defaultBoardArg = {}
-
-export function DealsBoardPage() {
+/** The kanban itself. Its page shell (topbar, stats, tabs) is `DealsPage`. */
+export function DealsBoard({ onCreate }: { onCreate: () => void }) {
   const boardQuery = useCrmGetBoardQuery(defaultBoardArg)
   const [moveDeal, moveState] = useCrmMoveDealMutation()
   const [announcement, setAnnouncement] = useState('')
@@ -36,11 +34,7 @@ export function DealsBoardPage() {
     useSensor(KeyboardSensor),
   )
   const stages = useMemo(() => boardQuery.data?.stages ?? [], [boardQuery.data?.stages])
-  const totals = useMemo(() => stages.reduce(
-    (result, stage) => ({ count: result.count + stage.deal_count, amount: result.amount + stage.amount_micros }),
-    { count: 0, amount: 0 },
-  ), [stages])
-  const allDeals = useMemo(() => stages.flatMap(({ deals }) => deals), [stages])
+  const dealCount = useMemo(() => stages.reduce((total, stage) => total + stage.deal_count, 0), [stages])
 
   const move = async (deal: CrmDeal, stageId: string, beforeDealId?: string, afterDealId?: string) => {
     if (deal.stage_id === stageId && !beforeDealId && !afterDealId) return
@@ -74,57 +68,39 @@ export function DealsBoardPage() {
   }
 
   return (
-    <Page>
-      <PageTopbar
-        eyebrow="CRM"
-        title="Deals"
-        subtitle="Move opportunities through the pipeline and keep the next action visible."
-        actions={
-          <Button size="sm" onClick={() => void boardQuery.refetch()} disabled={boardQuery.isFetching}>
-            <RefreshCw className={cn(boardQuery.isFetching && 'animate-spin')} aria-hidden="true" />
-            Refresh
-          </Button>
-        }
-      />
-      <StatStrip>
-        <Stat label="Pipeline value" value={formatTotal(totals.amount, allDeals)} sub="Across all stages" />
-        <Stat label="Deals" value={totals.count} sub={boardQuery.data?.pipeline.name ?? 'Default pipeline'} />
-        <Stat label="Open stages" value={stages.filter(({ stage }) => !stage.is_won && !stage.is_lost).length} sub="Active workflow" />
-      </StatStrip>
-      <PageBody>
-        <p className="sr-only" aria-live="polite">{announcement}</p>
-        {boardQuery.isLoading ? <BoardSkeleton /> : null}
-        {boardQuery.isError ? (
-          <EmptyBlock
-            title="The pipeline could not be loaded"
-            description={crmErrorMessage(boardQuery.error, 'Try refreshing. Your deals have not been changed.')}
-            action={<Button onClick={() => void boardQuery.refetch()}>Try again</Button>}
-          />
-        ) : null}
-        {boardQuery.data && totals.count === 0 ? (
-          <EmptyBlock
-            title="No deals yet"
-            description="Create a deal from CRM, or let a positive campaign reply create one automatically."
-            action={<Button asChild variant="primary"><Link to="/app/crm">Create a deal</Link></Button>}
-          />
-        ) : null}
-        {boardQuery.data && totals.count > 0 ? (
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-            <div className="grid grid-cols-1 items-start gap-4 md:grid-flow-col md:auto-cols-[minmax(17rem,1fr)] md:overflow-x-auto md:pb-3">
-              {stages.map((column) => (
-                <BoardColumn
-                  key={column.stage.id}
-                  column={column}
-                  stages={stages}
-                  disabled={moveState.isLoading}
-                  onMove={move}
-                />
-              ))}
-            </div>
-          </DndContext>
-        ) : null}
-      </PageBody>
-    </Page>
+    <>
+      <p className="sr-only" aria-live="polite">{announcement}</p>
+      {boardQuery.isLoading ? <BoardSkeleton /> : null}
+      {boardQuery.isError ? (
+        <EmptyBlock
+          title="The pipeline could not be loaded"
+          description={crmErrorMessage(boardQuery.error, 'Try refreshing. Your deals have not been changed.')}
+          action={<Button onClick={() => void boardQuery.refetch()}>Try again</Button>}
+        />
+      ) : null}
+      {boardQuery.data && dealCount === 0 ? (
+        <EmptyBlock
+          title="No deals yet"
+          description="Add the first deal, or let a positive campaign reply open one automatically."
+          action={<Button variant="primary" onClick={onCreate}>New deal</Button>}
+        />
+      ) : null}
+      {boardQuery.data && dealCount > 0 ? (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+          <div className="grid grid-cols-1 items-start gap-4 p-4 md:grid-flow-col md:auto-cols-[minmax(17rem,1fr)] md:overflow-x-auto md:pb-3">
+            {stages.map((column) => (
+              <BoardColumn
+                key={column.stage.id}
+                column={column}
+                stages={stages}
+                disabled={moveState.isLoading}
+                onMove={move}
+              />
+            ))}
+          </div>
+        </DndContext>
+      ) : null}
+    </>
   )
 }
 
@@ -211,7 +187,19 @@ const DealCard = memo(function DealCard({
           >
             {deal.name}
           </Link>
-          <p className="mt-1 truncate text-xs text-muted-foreground">{deal.company_name || deal.contact_email || 'No company linked'}</p>
+          {/* The company is the deal's other hub; from a card you can reach the
+              account, not just the opportunity. */}
+          {deal.company_id ? (
+            <Link
+              to="/app/companies/$id"
+              params={{ id: deal.company_id }}
+              className="mt-1 block truncate text-xs text-muted-foreground underline-offset-2 hover:text-accent-ink hover:underline"
+            >
+              {deal.company_name || 'Company'}
+            </Link>
+          ) : (
+            <p className="mt-1 truncate text-xs text-muted-foreground">{deal.contact_email || 'No company linked'}</p>
+          )}
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm font-semibold">{formatMoney(deal.amount_micros ?? 0, deal.currency)}</p>
             {/* An agent- or reply-created deal has to be tellable from a
@@ -237,9 +225,8 @@ const DealCard = memo(function DealCard({
 
 function BoardSkeleton() {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-3" aria-label="Loading pipeline">
+    <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-3" aria-label="Loading pipeline">
       {[0, 1, 2].map((value) => <div key={value} className="h-64 animate-pulse rounded-xl bg-surface-2" />)}
     </div>
   )
 }
-

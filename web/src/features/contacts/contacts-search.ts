@@ -34,6 +34,13 @@ const DEFAULT_SORT: ContactSort = 'newest'
  * reload lands you where you were.
  */
 export interface ContactsSearch {
+  /**
+   * Legacy: the id of a single contact. It used to expand an activity strip
+   * inline; contacts now have their own record page. The param survives in the
+   * contract because agent conversations already stored in the database contain
+   * `?contact=<id>` links a user can still scroll back to — the route redirects
+   * it to `/app/contacts/<id>`, and nothing renders from it.
+   */
   contact?: string
   list?: string
   q?: string

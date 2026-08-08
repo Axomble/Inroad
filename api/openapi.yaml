@@ -1185,6 +1185,41 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: List not found }
         '422': { description: "q shorter than 2 characters, unknown sort, or limit out of range" }
+  /contacts/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getContact
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        One contact's record: its own fields, its CRM company, and the deals it is
+        the primary contact on. Only the cheap relational fields live here -
+        engagement history aggregates over sends and tracking events and is a
+        separate resource, so this response stays a two-index read.
+      responses:
+        '200': { description: The contact record, content: { application/json: { schema: { $ref: '#/components/schemas/ContactDetail' } } } }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: "Contact not found. A contact in another workspace is indistinguishable from one that does not exist." }
+  /contacts/{id}/engagement:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getContactEngagement
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The contact's outreach history rolled up across every campaign: sends,
+        indicative opens, clicks, and reply/bounce/unsubscribe outcomes, plus the
+        campaigns they are enrolled in. Counts use the same definitions as the
+        per-campaign rollup (see Metrics), so the two never disagree. Separate from
+        GET /contacts/{id} because it aggregates over sends and tracking_events and
+        is both the slow half of the page and the half that changes on its own
+        schedule.
+      responses:
+        '200': { description: The contact's engagement rollup, content: { application/json: { schema: { $ref: '#/components/schemas/ContactEngagement' } } } }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Contact not found }
   /sending-domains:
     get:
       operationId: listSendingDomains
@@ -1938,6 +1973,37 @@ paths:
       responses:
         '204': { description: Company deleted }
         '409': { description: Company is still referenced }
+  /crm/companies/{id}/contacts:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmListCompanyContacts
+      tags: [crm]
+      description: >-
+        The company's people, keyset-paginated by email. A sub-resource rather than
+        a field on the company: a company's roster is unbounded and changes on a
+        different schedule than its header fields, so it pages and caches on its own.
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: A page of the company's contacts, content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompanyContactList' } } } }
+        '404': { description: Company not found }
+        '422': { description: Malformed cursor or non-positive limit }
+  /crm/companies/{id}/deals:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: crmListCompanyDeals
+      tags: [crm]
+      description: >-
+        The company's deals in board order, keyset-paginated. Same row shape as the
+        workspace deal list; the cursors are not interchangeable between the two.
+      parameters:
+        - { $ref: '#/components/parameters/PageLimit' }
+        - { $ref: '#/components/parameters/PageCursor' }
+      responses:
+        '200': { description: A page of the company's deals, content: { application/json: { schema: { $ref: '#/components/schemas/CRMDealList' } } } }
+        '404': { description: Company not found }
+        '422': { description: Malformed cursor or non-positive limit }
   /crm/pipelines:
     get:
       operationId: crmListPipelines
@@ -3086,6 +3152,151 @@ components:
           description: >-
             True when there are at least `total` matches and counting stopped there.
             Render as "N+" — counting further would be an unbounded scan.
+    ContactCompany:
+      type: object
+      required: [id, name, domain]
+      description: >-
+        The CRM company record the contact is linked to. The free-text company name
+        an import row carried is NOT this - only a real `companies` row appears here.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        domain: { type: string, description: "Empty when the company has no domain on file." }
+    ContactSuppression:
+      type: object
+      required: [reason, email, is_primary_email, since]
+      description: >-
+        Why this person may not be emailed. Present when any address of theirs is
+        on the workspace suppression list; the record page's first question is
+        "may I email this person at all", which outranks every engagement number.
+      properties:
+        reason:
+          type: string
+          enum: [unsubscribe, bounce, complaint, manual]
+          description: >-
+            The suppression list's own reason literal. `complaint` (they reported
+            us as spam) is deliberately distinct from `unsubscribe` (they asked to
+            stop) and is never collapsed into it.
+        email:
+          type: string
+          description: The suppressed address, which is not necessarily the one sends would use.
+        is_primary_email:
+          type: boolean
+          description: >-
+            True when the suppressed address is the contact's primary one - the
+            address the send path actually resolves - so this person cannot be
+            emailed at all. False means only a secondary alias is suppressed:
+            sending still works today, but promoting that alias would stop it.
+        since: { type: string, format: date-time }
+    ContactDeal:
+      type: object
+      required: [id, name, pipeline_id, stage_id, stage_label, stage_color, stage_is_won, stage_is_lost, currency, created_at, updated_at]
+      description: A deal this contact is the primary contact on, with the stage fields a chip needs.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        pipeline_id: { type: string, format: uuid }
+        stage_id: { type: string, format: uuid }
+        stage_label: { type: string }
+        stage_color: { type: string }
+        stage_is_won: { type: boolean }
+        stage_is_lost: { type: boolean }
+        amount_micros: { type: integer, format: int64, nullable: true }
+        currency: { type: string }
+        close_date: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ContactDetail:
+      type: object
+      required: [id, email, first_name, last_name, job_title, linkedin_url, suppression, company, deals, deals_truncated, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, description: The address the send path resolves for this contact. }
+        first_name: { type: string }
+        last_name: { type: string }
+        job_title: { type: string }
+        linkedin_url: { type: string }
+        suppression:
+          allOf: [{ $ref: '#/components/schemas/ContactSuppression' }]
+          type: object
+          nullable: true
+          description: Null when no address of this contact is suppressed - i.e. they may be emailed.
+        company:
+          allOf: [{ $ref: '#/components/schemas/ContactCompany' }]
+          type: object
+          nullable: true
+          description: Null when the contact is not linked to a company record.
+        deals:
+          type: array
+          description: >-
+            Deals in board order, capped at 25. A record page shows a roster, not a
+            paginated list; the cap is what keeps this response bounded.
+          items: { $ref: '#/components/schemas/ContactDeal' }
+        deals_truncated:
+          type: boolean
+          description: True when the contact has more deals than the cap and `deals` was cut short.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ContactCampaignEnrollment:
+      type: object
+      required: [campaign_id, campaign_name, status, current_step, enrolled_at]
+      properties:
+        campaign_id: { type: string, format: uuid }
+        campaign_name: { type: string }
+        status: { type: string, enum: [active, completed, stopped] }
+        current_step:
+          type: integer
+          description: "0 means enrolled but not yet sent to; N means step N was the last one sent."
+        stop_reason:
+          type: string
+          nullable: true
+          description: >-
+            Why the sequence stopped - one of replied, bounced, suppressed, manual.
+            Null while the enrollment is still active or completed normally.
+        enrolled_at: { type: string, format: date-time }
+        last_sent_at: { type: string, format: date-time, nullable: true }
+    ContactEngagement:
+      type: object
+      required: [contact_id, emails_sent, opens_indicative, clicks, replies, bounces, unsubscribes, open_rate, click_rate, campaigns_enrolled, last_activity_at, campaigns, campaigns_truncated]
+      description: >-
+        Counts reuse the per-campaign Metrics definitions verbatim, so a contact's
+        numbers roll up to the campaign's. `open_rate`/`click_rate` divide by
+        `emails_sent` (per-send, because a multi-step sequence sends several times
+        per contact) and are 0 when nothing has been sent - never a division by
+        zero. Reply/bounce/unsubscribe are reported as counts only: their
+        per-contact denominator is `campaigns_enrolled`, which is not a rate anyone
+        reads for one person.
+      properties:
+        contact_id: { type: string, format: uuid }
+        emails_sent: { type: integer, format: int64, description: "Sends with status 'sent' - the same numerator as the campaign rollup's stats.sent." }
+        opens_indicative:
+          type: integer
+          format: int64
+          description: >-
+            Distinct sends with an open event that is not a known prefetch (image
+            proxy UA, or a fetch within two seconds of the send). Approximate by
+            nature - clicks are the reliable signal.
+        clicks: { type: integer, format: int64, description: Distinct sends with at least one click event. }
+        replies: { type: integer, format: int64, description: "Enrollments stopped with reason 'replied'." }
+        bounces: { type: integer, format: int64, description: "Enrollments stopped with reason 'bounced'." }
+        unsubscribes: { type: integer, format: int64, description: "Enrollments stopped with reason 'suppressed'." }
+        open_rate: { type: number, description: "opens_indicative / emails_sent, or 0 when nothing was sent." }
+        click_rate: { type: number, description: "clicks / emails_sent, or 0 when nothing was sent." }
+        campaigns_enrolled: { type: integer, format: int64, description: "Enrollments over the contact's lifetime - active, completed, and stopped." }
+        last_activity_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            The most recent of the contact's last send and last tracking event. Null
+            when neither has ever happened.
+        campaigns:
+          type: array
+          description: The 20 most recently enrolled campaigns, newest first.
+          items: { $ref: '#/components/schemas/ContactCampaignEnrollment' }
+        campaigns_truncated:
+          type: boolean
+          description: True when the contact has more enrollments than the cap. The counts above stay exact regardless.
     RotationMode:
       type: string
       description: >-
@@ -3833,6 +4044,25 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/CRMCompany' } }
+        next_cursor:
+          type: string
+          description: Cursor for the next page. Absent on the last page.
+    CRMCompanyContact:
+      type: object
+      required: [id, email, first_name, last_name, job_title, linkedin_url, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        job_title: { type: string }
+        linkedin_url: { type: string }
+        created_at: { type: string, format: date-time }
+    CRMCompanyContactList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/CRMCompanyContact' } }
         next_cursor:
           type: string
           description: Cursor for the next page. Absent on the last page.

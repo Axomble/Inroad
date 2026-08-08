@@ -40,6 +40,16 @@ const contactsApi = api
       listContacts: {
         providesTags: [{ type: 'Contact', id: 'LIST' }],
       },
+      getContact: {
+        providesTags: (_result, _error, { id }) => [{ type: 'Contact', id }],
+      },
+      // The engagement rollup is deliberately a second request: the detail read is
+      // two index seeks, this one is four aggregates, so keeping them apart lets
+      // the record header paint without waiting on the aggregates. They share a
+      // tag because anything that invalidates one invalidates the other.
+      getContactEngagement: {
+        providesTags: (_result, _error, { id }) => [{ type: 'Contact', id }],
+      },
     },
   })
   .injectEndpoints({
@@ -56,7 +66,19 @@ const contactsApi = api
     overrideExisting: false,
   })
 
+// One source of truth for shapes: re-export the generated definitions rather
+// than restating them.
+export type {
+  ContactDetail,
+  ContactSuppression,
+  ContactDeal,
+  ContactEngagement,
+  ContactCampaignEnrollment,
+} from '@/store/api'
+
 export const {
+  useGetContactQuery,
+  useGetContactEngagementQuery,
   useListListsQuery,
   useCreateListMutation,
   useRenameListMutation,

@@ -19,7 +19,6 @@ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppApprovalsRouteImport } from './routes/app.approvals'
-import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppCrmRouteImport } from './routes/app.crm'
 import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
 import { Route as AppDocsRouteImport } from './routes/app.docs'
@@ -28,6 +27,10 @@ import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
 import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
 import { Route as AppCampaignsIdRouteImport } from './routes/app.campaigns.$id'
+import { Route as AppCompaniesIndexRouteImport } from './routes/app.companies.index'
+import { Route as AppCompaniesIdRouteImport } from './routes/app.companies.$id'
+import { Route as AppContactsIndexRouteImport } from './routes/app.contacts.index'
+import { Route as AppContactsIdRouteImport } from './routes/app.contacts.$id'
 import { Route as AppDealsIndexRouteImport } from './routes/app.deals.index'
 import { Route as AppDealsIdRouteImport } from './routes/app.deals.$id'
 import { Route as AppInboxIndexRouteImport } from './routes/app.inbox.index'
@@ -89,11 +92,6 @@ const AppApprovalsRoute = AppApprovalsRouteImport.update({
   path: '/approvals',
   getParentRoute: () => AppRoute,
 } as any)
-const AppContactsRoute = AppContactsRouteImport.update({
-  id: '/contacts',
-  path: '/contacts',
-  getParentRoute: () => AppRoute,
-} as any)
 const AppCrmRoute = AppCrmRouteImport.update({
   id: '/crm',
   path: '/crm',
@@ -132,6 +130,26 @@ const AppCampaignsIndexRoute = AppCampaignsIndexRouteImport.update({
 const AppCampaignsIdRoute = AppCampaignsIdRouteImport.update({
   id: '/campaigns/$id',
   path: '/campaigns/$id',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCompaniesIndexRoute = AppCompaniesIndexRouteImport.update({
+  id: '/companies/',
+  path: '/companies/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCompaniesIdRoute = AppCompaniesIdRouteImport.update({
+  id: '/companies/$id',
+  path: '/companies/$id',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppContactsIndexRoute = AppContactsIndexRouteImport.update({
+  id: '/contacts/',
+  path: '/contacts/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppContactsIdRoute = AppContactsIdRouteImport.update({
+  id: '/contacts/$id',
+  path: '/contacts/$id',
   getParentRoute: () => AppRoute,
 } as any)
 const AppDealsIndexRoute = AppDealsIndexRouteImport.update({
@@ -195,7 +213,6 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/approvals': typeof AppApprovalsRoute
-  '/app/contacts': typeof AppContactsRoute
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
@@ -204,6 +221,8 @@ export interface FileRoutesByFullPath {
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/companies/$id': typeof AppCompaniesIdRoute
+  '/app/contacts/$id': typeof AppContactsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
@@ -213,6 +232,8 @@ export interface FileRoutesByFullPath {
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
+  '/app/companies/': typeof AppCompaniesIndexRoute
+  '/app/contacts/': typeof AppContactsIndexRoute
   '/app/deals/': typeof AppDealsIndexRoute
   '/app/inbox/': typeof AppInboxIndexRoute
 }
@@ -225,7 +246,6 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/approvals': typeof AppApprovalsRoute
-  '/app/contacts': typeof AppContactsRoute
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
@@ -234,6 +254,8 @@ export interface FileRoutesByTo {
   '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/companies/$id': typeof AppCompaniesIdRoute
+  '/app/contacts/$id': typeof AppContactsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
@@ -243,6 +265,8 @@ export interface FileRoutesByTo {
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
+  '/app/companies': typeof AppCompaniesIndexRoute
+  '/app/contacts': typeof AppContactsIndexRoute
   '/app/deals': typeof AppDealsIndexRoute
   '/app/inbox': typeof AppInboxIndexRoute
 }
@@ -257,7 +281,6 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/verify-email': typeof VerifyEmailRoute
   '/app/approvals': typeof AppApprovalsRoute
-  '/app/contacts': typeof AppContactsRoute
   '/app/crm': typeof AppCrmRoute
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
@@ -266,6 +289,8 @@ export interface FileRoutesById {
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
   '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/companies/$id': typeof AppCompaniesIdRoute
+  '/app/contacts/$id': typeof AppContactsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
@@ -275,6 +300,8 @@ export interface FileRoutesById {
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
+  '/app/companies/': typeof AppCompaniesIndexRoute
+  '/app/contacts/': typeof AppContactsIndexRoute
   '/app/deals/': typeof AppDealsIndexRoute
   '/app/inbox/': typeof AppInboxIndexRoute
 }
@@ -290,7 +317,6 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/verify-email'
     | '/app/approvals'
-    | '/app/contacts'
     | '/app/crm'
     | '/app/deliverability'
     | '/app/docs'
@@ -299,6 +325,8 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/companies/$id'
+    | '/app/contacts/$id'
     | '/app/deals/$id'
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
@@ -308,6 +336,8 @@ export interface FileRouteTypes {
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
+    | '/app/companies/'
+    | '/app/contacts/'
     | '/app/deals/'
     | '/app/inbox/'
   fileRoutesByTo: FileRoutesByTo
@@ -320,7 +350,6 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/verify-email'
     | '/app/approvals'
-    | '/app/contacts'
     | '/app/crm'
     | '/app/deliverability'
     | '/app/docs'
@@ -329,6 +358,8 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/app'
     | '/app/campaigns/$id'
+    | '/app/companies/$id'
+    | '/app/contacts/$id'
     | '/app/deals/$id'
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
@@ -338,6 +369,8 @@ export interface FileRouteTypes {
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns'
+    | '/app/companies'
+    | '/app/contacts'
     | '/app/deals'
     | '/app/inbox'
   id:
@@ -351,7 +384,6 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/verify-email'
     | '/app/approvals'
-    | '/app/contacts'
     | '/app/crm'
     | '/app/deliverability'
     | '/app/docs'
@@ -360,6 +392,8 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/app/'
     | '/app/campaigns/$id'
+    | '/app/companies/$id'
+    | '/app/contacts/$id'
     | '/app/deals/$id'
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
@@ -369,6 +403,8 @@ export interface FileRouteTypes {
     | '/app/settings/security'
     | '/app/settings/team'
     | '/app/campaigns/'
+    | '/app/companies/'
+    | '/app/contacts/'
     | '/app/deals/'
     | '/app/inbox/'
   fileRoutesById: FileRoutesById
@@ -457,13 +493,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppApprovalsRouteImport
       parentRoute: typeof AppRoute
     }
-    '/app/contacts': {
-      id: '/app/contacts'
-      path: '/contacts'
-      fullPath: '/app/contacts'
-      preLoaderRoute: typeof AppContactsRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/app/crm': {
       id: '/app/crm'
       path: '/crm'
@@ -518,6 +547,34 @@ declare module '@tanstack/react-router' {
       path: '/campaigns/$id'
       fullPath: '/app/campaigns/$id'
       preLoaderRoute: typeof AppCampaignsIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/companies/': {
+      id: '/app/companies/'
+      path: '/companies'
+      fullPath: '/app/companies/'
+      preLoaderRoute: typeof AppCompaniesIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/companies/$id': {
+      id: '/app/companies/$id'
+      path: '/companies/$id'
+      fullPath: '/app/companies/$id'
+      preLoaderRoute: typeof AppCompaniesIdRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/contacts/': {
+      id: '/app/contacts/'
+      path: '/contacts'
+      fullPath: '/app/contacts/'
+      preLoaderRoute: typeof AppContactsIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/contacts/$id': {
+      id: '/app/contacts/$id'
+      path: '/contacts/$id'
+      fullPath: '/app/contacts/$id'
+      preLoaderRoute: typeof AppContactsIdRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/deals/': {
@@ -595,7 +652,6 @@ declare module '@tanstack/react-router' {
 
 interface AppRouteChildren {
   AppApprovalsRoute: typeof AppApprovalsRoute
-  AppContactsRoute: typeof AppContactsRoute
   AppCrmRoute: typeof AppCrmRoute
   AppDeliverabilityRoute: typeof AppDeliverabilityRoute
   AppDocsRoute: typeof AppDocsRoute
@@ -603,6 +659,8 @@ interface AppRouteChildren {
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
   AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppCompaniesIdRoute: typeof AppCompaniesIdRoute
+  AppContactsIdRoute: typeof AppContactsIdRoute
   AppDealsIdRoute: typeof AppDealsIdRoute
   AppInboxThreadIdRoute: typeof AppInboxThreadIdRoute
   AppSettingsAiRoute: typeof AppSettingsAiRoute
@@ -612,13 +670,14 @@ interface AppRouteChildren {
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
   AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
+  AppCompaniesIndexRoute: typeof AppCompaniesIndexRoute
+  AppContactsIndexRoute: typeof AppContactsIndexRoute
   AppDealsIndexRoute: typeof AppDealsIndexRoute
   AppInboxIndexRoute: typeof AppInboxIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppApprovalsRoute: AppApprovalsRoute,
-  AppContactsRoute: AppContactsRoute,
   AppCrmRoute: AppCrmRoute,
   AppDeliverabilityRoute: AppDeliverabilityRoute,
   AppDocsRoute: AppDocsRoute,
@@ -626,6 +685,8 @@ const AppRouteChildren: AppRouteChildren = {
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
   AppCampaignsIdRoute: AppCampaignsIdRoute,
+  AppCompaniesIdRoute: AppCompaniesIdRoute,
+  AppContactsIdRoute: AppContactsIdRoute,
   AppDealsIdRoute: AppDealsIdRoute,
   AppInboxThreadIdRoute: AppInboxThreadIdRoute,
   AppSettingsAiRoute: AppSettingsAiRoute,
@@ -635,6 +696,8 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppCampaignsIndexRoute: AppCampaignsIndexRoute,
+  AppCompaniesIndexRoute: AppCompaniesIndexRoute,
+  AppContactsIndexRoute: AppContactsIndexRoute,
   AppDealsIndexRoute: AppDealsIndexRoute,
   AppInboxIndexRoute: AppInboxIndexRoute,
 }
