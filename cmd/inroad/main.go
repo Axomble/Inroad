@@ -157,7 +157,16 @@ func run() error {
 	// identity handler calls when it revokes a session.
 	sessionVerifier := identity.NewSessionVerifier(cfg.JWTSecret, identStore, cfg.SessionCacheTTL)
 	identSvc := identity.NewService(identStore, cfg.RefreshTokenTTL, sender, cfg.AppBaseURL,
-		cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL)
+		cfg.EmailVerifyTTL, cfg.PasswordResetTTL, cfg.InviteTTL,
+		// Federated sign-in. A separate Google client from the mailbox-connect one
+		// (cfg.Google*), because login requests only openid/email/profile while
+		// connect requests restricted Gmail scopes. Unset credentials leave the
+		// sign-in endpoints reporting 501 rather than half-wired.
+		identity.WithGoogleSignIn(identity.NewGoogleAuthenticator(identity.GoogleSignIn{
+			ClientID:     cfg.GoogleSignInClientID,
+			ClientSecret: cfg.GoogleSignInClientSecret,
+			RedirectURL:  cfg.GoogleSignInRedirectURL,
+		}), cfg.JWTSecret))
 	// TOTP 2FA. The secret is USER-level, sealed under a server-level HKDF subkey
 	// of the master key (crypto.ServerKeyring) — NOT a per-workspace DEK, since a
 	// user's second factor spans every workspace they belong to. The twofa service
@@ -261,6 +270,10 @@ func run() error {
 	// Dynamic client registration carries no email; IP-throttle only, on the same
 	// per-IP cap as the other sensitive unauthenticated endpoints.
 	oauthRegisterThrottle := newThrottle("oauth-register", cfg.RateLimitSensitiveIP, 0)
+	// Federated sign-in start: IP-only (no account in the request), on the sensitive
+	// cap. It bounds an unauthenticated DB write rather than a credential guess --
+	// see identity.RouteDeps.GoogleStartThrottle.
+	googleStartThrottle := newThrottle("google-signin-start", cfg.RateLimitSensitiveIP, 0)
 
 	// OAuth 2.1 authorization server (Inroad as an OAuth PROVIDER). Self-contained
 	// domain mounted under /oauth2 (distinct from the mailbox-connect /oauth mount).
@@ -474,10 +487,11 @@ func run() error {
 			// otpStartThrottle is OUTERMOST (listed first) so the cheap local Redis
 			// rate-limit sheds an over-cap /email-otp/start with a 429 BEFORE captcha
 			// fires its outbound siteverify round-trip. Throttle must gate captcha.
-			EmailOTP:       emailOTPHandler.Routes([]func(http.Handler) http.Handler{otpStartThrottle, captchaMW}, []func(http.Handler) http.Handler{otpVerifyThrottle}),
-			Captcha:        captchaMW,
-			LoginThrottle:  loginThrottle,
-			ForgotThrottle: forgotThrottle,
+			EmailOTP:            emailOTPHandler.Routes([]func(http.Handler) http.Handler{otpStartThrottle, captchaMW}, []func(http.Handler) http.Handler{otpVerifyThrottle}),
+			Captcha:             captchaMW,
+			LoginThrottle:       loginThrottle,
+			ForgotThrottle:      forgotThrottle,
+			GoogleStartThrottle: googleStartThrottle,
 		})},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
@@ -543,7 +557,7 @@ func run() error {
 	// part of the api-key contract, so they authenticate with the session verifier
 	// alone — an `inrd_` token presented here is rejected 401 (fail closed).
 	sessionOnly := []mount{
-		{pattern: "/api/v1/workspaces", handler: identHandler.InviteRoutes()},
+		{pattern: "/api/v1/workspaces", handler: identHandler.WorkspaceRoutes()},
 		// Workspace-level warmup overview. The per-mailbox warmup routes
 		// (/mailboxes/{id}/warmup) are registered as a sub-router of the mailbox
 		// mount above, not here.

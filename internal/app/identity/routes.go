@@ -22,8 +22,9 @@ import (
 // session-authed (its own router wraps RequireAuth with the session verifier), so a
 // key can never mint or revoke keys.
 //
-// Captcha (register + login), LoginThrottle (login), and ForgotThrottle
-// (password/forgot) are the pre-authentication guards. The sibling routers apply
+// Captcha (register + login), LoginThrottle (login), ForgotThrottle
+// (password/forgot), and GoogleStartThrottle (federated sign-in start) are the
+// pre-authentication guards. The sibling routers apply
 // their own throttles to their public verify endpoints (the composition root wires
 // those in when building each router).
 type RouteDeps struct {
@@ -35,6 +36,10 @@ type RouteDeps struct {
 	Captcha        func(http.Handler) http.Handler
 	LoginThrottle  func(http.Handler) http.Handler
 	ForgotThrottle func(http.Handler) http.Handler
+	// GoogleStartThrottle caps the federated sign-in START routes per IP. Unlike the
+	// throttles above it is not guarding a credential comparison — it bounds an
+	// unauthenticated DB write (one oauth_login_states row per call).
+	GoogleStartThrottle func(http.Handler) http.Handler
 }
 
 // mw drops nil middlewares so chi's With never invokes a nil func. It returns the
@@ -91,6 +96,44 @@ func (h *Handler) Routes(d RouteDeps) http.Handler {
 	// accepting it usually isn't logged in yet (no csrf_token cookie to
 	// double-submit).
 	r.Post("/invites/accept", h.acceptInvite)
+	// Federated sign-in. Public for the same reason /login is: these ARE the
+	// pre-authentication endpoints. Distinct from the mailbox-connect Google flow,
+	// which sits behind RequireAuth + RequireVerified and requests Gmail scopes.
+	//
+	// The callback carries no CSRF cookie (Google navigates the browser here
+	// cross-site) and cannot be CSRF-forged in any meaningful sense: the
+	// single-use, HMAC-signed, purpose-scoped state is the credential, and an
+	// attacker who could make a victim's browser hit it with their own state would
+	// be logging the victim into the ATTACKER's account — which the state's
+	// single-use consumption plus the SPA showing who is signed in makes both
+	// detectable and useless for reading the victim's data.
+	//
+	// GET /start is the browser-navigation entry point (the SPA does
+	// window.location.assign and reads no body); POST /start is for a client that
+	// wants the consent URL without being navigated — it answers 501 when Google is
+	// unconfigured, so a button can be hidden rather than offered broken, and it is
+	// the only way to pass an invite token, which must not sit in a URL the browser
+	// records in history.
+	//
+	// BOTH start routes are throttled per-IP, because each call WRITES a row
+	// (oauth_login_states) on an unauthenticated request — a link prefetcher or a
+	// crawler following the button could otherwise insert rows as fast as it can ask.
+	// The blast radius is small (a tiny row with a 10-minute TTL, swept by the
+	// maintenance job), but an unauthenticated endpoint that writes unboundedly is
+	// worth capping with the limiter this app already runs. IP-only: neither request
+	// carries an account to key on.
+	//
+	// The CALLBACK is deliberately NOT throttled: it is the provider redirecting a
+	// real user's browser back, and shedding it would break a legitimate sign-in.
+	// Its own protection is stronger anyway — the state must be signed, unexpired,
+	// purpose-matched, and not yet consumed.
+	//
+	// Captcha deliberately does not apply either: /start does no credential
+	// comparison, and putting a challenge in front of the button would tax every
+	// sign-in to bound a write the throttle already bounds.
+	r.With(mw(d.GoogleStartThrottle)...).Get("/oauth/google/start", h.startGoogleSignIn)
+	r.With(mw(d.GoogleStartThrottle)...).Post("/oauth/google/start", h.startGoogleSignInJSON)
+	r.Get("/oauth/google/callback", h.googleSignInCallback)
 	r.Group(func(pr chi.Router) {
 		pr.Use(auth.RequireAuth(d.Verifier))
 		pr.Get("/me", h.me)
@@ -105,14 +148,14 @@ func (h *Handler) Routes(d RouteDeps) http.Handler {
 	return r
 }
 
-// InviteRoutes returns the workspace-scoped invite-management surface
-// (create/list/revoke), meant to be mounted at "/api/v1/workspaces" under the
-// protected router group (main.go) so auth.RequireAuth already runs before
-// any request reaches here. Every route additionally requires the caller be
-// an admin of the workspace named in the path - see pathWorkspaceID for why
-// the path segment is checked against the JWT's workspace claim rather than
-// trusted outright.
-func (h *Handler) InviteRoutes() http.Handler {
+// WorkspaceRoutes returns the workspace-scoped administration surface: invite
+// management (create/list/revoke) and onboarding completion. It is meant to be
+// mounted at "/api/v1/workspaces" under the protected router group (main.go) so
+// auth.RequireAuth already runs before any request reaches here. Every route
+// additionally requires the caller be an admin of the workspace named in the path
+// - see pathWorkspaceID for why the path segment is checked against the JWT's
+// workspace claim rather than trusted outright.
+func (h *Handler) WorkspaceRoutes() http.Handler {
 	r := chi.NewRouter()
 	r.Route("/{id}/invites", func(wr chi.Router) {
 		wr.Use(auth.RequireRole("admin"))
@@ -120,5 +163,8 @@ func (h *Handler) InviteRoutes() http.Handler {
 		wr.Get("/", h.listInvites)
 		wr.Delete("/{inviteId}", h.revokeInvite)
 	})
+	// Naming a workspace is workspace configuration, so admin (and above) only —
+	// a plain member finishing someone else's onboarding would rename the tenant.
+	r.With(auth.RequireRole("admin")).Post("/{id}/onboarding/complete", h.completeOnboarding)
 	return r
 }

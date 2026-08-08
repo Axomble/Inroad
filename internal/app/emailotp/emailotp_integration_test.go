@@ -91,7 +91,7 @@ func newItEnv(t *testing.T) *itEnv {
 	if err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
-	user, err := q.CreateUser(ctx, gen.CreateUserParams{Email: email, PasswordHash: "x"})
+	user, err := q.CreateUser(ctx, gen.CreateUserParams{Email: email, PasswordHash: ptrTo("x")})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -199,3 +199,7 @@ func TestIntegrationAttemptCap(t *testing.T) {
 		t.Fatalf("correct code after cap: got %d, want 401", status)
 	}
 }
+
+// ptrTo takes the address of a literal, for the nullable columns sqlc models as
+// *T (users.password_hash became nullable with federated sign-in, migration 000051).
+func ptrTo[T any](v T) *T { return &v }

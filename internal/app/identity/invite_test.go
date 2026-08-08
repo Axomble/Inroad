@@ -69,7 +69,7 @@ func (f *fakeStore) GetWorkspace(ctx context.Context, id uuid.UUID) (gen.Workspa
 // membership, mark accepted, mint a session - all against the fake's maps so
 // tests exercise the same branches as Store.AcceptInviteTx.
 func (f *fakeStore) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (AcceptInviteTxResult, error) {
-	hash := auth.HashToken(arg.RawToken)
+	hash := arg.TokenHash
 	var invite gen.WorkspaceInvite
 	found := false
 	for _, inv := range f.invites {
@@ -82,14 +82,22 @@ func (f *fakeStore) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams
 		return AcceptInviteTxResult{}, ErrTokenInvalid
 	}
 
+	// Mirror the real store's federated guard: a provider-authenticated caller
+	// must have been invited at the address they signed in with.
+	if arg.Identity != nil && !strings.EqualFold(arg.ExpectedEmail, invite.Email) {
+		return AcceptInviteTxResult{}, ErrIdentityEmailMismatch
+	}
+
 	user, existed := f.users[invite.Email]
 	var userID uuid.UUID
 	if !existed {
-		if arg.PasswordHash == nil {
+		// Either a password or a federated identity has to establish how the new
+		// user will authenticate - same rule as Store.AcceptInviteTx.
+		if arg.PasswordHash == nil && arg.Identity == nil {
 			return AcceptInviteTxResult{}, ErrPasswordRequired
 		}
 		userID = uuid.New()
-		user = gen.User{ID: userID, Email: invite.Email, PasswordHash: *arg.PasswordHash}
+		user = gen.User{ID: userID, Email: invite.Email, PasswordHash: arg.PasswordHash}
 	} else {
 		userID = user.ID
 	}
@@ -110,6 +118,12 @@ func (f *fakeStore) AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams
 			ID: member.ID, WorkspaceID: invite.WorkspaceID, UserID: userID, Role: invite.Role,
 			WorkspaceName: f.workspaces[invite.WorkspaceID].Name,
 		})
+	}
+
+	if arg.Identity != nil {
+		f.identities[identityKey(arg.Identity.Provider, arg.Identity.Subject)] = gen.UserIdentity{
+			ID: uuid.New(), UserID: userID, Provider: arg.Identity.Provider, ProviderSubject: arg.Identity.Subject,
+		}
 	}
 
 	invite.Status = gen.InviteStatusAccepted
@@ -302,7 +316,10 @@ func TestAcceptInviteNewUserCreatesAccount(t *testing.T) {
 	if !newUser.EmailVerifiedAt.Valid {
 		t.Fatal("expected new user's email_verified_at to be set")
 	}
-	if !auth.CheckPassword(newUser.PasswordHash, pw) {
+	if newUser.PasswordHash == nil {
+		t.Fatal("expected new user to have a password hash")
+	}
+	if !auth.CheckPassword(*newUser.PasswordHash, pw) {
 		t.Fatal("expected new user's password hash to match the supplied password")
 	}
 	if _, ok := store.memberByPair[[2]uuid.UUID{wsID, sess.UserID}]; !ok {

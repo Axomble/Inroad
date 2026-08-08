@@ -41,7 +41,7 @@ func newGatedTestHandler(t *testing.T, gate TwoFactorGate) (*Handler, string, st
 	}
 	uid := uuid.New()
 	wsID := uuid.New()
-	store.users[email] = gen.User{ID: uid, Email: email, PasswordHash: hash}
+	store.users[email] = gen.User{ID: uid, Email: email, PasswordHash: &hash}
 	store.usersByID[uid] = store.users[email]
 	store.members[uid] = []gen.ListMembersByUserRow{
 		{ID: uuid.New(), WorkspaceID: wsID, UserID: uid, Role: gen.MemberRoleOwner, WorkspaceName: "Acme"},

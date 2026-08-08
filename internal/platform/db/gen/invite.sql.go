@@ -73,6 +73,37 @@ func (q *Queries) GetInviteByHash(ctx context.Context, tokenHash []byte) (Worksp
 	return i, err
 }
 
+const getLatestPendingInviteByEmail = `-- name: GetLatestPendingInviteByEmail :one
+SELECT id, workspace_id, email, role, token_hash, invited_by, status, expires_at, accepted_at, created_at FROM workspace_invites
+WHERE email = $1 AND status = 'pending' AND expires_at > now()
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+// The federated sign-up path resolves a brand-new address to a pending invite
+// ACROSS workspaces (the invitee arrived at "Continue with Google" without an
+// invite link), so this looks up by email alone -- served by the partial index
+// idx_invites_pending_email. Unexpired only, and newest-first so an address
+// invited to several workspaces joins the most recent invitation rather than an
+// arbitrary one.
+func (q *Queries) GetLatestPendingInviteByEmail(ctx context.Context, email string) (WorkspaceInvite, error) {
+	row := q.db.QueryRow(ctx, getLatestPendingInviteByEmail, email)
+	var i WorkspaceInvite
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Email,
+		&i.Role,
+		&i.TokenHash,
+		&i.InvitedBy,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.AcceptedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getPendingInviteForEmail = `-- name: GetPendingInviteForEmail :one
 SELECT id, workspace_id, email, role, token_hash, invited_by, status, expires_at, accepted_at, created_at FROM workspace_invites WHERE workspace_id = $1 AND email = $2 AND status = 'pending'
 `

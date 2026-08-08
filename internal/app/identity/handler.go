@@ -84,6 +84,13 @@ type membershipDTO struct {
 	WorkspaceID   string `json:"workspace_id"`
 	WorkspaceName string `json:"workspace_name"`
 	Role          string `json:"role"`
+	// OnboardingCompletedAt is per-workspace so the SPA can gate its onboarding
+	// modal on a workspace switch without another round trip. Null while onboarding
+	// is still pending; RFC3339 once complete.
+	//
+	// A nullable timestamp rather than a boolean beside it: one field for one fact,
+	// so a response can never claim to be complete with no completion time.
+	OnboardingCompletedAt *string `json:"onboarding_completed_at"`
 }
 
 type sessionResponse struct {
@@ -96,6 +103,12 @@ type sessionResponse struct {
 	// Email lets the SPA render identity after a silent refresh — on a hard
 	// reload the refresh response is the only identity source it has.
 	Email string `json:"email"`
+	// OnboardingCompletedAt is the ACTIVE workspace's stamp (null while pending), on
+	// the session response for the same reason email_verified is on /auth/me: the SPA
+	// must decide on FIRST PAINT whether to show the onboarding modal, and a second
+	// request to find out would flash the console behind it. It matters most right
+	// after a Google sign-up, the one flow that lands on a workspace nobody has named.
+	OnboardingCompletedAt *string `json:"onboarding_completed_at"`
 }
 
 // clientMeta extracts the user-agent and bare client IP from the request. The IP
@@ -116,7 +129,10 @@ func (h *Handler) clientMeta(r *http.Request) (ua, ip string) {
 func toMembershipDTOs(mems []Membership) []membershipDTO {
 	dto := make([]membershipDTO, len(mems))
 	for i, m := range mems {
-		dto[i] = membershipDTO{WorkspaceID: m.WorkspaceID.String(), WorkspaceName: m.WorkspaceName, Role: m.Role}
+		dto[i] = membershipDTO{
+			WorkspaceID: m.WorkspaceID.String(), WorkspaceName: m.WorkspaceName, Role: m.Role,
+			OnboardingCompletedAt: rfc3339OrNil(m.OnboardingCompletedAt),
+		}
 	}
 	return dto
 }
@@ -154,7 +170,7 @@ func (h *Handler) issueSession(w http.ResponseWriter, sess Session) {
 		return
 	}
 	h.setRefreshCookie(w, sess.RawRefresh)
-	if _, err := h.setCSRFCookie(w); err != nil {
+	if err := h.setCSRFCookie(w); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not issue csrf token")
 		return
 	}
@@ -162,7 +178,7 @@ func (h *Handler) issueSession(w http.ResponseWriter, sess Session) {
 		AccessToken: access, ExpiresIn: int(h.accessTTL.Seconds()),
 		UserID: sess.UserID.String(), ActiveWorkspaceID: sess.WorkspaceID.String(),
 		Role: sess.Role, Memberships: toMembershipDTOs(sess.Memberships),
-		Email: sess.Email,
+		Email: sess.Email, OnboardingCompletedAt: rfc3339OrNil(sess.OnboardingCompletedAt),
 	})
 }
 
@@ -336,10 +352,17 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "could not load verification status")
 		return
 	}
+	activeWS, err := uuid.Parse(claims.WorkspaceID)
+	if err != nil {
+		httpx.Error(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"user_id": claims.UserID, "active_workspace_id": claims.WorkspaceID,
 		"role": claims.Role, "memberships": toMembershipDTOs(mems),
 		"email": email, "email_verified": verified,
+		// Read out of the memberships already loaded above � no extra query.
+		"onboarding_completed_at": rfc3339OrNil(onboardingFor(mems, activeWS)),
 	})
 }
 
@@ -393,7 +416,7 @@ func (h *Handler) switchWorkspace(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	activeWS, role, tokenVersion, err := h.svc.SwitchWorkspace(r.Context(), sid, uid, target)
+	res, err := h.svc.SwitchWorkspace(r.Context(), sid, uid, target)
 	if err != nil {
 		httpx.Error(w, http.StatusForbidden, "not a member of that workspace")
 		return
@@ -402,14 +425,15 @@ func (h *Handler) switchWorkspace(w http.ResponseWriter, r *http.Request) {
 	// changed), so the new token's `tv` MUST come from that row's current
 	// token_version — never a hardcoded 0, which a later tv-bump would turn into
 	// an instant self-inflicted 401. See mintAccessToken's rule.
-	access, err := h.mintAccessToken(claims.UserID, activeWS.String(), role, claims.SessionID, tokenVersion)
+	access, err := h.mintAccessToken(claims.UserID, res.WorkspaceID.String(), res.Role, claims.SessionID, res.TokenVersion)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "could not issue token")
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"access_token": access, "expires_in": int(h.accessTTL.Seconds()),
-		"active_workspace_id": activeWS.String(), "role": role,
+		"active_workspace_id": res.WorkspaceID.String(), "role": res.Role,
+		"onboarding_completed_at": rfc3339OrNil(res.OnboardingCompletedAt),
 	})
 }
 
@@ -613,6 +637,17 @@ func (h *Handler) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {
 		h.bustSession(sid)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"revoked": len(revoked)})
+}
+
+// rfc3339OrNil renders a timestamp as a nullable RFC3339 JSON string: the zero
+// time (meaning "not yet") becomes null rather than year 1, which no client should
+// have to special-case.
+func rfc3339OrNil(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
 }
 
 // ipToString renders an optional stored IP as a nullable JSON string.

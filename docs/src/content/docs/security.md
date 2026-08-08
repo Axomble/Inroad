@@ -104,11 +104,14 @@ or SSRF. (Not a full threat model; that's future work.)
     server minted it and the TTL bounds replay — the public callback carries no
     JWT cookie (top-level redirect from Google), so the state IS the auth. Every
     mailbox the callback creates is pinned to that workspace, so no cross-tenant
-    write is possible. **Residual risk:** there is no server-side single-use
-    nonce store yet, so a `state` URL leaked within its 10-minute window would
-    let an attacker bind *their own* Gmail mailbox into the victim's workspace
-    (low value, bounded, no data read). A single-use nonce store is the phase-2
-    hardening.
+    write is possible. The signed payload also carries a **purpose**
+    (`mailbox_connect`), checked on verify, so a SIGN-IN state can never be
+    replayed here and vice versa (invariant 50). **Residual risk:** mailbox connect
+    still has no server-side single-use nonce store, so a `state` URL leaked within
+    its 10-minute window would let an attacker bind *their own* Gmail mailbox into
+    the victim's workspace (low value, bounded, no data read). The LOGIN flow does
+    have one (invariant 50), because there a replay is account access; extending it
+    to mailbox connect remains the phase-2 hardening.
 11. **No new SSRF surface.** Gmail API, Google token, and OpenID userinfo calls
     all go to fixed Google hosts; the M365 code exchange, Graph `/me`,
     `sendMail`/draft, and `/$value` calls all go to fixed Microsoft hosts
@@ -603,6 +606,135 @@ limit / abuse control here is tracked in the Deferred list below.
     user-supplied `base_url`/endpoint hosts were vetted at write time by the mail
     package's SSRF classifier and again by the guarded transport at dial time.
 
+## Federated sign-in (Google)
+
+Google SIGN-IN (Inroad as an OAuth client to Google, for LOGIN) is a separate
+surface from the mailbox-connect flow of invariants 8–11, with its own redirect URL,
+its own routes (`GET`/`POST /api/v1/auth/oauth/google/start`,
+`GET /api/v1/auth/oauth/google/callback`, all unauthenticated), and its own scopes.
+Nothing about it is reachable from, or reuses state from, mailbox connect.
+
+It MAY, however, share the same Google OAuth *client*:
+`INROAD_GOOGLE_SIGNIN_CLIENT_ID` falls back to `INROAD_GOOGLE_CLIENT_ID` so one
+registered client makes both features work (a dedicated pair is available, and is
+worth setting, because the mailbox client carries restricted Gmail scopes subject to
+Google's verification review — the ability to log in should not be blocked by that
+review). Sharing a client is safe and does not weaken invariant 50, for two reasons
+worth stating since they are what a reader will reasonably worry about:
+
+- **A mailbox state still cannot be replayed as a login state.** Purpose separation is
+  enforced by the `oauthstate.Purpose` inside the HMAC-signed payload, not by which
+  OAuth client minted the state, so a shared client changes nothing about it.
+- **A login still never obtains Gmail authority.** Scopes are requested per
+  authorization, not granted per client: the sign-in flow requests only
+  `openid email profile`, so the token it receives cannot read or send mail even
+  though that client is *capable* of requesting those scopes on the other flow. And
+  sign-in never persists its token at all — it reads the ID token and drops it.
+
+The redirect URL never falls back, because the two flows have different callback
+paths even on a single shared client.
+
+50. **The workspace a federated session lands in is derived server-side, and the
+    provider identity is keyed on `sub`, never email.**
+
+    *Workspace from the server, never the callback.* The callback URL carries no
+    workspace at all — unlike a mailbox-connect state, a login state's subject is
+    empty. The workspace comes from resolving the provider identity: an existing
+    `user_identities` row, an existing account for the verified email, a pending
+    invite, or a brand-new workspace created in the same transaction. There is no
+    query parameter a caller can set to steer a session into a tenant.
+
+    *Identity keyed on `sub`.* `user_identities` is `UNIQUE (provider,
+    provider_subject)` on Google's immutable subject id. Email is used only to
+    find an existing account to LINK the first time. Matching on email instead
+    would silently mint a second account for the same person after they change
+    their Google address — and, worse, would let a re-registered address inherit an
+    account.
+
+    *`email_verified` gates BOTH signup and linking.* A Google `email_verified` of
+    false is refused outright. The tempting objection — that refusing to link
+    protects nothing, since whoever controls the mailbox could take the account
+    over via password reset — has it backwards: the claim being false is Google
+    telling us they may NOT control it. Without the check, anyone able to create a
+    Google account asserting `victim@corp.example` would be handed the existing
+    Inroad account for it.
+
+    *An invite must match the authenticated address.* An invite token is a bearer
+    credential granting workspace membership, so the federated accept path requires
+    the provider-verified email to equal the invite's address
+    (`ErrIdentityEmailMismatch`, checked inside the transaction that reads the
+    invite). Otherwise whoever obtained a link addressed to alice@ could present it
+    while authenticating as bob@ and join a workspace nobody invited them to. The
+    invite token also never travels to Google: only its SHA-256 is stashed
+    server-side against the state nonce, because `state` passes through Google's
+    servers, browser history, and any `Referer`.
+
+    *State is purpose-scoped, single-use, and PKCE-bound.* The signed `state`
+    (`internal/platform/oauthstate`) now carries a **purpose** inside the HMAC'd
+    payload, so a mailbox-connect state can never be replayed at the sign-in
+    callback or the reverse. Its nonce is additionally backed by a **server-side
+    single-use store** (`oauth_login_states`, consumed by a guarded `UPDATE ...
+    WHERE consumed_at IS NULL AND expires_at > now()`), so a leaked state URL is
+    usable at most once. That store was listed as deferred hardening under
+    invariant 10; it matters more here, because replaying a LOGIN state is account
+    access rather than a stray mailbox binding. Only the nonce's hash is stored (it
+    rides in a URL, so it is treated as a bearer credential like
+    `sessions.token_hash`). The code exchange is **PKCE S256**; the verifier lives
+    in that same row because the callback has no cookie to carry it. Mailbox
+    connect keeps its TTL-only replay window (invariant 10's residual risk) — it
+    gained the purpose tag but not the nonce store.
+
+    *The post-sign-in destination cannot become an open redirect.* A caller may ask
+    to land on an in-app path after sign-in (`return_to`). It is validated by an
+    ALLOWLIST, not sanitized (`identity.safeReturnTo`): only a single-leading-slash
+    same-origin path survives, and absolute URLs, scheme-relative `//host`,
+    backslash forms some browsers normalize to `/`, control characters and
+    whitespace that could split a `Location` header, and anything over 512 bytes are
+    all dropped in favor of the SPA's default landing route. It is stored in the
+    login-state row rather than in `state` or a redirect URL, so the destination
+    cannot be swapped by editing a URL mid-flow, and it is query-escaped when handed
+    back so it stays one parameter value.
+
+    *The unauthenticated write is rate-limited.* Each `/start` call inserts an
+    `oauth_login_states` row before any credential exists, so both start routes are
+    throttled per-IP through the shared Redis limiter
+    (`INROAD_RATELIMIT_SENSITIVE_IP`, fail-closed). Rows are small, expire in ten
+    minutes, and are swept by the maintenance job, so the exposure was bounded
+    already — but an unauthenticated endpoint that writes without a cap is worth
+    capping. The CALLBACK is deliberately NOT throttled: it is the provider
+    redirecting a real user's browser back, so shedding it would break a legitimate
+    sign-in, and its guard is stronger anyway (the state must be signed, unexpired,
+    purpose-matched, and unconsumed).
+
+    *Login scopes deliberately exclude Gmail.* `openid email profile` only. Gmail
+    scopes are Google-restricted, they would push every sign-in through a scarier
+    consent screen for permissions login does not need, and a mailbox token
+    obtained at sign-up would have no per-workspace DEK to be sealed under —
+    at that moment the workspace does not exist yet. Connecting a mailbox stays the
+    separate authenticated flow (invariants 8–11).
+
+    *No new SSRF surface.* The consent URL, token endpoint, and ID-token
+    verification all target fixed Google hosts; only server-minted values (state,
+    PKCE challenge) are interpolated. The ID token's signature is not verified,
+    and that is safe for one specific reason: it arrives in the body of a direct
+    server-to-server TLS call WE made to Google's token endpoint with our client
+    secret, so there is no party in between to have substituted it. Issuer,
+    audience (must be our client id), expiry, and subject ARE checked. If that
+    token ever starts arriving from a client instead, JWKS signature verification
+    becomes mandatory — the code comment on `parseGoogleIDToken` says so.
+
+51. **A NULL `password_hash` means "no password", and can never authenticate.**
+    `users.password_hash` became nullable so a federated account can exist at all
+    (migration 000051; before it, `AcceptInviteTx` refused to create a user without
+    one). `Service.Authenticate` checks for `nil` explicitly and rejects — never a
+    comparison against `""`, never a coalesce, never a nil dereference — and burns
+    the same dummy argon2 cost as a wrong password so response time does not reveal
+    which kind of account an address is. `UpdatePasswordHash` takes a non-pointer
+    string on purpose: setting a password is not the same operation as clearing
+    one, and no path should be able to strip a password. A password reset on a
+    federated account legitimately GIVES it a password — that is account recovery
+    for an address the provider already verified.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
@@ -610,7 +742,10 @@ limit / abuse control here is tracked in the Deferred list below.
   under a rotated KEK (today v1→v2 migration is lazy, on next write).
 - Rate limiting / abuse controls on auth and connect endpoints.
 - Audit log for sensitive actions (mailbox connect/disconnect, settings changes).
-- Server-side single-use nonce store for the OAuth `state` (see invariant 10).
+- Server-side single-use nonce store for the MAILBOX-CONNECT OAuth `state` (see
+  invariant 10). The LOGIN flow has one (invariant 50); mailbox connect still relies
+  on the 10-minute TTL alone, where the residual risk is an attacker binding their
+  own mailbox into a victim's workspace rather than account access.
 - Rate limiting + an audit log on reply-driven suppression/stop. Reply-driven
   actions (`MarkReplied`/`MarkUnsubscribed`) are workspace-bounded (invariant 21)
   but are spoofable WITHIN a workspace: anyone who knows a target contact email
@@ -633,6 +768,12 @@ limit / abuse control here is tracked in the Deferred list below.
 - [ ] New outbound dial to a user-supplied host? → routed through the SSRF guard.
 - [ ] New tenant-scoped query? → filtered by `workspace_id` from the JWT.
 - [ ] New secret/config? → env-loaded, fail-closed in compose, in `.env.example`.
-- [ ] New OAuth/state-authenticated flow? → `state` HMAC-signed + TTL; tenant
-      derived from the verified state, not a request param; token refresh stays
-      in the control plane.
+- [ ] New OAuth/state-authenticated flow? → `state` HMAC-signed + TTL + a
+      `oauthstate.Purpose` of its own (so it cannot be replayed at another flow's
+      callback); tenant derived server-side, not from a request param; token refresh
+      stays in the control plane. If the flow grants a SESSION rather than binding a
+      resource, it also needs a single-use nonce store and PKCE (invariant 50).
+- [ ] New federated identity provider? → keyed on the provider's immutable subject,
+      never email; the provider's email-verified claim gates both signup and
+      linking; no credential (invite token, session token) placed in `state` or a
+      redirect URL.

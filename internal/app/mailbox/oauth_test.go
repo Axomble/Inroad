@@ -159,7 +159,7 @@ func getMicrosoftCallback(router http.Handler, rawQuery string) *httptest.Respon
 func TestGoogleCallbackValidStateCreatesMailbox(t *testing.T) {
 	store, router := newCallbackHarness(t, "rep@example.com")
 	wsA := uuid.New()
-	state := oauthstate.Sign(callbackTestSecret, wsA.String(), time.Now(), 10*time.Minute)
+	state, _ := oauthstate.Sign(callbackTestSecret, oauthstate.PurposeMailboxConnect, wsA.String(), time.Now(), 10*time.Minute)
 
 	rec := getCallback(router, "code=abc&state="+url.QueryEscape(state))
 
@@ -220,7 +220,7 @@ func TestGoogleCallbackDuplicateEmailRedirectsAlreadyConnected(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	state := oauthstate.Sign(callbackTestSecret, wsA.String(), time.Now(), 10*time.Minute)
+	state, _ := oauthstate.Sign(callbackTestSecret, oauthstate.PurposeMailboxConnect, wsA.String(), time.Now(), 10*time.Minute)
 
 	rec := getCallback(router, "code=abc&state="+url.QueryEscape(state))
 
@@ -238,7 +238,7 @@ func TestGoogleCallbackDuplicateEmailRedirectsAlreadyConnected(t *testing.T) {
 func TestGoogleCallbackEmptyEmailRedirectsNoEmail(t *testing.T) {
 	store, router := newCallbackHarness(t, "")
 	wsA := uuid.New()
-	state := oauthstate.Sign(callbackTestSecret, wsA.String(), time.Now(), 10*time.Minute)
+	state, _ := oauthstate.Sign(callbackTestSecret, oauthstate.PurposeMailboxConnect, wsA.String(), time.Now(), 10*time.Minute)
 
 	rec := getCallback(router, "code=abc&state="+url.QueryEscape(state))
 
@@ -362,7 +362,7 @@ func TestCompleteMicrosoftOAuthEmptyEmailRejected(t *testing.T) {
 func TestMicrosoftCallbackValidStateCreatesMailbox(t *testing.T) {
 	store, router := newCallbackHarness(t, "rep@example.com")
 	wsA := uuid.New()
-	state := oauthstate.Sign(callbackTestSecret, wsA.String(), time.Now(), 10*time.Minute)
+	state, _ := oauthstate.Sign(callbackTestSecret, oauthstate.PurposeMailboxConnect, wsA.String(), time.Now(), 10*time.Minute)
 
 	rec := getMicrosoftCallback(router, "code=abc&state="+url.QueryEscape(state))
 
