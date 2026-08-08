@@ -1,10 +1,16 @@
-# Full dev stack: Postgres, Redis, migrations, api, worker, and the SPA.
+# Full dev stack: Postgres, Redis, migrations, api, worker, the SPA, and a mail
+# catcher.
 #
 #   docker compose -f deploy/compose/docker-compose.dev.yml up
 #
 # No local Go, Node, or make required — the repo is bind-mounted and rebuilt
 # inside the containers on change (air for Go, Vite HMR for the SPA). Ctrl+C
 # stops everything.
+#
+# Transactional email (verify, password reset, login codes, invites) is sent to
+# Mailpit instead of being logged: read it at http://localhost:8025. Nothing
+# leaves the machine, and the message bodies — which carry single-use links and
+# login codes — stay out of the logs.
 #
 # Dev credentials are hardcoded on purpose. This file must never run anything
 # reachable from the internet: the JWT secret and master key below are public
@@ -23,6 +29,16 @@ x-go-env: &go-env
   # Reach a mail catcher or a local Ollama without extra config.
   INROAD_MAIL_ALLOW_PRIVATE_HOSTS: "true"
   INROAD_AI_ALLOW_PRIVATE_BASE_URL: "true"
+  # Deliver transactional email to the Mailpit container (UI on :8025) so
+  # verification and reset links are actually readable in dev. Mailpit speaks
+  # plaintext and advertises no AUTH, hence the explicit cleartext opt-out —
+  # which defaults to false everywhere else, so it can only ever be on because
+  # a file like this one turned it on. Never set it in production.
+  INROAD_TRANSACTIONAL_DRIVER: smtp
+  INROAD_SYSTEM_SMTP_HOST: mailpit
+  INROAD_SYSTEM_SMTP_PORT: "1025"
+  INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT: "true"
+  INROAD_SYSTEM_EMAIL_FROM: no-reply@inroad.test
 
 x-go-build: &go-build
   build:
@@ -64,6 +80,21 @@ services:
       timeout: 3s
       retries: 10
 
+  # Catches every transactional email the stack sends and serves it at
+  # http://localhost:8025. Holds messages in memory only — nothing is persisted
+  # and nothing is relayed onward, so a dev signup can never email a real
+  # address.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"   # web UI
+      - "1025:1025"   # SMTP
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
   # One-shot: applies migrations then exits 0. api and worker wait for it to
   # complete, so neither ever starts against a schema behind the code.
   migrate:
@@ -83,6 +114,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      mailpit: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
 
   worker:

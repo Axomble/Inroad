@@ -152,6 +152,9 @@ func TestCreateInviteEmails(t *testing.T) {
 	if !strings.Contains(sender.last.TextBody, "https://app.example.test/accept-invite?token=") {
 		t.Fatalf("expected accept-invite link in sent email body, got %q", sender.last.TextBody)
 	}
+	if sender.last.To != "newhire@acme.test" {
+		t.Fatalf("invite addressed to %q, want the invitee newhire@acme.test", sender.last.To)
+	}
 	found := false
 	for _, inv := range store.invites {
 		if inv.WorkspaceID == wsID && inv.Email == "newhire@acme.test" && inv.Status == gen.InviteStatusPending {
@@ -160,6 +163,33 @@ func TestCreateInviteEmails(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected a pending invite to be persisted")
+	}
+}
+
+// TestCreateInviteEmailsTheInviteeNotTheInviter pins the recipient against the
+// most damaging way to get it wrong. The accept-invite link is a bearer
+// credential granting membership of the workspace, so mailing it to the admin
+// who created the invite (the other address in scope at that call site) would
+// disclose workspace access to the wrong party - not merely fail to deliver.
+func TestCreateInviteEmailsTheInviteeNotTheInviter(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeSender{}
+	svc := NewService(store, time.Hour, sender, "https://app.example.test", time.Hour, time.Hour, time.Hour)
+
+	wsID := uuid.New()
+	store.workspaces[wsID] = gen.Workspace{ID: wsID, Name: "Acme"}
+	invitedBy := uuid.New()
+	store.usersByID[invitedBy] = gen.User{ID: invitedBy, Email: "admin@acme.test"}
+	store.users["admin@acme.test"] = store.usersByID[invitedBy]
+
+	if _, err := svc.CreateInvite(context.Background(), wsID, invitedBy, "invitee@other.test", "member"); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	if sender.last.To == "admin@acme.test" {
+		t.Fatal("invite was emailed to the inviter - the accept link discloses workspace access")
+	}
+	if sender.last.To != "invitee@other.test" {
+		t.Fatalf("invite addressed to %q, want the invitee invitee@other.test", sender.last.To)
 	}
 }
 

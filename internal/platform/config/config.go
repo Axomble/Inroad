@@ -124,6 +124,12 @@ type Config struct {
 	SystemSMTPUsername  string
 	SystemSMTPPassword  string
 	SystemEmailFrom     string
+	// SystemSMTPAllowPlaintext explicitly opts the transactional SMTP
+	// connection out of TLS. Defaults to FALSE so an absent or malformed value
+	// keeps TLS mandatory — a misconfiguration can never silently downgrade
+	// system email to cleartext (security Invariant 6). Intended solely for a
+	// local mail catcher (Mailpit/MailHog) in development.
+	SystemSMTPAllowPlaintext bool
 
 	// AppBaseURL is the frontend origin used to build links (verify/reset/
 	// invite) embedded in transactional email.
@@ -280,6 +286,7 @@ func Load() (*Config, error) {
 	cfg.SystemSMTPUsername = getenv("INROAD_SYSTEM_SMTP_USERNAME", "")
 	cfg.SystemSMTPPassword = getenv("INROAD_SYSTEM_SMTP_PASSWORD", "")
 	cfg.SystemEmailFrom = getenv("INROAD_SYSTEM_EMAIL_FROM", "")
+	cfg.SystemSMTPAllowPlaintext = getenvBool("INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT", false)
 	cfg.AppBaseURL = getenv("INROAD_APP_BASE_URL", "http://localhost:5173")
 	cfg.WebDir = getenv("INROAD_WEB_DIR", "")
 	cfg.GoogleClientID = getenv("INROAD_GOOGLE_CLIENT_ID", "")

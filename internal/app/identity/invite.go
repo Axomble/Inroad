@@ -69,7 +69,10 @@ func (s *Service) CreateInvite(ctx context.Context, ws, invitedBy uuid.UUID, ema
 		return toInvite(inv), nil
 	}
 	link := s.appBaseURL + "/accept-invite?token=" + url.QueryEscape(raw)
-	if err := s.sender.Send(ctx, notify.InviteEmail(wsRow.Name, link)); err != nil {
+	// Addressed to inv.Email - the persisted invite row's address, i.e. the
+	// INVITEE - never invitedBy's. The link is a bearer credential granting
+	// membership of ws, so mailing it to the wrong party discloses access.
+	if err := s.sender.Send(ctx, notify.InviteEmail(inv.Email, wsRow.Name, link)); err != nil {
 		slog.Error("identity: failed to send invite email", "err", err, "invite_id", inv.ID)
 	}
 	return toInvite(inv), nil
