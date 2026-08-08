@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -39,10 +40,12 @@ func itKeyring(t *testing.T, q *gen.Queries) *crypto.Keyring {
 
 // itMailbox seeds one smtp mailbox with a real sealed credential + enables warmup.
 //
-// StartVolume MUST stay at or below warmup.EffectiveDailyVolume's anti-stall floor
-// threshold (8). GetWarmupSendJob reads the real clock, so a higher start volume would
-// let DailyVolumeFactor's weekend/skip-day shape drive today's quota to zero and make
-// every "expect a send" test below fail depending on the calendar date.
+// StartVolume is coupled to setupWarmup's clock pinning: warmupBusyDay uses this same
+// value (8) as the conservative target when it picks a day with enough send headroom.
+// Change one and change the other. An earlier note here claimed keeping StartVolume at
+// or below the anti-stall floor (8) was sufficient — it is not. That floor only
+// guarantees ONE send a day, and the fixture needs several, which is why the clock is
+// pinned rather than the volume merely capped.
 func itMailbox(t *testing.T, ctx context.Context, q *gen.Queries, sealer *crypto.Sealer, wsID uuid.UUID, email string) uuid.UUID {
 	t.Helper()
 	ct, err := sealer.Seal([]byte("smtp-app-password"))
@@ -110,8 +113,52 @@ func setupWarmup(t *testing.T) (context.Context, warmupFixture) {
 		"https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{},
 		[]byte("warmup-secret-0123456789abcdef"), warmup.NewStaticLibrary())
 
+	// Pin the clock to a day the warmup day-shape actually grants sending volume on.
+	// Without this the suite is calendar-dependent: warmup.EffectiveDailyVolume drops
+	// weekends to a fraction of a weekday and skips ~4% of weekdays outright, so a
+	// fixture that needs more than one send in a day passes on a Tuesday and fails on
+	// a Saturday. (It did: TestRecordWarmupReceiptSenderAttribution went red on main
+	// when CI ran on Saturday 2026-08-08.)
+	pinned := warmupBusyDay(t, a)
+	if impl, ok := core.(client); ok {
+		impl.now = func() time.Time { return pinned }
+		core = impl
+	} else {
+		t.Fatalf("New returned %T, want inprocess.client — cannot pin the warmup clock", core)
+	}
+
 	return ctx, warmupFixture{core: core, q: q, ws1: ws1.ID, a: a, b: b, ws2: ws2.ID, c: c}
 }
+
+// warmupBusyDay returns noon UTC on the first day, from today forward, whose
+// day-shape grants mailbox mbx at least warmupFixtureSends sends. It asks the REAL
+// policy (warmup.EffectiveDailyVolume) rather than hardcoding a date, so it stays
+// correct if the weekend/skip-day tuning changes.
+//
+// It uses the participant's START volume (8) as the target, which is a conservative
+// lower bound: EffectiveDailyVolume is monotonic in target, and the ramp only ever
+// raises it above the start, so a day that clears the bar at 8 clears it for real.
+// Scanning FORWARD keeps the pinned instant at or after the participant's started_at,
+// so ramp day counts stay non-negative.
+func warmupBusyDay(t *testing.T, mbx uuid.UUID) time.Time {
+	t.Helper()
+	const startVolume = 8
+	day := time.Now().UTC().Truncate(24 * time.Hour)
+	for i := 0; i < 21; i++ {
+		candidate := day.AddDate(0, 0, i).Add(12 * time.Hour) // noon: inside waking hours
+		if warmup.EffectiveDailyVolume(startVolume, mbx.String(), candidate) >= warmupFixtureSends {
+			return candidate
+		}
+	}
+	t.Fatalf("no day in the next 3 weeks grants mailbox %s >= %d warmup sends", mbx, warmupFixtureSends)
+	return time.Time{}
+}
+
+// warmupFixtureSends is the per-day send headroom the warmup integration fixture
+// needs. The most demanding test drives makeWarmupSend twice
+// (TestRecordWarmupReceiptSenderAttribution); 4 leaves margin without requiring an
+// unusually high-volume day.
+const warmupFixtureSends = 4
 
 // TestPartnerSelectionStaysInWorkspaceAndAvoidsSelf proves GetWarmupSendJob pairs A
 // only with its same-workspace partner B, never itself and never the foreign

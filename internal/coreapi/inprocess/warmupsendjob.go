@@ -86,7 +86,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		return coreapi.WarmupSendJob{}, coreapi.ErrCrossTenant
 	}
 
-	now := time.Now().UTC()
+	now := c.now().UTC()
 	// Paused / disabled sender → skip.
 	if !b.Enabled || b.HealthState == warmup.StatePaused || (b.PausedUntil.Valid && b.PausedUntil.Time.After(now)) {
 		return coreapi.WarmupSendJob{Skip: true}, nil
@@ -439,7 +439,7 @@ func (c client) NextWarmupDue(ctx context.Context, mailboxID, workspaceID string
 		StartedAt:   p.StartedAt.Time,
 		SentToday:   int(sentToday),
 		HealthState: p.HealthState,
-		Now:         time.Now().UTC(),
+		Now:         c.now().UTC(),
 	}
 	if p.PausedUntil.Valid {
 		in.PausedUntil = p.PausedUntil.Time
