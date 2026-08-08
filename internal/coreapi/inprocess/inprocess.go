@@ -5,6 +5,7 @@ package inprocess
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,6 +67,14 @@ type client struct {
 	// dedicated one), no new schema for what is structurally the identical
 	// problem (see ClaimInboxReply's own doc).
 	replyClaims *idempotency.PgStore
+	// now is the client's clock, injected rather than read from time.Now() at each
+	// call site. The warmup scheduler's day shape is a function of the CALENDAR DAY
+	// (warmup.EffectiveDailyVolume drops weekends hard and skips ~4% of weekdays
+	// outright), so a warmup path that reads the wall clock directly cannot be
+	// integration-tested deterministically — the same test passes on a Tuesday and
+	// fails on a Saturday. Mirrors deliverability.Service.now, for the same reason.
+	// New defaults it to time.Now; only tests replace it.
+	now func() time.Time
 }
 
 // New returns the in-process coreapi client backed by the given connection
@@ -91,6 +100,7 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		warmupContent: warmupContent,
 		inbox:         inbox.NewService(inbox.NewPgStore(pool)),
 		replyClaims:   idempotency.NewPgStore(pool),
+		now:           time.Now,
 	}
 }
 

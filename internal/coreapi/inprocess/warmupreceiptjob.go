@@ -194,7 +194,7 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 			ReplyRate:        float64(p.ReplyRate),
 			Placement:        dup.Placement,
 			ReceivedAt:       dup.ReceivedAt.Time,
-			Now:              time.Now().UTC(),
+			Now:              c.now().UTC(),
 		}), nil
 	}
 
@@ -239,7 +239,7 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		ReplyRate:        float64(p.ReplyRate),
 		Placement:        in.Placement,
 		ReceivedAt:       row.ReceivedAt.Time,
-		Now:              time.Now().UTC(),
+		Now:              c.now().UTC(),
 	}), nil
 }
 
@@ -456,7 +456,7 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
+	now := c.now().UTC()
 	var errs []error
 	for _, r := range rows {
 		// spamRate is "of MY sent warmup mail, the fraction that landed in spam" —
