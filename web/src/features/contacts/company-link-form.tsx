@@ -86,14 +86,23 @@ function CompanyPicker({
 
   const save = async () => {
     setError(null)
-    try {
-      // Explicitly `null` to unlink — the API rejects an omitted `company_id`
-      // rather than let "absent" quietly mean "detach".
-      await setCompany({ id: contactId, contactCompanyLink: { company_id: selected || null } }).unwrap()
-      onDone()
-    } catch (failure) {
-      setError(linkErrorMessage(failure))
+    // Explicitly `null` to unlink — the API rejects an omitted `company_id`
+    // rather than let "absent" quietly mean "detach".
+    //
+    // Result-checked rather than `.unwrap()`-and-catch, which is the convention
+    // everywhere else here for a concrete reason: unwrap derives a REJECTING
+    // promise, and a rejection that anything fails to observe surfaces as an
+    // unhandled rejection — which vitest turns into a non-zero exit even when
+    // every test passes. This shape never creates one.
+    const result = await setCompany({
+      id: contactId,
+      contactCompanyLink: { company_id: selected || null },
+    })
+    if ('error' in result) {
+      setError(linkErrorMessage(result.error))
+      return
     }
+    onDone()
   }
 
   return (

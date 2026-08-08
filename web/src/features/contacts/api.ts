@@ -74,8 +74,22 @@ const contactsApi = api
       // one refetch and cannot miss the old roster.
       setContactCompany: {
         async onQueryStarted({ id }, { dispatch, queryFulfilled }) {
-          const { data } = await queryFulfilled
-          dispatch(contactsApi.util.upsertQueryData('getContact', { id }, data))
+          try {
+            const { data } = await queryFulfilled
+            dispatch(contactsApi.util.upsertQueryData('getContact', { id }, data))
+          } catch {
+            // Deliberately swallowed, and it is not an unhandled error: the
+            // component that triggered the mutation reads the failure off the
+            // result and shows it. This handler exists only to seed the cache
+            // with the record the response already returned, so on failure
+            // there is simply nothing to seed — and `invalidatesTags` still
+            // refetches, so nothing goes stale.
+            //
+            // The `catch` itself is load-bearing. An awaited `queryFulfilled`
+            // that nobody observes becomes an unhandled promise rejection: it
+            // fired on every failed link in the browser, and in CI it made
+            // vitest exit non-zero while every single test passed.
+          }
         },
         invalidatesTags: [{ type: 'Contact', id: 'LIST' }, 'CRMCompany'],
       },
