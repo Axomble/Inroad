@@ -21,6 +21,9 @@ var (
 	ErrAlreadyLaunched  = errors.New("campaign already launched")
 	ErrEmptyList        = errors.New("target list is empty")
 	ErrNoSteps          = errors.New("campaign has no sequence steps")
+	// ErrResultsUnavailable is a results read with no ResultsStore wired -- a
+	// deployment/wiring fault, never a statement about the campaign.
+	ErrResultsUnavailable = errors.New("campaign results are unavailable")
 )
 
 // Enqueuer schedules a sequence:advance task at a given time. Satisfied by
@@ -57,6 +60,7 @@ type Service struct {
 	limiter      RateLimiter
 	suppression  SuppressionChecker
 	customFields CustomFieldReader
+	results      ResultsStore
 }
 
 // ServiceOption configures an optional Service dependency. See the Service
@@ -83,6 +87,15 @@ func WithDomainAuth(r DomainAuthReader) ServiceOption { return func(s *Service) 
 func WithCustomFields(r CustomFieldReader) ServiceOption {
 	return func(s *Service) { s.customFields = r }
 }
+
+// WithResults wires the per-step / per-variant results aggregates.
+//
+// Like WithCustomFields and unlike the rest, an unwired reader is an ERROR
+// rather than a quiet degradation: an empty report is indistinguishable from a
+// campaign that has genuinely sent nothing, and a reporting screen that shows
+// zeros for a campaign with thousands of sends is worse than one that says it
+// could not load.
+func WithResults(r ResultsStore) ServiceOption { return func(s *Service) { s.results = r } }
 
 // WithTestSendEnqueuer wires test-send's testsend:send task enqueue.
 func WithTestSendEnqueuer(e TestSendEnqueuer) ServiceOption {

@@ -10,6 +10,7 @@ import { campaignTone, campaignLabel } from './status'
 import { LifecycleMenu, CampaignStatusButton, PauseResumeDialog } from './lifecycle-menu'
 import { usePauseResume } from './lifecycle-actions'
 import { MetricsPanel } from './metrics-panel'
+import { ResultsPanel } from './results-panel'
 import { CampaignEnrollmentsList } from './campaign-enrollments-list'
 import { SequenceEditor } from './sequence-editor'
 import { SchedulePanel } from './schedule-panel'
@@ -112,6 +113,12 @@ export function CampaignDetailPage() {
         {!isLoading && !error && (
           <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
         )}
+
+        {/* The per-step, per-variant breakdown, directly under the campaign-wide
+            rollup it decomposes: the rollup answers "is this working", this
+            answers "which step and which copy". Owns its own loading/error
+            states. */}
+        <ResultsPanel campaignId={id} />
 
         {/* Contacts + their classified replies. Owns its own loading/empty/error
             states, so it mounts regardless of the campaign-detail query. */}

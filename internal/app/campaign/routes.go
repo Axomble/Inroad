@@ -38,6 +38,11 @@ func (h *Handler) Routes(checker auth.VerifiedChecker) http.Handler {
 	r.With(auth.RequireScope(auth.ScopeCampaignsSend)).Post("/{id}/pause", h.pause)
 	r.With(auth.RequireScope(auth.ScopeCampaignsSend)).Post("/{id}/resume", h.resume)
 	r.With(read).Get("/{id}/preflight", h.preflight)
+	// Per-step, per-variant results. The CSV twin is a separate route rather
+	// than a format parameter: it is a flat table, where the JSON is nested by
+	// step and carries the winner reading.
+	r.With(read).Get("/{id}/results", h.Results)
+	r.With(read).Get("/{id}/results.csv", h.ResultsCSV)
 	r.With(auth.RequireScope(auth.ScopeCampaignsSend), auth.RequireVerified(checker)).Post("/{id}/test-send", h.testSend)
 	r.With(write).Put("/{id}/tracking", h.toggleTracking)
 	r.With(read).Get("/{id}/schedule", h.getSchedule)

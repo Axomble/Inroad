@@ -25,6 +25,8 @@ export type { SequenceStep, StepRequest } from '@/store/api'
 // A/B variant shapes come from the contract too, so the editor's draft state
 // is typed by the same definition the API validates against.
 export type { StepVariant, StepVariantRequest } from '@/store/api'
+// Per-step / per-variant reporting shapes.
+export type { CampaignResults, CampaignStepResults, CampaignResultRow } from '@/store/api'
 // The schedule shapes come from the contract too, so the editor's state is typed
 // by the same definition the API validates against.
 export type { CampaignSchedule, SendWindowDay, SendWindowInterval } from '@/store/api'
@@ -126,6 +128,10 @@ const campaignApi = api.enhanceEndpoints({
     // The two weight writes additionally invalidate the campaign's Step tag,
     // because the step row itself carries variant_weight — without it, the base
     // side of the split would keep rendering its old share after a promotion.
+    // Results are read-only and recomputed on every load; nothing else in the
+    // app invalidates them, and a stale report is worse than a slow one, so
+    // this deliberately carries no cache tag.
+    getCampaignResults: {},
     listStepVariants: {
       providesTags: (_result, _error, arg) => [{ type: 'Variant', id: arg.stepId }],
     },
@@ -206,6 +212,7 @@ export const {
   useUpdateStepVariantMutation,
   useDeleteStepVariantMutation,
   useSetStepBaseWeightMutation,
+  useGetCampaignResultsQuery,
   useGetCampaignScheduleQuery,
   useUpdateCampaignScheduleMutation,
   useGetCampaignSendersQuery,
