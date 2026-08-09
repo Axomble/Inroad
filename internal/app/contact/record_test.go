@@ -205,7 +205,7 @@ func TestComputeEngagementLastActivity(t *testing.T) {
 }
 
 func recordService(store *fakeStore) *Service {
-	return NewService(store, &fakeChecker{exists: true})
+	return NewService(store, &fakeChecker{exists: true}, &fakeFieldStore{})
 }
 
 // The cap is enforced by asking for one row beyond it and reporting the surplus,

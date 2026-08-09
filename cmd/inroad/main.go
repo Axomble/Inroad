@@ -300,7 +300,10 @@ func run() error {
 	// service) so the contact package doesn't have to import app/list —
 	// keeps the "app packages don't import each other" invariant intact.
 	contactStore := contact.NewPgStore(pool)
-	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc})
+	// Custom field definitions are a second narrow seam on the same domain
+	// (workspace-defined typed fields whose values live in contacts.custom_fields).
+	contactFieldStore := contact.NewPgFieldStore(queries)
+	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc}, contactFieldStore)
 	// Sending-domain authentication (SPF/DKIM/DMARC). Built here (not inline at
 	// its mount below) because campaign preflight's domain_auth check also
 	// reads it, through the narrow domainAuthAdapter — the domain list is
@@ -315,6 +318,9 @@ func run() error {
 	suppStore := suppression.NewStore(queries)
 	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc},
 		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
+		// The personalization_tokens preflight check needs to know which
+		// {{custom.*}} keys the workspace actually defines; contact owns them.
+		campaign.WithCustomFields(customFieldAdapter{contacts: contactSvc}),
 		// Test-send (POST /campaigns/{id}/test-send) only ENQUEUES a
 		// testsend:send task here: cmd/inroad must never decrypt a mailbox
 		// credential or dial a provider (docs/security.md invariant 1). The
@@ -854,6 +860,30 @@ func parseOwnerIDs(userID, workspaceID string) (uuid.UUID, uuid.UUID, bool) {
 		return uuid.Nil, uuid.Nil, false
 	}
 	return uid, wid, true
+}
+
+// customFieldAdapter satisfies campaign.CustomFieldReader over contact.Service,
+// so the campaign package can validate {{custom.*}} tokens without importing
+// app/contact. Same shape as domainAuthAdapter.
+//
+// Only LIVE keys are returned: an archived field still has values on existing
+// contacts, but nothing new can be given one, so a token naming it renders
+// blank for every contact imported since it was retired — which is exactly the
+// silent failure the check exists to catch.
+type customFieldAdapter struct{ contacts *contact.Service }
+
+func (a customFieldAdapter) CustomFieldKeys(ctx context.Context, ws uuid.UUID) ([]string, error) {
+	defs, err := a.contacts.ListFieldDefs(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	liveKeys := make([]string, 0, len(defs))
+	for _, d := range defs {
+		if d.Live() {
+			liveKeys = append(liveKeys, d.Key)
+		}
+	}
+	return liveKeys, nil
 }
 
 // listCheckerAdapter satisfies contact.ListChecker so the contact package

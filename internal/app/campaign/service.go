@@ -49,13 +49,14 @@ type Enqueuer interface {
 // internal/worker/testsend in the execution plane. testSendEnq only enqueues
 // that task.
 type Service struct {
-	store       Store
-	checker     Checker
-	metrics     *metricsCache
-	domainAuth  DomainAuthReader
-	testSendEnq TestSendEnqueuer
-	limiter     RateLimiter
-	suppression SuppressionChecker
+	store        Store
+	checker      Checker
+	metrics      *metricsCache
+	domainAuth   DomainAuthReader
+	testSendEnq  TestSendEnqueuer
+	limiter      RateLimiter
+	suppression  SuppressionChecker
+	customFields CustomFieldReader
 }
 
 // ServiceOption configures an optional Service dependency. See the Service
@@ -66,6 +67,22 @@ type ServiceOption func(*Service)
 // Without it, every sender domain reports as "not checked" (see
 // Service.readDomainAuth) rather than the loader failing.
 func WithDomainAuth(r DomainAuthReader) ServiceOption { return func(s *Service) { s.domainAuth = r } }
+
+// WithCustomFields wires the preflight personalization_tokens check's source of
+// known {{custom.*}} keys.
+//
+// This one is NOT nil-safe by design, and is the exception to the "optional,
+// degrades quietly" rule the other options follow. Every other missing
+// dependency degrades toward permissiveness (a domain reports "not checked", a
+// test-send skips its rate limit); an absent key set would degrade toward
+// FALSE FAILURES -- every {{custom.*}} token in the workspace would read as
+// unknown and block the launch, blaming templates that are fine. So an unwired
+// reader fails the preflight request outright (Service.readCustomFieldKeys),
+// which is loud, obviously a wiring bug, and cannot be mistaken for a verdict
+// about the campaign.
+func WithCustomFields(r CustomFieldReader) ServiceOption {
+	return func(s *Service) { s.customFields = r }
+}
 
 // WithTestSendEnqueuer wires test-send's testsend:send task enqueue.
 func WithTestSendEnqueuer(e TestSendEnqueuer) ServiceOption {

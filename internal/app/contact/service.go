@@ -27,16 +27,23 @@ type ListChecker interface {
 
 // Service depends on the Store interface (never the concrete sqlc-backed
 // struct — dependency inversion) plus a ListChecker for cross-domain
-// ownership checks.
+// ownership checks and a FieldStore for workspace-defined custom fields.
+//
+// FieldStore is a second, narrow seam rather than more methods on Store because
+// it is a distinct responsibility with distinct callers (settings CRUD, import
+// column mapping, campaign preflight). Splitting it is what lets the import
+// path be tested against a fixed set of definitions with no database.
 type Service struct {
 	store   Store
 	checker ListChecker
+	fields  FieldStore
 }
 
-// NewService constructs a Service backed by store and using checker to
-// verify list ownership before mutating imports.
-func NewService(store Store, checker ListChecker) *Service {
-	return &Service{store: store, checker: checker}
+// NewService constructs a Service backed by store, using checker to verify list
+// ownership before mutating imports and fields to resolve custom field
+// definitions and values.
+func NewService(store Store, checker ListChecker, fields FieldStore) *Service {
+	return &Service{store: store, checker: checker, fields: fields}
 }
 
 // ImportCSV verifies the list belongs to the workspace, then imports rows.

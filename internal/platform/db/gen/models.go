@@ -13,6 +13,50 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ContactFieldType string
+
+const (
+	ContactFieldTypeText   ContactFieldType = "text"
+	ContactFieldTypeNumber ContactFieldType = "number"
+	ContactFieldTypeDate   ContactFieldType = "date"
+	ContactFieldTypeSelect ContactFieldType = "select"
+)
+
+func (e *ContactFieldType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ContactFieldType(s)
+	case string:
+		*e = ContactFieldType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ContactFieldType: %T", src)
+	}
+	return nil
+}
+
+type NullContactFieldType struct {
+	ContactFieldType ContactFieldType `json:"contact_field_type"`
+	Valid            bool             `json:"valid"` // Valid is true if ContactFieldType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullContactFieldType) Scan(value interface{}) error {
+	if value == nil {
+		ns.ContactFieldType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ContactFieldType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullContactFieldType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ContactFieldType), nil
+}
+
 type InviteStatus string
 
 const (
@@ -352,6 +396,17 @@ type ContactEmail struct {
 	Email       string             `json:"email"`
 	IsPrimary   bool               `json:"is_primary"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type ContactFieldDef struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Key         string             `json:"key"`
+	Label       string             `json:"label"`
+	FieldType   ContactFieldType   `json:"field_type"`
+	Options     []string           `json:"options"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt  pgtype.Timestamptz `json:"archived_at"`
 }
 
 type CrmMessage struct {

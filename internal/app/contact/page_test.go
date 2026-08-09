@@ -41,7 +41,7 @@ func rows(n int) []SearchRow {
 }
 
 func newSvc(store *fakeStore) *Service {
-	return NewService(store, &fakeChecker{exists: true})
+	return NewService(store, &fakeChecker{exists: true}, &fakeFieldStore{})
 }
 
 func TestSearchRejectsShortQuery(t *testing.T) {
@@ -131,7 +131,7 @@ func TestSearchRejectsBadCursor(t *testing.T) {
 }
 
 func TestSearchUnknownListIsNotFound(t *testing.T) {
-	svc := NewService(&fakeStore{}, &fakeChecker{exists: false})
+	svc := NewService(&fakeStore{}, &fakeChecker{exists: false}, &fakeFieldStore{})
 	_, err := svc.Search(context.Background(), testWS, SearchRequest{ListID: &testList})
 	if !errors.Is(err, ErrListNotFound) {
 		t.Fatalf("err = %v, want ErrListNotFound", err)
@@ -142,7 +142,7 @@ func TestSearchUnknownListIsNotFound(t *testing.T) {
 // reach the store and produce a (correctly empty, but misleading) page.
 func TestSearchChecksListBeforeReading(t *testing.T) {
 	store := &fakeStore{}
-	svc := NewService(store, &fakeChecker{exists: false})
+	svc := NewService(store, &fakeChecker{exists: false}, &fakeFieldStore{})
 	if _, err := svc.Search(context.Background(), testWS, SearchRequest{ListID: &testList}); err == nil {
 		t.Fatal("expected ErrListNotFound")
 	}
@@ -154,7 +154,7 @@ func TestSearchChecksListBeforeReading(t *testing.T) {
 func TestSearchNoListMeansWholeWorkspace(t *testing.T) {
 	store := &fakeStore{}
 	checker := &fakeChecker{exists: true}
-	if _, err := NewService(store, checker).Search(context.Background(), testWS, SearchRequest{}); err != nil {
+	if _, err := NewService(store, checker, &fakeFieldStore{}).Search(context.Background(), testWS, SearchRequest{}); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if store.lastSearch.Filter.ListID != nil {
@@ -295,7 +295,7 @@ func TestSearchTotalCapping(t *testing.T) {
 // total for a different search than the rows it is showing.
 func TestSearchCountUsesTheSameFilter(t *testing.T) {
 	store := &fakeStore{}
-	svc := NewService(store, &fakeChecker{exists: true})
+	svc := NewService(store, &fakeChecker{exists: true}, &fakeFieldStore{})
 	if _, err := svc.Search(context.Background(), testWS, SearchRequest{Q: "Acme", ListID: &testList}); err != nil {
 		t.Fatalf("Search: %v", err)
 	}

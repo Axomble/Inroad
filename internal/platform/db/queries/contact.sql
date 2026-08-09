@@ -1,9 +1,29 @@
 -- name: UpsertContact :one
-INSERT INTO contacts (workspace_id, email, first_name, last_name, company)
-VALUES ($1, $2, $3, $4, $5)
+-- custom_fields is MERGED (||), never replaced. An import maps only the columns
+-- present in one CSV, so replacing would make every import silently delete the
+-- custom values that file happened not to carry -- a second list upload wiping
+-- the enrichment from the first. Merge means an import can only add or overwrite
+-- the keys it actually supplied; the caller omits empty cells from the object so
+-- a blank column cannot overwrite a real value with "".
+INSERT INTO contacts (workspace_id, email, first_name, last_name, company, custom_fields)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (workspace_id, lower(email))
-DO UPDATE SET first_name = EXCLUDED.first_name
+DO UPDATE SET first_name = EXCLUDED.first_name,
+              custom_fields = contacts.custom_fields || EXCLUDED.custom_fields
 RETURNING id, (xmax = 0)::boolean AS inserted;
+
+-- name: GetContactCustomFields :one
+-- Zero rows means the contact is not in this workspace, which the caller reports
+-- as 404 -- the workspace pin is what makes that safe to say.
+SELECT custom_fields FROM contacts WHERE workspace_id = $1 AND id = $2;
+
+-- name: SetContactCustomFields :execrows
+-- Whole-object replacement, unlike the import path's merge: this serves an edit
+-- form that submitted the contact's complete custom field set, so a key absent
+-- from the payload is a deliberate clear rather than an unmentioned column. The
+-- service is what decides which of the two shapes it has; the SQL does not guess.
+UPDATE contacts SET custom_fields = $3
+WHERE workspace_id = $1 AND id = $2;
 -- name: AddListMember :exec
 INSERT INTO list_members (list_id, contact_id) VALUES ($1, $2)
 ON CONFLICT (list_id, contact_id) DO NOTHING;

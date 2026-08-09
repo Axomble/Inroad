@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ const (
 	CheckTracking        = "tracking"
 	CheckDailyLimit      = "daily_limit"
 	CheckWarmupHealth    = "warmup_health"
+	CheckTokens          = "personalization_tokens"
 )
 
 // Preflight check severities.
@@ -50,9 +52,14 @@ type PreflightReport struct {
 }
 
 // PreflightStep is the slice of a sequence step ComputePreflight needs: just
-// enough to detect an empty body, decoupled from the persistence model so the
-// pure function's tests build these by hand.
+// enough to detect an empty body and scan its personalization tokens,
+// decoupled from the persistence model so the pure function's tests build
+// these by hand.
 type PreflightStep struct {
+	// Subject is scanned for tokens but deliberately NOT counted by the
+	// empty-body check: a follow-up step with no subject threads onto the
+	// previous message (see replySubject), so an empty one is normal.
+	Subject  string
 	BodyText string
 	BodyHTML string
 }
@@ -67,6 +74,19 @@ type DomainAuthVerdict struct {
 	Checked    bool
 	SPFFound   bool
 	DMARCFound bool
+}
+
+// CustomFieldReader reads the workspace's live custom field keys. Custom fields
+// are owned by the contact app domain and app/* packages never import each
+// other (CLAUDE.md), so this consumer-defined interface is satisfied at wiring
+// time in cmd/inroad by an adapter over contact.Service -- the same shape as
+// DomainAuthReader and Checker.
+type CustomFieldReader interface {
+	// CustomFieldKeys returns only LIVE keys. An archived field's key must read
+	// as unknown here: its values still exist on contacts, but no new contact
+	// can be given one, so a token referring to it renders blank for everyone
+	// imported since it was retired.
+	CustomFieldKeys(ctx context.Context, ws uuid.UUID) ([]string, error)
 }
 
 // DomainAuthReader reads sending-domain SPF/DMARC verdicts for the workspace.
@@ -91,6 +111,9 @@ type PreflightInput struct {
 	AudienceCount   int64
 	DomainAuth      map[string]DomainAuthVerdict
 	TrackingEnabled bool
+	// CustomFieldKeys is the workspace's live custom field keys, against which
+	// every {{custom.*}} token in the sequence is resolved.
+	CustomFieldKeys []string
 	// DailyLimit is the campaign-wide cap on sends per UTC day; nil means no
 	// campaign-wide limit is set.
 	DailyLimit *int
@@ -104,6 +127,7 @@ func ComputePreflight(in PreflightInput) PreflightReport {
 	checks := []PreflightCheck{
 		checkSequenceSteps(in),
 		checkEmptyBodies(in),
+		checkTokens(in),
 		checkScheduleWindows(in),
 		checkSenderPool(in),
 		checkAudience(in),
@@ -158,6 +182,36 @@ func checkEmptyBodies(in PreflightInput) PreflightCheck {
 	return PreflightCheck{
 		ID: CheckEmptyBodies, Severity: SeverityPass,
 		Title: "All steps have a body", Detail: "Every step has body content.",
+	}
+}
+
+// checkTokens FAILS a sequence containing a personalization token nothing will
+// substitute.
+//
+// Fail rather than warn, which is a deliberately harsher verdict than the
+// neighbouring content checks: an empty body sends a blank email the operator
+// can see is blank the moment they look, whereas a bad token produces an email
+// that looks fine in the editor and arrives reading "Hi {{firstname}}" or
+// "Hi ,". There is also no legitimate reason to launch with one -- a token
+// nothing resolves was a typo or a field that has since been archived, never an
+// intent -- so there is nothing to weigh against blocking.
+func checkTokens(in PreflightInput) PreflightCheck {
+	templates := make([]string, 0, len(in.Steps)*3)
+	for _, st := range in.Steps {
+		templates = append(templates, st.Subject, st.BodyText, st.BodyHTML)
+	}
+	unknown := UnknownTokens(in.CustomFieldKeys, templates...)
+	if len(unknown) > 0 {
+		return PreflightCheck{
+			ID: CheckTokens, Severity: SeverityFail,
+			Title:  "Unknown personalization tokens",
+			Detail: fmt.Sprintf("%d placeholder(s) resolve to nothing: %s.", len(unknown), strings.Join(unknown, ", ")),
+			Remedy: "Fix the spelling, or define the custom field these tokens refer to under Settings → Custom fields.",
+		}
+	}
+	return PreflightCheck{
+		ID: CheckTokens, Severity: SeverityPass,
+		Title: "Personalization tokens resolve", Detail: "Every placeholder maps to a contact field.",
 	}
 }
 
@@ -397,11 +451,30 @@ func (s *Service) Preflight(ctx context.Context, ws, campaignID uuid.UUID) (Pref
 	if err != nil {
 		return PreflightReport{}, err
 	}
+	customKeys, err := s.readCustomFieldKeys(ctx, ws)
+	if err != nil {
+		return PreflightReport{}, err
+	}
 	return ComputePreflight(PreflightInput{
 		Steps: toPreflightSteps(steps), Windows: windows, Senders: senders,
-		AudienceCount: audience, DomainAuth: domainAuth,
+		AudienceCount: audience, DomainAuth: domainAuth, CustomFieldKeys: customKeys,
 		TrackingEnabled: c.TrackingEnabled, DailyLimit: optionalInt(c.DailyLimit),
 	}), nil
+}
+
+// readCustomFieldKeys returns the workspace's live custom field keys.
+//
+// Unlike readDomainAuth, an unwired reader is NOT degraded to an empty result
+// here -- it is an error. An empty key set makes every {{custom.*}} token in
+// the sequence look unknown, so degrading would turn a wiring mistake into a
+// campaign that cannot be launched, with a message blaming the operator's
+// templates. Failing the preflight request says the truth: this check could not
+// run.
+func (s *Service) readCustomFieldKeys(ctx context.Context, ws uuid.UUID) ([]string, error) {
+	if s.customFields == nil {
+		return nil, errors.New("preflight: no custom field reader wired")
+	}
+	return s.customFields.CustomFieldKeys(ctx, ws)
 }
 
 // readDomainAuth returns the workspace's domain-auth verdicts, or an empty
@@ -419,7 +492,7 @@ func (s *Service) readDomainAuth(ctx context.Context, ws uuid.UUID) (map[string]
 func toPreflightSteps(steps []gen.SequenceStep) []PreflightStep {
 	out := make([]PreflightStep, len(steps))
 	for i, st := range steps {
-		out[i] = PreflightStep{BodyText: st.BodyText, BodyHTML: st.BodyHtml}
+		out[i] = PreflightStep{Subject: st.Subject, BodyText: st.BodyText, BodyHTML: st.BodyHtml}
 	}
 	return out
 }
