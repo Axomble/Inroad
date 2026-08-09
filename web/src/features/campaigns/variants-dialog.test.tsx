@@ -123,7 +123,14 @@ test('warns loudly when every arm is retired', async () => {
 // thing, and a blank body would ship an empty email to half the audience.
 test('adding a variant seeds it from the step’s copy', async () => {
   render()
-  fireEvent.click(await screen.findByRole('button', { name: /add variant/i }))
+
+  // The button EXISTS immediately, rendered disabled while the variant list is
+  // in flight, so findByRole resolves before it is clickable and a click would
+  // silently do nothing. Waiting for enabled is the difference between this
+  // test passing on a fast machine and passing everywhere.
+  const addButton = await screen.findByRole('button', { name: /add variant/i })
+  await waitFor(() => expect(addButton).toBeEnabled())
+  fireEvent.click(addButton)
 
   await waitFor(() => expect(fetchMock.mock.calls.some(([i, init]) => methodOf(i, init) === 'POST')).toBe(true))
   expect(await lastBody(fetchMock, 'POST')).toMatchObject({
