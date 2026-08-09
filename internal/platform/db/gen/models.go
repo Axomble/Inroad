@@ -826,6 +826,7 @@ type Send struct {
 	StepOrder        int32              `json:"step_order"`
 	ReferencesHeader string             `json:"references_header"`
 	ClaimedAt        pgtype.Timestamptz `json:"claimed_at"`
+	VariantID        pgtype.UUID        `json:"variant_id"`
 }
 
 type SendingDomain struct {
@@ -866,16 +867,30 @@ type SequenceEnrollment struct {
 }
 
 type SequenceStep struct {
-	ID           uuid.UUID          `json:"id"`
-	WorkspaceID  uuid.UUID          `json:"workspace_id"`
-	CampaignID   uuid.UUID          `json:"campaign_id"`
-	StepOrder    int32              `json:"step_order"`
-	DelaySeconds int32              `json:"delay_seconds"`
-	Subject      string             `json:"subject"`
-	BodyText     string             `json:"body_text"`
-	BodyHtml     string             `json:"body_html"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID            uuid.UUID          `json:"id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	CampaignID    uuid.UUID          `json:"campaign_id"`
+	StepOrder     int32              `json:"step_order"`
+	DelaySeconds  int32              `json:"delay_seconds"`
+	Subject       string             `json:"subject"`
+	BodyText      string             `json:"body_text"`
+	BodyHtml      string             `json:"body_html"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	VariantWeight int32              `json:"variant_weight"`
+}
+
+type SequenceStepVariant struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	StepID      uuid.UUID          `json:"step_id"`
+	Label       string             `json:"label"`
+	Weight      int32              `json:"weight"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	BodyHtml    string             `json:"body_html"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Session struct {

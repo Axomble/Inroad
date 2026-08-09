@@ -114,3 +114,80 @@ func TestComputePreflightScansSubjectsForTokens(t *testing.T) {
 		t.Errorf("severity = %q, want pass once the field is defined", c.Severity)
 	}
 }
+
+// --- variants ------------------------------------------------------------
+//
+// A variant is a real email that real prospects receive. Every check that reads
+// copy has to read variants too, or a step that looks fine ships broken
+// alternatives to whatever share of the audience the split sends them.
+
+func TestComputePreflightScansVariantBodiesForTokens(t *testing.T) {
+	in := healthyInput()
+	in.Steps = []campaign.PreflightStep{{
+		Subject: "hi", BodyText: "Hello {{first_name}}", BaseWeight: 1,
+		Variants: []campaign.PreflightVariant{
+			{Label: "B", Weight: 1, BodyText: "Hello {{firstname}}"},
+		},
+	}}
+	c := findCheck(t, campaign.ComputePreflight(in), campaign.CheckTokens)
+	if c.Severity != campaign.SeverityFail {
+		t.Fatalf("severity = %q, want fail for a bad token in a variant", c.Severity)
+	}
+	if !strings.Contains(c.Detail, "{{firstname}}") {
+		t.Errorf("detail = %q, want it to name the variant's token", c.Detail)
+	}
+}
+
+func TestComputePreflightWarnsAboutAnEmptyVariantBody(t *testing.T) {
+	in := healthyInput()
+	in.Steps = []campaign.PreflightStep{{
+		BodyText: "hi", BaseWeight: 1,
+		Variants: []campaign.PreflightVariant{{Label: "B", Weight: 1}},
+	}}
+	if c := findCheck(t, campaign.ComputePreflight(in), campaign.CheckEmptyBodies); c.Severity != campaign.SeverityWarn {
+		t.Errorf("severity = %q, want warn for an empty variant body", c.Severity)
+	}
+}
+
+// A retired arm cannot be selected, so warning about its body would be noise
+// about an email nobody receives.
+func TestComputePreflightIgnoresTheBodyOfAZeroWeightVariant(t *testing.T) {
+	in := healthyInput()
+	in.Steps = []campaign.PreflightStep{{
+		BodyText: "hi", BaseWeight: 1,
+		Variants: []campaign.PreflightVariant{{Label: "B", Weight: 0}},
+	}}
+	if c := findCheck(t, campaign.ComputePreflight(in), campaign.CheckEmptyBodies); c.Severity != campaign.SeverityPass {
+		t.Errorf("severity = %q, want pass — a retired arm's body is irrelevant", c.Severity)
+	}
+}
+
+func TestComputePreflightFailsAStepWithEveryWeightAtZero(t *testing.T) {
+	in := healthyInput()
+	in.Steps = []campaign.PreflightStep{{
+		BodyText: "hi", BaseWeight: 0,
+		Variants: []campaign.PreflightVariant{{Label: "B", Weight: 0, BodyText: "hey"}},
+	}}
+	report := campaign.ComputePreflight(in)
+	if report.Ready {
+		t.Error("ready = true, want false: this step cannot send anything")
+	}
+	if c := findCheck(t, report, campaign.CheckVariantWeights); c.Severity != campaign.SeverityFail {
+		t.Errorf("severity = %q, want fail", c.Severity)
+	}
+}
+
+// A step with no variants at all must never be judged by its base weight: the
+// send path returns the base copy immediately when there are no variant rows,
+// so a stray 0 there is not "retired".
+func TestComputePreflightTreatsAVariantlessStepAsSendable(t *testing.T) {
+	in := healthyInput()
+	in.Steps = []campaign.PreflightStep{{BodyText: "hi", BaseWeight: 0}}
+	report := campaign.ComputePreflight(in)
+	if c := findCheck(t, report, campaign.CheckVariantWeights); c.Severity != campaign.SeverityPass {
+		t.Errorf("variant_weights severity = %q, want pass", c.Severity)
+	}
+	if c := findCheck(t, report, campaign.CheckEmptyBodies); c.Severity != campaign.SeverityPass {
+		t.Errorf("empty_bodies severity = %q, want pass", c.Severity)
+	}
+}

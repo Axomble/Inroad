@@ -26,6 +26,21 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(write).Post("/{id}/steps/reorder", h.Reorder)
 	r.With(write).Put("/{id}/steps/{stepId}", h.Update)
 	r.With(write).Delete("/{id}/steps/{stepId}", h.Delete)
+
+	// A/B variants. Nested under the step they belong to: a variant has no
+	// meaning apart from its step, and the nesting is what makes the step id
+	// available for the ownership check without trusting the body.
+	//
+	// Variant writes take campaigns:write like every other step edit. They are
+	// deliberately NOT gated on the campaign being draft: adding or reweighting
+	// an arm changes what future sends contain, which is the same class of change
+	// as editing a step's body (already allowed live). Requiring a pause to start
+	// an A/B test would mean pausing to learn anything.
+	r.With(read).Get("/{id}/steps/{stepId}/variants", h.ListVariants)
+	r.With(write).Post("/{id}/steps/{stepId}/variants", h.CreateVariant)
+	r.With(write).Put("/{id}/steps/{stepId}/base-weight", h.SetBaseWeight)
+	r.With(write).Put("/{id}/steps/{stepId}/variants/{variantId}", h.UpdateVariant)
+	r.With(write).Delete("/{id}/steps/{stepId}/variants/{variantId}", h.DeleteVariant)
 }
 
 type stepResponse struct {

@@ -457,7 +457,17 @@ type StepSendJob struct {
 	// embed it in tracking tokens at MIME-build time; MarkStepSent writes it as
 	// the sends row's id, so the events recorded against it (via the pixel/
 	// click endpoints) line up with the eventual send row.
-	SendID           string
+	SendID string
+	// VariantID is the A/B variant whose copy Subject/BodyText/BodyHTML carry,
+	// or "" when the step's own base content was selected (see migration 000053:
+	// a step IS variant A). It is written to sends.variant_id at claim time so
+	// results can be attributed per variant.
+	//
+	// Selection happens in the CONTROL plane, alongside the step content it
+	// chooses, and travels here already decided. The worker must not re-select:
+	// it has no reason to reach the variant rows, and a second roll could
+	// disagree with the copy already in this job.
+	VariantID        string
 	CurrentStep      int
 	StepOrder        int
 	NextDelaySeconds int

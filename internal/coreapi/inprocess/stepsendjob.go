@@ -11,10 +11,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/abtest"
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/unsub"
@@ -317,6 +319,14 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		}
 	}
 
+	// Which copy this contact gets. Resolved here, in the control plane, next to
+	// the step it belongs to — the execution plane receives a decided subject and
+	// body and never sees the alternatives.
+	copyFor, variantID, err := c.selectVariant(ctx, ws, enrollmentID, step)
+	if err != nil {
+		return coreapi.StepSendJob{}, err
+	}
+
 	// Is there a step after this one? Its existence decides last-step; its delay
 	// is the cadence gap to the following send. One query answers both.
 	after, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
@@ -334,6 +344,12 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	// Thread subject is only needed to build "Re: <step-1 subject>" for a
 	// later step that left its own subject empty (spec A5). Step 1 (deleted)
 	// missing → leave empty, replySubject then yields a bare "Re: ".
+	//
+	// It reads step 1's BASE subject, deliberately not whichever variant this
+	// contact drew at step 1: this only ever produces "Re: <subject>", the thread
+	// it refers to is identified by In-Reply-To/References rather than by the
+	// text, and resolving the variant would mean re-running selection for a step
+	// that may have been edited since. One stable "Re:" line beats a faithful one.
 	threadSubject := ""
 	if nextOrder > 1 {
 		if s1, serr := c.q.GetStepByOrder(ctx, gen.GetStepByOrderParams{
@@ -416,10 +432,11 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 			FirstName: b.FirstName, LastName: b.LastName, Email: b.ToEmail,
 			Company: b.Company, Custom: decodeCustom(b.CustomFields),
 		},
-		Subject: replySubject(nextOrder, step.Subject, threadSubject), ThreadSubject: threadSubject,
-		BodyText: step.BodyText, BodyHTML: step.BodyHtml, TrackingEnabled: b.TrackingEnabled,
-		Schedule: sched,
-		UnsubURL: c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
+		Subject: replySubject(nextOrder, copyFor.Subject, threadSubject), ThreadSubject: threadSubject,
+		BodyText: copyFor.BodyText, BodyHTML: copyFor.BodyHTML, VariantID: variantID,
+		TrackingEnabled: b.TrackingEnabled,
+		Schedule:        sched,
+		UnsubURL:        c.publicURL + "/u/" + token, InReplyTo: inReplyTo, References: references,
 		FromEmail: sender.fromEmail, FromName: sender.fromName,
 		Provider: sender.provider, AccessToken: accessToken,
 		SMTPHost: sender.smtpHost, SMTPPort: int(sender.smtpPort),
@@ -484,6 +501,7 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 		ID:          sendID,
 		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
 		ToEmail: job.ToEmail, StepOrder: int32(job.StepOrder), ReferencesHeader: job.References,
+		VariantID:    variantUUID(job.VariantID),
 		LeaseSeconds: claimLeaseSeconds,
 	}); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -754,4 +772,85 @@ func (c client) ListDueEnrollments(ctx context.Context) ([]coreapi.DueEnrollment
 		out[i] = coreapi.DueEnrollment{EnrollmentID: r.ID.String(), WorkspaceID: r.WorkspaceID.String()}
 	}
 	return out, nil
+}
+
+// stepCopy is the subject and bodies one send will actually use — the step's own
+// content, or a variant's.
+type stepCopy struct {
+	Subject  string
+	BodyText string
+	BodyHTML string
+}
+
+// selectVariant decides which copy this enrollment receives for this step, and
+// returns the variant id to attribute the send to ("" for the step's base
+// content — see migration 000053).
+//
+// The candidate list always leads with the base copy and is otherwise ordered by
+// variant id (ListStepVariants orders by id for exactly this reason), because
+// abtest.Select's weighting is positional: the same list in a different order
+// would put a retried send in a different interval, which is the one thing the
+// deterministic selection exists to prevent.
+//
+// A step with no variant rows and the default weight resolves to the base copy
+// without the extra query mattering, which is every step in every campaign that
+// has never used an A/B test.
+func (c client) selectVariant(ctx context.Context, ws uuid.UUID, enrollmentID string, step gen.SequenceStep) (stepCopy, string, error) {
+	base := stepCopy{Subject: step.Subject, BodyText: step.BodyText, BodyHTML: step.BodyHtml}
+
+	rows, err := c.q.ListStepVariants(ctx, gen.ListStepVariantsParams{StepID: step.ID, WorkspaceID: ws})
+	if err != nil {
+		return stepCopy{}, "", fmt.Errorf("list step variants: %w", err)
+	}
+	if len(rows) == 0 {
+		// No alternatives exist. The base copy sends regardless of its weight:
+		// variant_weight only describes a SPLIT, and there is nothing to split
+		// against. Refusing here would let a stray 0 silently stop a campaign
+		// that has no A/B test at all.
+		return base, "", nil
+	}
+
+	candidates := make([]abtest.Variant, 0, len(rows)+1)
+	candidates = append(candidates, abtest.Variant{ID: "", Weight: int(step.VariantWeight)})
+	for _, r := range rows {
+		candidates = append(candidates, abtest.Variant{ID: r.ID.String(), Weight: int(r.Weight)})
+	}
+
+	picked, ok := abtest.Select(enrollmentID, step.ID.String(), candidates)
+	if !ok {
+		// Every candidate is weight 0: the operator has retired the base copy and
+		// every variant. There is no defensible copy to send, so this fails loudly
+		// rather than falling back to the base content the weights explicitly
+		// retired. Campaign preflight refuses to launch in this state; this is the
+		// backstop for a campaign already running when the weights changed.
+		return stepCopy{}, "", fmt.Errorf("step %s: every variant has weight 0, nothing can send", step.ID)
+	}
+	if picked.ID == "" {
+		return base, "", nil
+	}
+	for _, r := range rows {
+		if r.ID.String() == picked.ID {
+			return stepCopy{Subject: r.Subject, BodyText: r.BodyText, BodyHTML: r.BodyHtml}, picked.ID, nil
+		}
+	}
+	// Unreachable: picked.ID came from this same list.
+	return base, "", nil
+}
+
+// variantUUID converts the job's variant id into the nullable column value.
+// An empty string is the step's own base content, which is stored as SQL NULL
+// (migration 000053) — so "no variant" and "an unparseable variant" deliberately
+// collapse to the same NULL rather than failing the claim: the id was produced
+// by selectVariant from a row this process just read, so an invalid value is not
+// a real state, and refusing to send over it would be worse than losing one
+// row's attribution.
+func variantUUID(id string) pgtype.UUID {
+	if id == "" {
+		return pgtype.UUID{}
+	}
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return pgtype.UUID{Bytes: parsed, Valid: true}
 }

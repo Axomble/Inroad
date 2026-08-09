@@ -58,7 +58,7 @@ func TestComputePreflightHealthyInputIsReadyAndEveryCheckPasses(t *testing.T) {
 	ids := []string{
 		campaign.CheckSequenceSteps, campaign.CheckEmptyBodies, campaign.CheckScheduleWindows,
 		campaign.CheckSenderPool, campaign.CheckAudience, campaign.CheckDomainAuth,
-		campaign.CheckTracking, campaign.CheckDailyLimit, campaign.CheckWarmupHealth, campaign.CheckTokens,
+		campaign.CheckTracking, campaign.CheckDailyLimit, campaign.CheckWarmupHealth, campaign.CheckTokens, campaign.CheckVariantWeights,
 	}
 	if len(report.Checks) != len(ids) {
 		t.Fatalf("checks = %d, want %d: %+v", len(report.Checks), len(ids), report.Checks)
@@ -363,6 +363,8 @@ type fakeCampaignStore struct {
 	steps   []gen.SequenceStep
 	windows []campaign.SendWindow
 
+	stepVariants map[uuid.UUID][]campaign.PreflightVariant
+
 	senders     []campaign.Sender
 	sendersErr  error
 	fallback    campaign.Sender
@@ -383,6 +385,12 @@ func (f *fakeCampaignStore) Get(_ context.Context, ws, id uuid.UUID) (gen.Campai
 }
 func (f *fakeCampaignStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return f.steps, f.stepsErr
+}
+
+// stepVariants is nil in every test that is not about A/B variants -- a campaign
+// with no variants at all, which is how the vast majority of campaigns run.
+func (f *fakeCampaignStore) ListStepVariants(context.Context, uuid.UUID, uuid.UUID) (map[uuid.UUID][]campaign.PreflightVariant, error) {
+	return f.stepVariants, nil
 }
 func (f *fakeCampaignStore) ListWindows(context.Context, uuid.UUID, uuid.UUID) ([]campaign.SendWindow, error) {
 	return f.windows, f.windowsErr
