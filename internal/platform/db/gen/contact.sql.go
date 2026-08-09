@@ -474,7 +474,7 @@ func (q *Queries) SetContactCustomFields(ctx context.Context, arg SetContactCust
 
 const upsertContact = `-- name: UpsertContact :one
 INSERT INTO contacts (workspace_id, email, first_name, last_name, company, custom_fields)
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, COALESCE($6::jsonb, '{}'::jsonb))
 ON CONFLICT (workspace_id, lower(email))
 DO UPDATE SET first_name = EXCLUDED.first_name,
               custom_fields = contacts.custom_fields || EXCLUDED.custom_fields
@@ -501,6 +501,22 @@ type UpsertContactRow struct {
 // the enrichment from the first. Merge means an import can only add or overwrite
 // the keys it actually supplied; the caller omits empty cells from the object so
 // a blank column cannot overwrite a real value with "".
+//
+// COALESCE, not a bare $6, and not the column's DEFAULT. contacts.custom_fields
+// is NOT NULL DEFAULT '{}', but a DEFAULT only applies when the column is OMITTED
+// from the INSERT -- naming it and binding a Go nil []byte sends an explicit SQL
+// NULL, which the default does not rescue and the NOT NULL constraint rejects.
+//
+// That is not a hypothetical: adding this parameter broke every caller that had
+// no custom fields to write, which is most of them (the agent's contact tool and
+// ~20 integration-test helpers all build gen.UpsertContactParams by hand). The
+// normalisation belongs HERE rather than in one app-layer store, because the
+// query is what every caller shares -- and a guard in one wrapper is exactly how
+// the other twenty were missed.
+//
+// The parameter is NAMED and CAST rather than left as a bare $6: sqlc cannot
+// infer a type through COALESCE, and silently generates `interface{}` for it —
+// which still compiles, so the loss only shows up as a runtime encode error.
 func (q *Queries) UpsertContact(ctx context.Context, arg UpsertContactParams) (UpsertContactRow, error) {
 	row := q.db.QueryRow(ctx, upsertContact,
 		arg.WorkspaceID,

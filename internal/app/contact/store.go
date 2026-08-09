@@ -118,17 +118,14 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 }
 
 func (s *PgStore) Upsert(ctx context.Context, ws uuid.UUID, in UpsertInput) (uuid.UUID, bool, error) {
-	// contacts.custom_fields is NOT NULL DEFAULT '{}', and a nil []byte binds as
-	// SQL NULL rather than as the default — so a caller that simply has no
-	// custom values (the agent's contact tool, any pre-existing caller) would
-	// hit a not-null violation. Normalising here keeps that out of every caller.
-	custom := in.CustomFields
-	if len(custom) == 0 {
-		custom = []byte(`{}`)
-	}
+	// A nil CustomFields is normalised to '{}' by the query itself (COALESCE in
+	// UpsertContact), not here. It was guarded here first, which fixed exactly
+	// this one caller and left every other one — the agent's contact tool and
+	// the integration-test helpers — writing an explicit NULL into a NOT NULL
+	// column. The fix belongs where all of them meet.
 	row, err := s.q.UpsertContact(ctx, gen.UpsertContactParams{
 		WorkspaceID: ws, Email: in.Email, FirstName: in.FirstName, LastName: in.LastName,
-		Company: in.Company, CustomFields: custom,
+		Company: in.Company, CustomFields: in.CustomFields,
 	})
 	if err != nil {
 		return uuid.Nil, false, err
