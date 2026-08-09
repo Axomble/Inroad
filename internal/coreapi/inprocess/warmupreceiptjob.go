@@ -144,7 +144,7 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	qtx := c.q.WithTx(tx)
 
 	row, err := qtx.UpsertWarmupReceipt(ctx, gen.UpsertWarmupReceiptParams{
-		WorkspaceID: ws, WarmupSendID: sendUUID, RecipientMailbox: recipient, Placement: in.Placement,
+		WorkspaceID: ws, WarmupSendID: sendID, RecipientMailbox: recipient, Placement: in.Placement,
 		SourceFolder: in.SourceFolder, MessageID: in.MessageID,
 	})
 	if err != nil {
@@ -162,7 +162,20 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		})
 		if gerr != nil {
 			if errors.Is(gerr, pgx.ErrNoRows) {
-				return coreapi.WarmupEngagePlan{}, coreapi.ErrCrossTenant
+				_, perr := c.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{
+					MailboxID: recipient, WorkspaceID: ws,
+				})
+				if perr == nil {
+					_ = c.q.RecordWarmupTokenFailureObservation(ctx, gen.RecordWarmupTokenFailureObservationParams{
+						WorkspaceID: ws, RecipientMailbox: recipient,
+						ReasonCode: "receipt_binding_mismatch", Fingerprint: "binding:" + sendID.String(),
+					})
+					return coreapi.WarmupEngagePlan{}, nil
+				}
+				if errors.Is(perr, pgx.ErrNoRows) {
+					return coreapi.WarmupEngagePlan{}, coreapi.ErrCrossTenant
+				}
+				return coreapi.WarmupEngagePlan{}, perr
 			}
 			return coreapi.WarmupEngagePlan{}, gerr
 		}
@@ -222,6 +235,12 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	}
 	if err := qtx.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{
 		WorkspaceID: ws, WarmupSendID: sendID, Placement: in.Placement,
+	}); err != nil {
+		return coreapi.WarmupEngagePlan{}, err
+	}
+	if err := qtx.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+		WorkspaceID: ws, WarmupSendID: sendID, RecipientMailbox: recipient,
+		ReceiptID: row.ID, Placement: in.Placement, ObservedAt: row.ReceivedAt,
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}
@@ -459,33 +478,32 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 	now := c.now().UTC()
 	var errs []error
 	for _, r := range rows {
-		// spamRate is "of MY sent warmup mail, the fraction that landed in spam" —
-		// spam / (inbox + spam), both SENDER-attributed (spec §4/§8). inbox+spam == 0
-		// (no recent sends observed) yields rate 0 → healthy.
-		sent := r.Inbox + r.Spam
-		var spamRate float64
-		if sent > 0 {
-			spamRate = float64(r.Spam) / float64(sent)
-		}
-		// Bounce rate and invalid-token count have no persistence in the v1 schema,
-		// so they are 0 here (documented gap); spam-placement rate is the only live
-		// signal. HealthState escalates immediately and recovers one level per clean
-		// window.
-		state, reason := warmup.HealthState(spamRate, 0, 0, r.HealthState)
+		// Placement is sender-attributed. Missing placement remains zero counts
+		// here and is mapped to unknown by the minimum-sample policy below.
+		decision := warmup.EvaluateHealth(warmup.HealthSignals{
+			Current: r.HealthState, Inbox: int(r.Inbox), Spam: int(r.Spam),
+			BounceSamples: int(r.BounceSamples), Bounces: int(r.Bounces),
+			ComplaintSamples: int(r.ComplaintSamples), Complaints: int(r.Complaints),
+			InvalidTokens: int(r.InvalidTokens),
+		})
 		// Timed-block floor (spec §8): an escalation to a worse state applies
 		// immediately, but a recovery (step down) is held back while paused_until is
 		// still in the future — so recovery can't bypass the 72h/24h dwell by walking
 		// paused→throttled→watch→healthy on consecutive 5-minute sweeps.
-		if !warmup.ShouldApplyTransition(r.HealthState, state, r.PausedUntil.Time, now) {
+		if !warmup.ShouldApplyTransition(r.HealthState, decision.State, r.PausedUntil.Time, now) {
 			continue
 		}
-		if err := c.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
-			MailboxID:    r.MailboxID,
-			WorkspaceID:  r.WorkspaceID,
-			HealthState:  state,
-			HealthReason: reason,
-			PausedUntil:  warmupPausedUntil(state, now),
-		}); err != nil {
+		_, err := c.q.ApplyWarmupHealthTransition(ctx, gen.ApplyWarmupHealthTransitionParams{
+			MailboxID: r.MailboxID, WorkspaceID: r.WorkspaceID,
+			FromState: r.HealthState, ToState: decision.State,
+			ReasonCode: decision.ReasonCode, Reason: decision.Reason,
+			PausedUntil:      warmupPausedUntil(decision.State, now),
+			PlacementSamples: int32(decision.PlacementSamples), SpamRate: float32(decision.SpamRate),
+			BounceSamples: int32(decision.BounceSamples), BounceRate: float32(decision.BounceRate),
+			ComplaintSamples: int32(decision.ComplaintSamples), ComplaintRate: float32(decision.ComplaintRate),
+			InvalidTokens: int32(decision.InvalidTokens), PolicyVersion: warmup.HealthPolicyVersion,
+		})
+		if err != nil {
 			errs = append(errs, fmt.Errorf("warmup: update health for mailbox %s: %w", r.MailboxID.String(), err))
 			continue
 		}

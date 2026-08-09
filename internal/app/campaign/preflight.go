@@ -466,21 +466,21 @@ func checkWarmupHealth(in PreflightInput) PreflightCheck {
 			continue
 		}
 		switch *sd.HealthState {
-		case sendcap.HealthThrottled, sendcap.HealthPaused:
+		case sendcap.HealthUnknown, sendcap.HealthWatch, sendcap.HealthThrottled, sendcap.HealthPaused:
 			affected = append(affected, sd.Email)
 		}
 	}
 	if len(affected) > 0 {
 		return PreflightCheck{
 			ID: CheckWarmupHealth, Severity: SeverityWarn,
-			Title:  "Warmup health limiting some senders",
-			Detail: fmt.Sprintf("Throttled or paused by warmup health: %s.", strings.Join(affected, ", ")),
+			Title:  "Warmup evidence or health limiting some senders",
+			Detail: fmt.Sprintf("Warmup has reduced capacity for: %s.", strings.Join(affected, ", ")),
 			Remedy: "Wait for warmup health to recover, or adjust the sender pool.",
 		}
 	}
 	return PreflightCheck{
 		ID: CheckWarmupHealth, Severity: SeverityPass,
-		Title: "Warmup health normal", Detail: "No pool mailbox is throttled or paused by warmup health.",
+		Title: "Warmup health normal", Detail: "Every warming pool mailbox has qualified healthy evidence.",
 	}
 }
 

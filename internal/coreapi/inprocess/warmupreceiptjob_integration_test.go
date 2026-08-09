@@ -264,6 +264,26 @@ func TestRecordWarmupReceiptCrossTenant(t *testing.T) {
 	}
 }
 
+func TestRecordWarmupReceiptRejectsWrongSameWorkspaceRecipient(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, _ := makeWarmupSend(t, ctx, f) // A sent to B.
+
+	plan, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: f.a.String(), Placement: placementInbox,
+	})
+	if err != nil {
+		t.Fatalf("wrong same-workspace recipient: %v", err)
+	}
+	if plan.ReceiptID != "" {
+		t.Fatalf("wrong recipient returned engagement plan: %+v", plan)
+	}
+	_, inbox, spam, _ := todayStats(t, ctx, f, f.a)
+	if inbox != 0 || spam != 0 {
+		t.Fatalf("wrong recipient changed sender placement: inbox=%d spam=%d", inbox, spam)
+	}
+}
+
 // TestGetWarmupEngageJobLoadsTransport proves the engage job loads the recipient's
 // decrypted transport and a source folder, and that MarkWarmupEngaged is idempotent.
 func TestGetWarmupEngageJobAndMarkEngaged(t *testing.T) {
@@ -419,7 +439,7 @@ func dueContains(refs []coreapi.MailboxRef, id uuid.UUID) bool {
 // clean paused participant whose timed block has ELAPSED one level back down
 // (recovery), and — the timed-block floor — does NOT recover a clean participant
 // whose paused_until is still in the future.
-func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
+func TestEvaluateWarmupHealthTransitionsAndRespectsEvidence(t *testing.T) {
 	ctx, f := setupWarmup(t)
 
 	// A: seed a spammy trailing window attributed to A as the SENDER via a real A->B
@@ -430,14 +450,17 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse sendID: %v", err)
 	}
-	for i := 0; i < 6; i++ {
-		if err := f.q.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{WorkspaceID: f.ws1, WarmupSendID: sid, Placement: placementSpam}); err != nil {
-			t.Fatalf("seed A spam: %v", err)
+	for i := 0; i < 20; i++ {
+		placement := placementInbox
+		if i < 12 {
+			placement = placementSpam
 		}
-	}
-	for i := 0; i < 4; i++ {
-		if err := f.q.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{WorkspaceID: f.ws1, WarmupSendID: sid, Placement: placementInbox}); err != nil {
-			t.Fatalf("seed A inbox: %v", err)
+		if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+			WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+			ReceiptID: uuid.New(), Placement: placement,
+			ObservedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		}); err != nil {
+			t.Fatalf("seed A spam: %v", err)
 		}
 	}
 	// B: paused with a CLEAN window whose block has ELAPSED (paused_until in the past)
@@ -476,8 +499,8 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read B: %v", err)
 	}
-	if pb.HealthState != warmup.StateThrottled {
-		t.Fatalf("B health = %q, want throttled (one-level recovery after block elapsed)", pb.HealthState)
+	if pb.HealthState != warmup.StatePaused {
+		t.Fatalf("B health = %q, want paused (recovery requires qualified placement evidence)", pb.HealthState)
 	}
 
 	pc, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: f.c, WorkspaceID: f.ws2})

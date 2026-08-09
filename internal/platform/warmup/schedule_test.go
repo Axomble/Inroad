@@ -355,6 +355,41 @@ func TestDeferToWakingHours(t *testing.T) {
 	}
 }
 
+func TestEvaluateHealthUsesQualifiedEvidence(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          HealthSignals
+		state, code string
+	}{
+		{"no evidence is unknown", HealthSignals{Current: StateHealthy}, StateUnknown, "placement_sample_insufficient"},
+		{"small bad sample is still unknown", HealthSignals{Current: StateHealthy, Spam: 19}, StateUnknown, "placement_sample_insufficient"},
+		{"qualified spam reaches watch", HealthSignals{Current: StateHealthy, Inbox: 16, Spam: 4}, StateWatch, "spam_watch"},
+		{"qualified bounce can pause", HealthSignals{Current: StateHealthy, BounceSamples: 50, Bounces: 6}, StatePaused, "bounce_pause"},
+		{"qualified complaint can pause", HealthSignals{Current: StateHealthy, ComplaintSamples: 1000, Complaints: 4}, StatePaused, "complaint_pause"},
+		{"degraded state cannot recover without placement", HealthSignals{Current: StatePaused}, StatePaused, "insufficient_evidence_to_recover"},
+		{"clean qualified placement establishes health", HealthSignals{Current: StateUnknown, Inbox: 20}, StateHealthy, ""},
+		{"qualified recovery is gradual", HealthSignals{Current: StatePaused, Inbox: 20}, StateThrottled, "recovery_step"},
+		{"trusted token failures throttle", HealthSignals{Current: StateHealthy, InvalidTokens: 3}, StateThrottled, "invalid_tokens"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EvaluateHealth(tc.in)
+			if got.State != tc.state || got.ReasonCode != tc.code {
+				t.Fatalf("decision = %q/%q, want %q/%q", got.State, got.ReasonCode, tc.state, tc.code)
+			}
+		})
+	}
+}
+
+func TestPairDailyCap(t *testing.T) {
+	if got := PairDailyCap(10, 3); got != 4 {
+		t.Fatalf("PairDailyCap(10, 3) = %d, want 4", got)
+	}
+	if PairDailyCap(10, 0) != 0 || PairDailyCap(0, 3) != 0 {
+		t.Fatal("empty target or partner pool must produce a zero pair cap")
+	}
+}
+
 func TestHealthStateTransitions(t *testing.T) {
 	cases := []struct {
 		name          string

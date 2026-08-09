@@ -46,6 +46,7 @@ export function WarmupPage() {
         />
         <Stat label="Healthy" value={overviewError ? '—' : countHealth('healthy')} dot={<StatusDot tone="running" />} />
         <Stat label="Watch" value={overviewError ? '—' : countHealth('watch')} dot={<StatusDot tone="paused" />} />
+        <Stat label="Needs evidence" value={overviewError ? '-' : countHealth('unknown')} />
         <Stat
           label="At risk"
           value={overviewError ? '—' : countHealth('throttled') + countHealth('paused')}

@@ -92,7 +92,7 @@ func (s *Service) Get(ctx context.Context, workspaceID uuid.UUID) (Pulse, error)
 	capToday := s.capacityOf(caps)
 	return Pulse{
 		Mailboxes: MailboxCounts{Total: mb.Total, Active: mb.Active, Paused: mb.Paused, Error: mb.Error},
-		Warmup:    WarmupCounts{Pool: wu.Pool, Healthy: wu.Healthy, Watch: wu.Watch, AtRisk: wu.AtRisk},
+		Warmup:    WarmupCounts{Pool: wu.Pool, Unknown: wu.Unknown, Healthy: wu.Healthy, Watch: wu.Watch, AtRisk: wu.AtRisk},
 		Campaigns: CampaignCounts{Total: cam.Total, Running: cam.Running, Draft: cam.Draft, Paused: cam.Paused},
 		Contacts:  ContactCounts{Total: contacts},
 		Sending:   SendingStatus{SentToday: sentToday, DailyCap: capToday.dailyCap},
@@ -106,12 +106,13 @@ func (s *Service) Get(ctx context.Context, workspaceID uuid.UUID) (Pulse, error)
 // health is currently gating (per state, so the attention reason can say so).
 type capacity struct {
 	dailyCap  int64
+	unknown   int64
 	watch     int64
 	throttled int64
 	paused    int64
 }
 
-func (c capacity) gated() int64 { return c.watch + c.throttled + c.paused }
+func (c capacity) gated() int64 { return c.unknown + c.watch + c.throttled + c.paused }
 
 // capacityOf computes today's workspace cap with the SAME arithmetic the send
 // path enforces (sendcap.Effective ramped cap, scaled by warmup health) — a
@@ -128,6 +129,8 @@ func (s *Service) capacityOf(rows []gen.ListPulseSenderCapacityRow) capacity {
 		effective := sendcap.Effective(int(r.DailyCap), int(r.RampStartCap), int(r.RampDays), r.RampEnabled, ageDays)
 		c.dailyCap += int64(sendcap.Cold(effective, r.HealthState))
 		switch r.HealthState {
+		case sendcap.HealthUnknown:
+			c.unknown++
 		case sendcap.HealthWatch:
 			c.watch++
 		case sendcap.HealthThrottled:
@@ -194,7 +197,10 @@ func mailboxErrorReason(stored string) string {
 // gatedReason narrates WHICH health states are limiting sending, from the
 // per-state counts — e.g. "warmup health limiting sending: 2 throttled, 1 paused".
 func gatedReason(c capacity) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
+	if c.unknown > 0 {
+		parts = append(parts, fmt.Sprintf("%d need evidence", c.unknown))
+	}
 	if c.watch > 0 {
 		parts = append(parts, fmt.Sprintf("%d on watch", c.watch))
 	}

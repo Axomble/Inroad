@@ -1013,6 +1013,22 @@ type WarmupDailyStat struct {
 	Replies     int32       `json:"replies"`
 }
 
+type WarmupObservation struct {
+	ID                 uuid.UUID          `json:"id"`
+	WorkspaceID        uuid.UUID          `json:"workspace_id"`
+	MailboxID          pgtype.UUID        `json:"mailbox_id"`
+	ObserverMailboxID  pgtype.UUID        `json:"observer_mailbox_id"`
+	WarmupSendID       pgtype.UUID        `json:"warmup_send_id"`
+	Kind               string             `json:"kind"`
+	Placement          *string            `json:"placement"`
+	Source             string             `json:"source"`
+	ReasonCode         string             `json:"reason_code"`
+	AttributionTrusted bool               `json:"attribution_trusted"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	ObservedAt         pgtype.Timestamptz `json:"observed_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type WarmupParticipant struct {
 	MailboxID     uuid.UUID          `json:"mailbox_id"`
 	WorkspaceID   uuid.UUID          `json:"workspace_id"`
@@ -1055,6 +1071,25 @@ type WarmupSend struct {
 	SentAt      pgtype.Timestamptz `json:"sent_at"`
 	LastError   string             `json:"last_error"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WarmupStateTransition struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	FromState        string             `json:"from_state"`
+	ToState          string             `json:"to_state"`
+	ReasonCode       string             `json:"reason_code"`
+	Reason           string             `json:"reason"`
+	PlacementSamples int32              `json:"placement_samples"`
+	SpamRate         float32            `json:"spam_rate"`
+	BounceSamples    int32              `json:"bounce_samples"`
+	BounceRate       float32            `json:"bounce_rate"`
+	ComplaintSamples int32              `json:"complaint_samples"`
+	ComplaintRate    float32            `json:"complaint_rate"`
+	InvalidTokens    int32              `json:"invalid_tokens"`
+	PolicyVersion    string             `json:"policy_version"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
 type WarmupThread struct {

@@ -2,6 +2,8 @@ package inbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -283,19 +285,35 @@ func graphJunkScan(g GraphFetcher) apiJunkScan {
 // yields ok=false — NOT warmup — so the caller falls through to normal
 // reply/bounce classification UNCHANGED (spec §9.3). The header alone is never
 // trusted: the token is HMAC-verified before the message is treated as warmup.
-func detectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, bool) {
+type warmupDetection uint8
+
+const (
+	warmupAbsent warmupDetection = iota
+	warmupInvalid
+	warmupWrongWorkspace
+	warmupValid
+)
+
+func inspectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, warmupDetection, string) {
 	token := msg.Header.Get(warmup.HeaderWarmup)
 	if token == "" {
-		return warmup.Payload{}, false
+		return warmup.Payload{}, warmupAbsent, ""
 	}
+	sum := sha256.Sum256([]byte(token))
+	fingerprint := hex.EncodeToString(sum[:])
 	payload, ok := warmup.Verify(token, secret)
 	if !ok {
-		return warmup.Payload{}, false
+		return warmup.Payload{}, warmupInvalid, fingerprint
 	}
 	if payload.WorkspaceID != workspaceID {
-		return warmup.Payload{}, false
+		return warmup.Payload{}, warmupWrongWorkspace, fingerprint
 	}
-	return payload, true
+	return payload, warmupValid, fingerprint
+}
+
+func detectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, bool) {
+	payload, detection, _ := inspectWarmup(msg, secret, workspaceID)
+	return payload, detection == warmupValid
 }
 
 // processInbound is the warmup receipt-detection HOOK in front of campaign
@@ -307,13 +325,31 @@ func detectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (w
 // A non-warmup message falls through to processMessage unchanged. placement is
 // "inbox" here (INBOX pass); sourceFolder is the provider inbox label.
 func processInbound(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, msg mail.InboundMessage, placement, sourceFolder string, replies, bounces *int) (bool, error) {
-	if payload, ok := detectWarmup(msg, hook.secret, p.WorkspaceID); ok {
+	payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
+	if detection == warmupValid {
 		if err := recordWarmup(ctx, core, hook, p, payload, msg, placement, sourceFolder); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
+	if detection == warmupInvalid || detection == warmupWrongWorkspace {
+		reason := "invalid_signature"
+		if detection == warmupWrongWorkspace {
+			reason = "workspace_mismatch"
+		}
+		recordWarmupTokenFailure(ctx, core, p, fingerprint, reason)
+	}
 	return processMessage(ctx, core, classifier, p.WorkspaceID, msg, replies, bounces)
+}
+
+func recordWarmupTokenFailure(ctx context.Context, core coreapi.Client, p queue.InboxPollPayload, fingerprint, reason string) {
+	evidence, ok := core.(coreapi.WarmupEvidenceClient)
+	if !ok {
+		return
+	}
+	if err := evidence.RecordWarmupTokenFailure(ctx, p.WorkspaceID, p.MailboxID, fingerprint, reason); err != nil {
+		slog.Warn("inbox_poll_warmup_token_evidence_failed", "mailbox_id", p.MailboxID, "reason", reason, "err", err)
+	}
 }
 
 // recordWarmup records a detected warmup message's receipt (idempotent, spec §7)
@@ -385,8 +421,13 @@ func apiJunkFolderLabel(provider string) string {
 // poll: the stateless rescan retries it. Non-warmup junk is skipped.
 func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, msgs []mail.InboundMessage, folder string) {
 	for _, msg := range msgs {
-		payload, ok := detectWarmup(msg, hook.secret, p.WorkspaceID)
-		if !ok {
+		payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
+		if detection != warmupValid {
+			if detection == warmupInvalid {
+				recordWarmupTokenFailure(ctx, core, p, fingerprint, "invalid_signature")
+			} else if detection == warmupWrongWorkspace {
+				recordWarmupTokenFailure(ctx, core, p, fingerprint, "workspace_mismatch")
+			}
 			continue // non-warmup junk is ignored — never classified
 		}
 		if err := recordWarmup(ctx, core, hook, p, payload, msg, placementSpam, folder); err != nil {
@@ -437,6 +478,16 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 		// through to the reply-matching path below.
 		switch d.Kind {
 		case HardBounce:
+			if evidence, ok := core.(coreapi.WarmupEvidenceClient); ok {
+				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, d.OriginalMessageID)
+				if err != nil {
+					return false, err
+				}
+				if matched {
+					*bounces++
+					return true, nil
+				}
+			}
 			s, err := core.FindSendByMessageID(ctx, workspaceID, d.OriginalMessageID)
 			if err != nil {
 				if errors.Is(err, coreapi.ErrNoMatch) {

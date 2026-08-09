@@ -13,6 +13,7 @@ import (
 // warmup_participants.health_state.
 const (
 	StateHealthy   = "healthy"
+	StateUnknown   = "unknown"
 	StateWatch     = "watch"
 	StateThrottled = "throttled"
 	StatePaused    = "paused"
@@ -26,6 +27,47 @@ const (
 	bounceSpikeRate   = 0.10 // hard-bounce rate above this → paused
 	invalidTokenLimit = 3    // sustained invalid/tampered tokens → throttled
 )
+
+const (
+	bounceWatchRate       = 0.03
+	bounceThrottleRate    = 0.05
+	bouncePauseRate       = 0.10
+	complaintWatchRate    = 0.0003
+	complaintThrottleRate = 0.001
+	complaintPauseRate    = 0.003
+
+	MinPlacementSamples = 20
+	MinBounceSamples    = 50
+	MinComplaintSamples = 100
+	HealthPolicyVersion = "warmup-phase0-v1"
+)
+
+// HealthSignals are normalized counts from immutable observations. A rate is
+// actionable only after its corresponding minimum sample count is reached.
+type HealthSignals struct {
+	Current          string
+	Inbox            int
+	Spam             int
+	BounceSamples    int
+	Bounces          int
+	ComplaintSamples int
+	Complaints       int
+	InvalidTokens    int
+}
+
+// HealthDecision records both the decision and the exact evidence behind it.
+type HealthDecision struct {
+	State            string
+	ReasonCode       string
+	Reason           string
+	PlacementSamples int
+	SpamRate         float64
+	BounceSamples    int
+	BounceRate       float64
+	ComplaintSamples int
+	ComplaintRate    float64
+	InvalidTokens    int
+}
 
 // wakingStartHour / wakingEndHour bound the recipient-local window in which
 // warmup traffic and engagement are allowed. 07:00 inclusive, 22:00 exclusive.
@@ -142,6 +184,21 @@ func EffectiveDailyVolume(target int, mailboxID string, day time.Time) int {
 	return v
 }
 
+const PairCooldown = 24 * time.Hour
+
+// PairDailyCap prevents a sender from concentrating its daily volume on one
+// recipient while still allowing the full target across the eligible pool.
+func PairDailyCap(target, eligiblePartners int) int {
+	if target <= 0 || eligiblePartners <= 0 {
+		return 0
+	}
+	cap := (target + eligiblePartners - 1) / eligiblePartners
+	if cap < 1 {
+		return 1
+	}
+	return cap
+}
+
 // NextSpacing is the delay before the index-th send of a day whose target volume
 // is `target`. It spreads `target` sends across the waking window and applies a
 // deterministic multiplicative jitter in [0.6, 1.4) so sends never land on fixed
@@ -229,6 +286,87 @@ func DeferToWakingHours(t time.Time, loc *time.Location) time.Time {
 		morning = morning.AddDate(0, 0, 1)
 	}
 	return morning
+}
+
+// EvaluateHealth applies minimum sample gates before any rate can influence a
+// mailbox. Escalation is immediate; recovery requires enough fresh placement
+// evidence and moves one state at a time.
+func EvaluateHealth(s HealthSignals) HealthDecision {
+	placementSamples := s.Inbox + s.Spam
+	d := HealthDecision{
+		State: StateHealthy, PlacementSamples: placementSamples,
+		SpamRate:      safeRate(s.Spam, placementSamples),
+		BounceSamples: s.BounceSamples, BounceRate: safeRate(s.Bounces, s.BounceSamples),
+		ComplaintSamples: s.ComplaintSamples, ComplaintRate: safeRate(s.Complaints, s.ComplaintSamples),
+		InvalidTokens: s.InvalidTokens,
+	}
+	setWorst := func(state, code, reason string) {
+		if stateRank(state) > stateRank(d.State) {
+			d.State, d.ReasonCode, d.Reason = state, code, reason
+		}
+	}
+	if placementSamples >= MinPlacementSamples {
+		switch {
+		case d.SpamRate > spamPauseRate:
+			setWorst(StatePaused, "spam_pause", "spam placement rate above 50%")
+		case d.SpamRate > spamThrottleRate:
+			setWorst(StateThrottled, "spam_throttle", "spam placement rate above 30%")
+		case d.SpamRate > spamWatchRate:
+			setWorst(StateWatch, "spam_watch", "spam placement rate above 15%")
+		}
+	}
+	if s.BounceSamples >= MinBounceSamples {
+		switch {
+		case d.BounceRate > bouncePauseRate:
+			setWorst(StatePaused, "bounce_pause", "hard-bounce rate above 10%")
+		case d.BounceRate > bounceThrottleRate:
+			setWorst(StateThrottled, "bounce_throttle", "hard-bounce rate above 5%")
+		case d.BounceRate > bounceWatchRate:
+			setWorst(StateWatch, "bounce_watch", "hard-bounce rate above 3%")
+		}
+	}
+	if s.ComplaintSamples >= MinComplaintSamples {
+		switch {
+		case d.ComplaintRate > complaintPauseRate:
+			setWorst(StatePaused, "complaint_pause", "complaint rate above 0.3%")
+		case d.ComplaintRate > complaintThrottleRate:
+			setWorst(StateThrottled, "complaint_throttle", "complaint rate above 0.1%")
+		case d.ComplaintRate > complaintWatchRate:
+			setWorst(StateWatch, "complaint_watch", "complaint rate above 0.03%")
+		}
+	}
+	if s.InvalidTokens >= invalidTokenLimit {
+		setWorst(StateThrottled, "invalid_tokens", "repeated trusted invalid warmup tokens")
+	}
+
+	current := normalizeState(s.Current)
+	if d.State == StateHealthy && placementSamples < MinPlacementSamples {
+		if stateRank(current) > stateRank(StateHealthy) {
+			d.State, d.ReasonCode, d.Reason = current, "insufficient_evidence_to_recover", "not enough recent placement evidence to recover"
+		} else {
+			d.State, d.ReasonCode, d.Reason = StateUnknown, "placement_sample_insufficient", "not enough recent placement evidence"
+		}
+		return d
+	}
+	if stateRank(d.State) < stateRank(current) {
+		d.State = stateAtRank(stateRank(current) - 1)
+		d.ReasonCode = "recovery_step"
+		d.Reason = "clean qualified window: recovering one state"
+	}
+	return d
+}
+
+func safeRate(numerator, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	if numerator >= denominator {
+		return 1
+	}
+	if numerator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
 }
 
 // HealthState computes the next health state from the trailing-window signals and
@@ -336,6 +474,9 @@ func stateAtRank(rank int) string {
 }
 
 func normalizeState(state string) string {
+	if state == StateUnknown {
+		return StateUnknown
+	}
 	return stateAtRank(stateRank(state))
 }
 

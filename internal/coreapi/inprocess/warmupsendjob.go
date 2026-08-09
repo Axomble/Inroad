@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -103,13 +104,26 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	if int(sentToday) >= effective {
 		return coreapi.WarmupSendJob{Skip: true}, nil
 	}
+	partnerCount, err := c.q.CountEligibleWarmupPartners(ctx, gen.CountEligibleWarmupPartnersParams{
+		WorkspaceID: ws, MailboxID: mbID,
+	})
+	if err != nil {
+		return coreapi.WarmupSendJob{}, err
+	}
+	pairCap := warmup.PairDailyCap(effective, int(partnerCount))
+	if pairCap == 0 {
+		return coreapi.WarmupSendJob{Skip: true}, nil
+	}
 
 	// Recency-spread partner (different, enabled, non-paused, same workspace): the
 	// seed anchor AND the new-thread recipient. Selected FIRST so the reply
 	// decision's seed is unchanged from before this tuning (partner spread for new
 	// threads is preserved); when a reply is wanted we may instead target a
 	// repliable partner below, but the new-thread fallback stays on this one.
-	spreadPartner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{WorkspaceID: ws, MailboxID: mbID})
+	spreadPartner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{
+		WorkspaceID: ws, SenderMailbox: mbID, MaxPairSends: int32(pairCap),
+		CooldownSince: pgtype.Timestamptz{Time: now.Add(-warmup.PairCooldown), Valid: true},
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No eligible partner (workspace has <2 usable participants) → skip.
@@ -147,7 +161,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		// of the under-realized reply_rate). No repliable partner → fall through to
 		// the new-thread path on the spread partner, unchanged.
 		rp, rerr := c.q.SelectWarmupReplyPartner(ctx, gen.SelectWarmupReplyPartnerParams{
-			WorkspaceID: ws, SenderMailbox: mbID, MaxTurn: int32(warmup.MaxContentTurns()),
+			WorkspaceID: ws, SenderMailbox: mbID, MaxTurn: int32(warmup.MaxContentTurns()), MaxPairSends: int32(pairCap),
 		})
 		switch {
 		case rerr == nil:

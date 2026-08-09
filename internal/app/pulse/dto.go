@@ -27,6 +27,7 @@ type MailboxCounts struct {
 // holding volume back.
 type WarmupCounts struct {
 	Pool    int64 `json:"pool"`
+	Unknown int64 `json:"unknown"`
 	Healthy int64 `json:"healthy"`
 	Watch   int64 `json:"watch"`
 	AtRisk  int64 `json:"at_risk"`

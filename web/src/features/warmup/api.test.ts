@@ -46,7 +46,7 @@ test('the generated warmup types keep the fields the UI depends on', () => {
     received: number
   }>()
   expectTypeOf<WarmupParticipant['health_state']>().toEqualTypeOf<
-    'healthy' | 'watch' | 'throttled' | 'paused'
+    'unknown' | 'healthy' | 'watch' | 'throttled' | 'paused'
   >()
   expectTypeOf<GetMailboxWarmupApiArg>().toMatchObjectType<{ id: string }>()
   expectTypeOf<WarmupSettings>().toMatchObjectType<{ start_volume?: number }>()

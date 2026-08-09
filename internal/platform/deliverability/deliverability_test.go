@@ -391,6 +391,20 @@ func TestUnknownWarmupStateIsUnpenalised(t *testing.T) {
 	}
 }
 
+func TestWarmupNeedsEvidenceIsNotMeasuredAsHealthy(t *testing.T) {
+	s := Compute(Inputs{Delivered: 1000, WarmupState: WarmupUnknown})
+	for _, component := range s.Components {
+		if component.Key != KeyWarmup {
+			continue
+		}
+		if component.Measured || component.Penalty != 0 || component.Detail != "insufficient warmup evidence" {
+			t.Fatalf("unknown warmup component = %+v", component)
+		}
+		return
+	}
+	t.Fatal("warmup component missing")
+}
+
 // Every component the score reports must be one of the five keys the frozen API
 // schema enumerates: an unknown key renders as nothing in the UI.
 func TestComponentKeysMatchTheAPIContract(t *testing.T) {

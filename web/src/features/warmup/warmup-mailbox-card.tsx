@@ -15,7 +15,8 @@ import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api
 const WarmupSparkline = lazy(() => import('./warmup-sparkline'))
 
 /** 0..1 fraction to a whole-percent string, e.g. 0.83 -> "83%". */
-function formatPct(value: number): string {
+function formatPct(value: number | null): string {
+  if (value == null) return 'Not measured'
   return `${Math.round(value * 100)}%`
 }
 
@@ -76,6 +77,7 @@ export function WarmupMailboxCard({
               <span>
                 spam 7d <span className="tabular-nums text-foreground">{formatPct(entry.spam_rate_7d)}</span>
               </span>
+              <span className="tabular-nums">{entry.placement_sample_7d} observations</span>
             </div>
           )}
         </div>

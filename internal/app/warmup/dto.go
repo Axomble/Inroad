@@ -144,15 +144,16 @@ type WarmupParticipantDTO struct {
 // WarmupMailboxDTO is the WarmupMailbox schema: a participant enriched with the
 // mailbox email and rolling 7-day placement rates for the overview.
 type WarmupMailboxDTO struct {
-	MailboxID    string  `json:"mailbox_id"`
-	Email        string  `json:"email"`
-	Enabled      bool    `json:"enabled"`
-	HealthState  string  `json:"health_state"`
-	HealthReason string  `json:"health_reason"`
-	TodaySent    int32   `json:"today_sent"`
-	TodayTarget  int32   `json:"today_target"`
-	InboxRate7d  float64 `json:"inbox_rate_7d"`
-	SpamRate7d   float64 `json:"spam_rate_7d"`
+	MailboxID         string   `json:"mailbox_id"`
+	Email             string   `json:"email"`
+	Enabled           bool     `json:"enabled"`
+	HealthState       string   `json:"health_state"`
+	HealthReason      string   `json:"health_reason"`
+	TodaySent         int32    `json:"today_sent"`
+	TodayTarget       int32    `json:"today_target"`
+	PlacementSample7d int64    `json:"placement_sample_7d"`
+	InboxRate7d       *float64 `json:"inbox_rate_7d"`
+	SpamRate7d        *float64 `json:"spam_rate_7d"`
 }
 
 // WarmupOverviewDTO is the WarmupOverview schema: the pool summary plus per

@@ -19,7 +19,7 @@ const jsonHeaders = { 'content-type': 'application/json' }
 function pulseWith(attention: WorkspacePulse['attention']): WorkspacePulse {
   return {
     mailboxes: { total: 1, active: 1, paused: 0, error: 0 },
-    warmup: { pool: 0, healthy: 0, watch: 0, at_risk: 0 },
+    warmup: { pool: 0, unknown: 0, healthy: 0, watch: 0, at_risk: 0 },
     campaigns: { total: 0, running: 0, draft: 0, paused: 0 },
     contacts: { total: 0 },
     sending: { sent_today: 0, daily_cap: 0 },

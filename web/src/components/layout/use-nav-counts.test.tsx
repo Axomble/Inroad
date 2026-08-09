@@ -8,7 +8,7 @@ const jsonHeaders = { 'content-type': 'application/json' }
 
 const pulse: WorkspacePulse = {
   mailboxes: { total: 12, active: 9, paused: 1, error: 2 },
-  warmup: { pool: 6, healthy: 6, watch: 0, at_risk: 0 },
+  warmup: { pool: 6, unknown: 0, healthy: 6, watch: 0, at_risk: 0 },
   campaigns: { total: 8, running: 3, draft: 4, paused: 1 },
   contacts: { total: 1243 },
   sending: { sent_today: 247, daily_cap: 600 },

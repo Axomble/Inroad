@@ -203,7 +203,7 @@ func TestOverviewHappyPath(t *testing.T) {
 	if resp.PoolSize != 2 || !resp.Active || len(resp.Mailboxes) != 1 {
 		t.Fatalf("overview payload wrong: %+v", resp)
 	}
-	if resp.Mailboxes[0].Email != "a@example.com" || resp.Mailboxes[0].InboxRate7d != 0.9 {
+	if resp.Mailboxes[0].Email != "a@example.com" || resp.Mailboxes[0].InboxRate7d == nil || *resp.Mailboxes[0].InboxRate7d != 0.9 || resp.Mailboxes[0].PlacementSample7d != 10 {
 		t.Fatalf("overview mailbox wrong: %+v", resp.Mailboxes[0])
 	}
 }

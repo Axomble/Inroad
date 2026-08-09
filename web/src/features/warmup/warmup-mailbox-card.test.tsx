@@ -22,6 +22,7 @@ const entry: WarmupMailbox = {
   health_reason: '',
   today_sent: 2,
   today_target: 4,
+  placement_sample_7d: 10,
   inbox_rate_7d: 0.9,
   spam_rate_7d: 0.1,
 }
@@ -68,6 +69,19 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+})
+
+test('an empty placement window is shown as not measured', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, health_state: 'unknown', placement_sample_7d: 0, inbox_rate_7d: null, spam_rate_7d: null }}
+    />,
+  )
+
+  expect(screen.getAllByText('Not measured')).toHaveLength(2)
+  expect(screen.getByText('0 observations')).toBeInTheDocument()
+  expect(screen.getByText('Needs evidence')).toBeInTheDocument()
 })
 
 test('a failed disable surfaces the inline error alert with the generic copy', async () => {

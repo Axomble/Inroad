@@ -4173,7 +4173,7 @@ components:
           type: string
           nullable: true
           description: "Read-only warmup health; null when the mailbox is not warming up."
-          enum: [healthy, watch, throttled, paused, null]
+          enum: [unknown, healthy, watch, throttled, paused, null]
         sending:
           type: boolean
           description: >-
@@ -4348,7 +4348,7 @@ components:
         reply_rate: { type: number }
         health_state:
           type: string
-          enum: [healthy, watch, throttled, paused]
+          enum: [unknown, healthy, watch, throttled, paused]
           description: reputation state derived from inbox-placement and behavior signals
         health_reason: { type: string, description: human-readable explanation of a non-healthy state }
         started_at: { type: string, format: date-time }
@@ -4357,17 +4357,18 @@ components:
     WarmupMailbox:
       type: object
       description: A participant enriched with rolling placement rates for the overview.
-      required: [mailbox_id, email, enabled, health_state, health_reason, today_sent, today_target, inbox_rate_7d, spam_rate_7d]
+      required: [mailbox_id, email, enabled, health_state, health_reason, today_sent, today_target, placement_sample_7d, inbox_rate_7d, spam_rate_7d]
       properties:
         mailbox_id: { type: string, format: uuid }
         email: { type: string }
         enabled: { type: boolean }
-        health_state: { type: string, enum: [healthy, watch, throttled, paused] }
+        health_state: { type: string, enum: [unknown, healthy, watch, throttled, paused] }
         health_reason: { type: string }
         today_sent: { type: integer }
         today_target: { type: integer }
-        inbox_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal" }
-        spam_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1)" }
+        placement_sample_7d: { type: integer, format: int64, description: "trusted inbox plus spam placement observations in the trailing 7 days" }
+        inbox_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed" }
+        spam_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed" }
     WarmupOverview:
       type: object
       description: >-
@@ -4419,9 +4420,10 @@ components:
         warmup:
           type: object
           description: enabled warmup participants bucketed by live health; at_risk = throttled + paused
-          required: [pool, healthy, watch, at_risk]
+          required: [pool, unknown, healthy, watch, at_risk]
           properties:
             pool: { type: integer }
+            unknown: { type: integer, description: enabled participants without enough evidence for a health verdict }
             healthy: { type: integer }
             watch: { type: integer }
             at_risk: { type: integer }

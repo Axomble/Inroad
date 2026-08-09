@@ -34,6 +34,77 @@ func (q *Queries) AdvanceWarmupThread(ctx context.Context, arg AdvanceWarmupThre
 	return err
 }
 
+const applyWarmupHealthTransition = `-- name: ApplyWarmupHealthTransition :one
+WITH changed AS (
+    UPDATE warmup_participants p
+    SET health_state = $1,
+        health_reason = $2,
+        paused_until = $3::timestamptz,
+        updated_at = now()
+    WHERE p.mailbox_id = $4
+      AND p.workspace_id = $5
+      AND p.health_state = $6
+    RETURNING p.mailbox_id, p.workspace_id
+), recorded AS (
+    INSERT INTO warmup_state_transitions (
+        workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+        placement_samples, spam_rate, bounce_samples, bounce_rate,
+        complaint_samples, complaint_rate, invalid_tokens, policy_version
+    )
+    SELECT workspace_id, mailbox_id, $6, $1, $7, $2,
+           $8, $9::real,
+           $10, $11::real,
+           $12, $13::real,
+           $14, $15
+    FROM changed
+    RETURNING id
+)
+SELECT EXISTS(SELECT 1 FROM recorded) AS applied
+`
+
+type ApplyWarmupHealthTransitionParams struct {
+	ToState          string             `json:"to_state"`
+	Reason           string             `json:"reason"`
+	PausedUntil      pgtype.Timestamptz `json:"paused_until"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	FromState        string             `json:"from_state"`
+	ReasonCode       string             `json:"reason_code"`
+	PlacementSamples int32              `json:"placement_samples"`
+	SpamRate         float32            `json:"spam_rate"`
+	BounceSamples    int32              `json:"bounce_samples"`
+	BounceRate       float32            `json:"bounce_rate"`
+	ComplaintSamples int32              `json:"complaint_samples"`
+	ComplaintRate    float32            `json:"complaint_rate"`
+	InvalidTokens    int32              `json:"invalid_tokens"`
+	PolicyVersion    string             `json:"policy_version"`
+}
+
+// State mutation and its explanation are one atomic statement. The from-state
+// guard prevents concurrent evaluators from writing contradictory history.
+func (q *Queries) ApplyWarmupHealthTransition(ctx context.Context, arg ApplyWarmupHealthTransitionParams) (bool, error) {
+	row := q.db.QueryRow(ctx, applyWarmupHealthTransition,
+		arg.ToState,
+		arg.Reason,
+		arg.PausedUntil,
+		arg.MailboxID,
+		arg.WorkspaceID,
+		arg.FromState,
+		arg.ReasonCode,
+		arg.PlacementSamples,
+		arg.SpamRate,
+		arg.BounceSamples,
+		arg.BounceRate,
+		arg.ComplaintSamples,
+		arg.ComplaintRate,
+		arg.InvalidTokens,
+		arg.PolicyVersion,
+	)
+	var applied bool
+	err := row.Scan(&applied)
+	return applied, err
+}
+
 const claimWarmupSend = `-- name: ClaimWarmupSend :one
 INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
                           is_reply, token, status, claimed_at)
@@ -83,6 +154,27 @@ func (q *Queries) ClaimWarmupSend(ctx context.Context, arg ClaimWarmupSendParams
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const countEligibleWarmupPartners = `-- name: CountEligibleWarmupPartners :one
+SELECT count(*) FROM warmup_participants p
+WHERE p.workspace_id = $1
+  AND p.mailbox_id <> $2
+  AND p.enabled
+  AND p.health_state <> 'paused'
+  AND (p.paused_until IS NULL OR p.paused_until <= now())
+`
+
+type CountEligibleWarmupPartnersParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+}
+
+func (q *Queries) CountEligibleWarmupPartners(ctx context.Context, arg CountEligibleWarmupPartnersParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countEligibleWarmupPartners, arg.WorkspaceID, arg.MailboxID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const countEnabledParticipants = `-- name: CountEnabledParticipants :one
@@ -664,34 +756,123 @@ func (q *Queries) ListDueWarmupMailboxes(ctx context.Context) ([]ListDueWarmupMa
 }
 
 const listWarmupHealthSignals = `-- name: ListWarmupHealthSignals :many
-SELECT p.mailbox_id, p.workspace_id, p.health_state, p.paused_until,
-       COALESCE(SUM(s.inbox), 0)::bigint AS inbox,
-       COALESCE(SUM(s.spam), 0)::bigint  AS spam
+SELECT p.mailbox_id,
+       p.workspace_id,
+       p.health_state,
+       p.paused_until,
+       COALESCE(placement.inbox, 0)::bigint AS inbox,
+       COALESCE(placement.spam, 0)::bigint AS spam,
+       (COALESCE(campaign.delivered, 0) + COALESCE(warm.delivered, 0))::bigint AS bounce_samples,
+       (COALESCE(campaign.bounces, 0) + COALESCE(warm.bounces, 0))::bigint AS bounces,
+       COALESCE(campaign.delivered, 0)::bigint AS complaint_samples,
+       COALESCE(campaign.complaints, 0)::bigint AS complaints,
+       COALESCE(tokens.invalid_tokens, 0)::bigint AS invalid_tokens
 FROM warmup_participants p
-LEFT JOIN warmup_daily_stats s
-  ON s.mailbox_id = p.mailbox_id AND s.day >= CURRENT_DATE - 6
+LEFT JOIN LATERAL (
+    SELECT count(*) FILTER (WHERE o.placement = 'inbox') AS inbox,
+           count(*) FILTER (WHERE o.placement = 'spam') AS spam
+    FROM warmup_observations o
+    WHERE o.workspace_id = p.workspace_id
+      AND o.mailbox_id = p.mailbox_id
+      AND o.kind = 'placement'
+      AND o.attribution_trusted
+      AND o.observed_at >= now() - interval '7 days'
+) placement ON true
+LEFT JOIN LATERAL (
+    SELECT
+        (
+            SELECT count(*)
+            FROM sends s
+            WHERE s.workspace_id = p.workspace_id
+              AND s.mailbox_id = p.mailbox_id
+              AND s.status = 'sent'
+              AND s.sent_at >= now() - interval '30 days'
+        ) AS delivered,
+        (
+            SELECT count(*)
+            FROM (
+                SELECT se.contact_id
+                FROM sequence_enrollments se
+                JOIN sends s ON s.workspace_id = se.workspace_id
+                            AND s.campaign_id = se.campaign_id
+                            AND s.contact_id = se.contact_id
+                WHERE se.workspace_id = p.workspace_id
+                  AND s.mailbox_id = p.mailbox_id
+                  AND se.stop_reason = 'bounced'
+                  AND se.stopped_at >= now() - interval '30 days'
+                UNION
+                SELECT s.contact_id
+                FROM deliverability_events de
+                JOIN sends s ON s.id = de.send_id
+                            AND s.workspace_id = de.workspace_id
+                WHERE de.workspace_id = p.workspace_id
+                  AND s.mailbox_id = p.mailbox_id
+                  AND de.kind = 'bounce'
+                  AND de.received_at >= now() - interval '30 days'
+            ) bounced_contacts
+        ) AS bounces,
+        (
+            SELECT count(*)
+            FROM deliverability_events de
+            JOIN sends s ON s.id = de.send_id
+                        AND s.workspace_id = de.workspace_id
+            WHERE de.workspace_id = p.workspace_id
+              AND s.mailbox_id = p.mailbox_id
+              AND de.kind = 'complaint'
+              AND de.received_at >= now() - interval '30 days'
+        ) AS complaints
+) campaign ON true
+LEFT JOIN LATERAL (
+    SELECT
+        (
+            SELECT count(*)
+            FROM warmup_sends s
+            WHERE s.workspace_id = p.workspace_id
+              AND s.from_mailbox = p.mailbox_id
+              AND s.status = 'sent'
+              AND s.sent_at >= now() - interval '30 days'
+        ) AS delivered,
+        (
+            SELECT count(*)
+            FROM warmup_observations o
+            WHERE o.workspace_id = p.workspace_id
+              AND o.mailbox_id = p.mailbox_id
+              AND o.kind = 'hard_bounce'
+              AND o.attribution_trusted
+              AND o.observed_at >= now() - interval '30 days'
+        ) AS bounces
+) warm ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS invalid_tokens
+    FROM warmup_observations o
+    WHERE o.workspace_id = p.workspace_id
+      AND o.mailbox_id = p.mailbox_id
+      AND o.kind = 'invalid_token'
+      AND o.attribution_trusted
+      AND o.observed_at >= now() - interval '24 hours'
+) tokens ON true
 WHERE p.enabled
-GROUP BY p.mailbox_id, p.workspace_id, p.health_state, p.paused_until
 `
 
 type ListWarmupHealthSignalsRow struct {
-	MailboxID   uuid.UUID          `json:"mailbox_id"`
-	WorkspaceID uuid.UUID          `json:"workspace_id"`
-	HealthState string             `json:"health_state"`
-	PausedUntil pgtype.Timestamptz `json:"paused_until"`
-	Inbox       int64              `json:"inbox"`
-	Spam        int64              `json:"spam"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	HealthState      string             `json:"health_state"`
+	PausedUntil      pgtype.Timestamptz `json:"paused_until"`
+	Inbox            int64              `json:"inbox"`
+	Spam             int64              `json:"spam"`
+	BounceSamples    int64              `json:"bounce_samples"`
+	Bounces          int64              `json:"bounces"`
+	ComplaintSamples int64              `json:"complaint_samples"`
+	Complaints       int64              `json:"complaints"`
+	InvalidTokens    int64              `json:"invalid_tokens"`
 }
 
-// Per-participant trailing-window signals for EvaluateWarmupHealth: the participant's
-// OWN sender-attributed inbox and spam placement sums over the last 7 UTC days, its
-// current health_state, and its paused_until (the timed-block floor gate). The spam
-// placement rate the caller derives is "of MY sent warmup mail, the fraction that
-// landed in spam" = spam / (inbox + spam) — a sender-deliverability signal, NOT the
-// recipient-side received volume. The LEFT JOIN keeps a participant with no recent
-// placement (inbox+spam=0 → spamRate 0 → healthy). Global fan-out (health is
-// recomputed for every enabled participant). Bounce and invalid-token signals have no
-// persistence in the v1 schema, so the caller passes them as zero (documented gap).
+// Global evidence fan-out for every enabled participant. Placement observations
+// are sender-attributed over 7 days; campaign and warmup bounce rates and campaign
+// complaints use 30-day delivered denominators. Trusted invalid-token evidence is
+// counted over 24 hours. Zero placement samples remains zero counts here, and the
+// policy deliberately maps that absence to unknown rather than healthy.
 func (q *Queries) ListWarmupHealthSignals(ctx context.Context) ([]ListWarmupHealthSignalsRow, error) {
 	rows, err := q.db.Query(ctx, listWarmupHealthSignals)
 	if err != nil {
@@ -708,6 +889,11 @@ func (q *Queries) ListWarmupHealthSignals(ctx context.Context) ([]ListWarmupHeal
 			&i.PausedUntil,
 			&i.Inbox,
 			&i.Spam,
+			&i.BounceSamples,
+			&i.Bounces,
+			&i.ComplaintSamples,
+			&i.Complaints,
+			&i.InvalidTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -730,10 +916,15 @@ SELECT
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
 LEFT JOIN (
-    SELECT s.mailbox_id, SUM(s.inbox) AS inbox, SUM(s.spam) AS spam
-    FROM warmup_daily_stats s
-    WHERE s.workspace_id = $1 AND s.day >= CURRENT_DATE - 6
-    GROUP BY s.mailbox_id
+    SELECT o.mailbox_id,
+           count(*) FILTER (WHERE o.placement = 'inbox') AS inbox,
+           count(*) FILTER (WHERE o.placement = 'spam') AS spam
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.kind = 'placement'
+      AND o.attribution_trusted
+      AND o.observed_at >= now() - interval '7 days'
+    GROUP BY o.mailbox_id
 ) wk ON wk.mailbox_id = p.mailbox_id
 LEFT JOIN (
     SELECT s.mailbox_id, s.sent
@@ -801,6 +992,86 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 	return items, nil
 }
 
+const recordWarmupHardBounceObservation = `-- name: RecordWarmupHardBounceObservation :one
+WITH candidate AS (
+    SELECT s.id, s.workspace_id, s.from_mailbox
+    FROM warmup_sends s
+    WHERE s.workspace_id = $1 AND s.message_id = $2 AND s.status = 'sent'
+    ORDER BY s.sent_at DESC
+    LIMIT 1
+), inserted AS (
+    INSERT INTO warmup_observations (
+        workspace_id, mailbox_id, warmup_send_id, kind, source, reason_code,
+        attribution_trusted, idempotency_key, observed_at
+    )
+    SELECT c.workspace_id, c.from_mailbox, c.id, 'hard_bounce',
+           'inbox_dsn', 'hard_bounce', true, 'bounce:' || c.id::text, now()
+    FROM candidate c
+    ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+    RETURNING 1
+)
+SELECT EXISTS(SELECT 1 FROM candidate) AS matched,
+       EXISTS(SELECT 1 FROM inserted) AS inserted
+`
+
+type RecordWarmupHardBounceObservationParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MessageID   string    `json:"message_id"`
+}
+
+type RecordWarmupHardBounceObservationRow struct {
+	Matched  bool `json:"matched"`
+	Inserted bool `json:"inserted"`
+}
+
+// A DSN is matched by the provider-returned Message-ID on the warmup send. The
+// CTE returns matched=true even on an idempotent duplicate so the inbox poller
+// never falls through and misclassifies a warmup DSN as a campaign bounce.
+func (q *Queries) RecordWarmupHardBounceObservation(ctx context.Context, arg RecordWarmupHardBounceObservationParams) (RecordWarmupHardBounceObservationRow, error) {
+	row := q.db.QueryRow(ctx, recordWarmupHardBounceObservation, arg.WorkspaceID, arg.MessageID)
+	var i RecordWarmupHardBounceObservationRow
+	err := row.Scan(&i.Matched, &i.Inserted)
+	return i, err
+}
+
+const recordWarmupPlacementObservation = `-- name: RecordWarmupPlacementObservation :exec
+INSERT INTO warmup_observations (
+    workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
+    kind, placement, source, attribution_trusted, idempotency_key, observed_at
+)
+SELECT s.workspace_id, s.from_mailbox, $1::uuid, s.id,
+       'placement', $2::text, 'warmup_receipt', true,
+       'receipt:' || $3::uuid::text, $4::timestamptz
+FROM warmup_sends s
+WHERE s.id = $5
+  AND s.workspace_id = $6
+  AND s.to_mailbox = $1
+ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+`
+
+type RecordWarmupPlacementObservationParams struct {
+	RecipientMailbox uuid.UUID          `json:"recipient_mailbox"`
+	Placement        string             `json:"placement"`
+	ReceiptID        uuid.UUID          `json:"receipt_id"`
+	ObservedAt       pgtype.Timestamptz `json:"observed_at"`
+	WarmupSendID     uuid.UUID          `json:"warmup_send_id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+}
+
+// Immutable counterpart of the daily placement projection. Runs in the same
+// transaction as a newly inserted receipt; the receipt id is the idempotency key.
+func (q *Queries) RecordWarmupPlacementObservation(ctx context.Context, arg RecordWarmupPlacementObservationParams) error {
+	_, err := q.db.Exec(ctx, recordWarmupPlacementObservation,
+		arg.RecipientMailbox,
+		arg.Placement,
+		arg.ReceiptID,
+		arg.ObservedAt,
+		arg.WarmupSendID,
+		arg.WorkspaceID,
+	)
+	return err
+}
+
 const recordWarmupReceivedStat = `-- name: RecordWarmupReceivedStat :exec
 INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, received)
 VALUES ($1, $2, CURRENT_DATE, 1)
@@ -862,6 +1133,40 @@ func (q *Queries) RecordWarmupSenderPlacementStat(ctx context.Context, arg Recor
 	return err
 }
 
+const recordWarmupTokenFailureObservation = `-- name: RecordWarmupTokenFailureObservation :exec
+INSERT INTO warmup_observations (
+    workspace_id, observer_mailbox_id, kind, source, reason_code,
+    attribution_trusted, idempotency_key, observed_at
+)
+SELECT $1, m.id, 'invalid_token', 'inbox_token_verifier',
+       $2, false,
+       'token:' || m.id::text || ':' || $3::text, now()
+FROM mailboxes m
+WHERE m.id = $4
+  AND m.workspace_id = $1
+ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
+`
+
+type RecordWarmupTokenFailureObservationParams struct {
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
+	ReasonCode       string    `json:"reason_code"`
+	Fingerprint      string    `json:"fingerprint"`
+	RecipientMailbox uuid.UUID `json:"recipient_mailbox"`
+}
+
+// Untrusted token failures retain no claimed sender. The recipient mailbox is
+// ownership-checked, but attribution_trusted remains false so this evidence can
+// inform the future observer-trust axis without health-gating an innocent sender.
+func (q *Queries) RecordWarmupTokenFailureObservation(ctx context.Context, arg RecordWarmupTokenFailureObservationParams) error {
+	_, err := q.db.Exec(ctx, recordWarmupTokenFailureObservation,
+		arg.WorkspaceID,
+		arg.ReasonCode,
+		arg.Fingerprint,
+		arg.RecipientMailbox,
+	)
+	return err
+}
+
 const releaseWarmupSend = `-- name: ReleaseWarmupSend :exec
 UPDATE warmup_sends
 SET status = 'queued', claimed_at = NULL
@@ -883,27 +1188,53 @@ func (q *Queries) ReleaseWarmupSend(ctx context.Context, arg ReleaseWarmupSendPa
 }
 
 const selectWarmupPartner = `-- name: SelectWarmupPartner :one
-SELECT p.mailbox_id, m.email, m.display_name
-FROM warmup_participants p
-JOIN mailboxes m ON m.id = p.mailbox_id
-WHERE p.workspace_id = $1
-  AND p.mailbox_id <> $2
-  AND p.enabled
-  AND p.health_state <> 'paused'
-  AND (p.paused_until IS NULL OR p.paused_until <= now())
-ORDER BY (
-    SELECT COALESCE(MAX(t.last_activity_at), 'epoch'::timestamptz)
-    FROM warmup_threads t
-    WHERE t.workspace_id = $1
-      AND ((t.sender_mailbox = $2 AND t.partner_mailbox = p.mailbox_id)
-        OR (t.sender_mailbox = p.mailbox_id AND t.partner_mailbox = $2))
-  ) ASC, p.mailbox_id ASC
+WITH candidates AS (
+    SELECT p.mailbox_id, m.email, m.display_name,
+           COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
+           COALESCE(pair.sent_today, 0)::bigint AS sent_today
+    FROM warmup_participants p
+    JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
+    LEFT JOIN LATERAL (
+        SELECT
+            (SELECT MAX(t.last_activity_at)
+             FROM warmup_threads t
+             WHERE t.workspace_id = $1
+               AND ((t.sender_mailbox = $2 AND t.partner_mailbox = p.mailbox_id)
+                 OR (t.sender_mailbox = p.mailbox_id AND t.partner_mailbox = $2))) AS last_pair_at,
+            (SELECT COUNT(*)
+             FROM warmup_sends s
+             WHERE s.workspace_id = $1
+               AND s.from_mailbox = $2
+               AND s.to_mailbox = p.mailbox_id
+               AND s.status IN ('sending','sent')
+               AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') AS sent_today
+    ) pair ON true
+    WHERE p.workspace_id = $1
+      AND p.mailbox_id <> $2
+      AND p.enabled
+      AND p.health_state <> 'paused'
+      AND (p.paused_until IS NULL OR p.paused_until <= now())
+)
+SELECT mailbox_id, email, display_name
+FROM candidates c
+WHERE c.sent_today < $3::int
+  AND (
+      c.last_pair_at <= $4::timestamptz
+      OR NOT EXISTS (
+          SELECT 1 FROM candidates fresh
+          WHERE fresh.sent_today < $3::int
+            AND fresh.last_pair_at <= $4::timestamptz
+      )
+  )
+ORDER BY c.sent_today ASC, c.last_pair_at ASC, c.mailbox_id ASC
 LIMIT 1
 `
 
 type SelectWarmupPartnerParams struct {
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	SenderMailbox uuid.UUID          `json:"sender_mailbox"`
+	MaxPairSends  int32              `json:"max_pair_sends"`
+	CooldownSince pgtype.Timestamptz `json:"cooldown_since"`
 }
 
 type SelectWarmupPartnerRow struct {
@@ -919,7 +1250,12 @@ type SelectWarmupPartnerRow struct {
 // mailbox_id so partner spread is stable and reproducible. workspace-pinned; a
 // workspace with <2 eligible participants returns no row.
 func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartnerParams) (SelectWarmupPartnerRow, error) {
-	row := q.db.QueryRow(ctx, selectWarmupPartner, arg.WorkspaceID, arg.MailboxID)
+	row := q.db.QueryRow(ctx, selectWarmupPartner,
+		arg.WorkspaceID,
+		arg.SenderMailbox,
+		arg.MaxPairSends,
+		arg.CooldownSince,
+	)
 	var i SelectWarmupPartnerRow
 	err := row.Scan(&i.MailboxID, &i.Email, &i.DisplayName)
 	return i, err
@@ -946,6 +1282,13 @@ WHERE p.workspace_id = $1
   AND (p.paused_until IS NULL OR p.paused_until <= now())
   AND t.turn >= 1
   AND t.turn < $3::int
+  AND (SELECT COUNT(*) FROM warmup_sends s
+       WHERE s.workspace_id = $1
+         AND s.from_mailbox = $2
+         AND s.to_mailbox = p.mailbox_id
+         AND s.status IN ('sending','sent')
+         AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc')
+      < $4::int
 ORDER BY t.last_activity_at ASC, p.mailbox_id ASC
 LIMIT 1
 `
@@ -954,6 +1297,7 @@ type SelectWarmupReplyPartnerParams struct {
 	WorkspaceID   uuid.UUID `json:"workspace_id"`
 	SenderMailbox uuid.UUID `json:"sender_mailbox"`
 	MaxTurn       int32     `json:"max_turn"`
+	MaxPairSends  int32     `json:"max_pair_sends"`
 }
 
 type SelectWarmupReplyPartnerRow struct {
@@ -983,7 +1327,12 @@ type SelectWarmupReplyPartnerRow struct {
 // (least-recently-active first, matching SelectWarmupPartner's spread), tie-broken
 // by mailbox_id for determinism. workspace-pinned; no repliable partner → no row.
 func (q *Queries) SelectWarmupReplyPartner(ctx context.Context, arg SelectWarmupReplyPartnerParams) (SelectWarmupReplyPartnerRow, error) {
-	row := q.db.QueryRow(ctx, selectWarmupReplyPartner, arg.WorkspaceID, arg.SenderMailbox, arg.MaxTurn)
+	row := q.db.QueryRow(ctx, selectWarmupReplyPartner,
+		arg.WorkspaceID,
+		arg.SenderMailbox,
+		arg.MaxTurn,
+		arg.MaxPairSends,
+	)
 	var i SelectWarmupReplyPartnerRow
 	err := row.Scan(
 		&i.MailboxID,
@@ -1145,19 +1494,22 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 const upsertWarmupReceipt = `-- name: UpsertWarmupReceipt :one
 
 INSERT INTO warmup_receipts (workspace_id, warmup_send_id, recipient_mailbox, placement, source_folder, message_id)
-SELECT $1, $2, $3, $4, $5, $6
-FROM mailboxes WHERE id = $3 AND workspace_id = $1
+SELECT s.workspace_id, s.id, m.id, $1, $2, $3
+FROM warmup_sends s
+JOIN mailboxes m ON m.id = $4 AND m.workspace_id = s.workspace_id
+WHERE s.id = $5 AND s.workspace_id = $6
+  AND s.to_mailbox = $4 AND s.status = 'sent'
 ON CONFLICT (warmup_send_id, recipient_mailbox) DO NOTHING
 RETURNING id, received_at
 `
 
 type UpsertWarmupReceiptParams struct {
-	WorkspaceID      uuid.UUID   `json:"workspace_id"`
-	WarmupSendID     pgtype.UUID `json:"warmup_send_id"`
-	RecipientMailbox uuid.UUID   `json:"recipient_mailbox"`
-	Placement        string      `json:"placement"`
-	SourceFolder     string      `json:"source_folder"`
-	MessageID        string      `json:"message_id"`
+	Placement        string    `json:"placement"`
+	SourceFolder     string    `json:"source_folder"`
+	MessageID        string    `json:"message_id"`
+	RecipientMailbox uuid.UUID `json:"recipient_mailbox"`
+	WarmupSendID     uuid.UUID `json:"warmup_send_id"`
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
 }
 
 type UpsertWarmupReceiptRow struct {
@@ -1174,22 +1526,24 @@ type UpsertWarmupReceiptRow struct {
 // Idempotently record a received warmup message's placement. UNIQUE
 // (warmup_send_id, recipient_mailbox) makes a re-poll a no-op: ON CONFLICT DO
 // NOTHING, and RETURNING yields a row ONLY on a genuinely NEW insert (a duplicate
-// returns pgx.ErrNoRows). SELF-ENFORCING tenancy: the INSERT ... SELECT emits a
-// candidate row ONLY when the recipient mailbox truly belongs to the workspace, so
-// a foreign pair also inserts nothing (also pgx.ErrNoRows) — the caller
-// disambiguates duplicate-vs-cross-tenant with GetWarmupReceiptByPair. received_at
+// returns pgx.ErrNoRows). The INSERT proves all three identities at once: the send
+// belongs to the workspace, the recipient belongs to that workspace, and the send
+// was actually addressed to that recipient. A foreign recipient or a same-workspace
+// binding mismatch therefore also returns no row; the caller distinguishes a true
+// duplicate with GetWarmupReceiptByPair and otherwise fails closed or records
+// untrusted mismatch evidence. received_at
 // is returned so the caller seeds the deterministic engage plan on the SAME instant
 // a later GetWarmupEngageJob re-reads. source_folder + message_id are the receipt
 // locator (000019): the provider folder the message was found in and its RFC822
 // Message-ID, so C5b's engager can relocate/rescue/mark-read the exact message.
 func (q *Queries) UpsertWarmupReceipt(ctx context.Context, arg UpsertWarmupReceiptParams) (UpsertWarmupReceiptRow, error) {
 	row := q.db.QueryRow(ctx, upsertWarmupReceipt,
-		arg.WorkspaceID,
-		arg.WarmupSendID,
-		arg.RecipientMailbox,
 		arg.Placement,
 		arg.SourceFolder,
 		arg.MessageID,
+		arg.RecipientMailbox,
+		arg.WarmupSendID,
+		arg.WorkspaceID,
 	)
 	var i UpsertWarmupReceiptRow
 	err := row.Scan(&i.ID, &i.ReceivedAt)

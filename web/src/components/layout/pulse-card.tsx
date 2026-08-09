@@ -106,7 +106,13 @@ function SendMeter({ sending }: { sending: WorkspacePulse['sending'] }) {
 
 function WarmupLine({ warmup }: { warmup: WorkspacePulse['warmup'] }) {
   const status =
-    warmup.at_risk > 0 ? `${warmup.at_risk} at risk` : warmup.watch > 0 ? `${warmup.watch} on watch` : 'all healthy'
+    warmup.at_risk > 0
+      ? `${warmup.at_risk} at risk`
+      : warmup.watch > 0
+        ? `${warmup.watch} on watch`
+        : warmup.unknown > 0
+          ? `${warmup.unknown} need evidence`
+          : 'all healthy'
   return (
     <Link to="/app/warmup" data-slot="pulse-warmup-line" className={cn(rowClass, 'text-[12px] text-chrome-muted')}>
       <Flame className="size-3 shrink-0 text-warm" strokeWidth={1.75} aria-hidden="true" />

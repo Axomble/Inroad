@@ -18,6 +18,7 @@ import "math"
 // packages do not depend on each other (sendcap does the same), and this one
 // must stay free of anything but its own arithmetic.
 const (
+	WarmupUnknown   = "unknown"
 	WarmupWatch     = "watch"
 	WarmupThrottled = "throttled"
 	WarmupPaused    = "paused"
@@ -384,6 +385,9 @@ func spamPlacementComponent(in Inputs) Component {
 func warmupComponent(in Inputs) Component {
 	c := Component{Key: KeyWarmup, Label: "Warmup health"}
 	switch in.WarmupState {
+	case WarmupUnknown:
+		c.Detail = "insufficient warmup evidence"
+		return c
 	case WarmupWatch:
 		c.Penalty = WarmupWatchPenalty
 	case WarmupThrottled:

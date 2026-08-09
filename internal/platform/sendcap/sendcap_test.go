@@ -33,6 +33,7 @@ func TestColdFactor(t *testing.T) {
 		want  float64
 	}{
 		{"healthy", 1},
+		{HealthUnknown, 0.5},
 		{"", 1},
 		{"nonsense", 1},
 		{HealthWatch, 0.7},
@@ -56,6 +57,7 @@ func TestCold(t *testing.T) {
 		want      int
 	}{
 		{"healthy is unscaled", 40, "healthy", 40},
+		{"unknown reputation is conservative", 40, HealthUnknown, 20},
 		{"not warming up is unscaled", 40, "", 40},
 		{"watch takes 70 percent", 40, HealthWatch, 28},
 		{"throttled takes half", 40, HealthThrottled, 20},

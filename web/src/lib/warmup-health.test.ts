@@ -5,6 +5,7 @@ describe('warmup health mapping', () => {
   // Each state maps to a distinct label AND a distinct color token, so the four
   // states are tellable apart by text alone (color is redundant reinforcement).
   test.each([
+    ['unknown', 'Needs evidence', 'text-muted-foreground', 'bg-muted-foreground'],
     ['healthy', 'Healthy', 'text-ok', 'bg-ok'],
     ['watch', 'Watch', 'text-warn', 'bg-warn'],
     ['throttled', 'Throttled', 'text-warm', 'bg-warm'],
@@ -23,10 +24,10 @@ describe('warmup health mapping', () => {
     expect(new Set(dots).size).toBe(dots.length)
   })
 
-  test('an unknown/absent state falls back to healthy rather than a blank badge', () => {
-    expect(toWarmupHealth('bogus')).toBe('healthy')
-    expect(toWarmupHealth(null)).toBe('healthy')
-    expect(toWarmupHealth(undefined)).toBe('healthy')
+  test('an unknown or absent value falls back to needs-evidence rather than healthy', () => {
+    expect(toWarmupHealth('bogus')).toBe('unknown')
+    expect(toWarmupHealth(null)).toBe('unknown')
+    expect(toWarmupHealth(undefined)).toBe('unknown')
   })
 
   test('a known state string narrows to itself', () => {

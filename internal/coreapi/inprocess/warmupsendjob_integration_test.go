@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -249,7 +250,10 @@ func TestReplyPrefersRepliablePartner(t *testing.T) {
 
 	// The recency-spread partner is D (never paired → 'epoch'); B has a just-active
 	// thread. Confirm that assumption so the test proves preference, not coincidence.
-	sp, err := f.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{WorkspaceID: f.ws1, MailboxID: f.a})
+	sp, err := f.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{
+		WorkspaceID: f.ws1, SenderMailbox: f.a, MaxPairSends: 100,
+		CooldownSince: pgtype.Timestamptz{Time: time.Now().Add(-warmup.PairCooldown), Valid: true},
+	})
 	if err != nil {
 		t.Fatalf("spread partner: %v", err)
 	}

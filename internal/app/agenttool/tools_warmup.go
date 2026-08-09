@@ -15,15 +15,16 @@ const maxWarmupSeries = 14
 
 // WarmupMailbox is one mailbox's warmup state in the pool overview.
 type WarmupMailbox struct {
-	MailboxID    uuid.UUID
-	Email        string
-	Enabled      bool
-	HealthState  string
-	HealthReason string
-	TodaySent    int32
-	TodayTarget  int32
-	InboxRate7d  float64
-	SpamRate7d   float64
+	MailboxID         uuid.UUID
+	Email             string
+	Enabled           bool
+	HealthState       string
+	HealthReason      string
+	TodaySent         int32
+	TodayTarget       int32
+	PlacementSample7d int64
+	InboxRate7d       *float64
+	SpamRate7d        *float64
 }
 
 // WarmupOverview is the pool summary. Active is false for a pool too small to
@@ -126,7 +127,8 @@ func warmupReadTool(r WarmupReader) Tool {
 						"mailbox_id": m.MailboxID.String(), "email": m.Email, "enabled": m.Enabled,
 						"health_state": m.HealthState, "health_reason": m.HealthReason,
 						"today_sent": m.TodaySent, "today_target": m.TodayTarget,
-						"inbox_rate_7d_pct": m.InboxRate7d, "spam_rate_7d_pct": m.SpamRate7d,
+						"placement_sample_7d": m.PlacementSample7d,
+						"inbox_rate_7d_pct":   m.InboxRate7d, "spam_rate_7d_pct": m.SpamRate7d,
 					})
 				}
 				return Ok(map[string]any{

@@ -225,16 +225,18 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 	now := s.now()
 	mailboxes := make([]WarmupMailboxDTO, len(rows))
 	for i, r := range rows {
+		placementSample := r.Inbox7d + r.Spam7d
 		mailboxes[i] = WarmupMailboxDTO{
-			MailboxID:    r.MailboxID.String(),
-			Email:        r.Email,
-			Enabled:      r.Enabled,
-			HealthState:  r.HealthState,
-			HealthReason: r.HealthReason,
-			TodaySent:    r.TodaySent,
-			TodayTarget:  targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
-			InboxRate7d:  placementRate(r.Inbox7d, r.Inbox7d+r.Spam7d),
-			SpamRate7d:   placementRate(r.Spam7d, r.Inbox7d+r.Spam7d),
+			MailboxID:         r.MailboxID.String(),
+			Email:             r.Email,
+			Enabled:           r.Enabled,
+			HealthState:       r.HealthState,
+			HealthReason:      r.HealthReason,
+			TodaySent:         r.TodaySent,
+			TodayTarget:       targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
+			PlacementSample7d: placementSample,
+			InboxRate7d:       placementRate(r.Inbox7d, placementSample),
+			SpamRate7d:        placementRate(r.Spam7d, placementSample),
 		}
 	}
 	return WarmupOverviewDTO{
@@ -294,11 +296,12 @@ func daysWarming(startedAt pgtype.Timestamptz, now time.Time) int {
 
 // placementRate is n/denom as a fraction, guarding the empty-window divide-by-zero
 // (no observed placements yet → rate 0).
-func placementRate(n, denom int64) float64 {
+func placementRate(n, denom int64) *float64 {
 	if denom == 0 {
-		return 0
+		return nil
 	}
-	return float64(n) / float64(denom)
+	rate := float64(n) / float64(denom)
+	return &rate
 }
 
 // dayStatDTO maps a daily-stats row to the WarmupDayStat wire shape (day as a

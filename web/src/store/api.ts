@@ -2675,7 +2675,7 @@ export type WarmupParticipant = {
   ramp_increment: number;
   reply_rate: number;
   /** reputation state derived from inbox-placement and behavior signals */
-  health_state: "healthy" | "watch" | "throttled" | "paused";
+  health_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
   /** human-readable explanation of a non-healthy state */
   health_reason: string;
   started_at: string;
@@ -2716,14 +2716,16 @@ export type WarmupMailbox = {
   mailbox_id: string;
   email: string;
   enabled: boolean;
-  health_state: "healthy" | "watch" | "throttled" | "paused";
+  health_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
   health_reason: string;
   today_sent: number;
   today_target: number;
-  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal */
-  inbox_rate_7d: number;
-  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1) */
-  spam_rate_7d: number;
+  /** trusted inbox plus spam placement observations in the trailing 7 days */
+  placement_sample_7d: number;
+  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed */
+  inbox_rate_7d: number | null;
+  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed */
+  spam_rate_7d: number | null;
 };
 export type WarmupOverview = {
   pool_size: number;
@@ -2750,6 +2752,8 @@ export type Pulse = {
   /** enabled warmup participants bucketed by live health; at_risk = throttled + paused */
   warmup: {
     pool: number;
+    /** enabled participants without enough evidence for a health verdict */
+    unknown: number;
     healthy: number;
     watch: number;
     at_risk: number;
@@ -3414,7 +3418,8 @@ export type CampaignSender = {
   assigned_count: number;
   last_assigned_at?: string | null;
   /** Read-only warmup health; null when the mailbox is not warming up. */
-  health_state?: ("healthy" | "watch" | "throttled" | "paused" | null) | null;
+  health_state?:
+    ("unknown" | "healthy" | "watch" | "throttled" | "paused" | null) | null;
   /** Read-only. False when this mailbox is not taking cold volume right now — paused by warmup, held out of rotation, or an inactive mailbox. */
   sending?: boolean;
   /** Read-only effective cap for today, after ramp and after warmup-health scaling. */
