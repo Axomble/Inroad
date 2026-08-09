@@ -50,11 +50,16 @@ type stepResponse struct {
 	Subject      string `json:"subject"`
 	BodyText     string `json:"body_text"`
 	BodyHTML     string `json:"body_html"`
+	// VariantWeight is this step's own share of its A/B split. It travels on the
+	// step so the editor can render the split without a second request, but it is
+	// written only through the base-weight endpoint -- see baseWeightRequest.
+	VariantWeight int32 `json:"variant_weight"`
 }
 
 func toResponse(st gen.SequenceStep) stepResponse {
 	return stepResponse{
 		ID: st.ID.String(), StepOrder: st.StepOrder, DelaySeconds: st.DelaySeconds,
 		Subject: st.Subject, BodyText: st.BodyText, BodyHTML: st.BodyHtml,
+		VariantWeight: st.VariantWeight,
 	}
 }

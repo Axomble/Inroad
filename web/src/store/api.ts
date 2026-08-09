@@ -882,6 +882,53 @@ const injectedRtkApi = api.injectEndpoints({
         method: "DELETE",
       }),
     }),
+    listStepVariants: build.query<
+      ListStepVariantsApiResponse,
+      ListStepVariantsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants`,
+      }),
+    }),
+    createStepVariant: build.mutation<
+      CreateStepVariantApiResponse,
+      CreateStepVariantApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants`,
+        method: "POST",
+        body: queryArg.stepVariantRequest,
+      }),
+    }),
+    updateStepVariant: build.mutation<
+      UpdateStepVariantApiResponse,
+      UpdateStepVariantApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants/${queryArg.variantId}`,
+        method: "PUT",
+        body: queryArg.stepVariantRequest,
+      }),
+    }),
+    deleteStepVariant: build.mutation<
+      DeleteStepVariantApiResponse,
+      DeleteStepVariantApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants/${queryArg.variantId}`,
+        method: "DELETE",
+      }),
+    }),
+    setStepBaseWeight: build.mutation<
+      SetStepBaseWeightApiResponse,
+      SetStepBaseWeightApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/base-weight`,
+        method: "PUT",
+        body: queryArg.stepBaseWeightRequest,
+      }),
+    }),
     reorderSteps: build.mutation<ReorderStepsApiResponse, ReorderStepsApiArg>({
       query: (queryArg) => ({
         url: `/campaigns/${queryArg.id}/steps/reorder`,
@@ -1963,6 +2010,40 @@ export type DeleteStepApiResponse = unknown;
 export type DeleteStepApiArg = {
   id: string;
   stepId: string;
+};
+export type ListStepVariantsApiResponse =
+  /** status 200 The step's variants */ StepVariant[];
+export type ListStepVariantsApiArg = {
+  id: string;
+  stepId: string;
+};
+export type CreateStepVariantApiResponse =
+  /** status 201 The created variant */ StepVariant;
+export type CreateStepVariantApiArg = {
+  id: string;
+  stepId: string;
+  stepVariantRequest: StepVariantRequest;
+};
+export type UpdateStepVariantApiResponse =
+  /** status 200 The updated variant */ StepVariant;
+export type UpdateStepVariantApiArg = {
+  id: string;
+  stepId: string;
+  variantId: string;
+  stepVariantRequest: StepVariantRequest;
+};
+export type DeleteStepVariantApiResponse = unknown;
+export type DeleteStepVariantApiArg = {
+  id: string;
+  stepId: string;
+  variantId: string;
+};
+export type SetStepBaseWeightApiResponse =
+  /** status 200 The step's variants after the change */ StepVariant[];
+export type SetStepBaseWeightApiArg = {
+  id: string;
+  stepId: string;
+  stepBaseWeightRequest: StepBaseWeightRequest;
 };
 export type ReorderStepsApiResponse =
   /** status 200 Steps in the new order */ SequenceStep[];
@@ -3193,6 +3274,8 @@ export type SequenceStep = {
   subject?: string;
   body_text?: string;
   body_html?: string;
+  /** This step's OWN share of its A/B split - the "A" side. Only meaningful alongside variants: a step with none sends its own content regardless of this value, matching the send path. Set it through PUT /campaigns/{id}/steps/{stepId}/base-weight, never through a step content edit. */
+  variant_weight?: number;
 };
 export type Metrics = {
   sent?: number;
@@ -3312,6 +3395,28 @@ export type StepRequest = {
   body_text?: string;
   body_html?: string;
 };
+export type StepVariant = {
+  id: string;
+  step_id: string;
+  /** Short name shown as a column in the results table; unique per step. */
+  label: string;
+  /** Relative selection weight, against the step's own variant_weight and the other variants. 0 means "still here, no longer sending", which is how a losing arm is retired without orphaning the sends attributed to it. */
+  weight: number;
+  /** Empty on a follow-up step threads onto the previous message, exactly as the base copy does. */
+  subject: string;
+  body_text: string;
+  body_html: string;
+};
+export type StepVariantRequest = {
+  label: string;
+  weight: number;
+  subject?: string;
+  body_text?: string;
+  body_html?: string;
+};
+export type StepBaseWeightRequest = {
+  weight: number;
+};
 export type ReorderStepsRequest = {
   /** the FULL ordered list of the campaign's step ids, in the desired order */
   step_ids: string[];
@@ -3322,6 +3427,7 @@ export type CampaignPreflightCheck = {
     | "sequence_steps"
     | "empty_bodies"
     | "personalization_tokens"
+    | "variant_weights"
     | "schedule_windows"
     | "sender_pool"
     | "audience"
@@ -3877,6 +3983,11 @@ export const {
   useCreateStepMutation,
   useUpdateStepMutation,
   useDeleteStepMutation,
+  useListStepVariantsQuery,
+  useCreateStepVariantMutation,
+  useUpdateStepVariantMutation,
+  useDeleteStepVariantMutation,
+  useSetStepBaseWeightMutation,
   useReorderStepsMutation,
   useLaunchCampaignMutation,
   useGetCampaignPreflightQuery,

@@ -1847,6 +1847,132 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: Campaign or step not found }
         '409': { description: Campaign not draft (delete is a structural edit) }
+  /campaigns/{id}/steps/{stepId}/variants:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listStepVariants
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The step's A/B ALTERNATIVES. The step's own subject and body are variant
+        A and are not repeated here - see SequenceStep.variant_weight for its
+        share of the split. A step with an empty list is a normal single-copy
+        step and sends its own content regardless of that weight.
+      responses:
+        '200':
+          description: The step's variants
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/StepVariant' } }
+        '400': { description: stepId is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign or step not found }
+    post:
+      operationId: createStepVariant
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Add an alternative to the step.
+
+
+        Allowed on a RUNNING campaign, unlike creating a step. Adding or
+        reweighting an arm changes what future sends contain, which is the same
+        class of change as editing a step's body (already permitted live), not a
+        structural change to the sequence. Requiring a pause to start an A/B test
+        would mean pausing to learn anything.
+
+
+        Refused with 409 when the resulting step would have every arm at weight
+        0, because nothing could then be selected and every send for that step
+        would fail at delivery time.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepVariantRequest' } } }
+      responses:
+        '201': { description: The created variant, content: { application/json: { schema: { $ref: '#/components/schemas/StepVariant' } } } }
+        '400': { description: "Invalid label (1-40 characters) or a negative weight" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Campaign or step not found }
+        '409': { description: "Label already used on this step, the step is at its variant limit, or no arm would be left with a weight above zero" }
+  /campaigns/{id}/steps/{stepId}/variants/{variantId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: variantId, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      operationId: updateStepVariant
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Edit one alternative's label, weight and copy. Setting weight to 0
+        retires the arm without losing the sends already attributed to it - this
+        is the supported way to stop a losing variant.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepVariantRequest' } } }
+      responses:
+        '200': { description: The updated variant, content: { application/json: { schema: { $ref: '#/components/schemas/StepVariant' } } } }
+        '400': { description: "Invalid label or a negative weight" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Variant not found }
+        '409': { description: "Label already used on this step, or this edit would leave no arm with a weight above zero" }
+    delete:
+      operationId: deleteStepVariant
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Delete an alternative that has NEVER SENT.
+
+
+        A variant with delivery history is refused with 409. sends.variant_id is
+        ON DELETE SET NULL, so deleting one would silently re-attribute its
+        messages to the base copy - the losing arm's results would fold into the
+        winner's and make the comparison read better than it was. Set the weight
+        to 0 instead; the arm stops sending and its numbers stay intact.
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Variant not found }
+        '409': { description: "The variant has already sent (set its weight to 0 instead), or deleting it would leave no arm with a weight above zero" }
+  /campaigns/{id}/steps/{stepId}/base-weight:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      operationId: setStepBaseWeight
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Set the weight of the step's OWN copy - the "A" side of the split.
+
+
+        Its own endpoint rather than a field on the step update, because it is
+        the one attribute of a step that changes what an in-flight A/B test
+        measures: folding it into the content PUT would let an unrelated body
+        edit silently reweight a running test.
+
+
+        Zero retires the base copy without deleting what it said, which is how a
+        winning variant is promoted. Refused with 409 if no arm would be left.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepBaseWeightRequest' } } }
+      responses:
+        '200':
+          description: The step's variants after the change
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/StepVariant' } }
+        '400': { description: Negative weight }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Campaign or step not found }
+        '409': { description: This would leave no arm with a weight above zero }
   /campaigns/{id}/steps/reorder:
     post:
       operationId: reorderSteps
@@ -3401,6 +3527,39 @@ components:
           format: date-time
           nullable: true
           description: RFC3339 timestamp the reply was classified
+    StepVariant:
+      type: object
+      description: One A/B alternative for a step. The step's own copy is variant A and is not represented here.
+      required: [id, step_id, label, weight, subject, body_text, body_html]
+      properties:
+        id: { type: string, format: uuid }
+        step_id: { type: string, format: uuid }
+        label: { type: string, maxLength: 40, description: "Short name shown as a column in the results table; unique per step." }
+        weight:
+          type: integer
+          minimum: 0
+          description: >-
+            Relative selection weight, against the step's own variant_weight and
+            the other variants. 0 means "still here, no longer sending", which is
+            how a losing arm is retired without orphaning the sends attributed to
+            it.
+        subject: { type: string, description: "Empty on a follow-up step threads onto the previous message, exactly as the base copy does." }
+        body_text: { type: string }
+        body_html: { type: string }
+    StepVariantRequest:
+      type: object
+      required: [label, weight]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 40 }
+        weight: { type: integer, minimum: 0 }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string }
+    StepBaseWeightRequest:
+      type: object
+      required: [weight]
+      properties:
+        weight: { type: integer, minimum: 0 }
     SequenceStep:
       type: object
       properties:
@@ -3410,6 +3569,15 @@ components:
         subject: { type: string }
         body_text: { type: string }
         body_html: { type: string }
+        variant_weight:
+          type: integer
+          minimum: 0
+          description: >-
+            This step's OWN share of its A/B split - the "A" side. Only
+            meaningful alongside variants: a step with none sends its own content
+            regardless of this value, matching the send path. Set it through PUT
+            /campaigns/{id}/steps/{stepId}/base-weight, never through a step
+            content edit.
     StepRequest:
       type: object
       properties:
@@ -3999,7 +4167,7 @@ components:
       properties:
         id:
           type: string
-          enum: [sequence_steps, empty_bodies, personalization_tokens, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+          enum: [sequence_steps, empty_bodies, personalization_tokens, variant_weights, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
           description: >-
             `personalization_tokens` FAILS (does not warn) when a step contains a
             `{{...}}` placeholder nothing will substitute, which is harsher than
