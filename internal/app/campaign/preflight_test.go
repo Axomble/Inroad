@@ -38,7 +38,7 @@ func healthyInput() campaign.PreflightInput {
 }
 
 // findCheck locates one check by id, failing the test if it is absent --
-// every one of the 9 documented ids must always be present.
+// every one of the documented ids must always be present.
 func findCheck(t *testing.T, report campaign.PreflightReport, id string) campaign.PreflightCheck {
 	t.Helper()
 	for _, c := range report.Checks {
@@ -58,7 +58,7 @@ func TestComputePreflightHealthyInputIsReadyAndEveryCheckPasses(t *testing.T) {
 	ids := []string{
 		campaign.CheckSequenceSteps, campaign.CheckEmptyBodies, campaign.CheckScheduleWindows,
 		campaign.CheckSenderPool, campaign.CheckAudience, campaign.CheckDomainAuth,
-		campaign.CheckTracking, campaign.CheckDailyLimit, campaign.CheckWarmupHealth,
+		campaign.CheckTracking, campaign.CheckDailyLimit, campaign.CheckWarmupHealth, campaign.CheckTokens, campaign.CheckVariantWeights,
 	}
 	if len(report.Checks) != len(ids) {
 		t.Fatalf("checks = %d, want %d: %+v", len(report.Checks), len(ids), report.Checks)
@@ -363,6 +363,8 @@ type fakeCampaignStore struct {
 	steps   []gen.SequenceStep
 	windows []campaign.SendWindow
 
+	stepVariants map[uuid.UUID][]campaign.PreflightVariant
+
 	senders     []campaign.Sender
 	sendersErr  error
 	fallback    campaign.Sender
@@ -383,6 +385,12 @@ func (f *fakeCampaignStore) Get(_ context.Context, ws, id uuid.UUID) (gen.Campai
 }
 func (f *fakeCampaignStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return f.steps, f.stepsErr
+}
+
+// stepVariants is nil in every test that is not about A/B variants -- a campaign
+// with no variants at all, which is how the vast majority of campaigns run.
+func (f *fakeCampaignStore) ListStepVariants(context.Context, uuid.UUID, uuid.UUID) (map[uuid.UUID][]campaign.PreflightVariant, error) {
+	return f.stepVariants, nil
 }
 func (f *fakeCampaignStore) ListWindows(context.Context, uuid.UUID, uuid.UUID) ([]campaign.SendWindow, error) {
 	return f.windows, f.windowsErr
@@ -457,11 +465,31 @@ func (f fakeDomainAuthReader) DomainAuth(context.Context, uuid.UUID) (map[string
 	return f.verdicts, f.err
 }
 
+// fakeCustomFieldReader supplies the live {{custom.*}} keys the
+// personalization_tokens check resolves against.
+type fakeCustomFieldReader struct {
+	keys []string
+	err  error
+}
+
+func (f fakeCustomFieldReader) CustomFieldKeys(context.Context, uuid.UUID) ([]string, error) {
+	return f.keys, f.err
+}
+
+// withFields is the option every loader test needs, because an unwired reader
+// deliberately fails the request rather than degrading (see WithCustomFields).
+// The default key set is empty: a sequence with no {{custom.*}} tokens passes
+// the check either way, so tests that are not about custom fields say nothing
+// about them.
+func withFields(keys ...string) campaign.ServiceOption {
+	return campaign.WithCustomFields(fakeCustomFieldReader{keys: keys})
+}
+
 func TestPreflightCrossTenantIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	owner, id := uuid.New(), uuid.New()
 	store := &fakeCampaignStore{campaigns: map[[2]uuid.UUID]gen.Campaign{{owner, id}: {ID: id, WorkspaceID: owner}}}
-	svc := campaign.NewService(store, noopChecker{})
+	svc := campaign.NewService(store, noopChecker{}, withFields())
 
 	if _, err := svc.Preflight(ctx, uuid.New(), id); !errors.Is(err, campaign.ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
@@ -479,7 +507,7 @@ func TestPreflightFallsBackToTheCampaignMailboxWhenThePoolIsEmpty(t *testing.T) 
 		fallback:  campaign.Sender{Email: "solo@x.test", Enabled: true, Status: "active", CapToday: 10},
 		audience:  1,
 	}
-	svc := campaign.NewService(store, noopChecker{})
+	svc := campaign.NewService(store, noopChecker{}, withFields())
 
 	report, err := svc.Preflight(ctx, ws, id)
 	if err != nil {
@@ -502,7 +530,7 @@ func TestPreflightWithoutADomainAuthReaderTreatsEveryDomainAsUnchecked(t *testin
 	}
 	// No campaign.WithDomainAuth option: the loader must not fail, and the
 	// check must degrade to "not checked" rather than silently reporting pass.
-	svc := campaign.NewService(store, noopChecker{})
+	svc := campaign.NewService(store, noopChecker{}, withFields())
 
 	report, err := svc.Preflight(ctx, ws, id)
 	if err != nil {
@@ -527,7 +555,7 @@ func TestPreflightUsesTheWiredDomainAuthReader(t *testing.T) {
 	reader := fakeDomainAuthReader{verdicts: map[string]campaign.DomainAuthVerdict{
 		"x.test": {Checked: true, SPFFound: true, DMARCFound: true},
 	}}
-	svc := campaign.NewService(store, noopChecker{}, campaign.WithDomainAuth(reader))
+	svc := campaign.NewService(store, noopChecker{}, campaign.WithDomainAuth(reader), withFields())
 
 	report, err := svc.Preflight(ctx, ws, id)
 	if err != nil {
@@ -546,7 +574,7 @@ func TestPreflightPropagatesStoreErrors(t *testing.T) {
 		campaigns: map[[2]uuid.UUID]gen.Campaign{{ws, id}: {ID: id, WorkspaceID: ws}},
 		stepsErr:  boom,
 	}
-	svc := campaign.NewService(store, noopChecker{})
+	svc := campaign.NewService(store, noopChecker{}, withFields())
 
 	if _, err := svc.Preflight(ctx, ws, id); err == nil {
 		t.Fatal("err = nil, want the propagated store error")

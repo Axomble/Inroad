@@ -42,11 +42,18 @@ WHERE e.id = $1 AND e.workspace_id = $2;
 -- it". Staleness is claimed_at older than the lease window (lease_seconds).
 -- workspace_id is pinned on both the insert value and the reclaim WHERE, so a
 -- foreign/cross-tenant id claims zero rows (belt-and-braces on the campaign FK).
+--
+-- variant_id records which A/B variant this message used, and is written on the
+-- RECLAIM path too: selection is deterministic per (enrollment, step), so a
+-- reclaim recomputes the same variant, but the weights could have been edited
+-- between the two attempts. Re-stamping it keeps the row describing what is
+-- actually about to be sent rather than what a previous attempt intended.
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-                   step_order, references_header, status, claimed_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now())
+                   step_order, references_header, status, claimed_at, variant_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), sqlc.narg(variant_id))
 ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
-DO UPDATE SET status = 'sending', claimed_at = now(), error = ''
+DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
+              variant_id = EXCLUDED.variant_id
     WHERE sends.status = 'sending'
       AND sends.workspace_id = $2
       AND sends.claimed_at < now() - make_interval(secs => sqlc.arg(lease_seconds)::int)

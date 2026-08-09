@@ -1284,6 +1284,164 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: List not found }
         '422': { description: "q shorter than 2 characters, unknown sort, or limit out of range" }
+  /custom-fields:
+    get:
+      operationId: listCustomFields
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace's custom field definitions, ARCHIVED ONES INCLUDED. Archived
+        definitions are returned rather than hidden because they are the
+        explanation for values a contact still carries under a key no form offers
+        any more; a client that dropped them would make real data look like
+        corruption. Filter on `archived` to render only the live set.
+      responses:
+        '200':
+          description: The workspace's custom field definitions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CustomFieldDef' } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createCustomField
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Define a custom field. `key` is what appears inside a template token
+        (`{{custom.<key>}}`) and what addresses the value on a contact, so it is
+        normalised to lower case and must match `^[a-z][a-z0-9_]{0,39}$`. The
+        personalizer's lookup is case-sensitive and resolves a miss to the empty
+        string, so allowing `Industry` and `industry` to coexist would let a casing
+        slip mail a blank where a value was intended.
+
+
+        A key is claimed permanently, archived definitions included: values are
+        addressed by key in a schemaless object, so reusing one would hand the new
+        definition the retired field's values under a type it never validated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomFieldCreate' }
+      responses:
+        '201': { description: The created definition, content: { application/json: { schema: { $ref: '#/components/schemas/CustomFieldDef' } } } }
+        '400': { description: "Invalid key, label, type, or options (a select needs options; nothing else may carry them)" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '409': { description: "The key is already used (including by an archived field), or the workspace is at its field limit" }
+  /custom-fields/{fieldID}:
+    parameters:
+      - { name: fieldID, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: updateCustomField
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Edit a definition's label, and a select's options. `key` and `type` are
+        deliberately not editable: both are load-bearing on data already written -
+        the key addresses stored values and appears in tokens operators have typed
+        into live sequences, and the type is the promise every existing value was
+        validated under. Changing either would silently reinterpret history, so the
+        replacement path is archive-then-create.
+
+
+        Removing an option that contacts already hold does NOT rewrite those
+        contacts. Their value stays and keeps rendering in emails; it simply stops
+        being offered in the form.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomFieldUpdate' }
+      responses:
+        '200': { description: The updated definition, content: { application/json: { schema: { $ref: '#/components/schemas/CustomFieldDef' } } } }
+        '400': { description: "fieldID is not a uuid, or the label/options are invalid" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: No such field in this workspace }
+        '409': { description: The field is archived and cannot be edited }
+    delete:
+      operationId: archiveCustomField
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Archive (retire) a definition. This is NOT a delete: stored values on every
+        contact are left exactly where they are, and keep rendering in emails. A
+        real delete would silently rewrite every contact row in the workspace with
+        no undo; an operator who wants the data gone clears values first.
+
+
+        Archiving hides the field from forms, from CSV import mapping, and from
+        token resolution - so a `{{custom.<key>}}` token naming it starts failing
+        campaign preflight. The response is the archived definition (200, not 204)
+        so a client updates it in place rather than dropping it from the list.
+
+
+        Idempotent: archiving an already-archived field returns it unchanged rather
+        than moving `archived_at`.
+      responses:
+        '200': { description: The archived definition, content: { application/json: { schema: { $ref: '#/components/schemas/CustomFieldDef' } } } }
+        '400': { description: fieldID is not a uuid }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: No such field in this workspace }
+  /contacts/{id}/fields:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getContactCustomFields
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        One contact's custom values, each paired with the definition describing it.
+        Every LIVE field appears, including ones with no value, so a form renders
+        the whole set from this one response. A value whose key has no live
+        definition appears with a null `def` - that is how an archived-key value
+        stays visible instead of vanishing from a page meant to show what the
+        record actually holds.
+      responses:
+        '200':
+          description: The contact's custom field values
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CustomFieldValue' } }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Contact not found }
+    put:
+      operationId: setContactCustomFields
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Replace the contact's custom values with the submitted set.
+
+
+        A REPLACE, not a merge: the caller is an edit form that rendered every live
+        field, so a live key it omitted was cleared on purpose. (CSV import is the
+        merge case and goes through POST /contacts/import instead, which is why a
+        partial upload cannot erase enrichment an earlier one supplied.)
+
+
+        Every submitted key must name a live field and every value must satisfy its
+        type - writing to an archived key is refused, because the field is retired
+        precisely so nothing new accumulates under it. Values already stored under
+        archived or unknown keys are preserved untouched: the form never showed
+        them, so its silence about them is not an instruction. An empty value
+        clears its key rather than storing an empty string.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomFieldValueSet' }
+      responses:
+        '200':
+          description: The contact's custom field values after the write
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CustomFieldValue' } }
+        '400': { description: "id is not a uuid, a key has no live field, or a value fails its field's type" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Contact not found }
   /contacts/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     get:
@@ -1589,6 +1747,63 @@ paths:
         '404': { description: Campaign not found }
         '422': { description: "Unknown timezone, an invalid or overlapping window, or a week with nothing open" }
         '500': { description: Could not save schedule }
+  /campaigns/{id}/results:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getCampaignResults
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Per-step, per-variant performance: sends, indicative opens, clicks, and
+        reply/bounce/unsubscribe outcomes, plus a conservative reading of which
+        A/B variant is winning.
+
+
+        Every numerator is defined identically to the campaign-wide rollup (see
+        Metrics), so a variant breakdown always sums to the campaign total rather
+        than telling a second story. Opens carry the same proxy filtering: a
+        comparison built on raw pixel hits would rank whichever arm reached more
+        Gmail users.
+
+
+        OUTCOME ATTRIBUTION: a reply, bounce or unsubscribe is attributed to the
+        step and variant of the LAST message that contact received, because that
+        is the message they answered. The consequence worth knowing is that on a
+        multi-step campaign, replies concentrate on whichever step actually landed
+        them - a step's reply count is not "replies from people who received this
+        step".
+      responses:
+        '200': { description: The campaign's per-step results, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignResults' } } } }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '503': { description: "Reporting is not available on this server. Distinct from 500: nothing is wrong with the request or the campaign." }
+  /campaigns/{id}/results.csv:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: exportCampaignResults
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The same results as a flat CSV, one row per (step, variant).
+
+
+        A separate endpoint rather than a format parameter, because the two differ
+        in more than encoding: this is a flat table, where the JSON is nested by
+        step. Rates are raw ratios rather than percentages, because a spreadsheet
+        formats them and a pre-multiplied "4.2" is ambiguous between 4.2% and
+        420%. The winner is deliberately not a column - it is a judgement with a
+        "too close to call" state, and a bare boolean loses the part that matters.
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '503': { description: Reporting is not available on this server }
   /campaigns/{id}/senders:
     get:
       operationId: getCampaignSenders
@@ -1689,6 +1904,132 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: Campaign or step not found }
         '409': { description: Campaign not draft (delete is a structural edit) }
+  /campaigns/{id}/steps/{stepId}/variants:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: listStepVariants
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The step's A/B ALTERNATIVES. The step's own subject and body are variant
+        A and are not repeated here - see SequenceStep.variant_weight for its
+        share of the split. A step with an empty list is a normal single-copy
+        step and sends its own content regardless of that weight.
+      responses:
+        '200':
+          description: The step's variants
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/StepVariant' } }
+        '400': { description: stepId is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign or step not found }
+    post:
+      operationId: createStepVariant
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Add an alternative to the step.
+
+
+        Allowed on a RUNNING campaign, unlike creating a step. Adding or
+        reweighting an arm changes what future sends contain, which is the same
+        class of change as editing a step's body (already permitted live), not a
+        structural change to the sequence. Requiring a pause to start an A/B test
+        would mean pausing to learn anything.
+
+
+        Refused with 409 when the resulting step would have every arm at weight
+        0, because nothing could then be selected and every send for that step
+        would fail at delivery time.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepVariantRequest' } } }
+      responses:
+        '201': { description: The created variant, content: { application/json: { schema: { $ref: '#/components/schemas/StepVariant' } } } }
+        '400': { description: "Invalid label (1-40 characters) or a negative weight" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Campaign or step not found }
+        '409': { description: "Label already used on this step, the step is at its variant limit, or no arm would be left with a weight above zero" }
+  /campaigns/{id}/steps/{stepId}/variants/{variantId}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: variantId, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      operationId: updateStepVariant
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Edit one alternative's label, weight and copy. Setting weight to 0
+        retires the arm without losing the sends already attributed to it - this
+        is the supported way to stop a losing variant.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepVariantRequest' } } }
+      responses:
+        '200': { description: The updated variant, content: { application/json: { schema: { $ref: '#/components/schemas/StepVariant' } } } }
+        '400': { description: "Invalid label or a negative weight" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Variant not found }
+        '409': { description: "Label already used on this step, or this edit would leave no arm with a weight above zero" }
+    delete:
+      operationId: deleteStepVariant
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Delete an alternative that has NEVER SENT.
+
+
+        A variant with delivery history is refused with 409. sends.variant_id is
+        ON DELETE SET NULL, so deleting one would silently re-attribute its
+        messages to the base copy - the losing arm's results would fold into the
+        winner's and make the comparison read better than it was. Set the weight
+        to 0 instead; the arm stops sending and its numbers stay intact.
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Variant not found }
+        '409': { description: "The variant has already sent (set its weight to 0 instead), or deleting it would leave no arm with a weight above zero" }
+  /campaigns/{id}/steps/{stepId}/base-weight:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: stepId, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      operationId: setStepBaseWeight
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Set the weight of the step's OWN copy - the "A" side of the split.
+
+
+        Its own endpoint rather than a field on the step update, because it is
+        the one attribute of a step that changes what an in-flight A/B test
+        measures: folding it into the content PUT would let an unrelated body
+        edit silently reweight a running test.
+
+
+        Zero retires the base copy without deleting what it said, which is how a
+        winning variant is promoted. Refused with 409 if no arm would be left.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/StepBaseWeightRequest' } } }
+      responses:
+        '200':
+          description: The step's variants after the change
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/StepVariant' } }
+        '400': { description: Negative weight }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Campaign or step not found }
+        '409': { description: This would leave no arm with a weight above zero }
   /campaigns/{id}/steps/reorder:
     post:
       operationId: reorderSteps
@@ -3075,10 +3416,95 @@ components:
         name: { type: string }
     ImportResult:
       type: object
+      required: [imported, skipped, duplicates, mapped_fields, ignored_columns, invalid_values]
       properties:
         imported: { type: integer }
-        skipped: { type: integer }
+        skipped: { type: integer, description: "Rows rejected outright: unreadable, or no valid email address." }
         duplicates: { type: integer }
+        mapped_fields:
+          type: array
+          items: { type: string }
+          description: Custom field keys this file populated, so an operator can confirm their column landed somewhere.
+        ignored_columns:
+          type: array
+          items: { type: string }
+          description: >-
+            Headers matching neither a built-in column nor a live custom field.
+            These are reported rather than dropped in silence, which is what made
+            a mis-named column impossible to diagnose before.
+        invalid_values:
+          type: integer
+          description: >-
+            Cells rejected by their field's type (a "next week" in a date column).
+            The ROW still imports - one bad cell should not cost the contact - so
+            this is counted separately from `skipped`.
+    CustomFieldType:
+      type: string
+      enum: [text, number, date, select]
+      description: >-
+        Every value is STORED and rendered as text regardless of type; the type
+        decides what is accepted on write. A number would otherwise be formatted by
+        the send path (15000000 arriving in a subject line as 1.5e+07), and a date
+        needs one unambiguous form because 03/04/2026 means two different days
+        depending on who reads the email.
+    CustomFieldDef:
+      type: object
+      required: [id, key, label, type, options, created_at, archived, archived_at]
+      properties:
+        id: { type: string, format: uuid }
+        key:
+          type: string
+          description: Lower-case identifier used as `{{custom.<key>}}` in sequence steps and as the CSV column name on import.
+        label: { type: string }
+        type: { $ref: '#/components/schemas/CustomFieldType' }
+        options:
+          type: array
+          items: { type: string }
+          description: The allowed values for a `select`. Always present - an empty array for every other type - so a client never distinguishes null from absent.
+        created_at: { type: string, format: date-time }
+        archived:
+          type: boolean
+          description: An archived field accepts no new values and no longer resolves in templates, but the values contacts already hold under it are untouched and still send.
+        archived_at: { type: string, format: date-time, nullable: true }
+    CustomFieldCreate:
+      type: object
+      required: [key, label, type]
+      properties:
+        key: { type: string, pattern: '^[a-z][a-z0-9_]{0,39}$' }
+        label: { type: string, minLength: 1, maxLength: 80 }
+        type: { $ref: '#/components/schemas/CustomFieldType' }
+        options:
+          type: array
+          items: { type: string }
+          description: Required for `select` (1-100 entries) and rejected for every other type.
+    CustomFieldUpdate:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 80 }
+        options:
+          type: array
+          items: { type: string }
+          description: The select's full replacement option list. Rejected for a non-select field.
+    CustomFieldValue:
+      type: object
+      required: [key, value, def]
+      properties:
+        key: { type: string }
+        value: { type: string, description: Empty for a live field the contact has no value for. }
+        def:
+          allOf: [{ $ref: '#/components/schemas/CustomFieldDef' }]
+          type: object
+          nullable: true
+          description: Null when the key has no live definition - an archived field, or a value written before definitions existed. Render these read-only rather than hiding them.
+    CustomFieldValueSet:
+      type: object
+      required: [values]
+      properties:
+        values:
+          type: object
+          additionalProperties: { type: string }
+          description: The contact's COMPLETE live field set, keyed by field key. An omitted live key is cleared; an empty value clears its key.
     Contact:
       type: object
       properties:
@@ -3158,6 +3584,103 @@ components:
           format: date-time
           nullable: true
           description: RFC3339 timestamp the reply was classified
+    CampaignResultRow:
+      type: object
+      description: One arm's performance - a step's own copy, or one of its variants.
+      required: [variant_id, label, is_base, weight, sent, opens, clicks, replies, bounces, unsubscribes, open_rate, click_rate, reply_rate, bounce_rate, unsub_rate]
+      properties:
+        variant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for the step's own base copy, which is also every send made before variants existed.
+        label: { type: string, description: "\"A\" for the base copy, otherwise the variant's own label." }
+        is_base: { type: boolean }
+        weight: { type: integer, description: "The arm share of the split. 0 for a retired arm that still has results." }
+        sent: { type: integer, format: int64 }
+        opens: { type: integer, format: int64, description: "Indicative opens: proxy-filtered, and structurally zero when tracking is off." }
+        clicks: { type: integer, format: int64 }
+        replies: { type: integer, format: int64 }
+        bounces: { type: integer, format: int64 }
+        unsubscribes: { type: integer, format: int64 }
+        open_rate: { type: number, format: double }
+        click_rate: { type: number, format: double }
+        reply_rate: { type: number, format: double }
+        bounce_rate: { type: number, format: double }
+        unsub_rate:
+          type: number
+          format: double
+          description: >-
+            Every rate divides by this arm's own `sent`, never by enrollments -
+            the numerator is per-arm, so a per-campaign denominator would let a
+            rate exceed 1.
+    CampaignStepResults:
+      type: object
+      required: [step_order, subject, rows, winner, winner_note]
+      properties:
+        step_order: { type: integer }
+        subject: { type: string }
+        rows: { type: array, items: { $ref: '#/components/schemas/CampaignResultRow' } }
+        winner:
+          type: string
+          nullable: true
+          description: >-
+            The label of the arm with the clearly-best REPLY rate, or null. Reply
+            rate is the criterion because it is the only measure of what a cold
+            email is for: opens are proxy-inflated and unmeasurable with tracking
+            off, and clicks rank a variant for containing a link.
+
+
+            Null far more often than not, deliberately. Naming a winner is an
+            instruction to promote one arm and retire another, and doing that on
+            noise costs a worse campaign plus a false belief about why. It stays
+            null below 200 sends on the leading arm, with no replies anywhere, and
+            when the leader is under 25% relatively ahead of the runner-up.
+        winner_note:
+          type: string
+          description: >-
+            Why there is no winner, so a null is never left to be interpreted.
+            Empty both when a winner was named and when the step has a single arm
+            (no comparison is pending).
+    CampaignResults:
+      type: object
+      required: [campaign_id, steps]
+      properties:
+        campaign_id: { type: string, format: uuid }
+        steps: { type: array, items: { $ref: '#/components/schemas/CampaignStepResults' } }
+    StepVariant:
+      type: object
+      description: One A/B alternative for a step. The step's own copy is variant A and is not represented here.
+      required: [id, step_id, label, weight, subject, body_text, body_html]
+      properties:
+        id: { type: string, format: uuid }
+        step_id: { type: string, format: uuid }
+        label: { type: string, maxLength: 40, description: "Short name shown as a column in the results table; unique per step." }
+        weight:
+          type: integer
+          minimum: 0
+          description: >-
+            Relative selection weight, against the step's own variant_weight and
+            the other variants. 0 means "still here, no longer sending", which is
+            how a losing arm is retired without orphaning the sends attributed to
+            it.
+        subject: { type: string, description: "Empty on a follow-up step threads onto the previous message, exactly as the base copy does." }
+        body_text: { type: string }
+        body_html: { type: string }
+    StepVariantRequest:
+      type: object
+      required: [label, weight]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 40 }
+        weight: { type: integer, minimum: 0 }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string }
+    StepBaseWeightRequest:
+      type: object
+      required: [weight]
+      properties:
+        weight: { type: integer, minimum: 0 }
     SequenceStep:
       type: object
       properties:
@@ -3167,6 +3690,15 @@ components:
         subject: { type: string }
         body_text: { type: string }
         body_html: { type: string }
+        variant_weight:
+          type: integer
+          minimum: 0
+          description: >-
+            This step's OWN share of its A/B split - the "A" side. Only
+            meaningful alongside variants: a step with none sends its own content
+            regardless of this value, matching the send path. Set it through PUT
+            /campaigns/{id}/steps/{stepId}/base-weight, never through a step
+            content edit.
     StepRequest:
       type: object
       properties:
@@ -3756,7 +4288,15 @@ components:
       properties:
         id:
           type: string
-          enum: [sequence_steps, empty_bodies, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+          enum: [sequence_steps, empty_bodies, personalization_tokens, variant_weights, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+          description: >-
+            `personalization_tokens` FAILS (does not warn) when a step contains a
+            `{{...}}` placeholder nothing will substitute, which is harsher than
+            the neighbouring content checks on purpose: an empty body is visible
+            the moment an operator looks at it, whereas a bad token produces an
+            email that looks fine in the editor and arrives reading "Hi
+            {{firstname}}" or "Hi ,". A token nothing resolves is always a typo or
+            a since-archived field, never an intent.
         severity: { type: string, enum: [pass, warn, fail] }
         title: { type: string }
         detail: { type: string }

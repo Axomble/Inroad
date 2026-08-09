@@ -42,7 +42,7 @@ func recordSetup(t *testing.T, ctx context.Context) recordFixture {
 		other:  newWorkspace(t, ctx, pool, "Record Other"),
 		sentAt: time.Date(2026, 5, 4, 9, 0, 0, 0, time.UTC),
 	}
-	f.svc = NewService(NewPgStore(pool), dbListChecker{pool: pool})
+	f.svc = NewService(NewPgStore(pool), dbListChecker{pool: pool}, NewPgFieldStore(gen.New(pool)))
 
 	f.companyID = f.company(t, ctx, f.ws, "Acme", "acme.test")
 	f.contactID = f.contact(t, ctx, f.ws, "dana@acme.test", &f.companyID)

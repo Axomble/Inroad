@@ -30,12 +30,16 @@ const draftStatus = "draft"
 // Service implements the step use cases. It depends on the Store and
 // CampaignChecker interfaces, not concrete stores (dependency inversion).
 type Service struct {
-	store   Store
-	checker CampaignChecker
+	store    Store
+	checker  CampaignChecker
+	variants VariantStore
 }
 
-func NewService(store Store, checker CampaignChecker) *Service {
-	return &Service{store: store, checker: checker}
+// NewService builds the step service. variants is a second, narrow seam for A/B
+// variants: a distinct responsibility with distinct callers, and keeping it
+// separate is what lets the weight invariant be tested without a database.
+func NewService(store Store, checker CampaignChecker, variants VariantStore) *Service {
+	return &Service{store: store, checker: checker, variants: variants}
 }
 
 // Create appends a step at max(step_order)+1. Structural change → requires the

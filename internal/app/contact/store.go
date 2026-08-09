@@ -14,7 +14,16 @@ import (
 )
 
 // UpsertInput carries the fields required to create or update a contact.
-type UpsertInput struct{ Email, FirstName, LastName, Company string }
+//
+// CustomFields is an encoded JSON object of workspace-defined field values,
+// MERGED into whatever the contact already holds (see UpsertContact). It is
+// []byte rather than a map because it crosses straight into a JSONB parameter;
+// callers with nothing to write leave it nil, which the store turns into an
+// empty object so the merge is a no-op.
+type UpsertInput struct {
+	Email, FirstName, LastName, Company string
+	CustomFields                        []byte
+}
 
 // SearchFilter is what decides which contacts match, independent of ordering
 // and position. A nil ListID means the whole workspace; an empty Query means no
@@ -109,8 +118,17 @@ func NewPgStore(pool *pgxpool.Pool) *PgStore {
 }
 
 func (s *PgStore) Upsert(ctx context.Context, ws uuid.UUID, in UpsertInput) (uuid.UUID, bool, error) {
+	// contacts.custom_fields is NOT NULL DEFAULT '{}', and a nil []byte binds as
+	// SQL NULL rather than as the default — so a caller that simply has no
+	// custom values (the agent's contact tool, any pre-existing caller) would
+	// hit a not-null violation. Normalising here keeps that out of every caller.
+	custom := in.CustomFields
+	if len(custom) == 0 {
+		custom = []byte(`{}`)
+	}
 	row, err := s.q.UpsertContact(ctx, gen.UpsertContactParams{
-		WorkspaceID: ws, Email: in.Email, FirstName: in.FirstName, LastName: in.LastName, Company: in.Company,
+		WorkspaceID: ws, Email: in.Email, FirstName: in.FirstName, LastName: in.LastName,
+		Company: in.Company, CustomFields: custom,
 	})
 	if err != nil {
 		return uuid.Nil, false, err

@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,6 +25,8 @@ const (
 	CheckTracking        = "tracking"
 	CheckDailyLimit      = "daily_limit"
 	CheckWarmupHealth    = "warmup_health"
+	CheckTokens          = "personalization_tokens"
+	CheckVariantWeights  = "variant_weights"
 )
 
 // Preflight check severities.
@@ -50,11 +53,66 @@ type PreflightReport struct {
 }
 
 // PreflightStep is the slice of a sequence step ComputePreflight needs: just
-// enough to detect an empty body, decoupled from the persistence model so the
-// pure function's tests build these by hand.
+// enough to detect an empty body and scan its personalization tokens,
+// decoupled from the persistence model so the pure function's tests build
+// these by hand.
 type PreflightStep struct {
+	// Subject is scanned for tokens but deliberately NOT counted by the
+	// empty-body check: a follow-up step with no subject threads onto the
+	// previous message (see replySubject), so an empty one is normal.
+	Subject  string
 	BodyText string
 	BodyHTML string
+	// Variants are the step's A/B alternatives. Every check that reads copy must
+	// read these too: an alternative is a real email that real prospects receive,
+	// so a token typo or an empty body in one is exactly as damaging as in the
+	// base copy — and strictly harder to notice, because the step looks fine.
+	Variants []PreflightVariant
+	// BaseWeight is the step's own share of the A/B split; Variants carry theirs.
+	// Zero everywhere means nothing can be selected and the step cannot send
+	// (see checkVariantWeights).
+	BaseWeight int
+}
+
+// PreflightVariant is one alternative's slice of a variant row.
+type PreflightVariant struct {
+	Label    string
+	Weight   int
+	Subject  string
+	BodyText string
+	BodyHTML string
+}
+
+// copies returns every candidate email this step can produce — the base copy
+// first, then each variant — so a check can walk them uniformly instead of
+// special-casing the base.
+func (s PreflightStep) copies() []PreflightVariant {
+	// With no alternatives, the base copy sends whatever its weight says —
+	// exactly as the send path treats it (inprocess.selectVariant returns the
+	// base immediately when there are no variant rows). BaseWeight only ever
+	// describes a SPLIT, and there is nothing to split against, so a stray 0 here
+	// must not read as "this step is retired".
+	baseWeight := s.BaseWeight
+	if len(s.Variants) == 0 {
+		baseWeight = 1
+	}
+	out := make([]PreflightVariant, 0, len(s.Variants)+1)
+	out = append(out, PreflightVariant{
+		Label: "base", Weight: baseWeight,
+		Subject: s.Subject, BodyText: s.BodyText, BodyHTML: s.BodyHTML,
+	})
+	return append(out, s.Variants...)
+}
+
+// eligibleCopies is the copies that can actually be selected.
+func (s PreflightStep) eligibleCopies() []PreflightVariant {
+	out := make([]PreflightVariant, 0, len(s.Variants)+1)
+	for _, c := range s.copies() {
+		if c.Weight > 0 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // DomainAuthVerdict is one sending domain's last known SPF/DMARC
@@ -67,6 +125,19 @@ type DomainAuthVerdict struct {
 	Checked    bool
 	SPFFound   bool
 	DMARCFound bool
+}
+
+// CustomFieldReader reads the workspace's live custom field keys. Custom fields
+// are owned by the contact app domain and app/* packages never import each
+// other (CLAUDE.md), so this consumer-defined interface is satisfied at wiring
+// time in cmd/inroad by an adapter over contact.Service -- the same shape as
+// DomainAuthReader and Checker.
+type CustomFieldReader interface {
+	// CustomFieldKeys returns only LIVE keys. An archived field's key must read
+	// as unknown here: its values still exist on contacts, but no new contact
+	// can be given one, so a token referring to it renders blank for everyone
+	// imported since it was retired.
+	CustomFieldKeys(ctx context.Context, ws uuid.UUID) ([]string, error)
 }
 
 // DomainAuthReader reads sending-domain SPF/DMARC verdicts for the workspace.
@@ -91,6 +162,9 @@ type PreflightInput struct {
 	AudienceCount   int64
 	DomainAuth      map[string]DomainAuthVerdict
 	TrackingEnabled bool
+	// CustomFieldKeys is the workspace's live custom field keys, against which
+	// every {{custom.*}} token in the sequence is resolved.
+	CustomFieldKeys []string
 	// DailyLimit is the campaign-wide cap on sends per UTC day; nil means no
 	// campaign-wide limit is set.
 	DailyLimit *int
@@ -104,6 +178,8 @@ func ComputePreflight(in PreflightInput) PreflightReport {
 	checks := []PreflightCheck{
 		checkSequenceSteps(in),
 		checkEmptyBodies(in),
+		checkTokens(in),
+		checkVariantWeights(in),
 		checkScheduleWindows(in),
 		checkSenderPool(in),
 		checkAudience(in),
@@ -141,23 +217,93 @@ func checkSequenceSteps(in PreflightInput) PreflightCheck {
 // checkEmptyBodies warns when any step has neither a text nor an HTML body --
 // still launchable, but that step would send an empty email.
 func checkEmptyBodies(in PreflightInput) PreflightCheck {
+	// Counts every candidate copy, not every step: a step whose base body is
+	// filled in but whose variant B is blank still sends blank emails, to
+	// whichever share of the audience the split sends B.
+	//
+	// A copy at weight 0 is skipped — it is retired and cannot be selected, so
+	// warning about its body would be noise about an email nobody receives.
 	empty := 0
 	for _, st := range in.Steps {
-		if st.BodyText == "" && st.BodyHTML == "" {
-			empty++
+		for _, c := range st.eligibleCopies() {
+			if c.BodyText == "" && c.BodyHTML == "" {
+				empty++
+			}
 		}
 	}
 	if empty > 0 {
 		return PreflightCheck{
 			ID: CheckEmptyBodies, Severity: SeverityWarn,
 			Title:  "Some steps have no body",
-			Detail: fmt.Sprintf("%d step(s) have neither a text nor an HTML body.", empty),
-			Remedy: "Add body content to every step before launching.",
+			Detail: fmt.Sprintf("%d step(s) or variant(s) have neither a text nor an HTML body.", empty),
+			Remedy: "Add body content to every step and variant before launching.",
 		}
 	}
 	return PreflightCheck{
 		ID: CheckEmptyBodies, Severity: SeverityPass,
-		Title: "All steps have a body", Detail: "Every step has body content.",
+		Title: "All steps have a body", Detail: "Every step and variant has body content.",
+	}
+}
+
+// checkVariantWeights FAILS a step whose base copy and every variant are all at
+// weight 0.
+//
+// Nothing can be selected in that state, so every send for that step errors at
+// the send path's backstop — one enrollment at a time, after launch, with a
+// message about weights that nobody is watching for. The variant API already
+// refuses the edit that would produce it (sequencestep.ErrNoEligibleVariant);
+// this catches the campaign that was edited into it by some other route, and
+// says so before anyone launches.
+func checkVariantWeights(in PreflightInput) PreflightCheck {
+	var stalled []string
+	for _, st := range in.Steps {
+		if len(st.eligibleCopies()) == 0 {
+			stalled = append(stalled, fmt.Sprintf("step %d", len(stalled)+1))
+		}
+	}
+	if len(stalled) > 0 {
+		return PreflightCheck{
+			ID: CheckVariantWeights, Severity: SeverityFail,
+			Title:  "A step has no sendable variant",
+			Detail: fmt.Sprintf("%d step(s) have every variant at weight 0, so they cannot send anything.", len(stalled)),
+			Remedy: "Give the step's own copy or one of its variants a weight above zero.",
+		}
+	}
+	return PreflightCheck{
+		ID: CheckVariantWeights, Severity: SeverityPass,
+		Title: "Every step can send", Detail: "Each step has at least one variant with a weight above zero.",
+	}
+}
+
+// checkTokens FAILS a sequence containing a personalization token nothing will
+// substitute.
+//
+// Fail rather than warn, which is a deliberately harsher verdict than the
+// neighbouring content checks: an empty body sends a blank email the operator
+// can see is blank the moment they look, whereas a bad token produces an email
+// that looks fine in the editor and arrives reading "Hi {{firstname}}" or
+// "Hi ,". There is also no legitimate reason to launch with one -- a token
+// nothing resolves was a typo or a field that has since been archived, never an
+// intent -- so there is nothing to weigh against blocking.
+func checkTokens(in PreflightInput) PreflightCheck {
+	templates := make([]string, 0, len(in.Steps)*3)
+	for _, st := range in.Steps {
+		for _, c := range st.copies() {
+			templates = append(templates, c.Subject, c.BodyText, c.BodyHTML)
+		}
+	}
+	unknown := UnknownTokens(in.CustomFieldKeys, templates...)
+	if len(unknown) > 0 {
+		return PreflightCheck{
+			ID: CheckTokens, Severity: SeverityFail,
+			Title:  "Unknown personalization tokens",
+			Detail: fmt.Sprintf("%d placeholder(s) resolve to nothing: %s.", len(unknown), strings.Join(unknown, ", ")),
+			Remedy: "Fix the spelling, or define the custom field these tokens refer to under Settings → Custom fields.",
+		}
+	}
+	return PreflightCheck{
+		ID: CheckTokens, Severity: SeverityPass,
+		Title: "Personalization tokens resolve", Detail: "Every placeholder maps to a contact field.",
 	}
 }
 
@@ -397,11 +543,34 @@ func (s *Service) Preflight(ctx context.Context, ws, campaignID uuid.UUID) (Pref
 	if err != nil {
 		return PreflightReport{}, err
 	}
+	customKeys, err := s.readCustomFieldKeys(ctx, ws)
+	if err != nil {
+		return PreflightReport{}, err
+	}
+	variants, err := s.store.ListStepVariants(ctx, ws, campaignID)
+	if err != nil {
+		return PreflightReport{}, err
+	}
 	return ComputePreflight(PreflightInput{
-		Steps: toPreflightSteps(steps), Windows: windows, Senders: senders,
-		AudienceCount: audience, DomainAuth: domainAuth,
+		Steps: toPreflightSteps(steps, variants), Windows: windows, Senders: senders,
+		AudienceCount: audience, DomainAuth: domainAuth, CustomFieldKeys: customKeys,
 		TrackingEnabled: c.TrackingEnabled, DailyLimit: optionalInt(c.DailyLimit),
 	}), nil
+}
+
+// readCustomFieldKeys returns the workspace's live custom field keys.
+//
+// Unlike readDomainAuth, an unwired reader is NOT degraded to an empty result
+// here -- it is an error. An empty key set makes every {{custom.*}} token in
+// the sequence look unknown, so degrading would turn a wiring mistake into a
+// campaign that cannot be launched, with a message blaming the operator's
+// templates. Failing the preflight request says the truth: this check could not
+// run.
+func (s *Service) readCustomFieldKeys(ctx context.Context, ws uuid.UUID) ([]string, error) {
+	if s.customFields == nil {
+		return nil, errors.New("preflight: no custom field reader wired")
+	}
+	return s.customFields.CustomFieldKeys(ctx, ws)
 }
 
 // readDomainAuth returns the workspace's domain-auth verdicts, or an empty
@@ -416,10 +585,13 @@ func (s *Service) readDomainAuth(ctx context.Context, ws uuid.UUID) (map[string]
 
 // toPreflightSteps projects the persistence model onto the pure function's
 // minimal input, decoupling ComputePreflight from gen.SequenceStep.
-func toPreflightSteps(steps []gen.SequenceStep) []PreflightStep {
+func toPreflightSteps(steps []gen.SequenceStep, variants map[uuid.UUID][]PreflightVariant) []PreflightStep {
 	out := make([]PreflightStep, len(steps))
 	for i, st := range steps {
-		out[i] = PreflightStep{BodyText: st.BodyText, BodyHTML: st.BodyHtml}
+		out[i] = PreflightStep{
+			Subject: st.Subject, BodyText: st.BodyText, BodyHTML: st.BodyHtml,
+			BaseWeight: int(st.VariantWeight), Variants: variants[st.ID],
+		}
 	}
 	return out
 }

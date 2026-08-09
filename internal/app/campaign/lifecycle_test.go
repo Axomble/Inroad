@@ -27,6 +27,8 @@ type fakeStore struct {
 	renameCalls int
 	lastName    string
 	deleteCalls int
+
+	stepVariants map[uuid.UUID][]campaign.PreflightVariant
 }
 
 var errNotFound = errors.New("no rows")
@@ -106,6 +108,13 @@ func (f *fakeStore) ReplaceSenders(context.Context, uuid.UUID, uuid.UUID, string
 }
 func (f *fakeStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return nil, nil
+}
+
+// stepVariants is the A/B variants keyed by step id. nil is the overwhelmingly
+// common case -- a campaign with no A/B test at all -- and every check treats a
+// step with no variants as a single-copy step.
+func (f *fakeStore) ListStepVariants(context.Context, uuid.UUID, uuid.UUID) (map[uuid.UUID][]campaign.PreflightVariant, error) {
+	return f.stepVariants, nil
 }
 func (f *fakeStore) EnrollmentCounts(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
 	return nil, nil

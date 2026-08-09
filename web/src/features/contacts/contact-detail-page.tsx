@@ -20,6 +20,7 @@ import {
 import { useGetContactQuery, type ContactDetail } from './api'
 import { CompanyLinkForm } from './company-link-form'
 import { EngagementPanel } from './engagement-panel'
+import { ContactCustomFields } from './contact-custom-fields'
 import { SuppressionNotice } from './suppression-notice'
 
 /**
@@ -106,6 +107,12 @@ export function ContactDetailPage({ contactId }: { contactId: string }) {
                   Showing the first {contact.deals.length} of {contact.deal_count} deals, in board order.
                 </p>
               ) : null}
+            </Section>
+            <Section
+              title="Custom fields"
+              description="Workspace-defined data on this contact, usable in sequences as {{custom.key}}."
+            >
+              <ContactCustomFields contactId={contactId} />
             </Section>
             <NotesPanel targetType="contact" targetId={contactId} />
           </div>

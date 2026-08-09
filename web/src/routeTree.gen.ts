@@ -37,6 +37,7 @@ import { Route as AppInboxIndexRouteImport } from './routes/app.inbox.index'
 import { Route as AppInboxThreadIdRouteImport } from './routes/app.inbox.$threadId'
 import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
+import { Route as AppSettingsCustomFieldsRouteImport } from './routes/app.settings.custom-fields'
 import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.oauth-apps'
 import { Route as AppSettingsReplyLabelsRouteImport } from './routes/app.settings.reply-labels'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
@@ -183,6 +184,11 @@ const AppSettingsApiKeysRoute = AppSettingsApiKeysRouteImport.update({
   path: '/settings/api-keys',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsCustomFieldsRoute = AppSettingsCustomFieldsRouteImport.update({
+  id: '/settings/custom-fields',
+  path: '/settings/custom-fields',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsOauthAppsRoute = AppSettingsOauthAppsRouteImport.update({
   id: '/settings/oauth-apps',
   path: '/settings/oauth-apps',
@@ -233,6 +239,7 @@ export interface FileRoutesByFullPath {
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -267,6 +274,7 @@ export interface FileRoutesByTo {
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -303,6 +311,7 @@ export interface FileRoutesById {
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -340,6 +349,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
+    | '/app/settings/custom-fields'
     | '/app/settings/oauth-apps'
     | '/app/settings/reply-labels'
     | '/app/settings/security'
@@ -374,6 +384,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
+    | '/app/settings/custom-fields'
     | '/app/settings/oauth-apps'
     | '/app/settings/reply-labels'
     | '/app/settings/security'
@@ -409,6 +420,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
+    | '/app/settings/custom-fields'
     | '/app/settings/oauth-apps'
     | '/app/settings/reply-labels'
     | '/app/settings/security'
@@ -632,6 +644,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsApiKeysRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/custom-fields': {
+      id: '/app/settings/custom-fields'
+      path: '/settings/custom-fields'
+      fullPath: '/app/settings/custom-fields'
+      preLoaderRoute: typeof AppSettingsCustomFieldsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings/oauth-apps': {
       id: '/app/settings/oauth-apps'
       path: '/settings/oauth-apps'
@@ -685,6 +704,7 @@ interface AppRouteChildren {
   AppInboxThreadIdRoute: typeof AppInboxThreadIdRoute
   AppSettingsAiRoute: typeof AppSettingsAiRoute
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
+  AppSettingsCustomFieldsRoute: typeof AppSettingsCustomFieldsRoute
   AppSettingsOauthAppsRoute: typeof AppSettingsOauthAppsRoute
   AppSettingsReplyLabelsRoute: typeof AppSettingsReplyLabelsRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
@@ -711,6 +731,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppInboxThreadIdRoute: AppInboxThreadIdRoute,
   AppSettingsAiRoute: AppSettingsAiRoute,
   AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
+  AppSettingsCustomFieldsRoute: AppSettingsCustomFieldsRoute,
   AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
   AppSettingsReplyLabelsRoute: AppSettingsReplyLabelsRoute,
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,

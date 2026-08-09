@@ -79,7 +79,7 @@ func setup(t *testing.T, ctx context.Context) fixture {
 		ws:    newWorkspace(t, ctx, pool, "Search"),
 		other: newWorkspace(t, ctx, pool, "Search Other"),
 	}
-	f.svc = NewService(f.store, dbListChecker{pool: pool})
+	f.svc = NewService(f.store, dbListChecker{pool: pool}, NewPgFieldStore(gen.New(pool)))
 	lst, err := gen.New(pool).CreateList(ctx, gen.CreateListParams{WorkspaceID: f.ws, Name: "L"})
 	if err != nil {
 		t.Fatalf("list: %v", err)

@@ -14,26 +14,28 @@ import (
 
 const claimStepSend = `-- name: ClaimStepSend :one
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-                   step_order, references_header, status, claimed_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now())
+                   step_order, references_header, status, claimed_at, variant_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), $9)
 ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
-DO UPDATE SET status = 'sending', claimed_at = now(), error = ''
+DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
+              variant_id = EXCLUDED.variant_id
     WHERE sends.status = 'sending'
       AND sends.workspace_id = $2
-      AND sends.claimed_at < now() - make_interval(secs => $9::int)
+      AND sends.claimed_at < now() - make_interval(secs => $10::int)
 RETURNING id
 `
 
 type ClaimStepSendParams struct {
-	ID               uuid.UUID `json:"id"`
-	WorkspaceID      uuid.UUID `json:"workspace_id"`
-	CampaignID       uuid.UUID `json:"campaign_id"`
-	ContactID        uuid.UUID `json:"contact_id"`
-	MailboxID        uuid.UUID `json:"mailbox_id"`
-	ToEmail          string    `json:"to_email"`
-	StepOrder        int32     `json:"step_order"`
-	ReferencesHeader string    `json:"references_header"`
-	LeaseSeconds     int32     `json:"lease_seconds"`
+	ID               uuid.UUID   `json:"id"`
+	WorkspaceID      uuid.UUID   `json:"workspace_id"`
+	CampaignID       uuid.UUID   `json:"campaign_id"`
+	ContactID        uuid.UUID   `json:"contact_id"`
+	MailboxID        uuid.UUID   `json:"mailbox_id"`
+	ToEmail          string      `json:"to_email"`
+	StepOrder        int32       `json:"step_order"`
+	ReferencesHeader string      `json:"references_header"`
+	VariantID        pgtype.UUID `json:"variant_id"`
+	LeaseSeconds     int32       `json:"lease_seconds"`
 }
 
 // Claim one step-send for delivery (claim-before-send). The sends row is the
@@ -46,6 +48,12 @@ type ClaimStepSendParams struct {
 // it". Staleness is claimed_at older than the lease window (lease_seconds).
 // workspace_id is pinned on both the insert value and the reclaim WHERE, so a
 // foreign/cross-tenant id claims zero rows (belt-and-braces on the campaign FK).
+//
+// variant_id records which A/B variant this message used, and is written on the
+// RECLAIM path too: selection is deterministic per (enrollment, step), so a
+// reclaim recomputes the same variant, but the weights could have been edited
+// between the two attempts. Re-stamping it keeps the row describing what is
+// actually about to be sent rather than what a previous attempt intended.
 func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, claimStepSend,
 		arg.ID,
@@ -56,6 +64,7 @@ func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (u
 		arg.ToEmail,
 		arg.StepOrder,
 		arg.ReferencesHeader,
+		arg.VariantID,
 		arg.LeaseSeconds,
 	)
 	var id uuid.UUID

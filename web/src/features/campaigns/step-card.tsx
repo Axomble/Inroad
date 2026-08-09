@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from 'lucide-react'
+import { FlaskConical, Pencil, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -24,6 +24,7 @@ export function StepCardBody({
   canModifyStructure,
   onEdit,
   onDelete,
+  onVariants,
   dragHandle,
   className,
 }: {
@@ -39,6 +40,12 @@ export function StepCardBody({
   canModifyStructure: boolean
   onEdit: () => void
   onDelete: () => void
+  /**
+   * Opens the step's A/B variants. Available while RUNNING, unlike delete:
+   * adding or reweighting an arm changes what future sends contain, which is the
+   * same class of change as editing the body, not a structural edit.
+   */
+  onVariants: () => void
   dragHandle?: React.ReactNode
   className?: string
 }) {
@@ -83,6 +90,14 @@ export function StepCardBody({
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`A/B variants for step ${position}`}
+          onClick={onVariants}
+        >
+          <FlaskConical className="size-4" />
+        </Button>
         <Button variant="ghost" size="icon-sm" aria-label={`Edit step ${position}`} onClick={onEdit}>
           <Pencil className="size-4" />
         </Button>
@@ -130,6 +145,7 @@ export function StepCard(props: {
   threadSubject?: string
   onEdit: () => void
   onDelete: () => void
+  onVariants: () => void
 }) {
   return <StepCardBody {...props} canModifyStructure={false} />
 }

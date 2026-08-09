@@ -53,7 +53,7 @@ func TestListContactsRequiresAuth(t *testing.T) {
 }
 
 func newHandler(store *fakeStore, exists bool) *Handler {
-	return NewHandler(NewService(store, &fakeChecker{exists: exists}))
+	return NewHandler(NewService(store, &fakeChecker{exists: exists}, &fakeFieldStore{}))
 }
 
 func TestListContactsStatusMapping(t *testing.T) {

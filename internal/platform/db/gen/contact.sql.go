@@ -168,6 +168,24 @@ func (q *Queries) ContactTrackingStats(ctx context.Context, arg ContactTrackingS
 	return i, err
 }
 
+const getContactCustomFields = `-- name: GetContactCustomFields :one
+SELECT custom_fields FROM contacts WHERE workspace_id = $1 AND id = $2
+`
+
+type GetContactCustomFieldsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ID          uuid.UUID `json:"id"`
+}
+
+// Zero rows means the contact is not in this workspace, which the caller reports
+// as 404 -- the workspace pin is what makes that safe to say.
+func (q *Queries) GetContactCustomFields(ctx context.Context, arg GetContactCustomFieldsParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, getContactCustomFields, arg.WorkspaceID, arg.ID)
+	var custom_fields []byte
+	err := row.Scan(&custom_fields)
+	return custom_fields, err
+}
+
 const getContactRecord = `-- name: GetContactRecord :one
 
 SELECT c.id, c.email, c.first_name, c.last_name, c.job_title, c.linkedin_url,
@@ -431,20 +449,45 @@ func (q *Queries) SetContactCompany(ctx context.Context, arg SetContactCompanyPa
 	return result.RowsAffected(), nil
 }
 
+const setContactCustomFields = `-- name: SetContactCustomFields :execrows
+UPDATE contacts SET custom_fields = $3
+WHERE workspace_id = $1 AND id = $2
+`
+
+type SetContactCustomFieldsParams struct {
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	ID           uuid.UUID `json:"id"`
+	CustomFields []byte    `json:"custom_fields"`
+}
+
+// Whole-object replacement, unlike the import path's merge: this serves an edit
+// form that submitted the contact's complete custom field set, so a key absent
+// from the payload is a deliberate clear rather than an unmentioned column. The
+// service is what decides which of the two shapes it has; the SQL does not guess.
+func (q *Queries) SetContactCustomFields(ctx context.Context, arg SetContactCustomFieldsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setContactCustomFields, arg.WorkspaceID, arg.ID, arg.CustomFields)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const upsertContact = `-- name: UpsertContact :one
-INSERT INTO contacts (workspace_id, email, first_name, last_name, company)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO contacts (workspace_id, email, first_name, last_name, company, custom_fields)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (workspace_id, lower(email))
-DO UPDATE SET first_name = EXCLUDED.first_name
+DO UPDATE SET first_name = EXCLUDED.first_name,
+              custom_fields = contacts.custom_fields || EXCLUDED.custom_fields
 RETURNING id, (xmax = 0)::boolean AS inserted
 `
 
 type UpsertContactParams struct {
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	Email       string    `json:"email"`
-	FirstName   string    `json:"first_name"`
-	LastName    string    `json:"last_name"`
-	Company     string    `json:"company"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	Email        string    `json:"email"`
+	FirstName    string    `json:"first_name"`
+	LastName     string    `json:"last_name"`
+	Company      string    `json:"company"`
+	CustomFields []byte    `json:"custom_fields"`
 }
 
 type UpsertContactRow struct {
@@ -452,6 +495,12 @@ type UpsertContactRow struct {
 	Inserted bool      `json:"inserted"`
 }
 
+// custom_fields is MERGED (||), never replaced. An import maps only the columns
+// present in one CSV, so replacing would make every import silently delete the
+// custom values that file happened not to carry -- a second list upload wiping
+// the enrichment from the first. Merge means an import can only add or overwrite
+// the keys it actually supplied; the caller omits empty cells from the object so
+// a blank column cannot overwrite a real value with "".
 func (q *Queries) UpsertContact(ctx context.Context, arg UpsertContactParams) (UpsertContactRow, error) {
 	row := q.db.QueryRow(ctx, upsertContact,
 		arg.WorkspaceID,
@@ -459,6 +508,7 @@ func (q *Queries) UpsertContact(ctx context.Context, arg UpsertContactParams) (U
 		arg.FirstName,
 		arg.LastName,
 		arg.Company,
+		arg.CustomFields,
 	)
 	var i UpsertContactRow
 	err := row.Scan(&i.ID, &i.Inserted)

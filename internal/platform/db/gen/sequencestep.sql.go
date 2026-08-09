@@ -29,7 +29,7 @@ func (q *Queries) CountStepsByCampaign(ctx context.Context, arg CountStepsByCamp
 
 const createStep = `-- name: CreateStep :one
 INSERT INTO sequence_steps (workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html)
-VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at
+VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at, variant_weight
 `
 
 type CreateStepParams struct {
@@ -64,6 +64,7 @@ func (q *Queries) CreateStep(ctx context.Context, arg CreateStepParams) (Sequenc
 		&i.BodyHtml,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VariantWeight,
 	)
 	return i, err
 }
@@ -83,7 +84,7 @@ func (q *Queries) DeleteStep(ctx context.Context, arg DeleteStepParams) error {
 }
 
 const getNextStep = `-- name: GetNextStep :one
-SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at FROM sequence_steps
+SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at, variant_weight FROM sequence_steps
 WHERE campaign_id = $1 AND workspace_id = $2 AND step_order > $3
 ORDER BY step_order ASC LIMIT 1
 `
@@ -112,12 +113,13 @@ func (q *Queries) GetNextStep(ctx context.Context, arg GetNextStepParams) (Seque
 		&i.BodyHtml,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VariantWeight,
 	)
 	return i, err
 }
 
 const getStep = `-- name: GetStep :one
-SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at FROM sequence_steps WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at, variant_weight FROM sequence_steps WHERE id = $1 AND workspace_id = $2
 `
 
 type GetStepParams struct {
@@ -139,12 +141,13 @@ func (q *Queries) GetStep(ctx context.Context, arg GetStepParams) (SequenceStep,
 		&i.BodyHtml,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VariantWeight,
 	)
 	return i, err
 }
 
 const getStepByOrder = `-- name: GetStepByOrder :one
-SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2 AND step_order = $3
+SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at, variant_weight FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2 AND step_order = $3
 `
 
 type GetStepByOrderParams struct {
@@ -167,12 +170,13 @@ func (q *Queries) GetStepByOrder(ctx context.Context, arg GetStepByOrderParams) 
 		&i.BodyHtml,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VariantWeight,
 	)
 	return i, err
 }
 
 const listStepsByCampaign = `-- name: ListStepsByCampaign :many
-SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2 ORDER BY step_order
+SELECT id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at, variant_weight FROM sequence_steps WHERE campaign_id = $1 AND workspace_id = $2 ORDER BY step_order
 `
 
 type ListStepsByCampaignParams struct {
@@ -200,6 +204,7 @@ func (q *Queries) ListStepsByCampaign(ctx context.Context, arg ListStepsByCampai
 			&i.BodyHtml,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.VariantWeight,
 		); err != nil {
 			return nil, err
 		}
@@ -274,7 +279,7 @@ func (q *Queries) ShiftStepOrders(ctx context.Context, arg ShiftStepOrdersParams
 
 const updateStep = `-- name: UpdateStep :one
 UPDATE sequence_steps SET delay_seconds = $3, subject = $4, body_text = $5, body_html = $6, updated_at = now()
-WHERE id = $1 AND workspace_id = $2 RETURNING id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at
+WHERE id = $1 AND workspace_id = $2 RETURNING id, workspace_id, campaign_id, step_order, delay_seconds, subject, body_text, body_html, created_at, updated_at, variant_weight
 `
 
 type UpdateStepParams struct {
@@ -307,6 +312,7 @@ func (q *Queries) UpdateStep(ctx context.Context, arg UpdateStepParams) (Sequenc
 		&i.BodyHtml,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.VariantWeight,
 	)
 	return i, err
 }

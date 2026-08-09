@@ -12,8 +12,51 @@ const contactsApi = api
     // linking a contact to a company changes that company's roster. Tag types are
     // one global namespace on the shared api instance, so naming another module's
     // tag is a cache dependency, not an import — none of its code comes with it.
-    addTagTypes: ['List', 'Contact', 'ContactEngagement', 'CRMCompany'],
+    addTagTypes: ['List', 'Contact', 'ContactEngagement', 'CRMCompany', 'CustomFieldDef', 'ContactCustomFields'],
     endpoints: {
+      // --- custom fields ---------------------------------------------------
+      //
+      // Definitions and values carry SEPARATE tags even though one describes
+      // the other. Editing a definition's label changes how every contact's
+      // values render, but there is at most one contact page mounted, so the
+      // value read is invalidated alongside; the reverse is not true, and
+      // sharing one tag would refetch the whole workspace's definitions every
+      // time somebody typed a value into one contact.
+      listCustomFields: {
+        providesTags: [{ type: 'CustomFieldDef', id: 'LIST' }],
+      },
+      createCustomField: {
+        invalidatesTags: [{ type: 'CustomFieldDef', id: 'LIST' }],
+      },
+      // A label or option change alters how stored values are rendered and
+      // which ones a form will accept, so the mounted contact's values are
+      // invalidated too.
+      updateCustomField: {
+        invalidatesTags: [
+          { type: 'CustomFieldDef', id: 'LIST' },
+          { type: 'ContactCustomFields', id: 'LIST' },
+        ],
+      },
+      // Archiving moves a value from "editable field" to "orphan the page shows
+      // read-only", which is a change to every contact's field view.
+      archiveCustomField: {
+        invalidatesTags: [
+          { type: 'CustomFieldDef', id: 'LIST' },
+          { type: 'ContactCustomFields', id: 'LIST' },
+        ],
+      },
+      getContactCustomFields: {
+        providesTags: (_result, _error, { id }) => [
+          { type: 'ContactCustomFields', id },
+          { type: 'ContactCustomFields', id: 'LIST' },
+        ],
+      },
+      // The response IS the contact's whole field set after the write, so the
+      // form re-renders from it without a follow-up GET; the tag still covers
+      // anything else reading the same data.
+      setContactCustomFields: {
+        invalidatesTags: (_result, _error, { id }) => [{ type: 'ContactCustomFields', id }],
+      },
       listLists: {
         providesTags: (result) =>
           result
@@ -119,9 +162,21 @@ export type {
   ContactCampaignEnrollment,
   ContactCompany,
   ContactCompanyLink,
+  CustomFieldDef,
+  CustomFieldType,
+  CustomFieldValue,
+  CustomFieldCreate,
+  CustomFieldUpdate,
+  ImportResult,
 } from '@/store/api'
 
 export const {
+  useListCustomFieldsQuery,
+  useCreateCustomFieldMutation,
+  useUpdateCustomFieldMutation,
+  useArchiveCustomFieldMutation,
+  useGetContactCustomFieldsQuery,
+  useSetContactCustomFieldsMutation,
   useGetContactQuery,
   useSetContactCompanyMutation,
   useGetContactEngagementQuery,
