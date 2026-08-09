@@ -322,6 +322,8 @@ func run() error {
 		// The personalization_tokens preflight check needs to know which
 		// {{custom.*}} keys the workspace actually defines; contact owns them.
 		campaign.WithCustomFields(customFieldAdapter{contacts: contactSvc}),
+		// Per-step / per-variant reporting aggregates.
+		campaign.WithResults(campaign.NewPgResultsStore(queries)),
 		// Test-send (POST /campaigns/{id}/test-send) only ENQUEUES a
 		// testsend:send task here: cmd/inroad must never decrypt a mailbox
 		// credential or dial a provider (docs/security.md invariant 1). The

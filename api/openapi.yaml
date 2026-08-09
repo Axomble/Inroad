@@ -1747,6 +1747,63 @@ paths:
         '404': { description: Campaign not found }
         '422': { description: "Unknown timezone, an invalid or overlapping window, or a week with nothing open" }
         '500': { description: Could not save schedule }
+  /campaigns/{id}/results:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getCampaignResults
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Per-step, per-variant performance: sends, indicative opens, clicks, and
+        reply/bounce/unsubscribe outcomes, plus a conservative reading of which
+        A/B variant is winning.
+
+
+        Every numerator is defined identically to the campaign-wide rollup (see
+        Metrics), so a variant breakdown always sums to the campaign total rather
+        than telling a second story. Opens carry the same proxy filtering: a
+        comparison built on raw pixel hits would rank whichever arm reached more
+        Gmail users.
+
+
+        OUTCOME ATTRIBUTION: a reply, bounce or unsubscribe is attributed to the
+        step and variant of the LAST message that contact received, because that
+        is the message they answered. The consequence worth knowing is that on a
+        multi-step campaign, replies concentrate on whichever step actually landed
+        them - a step's reply count is not "replies from people who received this
+        step".
+      responses:
+        '200': { description: The campaign's per-step results, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignResults' } } } }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '503': { description: "Reporting is not available on this server. Distinct from 500: nothing is wrong with the request or the campaign." }
+  /campaigns/{id}/results.csv:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: exportCampaignResults
+      tags: [campaigns]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The same results as a flat CSV, one row per (step, variant).
+
+
+        A separate endpoint rather than a format parameter, because the two differ
+        in more than encoding: this is a flat table, where the JSON is nested by
+        step. Rates are raw ratios rather than percentages, because a spreadsheet
+        formats them and a pre-multiplied "4.2" is ambiguous between 4.2% and
+        420%. The winner is deliberately not a column - it is a judgement with a
+        "too close to call" state, and a bare boolean loses the part that matters.
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Campaign not found }
+        '503': { description: Reporting is not available on this server }
   /campaigns/{id}/senders:
     get:
       operationId: getCampaignSenders
@@ -3527,6 +3584,70 @@ components:
           format: date-time
           nullable: true
           description: RFC3339 timestamp the reply was classified
+    CampaignResultRow:
+      type: object
+      description: One arm's performance - a step's own copy, or one of its variants.
+      required: [variant_id, label, is_base, weight, sent, opens, clicks, replies, bounces, unsubscribes, open_rate, click_rate, reply_rate, bounce_rate, unsub_rate]
+      properties:
+        variant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for the step's own base copy, which is also every send made before variants existed.
+        label: { type: string, description: "\"A\" for the base copy, otherwise the variant's own label." }
+        is_base: { type: boolean }
+        weight: { type: integer, description: "The arm share of the split. 0 for a retired arm that still has results." }
+        sent: { type: integer, format: int64 }
+        opens: { type: integer, format: int64, description: "Indicative opens: proxy-filtered, and structurally zero when tracking is off." }
+        clicks: { type: integer, format: int64 }
+        replies: { type: integer, format: int64 }
+        bounces: { type: integer, format: int64 }
+        unsubscribes: { type: integer, format: int64 }
+        open_rate: { type: number, format: double }
+        click_rate: { type: number, format: double }
+        reply_rate: { type: number, format: double }
+        bounce_rate: { type: number, format: double }
+        unsub_rate:
+          type: number
+          format: double
+          description: >-
+            Every rate divides by this arm's own `sent`, never by enrollments -
+            the numerator is per-arm, so a per-campaign denominator would let a
+            rate exceed 1.
+    CampaignStepResults:
+      type: object
+      required: [step_order, subject, rows, winner, winner_note]
+      properties:
+        step_order: { type: integer }
+        subject: { type: string }
+        rows: { type: array, items: { $ref: '#/components/schemas/CampaignResultRow' } }
+        winner:
+          type: string
+          nullable: true
+          description: >-
+            The label of the arm with the clearly-best REPLY rate, or null. Reply
+            rate is the criterion because it is the only measure of what a cold
+            email is for: opens are proxy-inflated and unmeasurable with tracking
+            off, and clicks rank a variant for containing a link.
+
+
+            Null far more often than not, deliberately. Naming a winner is an
+            instruction to promote one arm and retire another, and doing that on
+            noise costs a worse campaign plus a false belief about why. It stays
+            null below 200 sends on the leading arm, with no replies anywhere, and
+            when the leader is under 25% relatively ahead of the runner-up.
+        winner_note:
+          type: string
+          description: >-
+            Why there is no winner, so a null is never left to be interpreted.
+            Empty both when a winner was named and when the step has a single arm
+            (no comparison is pending).
+    CampaignResults:
+      type: object
+      required: [campaign_id, steps]
+      properties:
+        campaign_id: { type: string, format: uuid }
+        steps: { type: array, items: { $ref: '#/components/schemas/CampaignStepResults' } }
     StepVariant:
       type: object
       description: One A/B alternative for a step. The step's own copy is variant A and is not represented here.
