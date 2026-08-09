@@ -831,6 +831,18 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.campaignScheduleRequest,
       }),
     }),
+    getCampaignResults: build.query<
+      GetCampaignResultsApiResponse,
+      GetCampaignResultsApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/results` }),
+    }),
+    exportCampaignResults: build.query<
+      ExportCampaignResultsApiResponse,
+      ExportCampaignResultsApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/results.csv` }),
+    }),
     getCampaignSenders: build.query<
       GetCampaignSendersApiResponse,
       GetCampaignSendersApiArg
@@ -880,6 +892,53 @@ const injectedRtkApi = api.injectEndpoints({
       query: (queryArg) => ({
         url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}`,
         method: "DELETE",
+      }),
+    }),
+    listStepVariants: build.query<
+      ListStepVariantsApiResponse,
+      ListStepVariantsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants`,
+      }),
+    }),
+    createStepVariant: build.mutation<
+      CreateStepVariantApiResponse,
+      CreateStepVariantApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants`,
+        method: "POST",
+        body: queryArg.stepVariantRequest,
+      }),
+    }),
+    updateStepVariant: build.mutation<
+      UpdateStepVariantApiResponse,
+      UpdateStepVariantApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants/${queryArg.variantId}`,
+        method: "PUT",
+        body: queryArg.stepVariantRequest,
+      }),
+    }),
+    deleteStepVariant: build.mutation<
+      DeleteStepVariantApiResponse,
+      DeleteStepVariantApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/variants/${queryArg.variantId}`,
+        method: "DELETE",
+      }),
+    }),
+    setStepBaseWeight: build.mutation<
+      SetStepBaseWeightApiResponse,
+      SetStepBaseWeightApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/base-weight`,
+        method: "PUT",
+        body: queryArg.stepBaseWeightRequest,
       }),
     }),
     reorderSteps: build.mutation<ReorderStepsApiResponse, ReorderStepsApiArg>({
@@ -1923,6 +1982,15 @@ export type UpdateCampaignScheduleApiArg = {
   id: string;
   campaignScheduleRequest: CampaignScheduleRequest;
 };
+export type GetCampaignResultsApiResponse =
+  /** status 200 The campaign's per-step results */ CampaignResults;
+export type GetCampaignResultsApiArg = {
+  id: string;
+};
+export type ExportCampaignResultsApiResponse = unknown;
+export type ExportCampaignResultsApiArg = {
+  id: string;
+};
 export type GetCampaignSendersApiResponse =
   /** status 200 The campaign's sender pool and rotation mode */ CampaignSenderPool;
 export type GetCampaignSendersApiArg = {
@@ -1963,6 +2031,40 @@ export type DeleteStepApiResponse = unknown;
 export type DeleteStepApiArg = {
   id: string;
   stepId: string;
+};
+export type ListStepVariantsApiResponse =
+  /** status 200 The step's variants */ StepVariant[];
+export type ListStepVariantsApiArg = {
+  id: string;
+  stepId: string;
+};
+export type CreateStepVariantApiResponse =
+  /** status 201 The created variant */ StepVariant;
+export type CreateStepVariantApiArg = {
+  id: string;
+  stepId: string;
+  stepVariantRequest: StepVariantRequest;
+};
+export type UpdateStepVariantApiResponse =
+  /** status 200 The updated variant */ StepVariant;
+export type UpdateStepVariantApiArg = {
+  id: string;
+  stepId: string;
+  variantId: string;
+  stepVariantRequest: StepVariantRequest;
+};
+export type DeleteStepVariantApiResponse = unknown;
+export type DeleteStepVariantApiArg = {
+  id: string;
+  stepId: string;
+  variantId: string;
+};
+export type SetStepBaseWeightApiResponse =
+  /** status 200 The step's variants after the change */ StepVariant[];
+export type SetStepBaseWeightApiArg = {
+  id: string;
+  stepId: string;
+  stepBaseWeightRequest: StepBaseWeightRequest;
 };
 export type ReorderStepsApiResponse =
   /** status 200 Steps in the new order */ SequenceStep[];
@@ -3193,6 +3295,8 @@ export type SequenceStep = {
   subject?: string;
   body_text?: string;
   body_html?: string;
+  /** This step's OWN share of its A/B split - the "A" side. Only meaningful alongside variants: a step with none sends its own content regardless of this value, matching the send path. Set it through PUT /campaigns/{id}/steps/{stepId}/base-weight, never through a step content edit. */
+  variant_weight?: number;
 };
 export type Metrics = {
   sent?: number;
@@ -3258,6 +3362,43 @@ export type CampaignScheduleRequest = {
   /** Brand-new contacts started per UTC day; null or omitted clears the limit. This is a full-replace PUT, so an omitted field clears it exactly like an explicit null. */
   max_new_leads_per_day?: number | null;
 };
+export type CampaignResultRow = {
+  /** Null for the step's own base copy, which is also every send made before variants existed. */
+  variant_id: string | null;
+  /** "A" for the base copy, otherwise the variant's own label. */
+  label: string;
+  is_base: boolean;
+  /** The arm share of the split. 0 for a retired arm that still has results. */
+  weight: number;
+  sent: number;
+  /** Indicative opens: proxy-filtered, and structurally zero when tracking is off. */
+  opens: number;
+  clicks: number;
+  replies: number;
+  bounces: number;
+  unsubscribes: number;
+  open_rate: number;
+  click_rate: number;
+  reply_rate: number;
+  bounce_rate: number;
+  /** Every rate divides by this arm's own `sent`, never by enrollments - the numerator is per-arm, so a per-campaign denominator would let a rate exceed 1. */
+  unsub_rate: number;
+};
+export type CampaignStepResults = {
+  step_order: number;
+  subject: string;
+  rows: CampaignResultRow[];
+  /** The label of the arm with the clearly-best REPLY rate, or null. Reply rate is the criterion because it is the only measure of what a cold email is for: opens are proxy-inflated and unmeasurable with tracking off, and clicks rank a variant for containing a link.
+    
+    Null far more often than not, deliberately. Naming a winner is an instruction to promote one arm and retire another, and doing that on noise costs a worse campaign plus a false belief about why. It stays null below 200 sends on the leading arm, with no replies anywhere, and when the leader is under 25% relatively ahead of the runner-up. */
+  winner: string | null;
+  /** Why there is no winner, so a null is never left to be interpreted. Empty both when a winner was named and when the step has a single arm (no comparison is pending). */
+  winner_note: string;
+};
+export type CampaignResults = {
+  campaign_id: string;
+  steps: CampaignStepResults[];
+};
 export type RotationMode = "round_robin" | "least_recently_used" | "weighted";
 export type CampaignSender = {
   mailbox_id: string;
@@ -3312,6 +3453,28 @@ export type StepRequest = {
   body_text?: string;
   body_html?: string;
 };
+export type StepVariant = {
+  id: string;
+  step_id: string;
+  /** Short name shown as a column in the results table; unique per step. */
+  label: string;
+  /** Relative selection weight, against the step's own variant_weight and the other variants. 0 means "still here, no longer sending", which is how a losing arm is retired without orphaning the sends attributed to it. */
+  weight: number;
+  /** Empty on a follow-up step threads onto the previous message, exactly as the base copy does. */
+  subject: string;
+  body_text: string;
+  body_html: string;
+};
+export type StepVariantRequest = {
+  label: string;
+  weight: number;
+  subject?: string;
+  body_text?: string;
+  body_html?: string;
+};
+export type StepBaseWeightRequest = {
+  weight: number;
+};
 export type ReorderStepsRequest = {
   /** the FULL ordered list of the campaign's step ids, in the desired order */
   step_ids: string[];
@@ -3322,6 +3485,7 @@ export type CampaignPreflightCheck = {
     | "sequence_steps"
     | "empty_bodies"
     | "personalization_tokens"
+    | "variant_weights"
     | "schedule_windows"
     | "sender_pool"
     | "audience"
@@ -3870,6 +4034,8 @@ export const {
   useUpdateCampaignTrackingMutation,
   useGetCampaignScheduleQuery,
   useUpdateCampaignScheduleMutation,
+  useGetCampaignResultsQuery,
+  useExportCampaignResultsQuery,
   useGetCampaignSendersQuery,
   useUpdateCampaignSendersMutation,
   useListCampaignEnrollmentsQuery,
@@ -3877,6 +4043,11 @@ export const {
   useCreateStepMutation,
   useUpdateStepMutation,
   useDeleteStepMutation,
+  useListStepVariantsQuery,
+  useCreateStepVariantMutation,
+  useUpdateStepVariantMutation,
+  useDeleteStepVariantMutation,
+  useSetStepBaseWeightMutation,
   useReorderStepsMutation,
   useLaunchCampaignMutation,
   useGetCampaignPreflightQuery,

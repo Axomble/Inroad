@@ -17,6 +17,7 @@ import { SectionBar, EmptyBlock } from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
 import { useListStepsQuery, useDeleteStepMutation, type SequenceStep } from './api'
 import { StepCard, type StepWithId } from './step-card'
+import { VariantsDialog } from './variants-dialog'
 import { StepForm } from './step-form'
 import { stepErrorMessage } from './step-error'
 
@@ -41,6 +42,10 @@ function hasId(step: SequenceStep): step is StepWithId {
 export function SequenceEditor({ campaignId, status }: { campaignId: string; status: string | undefined }) {
   const isDraft = status === 'draft'
   const { data, isLoading, error, refetch } = useListStepsQuery({ id: campaignId })
+  // The step whose A/B variants are open, plus its 1-based position for the
+  // dialog title. Held here rather than in the card so only one dialog can be
+  // mounted at a time.
+  const [variantsFor, setVariantsFor] = useState<{ step: StepWithId; position: number } | null>(null)
   const [deleteStep, deleteState] = useDeleteStepMutation()
 
   const [adding, setAdding] = useState(false)
@@ -141,6 +146,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
               onEdit={setEditingId}
               onEditDone={stopEditing}
               onDelete={requestDelete}
+              onVariants={setVariantsFor}
             />
           }
         >
@@ -151,6 +157,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
             onEdit={setEditingId}
             onEditDone={stopEditing}
             onDelete={requestDelete}
+            onVariants={setVariantsFor}
             onReorderError={setReorderError}
             refetch={refetch}
           />
@@ -163,6 +170,16 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
           onEdit={setEditingId}
           onEditDone={stopEditing}
           onDelete={requestDelete}
+          onVariants={setVariantsFor}
+        />
+      )}
+
+      {variantsFor && (
+        <VariantsDialog
+          campaignID={campaignId}
+          step={variantsFor.step}
+          position={variantsFor.position}
+          onClose={() => setVariantsFor(null)}
         />
       )}
 
@@ -212,6 +229,7 @@ function StaticStepList({
   onEdit,
   onEditDone,
   onDelete,
+  onVariants,
 }: {
   campaignId: string
   steps: StepWithId[]
@@ -219,6 +237,7 @@ function StaticStepList({
   onEdit: (id: string) => void
   onEditDone: () => void
   onDelete: (step: StepWithId) => void
+  onVariants: (target: { step: StepWithId; position: number }) => void
 }) {
   return (
     <ul>
@@ -241,6 +260,7 @@ function StaticStepList({
             threadSubject={steps[0]?.subject}
             onEdit={() => onEdit(step.id)}
             onDelete={() => onDelete(step)}
+            onVariants={() => onVariants({ step, position: i + 1 })}
           />
         ),
       )}

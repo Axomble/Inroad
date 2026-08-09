@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -72,6 +73,13 @@ type Store interface {
 	ReplaceSenders(ctx context.Context, ws, campaignID uuid.UUID, mode string, senders []SenderInput) error
 	// ListSteps returns the campaign's ordered steps (for the detail view).
 	ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error)
+	// ListStepVariants returns the campaign's A/B variants keyed by step id.
+	//
+	// It reads a table the sequencestep app package owns, through sqlc, rather
+	// than calling that domain's service: app packages do not import each other,
+	// and routing a read through another domain's HTTP-shaped service would be
+	// the worse coupling (the same reasoning as the contact record-page queries).
+	ListStepVariants(ctx context.Context, ws, campaignID uuid.UUID) (map[uuid.UUID][]PreflightVariant, error)
 	// EnrollmentCounts returns enrollment counts grouped by status.
 	EnrollmentCounts(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error)
 	// EngagementCounts returns (opensIndicative, clicks) sourced from
@@ -440,6 +448,21 @@ func nullableTime(ts pgtype.Timestamptz) *time.Time {
 	}
 	at := ts.Time
 	return &at
+}
+
+func (s *PgStore) ListStepVariants(ctx context.Context, ws, campaignID uuid.UUID) (map[uuid.UUID][]PreflightVariant, error) {
+	rows, err := s.q.ListVariantsByCampaign(ctx, gen.ListVariantsByCampaignParams{CampaignID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return nil, fmt.Errorf("list campaign variants: %w", err)
+	}
+	out := make(map[uuid.UUID][]PreflightVariant, len(rows))
+	for _, r := range rows {
+		out[r.StepID] = append(out[r.StepID], PreflightVariant{
+			Label: r.Label, Weight: int(r.Weight),
+			Subject: r.Subject, BodyText: r.BodyText, BodyHTML: r.BodyHtml,
+		})
+	}
+	return out, nil
 }
 
 func (s *PgStore) ListSteps(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error) {

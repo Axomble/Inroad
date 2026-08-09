@@ -322,6 +322,8 @@ func run() error {
 		// The personalization_tokens preflight check needs to know which
 		// {{custom.*}} keys the workspace actually defines; contact owns them.
 		campaign.WithCustomFields(customFieldAdapter{contacts: contactSvc}),
+		// Per-step / per-variant reporting aggregates.
+		campaign.WithResults(campaign.NewPgResultsStore(queries)),
 		// Test-send (POST /campaigns/{id}/test-send) only ENQUEUES a
 		// testsend:send task here: cmd/inroad must never decrypt a mailbox
 		// credential or dial a provider (docs/security.md invariant 1). The
@@ -342,7 +344,8 @@ func run() error {
 	// Sequence steps live under /campaigns/{id}/steps; the step service checks
 	// campaign status (draft-gating) via an adapter over the campaign store.
 	stepHandler := sequencestep.NewHandler(
-		sequencestep.NewService(sequencestep.NewPgStore(pool), campaignStatusChecker{campaigns: campaignStore}),
+		sequencestep.NewService(sequencestep.NewPgStore(pool), campaignStatusChecker{campaigns: campaignStore},
+			sequencestep.NewPgVariantStore(queries)),
 		cfg.JWTSecret,
 	)
 	// Deliverability guardrails. One service backs BOTH the API endpoints and the

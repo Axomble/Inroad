@@ -39,6 +39,7 @@ type SortableStepListProps = {
   onEdit: (id: string) => void
   onEditDone: () => void
   onDelete: (step: StepWithId) => void
+  onVariants: (target: { step: StepWithId; position: number }) => void
   onReorderError: (message: string | null) => void
   /** Reconcile with server truth after a reverted optimistic reorder. */
   refetch: () => void
@@ -51,6 +52,7 @@ export default function SortableStepList({
   onEdit,
   onEditDone,
   onDelete,
+  onVariants,
   onReorderError,
   refetch,
 }: SortableStepListProps) {
@@ -121,6 +123,7 @@ export default function SortableStepList({
                 threadSubject={orderedSteps[0]?.subject}
                 onEdit={() => onEdit(step.id)}
                 onDelete={() => onDelete(step)}
+                onVariants={() => onVariants({ step, position: i + 1 })}
               />
             ),
           )}
@@ -141,12 +144,14 @@ function SortableStepCard({
   threadSubject,
   onEdit,
   onDelete,
+  onVariants,
 }: {
   step: StepWithId
   position: number
   threadSubject?: string
   onEdit: () => void
   onDelete: () => void
+  onVariants: () => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: step.id })
   const style: React.CSSProperties = {
@@ -164,6 +169,7 @@ function SortableStepCard({
         canModifyStructure
         onEdit={onEdit}
         onDelete={onDelete}
+        onVariants={onVariants}
         dragHandle={
           <button
             type="button"

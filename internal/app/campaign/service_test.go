@@ -23,6 +23,7 @@ type fakeStore struct {
 	campaigns map[[2]uuid.UUID]gen.Campaign
 	// detail-view fixtures.
 	stepList     []gen.SequenceStep
+	stepVariants map[uuid.UUID][]PreflightVariant
 	enrollCounts map[string]int64
 
 	// metrics fixtures. sendStats backs Stats (Sent is read from
@@ -174,6 +175,13 @@ func (f *fakeStore) ReplaceSenders(_ context.Context, ws, campaignID uuid.UUID, 
 
 func (f *fakeStore) ListSteps(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return f.stepList, nil
+}
+
+// stepVariants is the A/B variants keyed by step id. nil is the overwhelmingly
+// common case -- a campaign with no A/B test at all -- and every check treats a
+// step with no variants as a single-copy step.
+func (f *fakeStore) ListStepVariants(context.Context, uuid.UUID, uuid.UUID) (map[uuid.UUID][]PreflightVariant, error) {
+	return f.stepVariants, nil
 }
 func (f *fakeStore) EnrollmentCounts(context.Context, uuid.UUID, uuid.UUID) (map[string]int64, error) {
 	return f.enrollCounts, nil
