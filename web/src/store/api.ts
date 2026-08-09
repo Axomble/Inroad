@@ -633,6 +633,57 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    listCustomFields: build.query<
+      ListCustomFieldsApiResponse,
+      ListCustomFieldsApiArg
+    >({
+      query: () => ({ url: `/custom-fields` }),
+    }),
+    createCustomField: build.mutation<
+      CreateCustomFieldApiResponse,
+      CreateCustomFieldApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/custom-fields`,
+        method: "POST",
+        body: queryArg.customFieldCreate,
+      }),
+    }),
+    updateCustomField: build.mutation<
+      UpdateCustomFieldApiResponse,
+      UpdateCustomFieldApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/custom-fields/${queryArg.fieldId}`,
+        method: "PATCH",
+        body: queryArg.customFieldUpdate,
+      }),
+    }),
+    archiveCustomField: build.mutation<
+      ArchiveCustomFieldApiResponse,
+      ArchiveCustomFieldApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/custom-fields/${queryArg.fieldId}`,
+        method: "DELETE",
+      }),
+    }),
+    getContactCustomFields: build.query<
+      GetContactCustomFieldsApiResponse,
+      GetContactCustomFieldsApiArg
+    >({
+      query: (queryArg) => ({ url: `/contacts/${queryArg.id}/fields` }),
+    }),
+    setContactCustomFields: build.mutation<
+      SetContactCustomFieldsApiResponse,
+      SetContactCustomFieldsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/contacts/${queryArg.id}/fields`,
+        method: "PUT",
+        body: queryArg.customFieldValueSet,
+      }),
+    }),
     getContact: build.query<GetContactApiResponse, GetContactApiArg>({
       query: (queryArg) => ({ url: `/contacts/${queryArg.id}` }),
     }),
@@ -1751,6 +1802,36 @@ export type ListContactsApiArg = {
   cursor?: string;
   limit?: number;
 };
+export type ListCustomFieldsApiResponse =
+  /** status 200 The workspace's custom field definitions */ CustomFieldDef[];
+export type ListCustomFieldsApiArg = void;
+export type CreateCustomFieldApiResponse =
+  /** status 201 The created definition */ CustomFieldDef;
+export type CreateCustomFieldApiArg = {
+  customFieldCreate: CustomFieldCreate;
+};
+export type UpdateCustomFieldApiResponse =
+  /** status 200 The updated definition */ CustomFieldDef;
+export type UpdateCustomFieldApiArg = {
+  fieldId: string;
+  customFieldUpdate: CustomFieldUpdate;
+};
+export type ArchiveCustomFieldApiResponse =
+  /** status 200 The archived definition */ CustomFieldDef;
+export type ArchiveCustomFieldApiArg = {
+  fieldId: string;
+};
+export type GetContactCustomFieldsApiResponse =
+  /** status 200 The contact's custom field values */ CustomFieldValue[];
+export type GetContactCustomFieldsApiArg = {
+  id: string;
+};
+export type SetContactCustomFieldsApiResponse =
+  /** status 200 The contact's custom field values after the write */ CustomFieldValue[];
+export type SetContactCustomFieldsApiArg = {
+  id: string;
+  customFieldValueSet: CustomFieldValueSet;
+};
 export type GetContactApiResponse =
   /** status 200 The contact record */ ContactDetail;
 export type GetContactApiArg = {
@@ -2809,9 +2890,16 @@ export type List = {
   name?: string;
 };
 export type ImportResult = {
-  imported?: number;
-  skipped?: number;
-  duplicates?: number;
+  imported: number;
+  /** Rows rejected outright: unreadable, or no valid email address. */
+  skipped: number;
+  duplicates: number;
+  /** Custom field keys this file populated, so an operator can confirm their column landed somewhere. */
+  mapped_fields: string[];
+  /** Headers matching neither a built-in column nor a live custom field. These are reported rather than dropped in silence, which is what made a mis-named column impossible to diagnose before. */
+  ignored_columns: string[];
+  /** Cells rejected by their field's type (a "next week" in a date column). The ROW still imports - one bad cell should not cost the contact - so this is counted separately from `skipped`. */
+  invalid_values: number;
 };
 export type Contact = {
   id?: string;
@@ -2836,6 +2924,45 @@ export type ContactPage = {
   total_is_capped: boolean;
 };
 export type ContactSort = "newest" | "oldest" | "email";
+export type CustomFieldType = "text" | "number" | "date" | "select";
+export type CustomFieldDef = {
+  id: string;
+  /** Lower-case identifier used as `{{custom.<key>}}` in sequence steps and as the CSV column name on import. */
+  key: string;
+  label: string;
+  type: CustomFieldType;
+  /** The allowed values for a `select`. Always present - an empty array for every other type - so a client never distinguishes null from absent. */
+  options: string[];
+  created_at: string;
+  /** An archived field accepts no new values and no longer resolves in templates, but the values contacts already hold under it are untouched and still send. */
+  archived: boolean;
+  archived_at: string | null;
+};
+export type CustomFieldCreate = {
+  key: string;
+  label: string;
+  type: CustomFieldType;
+  /** Required for `select` (1-100 entries) and rejected for every other type. */
+  options?: string[];
+};
+export type CustomFieldUpdate = {
+  label: string;
+  /** The select's full replacement option list. Rejected for a non-select field. */
+  options?: string[];
+};
+export type CustomFieldValue = {
+  key: string;
+  /** Empty for a live field the contact has no value for. */
+  value: string;
+  /** Null when the key has no live definition - an archived field, or a value written before definitions existed. Render these read-only rather than hiding them. */
+  def: CustomFieldDef | null;
+};
+export type CustomFieldValueSet = {
+  /** The contact's COMPLETE live field set, keyed by field key. An omitted live key is cleared; an empty value clears its key. */
+  values: {
+    [key: string]: string;
+  };
+};
 export type ContactSuppression = {
   /** The suppression list's own reason literal. `complaint` (they reported us as spam) is deliberately distinct from `unsubscribe` (they asked to stop) and is never collapsed into it. `bounce` here means a HARD bounce classified by the inbox poller - an ingested provider bounce feed does not suppress at all, because those include soft bounces (full mailbox, greylisting) and suppressing forever on a temporary failure is not recoverable. So a `bounce` on this list is a permanent delivery failure, not "a message bounced once". */
   reason: "unsubscribe" | "bounce" | "complaint" | "manual";
@@ -3190,9 +3317,11 @@ export type ReorderStepsRequest = {
   step_ids: string[];
 };
 export type CampaignPreflightCheck = {
+  /** `personalization_tokens` FAILS (does not warn) when a step contains a `{{...}}` placeholder nothing will substitute, which is harsher than the neighbouring content checks on purpose: an empty body is visible the moment an operator looks at it, whereas a bad token produces an email that looks fine in the editor and arrives reading "Hi {{firstname}}" or "Hi ,". A token nothing resolves is always a typo or a since-archived field, never an intent. */
   id:
     | "sequence_steps"
     | "empty_bodies"
+    | "personalization_tokens"
     | "schedule_windows"
     | "sender_pool"
     | "audience"
@@ -3716,6 +3845,12 @@ export const {
   useDeleteListMutation,
   useImportContactsMutation,
   useListContactsQuery,
+  useListCustomFieldsQuery,
+  useCreateCustomFieldMutation,
+  useUpdateCustomFieldMutation,
+  useArchiveCustomFieldMutation,
+  useGetContactCustomFieldsQuery,
+  useSetContactCustomFieldsMutation,
   useGetContactQuery,
   useSetContactCompanyMutation,
   useGetContactEngagementQuery,

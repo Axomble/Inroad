@@ -1284,6 +1284,164 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: List not found }
         '422': { description: "q shorter than 2 characters, unknown sort, or limit out of range" }
+  /custom-fields:
+    get:
+      operationId: listCustomFields
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace's custom field definitions, ARCHIVED ONES INCLUDED. Archived
+        definitions are returned rather than hidden because they are the
+        explanation for values a contact still carries under a key no form offers
+        any more; a client that dropped them would make real data look like
+        corruption. Filter on `archived` to render only the live set.
+      responses:
+        '200':
+          description: The workspace's custom field definitions
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CustomFieldDef' } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createCustomField
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Define a custom field. `key` is what appears inside a template token
+        (`{{custom.<key>}}`) and what addresses the value on a contact, so it is
+        normalised to lower case and must match `^[a-z][a-z0-9_]{0,39}$`. The
+        personalizer's lookup is case-sensitive and resolves a miss to the empty
+        string, so allowing `Industry` and `industry` to coexist would let a casing
+        slip mail a blank where a value was intended.
+
+
+        A key is claimed permanently, archived definitions included: values are
+        addressed by key in a schemaless object, so reusing one would hand the new
+        definition the retired field's values under a type it never validated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomFieldCreate' }
+      responses:
+        '201': { description: The created definition, content: { application/json: { schema: { $ref: '#/components/schemas/CustomFieldDef' } } } }
+        '400': { description: "Invalid key, label, type, or options (a select needs options; nothing else may carry them)" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '409': { description: "The key is already used (including by an archived field), or the workspace is at its field limit" }
+  /custom-fields/{fieldID}:
+    parameters:
+      - { name: fieldID, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      operationId: updateCustomField
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Edit a definition's label, and a select's options. `key` and `type` are
+        deliberately not editable: both are load-bearing on data already written -
+        the key addresses stored values and appears in tokens operators have typed
+        into live sequences, and the type is the promise every existing value was
+        validated under. Changing either would silently reinterpret history, so the
+        replacement path is archive-then-create.
+
+
+        Removing an option that contacts already hold does NOT rewrite those
+        contacts. Their value stays and keeps rendering in emails; it simply stops
+        being offered in the form.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomFieldUpdate' }
+      responses:
+        '200': { description: The updated definition, content: { application/json: { schema: { $ref: '#/components/schemas/CustomFieldDef' } } } }
+        '400': { description: "fieldID is not a uuid, or the label/options are invalid" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: No such field in this workspace }
+        '409': { description: The field is archived and cannot be edited }
+    delete:
+      operationId: archiveCustomField
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Archive (retire) a definition. This is NOT a delete: stored values on every
+        contact are left exactly where they are, and keep rendering in emails. A
+        real delete would silently rewrite every contact row in the workspace with
+        no undo; an operator who wants the data gone clears values first.
+
+
+        Archiving hides the field from forms, from CSV import mapping, and from
+        token resolution - so a `{{custom.<key>}}` token naming it starts failing
+        campaign preflight. The response is the archived definition (200, not 204)
+        so a client updates it in place rather than dropping it from the list.
+
+
+        Idempotent: archiving an already-archived field returns it unchanged rather
+        than moving `archived_at`.
+      responses:
+        '200': { description: The archived definition, content: { application/json: { schema: { $ref: '#/components/schemas/CustomFieldDef' } } } }
+        '400': { description: fieldID is not a uuid }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: No such field in this workspace }
+  /contacts/{id}/fields:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getContactCustomFields
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        One contact's custom values, each paired with the definition describing it.
+        Every LIVE field appears, including ones with no value, so a form renders
+        the whole set from this one response. A value whose key has no live
+        definition appears with a null `def` - that is how an archived-key value
+        stays visible instead of vanishing from a page meant to show what the
+        record actually holds.
+      responses:
+        '200':
+          description: The contact's custom field values
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CustomFieldValue' } }
+        '400': { description: id is not a uuid }
+        '401': { description: Unauthorized }
+        '404': { description: Contact not found }
+    put:
+      operationId: setContactCustomFields
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Replace the contact's custom values with the submitted set.
+
+
+        A REPLACE, not a merge: the caller is an edit form that rendered every live
+        field, so a live key it omitted was cleared on purpose. (CSV import is the
+        merge case and goes through POST /contacts/import instead, which is why a
+        partial upload cannot erase enrichment an earlier one supplied.)
+
+
+        Every submitted key must name a live field and every value must satisfy its
+        type - writing to an archived key is refused, because the field is retired
+        precisely so nothing new accumulates under it. Values already stored under
+        archived or unknown keys are preserved untouched: the form never showed
+        them, so its silence about them is not an instruction. An empty value
+        clears its key rather than storing an empty string.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CustomFieldValueSet' }
+      responses:
+        '200':
+          description: The contact's custom field values after the write
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CustomFieldValue' } }
+        '400': { description: "id is not a uuid, a key has no live field, or a value fails its field's type" }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient scope }
+        '404': { description: Contact not found }
   /contacts/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     get:
@@ -3075,10 +3233,95 @@ components:
         name: { type: string }
     ImportResult:
       type: object
+      required: [imported, skipped, duplicates, mapped_fields, ignored_columns, invalid_values]
       properties:
         imported: { type: integer }
-        skipped: { type: integer }
+        skipped: { type: integer, description: "Rows rejected outright: unreadable, or no valid email address." }
         duplicates: { type: integer }
+        mapped_fields:
+          type: array
+          items: { type: string }
+          description: Custom field keys this file populated, so an operator can confirm their column landed somewhere.
+        ignored_columns:
+          type: array
+          items: { type: string }
+          description: >-
+            Headers matching neither a built-in column nor a live custom field.
+            These are reported rather than dropped in silence, which is what made
+            a mis-named column impossible to diagnose before.
+        invalid_values:
+          type: integer
+          description: >-
+            Cells rejected by their field's type (a "next week" in a date column).
+            The ROW still imports - one bad cell should not cost the contact - so
+            this is counted separately from `skipped`.
+    CustomFieldType:
+      type: string
+      enum: [text, number, date, select]
+      description: >-
+        Every value is STORED and rendered as text regardless of type; the type
+        decides what is accepted on write. A number would otherwise be formatted by
+        the send path (15000000 arriving in a subject line as 1.5e+07), and a date
+        needs one unambiguous form because 03/04/2026 means two different days
+        depending on who reads the email.
+    CustomFieldDef:
+      type: object
+      required: [id, key, label, type, options, created_at, archived, archived_at]
+      properties:
+        id: { type: string, format: uuid }
+        key:
+          type: string
+          description: Lower-case identifier used as `{{custom.<key>}}` in sequence steps and as the CSV column name on import.
+        label: { type: string }
+        type: { $ref: '#/components/schemas/CustomFieldType' }
+        options:
+          type: array
+          items: { type: string }
+          description: The allowed values for a `select`. Always present - an empty array for every other type - so a client never distinguishes null from absent.
+        created_at: { type: string, format: date-time }
+        archived:
+          type: boolean
+          description: An archived field accepts no new values and no longer resolves in templates, but the values contacts already hold under it are untouched and still send.
+        archived_at: { type: string, format: date-time, nullable: true }
+    CustomFieldCreate:
+      type: object
+      required: [key, label, type]
+      properties:
+        key: { type: string, pattern: '^[a-z][a-z0-9_]{0,39}$' }
+        label: { type: string, minLength: 1, maxLength: 80 }
+        type: { $ref: '#/components/schemas/CustomFieldType' }
+        options:
+          type: array
+          items: { type: string }
+          description: Required for `select` (1-100 entries) and rejected for every other type.
+    CustomFieldUpdate:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 80 }
+        options:
+          type: array
+          items: { type: string }
+          description: The select's full replacement option list. Rejected for a non-select field.
+    CustomFieldValue:
+      type: object
+      required: [key, value, def]
+      properties:
+        key: { type: string }
+        value: { type: string, description: Empty for a live field the contact has no value for. }
+        def:
+          allOf: [{ $ref: '#/components/schemas/CustomFieldDef' }]
+          type: object
+          nullable: true
+          description: Null when the key has no live definition - an archived field, or a value written before definitions existed. Render these read-only rather than hiding them.
+    CustomFieldValueSet:
+      type: object
+      required: [values]
+      properties:
+        values:
+          type: object
+          additionalProperties: { type: string }
+          description: The contact's COMPLETE live field set, keyed by field key. An omitted live key is cleared; an empty value clears its key.
     Contact:
       type: object
       properties:
@@ -3756,7 +3999,15 @@ components:
       properties:
         id:
           type: string
-          enum: [sequence_steps, empty_bodies, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+          enum: [sequence_steps, empty_bodies, personalization_tokens, schedule_windows, sender_pool, audience, domain_auth, tracking, daily_limit, warmup_health]
+          description: >-
+            `personalization_tokens` FAILS (does not warn) when a step contains a
+            `{{...}}` placeholder nothing will substitute, which is harsher than
+            the neighbouring content checks on purpose: an empty body is visible
+            the moment an operator looks at it, whereas a bad token produces an
+            email that looks fine in the editor and arrives reading "Hi
+            {{firstname}}" or "Hi ,". A token nothing resolves is always a typo or
+            a since-archived field, never an intent.
         severity: { type: string, enum: [pass, warn, fail] }
         title: { type: string }
         detail: { type: string }

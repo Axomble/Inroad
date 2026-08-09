@@ -304,6 +304,7 @@ func run() error {
 	// (workspace-defined typed fields whose values live in contacts.custom_fields).
 	contactFieldStore := contact.NewPgFieldStore(queries)
 	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc}, contactFieldStore)
+	contactHandler := contact.NewHandler(contactSvc)
 	// Sending-domain authentication (SPF/DKIM/DMARC). Built here (not inline at
 	// its mount below) because campaign preflight's domain_auth check also
 	// reads it, through the narrow domainAuthAdapter — the domain list is
@@ -532,7 +533,11 @@ func run() error {
 		// Mounted at /api/v1/contacts (not /api/v1) to avoid the chi mount-prefix
 		// overlap with /api/v1/lists that would otherwise 404 the import route.
 		// Surface: POST /api/v1/contacts/import?list={id}, GET /api/v1/contacts?list={id}.
-		{pattern: "/api/v1/contacts", handler: contact.NewHandler(contactSvc).Routes()},
+		{pattern: "/api/v1/contacts", handler: contactHandler.Routes()},
+		// Custom field DEFINITIONS are a workspace setting rather than a
+		// sub-resource of any one contact, so they get their own mount instead
+		// of sitting at /contacts/fields, ambiguously beside /contacts/{id}.
+		{pattern: "/api/v1/custom-fields", handler: contactHandler.FieldRoutes()},
 		{pattern: "/api/v1/crm", handler: crmHandler.Routes()},
 		// Reply-label taxonomy CRUD + reorder. Gated on the campaign scopes
 		// inside Routes(): a label's role flags are send-automation config.

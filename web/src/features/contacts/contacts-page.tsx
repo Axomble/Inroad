@@ -95,6 +95,8 @@ export function ContactsPage() {
         )}
       </StatStrip>
 
+      {lastImport && <ImportColumnReport result={lastImport} />}
+
       <PageBody className="flex flex-col overflow-hidden md:flex-row">
         <div className="flex max-h-40 w-full shrink-0 flex-col overflow-y-auto border-b border-border md:max-h-none md:w-56 md:border-b-0 md:border-r">
           {showNewList && (
@@ -466,5 +468,47 @@ function ContactsPane({
         </div>
       </div>
     </>
+  )
+}
+
+/**
+ * What the last import did with the columns it did not recognise.
+ *
+ * This exists because the counts alone cannot answer the question an operator
+ * actually has after an import: "where did my `industry` column go?" Before
+ * custom fields, unknown headers were dropped in silence — the import reported a
+ * clean success and the data simply was not there. Naming both the mapped and
+ * the ignored columns turns that into something diagnosable in one glance.
+ *
+ * Renders nothing when there is nothing to say, so a plain email-only CSV does
+ * not grow a banner about columns it never had.
+ */
+function ImportColumnReport({ result }: { result: ImportResult }) {
+  const mapped = result.mapped_fields ?? []
+  const ignored = result.ignored_columns ?? []
+  const invalid = result.invalid_values ?? 0
+  if (mapped.length === 0 && ignored.length === 0 && invalid === 0) return null
+
+  return (
+    <div role="status" className="space-y-1 border-b border-border px-4 py-3 text-xs sm:px-5">
+      {mapped.length > 0 && (
+        <p className="text-muted-foreground">
+          Mapped to custom fields: {mapped.map((key) => <code key={key} className="font-mono">{key}</code>)
+            .flatMap((el, i) => (i === 0 ? [el] : [', ', el]))}
+        </p>
+      )}
+      {ignored.length > 0 && (
+        <p className="text-muted-foreground">
+          Ignored columns (no matching custom field):{' '}
+          {ignored.join(', ')} — define one under Settings → Custom fields to import them next time.
+        </p>
+      )}
+      {invalid > 0 && (
+        <p className="text-muted-foreground">
+          {invalid} value{invalid === 1 ? '' : 's'} didn’t match their field’s type and were left empty. The contacts
+          still imported.
+        </p>
+      )}
+    </div>
   )
 }
