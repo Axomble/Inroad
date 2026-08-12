@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Flame } from 'lucide-react'
+import { Flame, Reply } from 'lucide-react'
 import { formatClock24 } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -17,9 +17,19 @@ import { usePulse } from './use-pulse'
  *   (`pulse.attention[]`) and sort danger > warn > info, so the top line of
  *   the sidebar is always the most important fact in the workspace.
  *
+ * Risk is only half the question. Attention rows, the send meter and the
+ * warmup line all answer "am I safe?"; the replies line answers "is it
+ * working?" — the outcome the sending exists to produce. It renders in both
+ * postures because a bad day for deliverability and a good day for replies are
+ * independent facts, and suppressing the second while showing the first would
+ * make the card read as worse news than the workspace is actually having.
+ *
+ * Conditional lines earn their space: replies appear only with unread threads,
+ * warmup only with a non-empty pool. Nothing here renders a zero.
+ *
  * Accent discipline: the send meter's `--primary` fill is the only lime; the
- * warmup line's `--warm` is the only orange; attention rows use the semantic
- * ok/warn/danger scale. Everything else is `--chrome-*`.
+ * warmup line's `--warm` is the only orange; attention rows and the interested
+ * count use the semantic ok/warn/danger scale. Everything else is `--chrome-*`.
  */
 
 const SEVERITY_ORDER: Record<PulseSeverity, number> = { danger: 0, warn: 1, info: 2 }
@@ -104,6 +114,32 @@ function SendMeter({ sending }: { sending: WorkspacePulse['sending'] }) {
   )
 }
 
+/**
+ * The one outcome line: replies waiting, and how many of them classified
+ * positive. Both numbers are unread-scoped — `interested` is a subset of
+ * `unread`, not a lifetime total — so the line reads as a to-do ("6 of the 23
+ * waiting are interested") rather than a vanity metric. `text-ok` on the
+ * interested count is the semantic scale, not a fourth accent.
+ */
+function RepliesLine({ inbox }: { inbox: WorkspacePulse['inbox'] }) {
+  return (
+    <Link to="/app/inbox" data-slot="pulse-replies-line" className={cn(rowClass, 'text-[12px] text-chrome-muted')}>
+      <Reply className="size-3 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+      <span className="truncate">
+        <span className="font-mono tabular-nums text-chrome-text">{inbox.unread}</span>{' '}
+        {inbox.unread === 1 ? 'reply' : 'replies'}
+        {inbox.interested > 0 && (
+          <>
+            {' · '}
+            <span className="font-mono tabular-nums text-ok">{inbox.interested}</span>
+            <span className="text-ok"> interested</span>
+          </>
+        )}
+      </span>
+    </Link>
+  )
+}
+
 function WarmupLine({ warmup }: { warmup: WorkspacePulse['warmup'] }) {
   const status =
     warmup.at_risk > 0 ? `${warmup.at_risk} at risk` : warmup.watch > 0 ? `${warmup.watch} on watch` : 'all healthy'
@@ -152,6 +188,7 @@ export function PulseCard() {
             All systems healthy
           </p>
           <SendMeter sending={data.sending} />
+          {data.inbox.unread > 0 && <RepliesLine inbox={data.inbox} />}
         </>
       ) : (
         <>
@@ -159,6 +196,7 @@ export function PulseCard() {
             <AttentionRow key={item.kind} item={item} />
           ))}
           <SendMeter sending={data.sending} />
+          {data.inbox.unread > 0 && <RepliesLine inbox={data.inbox} />}
           {data.warmup.pool > 0 && <WarmupLine warmup={data.warmup} />}
         </>
       )}

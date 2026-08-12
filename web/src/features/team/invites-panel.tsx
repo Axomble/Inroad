@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { StatusPill } from '@/components/shared/status-pill'
 import { Page, PageTopbar, PageBody, EmptyBlock } from '@/components/layout/page'
 import { useAppSelector } from '@/store/hooks'
+import { useHasRole } from '@/hooks/use-has-role'
 import { httpStatus } from '@/lib/rtk-error'
 import type { Invite } from '@/store/api'
 import { useCreateWorkspaceInviteMutation, useListWorkspaceInvitesQuery, useRevokeWorkspaceInviteMutation } from './api'
@@ -28,8 +29,7 @@ type FormValues = z.infer<typeof schema>
  */
 export function InvitesPanel() {
   const workspaceId = useAppSelector((s) => s.auth.activeWorkspaceId)
-  const role = useAppSelector((s) => s.auth.role)
-  const isAdmin = role === 'owner' || role === 'admin'
+  const isAdmin = useHasRole('admin')
   const [showInvite, setShowInvite] = useState(false)
 
   const { data, isLoading } = useListWorkspaceInvitesQuery({ id: workspaceId ?? '' }, { skip: !workspaceId || !isAdmin })

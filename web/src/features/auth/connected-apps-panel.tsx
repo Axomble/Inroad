@@ -14,7 +14,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Page, PageTopbar, PageBody, SectionBar, EmptyBlock } from '@/components/layout/page'
-import { useAppSelector } from '@/store/hooks'
+import { useHasRole } from '@/hooks/use-has-role'
 import { httpStatus } from '@/lib/rtk-error'
 import type { OAuth2Client } from '@/store/api'
 import { formatDateTime } from './session-format'
@@ -36,8 +36,7 @@ type Notice = { tone: 'ok' | 'error'; text: string }
  * the view refetches itself.
  */
 export function ConnectedAppsPanel() {
-  const role = useAppSelector((s) => s.auth.role)
-  const isAdmin = role === 'owner' || role === 'admin'
+  const isAdmin = useHasRole('admin')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [registering, setRegistering] = useState(false)
 

@@ -1,7 +1,6 @@
 import { Link } from '@tanstack/react-router'
-import { Building2, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, ShieldCheck, KeyRound, Plug, Sparkles, BookOpen, Tags, ListPlus, type LucideIcon } from 'lucide-react'
+import { Building2, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAppSelector } from '@/store/hooks'
 import { PulseCard } from './pulse-card'
 import { SidebarFooter } from './sidebar-footer'
 import { useNavCounts } from './use-nav-counts'
@@ -25,12 +24,6 @@ interface NavItem {
   label: string
   to: string
   icon: LucideIcon
-  /**
-   * Hide the row from non-admins. The route itself stays reachable (the panel
-   * renders its own "admins only" state on a deep-link) — this only keeps the
-   * nav honest, so a member isn't pointed at a screen they can't use.
-   */
-  adminOnly?: boolean
 }
 
 interface NavGroup {
@@ -79,20 +72,16 @@ const NAV: NavGroup[] = [
     ],
   },
   {
+    // Seven settings screens used to sit here as seven top-level rows, giving
+    // workspace administration more of the primary nav than Inbox, Campaigns
+    // and the whole CRM combined. They now live behind one row, on the
+    // settings rail (`components/layout/settings-rail.tsx`) — which is also
+    // where the next settings screen goes, instead of here.
     label: 'Workspace',
     items: [
-      { label: 'Team', to: '/app/settings/team', icon: Settings },
-      { label: 'Security', to: '/app/settings/security', icon: ShieldCheck },
-      // Not adminOnly: reply-label writes are campaigns:write on the backend, a
-      // scope every logged-in member holds (like Campaigns itself) — only API
-      // keys / OAuth grants are scope-attenuated.
-      { label: 'Reply labels', to: '/app/settings/reply-labels', icon: Tags },
-      // Same reasoning: custom-field writes are contacts:write, which every
-      // logged-in member holds.
-      { label: 'Custom fields', to: '/app/settings/custom-fields', icon: ListPlus },
-      { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound, adminOnly: true },
-      { label: 'Connected apps', to: '/app/settings/oauth-apps', icon: Plug, adminOnly: true },
-      { label: 'AI', to: '/app/settings/ai', icon: Sparkles, adminOnly: true },
+      { label: 'Settings', to: '/app/settings', icon: Settings },
+      // Stays top-level: it documents the API and MCP server for people
+      // integrating with Inroad, which is not workspace administration.
       { label: 'Docs & MCP', to: '/app/docs', icon: BookOpen },
     ],
   },
@@ -124,8 +113,6 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
 
 export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void }) {
   const counts = useNavCounts()
-  const role = useAppSelector((s) => s.auth.role)
-  const isAdmin = role === 'owner' || role === 'admin'
 
   return (
     <div className="flex h-full w-64 flex-col overflow-y-auto bg-chrome px-3 pb-3 pt-4">
@@ -141,8 +128,6 @@ export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void })
       </button>
       <nav aria-label="Primary" className="flex flex-col gap-5">
         {NAV.map((group, index) => {
-          const items = group.items.filter((item) => !item.adminOnly || isAdmin)
-          if (items.length === 0) return null
           return (
             <div key={group.label ?? index} className="flex flex-col gap-0.5">
               {group.label && (
@@ -150,7 +135,7 @@ export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void })
                   {group.label}
                 </div>
               )}
-              {items.map((item) => (
+              {group.items.map((item) => (
                 <NavRow key={item.to} item={item} count={counts[item.to]} />
               ))}
             </div>

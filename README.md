@@ -60,8 +60,18 @@ infrastructure than rent it.
 | **Open / click tracking** | Signed, per-send tracking tokens, toggleable per campaign, with opens honestly labelled *indicative* and clicks *reliable*. |
 | **Domain authentication checks** | SPF, DKIM, and DMARC verified per sending domain, so a missing or broken record is a visible state on the mailboxes you send from instead of silent spam-foldering. |
 | **Live console pulse** | One O(1) aggregate read-model drives the whole chrome: a sidebar pulse card that stays quiet when healthy and promotes the worst problem first (with its reason and a link to the fix), live nav counts, and a today's-sends meter. Polls; no websockets to run. |
+| **Unified cross-mailbox inbox** | Every reply from every connected mailbox in one threaded view, searchable, with the campaign and enrollment that produced it attached to the thread. Reply from the inbox and the message goes out through the mailbox that owns the thread. |
+| **User-definable reply taxonomy** | The six built-in reply classes are a starting point, not the ceiling. Define your own labels with your own match rules and your own automation (stop the sequence, suppress, do nothing) — the poller applies them on the way in. |
+| **A/B variants on sequence steps** | Multiple subject/body variants per step, assigned deterministically per enrollment, with per-variant send and reply counts so a winner is measured rather than guessed. |
+| **AI assistant, human-in-the-loop** | An in-app agent (`@` from anywhere) that can read and act on your workspace through typed tools, plus AI-drafted replies in the thread view. Every write goes through an approval queue with a diff-style preview — nothing mutates without a click. Bring your own provider key; the whole feature is off until you add one. |
+| **Deterministic classification stays the default** | Reply classification needs no AI and makes no network call. The model seam is an addition for the ambiguous middle, never a dependency — pull the key and the pipeline still classifies. |
+| **CRM records** | Companies, deals and pipelines alongside contacts, with notes, tasks and a unified activity feed modelled polymorphically so one implementation serves every record type. Records link to each other, and each shows who created it — agent, member, or auto-capture. |
+| **Typed custom fields** | Per-workspace field definitions with real types, mapped during CSV import and validated at campaign preflight, so a merge field can't reference something that isn't there. |
+| **Deliverability dashboard** | Placement, bounce and complaint trends over time, with the at-risk senders promoted out of the chart and into a list you can act on. |
 | **Contacts at scale** | Server-side search across email, name and company via a trigram index, and keyset pagination that seeks by cursor instead of `OFFSET` — a page 200k rows in costs the same as the first. CSV import with skip/duplicate reporting. |
 | **Multi-workspace teams** | One account, many workspaces. Owner / admin / member roles, email invites, workspace switcher. |
+| **Sign in how you like** | Email + password, Google sign-in, passkeys (WebAuthn), and TOTP two-factor — with refresh-token rotation and reuse detection underneath all of them. |
+| **Programmable surface** | Scoped API keys, an OAuth 2.0 provider so third-party apps can act on a workspace with consent, and an MCP server that exposes the same typed tools the in-app agent uses. |
 | **Envelope-encrypted secrets** | Per-workspace data-encryption keys wrapped by a key-encryption key. Deleting a workspace crypto-shreds its secrets. |
 
 ---
@@ -122,6 +132,15 @@ paused rather than pushed harder. Orange is reserved for this one concept in the
 Search runs server-side across email, name and company, and paging seeks by cursor rather than
 `OFFSET` — so the last page of a 200,000-contact workspace costs what the first one does. The count
 above the list is exact until it would stop being cheap, then honest about it: `10,000+`.
+
+### And where the replies land
+
+Everything that comes back arrives in one place. The **inbox** threads replies across every connected
+mailbox, carrying the campaign and enrollment that produced them, and sends your reply back out
+through the mailbox that owns the thread. Replies are labelled by your own taxonomy, and the
+**companies, deals and contact records** they belong to sit one click away — with notes, tasks and a
+shared activity feed. The **AI assistant** is `@` away from any page and can act on all of it, but
+every write it proposes waits in the approvals queue behind a preview of exactly what would change.
 
 ---
 
@@ -260,7 +279,8 @@ For cloud infrastructure, production deployment manifests are included in the re
 | Cache / job queue | Redis 7 (container, asynq) | ElastiCache, any Redis |
 | Root key (KEK) | Local AES-256 master key | Cloud KMS — the `KeyProvider` seam exists, the provider does not yet |
 | Mail transport | Your own mailboxes | Gmail API · Microsoft Graph · any SMTP/IMAP host |
-| Reply classification | Deterministic, offline, no network | An optional `ModelClassifier` seam for the ambiguous middle |
+| Reply classification | Deterministic, offline, no network | An optional model seam for the ambiguous middle |
+| AI features | Off — no key, no calls, no agent | Your own provider key, added per workspace; approval-gated writes |
 | Payments / licensing | None — everything is unlocked | — |
 
 Detailed deployment guides and configuration options are in [docs/self-hosting.md](docs/self-hosting.md). Connecting Gmail and Microsoft 365 (OAuth client
@@ -309,22 +329,30 @@ Layering is enforced by convention and review: `app/*` may import `platform/*` b
 Inroad is under active development and pre-1.0. What's built works and is covered by unit and
 integration tests; what isn't built is listed here rather than implied by a feature grid.
 
-**Working today:** multi-workspace auth with refresh-token rotation and reuse detection, TOTP, passkeys
-and scoped API keys · Gmail / M365 / SMTP mailbox connect · multi-step sequences with reorder ·
-enrollment engine with ramp-aware daily caps and atomic per-mailbox send spacing · natural send
-cadence and timezone-aware send windows · sender pools with round-robin / LRU / weighted rotation ·
-health-gated cold sending and campaign-wide daily limits · the warmup pool end-to-end (ramping volume,
-threaded replies, rescue-from-spam, mark-read, measured placement health, per-IP worker routing) ·
-reply and bounce polling across all three transports · deterministic reply classification ·
-suppression and one-click unsubscribe · open/click tracking · server-side contact search with keyset
-pagination · SPF/DKIM/DMARC domain authentication checks · the console pulse read-model behind the
-live sidebar.
+**Working today:** multi-workspace auth with refresh-token rotation and reuse detection, TOTP, passkeys,
+Google sign-in, scoped API keys and an OAuth 2.0 provider · Gmail / M365 / SMTP mailbox connect ·
+multi-step sequences with reorder and per-step A/B variants · enrollment engine with ramp-aware daily
+caps and atomic per-mailbox send spacing · natural send cadence and timezone-aware send windows ·
+sender pools with round-robin / LRU / weighted rotation · health-gated cold sending and campaign-wide
+daily limits · the warmup pool end-to-end (ramping volume, threaded replies, rescue-from-spam,
+mark-read, measured placement health, per-IP worker routing) · reply and bounce polling across all
+three transports · deterministic reply classification plus a user-definable reply taxonomy driving
+automation · the unified cross-mailbox inbox with threaded reply · suppression and one-click
+unsubscribe · open/click tracking · the deliverability dashboard · CRM records (companies, deals,
+pipelines) with notes, tasks and an activity feed · typed custom fields, mapped on import and checked
+at preflight · the approval-gated AI agent, its MCP server, and AI-drafted replies · server-side
+contact search with keyset pagination · SPF/DKIM/DMARC domain authentication checks · the console
+pulse read-model behind the live sidebar.
 
-**On the roadmap:** a unified cross-mailbox inbox UI ·
-lead-flow throttling, so a launch spreads across as many days as the pool's capacity actually needs
-rather than queueing behind a daily cap · outbound webhooks and a public API · cloud KMS as a second
-`KeyProvider` · rate limiting and an audit log on auth, connect, and reply-driven suppression · a
-key-rotation CLI.
+**On the roadmap:** lead-flow throttling, so a launch spreads across as many days as the pool's
+capacity actually needs rather than queueing behind a daily cap · email verification / list cleaning
+before send · soft-bounce retry with a threshold to suppress, and provider feedback-loop ingestion for
+real complaint data · a custom branded tracking domain per workspace · outbound webhooks for
+third-party integrations · billing and plan gating for the open-core split · cloud KMS as a second
+`KeyProvider` · an audit log on auth, connect, and reply-driven suppression · a key-rotation CLI.
+
+Open work is tracked as [GitHub issues](https://github.com/Axomble/Inroad/issues); anything labelled
+`roadmap` is on the list above.
 
 ---
 
