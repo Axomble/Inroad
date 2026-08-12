@@ -15,7 +15,10 @@ import (
 // be unit-tested against a fake without a database.
 type Store interface {
 	Create(ctx context.Context, workspaceID uuid.UUID, name string) (gen.List, error)
-	List(ctx context.Context, workspaceID uuid.UUID) ([]gen.List, error)
+	// List returns each list with its membership size (gen.ListListsRow), not
+	// a bare gen.List — the count is aggregated in the same query rather than
+	// N+1'd per row by the caller.
+	List(ctx context.Context, workspaceID uuid.UUID) ([]gen.ListListsRow, error)
 	Get(ctx context.Context, workspaceID, id uuid.UUID) (gen.List, error)
 	CountMembers(ctx context.Context, id uuid.UUID) (int64, error)
 	// Rename returns pgx.ErrNoRows when the list does not exist in the
@@ -34,7 +37,7 @@ func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
 func (s *PgStore) Create(ctx context.Context, ws uuid.UUID, name string) (gen.List, error) {
 	return s.q.CreateList(ctx, gen.CreateListParams{WorkspaceID: ws, Name: name})
 }
-func (s *PgStore) List(ctx context.Context, ws uuid.UUID) ([]gen.List, error) {
+func (s *PgStore) List(ctx context.Context, ws uuid.UUID) ([]gen.ListListsRow, error) {
 	return s.q.ListLists(ctx, ws)
 }
 func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.List, error) {

@@ -26,6 +26,7 @@ import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-na
 // the state and the copy, so a call site names only the action.
 import { VerifiedGateButton } from '@/features/auth/verified-gate-button'
 import type { Campaign } from '@/store/api'
+import { useToast } from '@/hooks/use-toast'
 import { useListCampaignsQuery, useLaunchCampaignMutation } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { CampaignForm } from './campaign-form'
@@ -218,6 +219,7 @@ function CampaignRow({
   onOpen: (campaign: Campaign) => void
 }) {
   const [launch, { isLoading }] = useLaunchCampaignMutation()
+  const toast = useToast()
   const [error, setError] = useState<string | null>(null)
   const [preflightOpen, setPreflightOpen] = useState(false)
   // One instance per row, shared by LifecycleMenu's menu item and the
@@ -230,7 +232,18 @@ function CampaignRow({
   async function onLaunch() {
     setError(null)
     const res = await launch({ id })
-    if ('error' in res) setError(launchErrorMessage(res.error))
+    if ('error' in res) {
+      setError(launchErrorMessage(res.error))
+      return
+    }
+    // A launch is the one action here with consequences that outlive the
+    // screen — mail starts going out. The status pill flipping to "running" is
+    // easy to miss, and the row may well be scrolled away or navigated from by
+    // the time it does, so the confirmation follows the user instead.
+    toast.ok(`${campaign.name || 'Campaign'} is live — sending has started.`, {
+      href: id ? `/app/campaigns/${id}` : undefined,
+      hrefLabel: 'View campaign',
+    })
   }
 
   return (

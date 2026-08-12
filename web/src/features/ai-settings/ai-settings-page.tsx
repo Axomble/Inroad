@@ -7,7 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { NoticeBanner, type Notice } from '@/components/shared/notice-banner'
 import { Page, PageTopbar, PageBody, SectionBar, EmptyBlock } from '@/components/layout/page'
-import { useAppSelector } from '@/store/hooks'
+import { useHasRole } from '@/hooks/use-has-role'
 import { httpStatus } from '@/lib/rtk-error'
 import { ProviderRow } from './provider-row'
 import { AddProviderDialog } from './provider-form'
@@ -36,8 +36,7 @@ import type { AiSettings } from './api'
  * PUT /ai/settings.
  */
 export function AiSettingsPage() {
-  const role = useAppSelector((s) => s.auth.role)
-  const isAdmin = role === 'owner' || role === 'admin'
+  const isAdmin = useHasRole('admin')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [adding, setAdding] = useState(false)
   // Post-connect chain: a fresh gateway goes straight to model discovery.

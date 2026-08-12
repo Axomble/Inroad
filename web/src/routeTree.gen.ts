@@ -23,6 +23,8 @@ import { Route as AppCrmRouteImport } from './routes/app.crm'
 import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
 import { Route as AppDocsRouteImport } from './routes/app.docs'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
+import { Route as AppReportsRouteImport } from './routes/app.reports'
+import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
 import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
@@ -35,6 +37,7 @@ import { Route as AppDealsIndexRouteImport } from './routes/app.deals.index'
 import { Route as AppDealsIdRouteImport } from './routes/app.deals.$id'
 import { Route as AppInboxIndexRouteImport } from './routes/app.inbox.index'
 import { Route as AppInboxThreadIdRouteImport } from './routes/app.inbox.$threadId'
+import { Route as AppSettingsIndexRouteImport } from './routes/app.settings.index'
 import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
 import { Route as AppSettingsCustomFieldsRouteImport } from './routes/app.settings.custom-fields'
@@ -114,6 +117,16 @@ const AppMailboxesRoute = AppMailboxesRouteImport.update({
   path: '/mailboxes',
   getParentRoute: () => AppRoute,
 } as any)
+const AppReportsRoute = AppReportsRouteImport.update({
+  id: '/reports',
+  path: '/reports',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsRoute = AppSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppWarmupRoute = AppWarmupRouteImport.update({
   id: '/warmup',
   path: '/warmup',
@@ -174,40 +187,45 @@ const AppInboxThreadIdRoute = AppInboxThreadIdRouteImport.update({
   path: '/inbox/$threadId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppSettingsIndexRoute = AppSettingsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppSettingsRoute,
+} as any)
 const AppSettingsAiRoute = AppSettingsAiRouteImport.update({
-  id: '/settings/ai',
-  path: '/settings/ai',
-  getParentRoute: () => AppRoute,
+  id: '/ai',
+  path: '/ai',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsApiKeysRoute = AppSettingsApiKeysRouteImport.update({
-  id: '/settings/api-keys',
-  path: '/settings/api-keys',
-  getParentRoute: () => AppRoute,
+  id: '/api-keys',
+  path: '/api-keys',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsCustomFieldsRoute = AppSettingsCustomFieldsRouteImport.update({
-  id: '/settings/custom-fields',
-  path: '/settings/custom-fields',
-  getParentRoute: () => AppRoute,
+  id: '/custom-fields',
+  path: '/custom-fields',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsOauthAppsRoute = AppSettingsOauthAppsRouteImport.update({
-  id: '/settings/oauth-apps',
-  path: '/settings/oauth-apps',
-  getParentRoute: () => AppRoute,
+  id: '/oauth-apps',
+  path: '/oauth-apps',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsReplyLabelsRoute = AppSettingsReplyLabelsRouteImport.update({
-  id: '/settings/reply-labels',
-  path: '/settings/reply-labels',
-  getParentRoute: () => AppRoute,
+  id: '/reply-labels',
+  path: '/reply-labels',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsSecurityRoute = AppSettingsSecurityRouteImport.update({
-  id: '/settings/security',
-  path: '/settings/security',
-  getParentRoute: () => AppRoute,
+  id: '/security',
+  path: '/security',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AppSettingsTeamRoute = AppSettingsTeamRouteImport.update({
-  id: '/settings/team',
-  path: '/settings/team',
-  getParentRoute: () => AppRoute,
+  id: '/team',
+  path: '/team',
+  getParentRoute: () => AppSettingsRoute,
 } as any)
 const AuthGoogleCallbackRoute = AuthGoogleCallbackRouteImport.update({
   id: '/auth/google/callback',
@@ -229,6 +247,8 @@ export interface FileRoutesByFullPath {
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
+  '/app/reports': typeof AppReportsRoute
+  '/app/settings': typeof AppSettingsRouteWithChildren
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
@@ -250,6 +270,7 @@ export interface FileRoutesByFullPath {
   '/app/contacts/': typeof AppContactsIndexRoute
   '/app/deals/': typeof AppDealsIndexRoute
   '/app/inbox/': typeof AppInboxIndexRoute
+  '/app/settings/': typeof AppSettingsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -264,6 +285,7 @@ export interface FileRoutesByTo {
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
+  '/app/reports': typeof AppReportsRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
@@ -285,6 +307,7 @@ export interface FileRoutesByTo {
   '/app/contacts': typeof AppContactsIndexRoute
   '/app/deals': typeof AppDealsIndexRoute
   '/app/inbox': typeof AppInboxIndexRoute
+  '/app/settings': typeof AppSettingsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -301,6 +324,8 @@ export interface FileRoutesById {
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
+  '/app/reports': typeof AppReportsRoute
+  '/app/settings': typeof AppSettingsRouteWithChildren
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
@@ -322,6 +347,7 @@ export interface FileRoutesById {
   '/app/contacts/': typeof AppContactsIndexRoute
   '/app/deals/': typeof AppDealsIndexRoute
   '/app/inbox/': typeof AppInboxIndexRoute
+  '/app/settings/': typeof AppSettingsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -339,6 +365,8 @@ export interface FileRouteTypes {
     | '/app/deliverability'
     | '/app/docs'
     | '/app/mailboxes'
+    | '/app/reports'
+    | '/app/settings'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app/'
@@ -360,6 +388,7 @@ export interface FileRouteTypes {
     | '/app/contacts/'
     | '/app/deals/'
     | '/app/inbox/'
+    | '/app/settings/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -374,6 +403,7 @@ export interface FileRouteTypes {
     | '/app/deliverability'
     | '/app/docs'
     | '/app/mailboxes'
+    | '/app/reports'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app'
@@ -395,6 +425,7 @@ export interface FileRouteTypes {
     | '/app/contacts'
     | '/app/deals'
     | '/app/inbox'
+    | '/app/settings'
   id:
     | '__root__'
     | '/'
@@ -410,6 +441,8 @@ export interface FileRouteTypes {
     | '/app/deliverability'
     | '/app/docs'
     | '/app/mailboxes'
+    | '/app/reports'
+    | '/app/settings'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app/'
@@ -431,6 +464,7 @@ export interface FileRouteTypes {
     | '/app/contacts/'
     | '/app/deals/'
     | '/app/inbox/'
+    | '/app/settings/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -546,6 +580,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMailboxesRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/reports': {
+      id: '/app/reports'
+      path: '/reports'
+      fullPath: '/app/reports'
+      preLoaderRoute: typeof AppReportsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/settings': {
+      id: '/app/settings'
+      path: '/settings'
+      fullPath: '/app/settings'
+      preLoaderRoute: typeof AppSettingsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/warmup': {
       id: '/app/warmup'
       path: '/warmup'
@@ -630,54 +678,61 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppInboxThreadIdRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings/': {
+      id: '/app/settings/'
+      path: '/'
+      fullPath: '/app/settings/'
+      preLoaderRoute: typeof AppSettingsIndexRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
     '/app/settings/ai': {
       id: '/app/settings/ai'
-      path: '/settings/ai'
+      path: '/ai'
       fullPath: '/app/settings/ai'
       preLoaderRoute: typeof AppSettingsAiRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/app/settings/api-keys': {
       id: '/app/settings/api-keys'
-      path: '/settings/api-keys'
+      path: '/api-keys'
       fullPath: '/app/settings/api-keys'
       preLoaderRoute: typeof AppSettingsApiKeysRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/app/settings/custom-fields': {
       id: '/app/settings/custom-fields'
-      path: '/settings/custom-fields'
+      path: '/custom-fields'
       fullPath: '/app/settings/custom-fields'
       preLoaderRoute: typeof AppSettingsCustomFieldsRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/app/settings/oauth-apps': {
       id: '/app/settings/oauth-apps'
-      path: '/settings/oauth-apps'
+      path: '/oauth-apps'
       fullPath: '/app/settings/oauth-apps'
       preLoaderRoute: typeof AppSettingsOauthAppsRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/app/settings/reply-labels': {
       id: '/app/settings/reply-labels'
-      path: '/settings/reply-labels'
+      path: '/reply-labels'
       fullPath: '/app/settings/reply-labels'
       preLoaderRoute: typeof AppSettingsReplyLabelsRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/app/settings/security': {
       id: '/app/settings/security'
-      path: '/settings/security'
+      path: '/security'
       fullPath: '/app/settings/security'
       preLoaderRoute: typeof AppSettingsSecurityRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/app/settings/team': {
       id: '/app/settings/team'
-      path: '/settings/team'
+      path: '/team'
       fullPath: '/app/settings/team'
       preLoaderRoute: typeof AppSettingsTeamRouteImport
-      parentRoute: typeof AppRoute
+      parentRoute: typeof AppSettingsRoute
     }
     '/auth/google/callback': {
       id: '/auth/google/callback'
@@ -689,19 +744,7 @@ declare module '@tanstack/react-router' {
   }
 }
 
-interface AppRouteChildren {
-  AppApprovalsRoute: typeof AppApprovalsRoute
-  AppCrmRoute: typeof AppCrmRoute
-  AppDeliverabilityRoute: typeof AppDeliverabilityRoute
-  AppDocsRoute: typeof AppDocsRoute
-  AppMailboxesRoute: typeof AppMailboxesRoute
-  AppWarmupRoute: typeof AppWarmupRoute
-  AppIndexRoute: typeof AppIndexRoute
-  AppCampaignsIdRoute: typeof AppCampaignsIdRoute
-  AppCompaniesIdRoute: typeof AppCompaniesIdRoute
-  AppContactsIdRoute: typeof AppContactsIdRoute
-  AppDealsIdRoute: typeof AppDealsIdRoute
-  AppInboxThreadIdRoute: typeof AppInboxThreadIdRoute
+interface AppSettingsRouteChildren {
   AppSettingsAiRoute: typeof AppSettingsAiRoute
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
   AppSettingsCustomFieldsRoute: typeof AppSettingsCustomFieldsRoute
@@ -709,6 +752,39 @@ interface AppRouteChildren {
   AppSettingsReplyLabelsRoute: typeof AppSettingsReplyLabelsRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
+  AppSettingsIndexRoute: typeof AppSettingsIndexRoute
+}
+
+const AppSettingsRouteChildren: AppSettingsRouteChildren = {
+  AppSettingsAiRoute: AppSettingsAiRoute,
+  AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
+  AppSettingsCustomFieldsRoute: AppSettingsCustomFieldsRoute,
+  AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
+  AppSettingsReplyLabelsRoute: AppSettingsReplyLabelsRoute,
+  AppSettingsSecurityRoute: AppSettingsSecurityRoute,
+  AppSettingsTeamRoute: AppSettingsTeamRoute,
+  AppSettingsIndexRoute: AppSettingsIndexRoute,
+}
+
+const AppSettingsRouteWithChildren = AppSettingsRoute._addFileChildren(
+  AppSettingsRouteChildren,
+)
+
+interface AppRouteChildren {
+  AppApprovalsRoute: typeof AppApprovalsRoute
+  AppCrmRoute: typeof AppCrmRoute
+  AppDeliverabilityRoute: typeof AppDeliverabilityRoute
+  AppDocsRoute: typeof AppDocsRoute
+  AppMailboxesRoute: typeof AppMailboxesRoute
+  AppReportsRoute: typeof AppReportsRoute
+  AppSettingsRoute: typeof AppSettingsRouteWithChildren
+  AppWarmupRoute: typeof AppWarmupRoute
+  AppIndexRoute: typeof AppIndexRoute
+  AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppCompaniesIdRoute: typeof AppCompaniesIdRoute
+  AppContactsIdRoute: typeof AppContactsIdRoute
+  AppDealsIdRoute: typeof AppDealsIdRoute
+  AppInboxThreadIdRoute: typeof AppInboxThreadIdRoute
   AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
   AppCompaniesIndexRoute: typeof AppCompaniesIndexRoute
   AppContactsIndexRoute: typeof AppContactsIndexRoute
@@ -722,6 +798,8 @@ const AppRouteChildren: AppRouteChildren = {
   AppDeliverabilityRoute: AppDeliverabilityRoute,
   AppDocsRoute: AppDocsRoute,
   AppMailboxesRoute: AppMailboxesRoute,
+  AppReportsRoute: AppReportsRoute,
+  AppSettingsRoute: AppSettingsRouteWithChildren,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
   AppCampaignsIdRoute: AppCampaignsIdRoute,
@@ -729,13 +807,6 @@ const AppRouteChildren: AppRouteChildren = {
   AppContactsIdRoute: AppContactsIdRoute,
   AppDealsIdRoute: AppDealsIdRoute,
   AppInboxThreadIdRoute: AppInboxThreadIdRoute,
-  AppSettingsAiRoute: AppSettingsAiRoute,
-  AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
-  AppSettingsCustomFieldsRoute: AppSettingsCustomFieldsRoute,
-  AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
-  AppSettingsReplyLabelsRoute: AppSettingsReplyLabelsRoute,
-  AppSettingsSecurityRoute: AppSettingsSecurityRoute,
-  AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppCampaignsIndexRoute: AppCampaignsIndexRoute,
   AppCompaniesIndexRoute: AppCompaniesIndexRoute,
   AppContactsIndexRoute: AppContactsIndexRoute,

@@ -46,6 +46,7 @@ import (
 	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/pulse"
 	"github.com/inroad/inroad/internal/app/replylabel"
+	"github.com/inroad/inroad/internal/app/reporting"
 	"github.com/inroad/inroad/internal/app/sendingdomain"
 	"github.com/inroad/inroad/internal/app/sequencestep"
 	"github.com/inroad/inroad/internal/app/suppression"
@@ -354,6 +355,11 @@ func run() error {
 	deliverabilitySvc := deliverability.NewService(deliverability.NewPgStore(pool))
 	deliverabilityHandler := deliverability.NewHandler(deliverabilitySvc)
 	pulseSvc := pulse.NewService(pulse.NewPgStore(queries))
+	// Cross-campaign performance. Its own domain rather than a campaign
+	// endpoint: it answers a workspace-level question (which campaign is
+	// working) from one query across every campaign, where campaign.Service
+	// deliberately computes and caches one campaign at a time.
+	reportingSvc := reporting.NewService(reporting.NewPgStore(queries))
 	// The reply-label taxonomy: which buckets a reply is classified into and,
 	// through each label's role flags, what automation that triggers. The
 	// execution plane reads the same table through coreapi, so the operator's
@@ -557,6 +563,11 @@ func run() error {
 		// /campaigns/{id}/guardrails here rather than on its own mount, so they live
 		// under the campaigns prefix (chi cannot mount two routers on one prefix).
 		{pattern: "/api/v1/campaigns", handler: campaign.NewHandler(campaignSvc, enq, stepHandler, deliverabilityHandler).Routes(identStore)},
+		// Cross-campaign performance rollup. In the data plane, not session-only:
+		// an external dashboard pulling this with campaigns:read is a legitimate
+		// use, and it exposes nothing that scope couldn't already assemble one
+		// campaign at a time.
+		{pattern: "/api/v1/reports", handler: reporting.NewHandler(reportingSvc).Routes()},
 		// Sending-domain authentication (SPF/DKIM/DMARC). Read-only status plus an
 		// on-demand recheck; the domain list is derived from this workspace's
 		// mailboxes, and the recheck resolves a domain ONLY after confirming the

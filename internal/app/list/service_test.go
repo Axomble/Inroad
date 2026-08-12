@@ -28,8 +28,11 @@ func (f *fakeStore) Create(_ context.Context, ws uuid.UUID, name string) (gen.Li
 	f.created = gen.List{ID: uuid.New(), WorkspaceID: ws, Name: name}
 	return f.created, nil
 }
-func (f *fakeStore) List(context.Context, uuid.UUID) ([]gen.List, error) {
-	return []gen.List{f.created}, nil
+func (f *fakeStore) List(context.Context, uuid.UUID) ([]gen.ListListsRow, error) {
+	return []gen.ListListsRow{{
+		ID: f.created.ID, WorkspaceID: f.created.WorkspaceID, Name: f.created.Name,
+		CreatedAt: f.created.CreatedAt, ContactCount: 3,
+	}}, nil
 }
 func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (gen.List, error) {
 	return f.created, nil

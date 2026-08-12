@@ -21,6 +21,7 @@ var (
 	campaignB = uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000002")
 	mailboxA  = uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000001")
 	listA     = uuid.MustParse("cccccccc-0000-0000-0000-000000000001")
+	listB     = uuid.MustParse("cccccccc-0000-0000-0000-000000000002")
 	contactA  = uuid.MustParse("dddddddd-0000-0000-0000-000000000001")
 )
 
@@ -405,13 +406,34 @@ func TestListReadGetCountsMembersOnlyAfterOwnershipCheck(t *testing.T) {
 	}
 }
 
-func TestListReadListOmitsMemberCounts(t *testing.T) {
-	reg := New(Deps{Lists: &fakeLists{lists: []gen.List{{ID: listA, WorkspaceID: wsID, Name: "Founders"}}, members: 9}})
+// The listing reports each list's size WITHOUT a per-list count query: the
+// size rides along on the listing row (ListLists aggregates it in the same
+// statement). Both halves matter — the number must be there, and `counted`
+// must stay untouched, or the tool has quietly become N+1 in the workspace's
+// list count.
+func TestListReadListReportsMemberCountsWithoutFanningOut(t *testing.T) {
+	lists := &fakeLists{
+		lists: []gen.List{
+			{ID: listA, WorkspaceID: wsID, Name: "Founders"},
+			{ID: listB, WorkspaceID: wsID, Name: "Operators"},
+		},
+		members: 9,
+	}
+	reg := New(Deps{Lists: lists})
+
 	out := ok(t, reg, member(), "inroad_list_read", `{"loading_message":"x","method":"list"}`)
 	items, _ := out["lists"].([]any)
-	first, _ := items[0].(map[string]any)
-	if _, present := first["members"]; present {
-		t.Errorf("listing fanned out to per-list counts: %v", first)
+	if len(items) != 2 {
+		t.Fatalf("lists = %v, want 2 rows", out["lists"])
+	}
+	for _, item := range items {
+		row, _ := item.(map[string]any)
+		if got, ok := row["members"].(float64); !ok || got != 9 {
+			t.Errorf("row %v: members = %v, want 9", row["name"], row["members"])
+		}
+	}
+	if lists.counted != uuid.Nil {
+		t.Errorf("listing fanned out to a per-list count for %s", lists.counted)
 	}
 }
 
