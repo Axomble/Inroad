@@ -37,7 +37,14 @@ CREATE TABLE warmup_observations (
     FOREIGN KEY (warmup_send_id, workspace_id)
         REFERENCES warmup_sends(id, workspace_id) ON DELETE SET NULL (warmup_send_id),
     CHECK ((kind = 'placement') = (placement IS NOT NULL)),
-    CHECK (kind <> 'placement' OR (mailbox_id IS NOT NULL AND warmup_send_id IS NOT NULL)),
+    -- A placement must name the sender it is attributed to. It deliberately does
+    -- NOT require warmup_send_id: the send FK above nulls that column when the
+    -- send is deleted, and a CHECK demanding it would abort the referential
+    -- action instead — making any mailbox with warmup history undeletable. The
+    -- send anchor is enforced where it can be, at INSERT: every writer selects
+    -- FROM warmup_sends, so a placement never enters without one. Losing the
+    -- anchor later must not destroy a DIFFERENT mailbox's reputation evidence.
+    CHECK (kind <> 'placement' OR mailbox_id IS NOT NULL),
     CHECK (kind <> 'invalid_token' OR reason_code <> '')
 );
 
@@ -47,6 +54,13 @@ CREATE INDEX idx_warmup_observations_subject_time
 CREATE INDEX idx_warmup_observations_observer_time
     ON warmup_observations (workspace_id, observer_mailbox_id, observed_at DESC)
     WHERE observer_mailbox_id IS NOT NULL;
+
+-- Supports the send FK's ON DELETE SET NULL. Without it every cascaded send
+-- delete sequentially scans this table once per parent row, so removing one
+-- mailbox — which cascades to every send it sent or received — would not finish.
+CREATE INDEX idx_warmup_observations_send
+    ON warmup_observations (warmup_send_id, workspace_id)
+    WHERE warmup_send_id IS NOT NULL;
 
 -- Backfill the receipt history so deployment does not erase the evidence behind
 -- an existing participant's state. The receipt is the idempotency boundary.

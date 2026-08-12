@@ -74,11 +74,15 @@ func itMailbox(t *testing.T, ctx context.Context, q *gen.Queries, sealer *crypto
 type warmupFixture struct {
 	core coreapi.Client
 	q    *gen.Queries
-	ws1  uuid.UUID
-	a    uuid.UUID // ws1 sender
-	b    uuid.UUID // ws1 partner
-	ws2  uuid.UUID
-	c    uuid.UUID // ws2 (foreign) mailbox
+	// raw reaches tables that have no sqlc query of their own — warmup_observations
+	// and warmup_state_transitions are written as side effects and read only by the
+	// evaluator, so asserting on them needs direct SQL.
+	raw gen.DBTX
+	ws1 uuid.UUID
+	a   uuid.UUID // ws1 sender
+	b   uuid.UUID // ws1 partner
+	ws2 uuid.UUID
+	c   uuid.UUID // ws2 (foreign) mailbox
 }
 
 func setupWarmup(t *testing.T) (context.Context, warmupFixture) {
@@ -128,7 +132,7 @@ func setupWarmup(t *testing.T) (context.Context, warmupFixture) {
 		t.Fatalf("New returned %T, want inprocess.client — cannot pin the warmup clock", core)
 	}
 
-	return ctx, warmupFixture{core: core, q: q, ws1: ws1.ID, a: a, b: b, ws2: ws2.ID, c: c}
+	return ctx, warmupFixture{core: core, q: q, raw: pool, ws1: ws1.ID, a: a, b: b, ws2: ws2.ID, c: c}
 }
 
 // warmupBusyDay returns noon UTC on the first day, from today forward, whose

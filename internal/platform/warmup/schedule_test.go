@@ -367,7 +367,8 @@ func TestEvaluateHealthUsesQualifiedEvidence(t *testing.T) {
 		{"qualified bounce can pause", HealthSignals{Current: StateHealthy, BounceSamples: 50, Bounces: 6}, StatePaused, "bounce_pause"},
 		{"qualified complaint can pause", HealthSignals{Current: StateHealthy, ComplaintSamples: 1000, Complaints: 4}, StatePaused, "complaint_pause"},
 		{"degraded state cannot recover without placement", HealthSignals{Current: StatePaused}, StatePaused, "insufficient_evidence_to_recover"},
-		{"clean qualified placement establishes health", HealthSignals{Current: StateUnknown, Inbox: 20}, StateHealthy, ""},
+		{"clean qualified placement establishes health", HealthSignals{Current: StateUnknown, Inbox: 20}, StateHealthy, "evidence_qualified"},
+		{"unknown escalates straight to the warranted state", HealthSignals{Current: StateUnknown, Inbox: 10, Spam: 10}, StateThrottled, "spam_throttle"},
 		{"qualified recovery is gradual", HealthSignals{Current: StatePaused, Inbox: 20}, StateThrottled, "recovery_step"},
 		{"trusted token failures throttle", HealthSignals{Current: StateHealthy, InvalidTokens: 3}, StateThrottled, "invalid_tokens"},
 	}
@@ -378,6 +379,49 @@ func TestEvaluateHealthUsesQualifiedEvidence(t *testing.T) {
 				t.Fatalf("decision = %q/%q, want %q/%q", got.State, got.ReasonCode, tc.state, tc.code)
 			}
 		})
+	}
+}
+
+// Every transition the evaluator asks to persist must name why. warmup_state_
+// transitions enforces reason_code <> ” and shares one atomic statement with the
+// participant update, so an unexplained decision does not merely lose its audit
+// trail — it aborts the state change itself and the mailbox never moves. This
+// sweeps the whole decision surface rather than the one pair that regressed
+// (unknown → healthy), because the empty code came from two states sharing a rank
+// and any future state added to that scale can reintroduce it.
+func TestEvaluateHealthExplainsEveryAppliedTransition(t *testing.T) {
+	states := []string{StateUnknown, StateHealthy, StateWatch, StateThrottled, StatePaused}
+	signals := []struct {
+		name string
+		in   HealthSignals
+	}{
+		{"no evidence", HealthSignals{}},
+		{"clean qualified placement", HealthSignals{Inbox: 20}},
+		{"spam at watch", HealthSignals{Inbox: 16, Spam: 4}},
+		{"spam at throttle", HealthSignals{Inbox: 10, Spam: 10}},
+		{"spam at pause", HealthSignals{Inbox: 4, Spam: 16}},
+		{"qualified bounce", HealthSignals{BounceSamples: 50, Bounces: 6}},
+		{"qualified complaint", HealthSignals{ComplaintSamples: 1000, Complaints: 4}},
+		{"sub-threshold sample", HealthSignals{Inbox: 5, Spam: 14}},
+	}
+	var zero time.Time
+	for _, from := range states {
+		for _, sig := range signals {
+			t.Run(from+"/"+sig.name, func(t *testing.T) {
+				in := sig.in
+				in.Current = from
+				got := EvaluateHealth(in)
+				if !ShouldApplyTransition(from, got.State, zero, zero) {
+					return // no write, so nothing to explain
+				}
+				if got.ReasonCode == "" {
+					t.Fatalf("%s -> %s would be persisted with an empty reason_code, which the transitions table rejects", from, got.State)
+				}
+				if got.Reason == "" {
+					t.Fatalf("%s -> %s (%s) has no human-readable reason", from, got.State, got.ReasonCode)
+				}
+			})
+		}
 	}
 }
 

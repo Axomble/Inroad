@@ -560,3 +560,112 @@ func sid16(t *testing.T, s string) [16]byte {
 	}
 	return u
 }
+
+// A mailbox the deploy migration demoted to `unknown` must be able to earn its way
+// back once it has qualified evidence. `unknown` shares healthy's rank (it is an
+// absence of evidence, not a degree of badness), so the evaluator's recovery-step
+// branch does not fire for unknown → healthy and the decision carried no reason
+// code — which warmup_state_transitions rejects, rolling back the participant
+// update in the same atomic statement. The mailbox then re-failed every sweep and
+// stayed unknown forever at half its cold-send cap. Asserts the promotion lands AND
+// that it is explained, because the missing explanation is what broke the write.
+func TestEvaluateWarmupHealthPromotesFromUnknownWithQualifiedEvidence(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sid := warmupSendUUID(t, ctx, f)
+	for i := 0; i < 20; i++ {
+		if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+			WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+			ReceiptID: uuid.New(), Placement: placementInbox,
+			ObservedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		}); err != nil {
+			t.Fatalf("seed clean placement %d: %v", i, err)
+		}
+	}
+	if err := f.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
+		MailboxID: f.a, WorkspaceID: f.ws1, HealthState: warmup.StateUnknown,
+		HealthReason: "not enough recent placement evidence",
+	}); err != nil {
+		t.Fatalf("seed A unknown: %v", err)
+	}
+
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth: %v", err)
+	}
+
+	pa, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: f.a, WorkspaceID: f.ws1})
+	if err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	if pa.HealthState != warmup.StateHealthy {
+		t.Fatalf("A health = %q, want healthy (20 clean placements qualify it)", pa.HealthState)
+	}
+
+	var reasonCode string
+	if err := f.raw.QueryRow(ctx,
+		`SELECT reason_code FROM warmup_state_transitions
+		 WHERE workspace_id = $1 AND mailbox_id = $2 AND from_state = 'unknown' AND to_state = 'healthy'`,
+		f.ws1, f.a).Scan(&reasonCode); err != nil {
+		t.Fatalf("no transition row recorded for unknown -> healthy: %v", err)
+	}
+	if reasonCode == "" {
+		t.Fatal("unknown -> healthy recorded with an empty reason_code")
+	}
+}
+
+// Deleting a mailbox that has warmup history must succeed. The observations table's
+// send FK nulls warmup_send_id when a send is deleted, so a CHECK requiring that
+// column for placements aborted the referential action: removing mailbox B cascaded
+// to the A→B send, which tried to null the column on A's surviving placement row and
+// failed the constraint. DELETE /mailboxes/{id} 500'd for every warmup participant.
+// Also asserts A's evidence OUTLIVES the send — deleting B must not erase what the
+// pool learned about A.
+func TestDeleteMailboxWithWarmupHistorySucceedsAndKeepsSenderEvidence(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sid := warmupSendUUID(t, ctx, f)
+	if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+		WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+		ReceiptID: uuid.New(), Placement: placementInbox,
+		ObservedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}); err != nil {
+		t.Fatalf("seed placement: %v", err)
+	}
+
+	// B is the RECIPIENT. The surviving observation is attributed to A, so it is not
+	// cascaded away with B — it is exactly the row whose send anchor gets nulled.
+	n, err := f.q.DeleteMailbox(ctx, gen.DeleteMailboxParams{ID: f.b, WorkspaceID: f.ws1})
+	if err != nil {
+		t.Fatalf("DeleteMailbox with warmup history: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("DeleteMailbox affected %d rows, want 1", n)
+	}
+
+	var count int
+	var sendIDNull bool
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*), bool_and(warmup_send_id IS NULL) FROM warmup_observations
+		 WHERE workspace_id = $1 AND mailbox_id = $2 AND kind = 'placement'`,
+		f.ws1, f.a).Scan(&count, &sendIDNull); err != nil {
+		t.Fatalf("read A observations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("A placement observations = %d, want 1 (deleting the recipient must not erase the sender's evidence)", count)
+	}
+	if !sendIDNull {
+		t.Fatal("expected the deleted send's anchor to be nulled, not retained")
+	}
+}
+
+// warmupSendUUID drives one A->B send and returns its id parsed, which is the form
+// the observation writers take.
+func warmupSendUUID(t *testing.T, ctx context.Context, f warmupFixture) uuid.UUID {
+	t.Helper()
+	sendID, _ := makeWarmupSend(t, ctx, f)
+	u, err := uuid.Parse(sendID)
+	if err != nil {
+		t.Fatalf("parse send id: %v", err)
+	}
+	return u
+}

@@ -311,11 +311,6 @@ func inspectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (
 	return payload, warmupValid, fingerprint
 }
 
-func detectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, bool) {
-	payload, detection, _ := inspectWarmup(msg, secret, workspaceID)
-	return payload, detection == warmupValid
-}
-
 // processInbound is the warmup receipt-detection HOOK in front of campaign
 // classification (spec §9.4 isolation). If msg is a verified warmup message for
 // this workspace it is recorded + engaged via recordWarmup and then STOPPED — it
@@ -423,9 +418,10 @@ func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook
 	for _, msg := range msgs {
 		payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
 		if detection != warmupValid {
-			if detection == warmupInvalid {
+			switch detection {
+			case warmupInvalid:
 				recordWarmupTokenFailure(ctx, core, p, fingerprint, "invalid_signature")
-			} else if detection == warmupWrongWorkspace {
+			case warmupWrongWorkspace:
 				recordWarmupTokenFailure(ctx, core, p, fingerprint, "workspace_mismatch")
 			}
 			continue // non-warmup junk is ignored — never classified

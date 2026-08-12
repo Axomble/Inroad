@@ -192,11 +192,11 @@ func PairDailyCap(target, eligiblePartners int) int {
 	if target <= 0 || eligiblePartners <= 0 {
 		return 0
 	}
-	cap := (target + eligiblePartners - 1) / eligiblePartners
-	if cap < 1 {
+	perPartner := (target + eligiblePartners - 1) / eligiblePartners
+	if perPartner < 1 {
 		return 1
 	}
-	return cap
+	return perPartner
 }
 
 // NextSpacing is the delay before the index-th send of a day whose target volume
@@ -352,6 +352,17 @@ func EvaluateHealth(s HealthSignals) HealthDecision {
 		d.State = stateAtRank(stateRank(current) - 1)
 		d.ReasonCode = "recovery_step"
 		d.Reason = "clean qualified window: recovering one state"
+	}
+	// unknown is an ABSENCE of evidence, not a degree of badness, so it shares
+	// healthy's rank and the recovery-step branch above never fires for
+	// unknown → healthy. That transition still has to name itself: the
+	// transitions table requires a non-empty reason_code, and a decision this
+	// evaluator cannot explain must never reach the database. Without this the
+	// promotion aborts on the CHECK, rolling back the participant update with
+	// it, and every mailbox the deploy migration demoted stays unknown forever.
+	if d.ReasonCode == "" && d.State != current {
+		d.ReasonCode = "evidence_qualified"
+		d.Reason = "qualified placement evidence establishes health"
 	}
 	return d
 }
