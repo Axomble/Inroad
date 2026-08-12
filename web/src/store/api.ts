@@ -2990,6 +2990,8 @@ export type AgentApprovalDecisionRequest = {
 export type List = {
   id?: string;
   name?: string;
+  /** How many contacts are on this list. Present on GET /lists, which aggregates it in the same query. Absent from the POST /lists response — a list is empty the moment it is created, so there is nothing to report yet. */
+  contact_count?: number;
 };
 export type ImportResult = {
   imported: number;

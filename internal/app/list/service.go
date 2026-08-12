@@ -31,7 +31,7 @@ func NewService(store Store) *Service { return &Service{store: store} }
 func (s *Service) Create(ctx context.Context, ws uuid.UUID, name string) (gen.List, error) {
 	return s.store.Create(ctx, ws, name)
 }
-func (s *Service) List(ctx context.Context, ws uuid.UUID) ([]gen.List, error) {
+func (s *Service) List(ctx context.Context, ws uuid.UUID) ([]gen.ListListsRow, error) {
 	return s.store.List(ctx, ws)
 }
 func (s *Service) Get(ctx context.Context, ws, id uuid.UUID) (gen.List, error) {

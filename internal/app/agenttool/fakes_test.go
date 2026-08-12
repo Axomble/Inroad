@@ -195,7 +195,10 @@ type fakeLists struct {
 	panicNow bool
 }
 
-func (f *fakeLists) List(_ context.Context, ws uuid.UUID) ([]gen.List, error) {
+// List projects the fake's gen.List fixtures into listing rows, attaching
+// `members` as every row's count — the real query aggregates a per-list count
+// in the same statement, and tests that care assert it arrives.
+func (f *fakeLists) List(_ context.Context, ws uuid.UUID) ([]gen.ListListsRow, error) {
 	if f.panicNow {
 		panic("fake list store exploded")
 	}
@@ -203,7 +206,14 @@ func (f *fakeLists) List(_ context.Context, ws uuid.UUID) ([]gen.List, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.lists, nil
+	rows := make([]gen.ListListsRow, 0, len(f.lists))
+	for _, l := range f.lists {
+		rows = append(rows, gen.ListListsRow{
+			ID: l.ID, WorkspaceID: l.WorkspaceID, Name: l.Name, CreatedAt: l.CreatedAt,
+			ContactCount: f.members,
+		})
+	}
+	return rows, nil
 }
 
 func (f *fakeLists) Get(_ context.Context, ws, id uuid.UUID) (gen.List, error) {

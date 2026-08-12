@@ -134,6 +134,7 @@ export function ContactsPage() {
                   <div className="min-w-0 flex-1">
                     <ScopeButton
                       label={list.name ?? 'Untitled list'}
+                      count={list.contact_count}
                       active={selectedListId === list.id}
                       onSelect={() => selectList(list.id ?? '')}
                     />
@@ -183,10 +184,18 @@ function ContactCells({ contact }: { contact: Contact }) {
 
 function ScopeButton({
   label,
+  count,
   active,
   onSelect,
 }: {
   label: string
+  /**
+   * Membership size, shown right-aligned. Omitted rather than zero where
+   * there's no cheap number — "All contacts" would need a second aggregate,
+   * and the nav's own doctrine is that a row with nothing truthful to show
+   * carries no count.
+   */
+  count?: number
   active: boolean
   onSelect: () => void
 }) {
@@ -196,12 +205,15 @@ function ScopeButton({
       onClick={onSelect}
       aria-current={active ? 'true' : undefined}
       className={cn(
-        'block w-full truncate px-4 py-2 text-left text-[13px] text-muted-foreground transition-colors',
+        'flex w-full items-center gap-2 px-4 py-2 text-left text-[13px] text-muted-foreground transition-colors',
         'hover:bg-surface-2 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
         active && 'bg-surface-2 font-medium text-foreground',
       )}
     >
-      {label}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {count != null && (
+        <span className="shrink-0 font-mono text-[11px] tabular-nums text-faint">{count.toLocaleString()}</span>
+      )}
     </button>
   )
 }

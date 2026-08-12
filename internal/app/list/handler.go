@@ -27,6 +27,10 @@ type createRequest struct {
 type listResponse struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// ContactCount is omitted from the create response — a list is empty the
+	// instant it is created, and a pointer keeps that "not reported here"
+	// distinct from a reported zero.
+	ContactCount *int64 `json:"contact_count,omitempty"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +67,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]listResponse, 0, len(ls))
 	for _, l := range ls {
-		out = append(out, listResponse{ID: l.ID.String(), Name: l.Name})
+		// &l.ContactCount would alias the loop variable's field; bind a copy.
+		count := l.ContactCount
+		out = append(out, listResponse{ID: l.ID.String(), Name: l.Name, ContactCount: &count})
 	}
 	httpx.JSON(w, http.StatusOK, out)
 }

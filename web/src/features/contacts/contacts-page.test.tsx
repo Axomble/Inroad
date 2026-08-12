@@ -69,6 +69,8 @@ function contactPage(overrides: Partial<ContactPageBody> = {}): ContactPageBody 
 let contactRequests: URL[]
 /** Per-test responder for GET /contacts, keyed off the query it received. */
 let respond: (url: URL) => Promise<Response> | Response
+/** Per-test body for GET /lists, so a test can vary the membership counts. */
+let listsBody: unknown
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders })
@@ -84,6 +86,7 @@ beforeEach(() => {
   router.search = {}
   contactRequests = []
   respond = () => json(contactPage())
+  listsBody = [{ id: 'list-1', name: 'SaaS founders' }]
 
   vi.stubGlobal(
     'fetch',
@@ -93,7 +96,7 @@ beforeEach(() => {
       const url = new URL(href, 'http://localhost')
       const method = (isRequest ? input.method : init?.method ?? 'GET').toUpperCase()
 
-      if (url.pathname.endsWith('/lists')) return json([{ id: 'list-1', name: 'SaaS founders' }])
+      if (url.pathname.endsWith('/lists')) return json(listsBody)
       if (url.pathname.endsWith('/contacts') && method === 'GET') {
         contactRequests.push(url)
         return respond(url)
@@ -275,6 +278,33 @@ test('no contacts at all and no matches for this query are different states', as
   fireEvent.click(screen.getByRole('button', { name: 'Clear search and show all contacts' }))
   await waitFor(() => expect(router.search.q).toBeUndefined())
   expect(await screen.findByText('No contacts yet')).toBeInTheDocument()
+})
+
+// Aiming a campaign at a list means knowing how big it is. The count comes
+// back on the listing itself, so the rail can show it without a request per
+// list — but an empty list must read as "0", not as a missing number.
+test('each list shows its membership size, and an empty one shows zero', async () => {
+  listsBody = [
+    { id: 'list-1', name: 'SaaS founders', contact_count: 41238 },
+    { id: 'list-2', name: 'Fresh import', contact_count: 0 },
+  ]
+
+  renderWithProviders(<ContactsPage />)
+
+  // Thousands are grouped — a bare 41238 is hard to size at a glance.
+  expect(await screen.findByRole('button', { name: /SaaS founders\s*41,238/ })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /Fresh import\s*0/ })).toBeInTheDocument()
+  // "All contacts" spans every list, which is a different (and uncounted)
+  // question — it carries no number rather than an invented one.
+  expect(screen.getByRole('button', { name: 'All contacts' })).toBeInTheDocument()
+})
+
+test('a list whose size the server did not report shows no count rather than a zero', async () => {
+  listsBody = [{ id: 'list-1', name: 'SaaS founders' }]
+
+  renderWithProviders(<ContactsPage />)
+
+  expect(await screen.findByRole('button', { name: 'SaaS founders' })).toBeInTheDocument()
 })
 
 test('choosing a list scopes the query and drops the cursor from the old result set', async () => {

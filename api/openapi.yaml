@@ -3414,6 +3414,14 @@ components:
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
+        contact_count:
+          type: integer
+          format: int64
+          description: >-
+            How many contacts are on this list. Present on GET /lists, which
+            aggregates it in the same query. Absent from the POST /lists
+            response — a list is empty the moment it is created, so there is
+            nothing to report yet.
     ImportResult:
       type: object
       required: [imported, skipped, duplicates, mapped_fields, ignored_columns, invalid_values]

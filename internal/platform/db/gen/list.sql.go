@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countListMembers = `-- name: CountListMembers :one
@@ -84,23 +85,43 @@ func (q *Queries) GetList(ctx context.Context, arg GetListParams) (List, error) 
 }
 
 const listLists = `-- name: ListLists :many
-SELECT id, workspace_id, name, created_at FROM lists WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT l.id, l.workspace_id, l.name, l.created_at,
+       COUNT(lm.contact_id)::bigint AS contact_count
+FROM lists l
+LEFT JOIN list_members lm ON lm.list_id = l.id
+WHERE l.workspace_id = $1
+GROUP BY l.id
+ORDER BY l.created_at DESC
 `
 
-func (q *Queries) ListLists(ctx context.Context, workspaceID uuid.UUID) ([]List, error) {
+type ListListsRow struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	Name         string             `json:"name"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ContactCount int64              `json:"contact_count"`
+}
+
+// Each list carries its membership size, so the picker can tell a 12-contact
+// list from a 40,000-contact one before a campaign is aimed at it. LEFT JOIN
+// (not INNER) so an empty list still returns a row, with 0. The count is cast
+// explicitly: an uncast aggregate generates interface{} in gen/ and still
+// compiles.
+func (q *Queries) ListLists(ctx context.Context, workspaceID uuid.UUID) ([]ListListsRow, error) {
 	rows, err := q.db.Query(ctx, listLists, workspaceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []List
+	var items []ListListsRow
 	for rows.Next() {
-		var i List
+		var i ListListsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WorkspaceID,
 			&i.Name,
 			&i.CreatedAt,
+			&i.ContactCount,
 		); err != nil {
 			return nil, err
 		}
