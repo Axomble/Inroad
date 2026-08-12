@@ -6,6 +6,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setAgentPanelOpen, toggleAgentPanel } from '@/store/slices/ui'
 import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
+import { ToastHost } from './toast-host'
 
 // Only needed once someone presses ⌘K, so it stays out of the initial bundle —
 // same pattern the warmup sparkline uses. No Suspense fallback: a spinner that
@@ -161,6 +162,11 @@ export function AppShell({
             <CommandPalette onClose={() => setPaletteOpen(false)} onOpenAgent={openAgent} />
           </Suspense>
         )}
+
+        {/* Mounted once for the whole authenticated app: a toast outlives the
+            screen that raised it, which is the entire point of it not being a
+            page-level banner. Fixed-positioned, so it costs no layout here. */}
+        <ToastHost />
       </div>
     </TooltipProvider>
   )

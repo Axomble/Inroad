@@ -6,6 +6,7 @@ import { emptyApi } from '@/store/empty-api'
 import authReducer, { type AuthState } from '@/store/slices/auth'
 import uiReducer from '@/store/slices/ui'
 import agentReducer from '@/store/slices/agent'
+import toastReducer from '@/store/slices/toast'
 
 type PreloadedState = {
   auth?: Partial<AuthState>
@@ -17,6 +18,7 @@ function makeReducer() {
     auth: authReducer,
     ui: uiReducer,
     agent: agentReducer,
+    toast: toastReducer,
   })
 }
 
