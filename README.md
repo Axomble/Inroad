@@ -68,6 +68,7 @@ infrastructure than rent it.
 | **CRM records** | Companies, deals and pipelines alongside contacts, with notes, tasks and a unified activity feed modelled polymorphically so one implementation serves every record type. Records link to each other, and each shows who created it — agent, member, or auto-capture. |
 | **Typed custom fields** | Per-workspace field definitions with real types, mapped during CSV import and validated at campaign preflight, so a merge field can't reference something that isn't there. |
 | **Deliverability dashboard** | Placement, bounce and complaint trends over time, with the at-risk senders promoted out of the chart and into a list you can act on. |
+| **Cross-campaign reporting** | Every campaign's performance ranked side by side from a single query — sends, opens, clicks, replies, bounces — with workspace totals weighted by volume rather than averaged across campaigns. Lifetime figures, so a rate means the same thing here as on the campaign itself. |
 | **Contacts at scale** | Server-side search across email, name and company via a trigram index, and keyset pagination that seeks by cursor instead of `OFFSET` — a page 200k rows in costs the same as the first. CSV import with skip/duplicate reporting. |
 | **Multi-workspace teams** | One account, many workspaces. Owner / admin / member roles, email invites, workspace switcher. |
 | **Sign in how you like** | Email + password, Google sign-in, passkeys (WebAuthn), and TOTP two-factor — with refresh-token rotation and reuse detection underneath all of them. |
@@ -338,7 +339,8 @@ daily limits · the warmup pool end-to-end (ramping volume, threaded replies, re
 mark-read, measured placement health, per-IP worker routing) · reply and bounce polling across all
 three transports · deterministic reply classification plus a user-definable reply taxonomy driving
 automation · the unified cross-mailbox inbox with threaded reply · suppression and one-click
-unsubscribe · open/click tracking · the deliverability dashboard · CRM records (companies, deals,
+unsubscribe · open/click tracking · the deliverability dashboard and the
+cross-campaign performance report · CRM records (companies, deals,
 pipelines) with notes, tasks and an activity feed · typed custom fields, mapped on import and checked
 at preflight · the approval-gated AI agent, its MCP server, and AI-drafted replies · server-side
 contact search with keyset pagination · SPF/DKIM/DMARC domain authentication checks · the console

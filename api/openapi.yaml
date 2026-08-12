@@ -839,6 +839,34 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Pulse' }
         '401': { description: Unauthorized }
+  /reports/campaigns:
+    get:
+      operationId: getCampaignReport
+      tags: [reporting]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Every campaign in the workspace with its lifetime performance, plus the
+        workspace roll-up — the cross-campaign comparison in one request rather
+        than one request per campaign.
+
+
+        Totals are weighted by volume (summed counts over summed denominators),
+        never an average of the per-campaign rates.
+
+
+        Figures are LIFETIME, not windowed, so every rate means exactly what the
+        same-named rate on the campaign detail page means. Note the two
+        denominators: `open_rate` and `click_rate` are per SEND, while
+        `reply_rate`, `bounce_rate` and `unsub_rate` are per ENROLLED CONTACT.
+        Rates are fractions in [0,1].
+      responses:
+        '200':
+          description: Cross-campaign performance report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CampaignReport' }
+        '401': { description: Unauthorized }
+        '403': { description: Missing the campaigns:read scope }
   /ai/settings:
     get:
       operationId: getAISettings
@@ -3409,6 +3437,45 @@ components:
         status: { type: string }
         last_error: { type: string }
         created_at: { type: string, format: date-time }
+    CampaignReport:
+      type: object
+      required: [campaigns, totals]
+      properties:
+        campaigns:
+          type: array
+          items: { $ref: '#/components/schemas/CampaignPerformance' }
+        totals:
+          allOf:
+            - $ref: '#/components/schemas/PerformanceCounts'
+          description: The workspace roll-up, weighted by volume.
+    CampaignPerformance:
+      allOf:
+        - $ref: '#/components/schemas/PerformanceCounts'
+        - type: object
+          required: [id, name, status, created_at]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            status: { type: string }
+            created_at: { type: string, format: date-time }
+    PerformanceCounts:
+      type: object
+      required:
+        [sent, enrolled, opens, clicks, replies, bounces, unsubscribes,
+         open_rate, click_rate, reply_rate, bounce_rate, unsub_rate]
+      properties:
+        sent: { type: integer, format: int64, description: "Messages sent." }
+        enrolled: { type: integer, format: int64, description: "Contacts enrolled — the denominator for the reply/bounce/unsubscribe rates." }
+        opens: { type: integer, format: int64, description: "Sends opened at least once. Indicative, not reliable: proxy prefetches and opens within 2s of the send are excluded, but open tracking cannot be exact." }
+        clicks: { type: integer, format: int64, description: "Sends with at least one link click." }
+        replies: { type: integer, format: int64 }
+        bounces: { type: integer, format: int64 }
+        unsubscribes: { type: integer, format: int64 }
+        open_rate: { type: number, format: double, description: "opens / sent, in [0,1]. Zero when nothing was sent." }
+        click_rate: { type: number, format: double, description: "clicks / sent, in [0,1]." }
+        reply_rate: { type: number, format: double, description: "replies / enrolled, in [0,1]." }
+        bounce_rate: { type: number, format: double, description: "bounces / enrolled, in [0,1]." }
+        unsub_rate: { type: number, format: double, description: "unsubscribes / enrolled, in [0,1]." }
     List:
       type: object
       properties:

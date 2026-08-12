@@ -137,3 +137,78 @@ JOIN contacts ct ON ct.id = lm.contact_id
 WHERE cam.id = $1 AND cam.workspace_id = $2
 ORDER BY lm.added_at ASC, ct.id ASC
 LIMIT 1;
+
+-- name: ListCampaignPerformance :many
+-- One row per campaign in the workspace: the whole cross-campaign comparison in
+-- a single statement. The per-campaign detail view runs four separate queries
+-- and caches them (campaign.metricsCacheTTL) because it only ever needs one
+-- campaign; doing that N times to rank a workspace's campaigns would be N+1.
+--
+-- LIFETIME totals, deliberately not windowed. Every rate here has to mean
+-- exactly what the same-named rate on the campaign detail page means, and that
+-- page's reply/bounce/unsubscribe rates use ENROLLED CONTACTS as the
+-- denominator while open/click use SENDS. Windowing would need an "enrolled in
+-- the window" denominator that no other screen uses, so the same campaign would
+-- show two different reply rates depending on where you looked. Ranking
+-- campaigns is a lifetime question anyway.
+--
+-- The open definition is copied from CampaignEngagementResults, NOT re-derived:
+-- proxy prefetches (GoogleImageProxy) and opens firing within 2 seconds of the
+-- send are both excluded, because an open Inroad caused isn't engagement. A
+-- second, laxer definition here would rank campaigns by how aggressively their
+-- recipients' mail providers prefetch images.
+--
+-- Each source aggregates ONCE and LEFT JOINs onto the campaign list, so a
+-- workspace with 200 campaigns still does one pass per table -- the same shape
+-- (and the same reason) as ListDeliverabilitySeries.
+WITH sent AS (
+    SELECT campaign_id, COUNT(*)::bigint AS n
+    FROM sends
+    WHERE workspace_id = $1 AND status = 'sent'
+    GROUP BY 1
+),
+opened AS (
+    SELECT te.campaign_id, COUNT(DISTINCT te.send_id)::bigint AS n
+    FROM tracking_events te
+    JOIN sends s ON s.id = te.send_id AND s.workspace_id = te.workspace_id
+    WHERE te.workspace_id = $1 AND te.kind = 'open'
+      AND te.user_agent NOT ILIKE '%GoogleImageProxy%'
+      AND (s.sent_at IS NULL OR te.created_at > s.sent_at + interval '2 seconds')
+    GROUP BY 1
+),
+clicked AS (
+    SELECT campaign_id, COUNT(DISTINCT send_id)::bigint AS n
+    FROM tracking_events
+    WHERE workspace_id = $1 AND kind = 'click'
+    GROUP BY 1
+),
+-- One pass over the enrollments gives both the denominator (every enrollment
+-- row is one contact, for the campaign's lifetime) and the stop-reason counts.
+enrolled AS (
+    SELECT campaign_id,
+           COUNT(*)::bigint AS n,
+           COUNT(*) FILTER (WHERE status = 'stopped' AND stop_reason = 'replied')::bigint    AS replied,
+           COUNT(*) FILTER (WHERE status = 'stopped' AND stop_reason = 'bounced')::bigint    AS bounced,
+           COUNT(*) FILTER (WHERE status = 'stopped' AND stop_reason = 'suppressed')::bigint AS unsubscribed
+    FROM sequence_enrollments
+    WHERE workspace_id = $1
+    GROUP BY 1
+)
+SELECT c.id,
+       c.name,
+       c.status,
+       c.created_at,
+       COALESCE(sent.n, 0)::bigint                 AS sent,
+       COALESCE(opened.n, 0)::bigint               AS opens,
+       COALESCE(clicked.n, 0)::bigint              AS clicks,
+       COALESCE(enrolled.n, 0)::bigint             AS enrolled,
+       COALESCE(enrolled.replied, 0)::bigint       AS replies,
+       COALESCE(enrolled.bounced, 0)::bigint       AS bounces,
+       COALESCE(enrolled.unsubscribed, 0)::bigint  AS unsubscribes
+FROM campaigns c
+LEFT JOIN sent     ON sent.campaign_id = c.id
+LEFT JOIN opened   ON opened.campaign_id = c.id
+LEFT JOIN clicked  ON clicked.campaign_id = c.id
+LEFT JOIN enrolled ON enrolled.campaign_id = c.id
+WHERE c.workspace_id = $1
+ORDER BY COALESCE(sent.n, 0) DESC, c.created_at DESC;

@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Building2, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
+import { Building2, ChartNoAxesColumn, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { PulseCard } from './pulse-card'
 import { SidebarFooter } from './sidebar-footer'
@@ -56,6 +56,9 @@ const NAV: NavGroup[] = [
       // Campaigns is outbound sequencing, not a CRM record type — it stays here
       // even though the people it mails are CRM contacts.
       { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
+      // Sits under Outreach, not Sending: it ranks campaigns by the replies
+      // they produced, where Deliverability is about the health of what sends.
+      { label: 'Reports', to: '/app/reports', icon: ChartNoAxesColumn },
     ],
   },
   {

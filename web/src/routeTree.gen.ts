@@ -23,6 +23,7 @@ import { Route as AppCrmRouteImport } from './routes/app.crm'
 import { Route as AppDeliverabilityRouteImport } from './routes/app.deliverability'
 import { Route as AppDocsRouteImport } from './routes/app.docs'
 import { Route as AppMailboxesRouteImport } from './routes/app.mailboxes'
+import { Route as AppReportsRouteImport } from './routes/app.reports'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AppWarmupRouteImport } from './routes/app.warmup'
 import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
@@ -114,6 +115,11 @@ const AppDocsRoute = AppDocsRouteImport.update({
 const AppMailboxesRoute = AppMailboxesRouteImport.update({
   id: '/mailboxes',
   path: '/mailboxes',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppReportsRoute = AppReportsRouteImport.update({
+  id: '/reports',
+  path: '/reports',
   getParentRoute: () => AppRoute,
 } as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
@@ -241,6 +247,7 @@ export interface FileRoutesByFullPath {
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
+  '/app/reports': typeof AppReportsRoute
   '/app/settings': typeof AppSettingsRouteWithChildren
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -278,6 +285,7 @@ export interface FileRoutesByTo {
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
+  '/app/reports': typeof AppReportsRoute
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
@@ -316,6 +324,7 @@ export interface FileRoutesById {
   '/app/deliverability': typeof AppDeliverabilityRoute
   '/app/docs': typeof AppDocsRoute
   '/app/mailboxes': typeof AppMailboxesRoute
+  '/app/reports': typeof AppReportsRoute
   '/app/settings': typeof AppSettingsRouteWithChildren
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
@@ -356,6 +365,7 @@ export interface FileRouteTypes {
     | '/app/deliverability'
     | '/app/docs'
     | '/app/mailboxes'
+    | '/app/reports'
     | '/app/settings'
     | '/app/warmup'
     | '/oauth/consent'
@@ -393,6 +403,7 @@ export interface FileRouteTypes {
     | '/app/deliverability'
     | '/app/docs'
     | '/app/mailboxes'
+    | '/app/reports'
     | '/app/warmup'
     | '/oauth/consent'
     | '/app'
@@ -430,6 +441,7 @@ export interface FileRouteTypes {
     | '/app/deliverability'
     | '/app/docs'
     | '/app/mailboxes'
+    | '/app/reports'
     | '/app/settings'
     | '/app/warmup'
     | '/oauth/consent'
@@ -566,6 +578,13 @@ declare module '@tanstack/react-router' {
       path: '/mailboxes'
       fullPath: '/app/mailboxes'
       preLoaderRoute: typeof AppMailboxesRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/reports': {
+      id: '/app/reports'
+      path: '/reports'
+      fullPath: '/app/reports'
+      preLoaderRoute: typeof AppReportsRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/settings': {
@@ -757,6 +776,7 @@ interface AppRouteChildren {
   AppDeliverabilityRoute: typeof AppDeliverabilityRoute
   AppDocsRoute: typeof AppDocsRoute
   AppMailboxesRoute: typeof AppMailboxesRoute
+  AppReportsRoute: typeof AppReportsRoute
   AppSettingsRoute: typeof AppSettingsRouteWithChildren
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -778,6 +798,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppDeliverabilityRoute: AppDeliverabilityRoute,
   AppDocsRoute: AppDocsRoute,
   AppMailboxesRoute: AppMailboxesRoute,
+  AppReportsRoute: AppReportsRoute,
   AppSettingsRoute: AppSettingsRouteWithChildren,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
