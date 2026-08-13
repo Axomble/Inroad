@@ -461,6 +461,79 @@ func TestQuarantinedSiblingWithholdsItsWholeDomain(t *testing.T) {
 	}
 }
 
+// addMailbox connects one more mailbox in the fixture's workspace at an exact
+// address. The address is the point: the gate groups by organizational domain, so
+// a test about subdomains has to choose the host itself.
+func (f poolFixture) addMailbox(t *testing.T, ctx context.Context, email string) uuid.UUID {
+	t.Helper()
+	mb, err := f.q.CreateMailbox(ctx, gen.CreateMailboxParams{
+		WorkspaceID: f.ws, Provider: "smtp", Email: email, DisplayName: email,
+		SmtpHost: "smtp.acme.test", SmtpPort: 587, SmtpUsername: email,
+		ImapHost: "imap.acme.test", ImapPort: 993, ImapUsername: email,
+		SecretCiphertext: "ct", DailyCap: 100, MinIntervalSeconds: 0,
+		RampEnabled: false, RampStartCap: 5, RampDays: 30,
+	})
+	if err != nil {
+		t.Fatalf("mailbox %s: %v", email, err)
+	}
+	return mb.ID
+}
+
+// The gate's scope is the ORGANIZATIONAL domain, on the path that actually sends.
+// The quarantined mailbox is on mail.acme.test and the pool's is on acme.test —
+// different hosts, one reputation, because providers largely inherit standing
+// across subdomains. Grouping on the exact host let the pool keep sending.
+//
+// It is also not in the campaign's pool at all, which is the point: containment
+// follows the domain, not the pool.
+func TestQuarantineOnASubdomainWithholdsTheParentDomainOnTheSendPath(t *testing.T) {
+	ctx, f := setupPool(t)
+	f.addSender(t, ctx, f.mailboxA, 1, true) // a-<uuid>@acme.test
+	f.setLane(t, ctx, f.mailboxA, warmup.LaneHealthy)
+	f.setLane(t, ctx, f.addMailbox(t, ctx, "sender-"+uuid.NewString()+"@mail.acme.test"), warmup.LaneQuarantine)
+
+	enrollmentID := f.enroll(t, ctx)
+	job, err := f.core.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob must defer, not error: %v", err)
+	}
+	if job.Skip {
+		t.Fatal("a withheld pool must defer, not skip the enrollment")
+	}
+	if !job.HealthPaused {
+		t.Error("HealthPaused = false: a subdomain's quarantine must withhold its parent domain")
+	}
+	if got := f.storedMailbox(t, ctx, enrollmentID); got != uuid.Nil {
+		t.Errorf("a withheld pool pinned mailbox %s; nothing may be chosen", got)
+	}
+	if n := f.sendCount(t, ctx); n != 0 {
+		t.Errorf("sends = %d, want none from a contained organizational domain", n)
+	}
+}
+
+// The counterweight: a quarantined mailbox that merely shares a PUBLIC SUFFIX is
+// a different organization and withholds nothing. Without this, widening the gate
+// to eTLD+1 could have widened it to "every .test mailbox" and this suite would
+// have looked healthier for it.
+func TestQuarantineOnAnUnrelatedDomainDoesNotWithhold(t *testing.T) {
+	ctx, f := setupPool(t)
+	f.addSender(t, ctx, f.mailboxA, 1, true) // @acme.test
+	f.setLane(t, ctx, f.mailboxA, warmup.LaneHealthy)
+	f.setLane(t, ctx, f.addMailbox(t, ctx, "sender-"+uuid.NewString()+"@unrelated.test"), warmup.LaneQuarantine)
+
+	job, err := f.core.GetStepSendJob(ctx, f.enroll(t, ctx).String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob: %v", err)
+	}
+	if job.Skip || job.HealthPaused {
+		t.Fatalf("job deferred (skip=%v paused=%v); unrelated.test and acme.test are different organizations",
+			job.Skip, job.HealthPaused)
+	}
+	if job.MailboxID != f.mailboxA.String() {
+		t.Fatalf("mailbox = %s, want A %s", job.MailboxID, f.mailboxA)
+	}
+}
+
 // The domain gate must not overreach: a sibling merely gathering evidence
 // (probation) restricts nothing, so the healthy mailbox still takes the contact.
 // Without this the previous test would also pass if the gate simply refused every

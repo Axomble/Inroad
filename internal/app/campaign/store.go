@@ -321,6 +321,10 @@ func (s *PgStore) ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]
 	if err != nil {
 		return nil, err
 	}
+	domainLanes, err := s.domainLanes(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Sender, len(rows))
 	for i, r := range rows {
 		out[i] = Sender{
@@ -332,10 +336,29 @@ func (s *PgStore) ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]
 			dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
 			rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
 			mailboxStatus: r.Status, poolEnabled: r.Enabled,
-			healthState: r.HealthState, lane: r.Lane, domainLane: r.DomainLane, sentToday: r.SentToday,
+			healthState: r.HealthState, lane: r.Lane,
+			domainLane: domainLanes.For(r.Email), sentToday: r.SentToday,
 		}.fill(&out[i])
 	}
 	return out, nil
+}
+
+// domainLanes reads the workspace's enabled participants and folds them into the
+// worst lane per ORGANIZATIONAL domain — the domain half of the campaign gate.
+//
+// A second query rather than a lateral, because the grouping needs public-suffix
+// data Postgres does not have (see internal/platform/warmup/domain.go). It is one
+// small workspace-pinned read: one row per participating mailbox.
+func (s *PgStore) domainLanes(ctx context.Context, ws uuid.UUID) (warmup.DomainLanes, error) {
+	rows, err := s.q.ListWorkspaceWarmupLanes(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	participants := make([]warmup.MailboxLane, len(rows))
+	for i, r := range rows {
+		participants[i] = warmup.MailboxLane{Email: r.Email, Lane: r.Lane}
+	}
+	return warmup.WorstLanesByDomain(participants), nil
 }
 
 // FallbackSender reports campaigns.mailbox_id in the pool's shape. Weight 1 and
@@ -348,6 +371,10 @@ func (s *PgStore) FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) 
 	if err != nil {
 		return Sender{}, err
 	}
+	domainLanes, err := s.domainLanes(ctx, ws)
+	if err != nil {
+		return Sender{}, err
+	}
 	out := Sender{
 		MailboxID: r.MailboxID, Email: r.Email, Provider: r.Provider, Status: r.Status,
 		Weight: defaultSenderWeight, Enabled: true,
@@ -356,7 +383,8 @@ func (s *PgStore) FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) 
 		dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
 		rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
 		mailboxStatus: r.Status, poolEnabled: true,
-		healthState: r.HealthState, lane: r.Lane, domainLane: r.DomainLane, sentToday: r.SentToday,
+		healthState: r.HealthState, lane: r.Lane,
+		domainLane: domainLanes.For(r.Email), sentToday: r.SentToday,
 	}.fill(&out)
 	return out, nil
 }

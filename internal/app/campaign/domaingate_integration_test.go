@@ -162,6 +162,62 @@ func TestForeignQuarantineOnTheSameDomainWithholdsNothing(t *testing.T) {
 	}
 }
 
+// The gate's scope is the ORGANIZATIONAL domain, not the exact host. Providers
+// largely inherit reputation across subdomains, so a quarantined
+// sender@mail.<d>.test has almost certainly damaged the standing of
+// owner@<d>.test — and expanding cold volume from the "clean" sibling spends a
+// reputation that is already in trouble. Grouping on the exact host let exactly
+// that happen.
+func TestQuarantineOnASubdomainWithholdsTheParentDomain(t *testing.T) {
+	ctx := context.Background()
+	f := setupSenders(t, ctx)
+
+	parent := "org-" + uuid.NewString()[:8] + ".test"
+	owner := mailboxOn(t, ctx, f.q, f.ws, "owner@"+parent)
+	if err := f.store.ReplaceSenders(ctx, f.ws, f.campaignID, rotation.ModeWeighted, []SenderInput{
+		{MailboxID: owner, Weight: 1, Enabled: true},
+	}); err != nil {
+		t.Fatalf("seed pool: %v", err)
+	}
+	// Same organization, different host.
+	sibling := mailboxOn(t, ctx, f.q, f.ws, "sender@mail."+parent)
+	quarantineMailbox(t, ctx, f, f.ws, sibling)
+
+	senders, err := f.store.ListSenders(ctx, f.ws, f.campaignID)
+	if err != nil {
+		t.Fatalf("ListSenders: %v", err)
+	}
+	got := senders[0]
+	if got.DomainLane == nil || *got.DomainLane != warmup.LaneQuarantine {
+		t.Fatalf("domain_lane = %v, want quarantine: mail.%s and %s are one organizational domain",
+			got.DomainLane, parent, parent)
+	}
+	if got.Sending || got.CapToday != 0 {
+		t.Fatalf("sending=%v cap_today=%d, want false/0 — a subdomain's containment reaches the parent",
+			got.Sending, got.CapToday)
+	}
+
+	// A DIFFERENT organization that merely ends in the same public suffix must
+	// not be swept in: .test is a public suffix, so unrelated-<x>.test and
+	// org-<x>.test are separate registrations.
+	unrelated := mailboxOn(t, ctx, f.q, f.ws, "owner@unrelated-"+uuid.NewString()[:8]+".test")
+	if err := f.store.ReplaceSenders(ctx, f.ws, f.campaignID, rotation.ModeWeighted, []SenderInput{
+		{MailboxID: unrelated, Weight: 1, Enabled: true},
+	}); err != nil {
+		t.Fatalf("replace pool: %v", err)
+	}
+	senders, err = f.store.ListSenders(ctx, f.ws, f.campaignID)
+	if err != nil {
+		t.Fatalf("ListSenders for the unrelated domain: %v", err)
+	}
+	if lane := senders[0].DomainLane; lane != nil {
+		t.Fatalf("unrelated domain_lane = %q, want none: a shared public suffix is not a shared organization", *lane)
+	}
+	if !senders[0].Sending {
+		t.Fatal("an unrelated domain was withheld by the quarantine")
+	}
+}
+
 // The same pin on the OTHER read of the gate. A campaign with no pool rows sends
 // from campaigns.mailbox_id, and that projection derives its own domain lane —
 // the pool listing and the fallback are separate queries, so a predicate can be

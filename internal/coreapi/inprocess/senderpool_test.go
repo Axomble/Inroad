@@ -10,6 +10,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/rotation"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 func pinned() pgtype.UUID { return pgtype.UUID{Bytes: uuid.New(), Valid: true} }
@@ -44,12 +45,44 @@ func TestThreadLostItsMailbox(t *testing.T) {
 	}
 }
 
-// candidateRow builds one pool row with the fields eligibility reads.
+// noDomainLanes is the domain half of the campaign gate with nothing in it: no
+// mailbox in these fixtures is warming up, so no domain is contained. The cases
+// below are about health, capacity and ESP matching.
+var noDomainLanes = warmup.DomainLanes{}
+
+// candidateRow builds one pool row with the fields eligibility reads. The address
+// matters now that the domain half of the gate is resolved from it.
 func candidateRow(id uuid.UUID, weight int32, enabled bool, status string, dailyCap int32, sentToday int64) gen.ListCampaignSenderCandidatesRow {
 	return gen.ListCampaignSenderCandidatesRow{
-		MailboxID: id, Weight: weight, Enabled: enabled, MailboxStatus: status,
+		MailboxID: id, Email: id.String() + "@pool.test",
+		Weight: weight, Enabled: enabled, MailboxStatus: status,
 		DailyCap: dailyCap, RampEnabled: false, SentToday: sentToday,
 		MailboxCreatedAt: pgtype.Timestamptz{Time: mailboxBirthday, Valid: true},
+	}
+}
+
+// The domain half of the gate on the SEND path, which is the half that actually
+// stops mail: the mailbox's own lane is clean, and a sibling on its organizational
+// domain — a different HOST, mail.<d> against <d> — is quarantined. Reporting
+// paths refusing it while rotation kept assigning is the drift this shares one
+// predicate to prevent.
+func TestEligibleCandidatesWithholdsAContainedOrganizationalDomain(t *testing.T) {
+	id := uuid.New()
+	row := candidateRow(id, 1, true, mailboxStatusActive, 100, 0)
+	row.Email = "owner@acme.test"
+
+	lanes := warmup.WorstLanesByDomain([]warmup.MailboxLane{
+		{Email: "sender@mail.acme.test", Lane: warmup.LaneQuarantine},
+	})
+	if got := eligibleCandidates([]gen.ListCampaignSenderCandidatesRow{row}, lanes); len(got) != 0 {
+		t.Fatalf("eligible = %+v, want none: a quarantined mailbox on the organizational domain withholds it", got)
+	}
+	// The control: the same lane on an unrelated organization leaves it sending.
+	other := warmup.WorstLanesByDomain([]warmup.MailboxLane{
+		{Email: "sender@unrelated.test", Lane: warmup.LaneQuarantine},
+	})
+	if got := eligibleCandidates([]gen.ListCampaignSenderCandidatesRow{row}, other); len(got) != 1 {
+		t.Fatalf("eligible = %+v, want the mailbox: another organization's containment is not its own", got)
 	}
 }
 
@@ -62,7 +95,7 @@ func TestEligibleCandidatesExcludesUnusableRows(t *testing.T) {
 		candidateRow(disabled, 5, false, mailboxStatusActive, 100, 0),
 		candidateRow(inactive, 5, true, "disconnected", 100, 0),
 		candidateRow(capped, 5, true, mailboxStatusActive, 100, 100),
-	})
+	}, noDomainLanes)
 	if len(got) != 1 {
 		t.Fatalf("eligible = %d rows (%+v), want only the usable one", len(got), got)
 	}
@@ -82,7 +115,7 @@ func TestEligibleCandidatesExcludesUnusableRows(t *testing.T) {
 func TestEligibleCandidatesEmptyPoolIsNoEligibleSender(t *testing.T) {
 	got := eligibleCandidates([]gen.ListCampaignSenderCandidatesRow{
 		candidateRow(uuid.New(), 1, false, mailboxStatusActive, 100, 0),
-	})
+	}, noDomainLanes)
 	if len(got) != 0 {
 		t.Fatalf("eligible = %+v, want none", got)
 	}
@@ -122,7 +155,7 @@ func espPool() (google, other gen.ListCampaignSenderCandidatesRow) {
 func TestPartitionByESPWinsUnderEveryRotationMode(t *testing.T) {
 	g, o := espPool()
 	rows := []gen.ListCampaignSenderCandidatesRow{g, o}
-	eligible := eligibleCandidates(rows)
+	eligible := eligibleCandidates(rows, noDomainLanes)
 	if len(eligible) != 2 {
 		t.Fatalf("eligible = %d rows, want both", len(eligible))
 	}
@@ -154,7 +187,7 @@ func TestPartitionByESPWinsUnderEveryRotationMode(t *testing.T) {
 func TestPartitionByESPFallsBackToTheFullPool(t *testing.T) {
 	g, o := espPool()
 	rows := []gen.ListCampaignSenderCandidatesRow{g, o}
-	eligible := eligibleCandidates(rows)
+	eligible := eligibleCandidates(rows, noDomainLanes)
 
 	for _, tc := range []struct {
 		name string
@@ -186,7 +219,7 @@ func TestPartitionByESPFallsBackToTheFullPool(t *testing.T) {
 func TestESPMatchSkipsTheLookupWhenThereIsNothingToChoose(t *testing.T) {
 	g, _ := espPool()
 	rows := []gen.ListCampaignSenderCandidatesRow{g}
-	eligible := eligibleCandidates(rows)
+	eligible := eligibleCandidates(rows, noDomainLanes)
 
 	got := client{}.espMatched(t.Context(), uuid.New(), "someone@acme.test", rows, eligible)
 	if len(got) != 1 || got[0].MailboxID != g.MailboxID.String() {

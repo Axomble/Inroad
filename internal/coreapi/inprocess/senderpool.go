@@ -98,9 +98,16 @@ func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b
 	// COALESCEs to it), so the fallback needs no extra lookup.
 	chosen := b.MailboxID
 	if len(rows) > 0 {
-		eligible := eligibleCandidates(rows)
+		// The DOMAIN half of the gate, read only on this path: it decides which
+		// pool members may take a NEW lead, and an enrollment that already has a
+		// mailbox (above) is not taking one.
+		domainLanes, derr := c.domainLanes(ctx, ws)
+		if derr != nil {
+			return resolvedSender{}, derr
+		}
+		eligible := eligibleCandidates(rows, domainLanes)
 		if len(eligible) == 0 {
-			return c.exhaustedPoolSender(b, rows)
+			return c.exhaustedPoolSender(b, rows, domainLanes)
 		}
 		winner, serr := rotation.Select(b.RotationMode, c.espMatched(ctx, ws, b.ToEmail, rows, eligible))
 		if serr != nil {
@@ -173,6 +180,26 @@ func (c client) claimEnrollmentSender(ctx context.Context, ws, enrollmentID, cam
 	return mailboxID, nil
 }
 
+// domainLanes reads the workspace's enabled participants and folds them into the
+// worst lane per ORGANIZATIONAL domain, which is the domain half of the campaign
+// gate. Grouping happens in Go because it needs public-suffix data Postgres does
+// not have (see internal/platform/warmup/domain.go).
+//
+// One small workspace-pinned read — one row per participating mailbox — on the
+// initial-assignment path only. A follow-up step keeps its thread's mailbox and
+// never reaches it.
+func (c client) domainLanes(ctx context.Context, ws uuid.UUID) (warmup.DomainLanes, error) {
+	rows, err := c.q.ListWorkspaceWarmupLanes(ctx, ws)
+	if err != nil {
+		return nil, fmt.Errorf("sender pool: read domain lanes for workspace %s: %w", ws, err)
+	}
+	participants := make([]warmup.MailboxLane, len(rows))
+	for i, r := range rows {
+		participants[i] = warmup.MailboxLane{Email: r.Email, Lane: r.Lane}
+	}
+	return warmup.WorstLanesByDomain(participants), nil
+}
+
 // eligibleCandidates keeps the pool rows that can send cold mail right now and
 // projects them onto the pure selector's Candidate. RemainingToday carries the
 // health-scaled capacity, which is the ONLY place health enters selection — the
@@ -180,10 +207,10 @@ func (c client) claimEnrollmentSender(ctx context.Context, ws, enrollmentID, cam
 //
 // A never-assigned member's LastAssignedAt is the zero time, which is what puts it
 // first under LRU.
-func eligibleCandidates(rows []gen.ListCampaignSenderCandidatesRow) []rotation.Candidate {
+func eligibleCandidates(rows []gen.ListCampaignSenderCandidatesRow, domainLanes warmup.DomainLanes) []rotation.Candidate {
 	out := make([]rotation.Candidate, 0, len(rows))
 	for _, r := range rows {
-		remaining := availableToday(r)
+		remaining := availableToday(r, domainLanes.For(r.Email))
 		if remaining <= 0 {
 			continue
 		}
@@ -290,7 +317,10 @@ func partitionByESP(rows []gen.ListCampaignSenderCandidatesRow, eligible []rotat
 //
 // The single place eligibility and remaining capacity are decided, so the selector
 // and the exhausted-pool report cannot disagree about which members can send.
-func availableToday(r gen.ListCampaignSenderCandidatesRow) int {
+//
+// domainLane is the worst lane on this mailbox's organizational domain, resolved
+// by the caller from one workspace read (see domainLanes) rather than per row.
+func availableToday(r gen.ListCampaignSenderCandidatesRow, domainLane string) int {
 	if !r.Enabled || r.MailboxStatus != mailboxStatusActive {
 		return 0
 	}
@@ -305,7 +335,7 @@ func availableToday(r gen.ListCampaignSenderCandidatesRow) int {
 	// function — so without it the UI reported sending=false and cap_today=0 while
 	// the worker kept assigning new leads at the mailbox's full ramped cap. The
 	// predicate is shared with those paths for exactly that reason.
-	if warmup.NewLeadsWithheld(r.Lane, r.DomainLane) {
+	if warmup.NewLeadsWithheld(r.Lane, domainLane) {
 		return 0
 	}
 	return max(sendcap.Cold(candidateCap(r), r.HealthState)-int(r.SentToday), 0)
@@ -329,15 +359,17 @@ func availableToday(r gen.ListCampaignSenderCandidatesRow) int {
 //
 // Nothing is pinned: no mailbox was chosen. The transport stays the campaign's
 // fallback, which the deferral guarantees is never dialed.
-func (c client) exhaustedPoolSender(b gen.GetStepEnrollmentBundleRow, rows []gen.ListCampaignSenderCandidatesRow) (resolvedSender, error) {
+func (c client) exhaustedPoolSender(b gen.GetStepEnrollmentBundleRow, rows []gen.ListCampaignSenderCandidatesRow,
+	domainLanes warmup.DomainLanes,
+) (resolvedSender, error) {
 	s := bundleSender(b)
 	var poolCap, consumed int
 	for _, r := range rows {
 		limit := candidateCap(r)
 		poolCap += limit
-		consumed += limit - min(availableToday(r), limit)
+		consumed += limit - min(availableToday(r, domainLanes.For(r.Email)), limit)
 		if r.Enabled && r.MailboxStatus == mailboxStatusActive &&
-			(r.HealthState == sendcap.HealthPaused || warmup.NewLeadsWithheld(r.Lane, r.DomainLane)) {
+			(r.HealthState == sendcap.HealthPaused || warmup.NewLeadsWithheld(r.Lane, domainLanes.For(r.Email))) {
 			// Same reasoning as a paused mailbox: a withheld lane can clear (a
 			// cooldown elapses, DNS starts passing), so the enrollment must wait
 			// rather than die on the degenerate zero-capacity branch.

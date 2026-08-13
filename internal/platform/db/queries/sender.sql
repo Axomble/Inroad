@@ -17,13 +17,19 @@
 -- cap_today is deliberately NOT computed here: ramp and health scaling live in
 -- platform/sendcap so the API and the sender cannot disagree about a mailbox's
 -- capacity.
+--
+-- The lane column is the MAILBOX half of the campaign gate only. The domain half
+-- used to be a lateral over the mailboxes sharing lower(split_part(email,'@',2)),
+-- which is the exact HOST — narrower than the organizational domain the gate is
+-- supposed to cover, so a quarantined a@example.com did not withhold
+-- b@mail.example.com. It is now folded in Go over ListWorkspaceWarmupLanes, which
+-- is why m.email travels here.
 SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned_at,
        m.email, m.provider, m.status,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
-       COALESCE(dl.lane, '')::text AS domain_lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -32,38 +38,35 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
 FROM campaign_senders cs
 JOIN mailboxes m ON m.id = cs.mailbox_id AND m.workspace_id = cs.workspace_id
 LEFT JOIN warmup_participants wp ON wp.mailbox_id = cs.mailbox_id AND wp.workspace_id = cs.workspace_id
-LEFT JOIN LATERAL (
-    -- The worst lane on this mailbox's ORGANIZATIONAL DOMAIN (design §7: the
-    -- campaign gate is mailbox AND domain). An aggregate read over the mailboxes
-    -- that share lower(split_part(email,'@',2)) — deliberately not a second state
-    -- machine and not a second table, because the domain has no state of its own
-    -- to keep: it is exactly the worst of its members'.
-    --
-    -- Reputation is largely assessed per domain, so a quarantined mailbox has
-    -- almost certainly damaged the standing of every sibling sending from the same
-    -- one. Expanding cold volume from a sibling spends a reputation that is
-    -- already in trouble.
-    --
-    -- ENABLED participants only, matching the lane column above: a disabled row's
-    -- lane is frozen history, not a live signal. Includes the mailbox itself,
-    -- which costs nothing and keeps "worst on the domain" true rather than
-    -- "worst among the others". Which lanes actually WITHHOLD is Go's decision
-    -- (warmup.NewLeadsWithheld) — this ranking only orders severity.
-    SELECT wp2.lane
-    FROM warmup_participants wp2
-    JOIN mailboxes m2 ON m2.id = wp2.mailbox_id AND m2.workspace_id = wp2.workspace_id
-    WHERE wp2.workspace_id = cs.workspace_id
-      AND wp2.enabled
-      AND lower(split_part(m2.email, '@', 2)) = lower(split_part(m.email, '@', 2))
-    ORDER BY CASE wp2.lane
-               WHEN 'blocked' THEN 6 WHEN 'quarantine' THEN 5 WHEN 'pending_auth' THEN 4
-               WHEN 'recovery' THEN 3 WHEN 'probation' THEN 2 WHEN 'watch' THEN 1
-               ELSE 0 END DESC,
-             wp2.mailbox_id
-    LIMIT 1
-) dl ON true
 WHERE cs.campaign_id = $1 AND cs.workspace_id = $2
 ORDER BY m.email;
+
+-- name: ListWorkspaceWarmupLanes :many
+-- Every ENABLED warmup participant's address and pool lane in one workspace: the
+-- raw material for the DOMAIN half of the campaign gate (design §7: the gate is
+-- mailbox AND domain).
+--
+-- The grouping itself is NOT done here. "Which mailboxes share a domain" means the
+-- ORGANIZATIONAL domain — providers largely inherit reputation across subdomains —
+-- and deriving that needs public-suffix data Postgres does not have. So this query
+-- returns the rows and warmup.WorstLanesByDomain folds them, which keeps ONE
+-- implementation of that question (see internal/platform/warmup/domain.go for why
+-- Go at read time beat a stored column and beat SQL).
+--
+-- ENABLED only: a disabled participant's lane is frozen history, not a live
+-- signal, and the health sweep never revisits it. It includes the pool's own
+-- mailboxes, which costs nothing and keeps "worst on the domain" true rather than
+-- "worst among the others".
+--
+-- One row per participant, and a workspace has one participant per mailbox, so
+-- this is small and bounded by the tenant's mailbox count. Workspace-pinned on
+-- both the participant and the mailbox join, which is the ONLY thing keeping one
+-- tenant's containment out of another's gate.
+SELECT m.email, wp.lane
+FROM warmup_participants wp
+JOIN mailboxes m ON m.id = wp.mailbox_id AND m.workspace_id = wp.workspace_id
+WHERE wp.workspace_id = $1 AND wp.enabled
+ORDER BY wp.mailbox_id;
 
 -- name: GetCampaignFallbackSender :one
 -- The implicit one-mailbox pool a campaign with NO campaign_senders rows sends
@@ -73,12 +76,15 @@ ORDER BY m.email;
 -- from — including the health and capacity columns, since the fallback mailbox is
 -- gated by its warmup health exactly like a pool member. Workspace-pinned on both
 -- the campaign and the mailbox join.
+--
+-- Its DOMAIN lane is folded in Go from ListWorkspaceWarmupLanes, exactly as the
+-- pool listing's is — one derivation of "which mailboxes share a domain", used by
+-- both, so the fallback and a configured pool cannot disagree about containment.
 SELECT cam.mailbox_id, m.email, m.provider, m.status,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
-       COALESCE(dl.lane, '')::text AS domain_lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cam.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -87,36 +93,6 @@ SELECT cam.mailbox_id, m.email, m.provider, m.status,
 FROM campaigns cam
 JOIN mailboxes m ON m.id = cam.mailbox_id AND m.workspace_id = cam.workspace_id
 LEFT JOIN warmup_participants wp ON wp.mailbox_id = cam.mailbox_id AND wp.workspace_id = cam.workspace_id
-LEFT JOIN LATERAL (
-    -- The worst lane on this mailbox's ORGANIZATIONAL DOMAIN (design §7: the
-    -- campaign gate is mailbox AND domain). An aggregate read over the mailboxes
-    -- that share lower(split_part(email,'@',2)) — deliberately not a second state
-    -- machine and not a second table, because the domain has no state of its own
-    -- to keep: it is exactly the worst of its members'.
-    --
-    -- Reputation is largely assessed per domain, so a quarantined mailbox has
-    -- almost certainly damaged the standing of every sibling sending from the same
-    -- one. Expanding cold volume from a sibling spends a reputation that is
-    -- already in trouble.
-    --
-    -- ENABLED participants only, matching the lane column above: a disabled row's
-    -- lane is frozen history, not a live signal. Includes the mailbox itself,
-    -- which costs nothing and keeps "worst on the domain" true rather than
-    -- "worst among the others". Which lanes actually WITHHOLD is Go's decision
-    -- (warmup.NewLeadsWithheld) — this ranking only orders severity.
-    SELECT wp2.lane
-    FROM warmup_participants wp2
-    JOIN mailboxes m2 ON m2.id = wp2.mailbox_id AND m2.workspace_id = wp2.workspace_id
-    WHERE wp2.workspace_id = cam.workspace_id
-      AND wp2.enabled
-      AND lower(split_part(m2.email, '@', 2)) = lower(split_part(m.email, '@', 2))
-    ORDER BY CASE wp2.lane
-               WHEN 'blocked' THEN 6 WHEN 'quarantine' THEN 5 WHEN 'pending_auth' THEN 4
-               WHEN 'recovery' THEN 3 WHEN 'probation' THEN 2 WHEN 'watch' THEN 1
-               ELSE 0 END DESC,
-             wp2.mailbox_id
-    LIMIT 1
-) dl ON true
 WHERE cam.id = $1 AND cam.workspace_id = $2;
 
 -- name: GetMailboxColdHealth :one
@@ -153,14 +129,18 @@ SELECT COALESCE((SELECT CASE WHEN wp.enabled THEN wp.health_state ELSE '' END
 -- is a transport tag (smtp|gmail|m365) that selects a code path, not an ESP — a
 -- Google Workspace mailbox connected by app password is provider='smtp' — so the
 -- host is the only evidence for that case. No secrets are projected; smtp_host
--- is a public endpoint name.
+-- is a public endpoint name, and so is email.
+--
+-- email travels for the DOMAIN half of the gate, which is folded in Go from
+-- ListWorkspaceWarmupLanes (see that query). The send path must apply the same
+-- domain scope as the panel and the preflight, or the UI would report cap_today=0
+-- while the rotation kept assigning new leads at the mailbox's full cap.
 SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned_at,
-       m.provider, m.smtp_host,
+       m.email, m.provider, m.smtp_host,
        m.status AS mailbox_status, m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
-       COALESCE(dl.lane, '')::text AS domain_lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -169,36 +149,6 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
 FROM campaign_senders cs
 JOIN mailboxes m ON m.id = cs.mailbox_id AND m.workspace_id = cs.workspace_id
 LEFT JOIN warmup_participants wp ON wp.mailbox_id = cs.mailbox_id AND wp.workspace_id = cs.workspace_id
-LEFT JOIN LATERAL (
-    -- The worst lane on this mailbox's ORGANIZATIONAL DOMAIN (design §7: the
-    -- campaign gate is mailbox AND domain). An aggregate read over the mailboxes
-    -- that share lower(split_part(email,'@',2)) — deliberately not a second state
-    -- machine and not a second table, because the domain has no state of its own
-    -- to keep: it is exactly the worst of its members'.
-    --
-    -- Reputation is largely assessed per domain, so a quarantined mailbox has
-    -- almost certainly damaged the standing of every sibling sending from the same
-    -- one. Expanding cold volume from a sibling spends a reputation that is
-    -- already in trouble.
-    --
-    -- ENABLED participants only, matching the lane column above: a disabled row's
-    -- lane is frozen history, not a live signal. Includes the mailbox itself,
-    -- which costs nothing and keeps "worst on the domain" true rather than
-    -- "worst among the others". Which lanes actually WITHHOLD is Go's decision
-    -- (warmup.NewLeadsWithheld) — this ranking only orders severity.
-    SELECT wp2.lane
-    FROM warmup_participants wp2
-    JOIN mailboxes m2 ON m2.id = wp2.mailbox_id AND m2.workspace_id = wp2.workspace_id
-    WHERE wp2.workspace_id = cs.workspace_id
-      AND wp2.enabled
-      AND lower(split_part(m2.email, '@', 2)) = lower(split_part(m.email, '@', 2))
-    ORDER BY CASE wp2.lane
-               WHEN 'blocked' THEN 6 WHEN 'quarantine' THEN 5 WHEN 'pending_auth' THEN 4
-               WHEN 'recovery' THEN 3 WHEN 'probation' THEN 2 WHEN 'watch' THEN 1
-               ELSE 0 END DESC,
-             wp2.mailbox_id
-    LIMIT 1
-) dl ON true
 WHERE cs.campaign_id = $1 AND cs.workspace_id = $2
 ORDER BY cs.mailbox_id;
 
