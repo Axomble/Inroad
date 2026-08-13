@@ -1050,6 +1050,93 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 	return items, nil
 }
 
+const listWarmupTransitions = `-- name: ListWarmupTransitions :many
+SELECT id, created_at, from_state, to_state, reason_code, reason,
+       from_lane, to_lane, lane_reason_code, lane_reason,
+       placement_samples, spam_rate, bounce_samples, bounce_rate,
+       complaint_samples, complaint_rate, invalid_tokens, policy_version
+FROM warmup_state_transitions
+WHERE workspace_id = $1 AND mailbox_id = $2
+ORDER BY created_at DESC, id DESC
+LIMIT $3
+`
+
+type ListWarmupTransitionsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	RowLimit    int32     `json:"row_limit"`
+}
+
+type ListWarmupTransitionsRow struct {
+	ID               uuid.UUID          `json:"id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	FromState        string             `json:"from_state"`
+	ToState          string             `json:"to_state"`
+	ReasonCode       string             `json:"reason_code"`
+	Reason           string             `json:"reason"`
+	FromLane         *string            `json:"from_lane"`
+	ToLane           *string            `json:"to_lane"`
+	LaneReasonCode   *string            `json:"lane_reason_code"`
+	LaneReason       *string            `json:"lane_reason"`
+	PlacementSamples int32              `json:"placement_samples"`
+	SpamRate         float32            `json:"spam_rate"`
+	BounceSamples    int32              `json:"bounce_samples"`
+	BounceRate       float32            `json:"bounce_rate"`
+	ComplaintSamples int32              `json:"complaint_samples"`
+	ComplaintRate    float32            `json:"complaint_rate"`
+	InvalidTokens    int32              `json:"invalid_tokens"`
+	PolicyVersion    string             `json:"policy_version"`
+}
+
+// One mailbox's automated state-change history, newest first, workspace-pinned.
+// Serves GET /warmup/mailboxes/{mailbox_id}/transitions: every row already names
+// the metric, sample size and threshold that produced it, which is what lets an
+// operator answer "why is this mailbox here and what clears it" without reading
+// logs.
+//
+// id breaks a created_at tie so paging is deterministic; the ordering otherwise
+// matches idx_warmup_state_transitions_mailbox (workspace_id, mailbox_id,
+// created_at DESC) exactly, so this is an index scan with a LIMIT rather than a
+// sort of the whole history.
+func (q *Queries) ListWarmupTransitions(ctx context.Context, arg ListWarmupTransitionsParams) ([]ListWarmupTransitionsRow, error) {
+	rows, err := q.db.Query(ctx, listWarmupTransitions, arg.WorkspaceID, arg.MailboxID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWarmupTransitionsRow
+	for rows.Next() {
+		var i ListWarmupTransitionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.CreatedAt,
+			&i.FromState,
+			&i.ToState,
+			&i.ReasonCode,
+			&i.Reason,
+			&i.FromLane,
+			&i.ToLane,
+			&i.LaneReasonCode,
+			&i.LaneReason,
+			&i.PlacementSamples,
+			&i.SpamRate,
+			&i.BounceSamples,
+			&i.BounceRate,
+			&i.ComplaintSamples,
+			&i.ComplaintRate,
+			&i.InvalidTokens,
+			&i.PolicyVersion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkspacesWithWarmupParticipants = `-- name: ListWorkspacesWithWarmupParticipants :many
 
 SELECT DISTINCT workspace_id FROM warmup_participants
@@ -1953,4 +2040,27 @@ func (q *Queries) UpsertWarmupSignalSnapshotsForWorkspace(ctx context.Context, w
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const warmupMailboxInWorkspace = `-- name: WarmupMailboxInWorkspace :one
+SELECT EXISTS (
+    SELECT 1 FROM mailboxes WHERE id = $1 AND workspace_id = $2
+) AS in_workspace
+`
+
+type WarmupMailboxInWorkspaceParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Does this mailbox belong to the caller's workspace? The transition history is
+// readable for a mailbox that is NOT (or is no longer) a participant — the trail
+// outlives the participant row, which is how containment survives a
+// disable/re-enable — so participation cannot be the 404 test. Ownership is, and
+// it is pinned on the workspace from the JWT, never a caller-supplied value.
+func (q *Queries) WarmupMailboxInWorkspace(ctx context.Context, arg WarmupMailboxInWorkspaceParams) (bool, error) {
+	row := q.db.QueryRow(ctx, warmupMailboxInWorkspace, arg.ID, arg.WorkspaceID)
+	var in_workspace bool
+	err := row.Scan(&in_workspace)
+	return in_workspace, err
 }

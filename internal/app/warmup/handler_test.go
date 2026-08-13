@@ -207,3 +207,92 @@ func TestOverviewHappyPath(t *testing.T) {
 		t.Fatalf("overview mailbox wrong: %+v", resp.Mailboxes[0])
 	}
 }
+
+// TestTransitionsRouteReturnsThePage proves the contract path, the JSON envelope
+// and the field names the SPA generates against: an object with a `transitions`
+// array whose rows carry snake_case keys and null (not "") lane fields on a
+// pre-lane row.
+func TestTransitionsRouteReturnsThePage(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	store.transitions[mb] = []Transition{{
+		ID: uuid.New(), CreatedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+		FromState: "unknown", ToState: "healthy",
+		ReasonCode: "evidence_qualified", Reason: "qualified placement evidence establishes health",
+		PolicyVersion: "warmup-phase1-v1",
+	}}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/mailboxes/"+mb.String()+"/transitions", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Transitions []map[string]any `json:"transitions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Transitions) != 1 {
+		t.Fatalf("want 1 transition, got %d: %s", len(raw.Transitions), w.Body.String())
+	}
+	row := raw.Transitions[0]
+	for _, key := range []string{
+		"id", "created_at", "from_state", "to_state", "reason_code", "reason",
+		"placement_samples", "spam_rate", "bounce_samples", "bounce_rate",
+		"complaint_samples", "complaint_rate", "invalid_tokens", "policy_version",
+	} {
+		if _, ok := row[key]; !ok {
+			t.Fatalf("required field %q missing from the payload: %s", key, w.Body.String())
+		}
+	}
+	if row["from_lane"] != nil || row["to_lane"] != nil {
+		t.Fatalf("pre-lane row must send null lanes, got %v/%v", row["from_lane"], row["to_lane"])
+	}
+}
+
+// TestTransitionsForeignMailboxIs404 proves the endpoint is workspace-pinned at
+// the HTTP seam: the workspace comes from the JWT, and a mailbox belonging to
+// another tenant is simply not there.
+func TestTransitionsForeignMailboxIs404(t *testing.T) {
+	ws, other, mb := uuid.New(), uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = other
+	store.transitions[mb] = []Transition{{ID: uuid.New(), FromState: "healthy", ToState: "watch"}}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/mailboxes/"+mb.String()+"/transitions", bearer(t, ws), "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "watch") {
+		t.Fatalf("404 body leaked another tenant's transition: %s", w.Body.String())
+	}
+}
+
+// TestTransitionsRejectsANonNumericLimit proves a malformed page size is a
+// caller error rather than something silently reinterpreted as the default.
+func TestTransitionsRejectsANonNumericLimit(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet,
+		"/warmup/mailboxes/"+mb.String()+"/transitions?limit=all", bearer(t, ws), "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestTransitionsRequiresAuth proves the endpoint is inside the authenticated
+// group: no bearer, no history.
+func TestTransitionsRequiresAuth(t *testing.T) {
+	mb := uuid.New()
+	h := NewHandler(NewService(newFakeStore()))
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/mailboxes/"+mb.String()+"/transitions", "", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", w.Code)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -112,6 +113,47 @@ func (h *Handler) detail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, d)
+}
+
+// transitions handles GET /warmup/mailboxes/{mailbox_id}/transitions — the
+// append-only decision record for one mailbox, newest first.
+func (h *Handler) transitions(w http.ResponseWriter, r *http.Request) {
+	wid, ok := auth.WorkspaceID(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "mailbox_id"))
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid mailbox id")
+		return
+	}
+	limit, ok := queryLimit(w, r)
+	if !ok {
+		return
+	}
+	page, err := h.svc.ListTransitions(r.Context(), wid, id, limit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, page)
+}
+
+// queryLimit reads the optional ?limit. An absent value is 0, which the service
+// resolves to the contract's default; a value that is not a positive integer is
+// a caller error rather than something to silently reinterpret. The service
+// clamps the upper bound, so the cap has one home.
+func queryLimit(w http.ResponseWriter, r *http.Request) (int32, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return 0, true
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || n < 1 {
+		httpx.Error(w, http.StatusBadRequest, "limit must be a positive integer")
+		return 0, false
+	}
+	return int32(n), true
 }
 
 // overview handles GET /warmup/overview — workspace pool summary.

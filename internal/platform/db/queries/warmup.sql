@@ -52,6 +52,36 @@ WHERE mailbox_id = $1 AND workspace_id = $2;
 DELETE FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2;
 
+-- name: WarmupMailboxInWorkspace :one
+-- Does this mailbox belong to the caller's workspace? The transition history is
+-- readable for a mailbox that is NOT (or is no longer) a participant — the trail
+-- outlives the participant row, which is how containment survives a
+-- disable/re-enable — so participation cannot be the 404 test. Ownership is, and
+-- it is pinned on the workspace from the JWT, never a caller-supplied value.
+SELECT EXISTS (
+    SELECT 1 FROM mailboxes WHERE id = $1 AND workspace_id = $2
+) AS in_workspace;
+
+-- name: ListWarmupTransitions :many
+-- One mailbox's automated state-change history, newest first, workspace-pinned.
+-- Serves GET /warmup/mailboxes/{mailbox_id}/transitions: every row already names
+-- the metric, sample size and threshold that produced it, which is what lets an
+-- operator answer "why is this mailbox here and what clears it" without reading
+-- logs.
+--
+-- id breaks a created_at tie so paging is deterministic; the ordering otherwise
+-- matches idx_warmup_state_transitions_mailbox (workspace_id, mailbox_id,
+-- created_at DESC) exactly, so this is an index scan with a LIMIT rather than a
+-- sort of the whole history.
+SELECT id, created_at, from_state, to_state, reason_code, reason,
+       from_lane, to_lane, lane_reason_code, lane_reason,
+       placement_samples, spam_rate, bounce_samples, bounce_rate,
+       complaint_samples, complaint_rate, invalid_tokens, policy_version
+FROM warmup_state_transitions
+WHERE workspace_id = $1 AND mailbox_id = $2
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(row_limit);
+
 -- name: CountEnabledParticipants :one
 SELECT count(*) FROM warmup_participants
 WHERE workspace_id = $1 AND enabled;
