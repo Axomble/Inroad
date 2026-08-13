@@ -170,7 +170,7 @@ function samplesText(samples: number): string {
  * round a real signal to "0.0%" — the false-clean reading this module exists to
  * prevent.
  */
-export function formatBoundedRate(rate: number): string {
+function formatBoundedRate(rate: number): string {
   const pct = rate * 100
   if (pct >= 1) return `${pct.toFixed(1)}%`
   if (pct >= 0.01) return `${pct.toFixed(2)}%`
