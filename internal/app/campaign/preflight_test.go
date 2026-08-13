@@ -302,9 +302,9 @@ func TestComputePreflightNilDailyLimitPasses(t *testing.T) {
 	}
 }
 
-func TestComputePreflightThrottledOrPausedMailboxWarns(t *testing.T) {
-	throttled, paused := "throttled", "paused"
-	cases := []*string{&throttled, &paused}
+func TestComputePreflightDegradedHealthWarns(t *testing.T) {
+	unknown, watch, throttled, paused := "unknown", "watch", "throttled", "paused"
+	cases := []*string{&unknown, &watch, &throttled, &paused}
 	for _, state := range cases {
 		t.Run(*state, func(t *testing.T) {
 			in := healthyInput()
@@ -313,7 +313,7 @@ func TestComputePreflightThrottledOrPausedMailboxWarns(t *testing.T) {
 			}
 			report := campaign.ComputePreflight(in)
 			if !report.Ready {
-				t.Error("warmup_health is informational -- it must never fail preflight")
+				t.Error("a degraded HEALTH state only reduces capacity -- it must not fail preflight")
 			}
 			if c := findCheck(t, report, campaign.CheckWarmupHealth); c.Severity != campaign.SeverityWarn {
 				t.Errorf("warmup_health severity = %q, want warn for state %q", c.Severity, *state)
@@ -578,5 +578,58 @@ func TestPreflightPropagatesStoreErrors(t *testing.T) {
 
 	if _, err := svc.Preflight(ctx, ws, id); err == nil {
 		t.Fatal("err = nil, want the propagated store error")
+	}
+}
+
+// A lane that may not take new leads is the one warmup condition that STOPS a
+// launch. Those mailboxes are withheld from the pool entirely, so launching would
+// either send nothing or silently concentrate the whole campaign on the senders
+// that remain.
+func TestComputePreflightWithheldLaneFailsPreflight(t *testing.T) {
+	for _, lane := range []string{"quarantine", "blocked", "pending_auth"} {
+		t.Run(lane, func(t *testing.T) {
+			lane := lane
+			healthy := "healthy"
+			in := healthyInput()
+			in.Senders = []campaign.Sender{
+				{Email: "a@x.test", Enabled: true, Status: "active", CapToday: 10, HealthState: &healthy, Lane: &lane},
+			}
+			report := campaign.ComputePreflight(in)
+			if report.Ready {
+				t.Error("a withheld lane must fail preflight even when health looks fine")
+			}
+			c := findCheck(t, report, campaign.CheckWarmupHealth)
+			if c.Severity != campaign.SeverityFail {
+				t.Fatalf("warmup_health severity = %q, want fail for lane %q", c.Severity, lane)
+			}
+			if !strings.Contains(c.Detail, lane) {
+				t.Errorf("detail %q does not name the lane that caused the failure", c.Detail)
+			}
+			if c.Remedy == "" {
+				t.Error("a failing check must tell the operator what clears it")
+			}
+		})
+	}
+}
+
+// Evidence-gathering lanes send at a bounded volume but are not withheld, so they
+// warn rather than fail: the campaign can launch, just slower.
+func TestComputePreflightEvidenceGatheringLanesWarn(t *testing.T) {
+	for _, lane := range []string{"probation", "recovery"} {
+		t.Run(lane, func(t *testing.T) {
+			lane := lane
+			healthy := "healthy"
+			in := healthyInput()
+			in.Senders = []campaign.Sender{
+				{Email: "a@x.test", Enabled: true, Status: "active", CapToday: 10, HealthState: &healthy, Lane: &lane},
+			}
+			report := campaign.ComputePreflight(in)
+			if !report.Ready {
+				t.Errorf("lane %q gathers evidence at reduced volume -- it must not fail preflight", lane)
+			}
+			if c := findCheck(t, report, campaign.CheckWarmupHealth); c.Severity != campaign.SeverityWarn {
+				t.Errorf("warmup_health severity = %q, want warn for lane %q", c.Severity, lane)
+			}
+		})
 	}
 }

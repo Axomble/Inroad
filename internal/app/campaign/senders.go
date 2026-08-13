@@ -60,9 +60,13 @@ type Sender struct {
 	AssignedCount  int64
 	LastAssignedAt *time.Time
 	HealthState    *string
-	Sending        bool
-	CapToday       int
-	SentToday      int
+	// Lane is the pool-eligibility axis, independent of HealthState. A mailbox can
+	// be reputation-healthy and still sit in probation, or sit in quarantine while
+	// its last measured reputation looked fine. Empty when not warming up.
+	Lane      *string
+	Sending   bool
+	CapToday  int
+	SentToday int
 }
 
 // SenderPool is a campaign's whole pool plus the mode that selects from it.

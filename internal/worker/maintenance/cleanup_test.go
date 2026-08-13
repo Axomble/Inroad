@@ -13,12 +13,15 @@ import (
 
 type cleanupCore struct {
 	coreapi.Client
-	deleted            int64
-	err                error
-	idempotencyDeleted int64
-	idempotencyErr     error
-	called             bool
-	idempotencyCalled  bool
+	deleted             int64
+	err                 error
+	idempotencyDeleted  int64
+	idempotencyErr      error
+	observationsDeleted int64
+	observationsErr     error
+	called              bool
+	idempotencyCalled   bool
+	observationsCalled  bool
 }
 
 func (c *cleanupCore) CleanupExpired(context.Context) (int64, error) {
@@ -31,8 +34,13 @@ func (c *cleanupCore) PurgeIdempotencyKeys(context.Context) (int64, error) {
 	return c.idempotencyDeleted, c.idempotencyErr
 }
 
+func (c *cleanupCore) PurgeWarmupObservations(context.Context) (int64, error) {
+	c.observationsCalled = true
+	return c.observationsDeleted, c.observationsErr
+}
+
 func TestCleanupHandler(t *testing.T) {
-	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3}
+	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7}
 	if err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -41,6 +49,21 @@ func TestCleanupHandler(t *testing.T) {
 	}
 	if !core.idempotencyCalled {
 		t.Fatal("PurgeIdempotencyKeys was not called")
+	}
+	if !core.observationsCalled {
+		t.Fatal("PurgeWarmupObservations was not called")
+	}
+}
+
+// Warmup evidence is reachable by any external sender (a forged token on inbound
+// mail writes an observer-side row), so a failure to purge it must surface for
+// retry rather than letting the table grow unbounded in silence.
+func TestCleanupHandlerReturnsErrorOnObservationPurgeFailure(t *testing.T) {
+	want := errors.New("db unavailable")
+	core := &cleanupCore{observationsErr: want}
+	err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
+	if !errors.Is(err, want) {
+		t.Fatalf("handler error = %v, want %v", err, want)
 	}
 }
 
@@ -53,6 +76,9 @@ func TestCleanupHandlerReturnsErrorForRetry(t *testing.T) {
 	}
 	if core.idempotencyCalled {
 		t.Fatal("PurgeIdempotencyKeys must not run when CleanupExpired already failed")
+	}
+	if core.observationsCalled {
+		t.Fatal("PurgeWarmupObservations must not run when CleanupExpired already failed")
 	}
 }
 

@@ -108,37 +108,63 @@ ORDER BY p.created_at DESC;
 
 -- name: GetWarmupSenderBundle :one
 -- Everything GetWarmupSendJob needs about the FROM mailbox: its participant ramp
--- config + health, and its decrypted-at-caller transport columns. workspace-pinned
--- (belt-and-braces on the unguessable mailbox UUID); a foreign pair yields no row.
+-- config, health and lane, and its decrypted-at-caller transport columns.
+-- workspace-pinned (belt-and-braces on the unguessable mailbox UUID); a foreign
+-- pair yields no row.
 SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
-       p.reply_rate, p.started_at, p.health_state, p.paused_until,
+       p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id
 WHERE p.mailbox_id = $1 AND p.workspace_id = $2;
 
+-- ----------------------------------------------------------------------------
+-- Lane compatibility (design §6.1, acceptance criterion 1). Every partner query
+-- below enforces the same two rules:
+--
+--     AND partner.lane = sender.lane
+--     AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
+--
+-- With no sentinel lane, same-lane IS the whole rule — simple enough to be
+-- provable, which is the point: a healthy customer mailbox never sends to, and
+-- never receives from, a probation, recovery, watch, quarantined, blocked or
+-- unauthenticated peer. Because the two lanes are equal, excluding the sealed
+-- lanes on the SENDER excludes them on the partner too.
+--
+-- The sender's own participant row is joined in (rather than passed as a
+-- parameter) so the lane the comparison uses is the one committed in the database
+-- at query time; a caller cannot widen its own eligibility by sending a lane.
+-- ----------------------------------------------------------------------------
+
 -- name: CountEligibleWarmupPartners :one
 SELECT count(*) FROM warmup_participants p
+JOIN warmup_participants sender
+  ON sender.mailbox_id = $2 AND sender.workspace_id = $1
 WHERE p.workspace_id = $1
   AND p.mailbox_id <> $2
   AND p.enabled
   AND p.health_state <> 'paused'
-  AND (p.paused_until IS NULL OR p.paused_until <= now());
+  AND (p.paused_until IS NULL OR p.paused_until <= now())
+  AND p.lane = sender.lane
+  AND sender.lane NOT IN ('pending_auth','quarantine','blocked');
 
 -- name: SelectWarmupPartner :one
 -- Pick ONE eligible warmup partner for a sender: a DIFFERENT, enabled, non-paused
 -- participant in the SAME workspace, preferring one not recently paired with the
 -- sender. Ordering: least-recently-active shared thread first (a never-paired
 -- partner sorts on 'epoch', so it wins), tie-broken deterministically by
--- mailbox_id so partner spread is stable and reproducible. workspace-pinned; a
--- workspace with <2 eligible participants returns no row.
+-- mailbox_id so partner spread is stable and reproducible. workspace-pinned AND
+-- lane-pinned (see the lane-compatibility note above); a workspace with <2
+-- eligible SAME-LANE participants returns no row.
 WITH candidates AS (
     SELECT p.mailbox_id, m.email, m.display_name,
            COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
            COALESCE(pair.sent_today, 0)::bigint AS sent_today
     FROM warmup_participants p
     JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
+    JOIN warmup_participants sender
+      ON sender.mailbox_id = $2 AND sender.workspace_id = $1
     LEFT JOIN LATERAL (
         SELECT
             (SELECT MAX(t.last_activity_at)
@@ -159,6 +185,8 @@ WITH candidates AS (
       AND p.enabled
       AND p.health_state <> 'paused'
       AND (p.paused_until IS NULL OR p.paused_until <= now())
+      AND p.lane = sender.lane
+      AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 )
 SELECT mailbox_id, email, display_name
 FROM candidates c
@@ -195,6 +223,8 @@ SELECT p.mailbox_id, m.email, m.display_name,
        t.id AS thread_id, t.content_key, t.turn, t.root_message_id
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id
+JOIN warmup_participants sender
+  ON sender.mailbox_id = $2 AND sender.workspace_id = $1
 JOIN LATERAL (
     SELECT th.id, th.content_key, th.turn, th.root_message_id, th.last_activity_at
     FROM warmup_threads th
@@ -209,6 +239,8 @@ WHERE p.workspace_id = $1
   AND p.enabled
   AND p.health_state <> 'paused'
   AND (p.paused_until IS NULL OR p.paused_until <= now())
+  AND p.lane = sender.lane
+  AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
   AND t.turn >= 1
   AND t.turn < sqlc.arg(max_turn)::int
   AND (SELECT COUNT(*) FROM warmup_sends s
@@ -373,15 +405,33 @@ ON CONFLICT (workspace_id, idempotency_key) DO NOTHING;
 
 -- name: RecordWarmupTokenFailureObservation :exec
 -- Untrusted token failures retain no claimed sender. The recipient mailbox is
--- ownership-checked, but attribution_trusted remains false so this evidence can
--- inform the future observer-trust axis without health-gating an innocent sender.
+-- ownership-checked, but attribution_trusted stays false and mailbox_id stays NULL
+-- (both now CHECK-enforced by migration 000055) so this evidence can inform the
+-- future observer-trust axis without health-gating an innocent sender: an
+-- unauthenticated token may claim ANY sender, and trusting the claim would let
+-- anyone throttle a mailbox they do not own by emailing it three times.
+--
+-- The idempotency key buckets on (mailbox, UTC date, reason_code), NOT on a hash of
+-- the token. The token is an attacker-controlled header, so hashing it made every
+-- distinct forged token a permanent row that anyone able to email a connected
+-- mailbox could write — unbounded growth in an append-only table by external input
+-- (design §4.6). Bucketing writes at most one row per mailbox per day per reason.
+-- The trade is deliberate: individual forged tokens are no longer distinguishable
+-- rows, so the caller LOGS each occurrence (poll.go / RecordWarmupReceipt) while the
+-- table keeps only the bounded "this mailbox saw forged traffic that day" fact.
+--
+-- The date is computed in UTC, matching the UTC-day convention the daily-stats
+-- reads and the snapshot windows use.
 INSERT INTO warmup_observations (
     workspace_id, observer_mailbox_id, kind, source, reason_code,
     attribution_trusted, idempotency_key, observed_at
 )
 SELECT sqlc.arg(workspace_id), m.id, 'invalid_token', 'inbox_token_verifier',
        sqlc.arg(reason_code), false,
-       'token:' || m.id::text || ':' || sqlc.arg(fingerprint)::text, now()
+       'token:' || m.id::text || ':'
+                || to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD') || ':'
+                || sqlc.arg(reason_code)::text,
+       now()
 FROM mailboxes m
 WHERE m.id = sqlc.arg(recipient_mailbox)
   AND m.workspace_id = sqlc.arg(workspace_id)
@@ -528,96 +578,142 @@ VALUES ($1, $2, CURRENT_DATE, 1)
 ON CONFLICT (mailbox_id, day) DO UPDATE SET replies = warmup_daily_stats.replies + 1;
 
 -- name: ListDueWarmupMailboxes :many
--- (mailbox, workspace) for every enabled, non-paused participant — the sweep
--- fan-out. Deliberately coarse: precise ramp/window due-gating is delegated to
--- NextWarmupDue in the send handler (C4), so this only filters out the two states
--- that can never send now (disabled, or paused with a live pause window). A lone
--- participant is returned too; its GetWarmupSendJob then Skips for want of a
--- partner. Global fan-out (no workspace pin), like ListActiveMailboxes.
+-- (mailbox, workspace) for every enabled, non-paused participant in a lane that
+-- MAY send — the sweep fan-out. Deliberately coarse otherwise: precise ramp/window
+-- due-gating is delegated to NextWarmupDue in the send handler (C4), so this only
+-- filters out what can never send now. The sealed lanes are part of that: a
+-- pending_auth, quarantined or blocked participant has no eligible partner by
+-- construction (same-lane pairing above), so ticking it could only ever produce a
+-- Skip. A lone same-lane participant is still returned; its GetWarmupSendJob then
+-- Skips for want of a partner. Global fan-out (no workspace pin), like
+-- ListActiveMailboxes.
 SELECT mailbox_id, workspace_id FROM warmup_participants
 WHERE enabled
   AND health_state <> 'paused'
   AND (paused_until IS NULL OR paused_until <= now())
+  AND lane NOT IN ('pending_auth','quarantine','blocked')
 ORDER BY mailbox_id;
 
--- name: ListWarmupHealthSignals :many
--- Global evidence fan-out for every enabled participant. Placement observations
--- are sender-attributed over 7 days; campaign and warmup bounce rates and campaign
--- complaints use 30-day delivered denominators. Trusted invalid-token evidence is
--- counted over 24 hours. Zero placement samples remains zero counts here, and the
--- policy deliberately maps that absence to unknown rather than healthy.
-SELECT p.mailbox_id,
-       p.workspace_id,
-       p.health_state,
-       p.paused_until,
-       COALESCE(placement.inbox, 0)::bigint AS inbox,
-       COALESCE(placement.spam, 0)::bigint AS spam,
-       (COALESCE(campaign.delivered, 0) + COALESCE(warm.delivered, 0))::bigint AS bounce_samples,
-       (COALESCE(campaign.bounces, 0) + COALESCE(warm.bounces, 0))::bigint AS bounces,
-       COALESCE(campaign.delivered, 0)::bigint AS complaint_samples,
-       COALESCE(campaign.complaints, 0)::bigint AS complaints,
-       COALESCE(tokens.invalid_tokens, 0)::bigint AS invalid_tokens
+-- ============================================================================
+-- Phase 1 reputation network (docs/superpowers/specs/
+-- 2026-08-12-warmup-reputation-phase-1-design.md). Evidence is MATERIALIZED once
+-- per workspace per sweep instead of recomputed per participant: Phase 0 re-ran
+-- eight correlated subqueries for EVERY enabled participant on every five-minute
+-- tick, one of them an arm over sequence_enrollments no index could serve. The
+-- sweep now issues a bounded number of statements per WORKSPACE (design §3.1,
+-- acceptance criterion 7).
+-- ============================================================================
+
+-- name: ListWorkspacesWithWarmupParticipants :many
+-- Drives the per-workspace snapshot loop. Global fan-out (no workspace pin), like
+-- ListDueWarmupMailboxes: the sweep is infrastructure maintenance rather than a
+-- tenant read, and every statement it then issues is pinned to one of these ids.
+SELECT DISTINCT workspace_id FROM warmup_participants
+WHERE enabled
+ORDER BY workspace_id;
+
+-- name: UpsertWarmupSignalSnapshotsForWorkspace :execrows
+-- Recompute every enabled participant's evidence for ONE workspace in ONE
+-- statement. Each population keeps its OWN denominator; unlike populations are
+-- never summed (design §4.1). Phase 0 pooled campaign and warmup sends into one
+-- bounce denominator, and warmup traffic — synthetic mail between the operator's
+-- own mailboxes, which essentially never hard-bounces — diluted it below the
+-- thresholds it was meant to trip: 20 hard bounces on 200 campaign sends is a 10%
+-- rate, but 20/(200+1200) reads as 1.4%, under even the watch band. Worse, warmup
+-- volume ALONE cleared the minimum-sample gate, so the evidence gate opened on
+-- data containing no bounce information at all.
+--
+-- Windows: placement over 7 days (the qualified clean window), delivered/bounce/
+-- complaint populations over 30 days, observer token failures over 7 days.
+-- $1 pins the workspace on the outer WHERE and on every subquery.
+INSERT INTO warmup_signal_snapshots (
+    workspace_id, mailbox_id, computed_at,
+    placement_inbox, placement_spam,
+    campaign_delivered, campaign_hard_bounces, campaign_complaints,
+    warmup_delivered, warmup_hard_bounces,
+    observer_token_failures, newest_evidence_at
+)
+SELECT p.workspace_id, p.mailbox_id, now(),
+       COALESCE(place.inbox, 0)::int,
+       COALESCE(place.spam, 0)::int,
+       COALESCE(camp.delivered, 0)::int,
+       COALESCE(camp.hard_bounces, 0)::int,
+       COALESCE(camp.complaints, 0)::int,
+       COALESCE(warm.delivered, 0)::int,
+       COALESCE(warm.hard_bounces, 0)::int,
+       COALESCE(tokens.failures, 0)::int,
+       evidence.newest_at
 FROM warmup_participants p
 LEFT JOIN LATERAL (
+    -- Placement is SENDER-attributed (security invariant 29): a warmup message
+    -- landing in spam degrades whoever SENT it, not the mailbox that observed it.
     SELECT count(*) FILTER (WHERE o.placement = 'inbox') AS inbox,
            count(*) FILTER (WHERE o.placement = 'spam') AS spam
     FROM warmup_observations o
-    WHERE o.workspace_id = p.workspace_id
+    WHERE o.workspace_id = $1
       AND o.mailbox_id = p.mailbox_id
       AND o.kind = 'placement'
       AND o.attribution_trusted
       AND o.observed_at >= now() - interval '7 days'
-) placement ON true
+) place ON true
 LEFT JOIN LATERAL (
     SELECT
         (
             SELECT count(*)
             FROM sends s
-            WHERE s.workspace_id = p.workspace_id
+            WHERE s.workspace_id = $1
               AND s.mailbox_id = p.mailbox_id
               AND s.status = 'sent'
               AND s.sent_at >= now() - interval '30 days'
         ) AS delivered,
         (
-            SELECT count(*)
-            FROM (
-                SELECT se.contact_id
-                FROM sequence_enrollments se
-                JOIN sends s ON s.workspace_id = se.workspace_id
-                            AND s.campaign_id = se.campaign_id
-                            AND s.contact_id = se.contact_id
-                WHERE se.workspace_id = p.workspace_id
-                  AND s.mailbox_id = p.mailbox_id
-                  AND se.stop_reason = 'bounced'
-                  AND se.stopped_at >= now() - interval '30 days'
-                UNION
-                SELECT s.contact_id
-                FROM deliverability_events de
-                JOIN sends s ON s.id = de.send_id
-                            AND s.workspace_id = de.workspace_id
-                WHERE de.workspace_id = p.workspace_id
-                  AND s.mailbox_id = p.mailbox_id
-                  AND de.kind = 'bounce'
-                  AND de.received_at >= now() - interval '30 days'
-            ) bounced_contacts
-        ) AS bounces,
-        (
-            SELECT count(*)
+            -- Only the deliverability_events arm, and only bounce_class='hard'.
+            --
+            -- The Phase 0 enrollment arm joined sequence_enrollments to sends on
+            -- (workspace_id, campaign_id, contact_id) with NO sender identity: a
+            -- campaign rotating over mailboxes M and N, where contact X bounced on
+            -- N's step, has a sends row for (C, X) under BOTH — so the bounce was
+            -- counted against M as well, throttling a clean mailbox for another
+            -- mailbox's failure, with the error scaling with pool rotation. This
+            -- arm carries send_id and therefore resolves the ACTUAL sender
+            -- (design §4.3). The enrollment arm stays correct at CAMPAIGN scope
+            -- and is left alone there.
+            --
+            -- bounce_class filters out soft bounces. Provider feeds include full
+            -- mailbox and greylisting (security invariant 42), and Phase 0 fed
+            -- them into a rate it reported as "hard-bounce rate above 10%", so a
+            -- normal week of greylisting could pause a healthy mailbox for 72h.
+            -- Rows predating the column are 'unknown' and excluded: under-counting
+            -- history is the safe direction.
+            --
+            -- DISTINCT s.id counts bounced SENDS, matching the delivered-sends
+            -- denominator above. Two DSNs for one send would otherwise be able to
+            -- push the numerator past the denominator.
+            SELECT count(DISTINCT s.id)
             FROM deliverability_events de
-            JOIN sends s ON s.id = de.send_id
-                        AND s.workspace_id = de.workspace_id
-            WHERE de.workspace_id = p.workspace_id
+            JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
+            WHERE de.workspace_id = $1
+              AND s.mailbox_id = p.mailbox_id
+              AND de.kind = 'bounce'
+              AND de.bounce_class = 'hard'
+              AND de.received_at >= now() - interval '30 days'
+        ) AS hard_bounces,
+        (
+            SELECT count(DISTINCT s.id)
+            FROM deliverability_events de
+            JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
+            WHERE de.workspace_id = $1
               AND s.mailbox_id = p.mailbox_id
               AND de.kind = 'complaint'
               AND de.received_at >= now() - interval '30 days'
         ) AS complaints
-) campaign ON true
+) camp ON true
 LEFT JOIN LATERAL (
     SELECT
         (
             SELECT count(*)
             FROM warmup_sends s
-            WHERE s.workspace_id = p.workspace_id
+            WHERE s.workspace_id = $1
               AND s.from_mailbox = p.mailbox_id
               AND s.status = 'sent'
               AND s.sent_at >= now() - interval '30 days'
@@ -625,23 +721,147 @@ LEFT JOIN LATERAL (
         (
             SELECT count(*)
             FROM warmup_observations o
-            WHERE o.workspace_id = p.workspace_id
+            WHERE o.workspace_id = $1
               AND o.mailbox_id = p.mailbox_id
               AND o.kind = 'hard_bounce'
               AND o.attribution_trusted
               AND o.observed_at >= now() - interval '30 days'
-        ) AS bounces
+        ) AS hard_bounces
 ) warm ON true
 LEFT JOIN LATERAL (
-    SELECT count(*) AS invalid_tokens
+    -- OBSERVER-side, matched on observer_mailbox_id: "this mailbox is receiving
+    -- forged warmup traffic". Phase 0 read it on mailbox_id with an
+    -- attribution_trusted predicate, but the writer records invalid tokens with
+    -- mailbox_id NULL and attribution_trusted false ON PURPOSE — an unauthenticated
+    -- token may claim any sender, so trusting the claim would let anyone throttle a
+    -- mailbox they do not own by emailing it three times. Both requirements were
+    -- therefore structurally unsatisfiable and the counter was always zero, which
+    -- is why migration 000055 turned that safeguard into two CHECK constraints
+    -- (design §4.5). attribution_trusted describes the DISCARDED sender claim, not
+    -- the observation, so it has no business filtering an observer-side count.
+    --
+    -- Nothing automatic acts on this number in Phase 1: it is operator visibility
+    -- and the seed of a future observer-trust axis. The 7-day window pairs with
+    -- the per-mailbox-per-day-per-reason idempotency key
+    -- (RecordWarmupTokenFailureObservation), so the count reads as "days this week
+    -- on which forged traffic arrived, per reason" and cannot be inflated without
+    -- bound by an external sender.
+    SELECT count(*) AS failures
     FROM warmup_observations o
-    WHERE o.workspace_id = p.workspace_id
-      AND o.mailbox_id = p.mailbox_id
+    WHERE o.workspace_id = $1
+      AND o.observer_mailbox_id = p.mailbox_id
       AND o.kind = 'invalid_token'
-      AND o.attribution_trusted
-      AND o.observed_at >= now() - interval '24 hours'
+      AND o.observed_at >= now() - interval '7 days'
 ) tokens ON true
-WHERE p.enabled;
+LEFT JOIN LATERAL (
+    -- How old the newest underlying evidence is, either role. GREATEST ignores
+    -- NULLs, and each arm range-seeks its own index
+    -- (idx_warmup_observations_subject_time / _observer_time) instead of an OR that
+    -- could use neither. Reported for operators; the FRESHNESS decision is made on
+    -- computed_at, which advances every sweep whether or not evidence arrived.
+    SELECT GREATEST(
+        (SELECT max(o.observed_at) FROM warmup_observations o
+          WHERE o.workspace_id = $1 AND o.mailbox_id = p.mailbox_id),
+        (SELECT max(o.observed_at) FROM warmup_observations o
+          WHERE o.workspace_id = $1 AND o.observer_mailbox_id = p.mailbox_id)
+    ) AS newest_at
+) evidence ON true
+WHERE p.workspace_id = $1 AND p.enabled
+ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
+    computed_at             = EXCLUDED.computed_at,
+    placement_inbox         = EXCLUDED.placement_inbox,
+    placement_spam          = EXCLUDED.placement_spam,
+    campaign_delivered      = EXCLUDED.campaign_delivered,
+    campaign_hard_bounces   = EXCLUDED.campaign_hard_bounces,
+    campaign_complaints     = EXCLUDED.campaign_complaints,
+    warmup_delivered        = EXCLUDED.warmup_delivered,
+    warmup_hard_bounces     = EXCLUDED.warmup_hard_bounces,
+    observer_token_failures = EXCLUDED.observer_token_failures,
+    newest_evidence_at      = EXCLUDED.newest_evidence_at;
+
+-- name: ListWarmupEvaluationRows :many
+-- One workspace's enabled participants, each with both current axes and the
+-- materialized evidence the policy reads. Pinned on $1.
+--
+-- The snapshot join is LEFT on purpose: a participant enabled between the refresh
+-- and this read has no snapshot row, and NULL computed_at must read as "no
+-- evidence" (unknown, no promotion) rather than as zeros that look clean. Absence
+-- of evidence is never health — that is the whole point of Phase 0's unknown state
+-- and this phase's staleness rule (design §8, acceptance criterion 3).
+--
+-- auth_passing is the admission prerequisite (design §6): the mailbox's
+-- organizational domain resolved to 'passing' AND the mailbox is connected (not in
+-- credential error). It deliberately does NOT consider dkim_found — migration
+-- 000036 documents DKIM as advisory because selectors are not discoverable from
+-- DNS, so dkim_found=false means "none of the probed selectors matched", not
+-- "unsigned", and gating on it would strand correctly-signed domains in
+-- pending_auth forever. 'unknown' (resolver timeout — could not check) does not
+-- open the gate either; it waits for the domainauth sweep.
+--
+-- quarantined_since is derived from the transition trail rather than stored on the
+-- participant: the newest row that MOVED it into quarantine. It gates the cooldown
+-- only — elapsing is necessary but never sufficient (acceptance criterion 2).
+SELECT p.mailbox_id,
+       p.workspace_id,
+       p.health_state,
+       p.lane,
+       p.paused_until,
+       (COALESCE(d.state, '') = 'passing' AND m.status = 'active')::boolean AS auth_passing,
+       -- Freshness is decided by the DATABASE clock on both sides. Comparing a
+       -- Go-injected clock against a DB-generated computed_at makes any app/DB
+       -- skew look like stale evidence, which fails CLOSED (a healthy mailbox
+       -- reads as unknown and stops being promotable) — quiet, and hard to
+       -- diagnose. The TTL still has one home: the caller passes it in seconds.
+       (s.computed_at IS NOT NULL
+        AND s.computed_at >= now() - make_interval(secs => sqlc.arg(evidence_ttl_seconds)::int)) AS evidence_fresh,
+       s.computed_at,
+       COALESCE(s.placement_inbox, 0)::int         AS placement_inbox,
+       COALESCE(s.placement_spam, 0)::int          AS placement_spam,
+       COALESCE(s.campaign_delivered, 0)::int      AS campaign_delivered,
+       COALESCE(s.campaign_hard_bounces, 0)::int   AS campaign_hard_bounces,
+       COALESCE(s.campaign_complaints, 0)::int     AS campaign_complaints,
+       COALESCE(s.warmup_delivered, 0)::int        AS warmup_delivered,
+       COALESCE(s.warmup_hard_bounces, 0)::int     AS warmup_hard_bounces,
+       COALESCE(s.observer_token_failures, 0)::int AS observer_token_failures,
+       q.quarantined_since
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
+LEFT JOIN warmup_signal_snapshots s
+       ON s.mailbox_id = p.mailbox_id AND s.workspace_id = p.workspace_id
+LEFT JOIN sending_domains d
+       ON d.workspace_id = p.workspace_id
+      AND d.domain = lower(split_part(m.email, '@', 2))
+LEFT JOIN LATERAL (
+    SELECT max(t.created_at)::timestamptz AS quarantined_since
+    FROM warmup_state_transitions t
+    WHERE t.workspace_id = p.workspace_id
+      AND t.mailbox_id = p.mailbox_id
+      AND t.to_lane = 'quarantine'
+) q ON true
+WHERE p.workspace_id = $1 AND p.enabled
+ORDER BY p.mailbox_id;
+
+-- name: PurgeWarmupObservations :one
+-- Bound the evidence table (design §4.6). warmup_observations is append-only and
+-- was in no maintenance sweep, while its invalid-token rows are written on behalf
+-- of anyone who can email a connected mailbox. 90 days is comfortably beyond the
+-- widest read window above (30), so retention can never remove evidence the policy
+-- would still have acted on. Batched at 5000 rows like every other purge in
+-- queries/maintenance.sql, to cap one sweep's lock/IO footprint.
+--
+-- Global (no workspace pin), for the same reason PurgeExpiredSecurityArtifacts is:
+-- retention is deployment maintenance, not a tenant read. It removes rows by age
+-- alone and returns only a count, so it can neither surface nor cross tenant data.
+WITH deleted AS (
+    DELETE FROM warmup_observations
+    WHERE id IN (
+        SELECT id FROM warmup_observations
+        WHERE observed_at < now() - interval '90 days'
+        ORDER BY observed_at LIMIT 5000
+    )
+    RETURNING 1
+)
+SELECT count(*)::bigint AS deleted_rows FROM deleted;
 
 -- name: UpdateWarmupHealth :exec
 -- Persist a health transition for one participant: new state, human-readable
@@ -651,26 +871,50 @@ UPDATE warmup_participants
 SET health_state = $3, health_reason = $4, paused_until = $5, updated_at = now()
 WHERE mailbox_id = $1 AND workspace_id = $2;
 
--- name: ApplyWarmupHealthTransition :one
--- State mutation and its explanation are one atomic statement. The from-state
--- guard prevents concurrent evaluators from writing contradictory history.
+-- name: ApplyWarmupParticipantTransition :one
+-- BOTH axes and their explanations are ONE atomic statement, so "quarantined but
+-- healthy" is unrepresentable and no applied transition can lose its audit trail.
+--
+-- The compare-and-set guards BOTH from_state AND from_lane: two evaluators racing
+-- on the same participant would otherwise each read one axis, and the loser would
+-- overwrite the winner's decision on the other — writing history that never
+-- happened. A guard miss means another evaluator already moved it, and the caller
+-- simply skips (applied=false) rather than retrying with a stale decision.
+--
+-- Each axis carries its own reason_code/reason. One slot cannot serve two
+-- independent decisions: when health says "spam placement above the pause
+-- threshold" and the lane says "quarantined", collapsing them destroys whichever
+-- loses.
+--
+-- bounce_samples/bounce_rate hold the arm that ACTUALLY drove the decision — the
+-- higher of the campaign and warmup rates, with ITS OWN denominator (the caller
+-- picks the pair). The table has one bounce column pair and pooling the two
+-- populations to fill it would reintroduce the exact dilution defect this phase
+-- exists to remove. invalid_tokens keeps its Phase 0 column name but now holds the
+-- observer-side token-failure count (design §4.5) — the number that column always
+-- meant to carry, finally non-zero.
 WITH changed AS (
     UPDATE warmup_participants p
     SET health_state = @to_state,
         health_reason = @reason,
+        lane = @to_lane,
         paused_until = sqlc.narg(paused_until)::timestamptz,
         updated_at = now()
     WHERE p.mailbox_id = @mailbox_id
       AND p.workspace_id = @workspace_id
       AND p.health_state = @from_state
+      AND p.lane = @from_lane
     RETURNING p.mailbox_id, p.workspace_id
 ), recorded AS (
     INSERT INTO warmup_state_transitions (
         workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+        from_lane, to_lane, lane_reason_code, lane_reason,
         placement_samples, spam_rate, bounce_samples, bounce_rate,
         complaint_samples, complaint_rate, invalid_tokens, policy_version
     )
     SELECT workspace_id, mailbox_id, @from_state, @to_state, @reason_code, @reason,
+           @from_lane, @to_lane,
+           sqlc.arg(lane_reason_code)::text, sqlc.arg(lane_reason)::text,
            @placement_samples, sqlc.arg(spam_rate)::real,
            @bounce_samples, sqlc.arg(bounce_rate)::real,
            @complaint_samples, sqlc.arg(complaint_rate)::real,

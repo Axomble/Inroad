@@ -158,10 +158,12 @@ func TestPausedUntilPerState(t *testing.T) {
 	}
 }
 
-// TestShouldApplyTransitionFloor proves the timed-block floor: escalation applies
-// immediately, a no-op never applies, and a recovery step-down is held back while
-// paused_until is still in the future but allowed once it has elapsed.
-func TestShouldApplyTransitionFloor(t *testing.T) {
+// TestTimedBlockFloor proves the timed-block floor as the sweep actually composes
+// it: HoldRecoveryDuringBlock clamps the health axis, then ShouldApplyTransition
+// decides whether anything is left to write. Escalation applies immediately, a
+// no-op never applies, and a recovery step-down is held while paused_until is in
+// the future but allowed once it has elapsed.
+func TestTimedBlockFloor(t *testing.T) {
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	future := now.Add(time.Hour)
 	past := now.Add(-time.Hour)
@@ -169,19 +171,48 @@ func TestShouldApplyTransitionFloor(t *testing.T) {
 		name        string
 		from, to    string
 		pausedUntil time.Time
-		want        bool
+		wantHealth  string
+		wantApply   bool
 	}{
-		{"escalation with live block still applies", warmup.StateThrottled, warmup.StatePaused, future, true},
-		{"escalation from healthy applies", warmup.StateHealthy, warmup.StateWatch, time.Time{}, true},
-		{"no-op never applies", warmup.StatePaused, warmup.StatePaused, past, false},
-		{"recovery blocked while block is live", warmup.StatePaused, warmup.StateThrottled, future, false},
-		{"recovery allowed once block elapsed", warmup.StatePaused, warmup.StateThrottled, past, true},
-		{"recovery allowed with no block set", warmup.StateThrottled, warmup.StateWatch, time.Time{}, true},
+		{"escalation with live block still applies", warmup.StateThrottled, warmup.StatePaused, future, warmup.StatePaused, true},
+		{"escalation from healthy applies", warmup.StateHealthy, warmup.StateWatch, time.Time{}, warmup.StateWatch, true},
+		{"no-op never applies", warmup.StatePaused, warmup.StatePaused, past, warmup.StatePaused, false},
+		{"recovery blocked while block is live", warmup.StatePaused, warmup.StateThrottled, future, warmup.StatePaused, false},
+		{"recovery allowed once block elapsed", warmup.StatePaused, warmup.StateThrottled, past, warmup.StateThrottled, true},
+		{"recovery allowed with no block set", warmup.StateThrottled, warmup.StateWatch, time.Time{}, warmup.StateWatch, true},
 	}
 	for _, tc := range cases {
-		if got := warmup.ShouldApplyTransition(tc.from, tc.to, tc.pausedUntil, now); got != tc.want {
-			t.Errorf("%s: ShouldApplyTransition(%q,%q) = %v, want %v", tc.name, tc.from, tc.to, got, tc.want)
+		d := warmup.Decision{Health: tc.to, HealthReasonCode: "recovery_step", Lane: warmup.LaneHealthy}
+		d = warmup.HoldRecoveryDuringBlock(d, tc.from, tc.pausedUntil, now)
+		if d.Health != tc.wantHealth {
+			t.Errorf("%s: health = %q, want %q", tc.name, d.Health, tc.wantHealth)
 		}
+		if got := warmup.ShouldApplyTransition(tc.from, d.Health, warmup.LaneHealthy, d.Lane); got != tc.wantApply {
+			t.Errorf("%s: apply = %v, want %v", tc.name, got, tc.wantApply)
+		}
+	}
+}
+
+// The dwell governs the HEALTH axis only. A lane change is containment — auth
+// regressed, evidence went stale, cooldown elapsed — not a recovery being rushed,
+// so holding it back to respect a health timer would delay exactly the action that
+// should not wait.
+func TestTimedBlockDoesNotHoldLaneChanges(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	d := warmup.Decision{
+		Health: warmup.StateThrottled, HealthReasonCode: "recovery_step",
+		Lane: warmup.LanePendingAuth, LaneReasonCode: "lane_auth_regressed",
+	}
+	d = warmup.HoldRecoveryDuringBlock(d, warmup.StatePaused, now.Add(time.Hour), now)
+
+	if d.Health != warmup.StatePaused {
+		t.Fatalf("health = %q, want paused: the dwell has not elapsed", d.Health)
+	}
+	if d.Lane != warmup.LanePendingAuth {
+		t.Fatalf("lane = %q, want pending_auth: a lane change must not be held by the health dwell", d.Lane)
+	}
+	if !warmup.ShouldApplyTransition(warmup.StatePaused, d.Health, warmup.LaneHealthy, d.Lane) {
+		t.Fatal("a lane-only change must still be persisted")
 	}
 }
 

@@ -1,0 +1,475 @@
+package warmup
+
+import (
+	"math"
+	"time"
+)
+
+// Pool lanes. These exact strings are pinned by migration 000055's CHECK
+// constraint on warmup_participants.lane.
+//
+// A lane answers "who may this mailbox exchange traffic with". It is a SEPARATE
+// axis from health_state, which answers "how does this mailbox's outbound mail
+// perform". Phase 0 overloaded one column with both questions, so a mailbox with
+// no evidence and a mailbox with bad evidence looked identical to the pool.
+const (
+	LanePendingAuth = "pending_auth"
+	LaneProbation   = "probation"
+	LaneHealthy     = "healthy"
+	LaneWatch       = "watch"
+	LaneRecovery    = "recovery"
+	LaneQuarantine  = "quarantine"
+	LaneBlocked     = "blocked"
+)
+
+// PolicyVersion stamps every transition so a decision stays explainable after the
+// thresholds move. Bump it whenever a threshold or rule below changes.
+const PolicyVersion = "warmup-phase1-v1"
+
+// Health states, ordered from best to worst, pinned by migration 000054's CHECK
+// constraint on warmup_participants.health_state.
+const (
+	StateHealthy   = "healthy"
+	StateUnknown   = "unknown"
+	StateWatch     = "watch"
+	StateThrottled = "throttled"
+	StatePaused    = "paused"
+)
+
+// Rate thresholds. Each is compared against a Wilson lower bound, never a point
+// estimate — see qualifiedRate.
+const (
+	spamWatchRate         = 0.15
+	spamThrottleRate      = 0.30
+	spamPauseRate         = 0.50
+	bounceWatchRate       = 0.03
+	bounceThrottleRate    = 0.05
+	bouncePauseRate       = 0.10
+	complaintWatchRate    = 0.0003
+	complaintThrottleRate = 0.001
+	complaintPauseRate    = 0.003
+)
+
+// Minimum samples before a rate may influence anything. A rate below its minimum
+// is UNPROVEN: it neither degrades a mailbox nor counts as clean evidence for
+// promotion. Absence of evidence is never health.
+const (
+	MinPlacementSamples = 20
+	MinBounceSamples    = 50
+	// Complaint thresholds are fine-grained (0.03% / 0.1% / 0.3%), so they need a
+	// far larger sample than the coarse spam bands to be resolvable at all. At 100
+	// samples a SINGLE complaint yields a Wilson lower bound of ~0.18%, which clears
+	// the 0.1% throttle threshold — so the old minimum let one FBL report throttle a
+	// mailbox even with the bound applied. At 1000, one complaint bounds to ~0.018%
+	// and reads as clean, while 20 bounds to ~1.3% and pauses.
+	MinComplaintSamples = 1000
+)
+
+// ProbationDailyVolume caps probation and recovery lanes (design doc §5). Low
+// enough to bound blast radius, high enough to accumulate placement evidence.
+const ProbationDailyVolume = 5
+
+// QuarantineCooldown is how long a quarantined participant must wait before it may
+// enter recovery. Elapsing is NECESSARY BUT NOT SUFFICIENT — recovery still has to
+// earn healthy through fresh evidence, which is acceptance criterion 2.
+const QuarantineCooldown = 72 * time.Hour
+
+// Signals are the materialized evidence for one participant, read from
+// warmup_signal_snapshots.
+//
+// Campaign and warmup bounce populations are deliberately SEPARATE. Phase 0 summed
+// them, and warmup traffic — synthetic mail between the operator's own mailboxes,
+// which essentially never hard-bounces — diluted the denominator below the
+// thresholds it was meant to trip: 20 hard bounces on 200 campaign sends is a 10%
+// rate, but 20/(200+1200) reads as 1.4%. Each population is evaluated against its
+// own gate and the worst result wins.
+type Signals struct {
+	CurrentHealth string
+	CurrentLane   string
+
+	// AuthPassing is sending_domains.state = 'passing' for the mailbox's
+	// organizational domain AND a mailbox that is connected. It deliberately does
+	// not consider DKIM: selectors are not discoverable from DNS, so a missing
+	// selector match is not evidence of an unsigned domain (see migration 000036).
+	AuthPassing bool
+
+	// EvidenceFresh reports whether the snapshot is recent enough to act on. A
+	// stale snapshot is treated as no evidence, never as health.
+	EvidenceFresh bool
+
+	Inbox int
+	Spam  int
+
+	CampaignDelivered   int
+	CampaignHardBounces int
+	CampaignComplaints  int
+
+	WarmupDelivered   int
+	WarmupHardBounces int
+
+	// ObserverTokenFailures counts forged warmup tokens THIS mailbox received. It
+	// is observer-side only and never attributed to a claimed sender, because an
+	// unauthenticated token may name any sender — trusting it would let anyone
+	// throttle a mailbox they do not own. Surfaced to operators; nothing automatic
+	// acts on it until an observer-trust axis exists.
+	ObserverTokenFailures int
+
+	// QuarantinedSince is when the participant entered quarantine, zero if it is
+	// not quarantined. Drives the cooldown gate only.
+	QuarantinedSince time.Time
+}
+
+// Decision is both the outcome and the evidence behind it. Every field that fed a
+// threshold is recorded so warmup_state_transitions can explain the change without
+// re-deriving anything.
+type Decision struct {
+	Health           string
+	HealthReasonCode string
+	HealthReason     string
+
+	Lane           string
+	LaneReasonCode string
+	LaneReason     string
+
+	PlacementSamples int
+	SpamRate         float64
+
+	CampaignBounceSamples int
+	CampaignBounceRate    float64
+	WarmupBounceSamples   int
+	WarmupBounceRate      float64
+
+	ComplaintSamples int
+	ComplaintRate    float64
+
+	ObserverTokenFailures int
+}
+
+// EvaluateParticipant decides both axes in one pass. The caller persists them in
+// one statement, which is what makes "quarantined but healthy" unrepresentable.
+//
+// Health escalation drives lane demotion; lane never drives health.
+func EvaluateParticipant(s Signals, now time.Time) Decision {
+	d := evaluateHealth(s)
+	d.Lane, d.LaneReasonCode, d.LaneReason = evaluateLane(s, d, now)
+	return d
+}
+
+// evaluateHealth applies each rate's minimum-sample gate and Wilson lower bound,
+// then takes the worst warranted state. Escalation is immediate; recovery is one
+// step per evaluation.
+func evaluateHealth(s Signals) Decision {
+	placement := s.Inbox + s.Spam
+	d := Decision{
+		Health:           StateHealthy,
+		PlacementSamples: placement,
+		SpamRate:         qualifiedRate(s.Spam, placement, MinPlacementSamples),
+
+		CampaignBounceSamples: s.CampaignDelivered,
+		CampaignBounceRate:    qualifiedRate(s.CampaignHardBounces, s.CampaignDelivered, MinBounceSamples),
+		WarmupBounceSamples:   s.WarmupDelivered,
+		WarmupBounceRate:      qualifiedRate(s.WarmupHardBounces, s.WarmupDelivered, MinBounceSamples),
+
+		ComplaintSamples: s.CampaignDelivered,
+		ComplaintRate:    qualifiedRate(s.CampaignComplaints, s.CampaignDelivered, MinComplaintSamples),
+
+		ObserverTokenFailures: s.ObserverTokenFailures,
+	}
+
+	worst := func(state, code, reason string) {
+		if stateRank(state) > stateRank(d.Health) {
+			d.Health, d.HealthReasonCode, d.HealthReason = state, code, reason
+		}
+	}
+
+	applyBand(d.SpamRate, spamWatchRate, spamThrottleRate, spamPauseRate, "spam", "spam placement rate", worst)
+	applyBand(d.CampaignBounceRate, bounceWatchRate, bounceThrottleRate, bouncePauseRate, "campaign_bounce", "campaign hard-bounce rate", worst)
+	applyBand(d.WarmupBounceRate, bounceWatchRate, bounceThrottleRate, bouncePauseRate, "warmup_bounce", "warmup hard-bounce rate", worst)
+	applyBand(d.ComplaintRate, complaintWatchRate, complaintThrottleRate, complaintPauseRate, "complaint", "complaint rate", worst)
+
+	current := normalizeState(s.CurrentHealth)
+
+	// No qualified placement evidence: hold a degraded state where it is, and call
+	// an undegraded one unknown. Never healthy.
+	if d.Health == StateHealthy && (placement < MinPlacementSamples || !s.EvidenceFresh) {
+		if stateRank(current) > stateRank(StateHealthy) {
+			d.Health, d.HealthReasonCode, d.HealthReason = current, "insufficient_evidence_to_recover", "not enough fresh placement evidence to recover"
+			return d
+		}
+		d.Health, d.HealthReasonCode, d.HealthReason = StateUnknown, "placement_sample_insufficient", "not enough fresh placement evidence"
+		return d
+	}
+
+	if stateRank(d.Health) < stateRank(current) {
+		d.Health = stateAtRank(stateRank(current) - 1)
+		d.HealthReasonCode, d.HealthReason = "recovery_step", "clean qualified window: recovering one state"
+		return d
+	}
+
+	// unknown shares healthy's rank, so the recovery-step branch above cannot fire
+	// for unknown -> healthy. That transition still has to name itself: the
+	// transitions table rejects an empty reason_code, and it shares one atomic
+	// statement with the participant update — so an unexplained decision does not
+	// merely lose its audit trail, it aborts the state change.
+	if d.HealthReasonCode == "" && d.Health != current {
+		d.HealthReasonCode, d.HealthReason = "evidence_qualified", "qualified placement evidence establishes health"
+	}
+	return d
+}
+
+// evaluateLane maps the health decision plus admission facts onto a pool lane.
+//
+// Automated policy never enters LaneBlocked. The design doc shows a severe signal
+// reaching it directly, but blocked requires operator approval to LEAVE — so an
+// automatic entry could strand a self-hosted install with no path out and no
+// operator watching. Quarantine is the automated terminal containment; blocked
+// stays operator-only in both directions.
+func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason string) {
+	cur := normalizeLane(s.CurrentLane)
+
+	// Operator-held states are never moved by policy.
+	if cur == LaneBlocked {
+		return LaneBlocked, "lane_blocked_held", "blocked: operator approval required to re-enter recovery"
+	}
+
+	// Admission prerequisite outranks everything else: unauthenticated mail damages
+	// reputation faster than any pool arrangement can repair it.
+	if !s.AuthPassing {
+		if cur == LanePendingAuth {
+			return LanePendingAuth, "lane_pending_auth", "domain authentication has not passed"
+		}
+		return LanePendingAuth, "lane_auth_regressed", "domain authentication no longer passes"
+	}
+
+	degraded := stateRank(d.Health) >= stateRank(StateThrottled)
+	watching := d.Health == StateWatch
+	qualified := d.Health == StateHealthy && s.EvidenceFresh && d.PlacementSamples >= MinPlacementSamples
+
+	// Any qualified-throttled-or-worse signal contains the participant, wherever it
+	// currently sits.
+	if degraded {
+		if cur == LaneQuarantine {
+			return LaneQuarantine, "lane_quarantine_held", "quarantined: " + d.HealthReason
+		}
+		return LaneQuarantine, "lane_quarantined", "quarantined: " + d.HealthReason
+	}
+
+	switch cur {
+	case LanePendingAuth:
+		// Authentication just passed. Entry is probation, never healthy — a
+		// newly-authenticated mailbox has proven nothing about placement.
+		return LaneProbation, "lane_admitted_to_probation", "domain authentication passed: entering probation"
+
+	case LaneQuarantine:
+		if s.QuarantinedSince.IsZero() || now.Sub(s.QuarantinedSince) < QuarantineCooldown {
+			return LaneQuarantine, "lane_cooldown_active", "quarantine cooldown has not elapsed"
+		}
+		// Cooldown elapsed AND prerequisites met. Recovery still has to EARN
+		// healthy: elapsed time alone never reinstates a participant.
+		return LaneRecovery, "lane_cooldown_elapsed", "quarantine cooldown elapsed: entering recovery to requalify"
+
+	case LaneProbation, LaneRecovery:
+		if qualified {
+			return LaneHealthy, "lane_qualified", "qualified clean window: promoted to the healthy pool"
+		}
+		return cur, "lane_awaiting_evidence", "awaiting a qualified clean window"
+
+	case LaneWatch:
+		if qualified {
+			return LaneHealthy, "lane_recovered", "clean qualified evidence: returned to the healthy pool"
+		}
+		return LaneWatch, "lane_watch_held", "held on watch pending clean evidence"
+
+	default: // LaneHealthy
+		if watching {
+			return LaneWatch, "lane_watch", "moved to watch: " + d.HealthReason
+		}
+		if !qualified {
+			// Evidence went stale or fell below the minimum sample. Leaving it in the
+			// healthy lane would let an unmeasured mailbox keep reaching healthy peers.
+			return LaneProbation, "lane_evidence_lapsed", "no fresh qualified evidence: returned to probation"
+		}
+		return LaneHealthy, "lane_healthy", "qualified clean evidence"
+	}
+}
+
+// LaneDailyVolume caps a lane's warmup output. Probation and recovery are
+// deliberately low-volume: they exist to gather evidence with a bounded blast
+// radius, not to make progress quickly. Lanes that may not send return 0.
+func LaneDailyVolume(lane string, rampTarget int) int {
+	switch normalizeLane(lane) {
+	case LaneHealthy, LaneWatch:
+		return rampTarget
+	case LaneProbation, LaneRecovery:
+		if rampTarget < ProbationDailyVolume {
+			return rampTarget
+		}
+		return ProbationDailyVolume
+	default: // pending_auth, quarantine, blocked
+		return 0
+	}
+}
+
+// LaneMaySend reports whether a lane may originate warmup traffic at all.
+func LaneMaySend(lane string) bool {
+	switch normalizeLane(lane) {
+	case LaneHealthy, LaneWatch, LaneProbation, LaneRecovery:
+		return true
+	default:
+		return false
+	}
+}
+
+// LaneMayTakeNewLead reports whether a mailbox in this lane may be given a NEW
+// campaign lead. Replies to a human who already wrote back are governed
+// separately and are always allowed: stopping reputation expansion is the goal,
+// and abandoning a live conversation is a business harm that outweighs it.
+func LaneMayTakeNewLead(lane string) bool {
+	switch normalizeLane(lane) {
+	case LaneQuarantine, LaneBlocked, LanePendingAuth:
+		return false
+	default:
+		return true
+	}
+}
+
+// LanesCompatible reports whether sender may send warmup to recipient. With no
+// sentinel lane, same-lane is the whole rule — simple enough to be provable,
+// which is the point: a healthy customer mailbox never receives traffic from a
+// probation, recovery, watch, quarantined or blocked peer.
+func LanesCompatible(sender, recipient string) bool {
+	s, r := normalizeLane(sender), normalizeLane(recipient)
+	return LaneMaySend(s) && LaneMaySend(r) && s == r
+}
+
+// applyBand maps one rate onto the worst state its three thresholds warrant. A
+// rate of exactly 0 never escalates, so an unproven rate (see qualifiedRate)
+// cannot degrade anything.
+func applyBand(rate, watch, throttle, pause float64, code, label string, worst func(state, code, reason string)) {
+	switch {
+	case rate > pause:
+		worst(StatePaused, code+"_pause", label+" above the pause threshold")
+	case rate > throttle:
+		worst(StateThrottled, code+"_throttle", label+" above the throttle threshold")
+	case rate > watch:
+		worst(StateWatch, code+"_watch", label+" above the watch threshold")
+	}
+}
+
+// qualifiedRate is the Wilson score interval's LOWER bound at 95% for
+// successes/trials, or 0 when the sample has not met its minimum.
+//
+// Using the lower bound rather than the point estimate is what makes a small
+// sample honest. Phase 0 compared 1 complaint in 100 sends (a point estimate of
+// 1%) against a 0.3% pause threshold and paused the mailbox for 72 hours — but one
+// FBL report is not evidence of a 0.3% rate. The lower bound for 1/100 is ~0.18%,
+// which does not pause; 20/1000 gives ~1.3%, which does.
+func qualifiedRate(successes, trials, minSamples int) float64 {
+	if trials < minSamples || trials <= 0 || successes <= 0 {
+		return 0
+	}
+	if successes >= trials {
+		return 1
+	}
+	return wilsonLowerBound(successes, trials)
+}
+
+// wilsonLowerBound returns the lower bound of the Wilson score interval at 95%
+// confidence (z = 1.96). Preferred over the normal approximation because it stays
+// well-behaved at small n and near 0, which is exactly where reputation rates live.
+func wilsonLowerBound(successes, trials int) float64 {
+	const z = 1.959963984540054
+	n := float64(trials)
+	p := float64(successes) / n
+	z2 := z * z
+	center := p + z2/(2*n)
+	margin := z * math.Sqrt(p*(1-p)/n+z2/(4*n*n))
+	lb := (center - margin) / (1 + z2/n)
+	if lb < 0 {
+		return 0
+	}
+	return lb
+}
+
+// stateRank orders health states by badness. unknown deliberately shares
+// healthy's rank: it is an ABSENCE of evidence, not a degree of badness, and
+// ranking it as "worse" would make recovery arithmetic treat missing data as a
+// penalty to be worked off.
+func stateRank(state string) int {
+	switch state {
+	case StateWatch:
+		return 1
+	case StateThrottled:
+		return 2
+	case StatePaused:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func stateAtRank(rank int) string {
+	switch rank {
+	case 1:
+		return StateWatch
+	case 2:
+		return StateThrottled
+	case 3:
+		return StatePaused
+	default:
+		return StateHealthy
+	}
+}
+
+func normalizeState(state string) string {
+	if state == StateUnknown {
+		return StateUnknown
+	}
+	return stateAtRank(stateRank(state))
+}
+
+// normalizeLane maps an unrecognized or empty lane to probation. A lane outside
+// the CHECK constraint can only come from a direct write, and treating it as
+// probation fails safe: bounded volume, own lane, no access to healthy peers.
+func normalizeLane(lane string) string {
+	switch lane {
+	case LanePendingAuth, LaneProbation, LaneHealthy, LaneWatch, LaneRecovery, LaneQuarantine, LaneBlocked:
+		return lane
+	default:
+		return LaneProbation
+	}
+}
+
+// IsRecovery reports whether a health transition from->to moves toward a healthier
+// state rather than a worse one. from == to is not a recovery.
+func IsRecovery(from, to string) bool {
+	return stateRank(to) < stateRank(from)
+}
+
+// HoldRecoveryDuringBlock keeps a health RECOVERY from landing while the timed
+// block is still in force (pausedUntil in the future), enforcing the 24h/72h dwell
+// so a mailbox cannot walk paused→throttled→watch→healthy on back-to-back
+// five-minute sweeps.
+//
+// It clamps only the health axis. A lane change still applies immediately, because
+// the reasons a lane must move — authentication regressed, cooldown elapsed,
+// evidence went stale — are not recoveries being rushed, and delaying containment
+// to respect a dwell timer would be backwards.
+func HoldRecoveryDuringBlock(d Decision, fromHealth string, pausedUntil, now time.Time) Decision {
+	if !IsRecovery(fromHealth, d.Health) || !pausedUntil.After(now) {
+		return d
+	}
+	d.Health = normalizeState(fromHealth)
+	if d.HealthReasonCode == "recovery_step" || d.HealthReasonCode == "evidence_qualified" {
+		d.HealthReasonCode = "recovery_blocked_by_dwell"
+		d.HealthReason = "recovery held: the timed block has not elapsed"
+	}
+	return d
+}
+
+// ShouldApplyTransition reports whether a decision differs from what is already
+// stored on either axis. A no-op on both is never written, so a steady-state sweep
+// touches nothing.
+func ShouldApplyTransition(fromHealth, toHealth, fromLane, toLane string) bool {
+	return fromHealth != toHealth || normalizeLane(fromLane) != normalizeLane(toLane)
+}

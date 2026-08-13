@@ -104,15 +104,34 @@ function SendMeter({ sending }: { sending: WorkspacePulse['sending'] }) {
   )
 }
 
+/**
+ * Warmup is two independent axes — pool eligibility (`lane`) and sender
+ * reputation (`health_state`) — condensed to one line, worst-first. The order
+ * encodes consequence, not the order the payload lists the fields:
+ * `quarantine` (withheld) outranks the reputation buckets because a withheld
+ * mailbox exchanges no warmup mail *and* takes no new campaign leads, where
+ * `at_risk` only reduces volume. `probation` sits last because it is the normal
+ * lifecycle of a new mailbox — but it still outranks "all healthy", which would
+ * otherwise claim a pool of entirely unproven mailboxes is healthy.
+ */
+const WARMUP_STATUS_RULES: Array<{ count: (w: WorkspacePulse['warmup']) => number; label: (n: number) => string }> = [
+  { count: (w) => w.quarantine, label: (n) => `${n} withheld` },
+  { count: (w) => w.at_risk, label: (n) => `${n} at risk` },
+  { count: (w) => w.watch, label: (n) => `${n} on watch` },
+  { count: (w) => w.unknown, label: (n) => `${n} need evidence` },
+  { count: (w) => w.probation, label: (n) => `${n} proving` },
+]
+
+function warmupStatus(warmup: WorkspacePulse['warmup']): string {
+  for (const rule of WARMUP_STATUS_RULES) {
+    const count = rule.count(warmup)
+    if (count > 0) return rule.label(count)
+  }
+  return 'all healthy'
+}
+
 function WarmupLine({ warmup }: { warmup: WorkspacePulse['warmup'] }) {
-  const status =
-    warmup.at_risk > 0
-      ? `${warmup.at_risk} at risk`
-      : warmup.watch > 0
-        ? `${warmup.watch} on watch`
-        : warmup.unknown > 0
-          ? `${warmup.unknown} need evidence`
-          : 'all healthy'
+  const status = warmupStatus(warmup)
   return (
     <Link to="/app/warmup" data-slot="pulse-warmup-line" className={cn(rowClass, 'text-[12px] text-chrome-muted')}>
       <Flame className="size-3 shrink-0 text-warm" strokeWidth={1.75} aria-hidden="true" />

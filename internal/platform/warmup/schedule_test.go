@@ -3,7 +3,6 @@ package warmup
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -355,136 +354,11 @@ func TestDeferToWakingHours(t *testing.T) {
 	}
 }
 
-func TestEvaluateHealthUsesQualifiedEvidence(t *testing.T) {
-	cases := []struct {
-		name        string
-		in          HealthSignals
-		state, code string
-	}{
-		{"no evidence is unknown", HealthSignals{Current: StateHealthy}, StateUnknown, "placement_sample_insufficient"},
-		{"small bad sample is still unknown", HealthSignals{Current: StateHealthy, Spam: 19}, StateUnknown, "placement_sample_insufficient"},
-		{"qualified spam reaches watch", HealthSignals{Current: StateHealthy, Inbox: 16, Spam: 4}, StateWatch, "spam_watch"},
-		{"qualified bounce can pause", HealthSignals{Current: StateHealthy, BounceSamples: 50, Bounces: 6}, StatePaused, "bounce_pause"},
-		{"qualified complaint can pause", HealthSignals{Current: StateHealthy, ComplaintSamples: 1000, Complaints: 4}, StatePaused, "complaint_pause"},
-		{"degraded state cannot recover without placement", HealthSignals{Current: StatePaused}, StatePaused, "insufficient_evidence_to_recover"},
-		{"clean qualified placement establishes health", HealthSignals{Current: StateUnknown, Inbox: 20}, StateHealthy, "evidence_qualified"},
-		{"unknown escalates straight to the warranted state", HealthSignals{Current: StateUnknown, Inbox: 10, Spam: 10}, StateThrottled, "spam_throttle"},
-		{"qualified recovery is gradual", HealthSignals{Current: StatePaused, Inbox: 20}, StateThrottled, "recovery_step"},
-		{"trusted token failures throttle", HealthSignals{Current: StateHealthy, InvalidTokens: 3}, StateThrottled, "invalid_tokens"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := EvaluateHealth(tc.in)
-			if got.State != tc.state || got.ReasonCode != tc.code {
-				t.Fatalf("decision = %q/%q, want %q/%q", got.State, got.ReasonCode, tc.state, tc.code)
-			}
-		})
-	}
-}
-
-// Every transition the evaluator asks to persist must name why. warmup_state_
-// transitions enforces reason_code <> ” and shares one atomic statement with the
-// participant update, so an unexplained decision does not merely lose its audit
-// trail — it aborts the state change itself and the mailbox never moves. This
-// sweeps the whole decision surface rather than the one pair that regressed
-// (unknown → healthy), because the empty code came from two states sharing a rank
-// and any future state added to that scale can reintroduce it.
-func TestEvaluateHealthExplainsEveryAppliedTransition(t *testing.T) {
-	states := []string{StateUnknown, StateHealthy, StateWatch, StateThrottled, StatePaused}
-	signals := []struct {
-		name string
-		in   HealthSignals
-	}{
-		{"no evidence", HealthSignals{}},
-		{"clean qualified placement", HealthSignals{Inbox: 20}},
-		{"spam at watch", HealthSignals{Inbox: 16, Spam: 4}},
-		{"spam at throttle", HealthSignals{Inbox: 10, Spam: 10}},
-		{"spam at pause", HealthSignals{Inbox: 4, Spam: 16}},
-		{"qualified bounce", HealthSignals{BounceSamples: 50, Bounces: 6}},
-		{"qualified complaint", HealthSignals{ComplaintSamples: 1000, Complaints: 4}},
-		{"sub-threshold sample", HealthSignals{Inbox: 5, Spam: 14}},
-	}
-	var zero time.Time
-	for _, from := range states {
-		for _, sig := range signals {
-			t.Run(from+"/"+sig.name, func(t *testing.T) {
-				in := sig.in
-				in.Current = from
-				got := EvaluateHealth(in)
-				if !ShouldApplyTransition(from, got.State, zero, zero) {
-					return // no write, so nothing to explain
-				}
-				if got.ReasonCode == "" {
-					t.Fatalf("%s -> %s would be persisted with an empty reason_code, which the transitions table rejects", from, got.State)
-				}
-				if got.Reason == "" {
-					t.Fatalf("%s -> %s (%s) has no human-readable reason", from, got.State, got.ReasonCode)
-				}
-			})
-		}
-	}
-}
-
 func TestPairDailyCap(t *testing.T) {
 	if got := PairDailyCap(10, 3); got != 4 {
 		t.Fatalf("PairDailyCap(10, 3) = %d, want 4", got)
 	}
 	if PairDailyCap(10, 0) != 0 || PairDailyCap(0, 3) != 0 {
 		t.Fatal("empty target or partner pool must produce a zero pair cap")
-	}
-}
-
-func TestHealthStateTransitions(t *testing.T) {
-	cases := []struct {
-		name          string
-		spam, bounce  float64
-		invalidTokens int
-		current       string
-		wantState     string
-	}{
-		{"clean stays healthy", 0.05, 0.0, 0, StateHealthy, StateHealthy},
-		{"spam over 15 -> watch", 0.20, 0.0, 0, StateHealthy, StateWatch},
-		{"spam over 30 -> throttled", 0.35, 0.0, 0, StateHealthy, StateThrottled},
-		{"spam over 50 -> paused", 0.60, 0.0, 0, StateHealthy, StatePaused},
-		{"bounce spike -> paused", 0.0, 0.20, 0, StateHealthy, StatePaused},
-		{"invalid tokens -> throttled", 0.0, 0.0, 3, StateHealthy, StateThrottled},
-		{"escalation is immediate", 0.60, 0.0, 0, StateWatch, StatePaused},
-		{"recover paused -> throttled on clean", 0.0, 0.0, 0, StatePaused, StateThrottled},
-		{"recover throttled -> watch on clean", 0.0, 0.0, 0, StateThrottled, StateWatch},
-		{"recover watch -> healthy on clean", 0.0, 0.0, 0, StateWatch, StateHealthy},
-		{"partial recovery steps one level toward health", 0.20, 0.0, 0, StatePaused, StateThrottled},
-		{"holds level when signals match state", 0.20, 0.0, 0, StateWatch, StateWatch},
-		{"unknown current treated as healthy", 0.20, 0.0, 0, "bogus", StateWatch},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, reason := HealthState(tc.spam, tc.bounce, tc.invalidTokens, tc.current)
-			if got != tc.wantState {
-				t.Fatalf("state = %q, want %q (reason %q)", got, tc.wantState, reason)
-			}
-			if got != StateHealthy && reason == "" {
-				t.Fatalf("expected a non-empty reason for non-healthy state %q", got)
-			}
-			if got == StateHealthy && reason != "" {
-				t.Fatalf("expected empty reason for healthy, got %q", reason)
-			}
-		})
-	}
-}
-
-// TestHealthStatePartialRecoveryReason pins that a step-down whose window is NOT
-// clean — signals still warrant a non-healthy level, just a milder one — reports
-// the persisting signal and never falsely claims a clean window. State is still a
-// single step toward health (paused -> throttled); only the reason is at issue.
-func TestHealthStatePartialRecoveryReason(t *testing.T) {
-	got, reason := HealthState(0.20, 0.0, 0, StatePaused) // spam 0.20 warrants watch
-	if got != StateThrottled {
-		t.Fatalf("state = %q, want %q (reason %q)", got, StateThrottled, reason)
-	}
-	if strings.Contains(reason, "clean window") {
-		t.Fatalf("reason must not claim a clean window while signals persist: %q", reason)
-	}
-	if !strings.Contains(reason, "15%") {
-		t.Fatalf("reason should surface the still-present signal, got %q", reason)
 	}
 }

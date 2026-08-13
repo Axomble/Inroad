@@ -488,8 +488,13 @@ func TestEvaluateWarmupHealthTransitionsAndRespectsEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read A: %v", err)
 	}
-	if pa.HealthState != warmup.StatePaused {
-		t.Fatalf("A health = %q, want paused (60%% sender-attributed spam)", pa.HealthState)
+	// 12 spam of 20 is 60% observed, but the policy compares a Wilson 95% LOWER
+	// bound, which for that sample is ~38.7% — over the 30% throttle band, under the
+	// 50% pause band. Deliberate: 20 observations cannot establish a 50% rate with
+	// confidence, and Phase 0's false positives came from treating thin samples as
+	// certain. What matters here is that sender-attributed spam degrades A at all.
+	if pa.HealthState != warmup.StateThrottled {
+		t.Fatalf("A health = %q, want throttled (60%% observed sender-attributed spam bounds to ~38.7%%)", pa.HealthState)
 	}
 	if !pa.PausedUntil.Valid {
 		t.Fatalf("A paused_until not set on escalation")

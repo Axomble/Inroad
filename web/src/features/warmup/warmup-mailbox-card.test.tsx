@@ -20,6 +20,8 @@ const entry: WarmupMailbox = {
   enabled: true,
   health_state: 'healthy',
   health_reason: '',
+  lane: 'healthy',
+  lane_reason: '',
   today_sent: 2,
   today_target: 4,
   placement_sample_7d: 10,
@@ -54,6 +56,7 @@ beforeEach(() => {
             reply_rate: 0.3,
             health_state: 'healthy',
             health_reason: '',
+            lane: 'healthy',
             started_at: '2026-07-26T00:00:00Z',
             today_sent: 2,
             today_target: 4,
@@ -75,13 +78,102 @@ test('an empty placement window is shown as not measured', () => {
   renderWithProviders(
     <WarmupMailboxCard
       mailbox={mailbox}
-      entry={{ ...entry, health_state: 'unknown', placement_sample_7d: 0, inbox_rate_7d: null, spam_rate_7d: null }}
+      entry={{
+        ...entry,
+        health_state: 'unknown',
+        lane: 'probation',
+        placement_sample_7d: 0,
+        inbox_rate_7d: null,
+        spam_rate_7d: null,
+      }}
     />,
   )
 
   expect(screen.getAllByText('Not measured')).toHaveLength(2)
   expect(screen.getByText('0 observations')).toBeInTheDocument()
   expect(screen.getByText('Needs evidence')).toBeInTheDocument()
+})
+
+/** The two axis chips as an operator reads them: [reputation, pool]. */
+function badgeText(): { health: string | undefined; lane: string | undefined } {
+  return {
+    health: document.querySelector('[data-slot="health-badge"]')?.textContent ?? undefined,
+    lane: document.querySelector('[data-slot="lane-badge"]')?.textContent ?? undefined,
+  }
+}
+
+// Lane and health are independent axes: this mailbox's outbound mail measures
+// clean, and it is still not in the healthy pool. Both facts must be on the row,
+// as two separately-labelled chips — one badge would have to lie about one axis.
+test('a reputation-healthy mailbox still in probation shows both axes', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, health_state: 'healthy', lane: 'probation', lane_reason: '3 of 20 placement samples' }}
+    />,
+  )
+
+  const badges = badgeText()
+  expect(badges.health).toContain('Healthy')
+  expect(badges.lane).toContain('Proving')
+  // The lane chip names its axis in text, so the pair can't be read as one status.
+  expect(badges.lane).toContain('Pool')
+  expect(badges.health).not.toContain('Pool')
+  expect(screen.getByText('3 of 20 placement samples')).toBeInTheDocument()
+})
+
+// The inverse pairing, which the single Phase 0 badge could not express: the last
+// measured reputation was fine, and the mailbox is withheld from the pool anyway.
+test('a quarantined mailbox reads as withheld and is distinguishable from a probation one', () => {
+  const { unmount } = renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{
+        ...entry,
+        health_state: 'healthy',
+        lane: 'quarantine',
+        lane_reason: 'Withheld after a 6% hard-bounce rate; needs a clean 7-day window',
+      }}
+    />,
+  )
+
+  const quarantined = badgeText()
+  expect(quarantined.lane).toContain('Withheld')
+  expect(quarantined.lane).not.toContain('Proving')
+  // Reputation is unchanged by the lane — the badges disagree, on purpose.
+  expect(quarantined.health).toContain('Healthy')
+  // Withheld carries the danger tone; proving carries the warmup "heat" tone.
+  expect(document.querySelector('[data-slot="lane-badge"]')?.className).toContain('text-danger')
+  expect(screen.getByText(/needs a clean 7-day window/i)).toBeInTheDocument()
+
+  unmount()
+  renderWithProviders(
+    <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, lane: 'probation', lane_reason: 'Gathering evidence' }} />,
+  )
+  const probation = badgeText()
+  expect(probation.lane).toContain('Proving')
+  expect(probation.lane).not.toBe(quarantined.lane)
+  expect(document.querySelector('[data-slot="lane-badge"]')?.className).not.toContain('text-danger')
+})
+
+// A lane this build has never heard of (or a server that stopped sending one)
+// must not present the mailbox as a member of the healthy pool.
+test('an unrecognized lane renders as proving, not as the healthy pool', () => {
+  renderWithProviders(
+    // The generated union is closed; the JSON boundary is not, so a newer server
+    // value is exactly what this asserts against.
+    <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, lane: 'sentinel' as WarmupMailbox['lane'] }} />,
+  )
+
+  const badges = badgeText()
+  expect(badges.lane).toContain('Proving')
+  expect(badges.lane).not.toContain('Healthy')
+})
+
+test('an empty lane reason renders no explanation line', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, lane_reason: '' }} />)
+
+  expect(screen.queryByText(/pool status/i)).not.toBeInTheDocument()
 })
 
 test('a failed disable surfaces the inline error alert with the generic copy', async () => {

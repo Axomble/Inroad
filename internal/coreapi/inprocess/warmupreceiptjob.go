@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -166,10 +167,18 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 					MailboxID: recipient, WorkspaceID: ws,
 				})
 				if perr == nil {
-					_ = c.q.RecordWarmupTokenFailureObservation(ctx, gen.RecordWarmupTokenFailureObservationParams{
+					// A valid-HMAC token presented against a send it was NOT addressed to
+					// is the highest-signal indicator of token compromise or replay in the
+					// system. Losing it silently — as this did — means an active forgery
+					// leaves no trace at all when the write fails.
+					if oerr := c.q.RecordWarmupTokenFailureObservation(ctx, gen.RecordWarmupTokenFailureObservationParams{
 						WorkspaceID: ws, RecipientMailbox: recipient,
-						ReasonCode: "receipt_binding_mismatch", Fingerprint: "binding:" + sendID.String(),
-					})
+						ReasonCode: "receipt_binding_mismatch",
+					}); oerr != nil {
+						slog.Warn("warmup_binding_mismatch_evidence_lost",
+							"workspace_id", ws.String(), "mailbox_id", recipient.String(),
+							"warmup_send_id", sendID.String(), "err", oerr)
+					}
 					return coreapi.WarmupEngagePlan{}, nil
 				}
 				if errors.Is(perr, pgx.ErrNoRows) {
@@ -471,40 +480,93 @@ func (c client) ListDueWarmupMailboxes(ctx context.Context) ([]coreapi.MailboxRe
 // update error is accumulated (errors.Join) and evaluation CONTINUES for the rest,
 // so one bad row never stalls health eval for every mailbox.
 func (c client) EvaluateWarmupHealth(ctx context.Context) error {
-	rows, err := c.q.ListWarmupHealthSignals(ctx)
+	workspaces, err := c.q.ListWorkspacesWithWarmupParticipants(ctx)
 	if err != nil {
 		return err
 	}
 	now := c.now().UTC()
 	var errs []error
-	for _, r := range rows {
-		// Placement is sender-attributed. Missing placement remains zero counts
-		// here and is mapped to unknown by the minimum-sample policy below.
-		decision := warmup.EvaluateHealth(warmup.HealthSignals{
-			Current: r.HealthState, Inbox: int(r.Inbox), Spam: int(r.Spam),
-			BounceSamples: int(r.BounceSamples), Bounces: int(r.Bounces),
-			ComplaintSamples: int(r.ComplaintSamples), Complaints: int(r.Complaints),
-			InvalidTokens: int(r.InvalidTokens),
-		})
-		// Timed-block floor (spec §8): an escalation to a worse state applies
-		// immediately, but a recovery (step down) is held back while paused_until is
-		// still in the future — so recovery can't bypass the 72h/24h dwell by walking
-		// paused→throttled→watch→healthy on consecutive 5-minute sweeps.
-		if !warmup.ShouldApplyTransition(r.HealthState, decision.State, r.PausedUntil.Time, now) {
+	for _, ws := range workspaces {
+		// Signals are aggregated ONCE per workspace, not recomputed per participant.
+		// The Phase 0 sweep ran eight correlated subqueries for every enabled mailbox
+		// on every tick, including an arm no index could serve.
+		if _, err := c.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, ws); err != nil {
+			// Skip this workspace rather than evaluating it on stale evidence. The
+			// previous snapshot survives and the staleness rule below will refuse to
+			// promote on it, so a persistent refresh failure degrades to "no
+			// promotions" rather than to wrong ones.
+			errs = append(errs, fmt.Errorf("warmup: refresh signals for workspace %s: %w", ws, err))
 			continue
 		}
-		_, err := c.q.ApplyWarmupHealthTransition(ctx, gen.ApplyWarmupHealthTransitionParams{
+		if err := c.evaluateWorkspaceParticipants(ctx, ws, now); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// warmupEvidenceTTL is how old a snapshot may be before it stops counting as
+// evidence. Twice the five-minute sweep interval tolerates one missed tick; beyond
+// that the participant reads as unknown and cannot be promoted. Staleness must
+// never read as safety (design §8, acceptance criterion 3).
+const warmupEvidenceTTL = 10 * time.Minute
+
+func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID, now time.Time) error {
+	rows, err := c.q.ListWarmupEvaluationRows(ctx, gen.ListWarmupEvaluationRowsParams{
+		WorkspaceID: ws, EvidenceTtlSeconds: int32(warmupEvidenceTTL / time.Second),
+	})
+	if err != nil {
+		return fmt.Errorf("warmup: list participants for workspace %s: %w", ws, err)
+	}
+	var errs []error
+	for _, r := range rows {
+		decision := warmup.EvaluateParticipant(warmup.Signals{
+			CurrentHealth: r.HealthState,
+			CurrentLane:   r.Lane,
+			AuthPassing:   r.AuthPassing,
+			// Computed by the DB clock (see the query): a participant enabled between
+			// the refresh and this read has no snapshot row at all, so the result is
+			// NULL, which must read as no evidence rather than as zeros that look clean.
+			EvidenceFresh:         r.EvidenceFresh != nil && *r.EvidenceFresh,
+			Inbox:                 int(r.PlacementInbox),
+			Spam:                  int(r.PlacementSpam),
+			CampaignDelivered:     int(r.CampaignDelivered),
+			CampaignHardBounces:   int(r.CampaignHardBounces),
+			CampaignComplaints:    int(r.CampaignComplaints),
+			WarmupDelivered:       int(r.WarmupDelivered),
+			WarmupHardBounces:     int(r.WarmupHardBounces),
+			ObserverTokenFailures: int(r.ObserverTokenFailures),
+			QuarantinedSince:      r.QuarantinedSince.Time,
+		}, now)
+
+		// The timed-block floor applies to the HEALTH axis only: a recovery is held
+		// while paused_until is in the future so a mailbox cannot walk
+		// paused→throttled→watch→healthy on consecutive five-minute sweeps. A lane
+		// change still lands immediately — auth regressing or evidence going stale is
+		// containment, not a recovery being rushed, and delaying it for a dwell timer
+		// would be backwards.
+		decision = warmup.HoldRecoveryDuringBlock(decision, r.HealthState, r.PausedUntil.Time, now)
+
+		if !warmup.ShouldApplyTransition(r.HealthState, decision.Health, r.Lane, decision.Lane) {
+			continue
+		}
+		if _, err := c.q.ApplyWarmupParticipantTransition(ctx, gen.ApplyWarmupParticipantTransitionParams{
 			MailboxID: r.MailboxID, WorkspaceID: r.WorkspaceID,
-			FromState: r.HealthState, ToState: decision.State,
-			ReasonCode: decision.ReasonCode, Reason: decision.Reason,
-			PausedUntil:      warmupPausedUntil(decision.State, now),
+			FromState: r.HealthState, ToState: decision.Health,
+			FromLane: r.Lane, ToLane: decision.Lane,
+			ReasonCode: decision.HealthReasonCode, Reason: decision.HealthReason,
+			LaneReasonCode: decision.LaneReasonCode, LaneReason: decision.LaneReason,
+			PausedUntil:      warmupPausedUntil(decision.Health, now),
 			PlacementSamples: int32(decision.PlacementSamples), SpamRate: float32(decision.SpamRate),
-			BounceSamples: int32(decision.BounceSamples), BounceRate: float32(decision.BounceRate),
+			// The transition row keeps one bounce column pair for continuity with
+			// Phase 0 history; the CAMPAIGN population is recorded because it is the
+			// one that reflects real recipients. The warmup population is evaluated
+			// separately by the policy and can still drive the state.
+			BounceSamples: int32(decision.CampaignBounceSamples), BounceRate: float32(decision.CampaignBounceRate),
 			ComplaintSamples: int32(decision.ComplaintSamples), ComplaintRate: float32(decision.ComplaintRate),
-			InvalidTokens: int32(decision.InvalidTokens), PolicyVersion: warmup.HealthPolicyVersion,
-		})
-		if err != nil {
-			errs = append(errs, fmt.Errorf("warmup: update health for mailbox %s: %w", r.MailboxID.String(), err))
+			InvalidTokens: int32(decision.ObserverTokenFailures), PolicyVersion: warmup.PolicyVersion,
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("warmup: apply transition for mailbox %s: %w", r.MailboxID.String(), err))
 			continue
 		}
 	}

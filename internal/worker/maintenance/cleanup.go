@@ -18,10 +18,15 @@ type Cleaner interface {
 	// authentication/authorization artifacts specifically, and the
 	// idempotency cache is an HTTP-layer concern, not a security artifact.
 	PurgeIdempotencyKeys(ctx context.Context) (deleted int64, err error)
+	// PurgeWarmupObservations removes warmup evidence past its 90-day retention.
+	// Separate for the same reason: it is neither a security artifact nor an
+	// HTTP-layer concern, and its retention is driven by the widest window any
+	// reputation query reads (30 days) plus margin.
+	PurgeWarmupObservations(ctx context.Context) (deleted int64, err error)
 }
 
-// CleanupHandler purges expired security artifacts AND expired
-// Idempotency-Key replay-cache rows. Returning a database error from either
+// CleanupHandler purges expired security artifacts, expired Idempotency-Key
+// replay-cache rows, AND warmup evidence past its retention window. Returning a database error from either
 // purge lets asynq retry; successful runs log each affected count for
 // observability.
 func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
@@ -37,6 +42,12 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired idempotency keys purged", "rows", idempotencyDeleted)
+
+		observationsDeleted, err := core.PurgeWarmupObservations(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired warmup observations purged", "rows", observationsDeleted)
 		return nil
 	}
 }

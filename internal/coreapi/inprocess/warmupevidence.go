@@ -22,7 +22,7 @@ func (c client) RecordWarmupTokenFailure(ctx context.Context, workspaceID, recip
 	}
 	return c.q.RecordWarmupTokenFailureObservation(ctx, gen.RecordWarmupTokenFailureObservationParams{
 		WorkspaceID: ws, RecipientMailbox: recipient,
-		Fingerprint: fingerprint, ReasonCode: reasonCode,
+		ReasonCode: reasonCode,
 	})
 }
 

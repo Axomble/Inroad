@@ -11,6 +11,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/sendcap"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // CreateInput carries the fields needed to create a new campaign. Timezone is
@@ -331,7 +332,7 @@ func (s *PgStore) ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]
 			dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
 			rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
 			mailboxStatus: r.Status, poolEnabled: r.Enabled,
-			healthState: r.HealthState, sentToday: r.SentToday,
+			healthState: r.HealthState, lane: r.Lane, sentToday: r.SentToday,
 		}.fill(&out[i])
 	}
 	return out, nil
@@ -355,7 +356,7 @@ func (s *PgStore) FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) 
 		dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
 		rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
 		mailboxStatus: r.Status, poolEnabled: true,
-		healthState: r.HealthState, sentToday: r.SentToday,
+		healthState: r.HealthState, lane: r.Lane, sentToday: r.SentToday,
 	}.fill(&out)
 	return out, nil
 }
@@ -371,6 +372,7 @@ type senderCapacity struct {
 	mailboxStatus                    string
 	poolEnabled                      bool
 	healthState                      string
+	lane                             string
 	sentToday                        int64
 }
 
@@ -383,10 +385,23 @@ func (c senderCapacity) fill(s *Sender) {
 	ramped := sendcap.Effective(int(c.dailyCap), int(c.rampStartCap), int(c.rampDays), c.rampEnabled, ageDays)
 	s.CapToday = sendcap.Cold(ramped, c.healthState)
 	s.SentToday = int(c.sentToday)
-	s.Sending = c.poolEnabled && c.mailboxStatus == mailboxStatusActive && c.healthState != sendcap.HealthPaused
+	// Two independent gates. Health decides how MUCH a mailbox may send; the lane
+	// decides WHETHER it may take new work at all. A quarantined mailbox reports
+	// sending=false even when its last measured reputation was healthy — that is the
+	// whole point of splitting the axes.
+	laneMayTake := c.lane == "" || warmup.LaneMayTakeNewLead(c.lane)
+	s.Sending = c.poolEnabled && c.mailboxStatus == mailboxStatusActive &&
+		c.healthState != sendcap.HealthPaused && laneMayTake
+	if !laneMayTake {
+		s.CapToday = 0
+	}
 	if c.healthState != "" {
 		state := c.healthState
 		s.HealthState = &state
+	}
+	if c.lane != "" {
+		lane := c.lane
+		s.Lane = &lane
 	}
 }
 
