@@ -188,7 +188,24 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 			}
 			return coreapi.WarmupEngagePlan{}, gerr
 		}
-		// Duplicate receipt. Already engaged (C5b ran) → nothing to do, empty plan.
+		// Duplicate receipt — but not necessarily the same OBSERVATION. A message
+		// seen in the inbox and later found in junk is the most important placement
+		// change there is, and first-observation-wins used to discard it.
+		//
+		// Applied BEFORE the engaged check, because whether we already engaged the
+		// message has nothing to do with where it ended up: the evidence must be
+		// corrected either way. It also runs before the plan is rebuilt below, so a
+		// still-unengaged receipt re-reads as spam and its plan rescues.
+		if in.Placement == placementSpam && dup.Placement != placementSpam {
+			reclassified, rerr := c.reclassifyToSpam(ctx, ws, sendID, recipient)
+			if rerr != nil {
+				return coreapi.WarmupEngagePlan{}, rerr
+			}
+			if reclassified {
+				dup.Placement = placementSpam
+			}
+		}
+		// Already engaged (C5b ran) → nothing left to do, empty plan.
 		if dup.Engaged {
 			return coreapi.WarmupEngagePlan{}, nil
 		}
@@ -473,6 +490,39 @@ func (c client) MarkWarmupEngaged(ctx context.Context, receiptID, workspaceID st
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// reclassifyToSpam promotes an already-recorded receipt's placement to spam and
+// carries the correction through to the evidence and the daily projection, in one
+// statement. It reports whether this call was the one that moved it.
+//
+// The write is monotone and exactly-once in SQL (see the query), so a re-poll of an
+// already-reclassified receipt changes nothing and cannot double-count. The error
+// is RETURNED rather than logged: unlike the plan rebuild around it, this is a
+// reputation signal, and dropping it silently is how the placement axis came to be
+// wrong in the first place. The poller retries, and the retry is a no-op if the
+// write in fact landed.
+func (c client) reclassifyToSpam(ctx context.Context, ws, sendID, recipient uuid.UUID) (bool, error) {
+	row, err := c.q.ReclassifyWarmupReceiptToSpam(ctx, gen.ReclassifyWarmupReceiptToSpamParams{
+		// warmup_receipts.warmup_send_id is nullable (the send FK nulls it on delete),
+		// so the parameter is the nullable form of an id we do have.
+		WorkspaceID: ws, WarmupSendID: pgtype.UUID{Bytes: sendID, Valid: true},
+		RecipientMailbox: recipient,
+	})
+	if err != nil {
+		return false, fmt.Errorf("coreapi: reclassify warmup receipt to spam: %w", err)
+	}
+	if row.Reclassified && !row.ObservationSuperseded {
+		// The receipt moved but no observation row carried the correction, so the
+		// policy is still reading the old placement. It happens when the observation
+		// has aged out of the 90-day retention, which is benign, and it would also
+		// happen if a writer ever stopped keying observations on the receipt id,
+		// which is not — and would be invisible without this.
+		slog.WarnContext(ctx, "warmup_placement_reclassified_without_evidence",
+			"workspace_id", ws.String(), "warmup_send_id", sendID.String(),
+			"recipient_mailbox", recipient.String())
+	}
+	return row.Reclassified, nil
 }
 
 // ListDueWarmupMailboxes returns the coarse sweep fan-out of enabled, non-paused

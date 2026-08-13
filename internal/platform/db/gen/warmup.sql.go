@@ -1239,6 +1239,95 @@ func (q *Queries) PurgeWarmupObservations(ctx context.Context) (int64, error) {
 	return deleted_rows, err
 }
 
+const reclassifyWarmupReceiptToSpam = `-- name: ReclassifyWarmupReceiptToSpam :one
+WITH promoted AS (
+    UPDATE warmup_receipts r
+    SET placement = 'spam'
+    FROM warmup_receipts prior
+    JOIN warmup_sends s ON s.id = prior.warmup_send_id AND s.workspace_id = prior.workspace_id
+    WHERE prior.id = r.id
+      AND r.workspace_id = $1
+      AND r.warmup_send_id = $2
+      AND r.recipient_mailbox = $3
+      AND r.placement <> 'spam'
+    RETURNING r.id, r.received_at, prior.placement AS prior_placement, s.from_mailbox
+), observation AS (
+    UPDATE warmup_observations o
+    SET placement = 'spam', observed_at = now()
+    FROM promoted p
+    WHERE o.workspace_id = $1
+      AND o.idempotency_key = 'receipt:' || p.id::text
+      AND o.kind = 'placement'
+    RETURNING o.id
+), projection AS (
+    UPDATE warmup_daily_stats d
+    SET inbox = greatest(d.inbox - CASE WHEN p.prior_placement = 'inbox' THEN 1 ELSE 0 END, 0),
+        spam  = d.spam + 1
+    FROM promoted p
+    WHERE d.mailbox_id = p.from_mailbox
+      AND d.workspace_id = $1
+      AND d.day = (p.received_at AT TIME ZONE 'utc')::date
+    RETURNING d.mailbox_id
+)
+SELECT EXISTS(SELECT 1 FROM promoted) AS reclassified,
+       EXISTS(SELECT 1 FROM observation) AS observation_superseded
+`
+
+type ReclassifyWarmupReceiptToSpamParams struct {
+	WorkspaceID      uuid.UUID   `json:"workspace_id"`
+	WarmupSendID     pgtype.UUID `json:"warmup_send_id"`
+	RecipientMailbox uuid.UUID   `json:"recipient_mailbox"`
+}
+
+type ReclassifyWarmupReceiptToSpamRow struct {
+	Reclassified          bool `json:"reclassified"`
+	ObservationSuperseded bool `json:"observation_superseded"`
+}
+
+// A message seen in the INBOX and later found in junk. First-observation-wins is
+// right for idempotency but wrong for a reputation signal: spam-after-inbox is the
+// single most important placement change there is, and the receipt upsert
+// short-circuits before the observation write, so it used to be discarded.
+//
+// The observation row is SUPERSEDED IN PLACE rather than joined by a second row.
+// The idempotency key IS the receipt id, so a second row would need a different
+// key — and the snapshot aggregation counts placement rows, so the same message
+// would then be counted twice: once as inbox and once as spam, inflating the spam
+// numerator, the placement denominator and the minimum-sample gate together.
+// Deduplicating in the aggregation instead would mean grouping on a receipt id the
+// observations table does not carry as a column. One row per message keeps
+// "placement samples" meaning messages, which is what the thresholds are calibrated
+// against.
+//
+// MONOTONE, and that direction is load-bearing rather than defensive: the engager
+// deliberately RESCUES spam messages into the inbox, so a later poll legitimately
+// finds them there. Allowing spam -> inbox would let our own rescue erase the
+// evidence that the rescue was needed. `placement <> 'spam'` is also what makes
+// this exactly-once: a re-poll of an already-reclassified receipt matches no row,
+// so nothing is written and no counter moves twice. Two concurrent pollers race on
+// the receipt row lock and the loser re-evaluates the predicate against the
+// winner's committed value, matching nothing.
+//
+// observed_at advances to now(): the message is in spam NOW. Filing the correction
+// at the original observation time would leave a current fact outside the freshness
+// window that decides whether the participant is measured at all.
+//
+// The daily projection is corrected on the day the message was RECEIVED, which is
+// where RecordWarmupSenderPlacementStat put the original count, and only the inbox
+// counter it actually incremented is decremented ('other' incremented neither).
+// Otherwise the overview and the deliverability score would keep reporting an inbox
+// placement the policy has already recorded as spam.
+//
+// `prior` is a second reference to the same row, read from the statement snapshot,
+// which is how the pre-update placement is recovered: RETURNING would give the new
+// value.
+func (q *Queries) ReclassifyWarmupReceiptToSpam(ctx context.Context, arg ReclassifyWarmupReceiptToSpamParams) (ReclassifyWarmupReceiptToSpamRow, error) {
+	row := q.db.QueryRow(ctx, reclassifyWarmupReceiptToSpam, arg.WorkspaceID, arg.WarmupSendID, arg.RecipientMailbox)
+	var i ReclassifyWarmupReceiptToSpamRow
+	err := row.Scan(&i.Reclassified, &i.ObservationSuperseded)
+	return i, err
+}
+
 const recordWarmupHardBounceObservation = `-- name: RecordWarmupHardBounceObservation :one
 WITH candidate AS (
     SELECT s.id, s.workspace_id, s.from_mailbox

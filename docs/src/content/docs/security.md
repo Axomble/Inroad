@@ -771,7 +771,12 @@ write history that never happened.
       wrote a trusted bounce against a different one
       (`TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender`).
     - `placement` requires a verified signed token AND a DB-proven send→recipient
-      binding.
+      binding. A later observation of the SAME receipt may only make the placement
+      worse (`inbox`/`other` → `spam`), superseding the row rather than adding one,
+      so one message is always one sample: a re-poll cannot inflate the evidence,
+      and the engager's own rescue of a spam message back into the inbox cannot
+      erase the evidence that the rescue was needed
+      (`TestPlacementReclassificationIsMonotoneAndCountsOnce`).
 
 53. **Containment cannot be cleared by the tenant.** `quarantine` and `blocked` are
     carried across a disable/re-enable: the participant row is deleted on disable,

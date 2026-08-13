@@ -966,3 +966,143 @@ func TestEvidenceLapseCostsTheHealthyLaneOnlyAfterTheGrace(t *testing.T) {
 		t.Fatalf("after sweep 4 A lane = %q, want probation: a lapse that outlasts the grace demotes", lane)
 	}
 }
+
+// placementObservations returns how many trusted placement observations of each
+// kind are attributed to a mailbox as the SENDER — the rows the snapshot counts.
+func placementObservations(t *testing.T, ctx context.Context, f warmupFixture, sender uuid.UUID) (inbox, spam, total int) {
+	t.Helper()
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE placement = 'inbox'),
+		        count(*) FILTER (WHERE placement = 'spam'),
+		        count(*)
+		   FROM warmup_observations
+		  WHERE workspace_id = $1 AND mailbox_id = $2 AND kind = 'placement'`,
+		f.ws1, sender).Scan(&inbox, &spam, &total); err != nil {
+		t.Fatalf("read placement observations: %v", err)
+	}
+	return inbox, spam, total
+}
+
+// A message seen in the INBOX and later found in junk used to keep
+// placement='inbox' forever: the receipt upsert short-circuits on the duplicate,
+// before the observation write. Spam-after-inbox is the most important placement
+// change there is, so the later observation supersedes the earlier one — as ONE
+// row, so the correction moves the count instead of adding to it.
+func TestSpamAfterInboxSupersedesThePlacement(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f) // A -> B, sender A
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("inbox receipt: %v", err)
+	}
+	if inbox, spam, total := placementObservations(t, ctx, f, f.a); inbox != 1 || spam != 0 || total != 1 {
+		t.Fatalf("after the inbox poll: inbox=%d spam=%d total=%d, want 1/0/1", inbox, spam, total)
+	}
+
+	// The next poll finds the same message in junk.
+	in.Placement = placementSpam
+	plan, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("spam re-poll: %v", err)
+	}
+
+	inbox, spam, total := placementObservations(t, ctx, f, f.a)
+	if spam != 1 {
+		t.Fatalf("spam observations = %d, want 1: the reclassification was discarded", spam)
+	}
+	if inbox != 0 {
+		t.Fatalf("inbox observations = %d, want 0: the superseded placement must not still count", inbox)
+	}
+	if total != 1 {
+		t.Fatalf("placement observations = %d, want 1: one message must not become two samples", total)
+	}
+
+	// The daily projection the overview and the deliverability score read moves with
+	// it, so the two views of one message cannot disagree.
+	if _, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a); aInbox != 0 || aSpam != 1 {
+		t.Fatalf("sender A daily stats inbox=%d spam=%d, want 0/1", aInbox, aSpam)
+	}
+
+	// And the still-unengaged receipt's rebuilt plan now rescues the message out of
+	// junk, which the stored inbox placement would never have asked for.
+	if !plan.DoRescue {
+		t.Fatal("the rebuilt plan does not rescue a message now known to be in spam")
+	}
+}
+
+// The correction is monotone and exactly-once. It must not flap back — the
+// engager RESCUES spam into the inbox, so a later poll legitimately finds it
+// there, and honouring that would let our own rescue erase the evidence that the
+// rescue was needed. Nor may a repeated spam poll count twice.
+func TestPlacementReclassificationIsMonotoneAndCountsOnce(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("inbox receipt: %v", err)
+	}
+	in.Placement = placementSpam
+	for i := 0; i < 3; i++ {
+		if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+			t.Fatalf("spam re-poll %d: %v", i, err)
+		}
+	}
+	if inbox, spam, total := placementObservations(t, ctx, f, f.a); inbox != 0 || spam != 1 || total != 1 {
+		t.Fatalf("after three spam polls: inbox=%d spam=%d total=%d, want 0/1/1", inbox, spam, total)
+	}
+	if _, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a); aInbox != 0 || aSpam != 1 {
+		t.Fatalf("repeated polls moved the counters twice: inbox=%d spam=%d, want 0/1", aInbox, aSpam)
+	}
+
+	// Now the rescue lands and the message is seen in the inbox again.
+	in.Placement = placementInbox
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("post-rescue inbox poll: %v", err)
+	}
+	if inbox, spam, _ := placementObservations(t, ctx, f, f.a); inbox != 0 || spam != 1 {
+		t.Fatalf("evidence flapped back after a rescue: inbox=%d spam=%d, want 0/1", inbox, spam)
+	}
+	if _, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a); aInbox != 0 || aSpam != 1 {
+		t.Fatalf("daily stats flapped back after a rescue: inbox=%d spam=%d, want 0/1", aInbox, aSpam)
+	}
+}
+
+// An ALREADY-ENGAGED receipt still records the reclassification. Whether we opened
+// the message has nothing to do with where it landed, and the placement axis is the
+// signal the whole policy leans on.
+func TestSpamAfterInboxIsRecordedEvenOnceEngaged(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	plan, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("inbox receipt: %v", err)
+	}
+	if err := f.core.MarkWarmupEngaged(ctx, plan.ReceiptID, f.ws1.String(), false); err != nil {
+		t.Fatalf("MarkWarmupEngaged: %v", err)
+	}
+
+	in.Placement = placementSpam
+	engagedPlan, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("spam re-poll after engagement: %v", err)
+	}
+	if engagedPlan != (coreapi.WarmupEngagePlan{}) {
+		t.Fatalf("an engaged receipt must not be re-engaged: %+v", engagedPlan)
+	}
+	if inbox, spam, total := placementObservations(t, ctx, f, f.a); inbox != 0 || spam != 1 || total != 1 {
+		t.Fatalf("engaged reclassification: inbox=%d spam=%d total=%d, want 0/1/1", inbox, spam, total)
+	}
+}
