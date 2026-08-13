@@ -31,12 +31,13 @@ var warmupSecret = []byte("warmup-signing-secret")
 // serves both the classification path (embedded methods) and the warmup path.
 type warmupStubCore struct {
 	*stubCore
-	receipts          []coreapi.WarmupReceiptInput
-	plan              coreapi.WarmupEngagePlan
-	recordErr         error
-	tokenFailures     []string
-	hardBounceIDs     []string
-	hardBounceMatched bool
+	receipts            []coreapi.WarmupReceiptInput
+	plan                coreapi.WarmupEngagePlan
+	recordErr           error
+	tokenFailures       []string
+	hardBounceObservers []string
+	hardBounceIDs       []string
+	hardBounceMatched   bool
 }
 
 func (w *warmupStubCore) RecordWarmupReceipt(_ context.Context, in coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error) {
@@ -52,10 +53,17 @@ func (w *warmupStubCore) RecordWarmupTokenFailure(_ context.Context, _, _, finge
 	return nil
 }
 
-func (w *warmupStubCore) RecordWarmupHardBounce(_ context.Context, _, messageID string) (bool, error) {
+func (w *warmupStubCore) RecordWarmupHardBounce(_ context.Context, _, messageID, observerMailbox string) (bool, error) {
 	w.hardBounceIDs = append(w.hardBounceIDs, messageID)
+	w.hardBounceObservers = append(w.hardBounceObservers, observerMailbox)
 	return w.hardBounceMatched, nil
 }
+
+// Compile-time proof that the stub still satisfies the optional capability. A
+// signature change previously made this assertion fail at RUNTIME instead, and the
+// poller silently fell through to campaign classification — which is precisely the
+// harm the capability exists to prevent.
+var _ coreapi.WarmupEvidenceClient = (*warmupStubCore)(nil)
 
 // spyEngageEnqueuer records warmup:engage enqueues instead of touching Redis.
 type spyEngageEnqueuer struct {

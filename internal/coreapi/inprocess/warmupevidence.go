@@ -26,8 +26,11 @@ func (c client) RecordWarmupTokenFailure(ctx context.Context, workspaceID, recip
 	})
 }
 
-// RecordWarmupHardBounce attributes a DSN only through a sent warmup message ID.
-func (c client) RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID string) (bool, error) {
+// RecordWarmupHardBounce attributes a DSN through a sent warmup message ID AND the
+// mailbox that observed it. observerMailbox must be the mailbox whose inbox the DSN
+// arrived in: Original-Message-ID is attacker-controlled, so the message id alone is
+// not proof of anything. See the query for why the binding costs no true positives.
+func (c client) RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (bool, error) {
 	if strings.TrimSpace(messageID) == "" {
 		return false, nil
 	}
@@ -35,8 +38,12 @@ func (c client) RecordWarmupHardBounce(ctx context.Context, workspaceID, message
 	if err != nil {
 		return false, err
 	}
+	observer, err := uuid.Parse(observerMailbox)
+	if err != nil {
+		return false, err
+	}
 	row, err := c.q.RecordWarmupHardBounceObservation(ctx, gen.RecordWarmupHardBounceObservationParams{
-		WorkspaceID: ws, MessageID: messageID,
+		WorkspaceID: ws, MessageID: messageID, ObserverMailbox: observer,
 	})
 	if err != nil {
 		return false, err

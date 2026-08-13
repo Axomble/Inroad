@@ -55,7 +55,7 @@ type InboxCaptureClient interface {
 // that never inspect inbound mail.
 type WarmupEvidenceClient interface {
 	RecordWarmupTokenFailure(ctx context.Context, workspaceID, recipientMailbox, fingerprint, reasonCode string) error
-	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID string) (matched bool, err error)
+	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (matched bool, err error)
 }
 
 // ReplyLabelClient is an optional execution-plane capability (same reasoning as

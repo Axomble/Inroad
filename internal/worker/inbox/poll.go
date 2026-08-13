@@ -120,6 +120,17 @@ type warmupHook struct {
 // mail (the core deliverability health signal) and persists its cursor.
 func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher, graph GraphFetcher, classifier *replyclassify.Classifier, warmupSecret []byte, enq WarmupEngageEnqueuer) func(context.Context, *asynq.Task) error {
 	hook := warmupHook{secret: warmupSecret, enq: enq}
+	// Resolve the optional evidence capability ONCE, at wiring time, and say so
+	// loudly if it is missing. Discovering it per message meant a core that does not
+	// implement it degraded in silence — and the consequence is worse than lost
+	// evidence: the warmup DSN then falls through to FindSendByMessageID/MarkBounced
+	// and bounces a CAMPAIGN enrollment, inverting the isolation this hook exists to
+	// enforce. A signature change has already caused exactly that failure once.
+	if _, ok := core.(coreapi.WarmupEvidenceClient); !ok {
+		slog.Error("inbox_poll_warmup_evidence_unavailable",
+			"impact", "warmup token failures and warmup DSNs will not be recorded, "+
+				"and warmup DSNs may be misclassified as campaign bounces")
+	}
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPollPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -334,7 +345,7 @@ func processInbound(ctx context.Context, core coreapi.Client, classifier *replyc
 		}
 		recordWarmupTokenFailure(ctx, core, p, fingerprint, reason)
 	}
-	return processMessage(ctx, core, classifier, p.WorkspaceID, msg, replies, bounces)
+	return processMessage(ctx, core, classifier, p.WorkspaceID, p.MailboxID, msg, replies, bounces)
 }
 
 func recordWarmupTokenFailure(ctx context.Context, core coreapi.Client, p queue.InboxPollPayload, fingerprint, reason string) {
@@ -467,7 +478,7 @@ func logJunkScanErr(err error, p queue.InboxPollPayload, provider string) {
 // whether the message matched (a bounce or a stopping/suppressing reply) — used
 // only for the skipped-count in the poll summary log; an automated tag reports
 // false so it counts as skipped rather than a reply.
-func processMessage(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, workspaceID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
+func processMessage(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, workspaceID, mailboxID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
 	d := ParseDSN(msg.Header, msg.ContentType, msg.Body)
 	if d.Kind != NotABounce {
 		// A DSN is never also a reply — always handled here, never falls
@@ -475,7 +486,7 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 		switch d.Kind {
 		case HardBounce:
 			if evidence, ok := core.(coreapi.WarmupEvidenceClient); ok {
-				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, d.OriginalMessageID)
+				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, d.OriginalMessageID, mailboxID)
 				if err != nil {
 					return false, err
 				}

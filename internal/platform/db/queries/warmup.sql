@@ -441,18 +441,37 @@ ON CONFLICT (workspace_id, idempotency_key) DO NOTHING;
 -- A DSN is matched by the provider-returned Message-ID on the warmup send. The
 -- CTE returns matched=true even on an idempotent duplicate so the inbox poller
 -- never falls through and misclassifies a warmup DSN as a campaign bounce.
+--
+-- The observer binding (s.from_mailbox = @observer_mailbox) is a SECURITY control,
+-- not a filter. Original-Message-ID is parsed out of the inbound DSN body and is
+-- therefore fully attacker-controlled; without this predicate a forged DSN
+-- delivered to ANY connected mailbox in the workspace — a public sales@ alias, a
+-- support inbox — would write a TRUSTED hard bounce attributed to a DIFFERENT
+-- mailbox, and since Phase 1 that can quarantine the sender and fail its
+-- campaign's preflight, not merely trim its capacity.
+--
+-- It costs no true positives: a DSN for a warmup send comes back to that send's
+-- own Return-Path, so the polled mailbox IS the sender. The forgery surface
+-- shrinks from "any connected mailbox" to "the sender's own mailbox", where an
+-- attacker would already need the Message-ID, which is CSPRNG-generated and never
+-- leaves the workspace.
 WITH candidate AS (
     SELECT s.id, s.workspace_id, s.from_mailbox
     FROM warmup_sends s
-    WHERE s.workspace_id = $1 AND s.message_id = $2 AND s.status = 'sent'
+    WHERE s.workspace_id = @workspace_id AND s.message_id = @message_id
+      AND s.status = 'sent'
+      AND s.from_mailbox = @observer_mailbox
     ORDER BY s.sent_at DESC
     LIMIT 1
 ), inserted AS (
     INSERT INTO warmup_observations (
-        workspace_id, mailbox_id, warmup_send_id, kind, source, reason_code,
-        attribution_trusted, idempotency_key, observed_at
+        workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id, kind, source,
+        reason_code, attribution_trusted, idempotency_key, observed_at
     )
-    SELECT c.workspace_id, c.from_mailbox, c.id, 'hard_bounce',
+    -- observer_mailbox_id records WHERE the DSN arrived, as the placement path
+    -- already does. Phase 0 left it NULL, so a mis-delivered DSN was unattributable
+    -- after the fact.
+    SELECT c.workspace_id, c.from_mailbox, @observer_mailbox, c.id, 'hard_bounce',
            'inbox_dsn', 'hard_bounce', true, 'bounce:' || c.id::text, now()
     FROM candidate c
     ON CONFLICT (workspace_id, idempotency_key) DO NOTHING

@@ -674,3 +674,53 @@ func warmupSendUUID(t *testing.T, ctx context.Context, f warmupFixture) uuid.UUI
 	}
 	return u
 }
+
+// Original-Message-ID is parsed out of an inbound DSN body and is therefore fully
+// attacker-controlled. Without an observer binding, a forged DSN delivered to ANY
+// connected mailbox in the workspace — a public alias, a support inbox — writes a
+// TRUSTED hard bounce attributed to a DIFFERENT mailbox. Since Phase 1 that can
+// quarantine the sender and fail its campaign's preflight, so the binding is a
+// security control, not a filter.
+func TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sendID, _ := makeWarmupSend(t, ctx, f) // A -> B
+	messageID := "<" + sendID + "@acme.test>"
+
+	// B is a real, same-workspace mailbox — but it is the RECIPIENT, not the sender.
+	// A DSN for A's send arriving at B is either a misdelivery or a forgery.
+	matched, err := f.core.(coreapi.WarmupEvidenceClient).
+		RecordWarmupHardBounce(ctx, f.ws1.String(), messageID, f.b.String())
+	if err != nil {
+		t.Fatalf("RecordWarmupHardBounce: %v", err)
+	}
+	if matched {
+		t.Fatal("a DSN observed by a mailbox that did not send the message must not match")
+	}
+	assertWarmupHardBounces(t, ctx, f, f.a, 0)
+
+	// The same DSN arriving at the actual sender is the legitimate case.
+	matched, err = f.core.(coreapi.WarmupEvidenceClient).
+		RecordWarmupHardBounce(ctx, f.ws1.String(), messageID, f.a.String())
+	if err != nil {
+		t.Fatalf("RecordWarmupHardBounce (sender): %v", err)
+	}
+	if !matched {
+		t.Fatal("a DSN observed by the sending mailbox must match")
+	}
+	assertWarmupHardBounces(t, ctx, f, f.a, 1)
+}
+
+func assertWarmupHardBounces(t *testing.T, ctx context.Context, f warmupFixture, mailbox uuid.UUID, want int) {
+	t.Helper()
+	var got int
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*) FROM warmup_observations
+		 WHERE workspace_id = $1 AND mailbox_id = $2 AND kind = 'hard_bounce'`,
+		f.ws1, mailbox).Scan(&got); err != nil {
+		t.Fatalf("count hard bounces: %v", err)
+	}
+	if got != want {
+		t.Fatalf("hard-bounce observations for %s = %d, want %d", mailbox, got, want)
+	}
+}
