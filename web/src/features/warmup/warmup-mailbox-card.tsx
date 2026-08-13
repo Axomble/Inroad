@@ -1,5 +1,5 @@
-import { Suspense, lazy, useState } from 'react'
-import { Flame, Loader2, Settings2 } from 'lucide-react'
+import { Suspense, lazy, useId, useState } from 'react'
+import { Flame, History, Loader2, Settings2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -15,6 +15,11 @@ import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api
 // mailboxes, so it's split out and loaded on demand behind Suspense rather than
 // shipped in the route's main chunk.
 const WarmupSparkline = lazy(() => import('./warmup-sparkline'))
+
+// The change history is opt-in per mailbox — same treatment, and for a second
+// reason: it carries its own copy tables and its own request, neither of which a
+// page of ten collapsed rows should pay for.
+const WarmupTransitionsPanel = lazy(() => import('./warmup-transitions-panel'))
 
 /** 0..1 fraction to a whole-percent string, e.g. 0.83 -> "83%". */
 function formatPct(value: number | null): string {
@@ -45,7 +50,9 @@ export function WarmupMailboxCard({
   const id = mailbox.id ?? ''
   const enrolled = !!entry?.enabled
   const [editing, setEditing] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const historyId = useId()
 
   // Detail (series + full participant) is only needed for the sparkline and to
   // prefill the settings form, so it's skipped for non-participants.
@@ -95,6 +102,17 @@ export function WarmupMailboxCard({
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {enrolled ? (
             <>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => setShowHistory((v) => !v)}
+                aria-expanded={showHistory}
+                aria-controls={historyId}
+                aria-label={`Change history for ${mailbox.email}`}
+              >
+                <History className="size-3.5" />
+                History
+              </Button>
               <Button variant="outline" size="xs" onClick={() => setEditing((v) => !v)} aria-label={`Warmup settings for ${mailbox.email}`}>
                 <Settings2 className="size-3.5" />
                 Settings
@@ -124,6 +142,20 @@ export function WarmupMailboxCard({
           ) : null}
         </div>
       )}
+
+      {/*
+        The history sits on the mailbox's own row rather than in a page-level
+        panel or a drawer: it explains THIS mailbox's two badges, so it belongs
+        directly beneath them, and the row already uses in-place disclosure for
+        settings. Keeping it collapsed also keeps the page to one request.
+      */}
+      <div id={historyId}>
+        {enrolled && showHistory && (
+          <Suspense fallback={<div className="border-t border-border px-5 py-3"><Skeleton className="h-16 w-full" /></div>}>
+            <WarmupTransitionsPanel mailboxId={id} />
+          </Suspense>
+        )}
+      </div>
 
       {actionError && (
         <div role="alert" className="px-5 pb-3 text-[11px] text-danger">
