@@ -1061,19 +1061,24 @@ type WarmupReceipt struct {
 }
 
 type WarmupSend struct {
-	ID          uuid.UUID          `json:"id"`
-	WorkspaceID uuid.UUID          `json:"workspace_id"`
-	ThreadID    uuid.UUID          `json:"thread_id"`
-	FromMailbox uuid.UUID          `json:"from_mailbox"`
-	ToMailbox   uuid.UUID          `json:"to_mailbox"`
-	IsReply     bool               `json:"is_reply"`
-	Status      string             `json:"status"`
-	MessageID   string             `json:"message_id"`
-	Token       string             `json:"token"`
-	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
-	SentAt      pgtype.Timestamptz `json:"sent_at"`
-	LastError   string             `json:"last_error"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ThreadID            uuid.UUID          `json:"thread_id"`
+	FromMailbox         uuid.UUID          `json:"from_mailbox"`
+	ToMailbox           uuid.UUID          `json:"to_mailbox"`
+	IsReply             bool               `json:"is_reply"`
+	Status              string             `json:"status"`
+	MessageID           string             `json:"message_id"`
+	Token               string             `json:"token"`
+	ClaimedAt           pgtype.Timestamptz `json:"claimed_at"`
+	SentAt              pgtype.Timestamptz `json:"sent_at"`
+	LastError           string             `json:"last_error"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	IssuedLane          *string            `json:"issued_lane"`
+	IssuedPolicyVersion *string            `json:"issued_policy_version"`
+	LeaseExpiresAt      pgtype.Timestamptz `json:"lease_expires_at"`
+	IssuedConstraints   []byte             `json:"issued_constraints"`
+	PairKey             *string            `json:"pair_key"`
 }
 
 type WarmupSignalSnapshot struct {

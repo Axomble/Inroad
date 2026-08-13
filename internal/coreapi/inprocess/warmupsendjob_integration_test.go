@@ -441,3 +441,139 @@ func TestClaimWarmupSendFailsClosedCrossTenant(t *testing.T) {
 		t.Fatalf("cross-tenant claim out = %v, want Skip", out)
 	}
 }
+
+// Acceptance criterion 7: "a stale pair lease cannot send after quarantine".
+//
+// The job is resolved while the sender is sendable, the sweep then contains it, and
+// the claim must refuse. Expiry cannot deliver this — the lease has its full window
+// left. Only re-reading the sender's CURRENT lane at claim can see it, which is why
+// ClaimWarmupSend joins warmup_participants rather than trusting the caller.
+func TestAQuarantineBetweenDecisionAndClaimStopsTheSend(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	job, err := f.core.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
+	if err != nil || job.Skip {
+		t.Fatalf("GetWarmupSendJob: job=%+v err=%v", job, err)
+	}
+	if job.IssuedLane == "" || job.LeaseExpiresAt.IsZero() {
+		t.Fatalf("job carries no lease: lane=%q expires=%v", job.IssuedLane, job.LeaseExpiresAt)
+	}
+	if !job.LeaseExpiresAt.After(time.Now()) {
+		t.Fatal("fixture is wrong: the lease must still be inside its window")
+	}
+
+	// The sweep quarantines the sender after the decision was made.
+	if _, err := f.raw.Exec(ctx,
+		`UPDATE warmup_participants SET lane = 'quarantine'
+		  WHERE mailbox_id = $1 AND workspace_id = $2`, f.a, f.ws1); err != nil {
+		t.Fatalf("quarantine sender: %v", err)
+	}
+
+	out, err := f.core.ClaimWarmupSend(ctx, job)
+	if err != nil {
+		t.Fatalf("ClaimWarmupSend: %v", err)
+	}
+	if out != coreapi.ClaimSkip {
+		t.Fatalf("claim = %v, want ClaimSkip: a lease issued under %q must not fire after quarantine", out, job.IssuedLane)
+	}
+	var rows int
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*) FROM warmup_sends WHERE id = $1 AND workspace_id = $2`,
+		mustParseUUID(t, job.SendID), f.ws1).Scan(&rows); err != nil {
+		t.Fatalf("count sends: %v", err)
+	}
+	if rows != 0 {
+		t.Fatal("the refused claim still wrote a warmup_sends row")
+	}
+}
+
+// An expired lease refuses even when nothing about the sender changed. This is the
+// enqueue-to-pickup window: a backed-up or retrying queue firing a send long after
+// its lane was decided.
+func TestAnExpiredLeaseCannotClaim(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	job, err := f.core.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
+	if err != nil || job.Skip {
+		t.Fatalf("GetWarmupSendJob: job=%+v err=%v", job, err)
+	}
+	job.LeaseExpiresAt = time.Now().Add(-time.Minute) // the task sat in the queue
+
+	out, err := f.core.ClaimWarmupSend(ctx, job)
+	if err != nil {
+		t.Fatalf("ClaimWarmupSend: %v", err)
+	}
+	if out != coreapi.ClaimSkip {
+		t.Fatalf("claim = %v, want ClaimSkip for an expired lease", out)
+	}
+}
+
+// The pair budget is one number for the two mailboxes, not one per direction. The
+// old counter keyed on (from, to), so B->A spent nothing of A->B's allowance and
+// real per-pair volume ran to about double the cap.
+func TestThePairBudgetIsSymmetric(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	makeWarmupSend(t, ctx, f) // A -> B
+
+	forward, err := f.q.CountWarmupPairSendsToday(ctx, gen.CountWarmupPairSendsTodayParams{
+		WorkspaceID: f.ws1, MailboxA: f.a, MailboxB: f.b,
+	})
+	if err != nil {
+		t.Fatalf("count A,B: %v", err)
+	}
+	reverse, err := f.q.CountWarmupPairSendsToday(ctx, gen.CountWarmupPairSendsTodayParams{
+		WorkspaceID: f.ws1, MailboxA: f.b, MailboxB: f.a,
+	})
+	if err != nil {
+		t.Fatalf("count B,A: %v", err)
+	}
+	if forward != 1 || reverse != 1 {
+		t.Fatalf("pair counts = %d forward / %d reverse, want 1 and 1: the budget must not depend on argument order", forward, reverse)
+	}
+}
+
+func mustParseUUID(t *testing.T, s string) uuid.UUID {
+	t.Helper()
+	u, err := uuid.Parse(s)
+	if err != nil {
+		t.Fatalf("parse uuid %q: %v", s, err)
+	}
+	return u
+}
+
+// Criterion 7's actual mechanism, isolated from containment.
+//
+// The quarantine test above passes even with the lane COMPARISON removed, because
+// the sealed-lane exclusion catches a quarantined sender on its own — so it proves
+// containment, not lease staleness. Drift between two SENDABLE lanes is the case
+// only the comparison can see: the sender is still perfectly allowed to send, it is
+// simply not in the pool the decision was made for, and pairing across lanes is
+// exactly what lane isolation forbids.
+func TestALeaseDoesNotSurviveDriftBetweenSendableLanes(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	job, err := f.core.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
+	if err != nil || job.Skip {
+		t.Fatalf("GetWarmupSendJob: job=%+v err=%v", job, err)
+	}
+	if job.IssuedLane != warmup.LaneProbation {
+		t.Fatalf("fixture assumes a probation sender, got %q", job.IssuedLane)
+	}
+
+	// Promoted between the decision and the claim. Still sendable — so the sealed
+	// lane exclusion does NOT fire — but its pool changed, and the partner it was
+	// matched with is a probation peer.
+	if _, err := f.raw.Exec(ctx,
+		`UPDATE warmup_participants SET lane = 'healthy'
+		  WHERE mailbox_id = $1 AND workspace_id = $2`, f.a, f.ws1); err != nil {
+		t.Fatalf("promote sender: %v", err)
+	}
+
+	out, err := f.core.ClaimWarmupSend(ctx, job)
+	if err != nil {
+		t.Fatalf("ClaimWarmupSend: %v", err)
+	}
+	if out != coreapi.ClaimSkip {
+		t.Fatalf("claim = %v, want ClaimSkip: a lease issued under %q must not fire once the sender moved lanes", out, job.IssuedLane)
+	}
+}

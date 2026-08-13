@@ -431,6 +431,47 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 	// one reply), NOT the recipient's mutable sent-today index. A post-send engage retry
 	// then re-derives the SAME id and reclaims the existing 'sent' row (ClaimAlreadySent →
 	// recover-forward), instead of a drifting id that would INSERT a fresh row and re-send.
+	// The reply draws from the SAME per-pair daily budget as a new send. It does not
+	// go through SelectWarmupPartner — it takes its partner from the thread — so
+	// nothing here consulted the budget and replies spent it without decrementing
+	// it, which is how real per-pair volume reached roughly double the nominal cap.
+	//
+	// The cap is derived exactly as the send path derives it, from the REPLIER's own
+	// ramp target and eligible-partner count, so one pair cannot be capped
+	// differently depending on which direction happens to speak next.
+	rb, err := c.q.GetWarmupSenderBundle(ctx, gen.GetWarmupSenderBundleParams{
+		MailboxID: recipient, WorkspaceID: ws,
+		LeaseSeconds: int32(warmup.LeaseLifetime / time.Second),
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return coreapi.WarmupSendJob{}, false, nil // no longer a participant → no reply
+		}
+		return coreapi.WarmupSendJob{}, false, err
+	}
+	partners, err := c.q.CountEligibleWarmupPartners(ctx, gen.CountEligibleWarmupPartnersParams{
+		WorkspaceID: ws, MailboxID: recipient,
+	})
+	if err != nil {
+		return coreapi.WarmupSendJob{}, false, err
+	}
+	now := c.now().UTC()
+	days := int(now.Sub(rb.StartedAt.Time).Hours() / 24)
+	target := warmup.LaneDailyVolume(rb.Lane, warmup.RampTarget(
+		int(rb.StartVolume), int(rb.MaxVolume), int(rb.RampIncrement), days))
+	pairCap := warmup.PairDailyCap(warmup.EffectiveDailyVolume(target, recipient.String(), now), int(partners))
+	pairSent, err := c.q.CountWarmupPairSendsToday(ctx, gen.CountWarmupPairSendsTodayParams{
+		WorkspaceID: ws, MailboxA: recipient, MailboxB: th.SenderMailbox,
+	})
+	if err != nil {
+		return coreapi.WarmupSendJob{}, false, err
+	}
+	if pairCap <= 0 || int(pairSent) >= pairCap {
+		// Budget spent. The thread is not abandoned — a later poll re-derives the
+		// same deterministic reply id and sends it once budget frees up.
+		return coreapi.WarmupSendJob{}, false, nil
+	}
+
 	replySendID := deriveWarmupReplySendID(receiptID)
 	token := warmup.Sign(warmup.Payload{
 		WorkspaceID: ws.String(), WarmupSendID: replySendID.String(), FromMailbox: recipient.String(),
@@ -443,14 +484,19 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 		ThreadID:    th.ThreadID.String(),
 		IsReply:     true,
 		SendID:      replySendID.String(),
-		ToEmail:     th.SenderEmail,
-		FromEmail:   th.RecipientEmail,
-		FromName:    th.RecipientName,
-		Subject:     "Re: " + content.Subject,
-		BodyText:    body,
-		InReplyTo:   th.RootMessageID,
-		References:  th.RootMessageID,
-		Token:       token,
+		// A reply is a NEW warmup send and carries its own lease, revalidated at
+		// claim exactly like a due-send.
+		IssuedLane:          rb.Lane,
+		IssuedPolicyVersion: warmup.PolicyVersion,
+		LeaseExpiresAt:      rb.LeaseExpiresAt.Time,
+		ToEmail:             th.SenderEmail,
+		FromEmail:           th.RecipientEmail,
+		FromName:            th.RecipientName,
+		Subject:             "Re: " + content.Subject,
+		BodyText:            body,
+		InReplyTo:           th.RootMessageID,
+		References:          th.RootMessageID,
+		Token:               token,
 	}, true, nil
 }
 
