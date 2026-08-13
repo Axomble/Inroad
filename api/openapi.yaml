@@ -821,6 +821,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/WarmupOverview' }
         '401': { description: Unauthorized }
+  /warmup/mailboxes/{mailbox_id}/transitions:
+    get:
+      operationId: listWarmupTransitions
+      tags: [warmup]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The append-only record of every automated warmup state change for one
+        mailbox, newest first. Each row names the metric, sample size and
+        threshold that produced it, so an operator can answer "why is this
+        mailbox here, and what clears it" without reading logs — the
+        explainability requirement the reputation design sets against showing a
+        bare score.
+      parameters:
+        - name: mailbox_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Transition history
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WarmupTransitionPage' }
+        '401': { description: Unauthorized }
+        '404': { description: Mailbox not found in this workspace }
   /pulse:
     get:
       operationId: getPulse
@@ -3945,6 +3974,17 @@ components:
         email: { type: string }
         provider_event_id: { type: string, description: "The provider's own id; the idempotency key." }
         send_id: { type: string, format: uuid, nullable: true }
+        bounce_class:
+          type: string
+          enum: [hard, soft, unknown]
+          default: unknown
+          description: >-
+            Whether a bounce is permanent (hard) or transient (soft). Provider
+            feeds mix them, and only hard bounces feed the warmup hard-bounce
+            rate — counting a greylist or a full mailbox as permanent pauses a
+            healthy sender. Omitted or 'unknown' is excluded from that rate
+            rather than assumed hard: under-counting is the safe direction.
+            Ignored when kind is 'complaint'.
     ContactSort:
       type: string
       description: >-
@@ -4457,6 +4497,73 @@ components:
         started_at: { type: string, format: date-time }
         today_sent: { type: integer, description: warmup emails sent by this mailbox today }
         today_target: { type: integer, description: "today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this." }
+    WarmupTransitionPage:
+      type: object
+      required: [transitions]
+      properties:
+        transitions:
+          type: array
+          items: { $ref: '#/components/schemas/WarmupTransition' }
+    WarmupTransition:
+      type: object
+      description: >-
+        One automated state change and the evidence behind it. Both axes are
+        recorded because they move independently and are written together: the
+        health fields are always present, the lane fields are null on rows
+        written before pool lanes existed.
+      required:
+        [id, created_at, from_state, to_state, reason_code, reason,
+         placement_samples, spam_rate, bounce_samples, bounce_rate,
+         complaint_samples, complaint_rate, invalid_tokens, policy_version]
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        from_state:
+          type: string
+          enum: [unknown, healthy, watch, throttled, paused]
+          description: "SENDER REPUTATION axis before the change."
+        to_state:
+          type: string
+          enum: [unknown, healthy, watch, throttled, paused]
+        reason_code:
+          type: string
+          description: >-
+            Stable machine identifier for why the health axis landed here, e.g.
+            spam_watch, campaign_bounce_throttle, recovery_step,
+            placement_sample_insufficient. Never empty.
+        reason: { type: string, description: "Human-readable form of reason_code." }
+        from_lane:
+          type: string
+          nullable: true
+          enum: [pending_auth, probation, healthy, watch, recovery, quarantine, blocked, null]
+          description: "POOL ELIGIBILITY axis before the change; null on pre-lane rows."
+        to_lane:
+          type: string
+          nullable: true
+          enum: [pending_auth, probation, healthy, watch, recovery, quarantine, blocked, null]
+        lane_reason_code: { type: string, nullable: true }
+        lane_reason: { type: string, nullable: true }
+        placement_samples:
+          type: integer
+          description: "Trusted inbox+spam observations in the evidence window."
+        spam_rate:
+          type: number
+          description: >-
+            Confidence-adjusted, not the raw observed fraction: a 95% lower bound,
+            so a thin sample reads lower than its point estimate. 0 when the
+            minimum sample was not met.
+        bounce_samples: { type: integer }
+        bounce_rate: { type: number, description: "Lower-bounded, like spam_rate." }
+        complaint_samples: { type: integer }
+        complaint_rate: { type: number, description: "Lower-bounded, like spam_rate." }
+        invalid_tokens:
+          type: integer
+          description: >-
+            Forged warmup tokens this mailbox RECEIVED. Observer-side only and
+            never attributed to a claimed sender, so it never gates health.
+        policy_version:
+          type: string
+          description: "Which thresholds produced this decision, so an old row stays readable after they move."
     WarmupMailbox:
       type: object
       description: >-
