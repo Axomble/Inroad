@@ -1045,6 +1045,7 @@ type WarmupParticipant struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	Lane          string             `json:"lane"`
+	LaneReason    string             `json:"lane_reason"`
 }
 
 type WarmupReceipt struct {

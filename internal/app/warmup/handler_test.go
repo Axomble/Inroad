@@ -188,6 +188,7 @@ func TestOverviewHappyPath(t *testing.T) {
 	store.overviewRows = []OverviewRow{{
 		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
 		StartedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}, HealthState: "healthy",
+		Lane: "watch", LaneReason: "held on watch pending clean evidence",
 		Email: "a@example.com", Inbox7d: 9, Spam7d: 1, TodaySent: 2,
 	}}
 	h := NewHandler(NewService(store))
@@ -205,6 +206,53 @@ func TestOverviewHappyPath(t *testing.T) {
 	}
 	if resp.Mailboxes[0].Email != "a@example.com" || resp.Mailboxes[0].InboxRate7d == nil || *resp.Mailboxes[0].InboxRate7d != 0.9 || resp.Mailboxes[0].PlacementSample7d != 10 {
 		t.Fatalf("overview mailbox wrong: %+v", resp.Mailboxes[0])
+	}
+}
+
+// The schema has REQUIRED lane/lane_reason on WarmupMailbox since lanes shipped,
+// but the query never selected them and the DTO never carried them — so the field
+// was absent from the JSON, arrived as undefined in the SPA, and every participant
+// rendered the "probation" badge whatever its real lane was. A required field that
+// is silently missing is worse than a wrong one: the client's safe fallback hides it.
+//
+// Asserted on the RAW JSON, not the decoded struct: decoding into WarmupMailboxDTO
+// would happily produce "" for an absent key and the test would pass over the bug.
+func TestOverviewCarriesTheLaneAxis(t *testing.T) {
+	ws := uuid.New()
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt:   pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+		HealthState: "healthy", HealthReason: "",
+		Lane: "quarantine", LaneReason: "quarantined: campaign hard-bounce rate above the pause threshold",
+		Email: "a@example.com", Inbox7d: 9, Spam7d: 1, TodaySent: 2,
+	}}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/overview", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Mailboxes []map[string]any `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Mailboxes) != 1 {
+		t.Fatalf("want one mailbox, got %d", len(raw.Mailboxes))
+	}
+	for _, key := range []string{"lane", "lane_reason"} {
+		if _, present := raw.Mailboxes[0][key]; !present {
+			t.Fatalf("%q is absent from the response; the schema requires it and the SPA falls back to probation without it", key)
+		}
+	}
+	if got := raw.Mailboxes[0]["lane"]; got != "quarantine" {
+		t.Fatalf("lane = %v, want quarantine — the participant's real lane, not a default", got)
+	}
+	if got, _ := raw.Mailboxes[0]["lane_reason"].(string); got == "" {
+		t.Fatal("lane_reason is empty; a withheld mailbox must say why")
 	}
 }
 

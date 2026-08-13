@@ -94,6 +94,8 @@ type OverviewRow struct {
 	StartedAt     pgtype.Timestamptz
 	HealthState   string
 	HealthReason  string
+	Lane          string
+	LaneReason    string
 	Email         string
 	Inbox7d       int64
 	Spam7d        int64
@@ -111,6 +113,8 @@ func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
 		StartedAt:     r.StartedAt,
 		HealthState:   r.HealthState,
 		HealthReason:  r.HealthReason,
+		Lane:          r.Lane,
+		LaneReason:    r.LaneReason,
 		Email:         r.Email,
 		Inbox7d:       r.Inbox7d,
 		Spam7d:        r.Spam7d,
@@ -192,11 +196,16 @@ type WarmupParticipantDTO struct {
 // WarmupMailboxDTO is the WarmupMailbox schema: a participant enriched with the
 // mailbox email and rolling 7-day placement rates for the overview.
 type WarmupMailboxDTO struct {
-	MailboxID         string   `json:"mailbox_id"`
-	Email             string   `json:"email"`
-	Enabled           bool     `json:"enabled"`
-	HealthState       string   `json:"health_state"`
-	HealthReason      string   `json:"health_reason"`
+	MailboxID    string `json:"mailbox_id"`
+	Email        string `json:"email"`
+	Enabled      bool   `json:"enabled"`
+	HealthState  string `json:"health_state"`
+	HealthReason string `json:"health_reason"`
+	// The POOL ELIGIBILITY axis. Required by the schema since lanes shipped, but
+	// unpopulated until now, so the SPA saw undefined and rendered every mailbox as
+	// "probation" regardless of its real lane.
+	Lane              string   `json:"lane"`
+	LaneReason        string   `json:"lane_reason"`
 	TodaySent         int32    `json:"today_sent"`
 	TodayTarget       int32    `json:"today_target"`
 	PlacementSample7d int64    `json:"placement_sample_7d"`

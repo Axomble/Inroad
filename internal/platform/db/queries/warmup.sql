@@ -119,6 +119,12 @@ WHERE mailbox_id = $1 AND workspace_id = $2
 SELECT
     p.mailbox_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
     p.reply_rate, p.started_at, p.health_state, p.health_reason,
+    -- The POOL ELIGIBILITY axis, alongside the reputation axis above. The schema
+    -- has required both since lanes shipped, but this query never selected them,
+    -- so the field was absent from the JSON, arrived as undefined in the SPA, and
+    -- every mailbox fell back to the "probation" badge — a wrong lane shown
+    -- confidently for every participant that was not actually in probation.
+    p.lane, p.lane_reason,
     m.email,
     COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
@@ -1135,6 +1141,7 @@ WITH changed AS (
     SET health_state = @to_state,
         health_reason = @reason,
         lane = @to_lane,
+        lane_reason = sqlc.arg(lane_reason)::text,
         paused_until = sqlc.narg(paused_until)::timestamptz,
         updated_at = now()
     WHERE p.mailbox_id = @mailbox_id

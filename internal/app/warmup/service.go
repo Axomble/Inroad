@@ -240,6 +240,8 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 			Enabled:           r.Enabled,
 			HealthState:       r.HealthState,
 			HealthReason:      r.HealthReason,
+			Lane:              r.Lane,
+			LaneReason:        r.LaneReason,
 			TodaySent:         r.TodaySent,
 			TodayTarget:       targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
 			PlacementSample7d: placementSample,

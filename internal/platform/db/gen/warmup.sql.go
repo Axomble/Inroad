@@ -40,12 +40,13 @@ WITH changed AS (
     SET health_state = $1,
         health_reason = $2,
         lane = $3,
-        paused_until = $4::timestamptz,
+        lane_reason = $4::text,
+        paused_until = $5::timestamptz,
         updated_at = now()
-    WHERE p.mailbox_id = $5
-      AND p.workspace_id = $6
-      AND p.health_state = $7
-      AND p.lane = $8
+    WHERE p.mailbox_id = $6
+      AND p.workspace_id = $7
+      AND p.health_state = $8
+      AND p.lane = $9
     RETURNING p.mailbox_id, p.workspace_id
 ), recorded AS (
     INSERT INTO warmup_state_transitions (
@@ -54,9 +55,9 @@ WITH changed AS (
         placement_samples, spam_rate, bounce_samples, bounce_rate,
         complaint_samples, complaint_rate, invalid_tokens, policy_version
     )
-    SELECT workspace_id, mailbox_id, $7, $1, $9, $2,
-           $8, $3,
-           $10::text, $11::text,
+    SELECT workspace_id, mailbox_id, $8, $1, $10, $2,
+           $9, $3,
+           $11::text, $4::text,
            $12, $13::real,
            $14, $15::real,
            $16, $17::real,
@@ -71,6 +72,7 @@ type ApplyWarmupParticipantTransitionParams struct {
 	ToState          string             `json:"to_state"`
 	Reason           string             `json:"reason"`
 	ToLane           string             `json:"to_lane"`
+	LaneReason       string             `json:"lane_reason"`
 	PausedUntil      pgtype.Timestamptz `json:"paused_until"`
 	MailboxID        uuid.UUID          `json:"mailbox_id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
@@ -78,7 +80,6 @@ type ApplyWarmupParticipantTransitionParams struct {
 	FromLane         string             `json:"from_lane"`
 	ReasonCode       string             `json:"reason_code"`
 	LaneReasonCode   string             `json:"lane_reason_code"`
-	LaneReason       string             `json:"lane_reason"`
 	PlacementSamples int32              `json:"placement_samples"`
 	SpamRate         float32            `json:"spam_rate"`
 	BounceSamples    int32              `json:"bounce_samples"`
@@ -115,6 +116,7 @@ func (q *Queries) ApplyWarmupParticipantTransition(ctx context.Context, arg Appl
 		arg.ToState,
 		arg.Reason,
 		arg.ToLane,
+		arg.LaneReason,
 		arg.PausedUntil,
 		arg.MailboxID,
 		arg.WorkspaceID,
@@ -122,7 +124,6 @@ func (q *Queries) ApplyWarmupParticipantTransition(ctx context.Context, arg Appl
 		arg.FromLane,
 		arg.ReasonCode,
 		arg.LaneReasonCode,
-		arg.LaneReason,
 		arg.PlacementSamples,
 		arg.SpamRate,
 		arg.BounceSamples,
@@ -441,7 +442,7 @@ func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngage
 }
 
 const getWarmupParticipant = `-- name: GetWarmupParticipant :one
-SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane FROM warmup_participants
+SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2
 `
 
@@ -468,6 +469,7 @@ func (q *Queries) GetWarmupParticipant(ctx context.Context, arg GetWarmupPartici
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Lane,
+		&i.LaneReason,
 	)
 	return i, err
 }
@@ -1000,6 +1002,12 @@ const listWarmupOverviewRows = `-- name: ListWarmupOverviewRows :many
 SELECT
     p.mailbox_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
     p.reply_rate, p.started_at, p.health_state, p.health_reason,
+    -- The POOL ELIGIBILITY axis, alongside the reputation axis above. The schema
+    -- has required both since lanes shipped, but this query never selected them,
+    -- so the field was absent from the JSON, arrived as undefined in the SPA, and
+    -- every mailbox fell back to the "probation" badge — a wrong lane shown
+    -- confidently for every participant that was not actually in probation.
+    p.lane, p.lane_reason,
     m.email,
     COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
@@ -1036,6 +1044,8 @@ type ListWarmupOverviewRowsRow struct {
 	StartedAt     pgtype.Timestamptz `json:"started_at"`
 	HealthState   string             `json:"health_state"`
 	HealthReason  string             `json:"health_reason"`
+	Lane          string             `json:"lane"`
+	LaneReason    string             `json:"lane_reason"`
 	Email         string             `json:"email"`
 	Inbox7d       int64              `json:"inbox_7d"`
 	Spam7d        int64              `json:"spam_7d"`
@@ -1068,6 +1078,8 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 			&i.StartedAt,
 			&i.HealthState,
 			&i.HealthReason,
+			&i.Lane,
+			&i.LaneReason,
 			&i.Email,
 			&i.Inbox7d,
 			&i.Spam7d,
@@ -1824,7 +1836,7 @@ ON CONFLICT (mailbox_id) DO UPDATE SET
     reply_rate     = EXCLUDED.reply_rate,
     updated_at     = now()
 WHERE warmup_participants.workspace_id = $2
-RETURNING mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane
+RETURNING mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason
 `
 
 type UpsertWarmupParticipantParams struct {
@@ -1880,6 +1892,7 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Lane,
+		&i.LaneReason,
 	)
 	return i, err
 }
