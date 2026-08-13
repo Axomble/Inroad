@@ -75,7 +75,10 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		return coreapi.WarmupSendJob{}, err
 	}
 
-	b, err := c.q.GetWarmupSenderBundle(ctx, gen.GetWarmupSenderBundleParams{MailboxID: mbID, WorkspaceID: ws})
+	b, err := c.q.GetWarmupSenderBundle(ctx, gen.GetWarmupSenderBundleParams{
+		MailboxID: mbID, WorkspaceID: ws,
+		LeaseSeconds: int32(warmup.LeaseLifetime / time.Second),
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Not an opted-in participant in this workspace → nothing to do.
@@ -276,10 +279,15 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		ThreadID:    threadID.String(),
 		IsReply:     isReply,
 		SendID:      sendID.String(),
-		ToEmail:     toEmail,
-		FromEmail:   b.FromEmail,
-		FromName:    b.FromName,
-		Subject:     subject,
+		// The decision this send is authorised by. Re-checked at claim, so a
+		// quarantine landing between here and delivery stops it.
+		IssuedLane:          b.Lane,
+		IssuedPolicyVersion: warmup.PolicyVersion,
+		LeaseExpiresAt:      b.LeaseExpiresAt.Time,
+		ToEmail:             toEmail,
+		FromEmail:           b.FromEmail,
+		FromName:            b.FromName,
+		Subject:             subject,
 		// Warmup mail is intentionally plaintext for v1 (the library content is
 		// text-only), so BodyHTML is deliberately left empty here — not a TODO.
 		BodyText:       body,
@@ -328,6 +336,8 @@ func (c client) ClaimWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) 
 	if _, err := c.q.ClaimWarmupSend(ctx, gen.ClaimWarmupSendParams{
 		ID: sendID, WorkspaceID: ws, ThreadID: threadID, FromMailbox: from, ToMailbox: to,
 		IsReply: job.IsReply, Token: job.Token, LeaseSeconds: claimLeaseSeconds,
+		IssuedLane: job.IssuedLane, IssuedPolicyVersion: job.IssuedPolicyVersion,
+		LeaseExpiresAt: pgtype.Timestamptz{Time: job.LeaseExpiresAt, Valid: !job.LeaseExpiresAt.IsZero()},
 	}); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return coreapi.ClaimSkip, err

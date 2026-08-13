@@ -164,6 +164,11 @@ ORDER BY p.created_at DESC;
 -- pair yields no row.
 SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
        p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
+       -- The lease expiry is minted HERE, from the database clock, because
+       -- ClaimWarmupSend compares it against the database clock. Computing it in
+       -- Go would put app/DB skew on both ends of a security check — the exact
+       -- mistake that made the Phase 1 freshness rule silently always-true.
+       (now() + make_interval(secs => sqlc.arg(lease_seconds)::int))::timestamptz AS lease_expires_at,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext
 FROM warmup_participants p
@@ -200,6 +205,27 @@ WHERE p.workspace_id = $1
   AND p.lane = sender.lane
   AND sender.lane NOT IN ('pending_auth','quarantine','blocked');
 
+-- ----------------------------------------------------------------------------
+-- The symmetric pair budget (pair-leases design §6). ONE budget per pair per UTC
+-- day, drawn down by BOTH directions and BOTH kinds — new sends and engagement
+-- replies alike. What bounds reputation exposure is what the two mailboxes
+-- exchange, which is the number a destination provider sees; counting only
+-- from→to let real per-pair volume run to roughly twice the nominal cap, because
+-- the partner's own sends back (and every reply in either direction) were free.
+--
+-- The count keys on the GENERATED pair_key, not on an OR of the two directions:
+-- an OR makes Postgres union two scans, and this counter runs inside a LATERAL
+-- over every candidate partner on the hottest read in the engine. is_reply is
+-- deliberately NOT filtered — a reply costs the pair the same exposure a new
+-- thread does.
+--
+-- The day is bounded on created_at because a claimed-but-unsent ('sending') row
+-- has sent_at IS NULL: bounding on sent_at would drop in-flight sends from the
+-- count and let two concurrent workers overrun the cap. idx_warmup_sends_pair_day
+-- is (workspace_id, pair_key, created_at) WHERE status IN ('sending','sent') and
+-- serves this index-only.
+-- ----------------------------------------------------------------------------
+
 -- name: SelectWarmupPartner :one
 -- Pick ONE eligible warmup partner for a sender: a DIFFERENT, enabled, non-paused
 -- participant in the SAME workspace, preferring one not recently paired with the
@@ -207,7 +233,9 @@ WHERE p.workspace_id = $1
 -- partner sorts on 'epoch', so it wins), tie-broken deterministically by
 -- mailbox_id so partner spread is stable and reproducible. workspace-pinned AND
 -- lane-pinned (see the lane-compatibility note above); a workspace with <2
--- eligible SAME-LANE participants returns no row.
+-- eligible SAME-LANE participants returns no row. sent_today is the SYMMETRIC
+-- pair budget (see the note above), so it also orders the spread by what the pair
+-- has actually exchanged rather than by what this sender happened to send.
 WITH candidates AS (
     SELECT p.mailbox_id, m.email, m.display_name,
            COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
@@ -226,8 +254,8 @@ WITH candidates AS (
             (SELECT COUNT(*)
              FROM warmup_sends s
              WHERE s.workspace_id = $1
-               AND s.from_mailbox = $2
-               AND s.to_mailbox = p.mailbox_id
+               AND s.pair_key = least($2::uuid::text, p.mailbox_id::text) || ':' ||
+                                greatest($2::uuid::text, p.mailbox_id::text)
                AND s.status IN ('sending','sent')
                AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') AS sent_today
     ) pair ON true
@@ -270,6 +298,9 @@ LIMIT 1;
 -- last_activity_at ASC so replies still spread across repliable partners
 -- (least-recently-active first, matching SelectWarmupPartner's spread), tie-broken
 -- by mailbox_id for determinism. workspace-pinned; no repliable partner → no row.
+-- The @max_pair_sends gate is the SAME symmetric per-pair-per-day budget
+-- SelectWarmupPartner draws on (see the note above it), so choosing to reply
+-- cannot buy a pair extra volume the new-thread path would have been refused.
 SELECT p.mailbox_id, m.email, m.display_name,
        t.id AS thread_id, t.content_key, t.turn, t.root_message_id
 FROM warmup_participants p
@@ -296,8 +327,8 @@ WHERE p.workspace_id = $1
   AND t.turn < sqlc.arg(max_turn)::int
   AND (SELECT COUNT(*) FROM warmup_sends s
        WHERE s.workspace_id = $1
-         AND s.from_mailbox = $2
-         AND s.to_mailbox = p.mailbox_id
+         AND s.pair_key = least($2::uuid::text, p.mailbox_id::text) || ':' ||
+                          greatest($2::uuid::text, p.mailbox_id::text)
          AND s.status IN ('sending','sent')
          AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc')
       < sqlc.arg(max_pair_sends)::int
@@ -352,16 +383,107 @@ WHERE id = $1 AND workspace_id = $2;
 -- yields a row iff we won; zero rows means skip / recover-forward (caller then
 -- reads status to distinguish already-'sent' from a fresh-'sending'/terminal skip).
 -- workspace_id is pinned on both the insert value and the reclaim WHERE.
+--
+-- This statement is ALSO the lease revalidation (pair-leases design §5). The
+-- caller supplies the lane and policy version the send was DECIDED under and the
+-- expiry the decision carries; the claim refuses — zero rows, so the existing
+-- ClaimSkip path fires — under any of three drifts. Refusing here rather than in
+-- Go is what makes the check unskippable: the row cannot enter 'sending' without
+-- passing it.
+--
+--   1. EXPIRY. @lease_expires_at was minted from the DATABASE clock at issue and
+--      is compared against the DATABASE clock here, so no Go clock enters the
+--      comparison — the mistake that made the Phase 1 freshness check silently
+--      wrong. It bounds the enqueue→pickup window: a backed-up or retrying asynq
+--      queue can fire a warmup:send long after its lane was decided. The check is
+--      on the expiry the CALLER holds, not on the stored column: a reclaim always
+--      arrives with a freshly re-derived decision, and gating it on the row's own
+--      (necessarily older) lease would strand a released row forever — it is the
+--      same deterministic id every retry and sweep re-derives, so nothing would
+--      ever rewrite the expired lease it was refused for.
+--   2. LANE DRIFT, against the sender's CURRENT participant lane read here, in
+--      SQL, not against a lane the caller asserts. This is acceptance criterion 7
+--      and it is why the join is not optional: on a FRESH insert there is no
+--      stored lease to compare, so a quarantine landing between decision and claim
+--      is only visible in the live row. A sender with no participant row claims
+--      nothing, which is correct — it is not in the pool.
+--   3. POLICY DRIFT on the stored row, so a threshold change takes effect on the
+--      in-flight tail instead of after it drains.
+--
+-- The sealed-lane exclusion beside the lane comparison is belt-and-braces for
+-- invariant 54 (lane isolation holds on EVERY outbound path): matching the live
+-- lane alone would let a caller that asserted 'quarantine' claim, because the
+-- assertion would be true. warmup.LaneMaySend gates that upstream; this makes the
+-- last write before delivery refuse it too.
+--
+-- Checks 1 and 2 gate the whole statement (a SELECT that yields no row inserts
+-- nothing AND resolves no conflict); the stored-vs-current comparisons in the
+-- DO UPDATE WHERE add the reclaim dimension, where a lease issued under an older
+-- lane or policy may be sitting on the row. A NULL issued_lane /
+-- issued_policy_version is a pre-lease row (written before 000057) and passes:
+-- those sends predate the lease and must keep working.
 INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
-                          is_reply, token, status, claimed_at)
-SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now()
-FROM mailboxes WHERE id = $4 AND workspace_id = $2
-ON CONFLICT (id) DO UPDATE SET status = 'sending', claimed_at = now(), last_error = ''
+                          is_reply, token, status, claimed_at,
+                          issued_lane, issued_policy_version, lease_expires_at)
+SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now(),
+       sqlc.arg(issued_lane)::text, sqlc.arg(issued_policy_version)::text,
+       sqlc.arg(lease_expires_at)::timestamptz
+FROM mailboxes m
+JOIN warmup_participants sender
+  ON sender.mailbox_id = m.id AND sender.workspace_id = m.workspace_id
+WHERE m.id = $4 AND m.workspace_id = $2
+  AND sqlc.arg(lease_expires_at)::timestamptz > now()
+  AND sender.lane = sqlc.arg(issued_lane)::text
+  AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
+ON CONFLICT (id) DO UPDATE SET
+    status = 'sending', claimed_at = now(), last_error = '',
+    -- Re-stamp the lease on a reclaim: the row now carries the decision this
+    -- attempt is acting on, not the one a crashed worker acted on.
+    issued_lane = sqlc.arg(issued_lane)::text,
+    issued_policy_version = sqlc.arg(issued_policy_version)::text,
+    lease_expires_at = sqlc.arg(lease_expires_at)::timestamptz
     WHERE warmup_sends.workspace_id = $2
       AND (warmup_sends.status = 'queued'
         OR (warmup_sends.status = 'sending'
             AND warmup_sends.claimed_at < now() - make_interval(secs => sqlc.arg(lease_seconds)::int)))
+      AND (warmup_sends.issued_lane IS NULL
+           OR warmup_sends.issued_lane = sqlc.arg(issued_lane)::text)
+      AND (warmup_sends.issued_policy_version IS NULL
+           OR warmup_sends.issued_policy_version = sqlc.arg(issued_policy_version)::text)
 RETURNING id;
+
+-- name: RecordWarmupSendConstraints :execrows
+-- Snapshot the constraints the match was made under (design §4): which lane, the
+-- cooldown in force, the pair budget and how much of it remained. Written right
+-- after the claim is won, by the winner only — the status='sending' guard keeps a
+-- worker that LOST the claim from overwriting the winner's snapshot, and keeps a
+-- late write off a row that has already reached a terminal state.
+--
+-- Deliberately a plain JSONB object with no schema: it exists so a bad match is
+-- reproducible in an incident review, and a fixed shape would have to migrate
+-- every time the matcher gains an input. Nothing reads it in code, so nothing
+-- breaks when its keys change. Rows affected is returned so a caller that cares
+-- can log a snapshot that did not land rather than assume it did.
+-- workspace-pinned.
+UPDATE warmup_sends
+SET issued_constraints = sqlc.arg(issued_constraints)
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending';
+
+-- name: CountWarmupPairSendsToday :one
+-- The symmetric pair budget already spent today by ONE known pair, for the
+-- engagement REPLY path — which selects no partner (the receipt fixes both ends)
+-- and so cannot get the count from SelectWarmupPartner. Before this, replies
+-- consulted no cap at all, which is the larger half of why real per-pair volume
+-- ran to about double the nominal cap. Same key, same window and the same
+-- both-directions/both-kinds semantics as the selection queries, so the two agree
+-- by construction rather than by two implementations staying in step. The
+-- argument order does not matter: pair_key is canonical. workspace-pinned.
+SELECT COUNT(*) FROM warmup_sends s
+WHERE s.workspace_id = $1
+  AND s.pair_key = least(sqlc.arg(mailbox_a)::uuid::text, sqlc.arg(mailbox_b)::uuid::text) || ':' ||
+                   greatest(sqlc.arg(mailbox_a)::uuid::text, sqlc.arg(mailbox_b)::uuid::text)
+  AND s.status IN ('sending','sent')
+  AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc';
 
 -- name: GetWarmupSendState :one
 -- The claimed row's terminal state, for the lost-claim recover-forward decision
@@ -680,6 +802,9 @@ ON CONFLICT (mailbox_id, day) DO UPDATE SET
 -- (belt-and-braces). warmup_send_id is carried through so the caller can derive the
 -- reply's receipt token. A foreign / vanished receipt yields pgx.ErrNoRows.
 SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
+       -- Same reasoning as GetWarmupSenderBundle: the reply is a NEW warmup send
+       -- and needs its own lease, minted on the database clock.
+       (now() + make_interval(secs => sqlc.arg(lease_seconds)::int))::timestamptz AS lease_expires_at,
        r.source_folder, r.message_id,
        m.provider, m.imap_host, m.imap_port, m.imap_username,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,

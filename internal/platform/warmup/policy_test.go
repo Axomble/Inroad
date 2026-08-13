@@ -584,3 +584,75 @@ func TestAssertedBouncesStillBlockPromotion(t *testing.T) {
 		t.Fatal("a mailbox the feed reports as heavily bouncing must not join the healthy pool")
 	}
 }
+
+func TestLeaseValid(t *testing.T) {
+	now := time.Now()
+	fresh := IssueLease(LaneHealthy, now)
+
+	cases := []struct {
+		name    string
+		lease   Lease
+		current string
+		ok      bool
+		code    string
+	}{
+		{"inside its window on an unchanged lane", fresh, LaneHealthy, true, LeaseOK},
+		{"expired", Lease{IssuedLane: LaneHealthy, IssuedPolicyVersion: PolicyVersion,
+			ExpiresAt: now.Add(-time.Second)}, LaneHealthy, false, LeaseExpired},
+		{"exactly at the expiry instant is expired", Lease{IssuedLane: LaneHealthy,
+			IssuedPolicyVersion: PolicyVersion, ExpiresAt: now}, LaneHealthy, false, LeaseExpired},
+		{"policy moved under it", Lease{IssuedLane: LaneHealthy,
+			IssuedPolicyVersion: "warmup-phase0-v1", ExpiresAt: now.Add(time.Minute)},
+			LaneHealthy, false, LeasePolicyChanged},
+		// A row written before leases existed: empty lane AND zero expiry. Evaluating
+		// expiry first would read that zero as "expired at the epoch" and refuse every
+		// historical send.
+		{"pre-lease row still claims", Lease{}, LaneHealthy, true, LeaseOK},
+		{"pre-lease row claims even from a sealed lane", Lease{}, LaneQuarantine, true, LeaseOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, code := LeaseValid(tc.lease, tc.current, now)
+			if ok != tc.ok || code != tc.code {
+				t.Fatalf("LeaseValid = %v/%q, want %v/%q", ok, code, tc.ok, tc.code)
+			}
+		})
+	}
+}
+
+// Acceptance criterion 7, stated as such: "a stale pair lease cannot send after
+// quarantine". Expiry alone cannot deliver this — the mailbox is quarantined well
+// inside its window, so only a comparison against CURRENT state catches it.
+func TestLeaseIssuedBeforeAQuarantineCannotClaim(t *testing.T) {
+	now := time.Now()
+	lease := IssueLease(LaneHealthy, now)
+
+	// Thirty seconds later the sweep quarantines the sender. The lease has 14.5
+	// minutes left on the clock.
+	claimAt := now.Add(30 * time.Second)
+	if lease.ExpiresAt.Before(claimAt) {
+		t.Fatal("fixture is wrong: the lease must still be inside its window")
+	}
+	ok, code := LeaseValid(lease, LaneQuarantine, claimAt)
+	if ok {
+		t.Fatal("a lease issued under healthy claimed after the sender was quarantined")
+	}
+	if code != LeaseLaneChanged {
+		t.Fatalf("reason = %q, want %q — the lane is what refused it, not the clock", code, LeaseLaneChanged)
+	}
+}
+
+// A refusal must always name itself, for the same reason a transition must: an
+// operator has to distinguish a slow queue from a mailbox being contained mid-flight.
+func TestEveryLeaseRefusalNamesItself(t *testing.T) {
+	now := time.Now()
+	for _, l := range []Lease{
+		{IssuedLane: LaneHealthy, IssuedPolicyVersion: PolicyVersion, ExpiresAt: now.Add(-time.Hour)},
+		{IssuedLane: LaneHealthy, IssuedPolicyVersion: PolicyVersion, ExpiresAt: now.Add(time.Hour)},
+		{IssuedLane: LaneHealthy, IssuedPolicyVersion: "stale", ExpiresAt: now.Add(time.Hour)},
+	} {
+		if ok, code := LeaseValid(l, LaneQuarantine, now); !ok && code == LeaseOK {
+			t.Fatalf("lease %+v refused with no reason code", l)
+		}
+	}
+}

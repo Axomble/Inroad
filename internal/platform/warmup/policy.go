@@ -670,3 +670,75 @@ func HoldRecoveryDuringBlock(d Decision, fromHealth string, pausedUntil, now tim
 func ShouldApplyTransition(fromHealth, toHealth, fromLane, toLane string) bool {
 	return fromHealth != toHealth || normalizeLane(fromLane) != normalizeLane(toLane)
 }
+
+// LeaseLifetime bounds how long an issued send lease stays claimable.
+//
+// It exists for the enqueue-to-pickup window, not for the microseconds between
+// choosing a partner and claiming the send: a backed-up or retrying asynq queue can
+// fire a warmup:send task long after the lane it was issued under was decided. Long
+// enough that a healthy queue never trips it, short enough that a stale task dies
+// rather than sends.
+const LeaseLifetime = 15 * time.Minute
+
+// Lease is the authority a send carries from the moment a partner is chosen to the
+// moment the send is claimed. It is stored on the send row itself rather than in a
+// separate table: that row already IS the reservation, and a second lifecycle to
+// keep in step with it is the "two things that must agree, and don't" shape every
+// repeated defect in this subsystem has taken.
+type Lease struct {
+	// IssuedLane is the sender's pool lane at issue time. EMPTY means the row
+	// predates leases entirely.
+	IssuedLane          string
+	IssuedPolicyVersion string
+	ExpiresAt           time.Time
+}
+
+// Lease refusal reason codes. A refusal is the system working, not an error, so it
+// has to be legible: an operator must be able to tell "the queue is slow" from
+// "this mailbox keeps getting quarantined mid-flight".
+const (
+	LeaseOK            = ""
+	LeaseExpired       = "lease_expired"
+	LeaseLaneChanged   = "lease_lane_changed"
+	LeasePolicyChanged = "lease_policy_changed"
+)
+
+// IssueLease stamps a lease for a sender currently in currentLane. The single home
+// for the expiry arithmetic, so no call site computes it and drifts.
+func IssueLease(currentLane string, now time.Time) Lease {
+	return Lease{
+		IssuedLane:          normalizeLane(currentLane),
+		IssuedPolicyVersion: PolicyVersion,
+		ExpiresAt:           now.Add(LeaseLifetime),
+	}
+}
+
+// LeaseValid reports whether a lease may still be claimed, and names why not when it
+// cannot.
+//
+// The lane comparison is what satisfies acceptance criterion 7 — "a stale pair lease
+// cannot send after quarantine". Expiry alone would not: a mailbox quarantined
+// thirty seconds after issue is still inside its window, and checking the clock
+// cannot see that. Comparing against CURRENT state can.
+func LeaseValid(l Lease, currentLane string, now time.Time) (bool, string) {
+	// Pre-lease rows first, before any other rule. A send written before this
+	// mechanism existed has an empty lane AND a zero ExpiresAt, and evaluating
+	// expiry first would read that zero as "expired at the epoch" and refuse every
+	// historical row. Back-filling a fabricated lane instead would put a claim in
+	// the record that was never true.
+	if l.IssuedLane == "" {
+		return true, LeaseOK
+	}
+	if !l.ExpiresAt.After(now) {
+		return false, LeaseExpired
+	}
+	if l.IssuedLane != normalizeLane(currentLane) {
+		return false, LeaseLaneChanged
+	}
+	// A threshold change takes effect immediately rather than after the in-flight
+	// tail drains under the old policy.
+	if l.IssuedPolicyVersion != PolicyVersion {
+		return false, LeasePolicyChanged
+	}
+	return true, LeaseOK
+}
