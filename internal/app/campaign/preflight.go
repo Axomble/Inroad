@@ -469,8 +469,18 @@ func checkDailyLimit(in PreflightInput) PreflightCheck {
 // lane — stays a WARNING: the campaign can launch, it will just send slower than
 // its configured caps promise.
 func checkWarmupHealth(in PreflightInput) PreflightCheck {
-	var withheld, reduced []string
+	var withheld, unauthenticated, reduced []string
 	for _, sd := range in.Senders {
+		// pending_auth is driven by sending_domains, which security.md invariant 39
+		// scopes as ADVISORY: "an advisory that turns out to be wrong must not be able
+		// to stop a campaign". A spoofed or merely un-swept DNS answer would otherwise
+		// block a launch, and a fresh install has no sending_domains row at all. It
+		// still WARNS, and warmup itself still refuses to send unauthenticated mail
+		// (LaneMaySend is false) — the advisory just cannot veto a campaign.
+		if sd.Lane != nil && *sd.Lane == warmup.LanePendingAuth {
+			unauthenticated = append(unauthenticated, sd.Email)
+			continue
+		}
 		if sd.Lane != nil && !warmup.LaneMayTakeNewLead(*sd.Lane) {
 			withheld = append(withheld, fmt.Sprintf("%s (%s)", sd.Email, *sd.Lane))
 			continue
@@ -495,6 +505,15 @@ func checkWarmupHealth(in PreflightInput) PreflightCheck {
 			Remedy: "A withheld mailbox rejoins the pool by passing domain authentication " +
 				"and then earning a clean evidence window; a blocked one needs operator approval. " +
 				"Remove them from the pool to launch now. Replies to existing conversations are unaffected.",
+		}
+	}
+	if len(unauthenticated) > 0 {
+		return PreflightCheck{
+			ID: CheckWarmupHealth, Severity: SeverityWarn,
+			Title:  "Domain authentication has not passed for some senders",
+			Detail: fmt.Sprintf("SPF/DMARC has not been confirmed for: %s.", strings.Join(unauthenticated, ", ")),
+			Remedy: "Publish SPF and DMARC for these domains. Warmup is paused for them until the " +
+				"next DNS check passes; campaigns can still launch.",
 		}
 	}
 	if len(reduced) > 0 {

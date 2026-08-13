@@ -12,11 +12,26 @@
 -- tenant's mailbox into this workspace. The ON CONFLICT UPDATE is likewise
 -- workspace-pinned, so a cross-workspace collision on an existing row updates
 -- nothing and returns no row. The caller maps that ErrNoRows to a domain sentinel.
+-- Re-entry does NOT clear containment. Disabling deletes the row, so a fresh
+-- INSERT would otherwise fall back to lane='probation' — and two calls any member
+-- with mailboxes:write can make (DELETE then PUT) would release a quarantined or
+-- blocked mailbox into a lane that may send and may take new campaign leads.
+-- warmup_state_transitions survives the delete, so the last recorded lane is
+-- restored when it was a sealed one. Only quarantine and blocked are carried
+-- forward: a mailbox that legitimately left them has a later transition saying so.
 INSERT INTO warmup_participants (
     mailbox_id, workspace_id,
-    start_volume, max_volume, ramp_increment, reply_rate
+    start_volume, max_volume, ramp_increment, reply_rate, lane
 )
-SELECT $1, $2, $3, $4, $5, $6
+SELECT $1, $2, $3, $4, $5, $6,
+       COALESCE((
+           SELECT CASE WHEN t.to_lane IN ('quarantine','blocked') THEN t.to_lane END
+           FROM warmup_state_transitions t
+           WHERE t.workspace_id = $2 AND t.mailbox_id = $1
+             AND t.to_lane IS NOT NULL
+           ORDER BY t.created_at DESC
+           LIMIT 1
+       ), 'probation')
 FROM mailboxes WHERE id = $1 AND workspace_id = $2
 ON CONFLICT (mailbox_id) DO UPDATE SET
     enabled        = true,
@@ -547,7 +562,7 @@ SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
        r.source_folder, r.message_id,
        m.provider, m.imap_host, m.imap_port, m.imap_username,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
-       m.allow_plaintext, p.reply_rate
+       m.allow_plaintext, p.reply_rate, p.lane
 FROM warmup_receipts r
 JOIN mailboxes m ON m.id = r.recipient_mailbox AND m.workspace_id = r.workspace_id
 JOIN warmup_participants p ON p.mailbox_id = r.recipient_mailbox AND p.workspace_id = r.workspace_id
@@ -562,7 +577,15 @@ WHERE r.id = $1 AND r.workspace_id = $2;
 -- (warmup_sends.from_mailbox — the reply's To); recipient_email/recipient_name are
 -- the replier's own envelope (the reply's From). Both mailbox joins are
 -- workspace-pinned (belt-and-braces), like the receipt WHERE.
-SELECT t.id AS thread_id, t.turn, t.content_key, t.root_message_id,
+--
+-- sender_lane is the ORIGINAL sender's CURRENT pool lane. Partner selection proved
+-- the two were lane-compatible when the outbound send was made, but a reply lands
+-- minutes to hours later (and a receipt can be re-engaged later still), by which
+-- time either side may have moved. Without re-checking, a mailbox that has since
+-- been quarantined keeps emitting warmup mail, and a healthy peer keeps receiving
+-- from a peer that has left the healthy pool.
+SELECT COALESCE(sp.lane, '')::text AS sender_lane,
+       t.id AS thread_id, t.turn, t.content_key, t.root_message_id,
        s.from_mailbox AS sender_mailbox,
        sm.email AS sender_email,
        rm.email AS recipient_email,
@@ -572,6 +595,8 @@ JOIN warmup_sends s ON s.id = r.warmup_send_id
 JOIN warmup_threads t ON t.id = s.thread_id
 JOIN mailboxes sm ON sm.id = s.from_mailbox AND sm.workspace_id = r.workspace_id
 JOIN mailboxes rm ON rm.id = r.recipient_mailbox AND rm.workspace_id = r.workspace_id
+LEFT JOIN warmup_participants sp
+       ON sp.mailbox_id = s.from_mailbox AND sp.workspace_id = r.workspace_id
 WHERE r.id = $1 AND r.workspace_id = $2;
 
 -- name: SetWarmupReceiptEngaged :one

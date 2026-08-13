@@ -389,7 +389,9 @@ func (c senderCapacity) fill(s *Sender) {
 	// decides WHETHER it may take new work at all. A quarantined mailbox reports
 	// sending=false even when its last measured reputation was healthy — that is the
 	// whole point of splitting the axes.
-	laneMayTake := c.lane == "" || warmup.LaneMayTakeNewLead(c.lane)
+	// pending_auth is excluded deliberately: it is driven by an ADVISORY DNS check
+	// (security.md invariant 39), so it must not zero a campaign's capacity.
+	laneMayTake := c.lane == "" || c.lane == warmup.LanePendingAuth || warmup.LaneMayTakeNewLead(c.lane)
 	s.Sending = c.poolEnabled && c.mailboxStatus == mailboxStatusActive &&
 		c.healthState != sendcap.HealthPaused && laneMayTake
 	if !laneMayTake {

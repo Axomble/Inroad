@@ -586,7 +586,7 @@ func TestPreflightPropagatesStoreErrors(t *testing.T) {
 // either send nothing or silently concentrate the whole campaign on the senders
 // that remain.
 func TestComputePreflightWithheldLaneFailsPreflight(t *testing.T) {
-	for _, lane := range []string{"quarantine", "blocked", "pending_auth"} {
+	for _, lane := range []string{"quarantine", "blocked"} {
 		t.Run(lane, func(t *testing.T) {
 			lane := lane
 			healthy := "healthy"
@@ -631,5 +631,29 @@ func TestComputePreflightEvidenceGatheringLanesWarn(t *testing.T) {
 				t.Errorf("warmup_health severity = %q, want warn for lane %q", c.Severity, lane)
 			}
 		})
+	}
+}
+
+// security.md invariant 39: "Nothing on the send path reads sending_domains — an
+// advisory that turns out to be wrong must not be able to stop a campaign."
+// pending_auth is derived from that advisory, so it warns rather than fails, and a
+// spoofed or merely un-swept DNS answer cannot veto a launch. Warmup itself still
+// refuses to send unauthenticated mail; only the campaign veto is withheld.
+func TestComputePreflightPendingAuthWarnsRatherThanBlocking(t *testing.T) {
+	lane, healthy := "pending_auth", "healthy"
+	in := healthyInput()
+	in.Senders = []campaign.Sender{
+		{Email: "a@x.test", Enabled: true, Status: "active", CapToday: 10, HealthState: &healthy, Lane: &lane},
+	}
+	report := campaign.ComputePreflight(in)
+	if !report.Ready {
+		t.Error("an advisory DNS check must not stop a campaign (security.md invariant 39)")
+	}
+	c := findCheck(t, report, campaign.CheckWarmupHealth)
+	if c.Severity != campaign.SeverityWarn {
+		t.Fatalf("warmup_health severity = %q, want warn for pending_auth", c.Severity)
+	}
+	if !strings.Contains(c.Detail, "a@x.test") {
+		t.Errorf("detail %q does not name the affected sender", c.Detail)
 	}
 }

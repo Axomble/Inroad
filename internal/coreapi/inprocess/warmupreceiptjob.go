@@ -321,10 +321,18 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 	// Reply only when the seeded decision says so AND the thread still has a turn to
 	// send; an exhausted / deleted thread means DoReply resolves to false.
 	doReply := warmup.ReplyDecision(seed, float64(b.ReplyRate))
+	// The replier's lane can have moved since the message arrived — minutes to hours,
+	// and a receipt can be re-engaged later still. Partner selection proved
+	// compatibility at SEND time only, so without re-checking here a mailbox that has
+	// since been quarantined keeps emitting warmup mail. Rescue and mark-read are
+	// inbound-only and remain allowed; only the outbound reply is withheld.
+	if doReply && !warmup.LaneMaySend(b.Lane) {
+		doReply = false
+	}
 
 	var reply coreapi.WarmupSendJob
 	if doReply {
-		built, ok, berr := c.buildWarmupReply(ctx, rid, b.RecipientMailbox, ws)
+		built, ok, berr := c.buildWarmupReply(ctx, rid, b.RecipientMailbox, ws, b.Lane)
 		if berr != nil {
 			return coreapi.WarmupEngageJob{}, berr
 		}
@@ -378,7 +386,7 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 // reclaim the existing 'sent' row (recover-forward) rather than re-send. The returned job
 // carries everything the claim/send/finalize path needs EXCEPT transport, which the caller
 // fills from the recipient's already-decrypted credentials.
-func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID) (coreapi.WarmupSendJob, bool, error) {
+func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID, replierLane string) (coreapi.WarmupSendJob, bool, error) {
 	th, err := c.q.GetWarmupReplyThread(ctx, gen.GetWarmupReplyThreadParams{ID: receiptID, WorkspaceID: ws})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -393,6 +401,13 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 	body, ok := warmup.Reply(content, int(th.Turn))
 	if !ok {
 		return coreapi.WarmupSendJob{}, false, nil // thread exhausted → no reply
+	}
+	// Re-check isolation against the ORIGINAL sender's CURRENT lane. A healthy peer
+	// must not receive from a mailbox that has left the healthy pool since the
+	// outbound send, and vice versa. An empty sender lane means that mailbox is no
+	// longer a warmup participant, so there is no thread left to continue.
+	if !warmup.LanesCompatible(replierLane, th.SenderLane) {
+		return coreapi.WarmupSendJob{}, false, nil
 	}
 
 	// Anchor the reply's warmup_sends id to the IMMUTABLE receipt id (one receipt maps to

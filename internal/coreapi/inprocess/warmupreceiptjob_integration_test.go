@@ -724,3 +724,92 @@ func assertWarmupHardBounces(t *testing.T, ctx context.Context, f warmupFixture,
 		t.Fatalf("hard-bounce observations for %s = %d, want %d", mailbox, got, want)
 	}
 }
+
+// Disabling deletes the participant row, so a fresh enable would fall back to
+// lane='probation' — and DELETE-then-PUT is two calls any member with
+// mailboxes:write can make. That would release a quarantined or blocked mailbox
+// into a lane that may send and may take new campaign leads. The transition trail
+// survives the delete and is what restores containment.
+func TestReEnablingWarmupDoesNotClearContainment(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	for _, sealed := range []string{warmup.LaneQuarantine, warmup.LaneBlocked} {
+		t.Run(sealed, func(t *testing.T) {
+			if _, err := f.raw.Exec(ctx,
+				`INSERT INTO warmup_state_transitions (
+				    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+				    reason_code, reason, lane_reason_code, lane_reason,
+				    placement_samples, spam_rate, bounce_samples, bounce_rate,
+				    complaint_samples, complaint_rate, invalid_tokens, policy_version)
+				 VALUES ($1,$2,'healthy','healthy','healthy',$3,
+				         'health_unchanged','x','lane_quarantined','x',
+				         0,0,0,0,0,0,0,'test')`,
+				f.ws1, f.a, sealed); err != nil {
+				t.Fatalf("seed transition: %v", err)
+			}
+
+			if _, err := f.q.DisableWarmupParticipant(ctx, gen.DisableWarmupParticipantParams{
+				MailboxID: f.a, WorkspaceID: f.ws1,
+			}); err != nil {
+				t.Fatalf("disable: %v", err)
+			}
+			p, err := f.q.UpsertWarmupParticipant(ctx, gen.UpsertWarmupParticipantParams{
+				MailboxID: f.a, WorkspaceID: f.ws1,
+				StartVolume: 8, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+			})
+			if err != nil {
+				t.Fatalf("re-enable: %v", err)
+			}
+			if p.Lane != sealed {
+				t.Fatalf("lane after re-enable = %q, want %q: disable+enable must not release containment", p.Lane, sealed)
+			}
+		})
+	}
+}
+
+// The cooldown is derived from the newest transition that MOVED a participant into
+// quarantine. Health-only rows written WHILE quarantined carry
+// from_lane = to_lane = 'quarantine'; counting those restarted the clock every time
+// the mailbox made recovery progress, so improving extended the containment that
+// improvement was meant to end.
+func TestQuarantineCooldownIsNotRestartedByHealthOnlyTransitions(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	insert := func(fromLane, toLane string, ageHours int) {
+		t.Helper()
+		if _, err := f.raw.Exec(ctx,
+			`INSERT INTO warmup_state_transitions (
+			    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+			    reason_code, reason, lane_reason_code, lane_reason,
+			    placement_samples, spam_rate, bounce_samples, bounce_rate,
+			    complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
+			 VALUES ($1,$2,'paused','paused',$3,$4,'x','x','y','y',
+			         0,0,0,0,0,0,0,'test', now() - make_interval(hours => $5))`,
+			f.ws1, f.a, fromLane, toLane, ageHours); err != nil {
+			t.Fatalf("seed transition: %v", err)
+		}
+	}
+	insert(warmup.LaneHealthy, warmup.LaneQuarantine, 96) // entry, 96h ago
+	insert(warmup.LaneQuarantine, warmup.LaneQuarantine, 1)
+	insert(warmup.LaneQuarantine, warmup.LaneQuarantine, 0) // held rows since
+
+	rows, err := f.q.ListWarmupEvaluationRows(ctx, gen.ListWarmupEvaluationRowsParams{
+		WorkspaceID: f.ws1, EvidenceTtlSeconds: 600,
+	})
+	if err != nil {
+		t.Fatalf("ListWarmupEvaluationRows: %v", err)
+	}
+	var since time.Time
+	for _, r := range rows {
+		if r.MailboxID == f.a {
+			since = r.QuarantinedSince.Time
+		}
+	}
+	if since.IsZero() {
+		t.Fatal("no quarantine entry time derived")
+	}
+	if elapsed := time.Since(since); elapsed < warmup.QuarantineCooldown {
+		t.Fatalf("quarantined_since is %s ago, want >= the %s cooldown: held rows must not restart the clock",
+			elapsed.Round(time.Hour), warmup.QuarantineCooldown)
+	}
+}

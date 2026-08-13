@@ -304,7 +304,7 @@ func availableToday(r gen.ListCampaignSenderCandidatesRow) int {
 	// function — so without it the UI reported sending=false and cap_today=0 while
 	// the worker kept assigning new leads at the mailbox's full ramped cap. An
 	// empty lane means the mailbox is not warming up at all and is not gated.
-	if r.Lane != "" && !warmup.LaneMayTakeNewLead(r.Lane) {
+	if r.Lane != "" && r.Lane != warmup.LanePendingAuth && !warmup.LaneMayTakeNewLead(r.Lane) {
 		return 0
 	}
 	return max(sendcap.Cold(candidateCap(r), r.HealthState)-int(r.SentToday), 0)
@@ -337,7 +337,7 @@ func (c client) exhaustedPoolSender(b gen.GetStepEnrollmentBundleRow, rows []gen
 		consumed += limit - min(availableToday(r), limit)
 		if r.Enabled && r.MailboxStatus == mailboxStatusActive &&
 			(r.HealthState == sendcap.HealthPaused ||
-				(r.Lane != "" && !warmup.LaneMayTakeNewLead(r.Lane))) {
+				(r.Lane != "" && r.Lane != warmup.LanePendingAuth && !warmup.LaneMayTakeNewLead(r.Lane))) {
 			// Same reasoning as a paused mailbox: a withheld lane can clear (a
 			// cooldown elapses, DNS starts passing), so the enrollment must wait
 			// rather than die on the degenerate zero-capacity branch.
