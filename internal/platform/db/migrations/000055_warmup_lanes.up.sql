@@ -83,6 +83,13 @@ ALTER TABLE warmup_state_transitions
 ALTER TABLE warmup_state_transitions
     ADD CONSTRAINT warmup_state_transitions_to_lane_check
     CHECK (to_lane IS NULL OR to_lane IN ('pending_auth','probation','healthy','watch','recovery','quarantine','blocked'));
+-- Symmetric with reason_code's non-empty CHECK on the health axis. That guarantee
+-- turned out to be load-bearing rather than decorative: an unexplained decision
+-- aborts the atomic statement it travels in, so the lane axis gets the same
+-- structural enforcement rather than relying on the writer to remember.
+ALTER TABLE warmup_state_transitions
+    ADD CONSTRAINT warmup_state_transitions_lane_reason_code_check
+    CHECK (lane_reason_code IS NULL OR btrim(lane_reason_code) <> '');
 
 -- Make the invalid-token safeguard STRUCTURAL. An unauthenticated token may claim
 -- any sender, so trusting the claim would let anyone throttle a mailbox they do
@@ -103,7 +110,7 @@ ALTER TABLE warmup_observations
 CREATE INDEX idx_warmup_sends_message_id
     ON warmup_sends (workspace_id, message_id) WHERE message_id <> '';
 
--- Serves the campaign-bounce aggregation's enrollment arm, which binds
+-- Serves the campaign hard-bounce aggregation's enrollment arm, which binds
 -- workspace_id, stop_reason and stopped_at but not campaign_id, so the existing
 -- (campaign_id, stopped_at) index could not be used.
 CREATE INDEX idx_sequence_enrollments_bounced
@@ -143,3 +150,26 @@ SET lane = CASE
     ELSE 'probation'
 END,
 updated_at = now();
+
+-- The quarantine cooldown is derived from the newest transition that MOVED a
+-- participant into quarantine. The backfill above sets lane directly, so without a
+-- matching row a backfilled quarantine has no entry timestamp — and a NULL entry
+-- time is treated as "cooldown has not elapsed", holding the mailbox forever. Write
+-- the entry rows the derivation expects.
+--
+-- created_at is now(): the cooldown starts at DEPLOY time, not retroactively. The
+-- alternative would credit a mailbox for time served under a policy that did not
+-- exist, which is the "time alone reinstates a participant" failure this phase
+-- exists to prevent.
+INSERT INTO warmup_state_transitions (
+    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+    reason_code, reason, lane_reason_code, lane_reason,
+    placement_samples, spam_rate, bounce_samples, bounce_rate,
+    complaint_samples, complaint_rate, invalid_tokens, policy_version
+)
+SELECT p.workspace_id, p.mailbox_id, p.health_state, p.health_state, 'probation', 'quarantine',
+       'health_unchanged', 'lane backfill: health was already degraded',
+       'lane_quarantined', 'backfilled into quarantine from a degraded health state',
+       0, 0, 0, 0, 0, 0, 0, 'warmup-phase1-v1'
+FROM warmup_participants p
+WHERE p.lane = 'quarantine';

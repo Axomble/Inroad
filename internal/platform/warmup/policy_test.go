@@ -258,9 +258,13 @@ func TestEveryAppliedTransitionIsExplained(t *testing.T) {
 					if !ShouldApplyTransition(h, d.Health, l, d.Lane) {
 						continue // nothing written, nothing to explain
 					}
-					if d.Health != h && (d.HealthReasonCode == "" || d.HealthReason == "") {
-						t.Fatalf("%s/%s auth=%v %s: health %s -> %s persisted with no explanation",
-							h, l, auth, sh.name, h, d.Health)
+					// Asserted on the WRITE, not on whether this axis moved. The health
+					// reason_code column is NOT NULL CHECK (btrim <> '') and shares one
+					// atomic statement with the lane update, so an unexplained health
+					// decision aborts the lane change travelling with it.
+					if d.HealthReasonCode == "" || d.HealthReason == "" {
+						t.Fatalf("%s/%s auth=%v %s: transition to %s/%s persisted with no health explanation",
+							h, l, auth, sh.name, d.Health, d.Lane)
 					}
 					if normalizeLane(d.Lane) != normalizeLane(l) && (d.LaneReasonCode == "" || d.LaneReason == "") {
 						t.Fatalf("%s/%s auth=%v %s: lane %s -> %s persisted with no explanation",
@@ -269,5 +273,107 @@ func TestEveryAppliedTransitionIsExplained(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A lane-only promotion (health already healthy and unchanged) still writes a row
+// into a table whose reason_code is NOT NULL CHECK (btrim <> ”), in the SAME
+// atomic statement as the participant update. An empty code aborted both, so the
+// mailbox was never promoted and the sweep re-failed identically forever.
+func TestLaneOnlyTransitionStillNamesTheHealthAxis(t *testing.T) {
+	now := time.Now()
+	d := EvaluateParticipant(Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneProbation, Inbox: 20,
+	}, now)
+
+	if d.Lane != LaneHealthy || d.Health != StateHealthy {
+		t.Fatalf("got %s/%s, want healthy/healthy", d.Health, d.Lane)
+	}
+	if !ShouldApplyTransition(StateHealthy, d.Health, LaneProbation, d.Lane) {
+		t.Fatal("a lane promotion must be persisted")
+	}
+	if d.HealthReasonCode == "" {
+		t.Fatal("the health axis must name itself even when unchanged; an empty reason_code aborts the whole statement")
+	}
+}
+
+// Quarantine is stricter than pending_auth: both seal the mailbox, but only
+// quarantine carries a cooldown. A DNS blip must not launder containment into
+// probation, which may send and may take new campaign leads.
+func TestAuthRegressionCannotLaunderAQuarantine(t *testing.T) {
+	now := time.Now()
+	entered := now.Add(-time.Hour) // well inside the 72h cooldown
+
+	regressed := EvaluateParticipant(Signals{
+		AuthPassing: false, EvidenceFresh: true, CurrentLane: LaneQuarantine,
+		Inbox: 20, QuarantinedSince: entered,
+	}, now)
+	if regressed.Lane != LaneQuarantine {
+		t.Fatalf("auth regression moved a quarantined mailbox to %q; quarantine is the stricter state", regressed.Lane)
+	}
+
+	// Even reached from pending_auth, an unexpired quarantine must resume.
+	restored := EvaluateParticipant(Signals{
+		AuthPassing: true, EvidenceFresh: true, CurrentLane: LanePendingAuth,
+		Inbox: 20, QuarantinedSince: entered,
+	}, now)
+	if restored.Lane != LaneQuarantine {
+		t.Fatalf("lane = %q, want quarantine: the cooldown has not elapsed", restored.Lane)
+	}
+	if LaneMayTakeNewLead(restored.Lane) || LaneMaySend(restored.Lane) {
+		t.Fatal("a resumed quarantine must neither send nor take new leads")
+	}
+}
+
+// A thin but catastrophic arm must not be promoted. Escalation needs a minimum
+// sample so thin evidence cannot produce false positives; vouching for a mailbox
+// does not get the same benefit of the doubt.
+func TestUnprovenBadEvidenceBlocksPromotion(t *testing.T) {
+	now := time.Now()
+	d := EvaluateParticipant(Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneProbation, Inbox: 20,
+		CampaignDelivered: 49, CampaignHardBounces: 25, // 51% on real recipients
+	}, now)
+
+	if d.Lane == LaneHealthy {
+		t.Fatal("25 hard bounces on 49 recipients must not join the healthy pool, even below MinBounceSamples")
+	}
+	// It is below the minimum sample, so it must not be PUNISHED either.
+	if d.Health != StateHealthy {
+		t.Fatalf("health = %q: a sub-minimum sample must not escalate", d.Health)
+	}
+}
+
+// A genuinely empty arm is no evidence and must not block promotion.
+func TestEmptyArmsDoNotBlockPromotion(t *testing.T) {
+	d := EvaluateParticipant(Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneProbation, Inbox: 20,
+	}, time.Now())
+	if d.Lane != LaneHealthy {
+		t.Fatalf("lane = %q (%s), want healthy: no campaign traffic at all is not bad evidence", d.Lane, d.LaneReasonCode)
+	}
+}
+
+// The dwell holds a health recovery, so it must also hold the lane promotion that
+// recovery would justify — otherwise a throttled mailbox lands in the recovery lane
+// and may send, which is the mirror of the "quarantined but healthy" pair the
+// atomic write exists to prevent.
+func TestDwellHoldsTheLanePromotionToo(t *testing.T) {
+	now := time.Now()
+	d := EvaluateParticipant(Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateThrottled, CurrentLane: LaneQuarantine, Inbox: 20,
+		QuarantinedSince: now.Add(-96 * time.Hour),
+		PausedUntil:      now.Add(time.Hour), // block still in force
+	}, now)
+
+	if d.Health != StateThrottled {
+		t.Fatalf("health = %q, want throttled: the dwell has not elapsed", d.Health)
+	}
+	if LaneMaySend(d.Lane) {
+		t.Fatalf("lane = %q may send, but the health recovery that would justify it was refused", d.Lane)
 	}
 }

@@ -854,6 +854,12 @@ LEFT JOIN LATERAL (
     WHERE t.workspace_id = p.workspace_id
       AND t.mailbox_id = p.mailbox_id
       AND t.to_lane = 'quarantine'
+      -- Only rows that MOVED it into quarantine start the clock. Health-only
+      -- transitions written while already quarantined carry
+      -- from_lane = to_lane = 'quarantine', and counting those restarted the
+      -- cooldown on every sweep the mailbox made recovery progress — so improving
+      -- extended the containment that improvement was supposed to end.
+      AND t.from_lane IS DISTINCT FROM 'quarantine'
 ) q ON true
 WHERE p.workspace_id = $1 AND p.enabled
 ORDER BY p.mailbox_id
@@ -1763,14 +1769,57 @@ LEFT JOIN LATERAL (
             -- DISTINCT s.id counts bounced SENDS, matching the delivered-sends
             -- denominator above. Two DSNs for one send would otherwise be able to
             -- push the numerator past the denominator.
-            SELECT count(DISTINCT s.id)
-            FROM deliverability_events de
-            JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
-            WHERE de.workspace_id = $1
-              AND s.mailbox_id = p.mailbox_id
-              AND de.kind = 'bounce'
-              AND de.bounce_class = 'hard'
-              AND de.received_at >= now() - interval '30 days'
+            -- TWO arms, unioned on the send so a bounce counted by both is counted
+            -- once. Neither alone is sufficient:
+            --
+            -- (a) provider webhooks carry bounce_class, but NOTHING populates it
+            --     yet: POST /deliverability/events has no such field, so every row
+            --     is 'unknown' and this arm currently matches nothing. It is the
+            --     forward path, live the moment ingest classifies.
+            -- (b) Inroad's OWN DSN parser already distinguishes hard bounces and
+            --     stops the enrollment with stop_reason='bounced'. Without this arm
+            --     the whole campaign hard-bounce guardrail is structurally zero —
+            --     the same "rule fed by a permanently-empty counter" defect this
+            --     phase set out to remove, reintroduced on the bounce axis.
+            --
+            -- (b) is attributed through the LAST send before the enrollment stopped,
+            -- which is the send that bounced. Phase 0 joined on
+            -- (campaign_id, contact_id) with no sender identity, so a campaign
+            -- rotating over M and N charged BOTH for one bounce.
+            SELECT count(*) FROM (
+                SELECT s.id
+                FROM deliverability_events de
+                JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
+                WHERE de.workspace_id = $1
+                  AND s.mailbox_id = p.mailbox_id
+                  AND de.kind = 'bounce'
+                  AND de.bounce_class = 'hard'
+                  AND de.received_at >= now() - interval '30 days'
+                  -- Bound the SEND to the same window and status as the denominator.
+                  -- A late DSN for an older send would otherwise count in the
+                  -- numerator against a denominator that excludes it.
+                  AND s.status = 'sent'
+                  AND s.sent_at >= now() - interval '30 days'
+                UNION
+                SELECT bounced.id
+                FROM sequence_enrollments se
+                JOIN LATERAL (
+                    SELECT s.id, s.mailbox_id
+                    FROM sends s
+                    WHERE s.workspace_id = se.workspace_id
+                      AND s.campaign_id = se.campaign_id
+                      AND s.contact_id = se.contact_id
+                      AND s.status = 'sent'
+                      AND s.sent_at <= se.stopped_at
+                      AND s.sent_at >= now() - interval '30 days'
+                    ORDER BY s.sent_at DESC
+                    LIMIT 1
+                ) bounced ON true
+                WHERE se.workspace_id = $1
+                  AND se.stop_reason = 'bounced'
+                  AND se.stopped_at >= now() - interval '30 days'
+                  AND bounced.mailbox_id = p.mailbox_id
+            ) hard_bounced_sends
         ) AS hard_bounces,
         (
             SELECT count(DISTINCT s.id)
@@ -1780,6 +1829,8 @@ LEFT JOIN LATERAL (
               AND s.mailbox_id = p.mailbox_id
               AND de.kind = 'complaint'
               AND de.received_at >= now() - interval '30 days'
+              AND s.status = 'sent'
+              AND s.sent_at >= now() - interval '30 days'
         ) AS complaints
 ) camp ON true
 LEFT JOIN LATERAL (

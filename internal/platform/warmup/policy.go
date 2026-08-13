@@ -117,6 +117,11 @@ type Signals struct {
 	// QuarantinedSince is when the participant entered quarantine, zero if it is
 	// not quarantined. Drives the cooldown gate only.
 	QuarantinedSince time.Time
+
+	// PausedUntil is the timed block from the last escalation. While it is in the
+	// future a health RECOVERY is held back, which also blocks the lane promotion
+	// that recovery would otherwise justify. Zero means no block.
+	PausedUntil time.Time
 }
 
 // Decision is both the outcome and the evidence behind it. Every field that fed a
@@ -151,6 +156,12 @@ type Decision struct {
 // Health escalation drives lane demotion; lane never drives health.
 func EvaluateParticipant(s Signals, now time.Time) Decision {
 	d := evaluateHealth(s)
+	// Applied here, BEFORE the lane is derived, so a health recovery the dwell is
+	// holding back cannot leak into a lane promotion. Containment moves (auth
+	// regressed, evidence stale, cooldown elapsed) are unaffected: they do not read
+	// the recovered health, and delaying containment for a dwell timer would be
+	// backwards. Idempotent, so a caller that also applies it changes nothing.
+	d = HoldRecoveryDuringBlock(d, s.CurrentHealth, s.PausedUntil, now)
 	d.Lane, d.LaneReasonCode, d.LaneReason = evaluateLane(s, d, now)
 	return d
 }
@@ -206,13 +217,19 @@ func evaluateHealth(s Signals) Decision {
 		return d
 	}
 
-	// unknown shares healthy's rank, so the recovery-step branch above cannot fire
-	// for unknown -> healthy. That transition still has to name itself: the
-	// transitions table rejects an empty reason_code, and it shares one atomic
-	// statement with the participant update — so an unexplained decision does not
-	// merely lose its audit trail, it aborts the state change.
-	if d.HealthReasonCode == "" && d.Health != current {
-		d.HealthReasonCode, d.HealthReason = "evidence_qualified", "qualified placement evidence establishes health"
+	// The health axis ALWAYS names itself, even when it did not move. A transition
+	// is written when EITHER axis changes, and both share one atomic statement
+	// against a table that rejects an empty reason_code — so an unexplained health
+	// decision does not merely lose its audit trail, it aborts the LANE decision
+	// travelling with it, and the participant is stuck on every subsequent sweep.
+	// (unknown shares healthy's rank, so the recovery-step branch above cannot fire
+	// for unknown -> healthy; that promotion reaches here.)
+	if d.HealthReasonCode == "" {
+		if d.Health != current {
+			d.HealthReasonCode, d.HealthReason = "evidence_qualified", "qualified placement evidence establishes health"
+		} else {
+			d.HealthReasonCode, d.HealthReason = "health_unchanged", "health is unchanged; this transition moves the pool lane"
+		}
 	}
 	return d
 }
@@ -232,6 +249,14 @@ func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason stri
 		return LaneBlocked, "lane_blocked_held", "blocked: operator approval required to re-enter recovery"
 	}
 
+	// Quarantine is STRICTER than pending_auth — both seal the mailbox, but only
+	// quarantine carries a cooldown and a requalification requirement. Letting an
+	// auth regression move it would launder containment: the mailbox would return
+	// through pending_auth -> probation, which may send and may take new leads.
+	if cur == LaneQuarantine && !s.AuthPassing {
+		return LaneQuarantine, "lane_quarantine_held", "quarantined; domain authentication is also failing"
+	}
+
 	// Admission prerequisite outranks everything else: unauthenticated mail damages
 	// reputation faster than any pool arrangement can repair it.
 	if !s.AuthPassing {
@@ -243,7 +268,8 @@ func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason stri
 
 	degraded := stateRank(d.Health) >= stateRank(StateThrottled)
 	watching := d.Health == StateWatch
-	qualified := d.Health == StateHealthy && s.EvidenceFresh && d.PlacementSamples >= MinPlacementSamples
+	qualified := d.Health == StateHealthy && s.EvidenceFresh &&
+		d.PlacementSamples >= MinPlacementSamples && !promotionAlarmed(s)
 
 	// Any qualified-throttled-or-worse signal contains the participant, wherever it
 	// currently sits.
@@ -256,6 +282,12 @@ func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason stri
 
 	switch cur {
 	case LanePendingAuth:
+		// Leaving pending_auth must not release an unexpired quarantine. A mailbox
+		// can reach here FROM quarantine only via an auth regression, and the
+		// transition trail still records when containment began.
+		if !s.QuarantinedSince.IsZero() && now.Sub(s.QuarantinedSince) < QuarantineCooldown {
+			return LaneQuarantine, "lane_quarantine_resumed", "domain authentication passed, but the quarantine cooldown has not elapsed"
+		}
 		// Authentication just passed. Entry is probation, never healthy — a
 		// newly-authenticated mailbox has proven nothing about placement.
 		return LaneProbation, "lane_admitted_to_probation", "domain authentication passed: entering probation"
@@ -340,6 +372,33 @@ func LaneMayTakeNewLead(lane string) bool {
 func LanesCompatible(sender, recipient string) bool {
 	s, r := normalizeLane(sender), normalizeLane(recipient)
 	return LaneMaySend(s) && LaneMaySend(r) && s == r
+}
+
+// promotionAlarmed reports whether any evidence arm looks bad enough to withhold
+// promotion, INDEPENDENTLY of whether it met the minimum sample for escalation.
+//
+// The two questions are genuinely different. "Is there enough evidence to punish
+// this mailbox?" needs a minimum sample, or thin samples produce false positives.
+// "Is there enough evidence to vouch for it?" does not: a mailbox with 25 hard
+// bounces on 49 recipients has not proven a rate, but it has certainly not earned
+// the healthy pool. Absence of evidence is not health — and neither is a small pile
+// of bad evidence.
+func promotionAlarmed(s Signals) bool {
+	return alarming(s.CampaignHardBounces, s.CampaignDelivered, bounceWatchRate) ||
+		alarming(s.WarmupHardBounces, s.WarmupDelivered, bounceWatchRate) ||
+		alarming(s.CampaignComplaints, s.CampaignDelivered, complaintWatchRate)
+}
+
+// alarming applies the Wilson lower bound with NO minimum-sample gate. A zero
+// denominator is genuinely no evidence and never alarms.
+func alarming(successes, trials int, watch float64) bool {
+	if trials <= 0 || successes <= 0 {
+		return false
+	}
+	if successes >= trials {
+		return true
+	}
+	return wilsonLowerBound(successes, trials) > watch
 }
 
 // applyBand maps one rate onto the worst state its three thresholds warrant. A

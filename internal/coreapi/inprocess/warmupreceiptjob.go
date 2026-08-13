@@ -537,18 +537,18 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 			WarmupHardBounces:     int(r.WarmupHardBounces),
 			ObserverTokenFailures: int(r.ObserverTokenFailures),
 			QuarantinedSince:      r.QuarantinedSince.Time,
+			PausedUntil:           r.PausedUntil.Time,
 		}, now)
 
-		// The timed-block floor applies to the HEALTH axis only: a recovery is held
-		// while paused_until is in the future so a mailbox cannot walk
-		// paused→throttled→watch→healthy on consecutive five-minute sweeps. A lane
-		// change still lands immediately — auth regressing or evidence going stale is
-		// containment, not a recovery being rushed, and delaying it for a dwell timer
-		// would be backwards.
-		decision = warmup.HoldRecoveryDuringBlock(decision, r.HealthState, r.PausedUntil.Time, now)
+		// The timed-block floor is applied INSIDE EvaluateParticipant, before the lane
+		// is derived, so a held health recovery cannot leak into a lane promotion.
 
 		if !warmup.ShouldApplyTransition(r.HealthState, decision.Health, r.Lane, decision.Lane) {
 			continue
+		}
+		bounceSamples, bounceRate := decision.CampaignBounceSamples, decision.CampaignBounceRate
+		if decision.WarmupBounceRate > decision.CampaignBounceRate {
+			bounceSamples, bounceRate = decision.WarmupBounceSamples, decision.WarmupBounceRate
 		}
 		if _, err := c.q.ApplyWarmupParticipantTransition(ctx, gen.ApplyWarmupParticipantTransitionParams{
 			MailboxID: r.MailboxID, WorkspaceID: r.WorkspaceID,
@@ -558,11 +558,13 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 			LaneReasonCode: decision.LaneReasonCode, LaneReason: decision.LaneReason,
 			PausedUntil:      warmupPausedUntil(decision.Health, now),
 			PlacementSamples: int32(decision.PlacementSamples), SpamRate: float32(decision.SpamRate),
-			// The transition row keeps one bounce column pair for continuity with
-			// Phase 0 history; the CAMPAIGN population is recorded because it is the
-			// one that reflects real recipients. The warmup population is evaluated
-			// separately by the policy and can still drive the state.
-			BounceSamples: int32(decision.CampaignBounceSamples), BounceRate: float32(decision.CampaignBounceRate),
+			// One bounce column pair, carrying the arm that actually DROVE the
+			// decision with ITS OWN denominator. Recording the campaign pair
+			// unconditionally meant a warmup-driven pause wrote
+			// reason_code='warmup_bounce_pause' next to rate 0.0 / samples 0 — a row
+			// that cannot explain itself, which is the Phase 0 defect this table
+			// exists to fix.
+			BounceSamples: int32(bounceSamples), BounceRate: float32(bounceRate),
 			ComplaintSamples: int32(decision.ComplaintSamples), ComplaintRate: float32(decision.ComplaintRate),
 			InvalidTokens: int32(decision.ObserverTokenFailures), PolicyVersion: warmup.PolicyVersion,
 		}); err != nil {

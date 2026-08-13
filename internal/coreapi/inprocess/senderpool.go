@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/rotation"
 	"github.com/inroad/inroad/internal/platform/sendcap"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // mailboxStatusActive is the only mailbox status a pool member may send from.
@@ -293,6 +294,19 @@ func availableToday(r gen.ListCampaignSenderCandidatesRow) int {
 	if !r.Enabled || r.MailboxStatus != mailboxStatusActive {
 		return 0
 	}
+	// The pool LANE is a separate axis from health and gates differently: health
+	// decides how MUCH may be sent, the lane decides WHETHER new work may be taken
+	// at all. A withheld mailbox (quarantine, blocked, pending_auth) contributes no
+	// capacity, exactly like a paused one.
+	//
+	// This must live HERE, not only in the reporting paths. Preflight and the
+	// senders panel already refused a withheld mailbox, but the rotation reads this
+	// function — so without it the UI reported sending=false and cap_today=0 while
+	// the worker kept assigning new leads at the mailbox's full ramped cap. An
+	// empty lane means the mailbox is not warming up at all and is not gated.
+	if r.Lane != "" && !warmup.LaneMayTakeNewLead(r.Lane) {
+		return 0
+	}
 	return max(sendcap.Cold(candidateCap(r), r.HealthState)-int(r.SentToday), 0)
 }
 
@@ -321,7 +335,12 @@ func (c client) exhaustedPoolSender(b gen.GetStepEnrollmentBundleRow, rows []gen
 		limit := candidateCap(r)
 		poolCap += limit
 		consumed += limit - min(availableToday(r), limit)
-		if r.Enabled && r.MailboxStatus == mailboxStatusActive && r.HealthState == sendcap.HealthPaused {
+		if r.Enabled && r.MailboxStatus == mailboxStatusActive &&
+			(r.HealthState == sendcap.HealthPaused ||
+				(r.Lane != "" && !warmup.LaneMayTakeNewLead(r.Lane))) {
+			// Same reasoning as a paused mailbox: a withheld lane can clear (a
+			// cooldown elapses, DNS starts passing), so the enrollment must wait
+			// rather than die on the degenerate zero-capacity branch.
 			s.healthPaused = true
 		}
 	}
