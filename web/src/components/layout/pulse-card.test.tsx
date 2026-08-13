@@ -154,6 +154,58 @@ test('a withheld mailbox is not hidden behind a concurrent at-risk count', async
   expect(screen.queryByText(/4 at risk/i)).not.toBeInTheDocument()
 })
 
+// The outcome line is the card's only answer to "is it working?", so it has
+// to survive both postures — the healthy one and the one where an attention
+// row is shouting. Its own zero state stays silent.
+test('replies line renders in the healthy posture and links to the inbox', async () => {
+  const payload = healthyPulse()
+  payload.inbox = { unread: 23, interested: 6 }
+  pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<PulseCard />, { preloadedState: authed })
+
+  await screen.findByText(/all systems healthy/i)
+  const line = document.querySelector('[data-slot="pulse-replies-line"]')
+  expect(line).toHaveAttribute('href', '/app/inbox')
+  expect(line).toHaveTextContent('23 replies')
+  expect(line).toHaveTextContent('6 interested')
+})
+
+test('replies line survives the attention posture — bad sending news does not hide good reply news', async () => {
+  const payload = healthyPulse()
+  payload.inbox = { unread: 4, interested: 0 }
+  payload.attention = [
+    { kind: 'mailbox_error', severity: 'danger', count: 2, reason: 'auth failed', href: '/app/mailboxes?status=error' },
+  ]
+  pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<PulseCard />, { preloadedState: authed })
+
+  await screen.findByText(/mailboxes need attention/i)
+  const line = document.querySelector('[data-slot="pulse-replies-line"]')
+  expect(line).toHaveTextContent('4 replies')
+  // Zero interested is omitted rather than rendered as "0 interested".
+  expect(line).not.toHaveTextContent(/interested/i)
+})
+
+test('replies line stays silent with no unread threads, and singularizes at one', async () => {
+  renderWithProviders(<PulseCard />, { preloadedState: authed })
+  await screen.findByText(/all systems healthy/i)
+  expect(document.querySelector('[data-slot="pulse-replies-line"]')).toBeNull()
+
+  const payload = healthyPulse()
+  payload.inbox = { unread: 1, interested: 1 }
+  pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
+  const { container } = renderWithProviders(<PulseCard />, { preloadedState: authed })
+
+  await vi.waitFor(() => {
+    const singular = container.querySelector('[data-slot="pulse-replies-line"]')
+    expect(singular).toHaveTextContent('1 reply')
+    // "reply", not "replies" — and the plural must not merely be a substring hit.
+    expect(singular).not.toHaveTextContent(/replies/i)
+  })
+})
+
 test('query error shows the danger body instead of stale-looking numbers', async () => {
   pulseResponder = () => new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: jsonHeaders })
 

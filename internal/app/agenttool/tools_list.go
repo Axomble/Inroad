@@ -18,8 +18,11 @@ const maxListNameLen = 200
 // ListReader is the read half of the contact-list domain. The signatures are
 // *list.Service's. MemberCount is NOT workspace-scoped — the tool must confirm
 // ownership with Get first, which is why both live on the same interface.
+//
+// List returns rows carrying their own membership size; MemberCount remains
+// for method=get, whose gen.List has no count attached.
 type ListReader interface {
-	List(ctx context.Context, ws uuid.UUID) ([]gen.List, error)
+	List(ctx context.Context, ws uuid.UUID) ([]gen.ListListsRow, error)
 	Get(ctx context.Context, ws, id uuid.UUID) (gen.List, error)
 	MemberCount(ctx context.Context, id uuid.UUID) (int64, error)
 }
@@ -33,13 +36,23 @@ type listView struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at,omitempty"`
-	// Members is only filled by method=get; counting is a query per list, so
-	// the listing deliberately omits it rather than fanning out.
+	// Members is filled by both reads. The listing used to omit it because
+	// counting was a query per list; ListLists now aggregates the count in the
+	// same query, so a model choosing an audience sees each list's size without
+	// a follow-up call per candidate.
 	Members *int64 `json:"members,omitempty"`
 }
 
+// renderList renders a list with no count attached — method=get and the write
+// tool, both of which return a bare gen.List.
 func renderList(l gen.List) listView {
 	return listView{ID: l.ID.String(), Name: l.Name, CreatedAt: rfc3339(l.CreatedAt)}
+}
+
+// renderListRow renders a listing row, whose membership size came back with it.
+func renderListRow(l gen.ListListsRow) listView {
+	count := l.ContactCount
+	return listView{ID: l.ID.String(), Name: l.Name, CreatedAt: rfc3339(l.CreatedAt), Members: &count}
 }
 
 func listTools(deps Deps) []Tool {
@@ -96,7 +109,7 @@ func listReadTool(r ListReader) Tool {
 				}
 				items := make([]listView, 0, len(page))
 				for _, l := range page {
-					items = append(items, renderList(l))
+					items = append(items, renderListRow(l))
 				}
 				return Ok(map[string]any{"lists": items, "total": len(all), "returned": len(items)}), nil
 			case methodGet:

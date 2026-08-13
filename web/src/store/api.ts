@@ -393,6 +393,12 @@ const injectedRtkApi = api.injectEndpoints({
     getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
       query: () => ({ url: `/pulse` }),
     }),
+    getCampaignReport: build.query<
+      GetCampaignReportApiResponse,
+      GetCampaignReportApiArg
+    >({
+      query: () => ({ url: `/reports/campaigns` }),
+    }),
     getAiSettings: build.query<GetAiSettingsApiResponse, GetAiSettingsApiArg>({
       query: () => ({ url: `/ai/settings` }),
     }),
@@ -1712,6 +1718,9 @@ export type GetWarmupOverviewApiResponse =
 export type GetWarmupOverviewApiArg = void;
 export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
 export type GetPulseApiArg = void;
+export type GetCampaignReportApiResponse =
+  /** status 200 Cross-campaign performance report */ CampaignReport;
+export type GetCampaignReportApiArg = void;
 export type GetAiSettingsApiResponse = /** status 200 AI settings */ AiSettings;
 export type GetAiSettingsApiArg = void;
 export type UpdateAiSettingsApiResponse =
@@ -2806,6 +2815,40 @@ export type Pulse = {
   };
   attention: PulseAttention[];
 };
+export type PerformanceCounts = {
+  /** Messages sent. */
+  sent: number;
+  /** Contacts enrolled — the denominator for the reply/bounce/unsubscribe rates. */
+  enrolled: number;
+  /** Sends opened at least once. Indicative, not reliable: proxy prefetches and opens within 2s of the send are excluded, but open tracking cannot be exact. */
+  opens: number;
+  /** Sends with at least one link click. */
+  clicks: number;
+  replies: number;
+  bounces: number;
+  unsubscribes: number;
+  /** opens / sent, in [0,1]. Zero when nothing was sent. */
+  open_rate: number;
+  /** clicks / sent, in [0,1]. */
+  click_rate: number;
+  /** replies / enrolled, in [0,1]. */
+  reply_rate: number;
+  /** bounces / enrolled, in [0,1]. */
+  bounce_rate: number;
+  /** unsubscribes / enrolled, in [0,1]. */
+  unsub_rate: number;
+};
+export type CampaignPerformance = PerformanceCounts & {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string;
+};
+export type CampaignReport = {
+  campaigns: CampaignPerformance[];
+  /** The workspace roll-up, weighted by volume. */
+  totals: PerformanceCounts;
+};
 export type AiSettings = {
   default_smart_model: string;
   default_fast_model: string;
@@ -3019,6 +3062,8 @@ export type AgentApprovalDecisionRequest = {
 export type List = {
   id?: string;
   name?: string;
+  /** How many contacts are on this list. Present on GET /lists, which aggregates it in the same query. Absent from the POST /lists response — a list is empty the moment it is created, so there is nothing to report yet. */
+  contact_count?: number;
 };
 export type ImportResult = {
   imported: number;
@@ -4010,6 +4055,7 @@ export const {
   useDisableMailboxWarmupMutation,
   useGetWarmupOverviewQuery,
   useGetPulseQuery,
+  useGetCampaignReportQuery,
   useGetAiSettingsQuery,
   useUpdateAiSettingsMutation,
   useListAiProvidersQuery,

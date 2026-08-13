@@ -28,20 +28,6 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-test('shows the API keys nav item for an admin', () => {
-  renderWithProviders(<AppSidebar />, {
-    preloadedState: { auth: { role: 'admin', status: 'authed' } },
-  })
-  expect(screen.getByRole('link', { name: /api keys/i })).toBeInTheDocument()
-})
-
-test('shows the API keys nav item for an owner', () => {
-  renderWithProviders(<AppSidebar />, {
-    preloadedState: { auth: { role: 'owner', status: 'authed' } },
-  })
-  expect(screen.getByRole('link', { name: /api keys/i })).toBeInTheDocument()
-})
-
 test('the Inbox screen is reachable from the nav', () => {
   renderWithProviders(<AppSidebar />, {
     preloadedState: { auth: { role: 'member', status: 'authed' } },
@@ -83,11 +69,18 @@ test('lists Deals exactly once, and no longer offers a row called CRM', () => {
   expect(screen.queryByRole('link', { name: /revenue workspace/i })).not.toBeInTheDocument()
 })
 
-test('hides the API keys nav item from a non-admin member', () => {
+// The seven settings screens now live on the settings rail, one level down.
+// Role-gating moved there with them (see settings-rail.test.tsx); what the
+// primary nav must guarantee is that it no longer carries the leaves at all —
+// for any role, so an owner doesn't get the old eight-row Workspace group back.
+test.each(['member', 'admin', 'owner'])('the Workspace group is one Settings row for a %s', (role) => {
   renderWithProviders(<AppSidebar />, {
-    preloadedState: { auth: { role: 'member', status: 'authed' } },
+    preloadedState: { auth: { role, status: 'authed' } },
   })
-  expect(screen.queryByRole('link', { name: /api keys/i })).not.toBeInTheDocument()
-  // The rest of the Workspace group still renders.
-  expect(screen.getByRole('link', { name: /security/i })).toBeInTheDocument()
+
+  expect(screen.getByRole('link', { name: /^settings$/i })).toHaveAttribute('href', '/app/settings')
+  expect(screen.getByRole('link', { name: /docs & mcp/i })).toHaveAttribute('href', '/app/docs')
+  for (const leaf of [/api keys/i, /connected apps/i, /reply labels/i, /custom fields/i, /^security$/i, /^team$/i]) {
+    expect(screen.queryByRole('link', { name: leaf })).not.toBeInTheDocument()
+  }
 })

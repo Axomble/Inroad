@@ -14,9 +14,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Page, PageTopbar, PageBody, SectionBar, EmptyBlock } from '@/components/layout/page'
-import { useAppSelector } from '@/store/hooks'
 import { httpStatus } from '@/lib/rtk-error'
 import type { ApiKey } from '@/store/api'
+import { useHasRole } from '@/hooks/use-has-role'
 import { formatDateTime, relativeTime } from './session-format'
 import { API_KEY_SCOPE_GROUPS } from './api-key-scopes'
 import { useAuthApiKeyListQuery, useAuthApiKeyCreateMutation, useAuthApiKeyRevokeMutation } from './api'
@@ -32,8 +32,7 @@ type Notice = { tone: 'ok' | 'error'; text: string }
  * / revoking invalidates the `ApiKeys` list tag so the view refetches itself.
  */
 export function ApiKeysPanel() {
-  const role = useAppSelector((s) => s.auth.role)
-  const isAdmin = role === 'owner' || role === 'admin'
+  const isAdmin = useHasRole('admin')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [creating, setCreating] = useState(false)
 
