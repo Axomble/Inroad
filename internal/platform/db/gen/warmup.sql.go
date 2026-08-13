@@ -140,26 +140,48 @@ func (q *Queries) ApplyWarmupParticipantTransition(ctx context.Context, arg Appl
 
 const claimWarmupSend = `-- name: ClaimWarmupSend :one
 INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
-                          is_reply, token, status, claimed_at)
-SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now()
-FROM mailboxes WHERE id = $4 AND workspace_id = $2
-ON CONFLICT (id) DO UPDATE SET status = 'sending', claimed_at = now(), last_error = ''
+                          is_reply, token, status, claimed_at,
+                          issued_lane, issued_policy_version, lease_expires_at)
+SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now(),
+       $8::text, $9::text,
+       $10::timestamptz
+FROM mailboxes m
+JOIN warmup_participants sender
+  ON sender.mailbox_id = m.id AND sender.workspace_id = m.workspace_id
+WHERE m.id = $4 AND m.workspace_id = $2
+  AND $10::timestamptz > now()
+  AND sender.lane = $8::text
+  AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
+ON CONFLICT (id) DO UPDATE SET
+    status = 'sending', claimed_at = now(), last_error = '',
+    -- Re-stamp the lease on a reclaim: the row now carries the decision this
+    -- attempt is acting on, not the one a crashed worker acted on.
+    issued_lane = $8::text,
+    issued_policy_version = $9::text,
+    lease_expires_at = $10::timestamptz
     WHERE warmup_sends.workspace_id = $2
       AND (warmup_sends.status = 'queued'
         OR (warmup_sends.status = 'sending'
-            AND warmup_sends.claimed_at < now() - make_interval(secs => $8::int)))
+            AND warmup_sends.claimed_at < now() - make_interval(secs => $11::int)))
+      AND (warmup_sends.issued_lane IS NULL
+           OR warmup_sends.issued_lane = $8::text)
+      AND (warmup_sends.issued_policy_version IS NULL
+           OR warmup_sends.issued_policy_version = $9::text)
 RETURNING id
 `
 
 type ClaimWarmupSendParams struct {
-	ID           uuid.UUID `json:"id"`
-	WorkspaceID  uuid.UUID `json:"workspace_id"`
-	ThreadID     uuid.UUID `json:"thread_id"`
-	FromMailbox  uuid.UUID `json:"from_mailbox"`
-	ToMailbox    uuid.UUID `json:"to_mailbox"`
-	IsReply      bool      `json:"is_reply"`
-	Token        string    `json:"token"`
-	LeaseSeconds int32     `json:"lease_seconds"`
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	ThreadID            uuid.UUID          `json:"thread_id"`
+	FromMailbox         uuid.UUID          `json:"from_mailbox"`
+	ToMailbox           uuid.UUID          `json:"to_mailbox"`
+	IsReply             bool               `json:"is_reply"`
+	Token               string             `json:"token"`
+	IssuedLane          string             `json:"issued_lane"`
+	IssuedPolicyVersion string             `json:"issued_policy_version"`
+	LeaseExpiresAt      pgtype.Timestamptz `json:"lease_expires_at"`
+	LeaseSeconds        int32              `json:"lease_seconds"`
 }
 
 // Claim one warmup send for delivery (claim-before-send), mirroring ClaimStepSend.
@@ -173,6 +195,45 @@ type ClaimWarmupSendParams struct {
 // yields a row iff we won; zero rows means skip / recover-forward (caller then
 // reads status to distinguish already-'sent' from a fresh-'sending'/terminal skip).
 // workspace_id is pinned on both the insert value and the reclaim WHERE.
+//
+// This statement is ALSO the lease revalidation (pair-leases design §5). The
+// caller supplies the lane and policy version the send was DECIDED under and the
+// expiry the decision carries; the claim refuses — zero rows, so the existing
+// ClaimSkip path fires — under any of three drifts. Refusing here rather than in
+// Go is what makes the check unskippable: the row cannot enter 'sending' without
+// passing it.
+//
+//  1. EXPIRY. @lease_expires_at was minted from the DATABASE clock at issue and
+//     is compared against the DATABASE clock here, so no Go clock enters the
+//     comparison — the mistake that made the Phase 1 freshness check silently
+//     wrong. It bounds the enqueue→pickup window: a backed-up or retrying asynq
+//     queue can fire a warmup:send long after its lane was decided. The check is
+//     on the expiry the CALLER holds, not on the stored column: a reclaim always
+//     arrives with a freshly re-derived decision, and gating it on the row's own
+//     (necessarily older) lease would strand a released row forever — it is the
+//     same deterministic id every retry and sweep re-derives, so nothing would
+//     ever rewrite the expired lease it was refused for.
+//  2. LANE DRIFT, against the sender's CURRENT participant lane read here, in
+//     SQL, not against a lane the caller asserts. This is acceptance criterion 7
+//     and it is why the join is not optional: on a FRESH insert there is no
+//     stored lease to compare, so a quarantine landing between decision and claim
+//     is only visible in the live row. A sender with no participant row claims
+//     nothing, which is correct — it is not in the pool.
+//  3. POLICY DRIFT on the stored row, so a threshold change takes effect on the
+//     in-flight tail instead of after it drains.
+//
+// The sealed-lane exclusion beside the lane comparison is belt-and-braces for
+// invariant 54 (lane isolation holds on EVERY outbound path): matching the live
+// lane alone would let a caller that asserted 'quarantine' claim, because the
+// assertion would be true. warmup.LaneMaySend gates that upstream; this makes the
+// last write before delivery refuse it too.
+//
+// Checks 1 and 2 gate the whole statement (a SELECT that yields no row inserts
+// nothing AND resolves no conflict); the stored-vs-current comparisons in the
+// DO UPDATE WHERE add the reclaim dimension, where a lease issued under an older
+// lane or policy may be sitting on the row. A NULL issued_lane /
+// issued_policy_version is a pre-lease row (written before 000057) and passes:
+// those sends predate the lease and must keep working.
 func (q *Queries) ClaimWarmupSend(ctx context.Context, arg ClaimWarmupSendParams) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, claimWarmupSend,
 		arg.ID,
@@ -182,6 +243,9 @@ func (q *Queries) ClaimWarmupSend(ctx context.Context, arg ClaimWarmupSendParams
 		arg.ToMailbox,
 		arg.IsReply,
 		arg.Token,
+		arg.IssuedLane,
+		arg.IssuedPolicyVersion,
+		arg.LeaseExpiresAt,
 		arg.LeaseSeconds,
 	)
 	var id uuid.UUID
@@ -239,6 +303,36 @@ WHERE workspace_id = $1 AND enabled
 
 func (q *Queries) CountEnabledParticipants(ctx context.Context, workspaceID uuid.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countEnabledParticipants, workspaceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countWarmupPairSendsToday = `-- name: CountWarmupPairSendsToday :one
+SELECT COUNT(*) FROM warmup_sends s
+WHERE s.workspace_id = $1
+  AND s.pair_key = least($2::uuid::text, $3::uuid::text) || ':' ||
+                   greatest($2::uuid::text, $3::uuid::text)
+  AND s.status IN ('sending','sent')
+  AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
+`
+
+type CountWarmupPairSendsTodayParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MailboxA    uuid.UUID `json:"mailbox_a"`
+	MailboxB    uuid.UUID `json:"mailbox_b"`
+}
+
+// The symmetric pair budget already spent today by ONE known pair, for the
+// engagement REPLY path — which selects no partner (the receipt fixes both ends)
+// and so cannot get the count from SelectWarmupPartner. Before this, replies
+// consulted no cap at all, which is the larger half of why real per-pair volume
+// ran to about double the nominal cap. Same key, same window and the same
+// both-directions/both-kinds semantics as the selection queries, so the two agree
+// by construction rather than by two implementations staying in step. The
+// argument order does not matter: pair_key is canonical. workspace-pinned.
+func (q *Queries) CountWarmupPairSendsToday(ctx context.Context, arg CountWarmupPairSendsTodayParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countWarmupPairSendsToday, arg.WorkspaceID, arg.MailboxA, arg.MailboxB)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -1488,6 +1582,38 @@ func (q *Queries) RecordWarmupReceivedStat(ctx context.Context, arg RecordWarmup
 	return err
 }
 
+const recordWarmupSendConstraints = `-- name: RecordWarmupSendConstraints :execrows
+UPDATE warmup_sends
+SET issued_constraints = $3
+WHERE id = $1 AND workspace_id = $2 AND status = 'sending'
+`
+
+type RecordWarmupSendConstraintsParams struct {
+	ID                uuid.UUID `json:"id"`
+	WorkspaceID       uuid.UUID `json:"workspace_id"`
+	IssuedConstraints []byte    `json:"issued_constraints"`
+}
+
+// Snapshot the constraints the match was made under (design §4): which lane, the
+// cooldown in force, the pair budget and how much of it remained. Written right
+// after the claim is won, by the winner only — the status='sending' guard keeps a
+// worker that LOST the claim from overwriting the winner's snapshot, and keeps a
+// late write off a row that has already reached a terminal state.
+//
+// Deliberately a plain JSONB object with no schema: it exists so a bad match is
+// reproducible in an incident review, and a fixed shape would have to migrate
+// every time the matcher gains an input. Nothing reads it in code, so nothing
+// breaks when its keys change. Rows affected is returned so a caller that cares
+// can log a snapshot that did not land rather than assume it did.
+// workspace-pinned.
+func (q *Queries) RecordWarmupSendConstraints(ctx context.Context, arg RecordWarmupSendConstraintsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordWarmupSendConstraints, arg.ID, arg.WorkspaceID, arg.IssuedConstraints)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const recordWarmupSenderPlacementStat = `-- name: RecordWarmupSenderPlacementStat :exec
 INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, inbox, spam)
 SELECT s.from_mailbox, s.workspace_id, CURRENT_DATE,
@@ -1586,6 +1712,7 @@ func (q *Queries) ReleaseWarmupSend(ctx context.Context, arg ReleaseWarmupSendPa
 }
 
 const selectWarmupPartner = `-- name: SelectWarmupPartner :one
+
 WITH candidates AS (
     SELECT p.mailbox_id, m.email, m.display_name,
            COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
@@ -1604,8 +1731,8 @@ WITH candidates AS (
             (SELECT COUNT(*)
              FROM warmup_sends s
              WHERE s.workspace_id = $1
-               AND s.from_mailbox = $2
-               AND s.to_mailbox = p.mailbox_id
+               AND s.pair_key = least($2::uuid::text, p.mailbox_id::text) || ':' ||
+                                greatest($2::uuid::text, p.mailbox_id::text)
                AND s.status IN ('sending','sent')
                AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') AS sent_today
     ) pair ON true
@@ -1645,13 +1772,35 @@ type SelectWarmupPartnerRow struct {
 	DisplayName string    `json:"display_name"`
 }
 
+// ----------------------------------------------------------------------------
+// The symmetric pair budget (pair-leases design §6). ONE budget per pair per UTC
+// day, drawn down by BOTH directions and BOTH kinds — new sends and engagement
+// replies alike. What bounds reputation exposure is what the two mailboxes
+// exchange, which is the number a destination provider sees; counting only
+// from→to let real per-pair volume run to roughly twice the nominal cap, because
+// the partner's own sends back (and every reply in either direction) were free.
+//
+// The count keys on the GENERATED pair_key, not on an OR of the two directions:
+// an OR makes Postgres union two scans, and this counter runs inside a LATERAL
+// over every candidate partner on the hottest read in the engine. is_reply is
+// deliberately NOT filtered — a reply costs the pair the same exposure a new
+// thread does.
+//
+// The day is bounded on created_at because a claimed-but-unsent ('sending') row
+// has sent_at IS NULL: bounding on sent_at would drop in-flight sends from the
+// count and let two concurrent workers overrun the cap. idx_warmup_sends_pair_day
+// is (workspace_id, pair_key, created_at) WHERE status IN ('sending','sent') and
+// serves this index-only.
+// ----------------------------------------------------------------------------
 // Pick ONE eligible warmup partner for a sender: a DIFFERENT, enabled, non-paused
 // participant in the SAME workspace, preferring one not recently paired with the
 // sender. Ordering: least-recently-active shared thread first (a never-paired
 // partner sorts on 'epoch', so it wins), tie-broken deterministically by
 // mailbox_id so partner spread is stable and reproducible. workspace-pinned AND
 // lane-pinned (see the lane-compatibility note above); a workspace with <2
-// eligible SAME-LANE participants returns no row.
+// eligible SAME-LANE participants returns no row. sent_today is the SYMMETRIC
+// pair budget (see the note above), so it also orders the spread by what the pair
+// has actually exchanged rather than by what this sender happened to send.
 func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartnerParams) (SelectWarmupPartnerRow, error) {
 	row := q.db.QueryRow(ctx, selectWarmupPartner,
 		arg.WorkspaceID,
@@ -1691,8 +1840,8 @@ WHERE p.workspace_id = $1
   AND t.turn < $3::int
   AND (SELECT COUNT(*) FROM warmup_sends s
        WHERE s.workspace_id = $1
-         AND s.from_mailbox = $2
-         AND s.to_mailbox = p.mailbox_id
+         AND s.pair_key = least($2::uuid::text, p.mailbox_id::text) || ':' ||
+                          greatest($2::uuid::text, p.mailbox_id::text)
          AND s.status IN ('sending','sent')
          AND s.created_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc')
       < $4::int
@@ -1733,6 +1882,9 @@ type SelectWarmupReplyPartnerRow struct {
 // last_activity_at ASC so replies still spread across repliable partners
 // (least-recently-active first, matching SelectWarmupPartner's spread), tie-broken
 // by mailbox_id for determinism. workspace-pinned; no repliable partner → no row.
+// The @max_pair_sends gate is the SAME symmetric per-pair-per-day budget
+// SelectWarmupPartner draws on (see the note above it), so choosing to reply
+// cannot buy a pair extra volume the new-thread path would have been refused.
 func (q *Queries) SelectWarmupReplyPartner(ctx context.Context, arg SelectWarmupReplyPartnerParams) (SelectWarmupReplyPartnerRow, error) {
 	row := q.db.QueryRow(ctx, selectWarmupReplyPartner,
 		arg.WorkspaceID,
