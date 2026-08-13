@@ -314,6 +314,53 @@ func TestListTransitionsIsNewestFirstAndWorkspacePinned(t *testing.T) {
 	}
 }
 
+// The read path has to carry the bounce population as a THREE-valued fact:
+// campaign, warmup, or genuinely unknown. Two of the three are load-bearing here —
+// a labelled row must keep the label the writer chose, and a row written before the
+// split must stay NULL rather than being coerced to a default that claims something
+// nobody measured.
+func TestListTransitionsCarriesTheBouncePopulationIncludingUnlabelledRows(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	seedTransitionWithPopulation(t, f, w.ID, mb.ID, nil, 2*time.Hour) // pre-split
+	campaign := "campaign"
+	seedTransitionWithPopulation(t, f, w.ID, mb.ID, &campaign, time.Hour)
+
+	rows, err := store.ListTransitions(ctx, w.ID, mb.ID, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	if rows[0].BouncePopulation == nil || *rows[0].BouncePopulation != campaign {
+		t.Fatalf("newest row population = %v, want campaign", rows[0].BouncePopulation)
+	}
+	if rows[1].BouncePopulation != nil {
+		t.Fatalf("pre-split row population = %q, want NULL: the row does not know which arm spoke",
+			*rows[1].BouncePopulation)
+	}
+}
+
+// seedTransitionWithPopulation inserts one transition row with an explicit
+// bounce_population (nil for a row written before the campaign/warmup split).
+func seedTransitionWithPopulation(t *testing.T, f fixture, ws, mailbox uuid.UUID, population *string, ago time.Duration) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO warmup_state_transitions (
+		     workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+		     placement_samples, spam_rate, bounce_population, bounce_samples, bounce_rate,
+		     complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
+		 VALUES ($1, $2, 'healthy', 'throttled', 'campaign_bounce_throttle',
+		         'campaign hard-bounce rate above the throttle threshold',
+		         40, 0.02, $3, 200, 0.066, 1000, 0.0002, 0, 'warmup-phase1-v1', now() - $4::interval)`,
+		ws, mailbox, population, ago.String(),
+	); err != nil {
+		t.Fatalf("seed transition: %v", err)
+	}
+}
+
 // TestMailboxInWorkspaceIsTheOwnershipGate proves the 404 test: true for this
 // workspace's mailbox (participant or not), false for another workspace's and
 // for a mailbox that does not exist.

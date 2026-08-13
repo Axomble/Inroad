@@ -126,6 +126,8 @@ func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
 // (warmup_state_transitions). The lane fields are pointers because rows written
 // before pool lanes existed genuinely had no lane: the migration deliberately
 // left them NULL rather than fabricating 'probation' in an audit trail.
+// BouncePopulation is a pointer for the same reason — a row written before the
+// campaign/warmup bounce split does not know which arm its samples counted.
 type Transition struct {
 	ID               uuid.UUID
 	CreatedAt        pgtype.Timestamptz
@@ -139,6 +141,7 @@ type Transition struct {
 	LaneReason       *string
 	PlacementSamples int32
 	SpamRate         float32
+	BouncePopulation *string
 	BounceSamples    int32
 	BounceRate       float32
 	ComplaintSamples int32
@@ -161,6 +164,7 @@ func transitionFromGen(r gen.ListWarmupTransitionsRow) Transition {
 		LaneReason:       r.LaneReason,
 		PlacementSamples: r.PlacementSamples,
 		SpamRate:         r.SpamRate,
+		BouncePopulation: r.BouncePopulation,
 		BounceSamples:    r.BounceSamples,
 		BounceRate:       r.BounceRate,
 		ComplaintSamples: r.ComplaintSamples,
@@ -246,6 +250,12 @@ type WarmupDetailDTO struct {
 // to guess about. The rates are CONFIDENCE-ADJUSTED lower bounds, not observed
 // fractions — the schema says so, because rendering them as raw percentages would
 // misreport every thin sample.
+//
+// bounce_population is nullable on the same grounds and matters for the same
+// reason: bounce_samples/bounce_rate describe ONE population (campaign or warmup
+// hard bounces, never both — pooling them is the dilution defect Phase 1 removed),
+// so a client rendering the pair without the label would report a campaign figure
+// as a warmup one.
 type WarmupTransitionDTO struct {
 	ID               string  `json:"id"`
 	CreatedAt        string  `json:"created_at"`
@@ -259,6 +269,7 @@ type WarmupTransitionDTO struct {
 	LaneReason       *string `json:"lane_reason"`
 	PlacementSamples int32   `json:"placement_samples"`
 	SpamRate         float64 `json:"spam_rate"`
+	BouncePopulation *string `json:"bounce_population"`
 	BounceSamples    int32   `json:"bounce_samples"`
 	BounceRate       float64 `json:"bounce_rate"`
 	ComplaintSamples int32   `json:"complaint_samples"`

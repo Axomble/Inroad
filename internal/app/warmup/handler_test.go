@@ -288,7 +288,7 @@ func TestTransitionsRouteReturnsThePage(t *testing.T) {
 	row := raw.Transitions[0]
 	for _, key := range []string{
 		"id", "created_at", "from_state", "to_state", "reason_code", "reason",
-		"placement_samples", "spam_rate", "bounce_samples", "bounce_rate",
+		"placement_samples", "spam_rate", "bounce_population", "bounce_samples", "bounce_rate",
 		"complaint_samples", "complaint_rate", "invalid_tokens", "policy_version",
 	} {
 		if _, ok := row[key]; !ok {
@@ -297,6 +297,11 @@ func TestTransitionsRouteReturnsThePage(t *testing.T) {
 	}
 	if row["from_lane"] != nil || row["to_lane"] != nil {
 		t.Fatalf("pre-lane row must send null lanes, got %v/%v", row["from_lane"], row["to_lane"])
+	}
+	// Same reasoning on the bounce axis: a row from before the split does not know
+	// which population its samples counted, so it says null rather than guessing.
+	if row["bounce_population"] != nil {
+		t.Fatalf("pre-split row must send a null bounce_population, got %v", row["bounce_population"])
 	}
 }
 

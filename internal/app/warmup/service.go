@@ -311,6 +311,7 @@ func transitionDTO(t Transition) WarmupTransitionDTO {
 		LaneReason:       t.LaneReason,
 		PlacementSamples: t.PlacementSamples,
 		SpamRate:         wireRate(t.SpamRate),
+		BouncePopulation: t.BouncePopulation,
 		BounceSamples:    t.BounceSamples,
 		BounceRate:       wireRate(t.BounceRate),
 		ComplaintSamples: t.ComplaintSamples,

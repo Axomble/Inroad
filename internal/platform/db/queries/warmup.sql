@@ -75,7 +75,8 @@ SELECT EXISTS (
 -- sort of the whole history.
 SELECT id, created_at, from_state, to_state, reason_code, reason,
        from_lane, to_lane, lane_reason_code, lane_reason,
-       placement_samples, spam_rate, bounce_samples, bounce_rate,
+       placement_samples, spam_rate,
+       bounce_population, bounce_samples, bounce_rate,
        complaint_samples, complaint_rate, invalid_tokens, policy_version
 FROM warmup_state_transitions
 WHERE workspace_id = $1 AND mailbox_id = $2
@@ -1279,13 +1280,17 @@ WHERE mailbox_id = $1 AND workspace_id = $2;
 -- threshold" and the lane says "quarantined", collapsing them destroys whichever
 -- loses.
 --
--- bounce_samples/bounce_rate hold the arm that ACTUALLY drove the decision — the
--- higher of the campaign and warmup rates, with ITS OWN denominator (the caller
--- picks the pair). The table has one bounce column pair and pooling the two
--- populations to fill it would reintroduce the exact dilution defect this phase
--- exists to remove. invalid_tokens keeps its Phase 0 column name but now holds the
--- observer-side token-failure count (design §4.5) — the number that column always
--- meant to carry, finally non-zero.
+-- bounce_population/bounce_samples/bounce_rate hold the arm that ACTUALLY drove
+-- the decision — the higher of the campaign and warmup rates, with ITS OWN
+-- denominator (the caller picks all three at once, from
+-- warmup.Decision.DrivingBouncePair). The table has one bounce column pair and
+-- pooling the two populations to fill it would reintroduce the exact dilution
+-- defect this phase exists to remove. bounce_population is NOT NULL in the
+-- PARAMETER even though the column is nullable: the column is nullable only for
+-- rows written before the split, and a new row that cannot say which population it
+-- counted has no business being written. invalid_tokens keeps its Phase 0 column
+-- name but now holds the observer-side token-failure count (design §4.5) — the
+-- number that column always meant to carry, finally non-zero.
 WITH changed AS (
     UPDATE warmup_participants p
     SET health_state = @to_state,
@@ -1303,14 +1308,15 @@ WITH changed AS (
     INSERT INTO warmup_state_transitions (
         workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
         from_lane, to_lane, lane_reason_code, lane_reason,
-        placement_samples, spam_rate, bounce_samples, bounce_rate,
+        placement_samples, spam_rate,
+        bounce_population, bounce_samples, bounce_rate,
         complaint_samples, complaint_rate, invalid_tokens, policy_version
     )
     SELECT workspace_id, mailbox_id, @from_state, @to_state, @reason_code, @reason,
            @from_lane, @to_lane,
            sqlc.arg(lane_reason_code)::text, sqlc.arg(lane_reason)::text,
            @placement_samples, sqlc.arg(spam_rate)::real,
-           @bounce_samples, sqlc.arg(bounce_rate)::real,
+           sqlc.arg(bounce_population)::text, @bounce_samples, sqlc.arg(bounce_rate)::real,
            @complaint_samples, sqlc.arg(complaint_rate)::real,
            @invalid_tokens, @policy_version
     FROM changed

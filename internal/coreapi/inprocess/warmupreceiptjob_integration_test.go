@@ -814,6 +814,91 @@ func TestQuarantineCooldownIsNotRestartedByHealthOnlyTransitions(t *testing.T) {
 	}
 }
 
+// seedWarmupBounceEvidence gives A a WARMUP bounce population that clears the
+// minimum-sample gate: `delivered` sent warmup messages in the 30-day window and
+// `bounces` trusted hard-bounce observations attributed to A as the sender. The
+// sends reuse the thread and token of a real send, so nothing about the row shape
+// is invented; only the volume is.
+func seedWarmupBounceEvidence(t *testing.T, ctx context.Context, f warmupFixture, anchor uuid.UUID, delivered, bounces int) {
+	t.Helper()
+	if _, err := f.raw.Exec(ctx,
+		`INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
+		                           status, token, sent_at)
+		 SELECT gen_random_uuid(), s.workspace_id, s.thread_id, s.from_mailbox, s.to_mailbox,
+		        'sent', s.token, now()
+		   FROM warmup_sends s, generate_series(1, $2) g
+		  WHERE s.id = $1`, anchor, delivered); err != nil {
+		t.Fatalf("seed warmup sends: %v", err)
+	}
+	if _, err := f.raw.Exec(ctx,
+		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, source,
+		                                  attribution_trusted, idempotency_key, observed_at)
+		 SELECT $1, $2::uuid, 'hard_bounce', 'dsn', true, 'it-bounce:' || $2::text || ':' || g::text, now()
+		   FROM generate_series(1, $3) g`, f.ws1, f.a, bounces); err != nil {
+		t.Fatalf("seed hard-bounce observations: %v", err)
+	}
+}
+
+// newestTransition reads the newest transition row for a mailbox.
+func newestTransition(t *testing.T, ctx context.Context, f warmupFixture, mailbox uuid.UUID) gen.WarmupStateTransition {
+	t.Helper()
+	rows, err := f.q.ListWarmupTransitions(ctx, gen.ListWarmupTransitionsParams{
+		WorkspaceID: f.ws1, MailboxID: mailbox, RowLimit: 1,
+	})
+	if err != nil {
+		t.Fatalf("ListWarmupTransitions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("transitions for %s = %d, want 1", mailbox, len(rows))
+	}
+	r := rows[0]
+	return gen.WarmupStateTransition{
+		ID: r.ID, FromState: r.FromState, ToState: r.ToState, ReasonCode: r.ReasonCode,
+		BouncePopulation: r.BouncePopulation, BounceSamples: r.BounceSamples, BounceRate: r.BounceRate,
+	}
+}
+
+// The table has ONE bounce column pair and two populations that are deliberately
+// never pooled, so a row that does not name its population is unreadable: this
+// mailbox is paused by WARMUP bounces while its campaign denominator is zero, and
+// an unlabelled "300 samples at 15.8%" beside reason_code='warmup_bounce_pause'
+// invites the reader to attribute the figure to campaign mail.
+func TestTransitionNamesTheBouncePopulationThatDroveIt(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	f = withWallClock(t, f)
+	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
+
+	anchor := warmupSendUUID(t, ctx, f)
+	// 15 hard bounces on 60 warmup sends: 25% observed, whose Wilson lower bound
+	// (~15.8%) clears the 10% pause band. A has sent no campaign mail at all.
+	seedWarmupBounceEvidence(t, ctx, f, anchor, 59, 15)
+
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth: %v", err)
+	}
+
+	if health, _ := participantAxes(t, ctx, f, f.a); health != warmup.StatePaused {
+		t.Fatalf("A health = %q, want paused — the fixture must actually trip the warmup bounce band", health)
+	}
+	got := newestTransition(t, ctx, f, f.a)
+	if got.BouncePopulation == nil {
+		t.Fatal("bounce_population is NULL on a row this engine wrote: the pair has no population to belong to")
+	}
+	if *got.BouncePopulation != warmup.BouncePopulationWarmup {
+		t.Fatalf("bounce_population = %q, want %q — the warmup arm drove this decision",
+			*got.BouncePopulation, warmup.BouncePopulationWarmup)
+	}
+	// The denominator must be the named population's own. The campaign arm is
+	// empty here, so recording the campaign pair would report 0 samples beside a
+	// pause the evidence plainly justifies.
+	if got.BounceSamples != 60 {
+		t.Fatalf("bounce_samples = %d, want 60 (the warmup denominator, not the empty campaign one)", got.BounceSamples)
+	}
+	if got.BounceRate <= 0.10 {
+		t.Fatalf("bounce_rate = %v, want the warmup arm's rate above the 10%% pause band", got.BounceRate)
+	}
+}
+
 // seedAuthPassing caches a 'passing' DNS verdict for a mailbox's organizational
 // domain, which is the lane's admission prerequisite. Without it every lane
 // decision collapses to pending_auth and says nothing about evidence.

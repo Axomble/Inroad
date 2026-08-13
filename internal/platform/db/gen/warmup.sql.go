@@ -52,16 +52,17 @@ WITH changed AS (
     INSERT INTO warmup_state_transitions (
         workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
         from_lane, to_lane, lane_reason_code, lane_reason,
-        placement_samples, spam_rate, bounce_samples, bounce_rate,
+        placement_samples, spam_rate,
+        bounce_population, bounce_samples, bounce_rate,
         complaint_samples, complaint_rate, invalid_tokens, policy_version
     )
     SELECT workspace_id, mailbox_id, $8, $1, $10, $2,
            $9, $3,
            $11::text, $4::text,
            $12, $13::real,
-           $14, $15::real,
-           $16, $17::real,
-           $18, $19
+           $14::text, $15, $16::real,
+           $17, $18::real,
+           $19, $20
     FROM changed
     RETURNING id
 )
@@ -82,6 +83,7 @@ type ApplyWarmupParticipantTransitionParams struct {
 	LaneReasonCode   string             `json:"lane_reason_code"`
 	PlacementSamples int32              `json:"placement_samples"`
 	SpamRate         float32            `json:"spam_rate"`
+	BouncePopulation string             `json:"bounce_population"`
 	BounceSamples    int32              `json:"bounce_samples"`
 	BounceRate       float32            `json:"bounce_rate"`
 	ComplaintSamples int32              `json:"complaint_samples"`
@@ -104,13 +106,17 @@ type ApplyWarmupParticipantTransitionParams struct {
 // threshold" and the lane says "quarantined", collapsing them destroys whichever
 // loses.
 //
-// bounce_samples/bounce_rate hold the arm that ACTUALLY drove the decision — the
-// higher of the campaign and warmup rates, with ITS OWN denominator (the caller
-// picks the pair). The table has one bounce column pair and pooling the two
-// populations to fill it would reintroduce the exact dilution defect this phase
-// exists to remove. invalid_tokens keeps its Phase 0 column name but now holds the
-// observer-side token-failure count (design §4.5) — the number that column always
-// meant to carry, finally non-zero.
+// bounce_population/bounce_samples/bounce_rate hold the arm that ACTUALLY drove
+// the decision — the higher of the campaign and warmup rates, with ITS OWN
+// denominator (the caller picks all three at once, from
+// warmup.Decision.DrivingBouncePair). The table has one bounce column pair and
+// pooling the two populations to fill it would reintroduce the exact dilution
+// defect this phase exists to remove. bounce_population is NOT NULL in the
+// PARAMETER even though the column is nullable: the column is nullable only for
+// rows written before the split, and a new row that cannot say which population it
+// counted has no business being written. invalid_tokens keeps its Phase 0 column
+// name but now holds the observer-side token-failure count (design §4.5) — the
+// number that column always meant to carry, finally non-zero.
 func (q *Queries) ApplyWarmupParticipantTransition(ctx context.Context, arg ApplyWarmupParticipantTransitionParams) (bool, error) {
 	row := q.db.QueryRow(ctx, applyWarmupParticipantTransition,
 		arg.ToState,
@@ -126,6 +132,7 @@ func (q *Queries) ApplyWarmupParticipantTransition(ctx context.Context, arg Appl
 		arg.LaneReasonCode,
 		arg.PlacementSamples,
 		arg.SpamRate,
+		arg.BouncePopulation,
 		arg.BounceSamples,
 		arg.BounceRate,
 		arg.ComplaintSamples,
@@ -1209,7 +1216,8 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 const listWarmupTransitions = `-- name: ListWarmupTransitions :many
 SELECT id, created_at, from_state, to_state, reason_code, reason,
        from_lane, to_lane, lane_reason_code, lane_reason,
-       placement_samples, spam_rate, bounce_samples, bounce_rate,
+       placement_samples, spam_rate,
+       bounce_population, bounce_samples, bounce_rate,
        complaint_samples, complaint_rate, invalid_tokens, policy_version
 FROM warmup_state_transitions
 WHERE workspace_id = $1 AND mailbox_id = $2
@@ -1236,6 +1244,7 @@ type ListWarmupTransitionsRow struct {
 	LaneReason       *string            `json:"lane_reason"`
 	PlacementSamples int32              `json:"placement_samples"`
 	SpamRate         float32            `json:"spam_rate"`
+	BouncePopulation *string            `json:"bounce_population"`
 	BounceSamples    int32              `json:"bounce_samples"`
 	BounceRate       float32            `json:"bounce_rate"`
 	ComplaintSamples int32              `json:"complaint_samples"`
@@ -1276,6 +1285,7 @@ func (q *Queries) ListWarmupTransitions(ctx context.Context, arg ListWarmupTrans
 			&i.LaneReason,
 			&i.PlacementSamples,
 			&i.SpamRate,
+			&i.BouncePopulation,
 			&i.BounceSamples,
 			&i.BounceRate,
 			&i.ComplaintSamples,

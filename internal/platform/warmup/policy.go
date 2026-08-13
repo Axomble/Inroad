@@ -22,6 +22,18 @@ const (
 	LaneBlocked     = "blocked"
 )
 
+// Bounce populations. These exact strings are pinned by migration 000058's CHECK
+// constraint on warmup_state_transitions.bounce_population.
+//
+// The two are kept apart deliberately: pooling them let synthetic warmup traffic
+// dilute a real campaign bounce rate below its own threshold (see
+// TestBounceDenominatorsAreNotPooled). A transition therefore records ONE pair —
+// whichever arm drove the decision — and has to say which.
+const (
+	BouncePopulationCampaign = "campaign"
+	BouncePopulationWarmup   = "warmup"
+)
+
 // PolicyVersion stamps every transition so a decision stays explainable after the
 // thresholds move. Bump it whenever a threshold or rule below changes.
 const PolicyVersion = "warmup-phase1-v1"
@@ -190,6 +202,25 @@ type Decision struct {
 	ComplaintRate    float64
 
 	ObserverTokenFailures int
+}
+
+// DrivingBouncePair returns the bounce population that drove this decision, with
+// ITS OWN denominator and rate — the triple warmup_state_transitions records.
+//
+// The table has one bounce column pair and two populations, so the writer has to
+// choose. Returning all three values together is what keeps them consistent: three
+// separate assignments at the call site could label the campaign denominator
+// "warmup", and a wrong label in an append-only trail is worse than none.
+//
+// The higher rate is the driving one, because that is the arm a band was applied
+// to. A tie — including no bounces at all in either arm — reports the campaign
+// population: it is the one an operator is asking about, and equal rates are not a
+// warmup finding.
+func (d Decision) DrivingBouncePair() (population string, samples int, rate float64) {
+	if d.WarmupBounceRate > d.CampaignBounceRate {
+		return BouncePopulationWarmup, d.WarmupBounceSamples, d.WarmupBounceRate
+	}
+	return BouncePopulationCampaign, d.CampaignBounceSamples, d.CampaignBounceRate
 }
 
 // EvaluateParticipant decides both axes in one pass. The caller persists them in
