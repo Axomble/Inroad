@@ -13,7 +13,7 @@ export default defineConfig({
 				replacesTitle: false,
 			},
 			social: [
-				{ icon: 'github', label: 'GitHub', href: 'https://github.com/inroad/inroad' },
+				{ icon: 'github', label: 'GitHub', href: 'https://github.com/Axomble/Inroad' },
 			],
 			sidebar: [
 				{

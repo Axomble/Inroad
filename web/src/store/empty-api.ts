@@ -1,3 +1,4 @@
+import { config } from '@/lib/config'
 import {
   createApi,
   fetchBaseQuery,
@@ -27,14 +28,13 @@ type SessionResponse = {
 }
 
 const rawBaseQuery = fetchBaseQuery({
-  // Deployment-configurable base URL. Falls back to same-origin `/api/v1` for
-  // the default self-hosted setup where the SPA and API share an origin (via
-  // the reverse proxy / Vite dev proxy). VITE_API_BASE_URL lets a hoster point
-  // the SPA at a different API host (e.g. `https://api.example.com/v1`).
+  // Deployment-configurable base URL (see lib/config.ts). Falls back to
+  // same-origin `/api/v1` for the default self-hosted setup where the SPA and
+  // API share an origin (via the reverse proxy / Vite dev proxy).
   // A leading protocol/host in the value is respected; a bare path is resolved
   // against the current page — safe in the browser, and vitest configures
   // jsdom's URL so tests can hit `document.location.origin` too.
-  baseUrl: import.meta.env.VITE_API_BASE_URL ?? '/api/v1',
+  baseUrl: config.apiBaseUrl,
   // Send the httpOnly refresh cookie + readable csrf_token cookie to every request.
   credentials: 'include',
   // Attach the in-memory access token (auth slice) as a Bearer token, and echo

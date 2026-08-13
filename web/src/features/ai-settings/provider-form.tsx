@@ -8,12 +8,12 @@ import { Textarea } from '@/components/ui/textarea'
 import type { Notice } from '@/components/shared/notice-banner'
 import {
   AlertDialog,
-  AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { ScrollDialogContent, ScrollDialogBody } from '@/components/shared/scroll-dialog'
 import { httpStatus } from '@/lib/rtk-error'
 import { useCreateAiProviderMutation, useUpdateAiProviderMutation, type AiProvider } from './api'
 import { PROVIDER_KIND_GROUPS, PROVIDER_KINDS, KIND_META, type ProviderKindMeta } from './provider-kinds'
@@ -37,7 +37,7 @@ export function AddProviderDialog({
 
   return (
     <AlertDialog open onOpenChange={(next) => !next && onClose()}>
-      <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+      <ScrollDialogContent className="sm:max-w-xl">
         {meta === null ? (
           <>
             <AlertDialogHeader>
@@ -47,7 +47,7 @@ export function AddProviderDialog({
               </AlertDialogDescription>
             </AlertDialogHeader>
 
-            <div className="flex flex-col gap-4">
+            <ScrollDialogBody>
               {PROVIDER_KIND_GROUPS.map((group) => (
                 <div key={group.id}>
                   <p className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">{group.label}</p>
@@ -74,7 +74,7 @@ export function AddProviderDialog({
                   </div>
                 </div>
               ))}
-            </div>
+            </ScrollDialogBody>
 
             <AlertDialogFooter>
               <Button variant="ghost" size="sm" onClick={onClose}>
@@ -91,7 +91,7 @@ export function AddProviderDialog({
             onConnected={onConnected}
           />
         )}
-      </AlertDialogContent>
+      </ScrollDialogContent>
     </AlertDialog>
   )
 }
@@ -108,14 +108,14 @@ export function EditProviderDialog({
 }) {
   return (
     <AlertDialog open onOpenChange={(next) => !next && onClose()}>
-      <AlertDialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
+      <ScrollDialogContent className="sm:max-w-xl">
         <ProviderConnectForm
           meta={KIND_META[provider.kind]}
           existing={provider}
           onClose={onClose}
           onNotice={onNotice}
         />
-      </AlertDialogContent>
+      </ScrollDialogContent>
     </AlertDialog>
   )
 }
@@ -225,7 +225,7 @@ function ProviderConnectForm({
         <AlertDialogDescription>{meta.helper ?? meta.blurb}</AlertDialogDescription>
       </AlertDialogHeader>
 
-      <div className="flex flex-col gap-4">
+      <ScrollDialogBody>
         <div>
           <Label htmlFor={`${formId}-name`}>Display name (optional)</Label>
           <Input
@@ -289,7 +289,7 @@ function ProviderConnectForm({
             {error}
           </p>
         )}
-      </div>
+      </ScrollDialogBody>
 
       <AlertDialogFooter>
         <Button variant="ghost" size="sm" onClick={onClose} disabled={isLoading}>

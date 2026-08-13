@@ -12,16 +12,15 @@ import {
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { clearSession } from '@/store/slices/auth'
 import { useAuthLogoutAllMutation, useAuthLogoutMutation } from './api'
-import { WorkspaceSwitcher } from './workspace-switcher'
 import { ThemeToggle } from '@/components/layout/theme-toggle'
 import { initialsFromIdentity } from '@/lib/initials'
 
 /**
- * Auth-owned header slot: workspace switcher + account menu (profile,
- * workspace settings, logout / logout everywhere). Rendered by the app
- * layout via the `rightSlot` prop on `AppHeader`, so `AppHeader` (a layout
- * component) no longer needs to import from features/* — restoring the
- * layout -> feature layering direction.
+ * Auth-owned header slot: theme toggle + account menu (workspace settings,
+ * logout / logout everywhere). Rendered by the app layout via the `rightSlot`
+ * prop on `AppHeader`, so `AppHeader` (a layout component) never imports from
+ * features/*. The workspace switcher is its own slot (`leftSlot`, composed in
+ * routes/app.tsx) — identity reads left-to-right: product, then workspace.
  */
 export function AuthHeader() {
   const role = useAppSelector((state) => state.auth.role)
@@ -58,12 +57,7 @@ export function AuthHeader() {
   const initials = initialsFromIdentity(userName, userEmail)
 
   return (
-    <>
-      <div className="hidden items-center gap-1 border-l border-chrome-border pl-3 sm:flex">
-        <WorkspaceSwitcher />
-      </div>
-
-      <div className="ml-auto flex items-center gap-2">
+    <div className="flex items-center gap-2">
         <ThemeToggle />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -105,7 +99,6 @@ export function AuthHeader() {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
-    </>
+    </div>
   )
 }

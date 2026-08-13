@@ -10,6 +10,7 @@
 // `/api/v1/oauth2/*` (404). We therefore re-inject them here with an absolute root
 // URL. The request/response TYPES still come from the generated client (one source
 // of truth); only the URL is corrected, and cache tags are added.
+import { config } from '@/lib/config'
 import { api } from '@/store/api'
 import type {
   Oauth2ConsentDataApiResponse,
@@ -34,7 +35,7 @@ import type {
  * `credentials: 'include'` still ships the session/CSRF cookies.
  */
 function providerUrl(path: string): string {
-  const apiBase = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
+  const apiBase = config.apiBaseUrl
   const origin = new URL(apiBase, window.location.origin).origin
   return `${origin}${path}`
 }

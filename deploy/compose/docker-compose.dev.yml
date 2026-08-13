@@ -39,6 +39,21 @@ x-go-env: &go-env
   INROAD_SYSTEM_SMTP_PORT: "1025"
   INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT: "true"
   INROAD_SYSTEM_EMAIL_FROM: no-reply@inroad.test
+  # Google / Microsoft OAuth (optional). Interpolated at `docker compose` time
+  # from the shell or an --env-file (e.g. the repo-root .env:
+  #   docker compose --env-file .env -f deploy/compose/docker-compose.dev.yml up -d
+  # ). Blank keeps the provider disabled; redirect URLs default in-app to
+  # INROAD_PUBLIC_URL-derived paths, and the app treats empty as unset.
+  INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+  INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+  INROAD_GOOGLE_REDIRECT_URL: ${INROAD_GOOGLE_REDIRECT_URL:-}
+  INROAD_GOOGLE_SIGNIN_CLIENT_ID: ${INROAD_GOOGLE_SIGNIN_CLIENT_ID:-}
+  INROAD_GOOGLE_SIGNIN_CLIENT_SECRET: ${INROAD_GOOGLE_SIGNIN_CLIENT_SECRET:-}
+  INROAD_GOOGLE_SIGNIN_REDIRECT_URL: ${INROAD_GOOGLE_SIGNIN_REDIRECT_URL:-}
+  INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+  INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+  INROAD_MS_REDIRECT_URL: ${INROAD_MS_REDIRECT_URL:-}
+  INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
 
 x-go-build: &go-build
   build:
@@ -150,11 +165,26 @@ services:
     environment:
       # Vite proxies /api to the api container rather than localhost.
       VITE_API_PROXY_TARGET: http://api:8080
+      # "Docs & MCP" links go to the docs container (browser-side URL, so
+      # localhost, not the service name).
+      VITE_DOCS_URL: http://localhost:4321
       # Bind-mount file events are not delivered natively on Windows/macOS;
       # polling is what actually makes HMR fire.
       CHOKIDAR_USEPOLLING: "true"
     depends_on:
       api: { condition: service_started }
+
+  # The Astro/Starlight docs site (docs/), served on :4321. The SPA never
+  # renders documentation itself — its "Docs & MCP" links point here.
+  docs:
+    image: node:22-alpine
+    working_dir: /docs
+    command: sh -c "npm ci && npm run dev -- --host --port 4321"
+    volumes:
+      - ../../docs:/docs
+      # Container-private node_modules for the same platform reasons as web.
+      - /docs/node_modules
+    ports: ["4321:4321"]
 
 volumes:
   pgdata:

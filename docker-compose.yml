@@ -83,6 +83,18 @@ services:
       INROAD_PUBLIC_URL: ${INROAD_PUBLIC_URL:-http://localhost:8080}
       INROAD_ENV: ${INROAD_ENV:-production}
       INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+      # OAuth providers — blank keeps the provider disabled; the redirect URLs
+      # default in-app to ${INROAD_PUBLIC_URL}-derived paths (empty = unset).
+      INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+      INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+      INROAD_GOOGLE_REDIRECT_URL: ${INROAD_GOOGLE_REDIRECT_URL:-}
+      INROAD_GOOGLE_SIGNIN_CLIENT_ID: ${INROAD_GOOGLE_SIGNIN_CLIENT_ID:-}
+      INROAD_GOOGLE_SIGNIN_CLIENT_SECRET: ${INROAD_GOOGLE_SIGNIN_CLIENT_SECRET:-}
+      INROAD_GOOGLE_SIGNIN_REDIRECT_URL: ${INROAD_GOOGLE_SIGNIN_REDIRECT_URL:-}
+      INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+      INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+      INROAD_MS_REDIRECT_URL: ${INROAD_MS_REDIRECT_URL:-}
+      INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
     volumes:
       - appsecrets:/run/secrets/inroad:ro
     ports:
@@ -114,6 +126,13 @@ services:
       SECRETS_FILE: /run/secrets/inroad/env
       INROAD_ENV: ${INROAD_ENV:-production}
       INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+      # The worker refreshes OAuth mailbox tokens when sending, so it needs the
+      # same provider credentials as the api (redirect URLs are api-only).
+      INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+      INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+      INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+      INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+      INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
     volumes:
       - appsecrets:/run/secrets/inroad:ro
     restart: unless-stopped

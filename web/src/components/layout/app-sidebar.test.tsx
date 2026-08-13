@@ -1,6 +1,7 @@
 import { screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
+import { config } from '@/lib/config'
 import { AppSidebar } from './app-sidebar'
 
 // The sidebar renders router <Link>s; stub them to plain anchors so we can
@@ -79,7 +80,10 @@ test.each(['member', 'admin', 'owner'])('the Workspace group is one Settings row
   })
 
   expect(screen.getByRole('link', { name: /^settings$/i })).toHaveAttribute('href', '/app/settings')
-  expect(screen.getByRole('link', { name: /docs & mcp/i })).toHaveAttribute('href', '/app/docs')
+  // Docs are the external Starlight site, opened in a new tab — never an SPA route.
+  const docsLink = screen.getByRole('link', { name: /docs & mcp/i })
+  expect(docsLink).toHaveAttribute('href', config.docsUrl)
+  expect(docsLink).toHaveAttribute('target', '_blank')
   for (const leaf of [/api keys/i, /connected apps/i, /reply labels/i, /custom fields/i, /^security$/i, /^team$/i]) {
     expect(screen.queryByRole('link', { name: leaf })).not.toBeInTheDocument()
   }

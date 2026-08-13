@@ -36,6 +36,12 @@ export default defineConfig({
     proxy: {
       '/api': apiProxyTarget,
       '/oauth2': apiProxyTarget,
+      // Mailbox-connect OAuth callbacks are server routes (the API owns
+      // /oauth/<provider>/callback — see internal/platform/httpx/spa.go). Proxy
+      // them individually rather than all of /oauth, because /oauth/consent is
+      // an SPA route that Vite must keep serving itself.
+      '/oauth/google/callback': apiProxyTarget,
+      '/oauth/microsoft/callback': apiProxyTarget,
     },
   },
 })

@@ -15,7 +15,7 @@ interface Command {
 }
 
 const COMMANDS: readonly Command[] = [
-  { id: 'assistant', label: 'Ask Inroad assistant', group: 'Assistant', icon: Sparkles, keywords: 'ai agent help ask chat' },
+  { id: 'assistant', label: 'Open agent', group: 'Assistant', icon: Sparkles, keywords: 'ai agent assistant help ask chat' },
   { id: 'overview', label: 'Overview', group: 'Workspace', icon: LayoutDashboard, to: '/app', keywords: 'home dashboard health activity' },
   { id: 'mailboxes', label: 'Mailboxes', group: 'Sending', icon: Mail, to: '/app/mailboxes', keywords: 'smtp gmail microsoft connect accounts' },
   { id: 'warmup', label: 'Warmup', group: 'Sending', icon: Flame, to: '/app/warmup', keywords: 'reputation ramp health pool deliverability' },

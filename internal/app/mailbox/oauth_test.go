@@ -168,7 +168,7 @@ func TestGoogleCallbackValidStateCreatesMailbox(t *testing.T) {
 	}
 	// The redirect carries connected=<email> plus &provider=gmail so the SPA
 	// banner can render provider-correct copy.
-	wantLoc := callbackTestAppBase + "/mailboxes?connected=" + url.QueryEscape("rep@example.com") + "&provider=gmail"
+	wantLoc := callbackTestAppBase + "/app/mailboxes?connected=" + url.QueryEscape("rep@example.com") + "&provider=gmail"
 	if got := rec.Header().Get("Location"); got != wantLoc {
 		t.Fatalf("Location = %q, want %q", got, wantLoc)
 	}
@@ -372,7 +372,7 @@ func TestMicrosoftCallbackValidStateCreatesMailbox(t *testing.T) {
 	// The redirect carries connected=<email> plus &provider=m365 (the persisted
 	// mailbox provider value, not the "microsoft" route segment) so the SPA
 	// banner renders Microsoft 365 copy.
-	wantLoc := callbackTestAppBase + "/mailboxes?connected=" + url.QueryEscape("rep@example.com") + "&provider=m365"
+	wantLoc := callbackTestAppBase + "/app/mailboxes?connected=" + url.QueryEscape("rep@example.com") + "&provider=m365"
 	if got := rec.Header().Get("Location"); got != wantLoc {
 		t.Fatalf("Location = %q, want %q", got, wantLoc)
 	}

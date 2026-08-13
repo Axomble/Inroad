@@ -13,6 +13,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { ScrollDialogContent, ScrollDialogBody } from '@/components/shared/scroll-dialog'
 import { Page, PageTopbar, PageBody, SectionBar, EmptyBlock } from '@/components/layout/page'
 import { useHasRole } from '@/hooks/use-has-role'
 import { httpStatus } from '@/lib/rtk-error'
@@ -373,7 +374,9 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
         if (!next && !revealed && !isLoading) onClose()
       }}
     >
-      <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+      {/* Wide enough for the two-column scope grid; header and actions stay
+          pinned while the form body scrolls. */}
+      <ScrollDialogContent className="sm:max-w-2xl">
         {registered ? (
           <CredentialReveal client={registered} onDone={onClose} />
         ) : (
@@ -386,7 +389,7 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
               </AlertDialogDescription>
             </AlertDialogHeader>
 
-            <div className="flex flex-col gap-4">
+            <ScrollDialogBody>
               <div>
                 <Label htmlFor={nameId}>App name</Label>
                 <Input
@@ -516,7 +519,7 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
                   {error}
                 </p>
               )}
-            </div>
+            </ScrollDialogBody>
 
             <AlertDialogFooter>
               <Button variant="ghost" size="sm" onClick={onClose} disabled={isLoading}>
@@ -529,7 +532,7 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
             </AlertDialogFooter>
           </>
         )}
-      </AlertDialogContent>
+      </ScrollDialogContent>
     </AlertDialog>
   )
 }

@@ -1,6 +1,6 @@
-import { Link } from '@tanstack/react-router'
 import { BookOpen, Menu, Search, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { config } from '@/lib/config'
 import type { WorkspacePulse } from '@/features/pulse/api'
 import { usePulseSelect } from './use-pulse'
 
@@ -23,6 +23,7 @@ export function AppHeader({
   onOpenPalette,
   agentOpen = false,
   onToggleAgent = noop,
+  leftSlot,
   rightSlot,
 }: {
   onToggleNav: () => void
@@ -30,6 +31,8 @@ export function AppHeader({
   agentOpen?: boolean
   onToggleAgent?: () => void
   navOpen: boolean
+  /** Feature-owned identity block rendered beside the logo (workspace switcher). */
+  leftSlot?: React.ReactNode
   rightSlot?: React.ReactNode
 }) {
   // Below md the pulse card lives inside the closed drawer, so a danger row
@@ -65,6 +68,8 @@ export function AppHeader({
         </div>
       </div>
 
+      {leftSlot}
+
       <button
         type="button"
         onClick={onOpenPalette}
@@ -76,25 +81,30 @@ export function AppHeader({
         <kbd className="rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">⌘ K</kbd>
       </button>
 
-      <Link
-        to="/app/docs"
-        className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs text-chrome-muted transition-colors hover:bg-chrome-hover hover:text-chrome-text"
+      {/* Icon-only utilities, full-strength chrome text (black on light, white
+          on dark) — the accessible name and title carry the label. Docs are the
+          external Starlight site, never an in-app page. */}
+      <a
+        href={config.docsUrl}
+        target="_blank"
+        rel="noreferrer"
+        title="Docs & MCP"
+        aria-label="Docs & MCP"
+        className="ml-auto grid size-8 shrink-0 place-items-center rounded-md text-chrome-text transition-colors hover:bg-chrome-hover"
       >
-        <BookOpen className="size-3.5 text-primary" aria-hidden="true" />
-        <span className="hidden sm:inline">Docs & MCP</span>
-      </Link>
+        <BookOpen className="size-4" aria-hidden="true" />
+      </a>
 
       <Button
         variant="ghost"
-        size="sm"
-        className="text-chrome-muted hover:bg-chrome-hover hover:text-chrome-text"
+        size="icon-sm"
+        className="shrink-0 text-chrome-text hover:bg-chrome-hover hover:text-chrome-text"
         onClick={onToggleAgent}
+        title="Assistant"
         aria-label={agentOpen ? 'Close Inroad assistant' : 'Open Inroad assistant'}
         aria-expanded={agentOpen}
       >
-        <Sparkles className="size-4 text-primary" aria-hidden="true" />
-        <span className="hidden lg:inline">Assistant</span>
-        <kbd className="hidden rounded border border-chrome-border px-1 py-0.5 font-mono text-[8px] text-chrome-muted sm:inline">@</kbd>
+        <Sparkles className="size-4" aria-hidden="true" />
       </Button>
 
       {rightSlot}
