@@ -471,18 +471,24 @@ func checkDailyLimit(in PreflightInput) PreflightCheck {
 func checkWarmupHealth(in PreflightInput) PreflightCheck {
 	var withheld, unauthenticated, reduced []string
 	for _, sd := range in.Senders {
+		// The same predicate the senders panel and the rotation use, so the warning
+		// here and the block there cannot disagree. It answers for the mailbox AND
+		// its organizational domain: a quarantined mailbox has almost certainly
+		// damaged the standing of every sibling sending from the same domain.
+		if warmup.NewLeadsWithheld(deref(sd.Lane), deref(sd.DomainLane)) {
+			withheld = append(withheld, withheldSender(sd))
+			continue
+		}
 		// pending_auth is driven by sending_domains, which security.md invariant 39
 		// scopes as ADVISORY: "an advisory that turns out to be wrong must not be able
 		// to stop a campaign". A spoofed or merely un-swept DNS answer would otherwise
 		// block a launch, and a fresh install has no sending_domains row at all. It
 		// still WARNS, and warmup itself still refuses to send unauthenticated mail
-		// (LaneMaySend is false) — the advisory just cannot veto a campaign.
+		// (LaneMaySend is false) — the advisory just cannot veto a campaign. It is
+		// checked AFTER the withheld test so an unauthenticated mailbox that is also
+		// quarantined reports the containment, which is the one an operator can act on.
 		if sd.Lane != nil && *sd.Lane == warmup.LanePendingAuth {
 			unauthenticated = append(unauthenticated, sd.Email)
-			continue
-		}
-		if sd.Lane != nil && !warmup.LaneMayTakeNewLead(*sd.Lane) {
-			withheld = append(withheld, fmt.Sprintf("%s (%s)", sd.Email, *sd.Lane))
 			continue
 		}
 		degraded := false
@@ -504,6 +510,7 @@ func checkWarmupHealth(in PreflightInput) PreflightCheck {
 			Detail: fmt.Sprintf("These mailboxes cannot take new leads: %s.", strings.Join(withheld, ", ")),
 			Remedy: "A withheld mailbox rejoins the pool by passing domain authentication " +
 				"and then earning a clean evidence window; a blocked one needs operator approval. " +
+				"A mailbox withheld by its domain waits for the sibling that is containing it. " +
 				"Remove them from the pool to launch now. Replies to existing conversations are unaffected.",
 		}
 	}
@@ -528,6 +535,26 @@ func checkWarmupHealth(in PreflightInput) PreflightCheck {
 		ID: CheckWarmupHealth, Severity: SeverityPass,
 		Title: "Warmup health normal", Detail: "No pool mailbox is withheld or capacity-limited by warmup.",
 	}
+}
+
+// withheldSender names a refused mailbox AND why, distinguishing its own lane
+// from a sibling's. The two have different remedies — one waits for its own
+// evidence, the other for another mailbox's — so a message that said only
+// "withheld" would send the operator to look at the wrong mailbox.
+func withheldSender(sd Sender) string {
+	if sd.Lane != nil && !warmup.LaneMayTakeNewLead(*sd.Lane) {
+		return fmt.Sprintf("%s (%s)", sd.Email, *sd.Lane)
+	}
+	return fmt.Sprintf("%s (domain %s is %s)", sd.Email, domainOf(sd.Email), deref(sd.DomainLane))
+}
+
+// deref reads an optional lane as the empty string, which every lane predicate
+// already treats as "not warming up, therefore not gated".
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // senderDomains returns the distinct, lower-cased domains the pool sends

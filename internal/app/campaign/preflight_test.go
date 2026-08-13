@@ -657,3 +657,56 @@ func TestComputePreflightPendingAuthWarnsRatherThanBlocking(t *testing.T) {
 		t.Errorf("detail %q does not name the affected sender", c.Detail)
 	}
 }
+
+// Design §7: the gate is mailbox AND organizational domain. A mailbox whose own
+// lane is healthy but whose domain carries a quarantined sibling is withheld —
+// reputation is largely assessed per domain, so expanding cold volume from the
+// clean sibling spends a standing that is already in trouble.
+func TestComputePreflightDomainLaneWithholdsAHealthyMailbox(t *testing.T) {
+	for _, domainLane := range []string{"quarantine", "blocked"} {
+		t.Run(domainLane, func(t *testing.T) {
+			domainLane := domainLane
+			healthy, mailboxLane := "healthy", "healthy"
+			in := healthyInput()
+			in.Senders = []campaign.Sender{{
+				Email: "clean@shared.test", Enabled: true, Status: "active", CapToday: 10,
+				HealthState: &healthy, Lane: &mailboxLane, DomainLane: &domainLane,
+			}}
+			report := campaign.ComputePreflight(in)
+			if report.Ready {
+				t.Error("a mailbox on a contained domain must not take new leads")
+			}
+			c := findCheck(t, report, campaign.CheckWarmupHealth)
+			if c.Severity != campaign.SeverityFail {
+				t.Fatalf("warmup_health severity = %q, want fail", c.Severity)
+			}
+			// The remedy differs from the mailbox's own containment — the operator has
+			// to look at a DIFFERENT mailbox — so the message has to say which it is.
+			if !strings.Contains(c.Detail, "domain shared.test") || !strings.Contains(c.Detail, domainLane) {
+				t.Errorf("detail %q does not name the domain that caused the failure", c.Detail)
+			}
+		})
+	}
+}
+
+// The domain gate must not overreach. A sibling in an evidence-gathering lane, or
+// one whose DNS advisory has not passed, restricts nothing: only containment
+// (quarantine/blocked) withholds leads, and pending_auth in particular is an
+// advisory that security.md invariant 39 forbids from stopping a campaign.
+func TestComputePreflightNonContainingDomainLanesDoNotBlock(t *testing.T) {
+	for _, domainLane := range []string{"probation", "recovery", "watch", "pending_auth"} {
+		t.Run(domainLane, func(t *testing.T) {
+			domainLane := domainLane
+			healthy, mailboxLane := "healthy", "healthy"
+			in := healthyInput()
+			in.Senders = []campaign.Sender{{
+				Email: "clean@shared.test", Enabled: true, Status: "active", CapToday: 10,
+				HealthState: &healthy, Lane: &mailboxLane, DomainLane: &domainLane,
+			}}
+			if report := campaign.ComputePreflight(in); !report.Ready {
+				c := findCheck(t, report, campaign.CheckWarmupHealth)
+				t.Errorf("domain lane %q must not stop a launch: %s — %s", domainLane, c.Severity, c.Detail)
+			}
+		})
+	}
+}

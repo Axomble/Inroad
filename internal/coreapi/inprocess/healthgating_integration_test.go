@@ -11,6 +11,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/rotation"
 	"github.com/inroad/inroad/internal/platform/sendcap"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // These tests exercise health-gated cold sending and the campaign-wide daily limit
@@ -409,5 +410,78 @@ func TestCampaignDailyLimitCountsOnlyItsOwnSends(t *testing.T) {
 	}
 	if job.CampaignLimited {
 		t.Error("another campaign's sends consumed this campaign's daily limit")
+	}
+}
+
+// setLane makes the mailbox an enabled warmup participant in the given pool lane.
+// The lane is the pool-eligibility axis; health is left at its default so these
+// tests cannot pass for the wrong reason.
+func (f poolFixture) setLane(t *testing.T, ctx context.Context, mailboxID uuid.UUID, lane string) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO warmup_participants (mailbox_id, workspace_id, lane)
+		 VALUES ($1,$2,$3)
+		 ON CONFLICT (mailbox_id) DO UPDATE SET lane = EXCLUDED.lane, enabled = true`,
+		mailboxID, f.ws, lane); err != nil {
+		t.Fatalf("warmup participant lane %s: %v", lane, err)
+	}
+}
+
+// Design §7: the campaign gate is mailbox AND organizational domain. A and B share
+// acme.test, so quarantining A withholds B too — reputation is largely assessed per
+// domain, and expanding cold volume from the clean sibling spends a standing that
+// is already in trouble. The whole pool is therefore withheld and the send DEFERS
+// with the enrollment intact, exactly as a fully paused pool does.
+func TestQuarantinedSiblingWithholdsItsWholeDomain(t *testing.T) {
+	ctx, f := setupPool(t)
+	f.addSender(t, ctx, f.mailboxA, 1, true)
+	f.addSender(t, ctx, f.mailboxB, 1, true)
+	f.setLane(t, ctx, f.mailboxA, warmup.LaneQuarantine)
+	f.setLane(t, ctx, f.mailboxB, warmup.LaneHealthy)
+
+	enrollmentID := f.enroll(t, ctx)
+	job, err := f.core.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob must defer, not error: %v", err)
+	}
+	if job.Skip {
+		t.Fatal("a withheld pool must defer, not skip the enrollment")
+	}
+	if !job.HealthPaused {
+		t.Error("HealthPaused = false: a pool withheld by its domain must defer explicitly")
+	}
+	if got := f.storedMailbox(t, ctx, enrollmentID); got != uuid.Nil {
+		t.Errorf("a withheld pool pinned mailbox %s; nothing may be chosen", got)
+	}
+	if status := f.enrollmentStatus(t, ctx, enrollmentID); status != "active" {
+		t.Errorf("enrollment status = %q, want active — containment defers, it does not stop", status)
+	}
+	if n := f.sendCount(t, ctx); n != 0 {
+		t.Errorf("sends = %d, want none from a contained domain", n)
+	}
+}
+
+// The domain gate must not overreach: a sibling merely gathering evidence
+// (probation) restricts nothing, so the healthy mailbox still takes the contact.
+// Without this the previous test would also pass if the gate simply refused every
+// pool with any warmup participant in it.
+func TestEvidenceGatheringSiblingDoesNotWithholdTheDomain(t *testing.T) {
+	ctx, f := setupPool(t)
+	f.addSender(t, ctx, f.mailboxA, 1, true)
+	f.addSender(t, ctx, f.mailboxB, 1, true)
+	f.setLane(t, ctx, f.mailboxA, warmup.LaneProbation)
+	f.setLane(t, ctx, f.mailboxB, warmup.LaneHealthy)
+
+	enrollmentID := f.enroll(t, ctx)
+	job, err := f.core.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob: %v", err)
+	}
+	if job.Skip || job.HealthPaused {
+		t.Fatalf("job deferred (skip=%v paused=%v); a probation sibling withholds nothing",
+			job.Skip, job.HealthPaused)
+	}
+	if job.MailboxID == "" {
+		t.Fatal("no mailbox was chosen")
 	}
 }

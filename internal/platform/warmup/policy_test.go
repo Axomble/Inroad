@@ -501,3 +501,36 @@ func withSignals(base Signals, mutate func(*Signals)) Signals {
 	mutate(&base)
 	return base
 }
+
+// New campaign leads are gated on the mailbox AND its organizational domain
+// (design §7). Only containment withholds: pending_auth is an advisory DNS
+// verdict (security.md invariant 39) and must never be able to stop a campaign,
+// and an empty lane means the mailbox is not warming up at all.
+func TestNewLeadsWithheldGatesMailboxAndDomain(t *testing.T) {
+	cases := []struct {
+		name         string
+		mailbox      string
+		domain       string
+		wantWithheld bool
+	}{
+		{"not warming up at all", "", "", false},
+		{"both healthy", LaneHealthy, LaneHealthy, false},
+		{"own quarantine", LaneQuarantine, LaneQuarantine, true},
+		{"own blocked", LaneBlocked, LaneBlocked, true},
+		{"a quarantined sibling withholds a healthy mailbox", LaneHealthy, LaneQuarantine, true},
+		{"a blocked sibling withholds a healthy mailbox", LaneHealthy, LaneBlocked, true},
+		{"a quarantined sibling withholds a mailbox not warming up", "", LaneQuarantine, true},
+		{"a probation sibling does not", LaneHealthy, LaneProbation, false},
+		{"a watch sibling does not", LaneHealthy, LaneWatch, false},
+		{"a recovery sibling does not", LaneHealthy, LaneRecovery, false},
+		{"pending_auth is advisory on the mailbox", LanePendingAuth, LanePendingAuth, false},
+		{"pending_auth is advisory on the domain too", LaneHealthy, LanePendingAuth, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NewLeadsWithheld(tc.mailbox, tc.domain); got != tc.wantWithheld {
+				t.Fatalf("NewLeadsWithheld(%q, %q) = %v, want %v", tc.mailbox, tc.domain, got, tc.wantWithheld)
+			}
+		})
+	}
+}

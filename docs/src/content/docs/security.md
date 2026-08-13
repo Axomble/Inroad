@@ -787,6 +787,20 @@ write history that never happened.
     a send and its answer. A healthy mailbox never exchanges warmup traffic with a
     probation, recovery, watch, quarantined, blocked or unauthenticated peer.
 
+    New CAMPAIGN leads are gated on the mailbox AND its organizational domain, and
+    both halves go through one predicate (`warmup.NewLeadsWithheld`) that the
+    preflight check, the senders panel's `cap_today` and the rotation all call, so a
+    displayed warning and an enforced block cannot drift. Domain scope is an
+    aggregate read — the worst lane among the workspace's ENABLED participants
+    sharing `lower(split_part(email,'@',2))` — not a second state machine and not a
+    second table. Only `quarantine` and `blocked` withhold. `pending_auth` never
+    does, on either half, because it is derived from the advisory DNS check that
+    invariant 39 forbids from stopping a campaign, and an empty lane means the
+    mailbox is not warming up at all
+    (`TestQuarantinedSiblingWithholdsItsWholeDomain`,
+    `TestComputePreflightNonContainingDomainLanesDoNotBlock`). Replies to a human who
+    already wrote back are exempt throughout.
+
 55. **Warmup evidence is bounded and retained.** `warmup_observations` is append-only
     and reachable by external senders, so the invalid-token idempotency key buckets on
     (mailbox, UTC date, reason) rather than hashing an attacker-controlled header, and

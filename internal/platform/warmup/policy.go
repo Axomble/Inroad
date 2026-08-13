@@ -436,6 +436,43 @@ func LaneMayTakeNewLead(lane string) bool {
 	}
 }
 
+// NewLeadsWithheld reports whether a mailbox must be refused NEW campaign leads,
+// judging its own pool lane AND the worst lane on its organizational domain
+// (design §7: the gate is mailbox AND domain). It is the ONE place that decision
+// is made, so the preflight warning, the senders panel's cap_today and the
+// rotation's eligibility cannot drift apart — they had three copies of an
+// increasingly subtle expression between them.
+//
+// Domain scope exists because reputation is largely assessed per organizational
+// domain: a quarantined mailbox on a domain has almost certainly damaged the
+// standing of every other mailbox sending from it, so continuing to expand cold
+// volume there spends a reputation that is already in trouble.
+//
+// Replies to a human who already wrote back are governed separately and are
+// always allowed — see LaneMayTakeNewLead.
+func NewLeadsWithheld(mailboxLane, domainLane string) bool {
+	return laneWithholdsNewLeads(mailboxLane) || laneWithholdsNewLeads(domainLane)
+}
+
+// laneWithholdsNewLeads is NewLeadsWithheld for one lane value.
+//
+// Two lanes are deliberately exempt from the ones LaneMayTakeNewLead refuses:
+//
+//   - "" means the mailbox is not warming up at all (or its participant row is
+//     disabled, whose stored lane is frozen history rather than a live signal).
+//     Warmup is opt-in; not opting in cannot cost a mailbox its campaigns.
+//   - pending_auth is derived from sending_domains, which security.md invariant 39
+//     scopes as ADVISORY: "an advisory that turns out to be wrong must not be able
+//     to stop a campaign". A spoofed or merely un-swept DNS answer would otherwise
+//     block a launch, and a fresh install has no sending_domains row at all. It
+//     still withholds warmup traffic, which is Inroad's own mail.
+func laneWithholdsNewLeads(lane string) bool {
+	if lane == "" || lane == LanePendingAuth {
+		return false
+	}
+	return !LaneMayTakeNewLead(lane)
+}
+
 // LanesCompatible reports whether sender may send warmup to recipient. With no
 // sentinel lane, same-lane is the whole rule — simple enough to be provable,
 // which is the point: a healthy customer mailbox never receives traffic from a
