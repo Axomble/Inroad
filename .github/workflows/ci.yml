@@ -26,9 +26,93 @@ concurrency:
 permissions:
   contents: read
 
+# The five verification jobs below are INDEPENDENT and run concurrently. They
+# were one sequential `verify` job, which meant every run paid the sum of its
+# parts (~7m20s) even though nothing in it was actually ordered: only the
+# integration suite needs Postgres, and Playwright serves the SPA itself.
+# Splitting puts the wall clock at the slowest single job (~2m20s) instead.
+#
+# This repository is PUBLIC, so Actions minutes are free and the usual argument
+# against fan-out — more billed job-minutes for less waiting — does not apply.
+# The extra cost is ~25s of duplicated setup per job, paid in parallel.
+#
+# Branch protection should require the aggregate `ci` job at the bottom, NOT the
+# individual jobs: that keeps one stable check name, so adding or renaming a job
+# here never silently leaves a PR mergeable with no verification attached.
 jobs:
-  verify:
+  go-lint:
+    name: Go lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: true
+      # install-mode goinstall, not the default prebuilt binary: the published
+      # v2.1.6 binary is built with go1.24, and golangci-lint refuses to load a
+      # config whose target Go version (1.25.0, from go.mod) is newer than its own
+      # build toolchain. Compiling it here with the Go set up above makes the CI
+      # linter identical to the `go install`-ed one `make lint` runs locally, so
+      # neither side can pass while the other fails.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.1.6
+          install-mode: goinstall
+
+  go-test:
+    name: Go unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # No service containers: the unit suite does not touch Postgres or Redis
+    # (dbtest is behind the `integration` build tag), so this job skips the ~16s
+    # of container startup the integration job pays.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: true
+      # Pinned to the version `make sqlc` runs locally: sqlc's generated output is
+      # version-dependent, so an unpinned CI would fail `sqlc diff` on a release
+      # bump with no source change — and a newer sqlc silently regenerating
+      # different code is exactly what `diff` exists to catch.
+      # The published binary, not `go install`: sqlc v1.31.1's module declares
+      # `go >= 1.26.0`, and actions/setup-go pins GOTOOLCHAIN=local, so building it
+      # from source fails outright on the Go version this repo targets. The release
+      # tarball carries no toolchain constraint and is the same pinned version
+      # `make sqlc` runs locally.
+      - name: Install sqlc
+        run: |
+          mkdir -p "$RUNNER_TEMP/sqlc-bin"
+          curl -fsSL "https://downloads.sqlc.dev/sqlc_${SQLC_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/sqlc-bin" sqlc
+          echo "$RUNNER_TEMP/sqlc-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/sqlc-bin/sqlc" version
+        env:
+          SQLC_VERSION: 1.31.1
+      - name: Verify backend
+        run: |
+          # Kept alongside golangci-lint's govet rather than deduplicated: the
+          # linter config sets `generated: lax`, so it skips sqlc output that
+          # `go vet ./...` still checks. It is not on the critical path.
+          go vet ./...
+          # `sqlc diff` needs no database (it regenerates and compares); only
+          # `sqlc vet`, which PREPAREs against a live schema, does — that runs in
+          # the integration job.
+          sqlc diff
+          # -race here and on the integration run: this is the only place it can
+          # run at all. It needs cgo, and the Windows dev machines have no C
+          # compiler (CGO_ENABLED=0), so a data race in the worker pool or the
+          # queue is undetectable locally and CI is the sole line of defence.
+          go test -race ./...
+
+  go-integration:
+    name: Go integration tests
+    runs-on: ubuntu-latest
+    # The longest job, and therefore the run's critical path. Raise this ceiling
+    # rather than trimming coverage if it starts brushing the limit.
     timeout-minutes: 20
     services:
       postgres:
@@ -98,34 +182,6 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: web
-        run: npm ci
-      # install-mode goinstall, not the default prebuilt binary: the published
-      # v2.1.6 binary is built with go1.24, and golangci-lint refuses to load a
-      # config whose target Go version (1.25.0, from go.mod) is newer than its own
-      # build toolchain. Compiling it here with the Go set up above makes the CI
-      # linter identical to the `go install`-ed one `make lint` runs locally, so
-      # neither side can pass while the other fails.
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.1.6
-          install-mode: goinstall
-      # Pinned to the version `make sqlc` runs locally: sqlc's generated output is
-      # version-dependent, so an unpinned CI would fail `sqlc diff` on a release
-      # bump with no source change — and a newer sqlc silently regenerating
-      # different code is exactly what `diff` exists to catch.
-      # The published binary, not `go install`: sqlc v1.31.1's module declares
-      # `go >= 1.26.0`, and actions/setup-go pins GOTOOLCHAIN=local, so building it
-      # from source fails outright on the Go version this repo targets. The release
-      # tarball carries no toolchain constraint and is the same pinned version
-      # `make sqlc` runs locally.
       - name: Install sqlc
         run: |
           mkdir -p "$RUNNER_TEMP/sqlc-bin"
@@ -135,15 +191,6 @@ jobs:
           "$RUNNER_TEMP/sqlc-bin/sqlc" version
         env:
           SQLC_VERSION: 1.31.1
-      - name: Verify backend
-        run: |
-          go vet ./...
-          sqlc diff
-          # -race here and on the integration run: this is the only place it can
-          # run at all. It needs cgo, and the Windows dev machines have no C
-          # compiler (CGO_ENABLED=0), so a data race in the worker pool or the
-          # queue is undetectable locally and CI is the sole line of defence.
-          go test -race ./...
       - name: Verify database behavior
         run: |
           go run ./cmd/migrate up
@@ -160,6 +207,23 @@ jobs:
           # -p 4 matches make test-integration. Each package's pool is capped by
           # dbtest (8 connections), so this is ~32 against max_connections=300.
           go test -race -p 4 -tags=integration ./...
+
+  web:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      # Contract first: a spec that does not lint makes every generated-type
+      # failure below a red herring.
       - name: Verify API contract
         working-directory: web
         run: npm run lint:api
@@ -170,8 +234,25 @@ jobs:
           npm run typecheck
           npm test
           npm run build
-      # The e2e suite mocks every /api/v1 route in the browser, so it needs no
-      # API server or database — only the SPA dev server Playwright starts itself.
+
+  e2e:
+    name: Frontend end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Independent of every other job: the suite mocks every /api/v1 route in the
+    # browser, so it needs no API server, no database, and no Go toolchain — and
+    # Playwright starts the Vite DEV server itself, so it does not wait on the
+    # production build in the `web` job either.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
       - name: Install Playwright browser
         working-directory: web
         run: npx playwright install --with-deps chromium
@@ -186,3 +267,25 @@ jobs:
           path: web/playwright-report
           retention-days: 7
 
+  # The single required status check. Branch protection points here, so the set
+  # of jobs above can change without touching repository settings — and a job
+  # added but forgotten in protection can never leave a PR silently unverified.
+  #
+  # `if: always()` is what makes this a real gate: without it the job is SKIPPED
+  # when a dependency fails, and GitHub treats a skipped required check as
+  # satisfied. The explicit result check below is therefore the assertion, not
+  # the `needs` list.
+  ci:
+    name: CI
+    if: always()
+    needs: [go-lint, go-test, go-integration, web, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any verification job did not succeed
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}; then
+            echo "::error::one or more verification jobs did not succeed"
+            exit 1
+          fi
