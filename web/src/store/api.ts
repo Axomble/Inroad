@@ -390,6 +390,17 @@ const injectedRtkApi = api.injectEndpoints({
     >({
       query: () => ({ url: `/warmup/overview` }),
     }),
+    listWarmupTransitions: build.query<
+      ListWarmupTransitionsApiResponse,
+      ListWarmupTransitionsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/warmup/mailboxes/${queryArg.mailboxId}/transitions`,
+        params: {
+          limit: queryArg.limit,
+        },
+      }),
+    }),
     getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
       query: () => ({ url: `/pulse` }),
     }),
@@ -1716,6 +1727,12 @@ export type DisableMailboxWarmupApiArg = {
 export type GetWarmupOverviewApiResponse =
   /** status 200 Warmup overview */ WarmupOverview;
 export type GetWarmupOverviewApiArg = void;
+export type ListWarmupTransitionsApiResponse =
+  /** status 200 Transition history */ WarmupTransitionPage;
+export type ListWarmupTransitionsApiArg = {
+  mailboxId: string;
+  limit?: number;
+};
 export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
 export type GetPulseApiArg = void;
 export type GetCampaignReportApiResponse =
@@ -2762,6 +2779,61 @@ export type WarmupOverview = {
   active: boolean;
   mailboxes: WarmupMailbox[];
 };
+export type WarmupTransition = {
+  id: string;
+  created_at: string;
+  /** SENDER REPUTATION axis before the change. */
+  from_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
+  to_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
+  /** Stable machine identifier for why the health axis landed here, e.g. spam_watch, campaign_bounce_throttle, recovery_step, placement_sample_insufficient. Never empty. */
+  reason_code: string;
+  /** Human-readable form of reason_code. */
+  reason: string;
+  /** POOL ELIGIBILITY axis before the change; null on pre-lane rows. */
+  from_lane?:
+    | (
+        | "pending_auth"
+        | "probation"
+        | "healthy"
+        | "watch"
+        | "recovery"
+        | "quarantine"
+        | "blocked"
+        | null
+      )
+    | null;
+  to_lane?:
+    | (
+        | "pending_auth"
+        | "probation"
+        | "healthy"
+        | "watch"
+        | "recovery"
+        | "quarantine"
+        | "blocked"
+        | null
+      )
+    | null;
+  lane_reason_code?: string | null;
+  lane_reason?: string | null;
+  /** Trusted inbox+spam observations in the evidence window. */
+  placement_samples: number;
+  /** Confidence-adjusted, not the raw observed fraction: a 95% lower bound, so a thin sample reads lower than its point estimate. 0 when the minimum sample was not met. */
+  spam_rate: number;
+  bounce_samples: number;
+  /** Lower-bounded, like spam_rate. */
+  bounce_rate: number;
+  complaint_samples: number;
+  /** Lower-bounded, like spam_rate. */
+  complaint_rate: number;
+  /** Forged warmup tokens this mailbox RECEIVED. Observer-side only and never attributed to a claimed sender, so it never gates health. */
+  invalid_tokens: number;
+  /** Which thresholds produced this decision, so an old row stays readable after they move. */
+  policy_version: string;
+};
+export type WarmupTransitionPage = {
+  transitions: WarmupTransition[];
+};
 export type PulseAttention = {
   /** stable machine identifier; current producers: mailbox_error, senders_gated, dmarc_failing, cap_consumed */
   kind: string;
@@ -3343,6 +3415,8 @@ export type DeliverabilityEvent = {
   /** The provider's own id; the idempotency key. */
   provider_event_id: string;
   send_id?: string | null;
+  /** Whether a bounce is permanent (hard) or transient (soft). Provider feeds mix them, and only hard bounces feed the warmup hard-bounce rate — counting a greylist or a full mailbox as permanent pauses a healthy sender. Omitted or 'unknown' is excluded from that rate rather than assumed hard: under-counting is the safe direction. Ignored when kind is 'complaint'. */
+  bounce_class?: "hard" | "soft" | "unknown";
 };
 export type Campaign = {
   id?: string;
@@ -4054,6 +4128,7 @@ export const {
   useEnableMailboxWarmupMutation,
   useDisableMailboxWarmupMutation,
   useGetWarmupOverviewQuery,
+  useListWarmupTransitionsQuery,
   useGetPulseQuery,
   useGetCampaignReportQuery,
   useGetAiSettingsQuery,
