@@ -838,14 +838,22 @@ SELECT p.mailbox_id,
        p.lane,
        p.paused_until,
        (COALESCE(d.state, '') = 'passing' AND m.status = 'active')::boolean AS auth_passing,
-       -- Freshness is decided by the DATABASE clock on both sides. Comparing a
-       -- Go-injected clock against a DB-generated computed_at makes any app/DB
-       -- skew look like stale evidence, which fails CLOSED (a healthy mailbox
-       -- reads as unknown and stops being promotable) — quiet, and hard to
-       -- diagnose. The TTL still has one home: the caller passes it in seconds.
-       (s.computed_at IS NOT NULL
-        AND s.computed_at >= now() - make_interval(secs => $2::int)) AS evidence_fresh,
-       s.computed_at,
+       -- Freshness measures the age of the EVIDENCE, not the age of the snapshot.
+       --
+       -- computed_at is written by the upsert that runs immediately before this
+       -- read, in the same sweep, so a computed_at-based test was true for every
+       -- participant on every tick except one enabled between the two statements:
+       -- a staleness rule that could not detect staleness. newest_evidence_at is
+       -- the column that actually ages, and NULL — no evidence at all — reads as
+       -- NOT fresh, which is the direction acceptance criterion 3 requires
+       -- (absence of evidence is never health).
+       --
+       -- Still decided by the DATABASE clock on both sides. Comparing a
+       -- Go-injected clock against a DB-generated timestamp makes any app/DB skew
+       -- look like stale evidence, which fails CLOSED — quiet, and hard to
+       -- diagnose. The TTL keeps one home: the caller passes it in seconds.
+       (s.newest_evidence_at IS NOT NULL
+        AND s.newest_evidence_at >= now() - make_interval(secs => $2::int)) AS evidence_fresh,
        COALESCE(s.placement_inbox, 0)::int         AS placement_inbox,
        COALESCE(s.placement_spam, 0)::int          AS placement_spam,
        COALESCE(s.campaign_delivered, 0)::int      AS campaign_delivered,
@@ -892,7 +900,6 @@ type ListWarmupEvaluationRowsRow struct {
 	PausedUntil           pgtype.Timestamptz `json:"paused_until"`
 	AuthPassing           bool               `json:"auth_passing"`
 	EvidenceFresh         *bool              `json:"evidence_fresh"`
-	ComputedAt            pgtype.Timestamptz `json:"computed_at"`
 	PlacementInbox        int32              `json:"placement_inbox"`
 	PlacementSpam         int32              `json:"placement_spam"`
 	CampaignDelivered     int32              `json:"campaign_delivered"`
@@ -942,7 +949,6 @@ func (q *Queries) ListWarmupEvaluationRows(ctx context.Context, arg ListWarmupEv
 			&i.PausedUntil,
 			&i.AuthPassing,
 			&i.EvidenceFresh,
-			&i.ComputedAt,
 			&i.PlacementInbox,
 			&i.PlacementSpam,
 			&i.CampaignDelivered,
@@ -1996,17 +2002,25 @@ LEFT JOIN LATERAL (
       AND o.observed_at >= now() - interval '7 days'
 ) tokens ON true
 LEFT JOIN LATERAL (
-    -- How old the newest underlying evidence is, either role. GREATEST ignores
-    -- NULLs, and each arm range-seeks its own index
-    -- (idx_warmup_observations_subject_time / _observer_time) instead of an OR that
-    -- could use neither. Reported for operators; the FRESHNESS decision is made on
-    -- computed_at, which advances every sweep whether or not evidence arrived.
-    SELECT GREATEST(
-        (SELECT max(o.observed_at) FROM warmup_observations o
-          WHERE o.workspace_id = $1 AND o.mailbox_id = p.mailbox_id),
-        (SELECT max(o.observed_at) FROM warmup_observations o
-          WHERE o.workspace_id = $1 AND o.observer_mailbox_id = p.mailbox_id)
-    ) AS newest_at
+    -- How old the newest evidence about THIS mailbox's own mail is. It drives the
+    -- freshness rule in ListWarmupEvaluationRows, so its definition is
+    -- load-bearing rather than informational.
+    --
+    -- SUBJECT-side and TRUSTED only, deliberately. The observer-side arm this
+    -- replaces counted invalid_token rows, which an external sender can cause by
+    -- emailing a connected mailbox — so anyone could have kept a mailbox's
+    -- evidence looking "fresh" without a single observation about its outbound
+    -- mail. attribution_trusted is the same gate the rate arms above use, and the
+    -- migration 000055 CHECK guarantees invalid_token rows can never set it.
+    -- NULL (no evidence at all) is preserved and must read as NOT fresh.
+    --
+    -- Range-seeks idx_warmup_observations_subject_time on its
+    -- (workspace_id, mailbox_id) prefix.
+    SELECT max(o.observed_at) AS newest_at
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.mailbox_id = p.mailbox_id
+      AND o.attribution_trusted
 ) evidence ON true
 WHERE p.workspace_id = $1 AND p.enabled
 ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET

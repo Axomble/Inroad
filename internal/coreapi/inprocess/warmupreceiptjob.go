@@ -520,11 +520,20 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// warmupEvidenceTTL is how old a snapshot may be before it stops counting as
-// evidence. Twice the five-minute sweep interval tolerates one missed tick; beyond
-// that the participant reads as unknown and cannot be promoted. Staleness must
-// never read as safety (design §8, acceptance criterion 3).
-const warmupEvidenceTTL = 10 * time.Minute
+// warmupEvidenceTTL is how old the newest OBSERVATION about a mailbox may be
+// before it stops counting as evidence. Beyond it the participant reads as
+// unknown and cannot be promoted: staleness must never read as safety (design §8,
+// acceptance criterion 3).
+//
+// It is a property of the evidence, not of the sweep. The previous value was
+// twice the sweep interval, which was right for the snapshot ROW's age but is
+// meaningless for observations: warmup deliberately skips weekends and ~4% of
+// weekdays (warmup.EffectiveDailyVolume), so a perfectly healthy participant can
+// legitimately produce nothing from Friday evening to Monday morning. Four days
+// clears any such gap while staying well inside the 7-day window that supplies
+// the placement samples, so a mailbox whose evidence is all older than this has
+// nothing left in that window to be judged on anyway.
+const warmupEvidenceTTL = 96 * time.Hour
 
 func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID, now time.Time) error {
 	rows, err := c.q.ListWarmupEvaluationRows(ctx, gen.ListWarmupEvaluationRowsParams{

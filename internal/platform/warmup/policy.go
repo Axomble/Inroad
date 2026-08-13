@@ -93,8 +93,11 @@ type Signals struct {
 	// selector match is not evidence of an unsigned domain (see migration 000036).
 	AuthPassing bool
 
-	// EvidenceFresh reports whether the snapshot is recent enough to act on. A
-	// stale snapshot is treated as no evidence, never as health.
+	// EvidenceFresh reports whether the newest evidence ABOUT THIS MAILBOX is
+	// recent enough to act on. Stale evidence is treated as no evidence, never as
+	// health. It measures the age of the observations, not the age of the
+	// snapshot row that aggregates them — a snapshot is rewritten every sweep and
+	// so is always young, which made the earlier test vacuously true.
 	EvidenceFresh bool
 
 	Inbox int

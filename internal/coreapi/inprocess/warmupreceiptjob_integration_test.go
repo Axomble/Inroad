@@ -813,3 +813,94 @@ func TestQuarantineCooldownIsNotRestartedByHealthOnlyTransitions(t *testing.T) {
 			elapsed.Round(time.Hour), warmup.QuarantineCooldown)
 	}
 }
+
+// seedAuthPassing caches a 'passing' DNS verdict for a mailbox's organizational
+// domain, which is the lane's admission prerequisite. Without it every lane
+// decision collapses to pending_auth and says nothing about evidence.
+func seedAuthPassing(t *testing.T, ctx context.Context, f warmupFixture, ws uuid.UUID, domain string) {
+	t.Helper()
+	if _, err := f.raw.Exec(ctx,
+		`INSERT INTO sending_domains (workspace_id, domain, state, spf_found, dkim_found, dmarc_found, checked_at)
+		 VALUES ($1,$2,'passing',true,false,true,now())
+		 ON CONFLICT (workspace_id, domain) DO UPDATE SET state = 'passing'`, ws, domain); err != nil {
+		t.Fatalf("seed sending domain: %v", err)
+	}
+}
+
+// seedPlacementsAged records n trusted inbox placements attributed to A as the
+// SENDER, all observed at the same age.
+func seedPlacementsAged(t *testing.T, ctx context.Context, f warmupFixture, sid uuid.UUID, n int, age time.Duration) {
+	t.Helper()
+	observed := pgtype.Timestamptz{Time: time.Now().Add(-age), Valid: true}
+	for i := 0; i < n; i++ {
+		if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+			WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+			ReceiptID: uuid.New(), Placement: placementInbox, ObservedAt: observed,
+		}); err != nil {
+			t.Fatalf("seed placement %d: %v", i, err)
+		}
+	}
+}
+
+// withWallClock returns the fixture with the evaluator reading the real clock.
+//
+// setupWarmup pins it to noon on a future warmup-busy day so SEND scheduling is
+// deterministic, but the evaluator compares that instant against timestamps
+// Postgres stamped with its own now() — so any assertion about an elapsed grace
+// or cooldown would be measuring the gap between the two clocks instead. The
+// health sweep does not schedule anything, so the wall clock is safe here.
+func withWallClock(t *testing.T, f warmupFixture) warmupFixture {
+	t.Helper()
+	impl, ok := f.core.(client)
+	if !ok {
+		t.Fatalf("core is %T, want inprocess.client — cannot restore the wall clock", f.core)
+	}
+	impl.now = time.Now
+	f.core = impl
+	return f
+}
+
+func participantAxes(t *testing.T, ctx context.Context, f warmupFixture, mailbox uuid.UUID) (health, lane string) {
+	t.Helper()
+	p, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: mailbox, WorkspaceID: f.ws1})
+	if err != nil {
+		t.Fatalf("read participant: %v", err)
+	}
+	return p.HealthState, p.Lane
+}
+
+// Freshness must measure the age of the EVIDENCE, not the age of the snapshot row.
+// The snapshot is rewritten by the statement immediately before the read, so a
+// computed_at-based test was true on every tick — a staleness rule that could not
+// detect staleness. Here the placements are plentiful (30, well over
+// MinPlacementSamples) and inside the 7-day sample window, but every one of them
+// is older than the freshness TTL: the mailbox has not been seen for days and must
+// read as unmeasured, never as healthy.
+func TestFreshnessMeasuresEvidenceAgeNotSnapshotAge(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	f = withWallClock(t, f)
+	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
+	sid := warmupSendUUID(t, ctx, f)
+	seedPlacementsAged(t, ctx, f, sid, 30, warmupEvidenceTTL+2*time.Hour)
+
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth: %v", err)
+	}
+	health, lane := participantAxes(t, ctx, f, f.a)
+	if health != warmup.StateUnknown {
+		t.Fatalf("A health = %q, want unknown: 30 placements that are all older than the TTL are not fresh evidence", health)
+	}
+	if lane == warmup.LaneHealthy {
+		t.Fatal("A was promoted to the healthy lane on evidence nobody has refreshed for days")
+	}
+
+	// Control: the same 30 observations, observed NOW, do qualify. Without this the
+	// assertion above would also pass if the query were simply broken.
+	seedPlacementsAged(t, ctx, f, sid, 30, 0)
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth (fresh): %v", err)
+	}
+	if health, lane = participantAxes(t, ctx, f, f.a); health != warmup.StateHealthy || lane != warmup.LaneHealthy {
+		t.Fatalf("A = %s/%s, want healthy/healthy once the same evidence is fresh", health, lane)
+	}
+}
