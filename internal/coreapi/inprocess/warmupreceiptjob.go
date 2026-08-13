@@ -552,6 +552,7 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 			// the refresh and this read has no snapshot row at all, so the result is
 			// NULL, which must read as no evidence rather than as zeros that look clean.
 			EvidenceFresh:         r.EvidenceFresh != nil && *r.EvidenceFresh,
+			EvidenceLapsedSince:   r.EvidenceLapsedSince.Time,
 			Inbox:                 int(r.PlacementInbox),
 			Spam:                  int(r.PlacementSpam),
 			CampaignDelivered:     int(r.CampaignDelivered),

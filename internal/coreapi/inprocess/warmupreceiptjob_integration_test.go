@@ -904,3 +904,65 @@ func TestFreshnessMeasuresEvidenceAgeNotSnapshotAge(t *testing.T) {
 		t.Fatalf("A = %s/%s, want healthy/healthy once the same evidence is fresh", health, lane)
 	}
 }
+
+// End-to-end hysteresis: a lapse costs the healthy lane only once it has PERSISTED
+// past LaneEvidenceGrace. The grace is anchored on the transition trail, so this
+// exercises the lateral that derives it as well as the policy that reads it.
+func TestEvidenceLapseCostsTheHealthyLaneOnlyAfterTheGrace(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	f = withWallClock(t, f)
+	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
+	sid := warmupSendUUID(t, ctx, f)
+
+	// Sweep 1: fresh qualified evidence puts A in the healthy lane.
+	seedPlacementsAged(t, ctx, f, sid, 25, 0)
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if health, lane := participantAxes(t, ctx, f, f.a); health != warmup.StateHealthy || lane != warmup.LaneHealthy {
+		t.Fatalf("after sweep 1 A = %s/%s, want healthy/healthy", health, lane)
+	}
+
+	// The evidence ages out from under it — the pool stalled, a partner stopped
+	// polling. Sweep 2 sees no fresh evidence.
+	if _, err := f.raw.Exec(ctx,
+		`UPDATE warmup_observations SET observed_at = now() - make_interval(secs => $3)
+		  WHERE workspace_id = $1 AND mailbox_id = $2`,
+		f.ws1, f.a, int(warmupEvidenceTTL.Seconds())+3600); err != nil {
+		t.Fatalf("age the evidence: %v", err)
+	}
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	health, lane := participantAxes(t, ctx, f, f.a)
+	if health != warmup.StateUnknown {
+		t.Fatalf("after sweep 2 A health = %q, want unknown", health)
+	}
+	if lane != warmup.LaneHealthy {
+		t.Fatalf("after sweep 2 A lane = %q, want healthy: one unqualified tick must not cost the lane", lane)
+	}
+
+	// Sweep 3, five minutes later in the real system: still inside the grace.
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if _, lane = participantAxes(t, ctx, f, f.a); lane != warmup.LaneHealthy {
+		t.Fatalf("after sweep 3 A lane = %q, want healthy: the grace has not elapsed", lane)
+	}
+
+	// Age the recorded lapse past the grace. The next sweep demotes: the grace is a
+	// delay, not an exemption.
+	//
+	if _, err := f.raw.Exec(ctx,
+		`UPDATE warmup_state_transitions SET created_at = created_at - make_interval(secs => $3)
+		  WHERE workspace_id = $1 AND mailbox_id = $2 AND to_state = 'unknown'`,
+		f.ws1, f.a, int(warmup.LaneEvidenceGrace.Seconds())+60); err != nil {
+		t.Fatalf("age the lapse: %v", err)
+	}
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 4: %v", err)
+	}
+	if _, lane = participantAxes(t, ctx, f, f.a); lane != warmup.LaneProbation {
+		t.Fatalf("after sweep 4 A lane = %q, want probation: a lapse that outlasts the grace demotes", lane)
+	}
+}

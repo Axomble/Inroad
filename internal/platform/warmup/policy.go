@@ -74,6 +74,29 @@ const ProbationDailyVolume = 5
 // earn healthy through fresh evidence, which is acceptance criterion 2.
 const QuarantineCooldown = 72 * time.Hour
 
+// LaneEvidenceGrace is how long a healthy-lane participant may go without
+// qualified evidence before it is returned to probation.
+//
+// It exists because losing SIGHT of a mailbox and finding something WRONG with it
+// are different events that deserve different reflexes. Without a grace, one
+// unqualified tick — a 7-day window sliding past its twentieth placement, a
+// partner that did not poll, a snapshot refresh that skipped a workspace —
+// demoted the mailbox on the next sweep and promoted it back on the one after:
+// two audit rows, and a day capped at ProbationDailyVolume for a mailbox nothing
+// was ever wrong with. Worse, the demotion is self-reinforcing: probation caps
+// output, fewer sends produce fewer placements, and the sample needed to
+// requalify takes days to rebuild. The cost of holding an unmeasured mailbox for
+// a few hours is far below the cost of that ratchet.
+//
+// It applies ONLY to the absence of evidence. A degraded health state, an auth
+// regression and a quarantine all still apply on the first sweep — containment
+// must never wait, and none of them route through this branch.
+//
+// Six hours is ~72 sweeps at the five-minute cadence, so no transient can survive
+// it, while a mailbox that has genuinely gone dark still leaves the healthy pool
+// the same day.
+const LaneEvidenceGrace = 6 * time.Hour
+
 // Signals are the materialized evidence for one participant, read from
 // warmup_signal_snapshots.
 //
@@ -99,6 +122,12 @@ type Signals struct {
 	// snapshot row that aggregates them — a snapshot is rewritten every sweep and
 	// so is always young, which made the earlier test vacuously true.
 	EvidenceFresh bool
+
+	// EvidenceLapsedSince is when this participant's health last FELL to unknown,
+	// i.e. when it stopped having qualified evidence; zero when that has never
+	// happened (or not since it was last proven). It anchors LaneEvidenceGrace and
+	// nothing else — it can neither promote nor contain.
+	EvidenceLapsedSince time.Time
 
 	Inbox int
 	Spam  int
@@ -320,12 +349,51 @@ func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason stri
 			return LaneWatch, "lane_watch", "moved to watch: " + d.HealthReason
 		}
 		if !qualified {
-			// Evidence went stale or fell below the minimum sample. Leaving it in the
-			// healthy lane would let an unmeasured mailbox keep reaching healthy peers.
+			if holdsForEvidenceGrace(s, d, now) {
+				return LaneHealthy, "lane_evidence_grace",
+					"evidence lapsed recently: holding the healthy lane until the grace period elapses"
+			}
+			// Evidence went stale or fell below the minimum sample, and stayed that
+			// way. Leaving it in the healthy lane would let an unmeasured mailbox keep
+			// reaching healthy peers.
 			return LaneProbation, "lane_evidence_lapsed", "no fresh qualified evidence: returned to probation"
 		}
 		return LaneHealthy, "lane_healthy", "qualified clean evidence"
 	}
+}
+
+// holdsForEvidenceGrace reports whether a healthy-lane participant that failed to
+// qualify should keep its lane for now. See LaneEvidenceGrace for why the grace
+// exists.
+//
+// Three gates, each load-bearing:
+//
+//  1. Only StateUnknown qualifies for the hold. That state means exactly "no
+//     qualified evidence" — an ABSENCE. Every other way to miss qualification is a
+//     signal: watch and worse are handled by the branches above, and a healthy
+//     state that fails promotionAlarmed is a small pile of BAD evidence, which is
+//     information, not a blind spot, and still demotes immediately.
+//
+//  2. If the health axis is falling INTO unknown on this very evaluation, the
+//     lapse starts now, so it is inside any grace. The transition this tick writes
+//     (from a non-unknown state to unknown) is what EvidenceLapsedSince reads on
+//     every subsequent sweep, so the marker exists from the second tick onward.
+//
+//  3. Health that is ALREADY unknown with no recorded fall has no lapse to date
+//     from — a participant backfilled straight into the healthy lane, for
+//     instance. It is not held: an unbounded hold on an unmeasured mailbox is the
+//     failure mode the grace is supposed to bound, not create.
+func holdsForEvidenceGrace(s Signals, d Decision, now time.Time) bool {
+	if d.Health != StateUnknown {
+		return false
+	}
+	if normalizeState(s.CurrentHealth) != StateUnknown {
+		return true
+	}
+	if s.EvidenceLapsedSince.IsZero() {
+		return false
+	}
+	return now.Sub(s.EvidenceLapsedSince) < LaneEvidenceGrace
 }
 
 // LaneDailyVolume caps a lane's warmup output. Probation and recovery are

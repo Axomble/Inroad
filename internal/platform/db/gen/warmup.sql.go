@@ -862,7 +862,8 @@ SELECT p.mailbox_id,
        COALESCE(s.warmup_delivered, 0)::int        AS warmup_delivered,
        COALESCE(s.warmup_hard_bounces, 0)::int     AS warmup_hard_bounces,
        COALESCE(s.observer_token_failures, 0)::int AS observer_token_failures,
-       q.quarantined_since
+       q.quarantined_since,
+       lapse.evidence_lapsed_since
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
 LEFT JOIN warmup_signal_snapshots s
@@ -883,6 +884,30 @@ LEFT JOIN LATERAL (
       -- extended the containment that improvement was supposed to end.
       AND t.from_lane IS DISTINCT FROM 'quarantine'
 ) q ON true
+LEFT JOIN LATERAL (
+    -- When the health axis last FELL to unknown — the moment this participant
+    -- stopped having qualified evidence. It anchors the healthy lane's grace
+    -- period (design §6 hysteresis): a lapse has to persist before it costs a
+    -- mailbox its lane, while a degraded signal still contains it on the first
+    -- sweep.
+    --
+    -- Derived from the transition trail rather than stored on the participant,
+    -- for the same reason quarantined_since is: the trail is append-only and
+    -- already records exactly this event, so there is no second source of truth
+    -- to drift.
+    --
+    -- from_state <> 'unknown' keeps it the moment of the FALL. Rows written while
+    -- already unknown (a lane move with no health change) carry
+    -- from_state = to_state = 'unknown', and counting those would restart the
+    -- grace every time anything else happened — the same defect the quarantine
+    -- cooldown had.
+    SELECT max(t.created_at)::timestamptz AS evidence_lapsed_since
+    FROM warmup_state_transitions t
+    WHERE t.workspace_id = p.workspace_id
+      AND t.mailbox_id = p.mailbox_id
+      AND t.to_state = 'unknown'
+      AND t.from_state <> 'unknown'
+) lapse ON true
 WHERE p.workspace_id = $1 AND p.enabled
 ORDER BY p.mailbox_id
 `
@@ -909,6 +934,7 @@ type ListWarmupEvaluationRowsRow struct {
 	WarmupHardBounces     int32              `json:"warmup_hard_bounces"`
 	ObserverTokenFailures int32              `json:"observer_token_failures"`
 	QuarantinedSince      pgtype.Timestamptz `json:"quarantined_since"`
+	EvidenceLapsedSince   pgtype.Timestamptz `json:"evidence_lapsed_since"`
 }
 
 // One workspace's enabled participants, each with both current axes and the
@@ -958,6 +984,7 @@ func (q *Queries) ListWarmupEvaluationRows(ctx context.Context, arg ListWarmupEv
 			&i.WarmupHardBounces,
 			&i.ObserverTokenFailures,
 			&i.QuarantinedSince,
+			&i.EvidenceLapsedSince,
 		); err != nil {
 			return nil, err
 		}

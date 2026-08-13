@@ -127,8 +127,12 @@ func TestLaneTransitions(t *testing.T) {
 		{"blocked is never moved by policy",
 			Signals{AuthPassing: true, EvidenceFresh: true, CurrentLane: LaneBlocked, Inbox: 20},
 			LaneBlocked, "lane_blocked_held"},
-		{"lapsed evidence returns a healthy mailbox to probation",
-			Signals{AuthPassing: true, CurrentLane: LaneHealthy, Inbox: 20},
+		{"a fresh evidence lapse holds the healthy lane while the grace runs",
+			Signals{AuthPassing: true, CurrentLane: LaneHealthy, CurrentHealth: StateHealthy, Inbox: 20},
+			LaneHealthy, "lane_evidence_grace"},
+		{"a lapse that outlasts the grace returns a healthy mailbox to probation",
+			Signals{AuthPassing: true, CurrentLane: LaneHealthy, CurrentHealth: StateUnknown, Inbox: 20,
+				EvidenceLapsedSince: now.Add(-LaneEvidenceGrace - time.Minute)},
 			LaneProbation, "lane_evidence_lapsed"},
 	}
 	for _, tc := range cases {
@@ -376,4 +380,124 @@ func TestDwellHoldsTheLanePromotionToo(t *testing.T) {
 	if LaneMaySend(d.Lane) {
 		t.Fatalf("lane = %q may send, but the health recovery that would justify it was refused", d.Lane)
 	}
+}
+
+// A single unqualified tick used to cost a healthy mailbox its lane: it demoted
+// on one sweep and was promoted back on the next, five minutes later, leaving two
+// audit rows and a day capped at ProbationDailyVolume for a mailbox nothing was
+// ever wrong with. This walks that exact sequence and asserts the lane never
+// moves.
+func TestASingleEvidenceDipDoesNotCostTheHealthyLane(t *testing.T) {
+	now := time.Now()
+	qualified := Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneHealthy, Inbox: 20,
+	}
+
+	// Tick 1: the window slides past the twentieth placement. Health drops to
+	// unknown (it is genuinely unmeasured), but the LANE holds.
+	dip := qualified
+	dip.Inbox = 19
+	dipped := EvaluateParticipant(dip, now)
+	if dipped.Health != StateUnknown {
+		t.Fatalf("health = %q, want unknown: a thin sample is still unmeasured", dipped.Health)
+	}
+	if dipped.Lane != LaneHealthy || dipped.LaneReasonCode != "lane_evidence_grace" {
+		t.Fatalf("lane = %q (%s), want healthy held by the grace", dipped.Lane, dipped.LaneReasonCode)
+	}
+
+	// Tick 2, five minutes later: evidence is back. The mailbox requalifies from
+	// the lane it never left, so nothing about the pool changed.
+	back := qualified
+	back.CurrentHealth = StateUnknown
+	back.EvidenceLapsedSince = now
+	recovered := EvaluateParticipant(back, now.Add(5*time.Minute))
+	if recovered.Lane != LaneHealthy {
+		t.Fatalf("lane = %q, want healthy", recovered.Lane)
+	}
+	if recovered.Health != StateHealthy {
+		t.Fatalf("health = %q, want healthy", recovered.Health)
+	}
+}
+
+// The grace is a delay, not an exemption: a lapse that persists past it demotes.
+func TestAPersistentEvidenceLapseStillDemotes(t *testing.T) {
+	now := time.Now()
+	in := Signals{
+		AuthPassing: true, CurrentHealth: StateUnknown, CurrentLane: LaneHealthy, Inbox: 19,
+		EvidenceLapsedSince: now.Add(-LaneEvidenceGrace - time.Second),
+	}
+	d := EvaluateParticipant(in, now)
+	if d.Lane != LaneProbation || d.LaneReasonCode != "lane_evidence_lapsed" {
+		t.Fatalf("lane = %q (%s), want probation/lane_evidence_lapsed", d.Lane, d.LaneReasonCode)
+	}
+
+	// One second earlier it is still inside the grace — the boundary is the rule,
+	// not an accident of rounding.
+	in.EvidenceLapsedSince = now.Add(-LaneEvidenceGrace + time.Second)
+	if held := EvaluateParticipant(in, now); held.Lane != LaneHealthy {
+		t.Fatalf("inside the grace: lane = %q, want healthy", held.Lane)
+	}
+}
+
+// An unmeasured mailbox with no recorded fall — one backfilled straight into the
+// healthy lane, for instance — has no lapse to date the grace from and must not
+// be held indefinitely. An unbounded hold is the failure the grace bounds, not
+// one it may create.
+func TestUnknownHealthWithNoRecordedLapseIsNotHeld(t *testing.T) {
+	d := EvaluateParticipant(Signals{
+		AuthPassing: true, CurrentHealth: StateUnknown, CurrentLane: LaneHealthy,
+	}, time.Now())
+	if d.Lane != LaneProbation || d.LaneReasonCode != "lane_evidence_lapsed" {
+		t.Fatalf("lane = %q (%s), want probation/lane_evidence_lapsed", d.Lane, d.LaneReasonCode)
+	}
+}
+
+// The grace must never slow CONTAINMENT. Everything that means "something is
+// wrong" — a degraded rate, an auth regression, a small pile of bad evidence —
+// still moves the mailbox out of the healthy lane on the first sweep, with no
+// lapse marker anywhere in sight.
+func TestContainmentIsNeverDelayedByTheEvidenceGrace(t *testing.T) {
+	now := time.Now()
+	healthy := Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneHealthy,
+	}
+	cases := []struct {
+		name string
+		in   Signals
+		lane string
+	}{
+		{"spam pause quarantines immediately", withSignals(healthy, func(s *Signals) {
+			s.Inbox, s.Spam = 4, 16
+		}), LaneQuarantine},
+		{"spam watch leaves the healthy lane immediately", withSignals(healthy, func(s *Signals) {
+			s.Inbox, s.Spam = 12, 8
+		}), LaneWatch},
+		{"campaign hard bounces quarantine immediately", withSignals(healthy, func(s *Signals) {
+			s.Inbox, s.CampaignDelivered, s.CampaignHardBounces = 20, 200, 40
+		}), LaneQuarantine},
+		{"an auth regression withdraws the mailbox immediately", withSignals(healthy, func(s *Signals) {
+			s.AuthPassing, s.Inbox = false, 20
+		}), LanePendingAuth},
+		{"a thin pile of BAD evidence is a signal, not a blind spot", withSignals(healthy, func(s *Signals) {
+			// Below MinBounceSamples, so it cannot degrade health — but it is
+			// evidence of something wrong, and promotionAlarmed refuses to vouch.
+			s.Inbox, s.CampaignDelivered, s.CampaignHardBounces = 20, 40, 20
+		}), LaneProbation},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EvaluateParticipant(tc.in, now); got.Lane != tc.lane {
+				t.Fatalf("lane = %q (%s), want %q on the FIRST sweep", got.Lane, got.LaneReasonCode, tc.lane)
+			}
+		})
+	}
+}
+
+// withSignals copies a base Signals and applies one mutation, so each case above
+// states only what it changes.
+func withSignals(base Signals, mutate func(*Signals)) Signals {
+	mutate(&base)
+	return base
 }
