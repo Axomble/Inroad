@@ -813,3 +813,296 @@ func TestQuarantineCooldownIsNotRestartedByHealthOnlyTransitions(t *testing.T) {
 			elapsed.Round(time.Hour), warmup.QuarantineCooldown)
 	}
 }
+
+// seedAuthPassing caches a 'passing' DNS verdict for a mailbox's organizational
+// domain, which is the lane's admission prerequisite. Without it every lane
+// decision collapses to pending_auth and says nothing about evidence.
+func seedAuthPassing(t *testing.T, ctx context.Context, f warmupFixture, ws uuid.UUID, domain string) {
+	t.Helper()
+	if _, err := f.raw.Exec(ctx,
+		`INSERT INTO sending_domains (workspace_id, domain, state, spf_found, dkim_found, dmarc_found, checked_at)
+		 VALUES ($1,$2,'passing',true,false,true,now())
+		 ON CONFLICT (workspace_id, domain) DO UPDATE SET state = 'passing'`, ws, domain); err != nil {
+		t.Fatalf("seed sending domain: %v", err)
+	}
+}
+
+// seedPlacementsAged records n trusted inbox placements attributed to A as the
+// SENDER, all observed at the same age.
+func seedPlacementsAged(t *testing.T, ctx context.Context, f warmupFixture, sid uuid.UUID, n int, age time.Duration) {
+	t.Helper()
+	observed := pgtype.Timestamptz{Time: time.Now().Add(-age), Valid: true}
+	for i := 0; i < n; i++ {
+		if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+			WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+			ReceiptID: uuid.New(), Placement: placementInbox, ObservedAt: observed,
+		}); err != nil {
+			t.Fatalf("seed placement %d: %v", i, err)
+		}
+	}
+}
+
+// withWallClock returns the fixture with the evaluator reading the real clock.
+//
+// setupWarmup pins it to noon on a future warmup-busy day so SEND scheduling is
+// deterministic, but the evaluator compares that instant against timestamps
+// Postgres stamped with its own now() — so any assertion about an elapsed grace
+// or cooldown would be measuring the gap between the two clocks instead. The
+// health sweep does not schedule anything, so the wall clock is safe here.
+func withWallClock(t *testing.T, f warmupFixture) warmupFixture {
+	t.Helper()
+	impl, ok := f.core.(client)
+	if !ok {
+		t.Fatalf("core is %T, want inprocess.client — cannot restore the wall clock", f.core)
+	}
+	impl.now = time.Now
+	f.core = impl
+	return f
+}
+
+func participantAxes(t *testing.T, ctx context.Context, f warmupFixture, mailbox uuid.UUID) (health, lane string) {
+	t.Helper()
+	p, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: mailbox, WorkspaceID: f.ws1})
+	if err != nil {
+		t.Fatalf("read participant: %v", err)
+	}
+	return p.HealthState, p.Lane
+}
+
+// Freshness must measure the age of the EVIDENCE, not the age of the snapshot row.
+// The snapshot is rewritten by the statement immediately before the read, so a
+// computed_at-based test was true on every tick — a staleness rule that could not
+// detect staleness. Here the placements are plentiful (30, well over
+// MinPlacementSamples) and inside the 7-day sample window, but every one of them
+// is older than the freshness TTL: the mailbox has not been seen for days and must
+// read as unmeasured, never as healthy.
+func TestFreshnessMeasuresEvidenceAgeNotSnapshotAge(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	f = withWallClock(t, f)
+	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
+	sid := warmupSendUUID(t, ctx, f)
+	seedPlacementsAged(t, ctx, f, sid, 30, warmupEvidenceTTL+2*time.Hour)
+
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth: %v", err)
+	}
+	health, lane := participantAxes(t, ctx, f, f.a)
+	if health != warmup.StateUnknown {
+		t.Fatalf("A health = %q, want unknown: 30 placements that are all older than the TTL are not fresh evidence", health)
+	}
+	if lane == warmup.LaneHealthy {
+		t.Fatal("A was promoted to the healthy lane on evidence nobody has refreshed for days")
+	}
+
+	// Control: the same 30 observations, observed NOW, do qualify. Without this the
+	// assertion above would also pass if the query were simply broken.
+	seedPlacementsAged(t, ctx, f, sid, 30, 0)
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth (fresh): %v", err)
+	}
+	if health, lane = participantAxes(t, ctx, f, f.a); health != warmup.StateHealthy || lane != warmup.LaneHealthy {
+		t.Fatalf("A = %s/%s, want healthy/healthy once the same evidence is fresh", health, lane)
+	}
+}
+
+// End-to-end hysteresis: a lapse costs the healthy lane only once it has PERSISTED
+// past LaneEvidenceGrace. The grace is anchored on the transition trail, so this
+// exercises the lateral that derives it as well as the policy that reads it.
+func TestEvidenceLapseCostsTheHealthyLaneOnlyAfterTheGrace(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	f = withWallClock(t, f)
+	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
+	sid := warmupSendUUID(t, ctx, f)
+
+	// Sweep 1: fresh qualified evidence puts A in the healthy lane.
+	seedPlacementsAged(t, ctx, f, sid, 25, 0)
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if health, lane := participantAxes(t, ctx, f, f.a); health != warmup.StateHealthy || lane != warmup.LaneHealthy {
+		t.Fatalf("after sweep 1 A = %s/%s, want healthy/healthy", health, lane)
+	}
+
+	// The evidence ages out from under it — the pool stalled, a partner stopped
+	// polling. Sweep 2 sees no fresh evidence.
+	if _, err := f.raw.Exec(ctx,
+		`UPDATE warmup_observations SET observed_at = now() - make_interval(secs => $3)
+		  WHERE workspace_id = $1 AND mailbox_id = $2`,
+		f.ws1, f.a, int(warmupEvidenceTTL.Seconds())+3600); err != nil {
+		t.Fatalf("age the evidence: %v", err)
+	}
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	health, lane := participantAxes(t, ctx, f, f.a)
+	if health != warmup.StateUnknown {
+		t.Fatalf("after sweep 2 A health = %q, want unknown", health)
+	}
+	if lane != warmup.LaneHealthy {
+		t.Fatalf("after sweep 2 A lane = %q, want healthy: one unqualified tick must not cost the lane", lane)
+	}
+
+	// Sweep 3, five minutes later in the real system: still inside the grace.
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if _, lane = participantAxes(t, ctx, f, f.a); lane != warmup.LaneHealthy {
+		t.Fatalf("after sweep 3 A lane = %q, want healthy: the grace has not elapsed", lane)
+	}
+
+	// Age the recorded lapse past the grace. The next sweep demotes: the grace is a
+	// delay, not an exemption.
+	//
+	if _, err := f.raw.Exec(ctx,
+		`UPDATE warmup_state_transitions SET created_at = created_at - make_interval(secs => $3)
+		  WHERE workspace_id = $1 AND mailbox_id = $2 AND to_state = 'unknown'`,
+		f.ws1, f.a, int(warmup.LaneEvidenceGrace.Seconds())+60); err != nil {
+		t.Fatalf("age the lapse: %v", err)
+	}
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("sweep 4: %v", err)
+	}
+	if _, lane = participantAxes(t, ctx, f, f.a); lane != warmup.LaneProbation {
+		t.Fatalf("after sweep 4 A lane = %q, want probation: a lapse that outlasts the grace demotes", lane)
+	}
+}
+
+// placementObservations returns how many trusted placement observations of each
+// kind are attributed to a mailbox as the SENDER — the rows the snapshot counts.
+func placementObservations(t *testing.T, ctx context.Context, f warmupFixture, sender uuid.UUID) (inbox, spam, total int) {
+	t.Helper()
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE placement = 'inbox'),
+		        count(*) FILTER (WHERE placement = 'spam'),
+		        count(*)
+		   FROM warmup_observations
+		  WHERE workspace_id = $1 AND mailbox_id = $2 AND kind = 'placement'`,
+		f.ws1, sender).Scan(&inbox, &spam, &total); err != nil {
+		t.Fatalf("read placement observations: %v", err)
+	}
+	return inbox, spam, total
+}
+
+// A message seen in the INBOX and later found in junk used to keep
+// placement='inbox' forever: the receipt upsert short-circuits on the duplicate,
+// before the observation write. Spam-after-inbox is the most important placement
+// change there is, so the later observation supersedes the earlier one — as ONE
+// row, so the correction moves the count instead of adding to it.
+func TestSpamAfterInboxSupersedesThePlacement(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f) // A -> B, sender A
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("inbox receipt: %v", err)
+	}
+	if inbox, spam, total := placementObservations(t, ctx, f, f.a); inbox != 1 || spam != 0 || total != 1 {
+		t.Fatalf("after the inbox poll: inbox=%d spam=%d total=%d, want 1/0/1", inbox, spam, total)
+	}
+
+	// The next poll finds the same message in junk.
+	in.Placement = placementSpam
+	plan, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("spam re-poll: %v", err)
+	}
+
+	inbox, spam, total := placementObservations(t, ctx, f, f.a)
+	if spam != 1 {
+		t.Fatalf("spam observations = %d, want 1: the reclassification was discarded", spam)
+	}
+	if inbox != 0 {
+		t.Fatalf("inbox observations = %d, want 0: the superseded placement must not still count", inbox)
+	}
+	if total != 1 {
+		t.Fatalf("placement observations = %d, want 1: one message must not become two samples", total)
+	}
+
+	// The daily projection the overview and the deliverability score read moves with
+	// it, so the two views of one message cannot disagree.
+	if _, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a); aInbox != 0 || aSpam != 1 {
+		t.Fatalf("sender A daily stats inbox=%d spam=%d, want 0/1", aInbox, aSpam)
+	}
+
+	// And the still-unengaged receipt's rebuilt plan now rescues the message out of
+	// junk, which the stored inbox placement would never have asked for.
+	if !plan.DoRescue {
+		t.Fatal("the rebuilt plan does not rescue a message now known to be in spam")
+	}
+}
+
+// The correction is monotone and exactly-once. It must not flap back — the
+// engager RESCUES spam into the inbox, so a later poll legitimately finds it
+// there, and honouring that would let our own rescue erase the evidence that the
+// rescue was needed. Nor may a repeated spam poll count twice.
+func TestPlacementReclassificationIsMonotoneAndCountsOnce(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("inbox receipt: %v", err)
+	}
+	in.Placement = placementSpam
+	for i := 0; i < 3; i++ {
+		if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+			t.Fatalf("spam re-poll %d: %v", i, err)
+		}
+	}
+	if inbox, spam, total := placementObservations(t, ctx, f, f.a); inbox != 0 || spam != 1 || total != 1 {
+		t.Fatalf("after three spam polls: inbox=%d spam=%d total=%d, want 0/1/1", inbox, spam, total)
+	}
+	if _, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a); aInbox != 0 || aSpam != 1 {
+		t.Fatalf("repeated polls moved the counters twice: inbox=%d spam=%d, want 0/1", aInbox, aSpam)
+	}
+
+	// Now the rescue lands and the message is seen in the inbox again.
+	in.Placement = placementInbox
+	if _, err := f.core.RecordWarmupReceipt(ctx, in); err != nil {
+		t.Fatalf("post-rescue inbox poll: %v", err)
+	}
+	if inbox, spam, _ := placementObservations(t, ctx, f, f.a); inbox != 0 || spam != 1 {
+		t.Fatalf("evidence flapped back after a rescue: inbox=%d spam=%d, want 0/1", inbox, spam)
+	}
+	if _, aInbox, aSpam, _ := todayStats(t, ctx, f, f.a); aInbox != 0 || aSpam != 1 {
+		t.Fatalf("daily stats flapped back after a rescue: inbox=%d spam=%d, want 0/1", aInbox, aSpam)
+	}
+}
+
+// An ALREADY-ENGAGED receipt still records the reclassification. Whether we opened
+// the message has nothing to do with where it landed, and the placement axis is the
+// signal the whole policy leans on.
+func TestSpamAfterInboxIsRecordedEvenOnceEngaged(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, recipient := makeWarmupSend(t, ctx, f)
+
+	in := coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: recipient, Placement: placementInbox,
+	}
+	plan, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("inbox receipt: %v", err)
+	}
+	if err := f.core.MarkWarmupEngaged(ctx, plan.ReceiptID, f.ws1.String(), false); err != nil {
+		t.Fatalf("MarkWarmupEngaged: %v", err)
+	}
+
+	in.Placement = placementSpam
+	engagedPlan, err := f.core.RecordWarmupReceipt(ctx, in)
+	if err != nil {
+		t.Fatalf("spam re-poll after engagement: %v", err)
+	}
+	if engagedPlan != (coreapi.WarmupEngagePlan{}) {
+		t.Fatalf("an engaged receipt must not be re-engaged: %+v", engagedPlan)
+	}
+	if inbox, spam, total := placementObservations(t, ctx, f, f.a); inbox != 0 || spam != 1 || total != 1 {
+		t.Fatalf("engaged reclassification: inbox=%d spam=%d total=%d, want 0/1/1", inbox, spam, total)
+	}
+}

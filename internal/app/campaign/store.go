@@ -332,7 +332,7 @@ func (s *PgStore) ListSenders(ctx context.Context, ws, campaignID uuid.UUID) ([]
 			dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
 			rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
 			mailboxStatus: r.Status, poolEnabled: r.Enabled,
-			healthState: r.HealthState, lane: r.Lane, sentToday: r.SentToday,
+			healthState: r.HealthState, lane: r.Lane, domainLane: r.DomainLane, sentToday: r.SentToday,
 		}.fill(&out[i])
 	}
 	return out, nil
@@ -356,7 +356,7 @@ func (s *PgStore) FallbackSender(ctx context.Context, ws, campaignID uuid.UUID) 
 		dailyCap: r.DailyCap, rampStartCap: r.RampStartCap, rampDays: r.RampDays,
 		rampEnabled: r.RampEnabled, mailboxCreatedAt: r.MailboxCreatedAt,
 		mailboxStatus: r.Status, poolEnabled: true,
-		healthState: r.HealthState, lane: r.Lane, sentToday: r.SentToday,
+		healthState: r.HealthState, lane: r.Lane, domainLane: r.DomainLane, sentToday: r.SentToday,
 	}.fill(&out)
 	return out, nil
 }
@@ -373,6 +373,7 @@ type senderCapacity struct {
 	poolEnabled                      bool
 	healthState                      string
 	lane                             string
+	domainLane                       string
 	sentToday                        int64
 }
 
@@ -389,12 +390,14 @@ func (c senderCapacity) fill(s *Sender) {
 	// decides WHETHER it may take new work at all. A quarantined mailbox reports
 	// sending=false even when its last measured reputation was healthy — that is the
 	// whole point of splitting the axes.
-	// pending_auth is excluded deliberately: it is driven by an ADVISORY DNS check
-	// (security.md invariant 39), so it must not zero a campaign's capacity.
-	laneMayTake := c.lane == "" || c.lane == warmup.LanePendingAuth || warmup.LaneMayTakeNewLead(c.lane)
+	//
+	// The lane question is asked of the mailbox AND of its organizational domain,
+	// through the one predicate the preflight and the rotation also use, so a
+	// displayed warning and an enforced block cannot drift.
+	withheld := warmup.NewLeadsWithheld(c.lane, c.domainLane)
 	s.Sending = c.poolEnabled && c.mailboxStatus == mailboxStatusActive &&
-		c.healthState != sendcap.HealthPaused && laneMayTake
-	if !laneMayTake {
+		c.healthState != sendcap.HealthPaused && !withheld
+	if withheld {
 		s.CapToday = 0
 	}
 	if c.healthState != "" {
@@ -404,6 +407,10 @@ func (c senderCapacity) fill(s *Sender) {
 	if c.lane != "" {
 		lane := c.lane
 		s.Lane = &lane
+	}
+	if c.domainLane != "" {
+		domainLane := c.domainLane
+		s.DomainLane = &domainLane
 	}
 }
 

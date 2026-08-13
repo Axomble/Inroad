@@ -38,6 +38,13 @@ type Store interface {
 	DailyStats(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]DayStat, error)
 	SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int32, error)
 	ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error)
+	// MailboxInWorkspace reports whether the mailbox belongs to this workspace.
+	// It is the ownership gate for reads whose subject outlives the participant
+	// row, where "is a participant" would be the wrong 404 test.
+	MailboxInWorkspace(ctx context.Context, workspaceID, mailboxID uuid.UUID) (bool, error)
+	// ListTransitions returns one mailbox's decision history, newest first,
+	// capped at limit rows.
+	ListTransitions(ctx context.Context, workspaceID, mailboxID uuid.UUID, limit int32) ([]Transition, error)
 }
 
 // PgStore implements Store by wrapping sqlc-generated queries. It is the only
@@ -113,6 +120,29 @@ func (s *PgStore) SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUI
 		MailboxID:   mailboxID,
 		WorkspaceID: workspaceID,
 	})
+}
+
+func (s *PgStore) MailboxInWorkspace(ctx context.Context, workspaceID, mailboxID uuid.UUID) (bool, error) {
+	return s.q.WarmupMailboxInWorkspace(ctx, gen.WarmupMailboxInWorkspaceParams{
+		ID:          mailboxID,
+		WorkspaceID: workspaceID,
+	})
+}
+
+func (s *PgStore) ListTransitions(ctx context.Context, workspaceID, mailboxID uuid.UUID, limit int32) ([]Transition, error) {
+	rows, err := s.q.ListWarmupTransitions(ctx, gen.ListWarmupTransitionsParams{
+		WorkspaceID: workspaceID,
+		MailboxID:   mailboxID,
+		RowLimit:    limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Transition, len(rows))
+	for i, r := range rows {
+		out[i] = transitionFromGen(r)
+	}
+	return out, nil
 }
 
 // ListOverviewRows returns one row per participant enriched with the mailbox

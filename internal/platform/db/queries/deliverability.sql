@@ -329,11 +329,18 @@ ORDER BY domain;
 -- request: a caller-supplied send_id belonging to another tenant (or to nothing)
 -- stores NULL instead of failing the FK, so the event is still recorded and
 -- counted at workspace scope -- it simply attributes to no campaign.
-INSERT INTO deliverability_events (workspace_id, kind, email, send_id, provider_event_id)
+--
+-- bounce_class is the hard/soft discriminator the warmup hard-bounce rate filters
+-- on. It is validated at the service boundary against the same three values the
+-- CHECK constraint permits, and normalized to 'unknown' for a complaint (where
+-- the concept does not apply) and for an omitted value. 'unknown' is EXCLUDED
+-- from the hard-bounce numerator rather than assumed hard: over-counting pauses
+-- a healthy sender for 72 hours, under-counting merely delays a true signal.
+INSERT INTO deliverability_events (workspace_id, kind, email, send_id, provider_event_id, bounce_class)
 SELECT @workspace_id, @kind, @email,
        (SELECT s.id FROM sends s
          WHERE s.id = sqlc.narg(send_id)::uuid AND s.workspace_id = @workspace_id),
-       @provider_event_id
+       @provider_event_id, @bounce_class
 ON CONFLICT (workspace_id, provider_event_id) DO NOTHING;
 
 -- name: GetSendCampaign :one

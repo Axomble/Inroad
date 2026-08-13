@@ -307,11 +307,11 @@ func (q *Queries) InsertCampaignPauseEvent(ctx context.Context, arg InsertCampai
 }
 
 const insertDeliverabilityEvent = `-- name: InsertDeliverabilityEvent :execrows
-INSERT INTO deliverability_events (workspace_id, kind, email, send_id, provider_event_id)
+INSERT INTO deliverability_events (workspace_id, kind, email, send_id, provider_event_id, bounce_class)
 SELECT $1, $2, $3,
        (SELECT s.id FROM sends s
          WHERE s.id = $4::uuid AND s.workspace_id = $1),
-       $5
+       $5, $6
 ON CONFLICT (workspace_id, provider_event_id) DO NOTHING
 `
 
@@ -321,6 +321,7 @@ type InsertDeliverabilityEventParams struct {
 	Email           string      `json:"email"`
 	SendID          pgtype.UUID `json:"send_id"`
 	ProviderEventID string      `json:"provider_event_id"`
+	BounceClass     string      `json:"bounce_class"`
 }
 
 // The ingest write. ON CONFLICT DO NOTHING on (workspace_id, provider_event_id)
@@ -332,6 +333,13 @@ type InsertDeliverabilityEventParams struct {
 // request: a caller-supplied send_id belonging to another tenant (or to nothing)
 // stores NULL instead of failing the FK, so the event is still recorded and
 // counted at workspace scope -- it simply attributes to no campaign.
+//
+// bounce_class is the hard/soft discriminator the warmup hard-bounce rate filters
+// on. It is validated at the service boundary against the same three values the
+// CHECK constraint permits, and normalized to 'unknown' for a complaint (where
+// the concept does not apply) and for an omitted value. 'unknown' is EXCLUDED
+// from the hard-bounce numerator rather than assumed hard: over-counting pauses
+// a healthy sender for 72 hours, under-counting merely delays a true signal.
 func (q *Queries) InsertDeliverabilityEvent(ctx context.Context, arg InsertDeliverabilityEventParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertDeliverabilityEvent,
 		arg.WorkspaceID,
@@ -339,6 +347,7 @@ func (q *Queries) InsertDeliverabilityEvent(ctx context.Context, arg InsertDeliv
 		arg.Email,
 		arg.SendID,
 		arg.ProviderEventID,
+		arg.BounceClass,
 	)
 	if err != nil {
 		return 0, err

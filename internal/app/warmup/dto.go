@@ -94,6 +94,8 @@ type OverviewRow struct {
 	StartedAt     pgtype.Timestamptz
 	HealthState   string
 	HealthReason  string
+	Lane          string
+	LaneReason    string
 	Email         string
 	Inbox7d       int64
 	Spam7d        int64
@@ -111,10 +113,60 @@ func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
 		StartedAt:     r.StartedAt,
 		HealthState:   r.HealthState,
 		HealthReason:  r.HealthReason,
+		Lane:          r.Lane,
+		LaneReason:    r.LaneReason,
 		Email:         r.Email,
 		Inbox7d:       r.Inbox7d,
 		Spam7d:        r.Spam7d,
 		TodaySent:     r.TodaySent,
+	}
+}
+
+// Transition is one persisted row of the append-only decision record
+// (warmup_state_transitions). The lane fields are pointers because rows written
+// before pool lanes existed genuinely had no lane: the migration deliberately
+// left them NULL rather than fabricating 'probation' in an audit trail.
+type Transition struct {
+	ID               uuid.UUID
+	CreatedAt        pgtype.Timestamptz
+	FromState        string
+	ToState          string
+	ReasonCode       string
+	Reason           string
+	FromLane         *string
+	ToLane           *string
+	LaneReasonCode   *string
+	LaneReason       *string
+	PlacementSamples int32
+	SpamRate         float32
+	BounceSamples    int32
+	BounceRate       float32
+	ComplaintSamples int32
+	ComplaintRate    float32
+	InvalidTokens    int32
+	PolicyVersion    string
+}
+
+func transitionFromGen(r gen.ListWarmupTransitionsRow) Transition {
+	return Transition{
+		ID:               r.ID,
+		CreatedAt:        r.CreatedAt,
+		FromState:        r.FromState,
+		ToState:          r.ToState,
+		ReasonCode:       r.ReasonCode,
+		Reason:           r.Reason,
+		FromLane:         r.FromLane,
+		ToLane:           r.ToLane,
+		LaneReasonCode:   r.LaneReasonCode,
+		LaneReason:       r.LaneReason,
+		PlacementSamples: r.PlacementSamples,
+		SpamRate:         r.SpamRate,
+		BounceSamples:    r.BounceSamples,
+		BounceRate:       r.BounceRate,
+		ComplaintSamples: r.ComplaintSamples,
+		ComplaintRate:    r.ComplaintRate,
+		InvalidTokens:    r.InvalidTokens,
+		PolicyVersion:    r.PolicyVersion,
 	}
 }
 
@@ -144,11 +196,16 @@ type WarmupParticipantDTO struct {
 // WarmupMailboxDTO is the WarmupMailbox schema: a participant enriched with the
 // mailbox email and rolling 7-day placement rates for the overview.
 type WarmupMailboxDTO struct {
-	MailboxID         string   `json:"mailbox_id"`
-	Email             string   `json:"email"`
-	Enabled           bool     `json:"enabled"`
-	HealthState       string   `json:"health_state"`
-	HealthReason      string   `json:"health_reason"`
+	MailboxID    string `json:"mailbox_id"`
+	Email        string `json:"email"`
+	Enabled      bool   `json:"enabled"`
+	HealthState  string `json:"health_state"`
+	HealthReason string `json:"health_reason"`
+	// The POOL ELIGIBILITY axis. Required by the schema since lanes shipped, but
+	// unpopulated until now, so the SPA saw undefined and rendered every mailbox as
+	// "probation" regardless of its real lane.
+	Lane              string   `json:"lane"`
+	LaneReason        string   `json:"lane_reason"`
 	TodaySent         int32    `json:"today_sent"`
 	TodayTarget       int32    `json:"today_target"`
 	PlacementSample7d int64    `json:"placement_sample_7d"`
@@ -179,4 +236,40 @@ type WarmupDayStatDTO struct {
 type WarmupDetailDTO struct {
 	Participant WarmupParticipantDTO `json:"participant"`
 	Series      []WarmupDayStatDTO   `json:"series"`
+}
+
+// WarmupTransitionDTO is the WarmupTransition schema: one automated state change
+// and the evidence behind it.
+//
+// The four lane fields are nullable in the contract and stay pointers here, so a
+// pre-lane row serializes as null rather than as an empty string a UI would have
+// to guess about. The rates are CONFIDENCE-ADJUSTED lower bounds, not observed
+// fractions — the schema says so, because rendering them as raw percentages would
+// misreport every thin sample.
+type WarmupTransitionDTO struct {
+	ID               string  `json:"id"`
+	CreatedAt        string  `json:"created_at"`
+	FromState        string  `json:"from_state"`
+	ToState          string  `json:"to_state"`
+	ReasonCode       string  `json:"reason_code"`
+	Reason           string  `json:"reason"`
+	FromLane         *string `json:"from_lane"`
+	ToLane           *string `json:"to_lane"`
+	LaneReasonCode   *string `json:"lane_reason_code"`
+	LaneReason       *string `json:"lane_reason"`
+	PlacementSamples int32   `json:"placement_samples"`
+	SpamRate         float64 `json:"spam_rate"`
+	BounceSamples    int32   `json:"bounce_samples"`
+	BounceRate       float64 `json:"bounce_rate"`
+	ComplaintSamples int32   `json:"complaint_samples"`
+	ComplaintRate    float64 `json:"complaint_rate"`
+	InvalidTokens    int32   `json:"invalid_tokens"`
+	PolicyVersion    string  `json:"policy_version"`
+}
+
+// WarmupTransitionPageDTO is the WarmupTransitionPage schema. transitions is
+// never null: an empty history is [], because a client distinguishing "no rows"
+// from "field missing" is a distinction with no meaning here.
+type WarmupTransitionPageDTO struct {
+	Transitions []WarmupTransitionDTO `json:"transitions"`
 }

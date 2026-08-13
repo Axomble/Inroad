@@ -63,10 +63,16 @@ type Sender struct {
 	// Lane is the pool-eligibility axis, independent of HealthState. A mailbox can
 	// be reputation-healthy and still sit in probation, or sit in quarantine while
 	// its last measured reputation looked fine. Empty when not warming up.
-	Lane      *string
-	Sending   bool
-	CapToday  int
-	SentToday int
+	Lane *string
+	// DomainLane is the WORST lane among the mailboxes sharing this one's
+	// organizational domain, itself included. New campaign leads are gated on
+	// mailbox AND domain, because a quarantined mailbox has almost certainly
+	// damaged the standing of every sibling sending from the same domain. Empty
+	// when no mailbox on the domain is warming up.
+	DomainLane *string
+	Sending    bool
+	CapToday   int
+	SentToday  int
 }
 
 // SenderPool is a campaign's whole pool plus the mode that selects from it.

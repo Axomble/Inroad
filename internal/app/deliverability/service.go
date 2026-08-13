@@ -37,6 +37,19 @@ const (
 	eventKindBounce    = "bounce"
 )
 
+// Bounce classes, mirroring the deliverability_events.bounce_class CHECK
+// constraint (migration 000055) and the DeliverabilityEvent schema's enum.
+//
+// Only BounceClassHard feeds the warmup hard-bounce rate. BounceClassUnknown is
+// the default for an omitted value and for every row written before the column
+// existed, and it is excluded from that rate — a provider feed that does not
+// classify must not be read as though every bounce were permanent.
+const (
+	BounceClassHard    = "hard"
+	BounceClassSoft    = "soft"
+	BounceClassUnknown = "unknown"
+)
+
 // Service holds the business rules: which window to judge a campaign on, what to
 // do when the breaker fires, and what an ingested event is allowed to cause. The
 // scoring itself is platform/deliverability's — this package never re-derives it.
@@ -369,6 +382,11 @@ func (s *Service) Ingest(ctx context.Context, ws uuid.UUID, in EventInput) (Inge
 	if in.ProviderEventID == "" {
 		return IngestResult{}, fmt.Errorf("%w: provider_event_id is required", ErrInvalid)
 	}
+	bounceClass, err := resolveBounceClass(in.Kind, in.BounceClass)
+	if err != nil {
+		return IngestResult{}, err
+	}
+	in.BounceClass = bounceClass
 
 	recorded, err := s.store.Ingest(ctx, ws, in)
 	if err != nil {
@@ -384,6 +402,37 @@ func (s *Service) Ingest(ctx context.Context, ws uuid.UUID, in EventInput) (Inge
 	}
 	s.evaluateAfterIngest(ctx, ws, in)
 	return IngestResult{}, nil
+}
+
+// resolveBounceClass normalizes and validates the hard/soft discriminator.
+//
+// A value outside the enum is REJECTED rather than coerced to unknown: a feed
+// sending "permanent" or "Hard-Bounce" has a mapping bug, and silently filing it
+// as unclassified would hide a signal the operator believes is being counted —
+// the same "rule fed by a permanently-empty counter" failure this column exists
+// to remove.
+//
+// For a complaint the field is ignored entirely, not rejected. The concept does
+// not apply, an SNS subscriber forwarding one payload shape for both kinds
+// should not have to strip it, and storing anything but 'unknown' would put a
+// classification on a row no bounce rate reads.
+func resolveBounceClass(kind, class string) (string, error) {
+	if kind == eventKindComplaint {
+		return BounceClassUnknown, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "":
+		return BounceClassUnknown, nil
+	case BounceClassHard:
+		return BounceClassHard, nil
+	case BounceClassSoft:
+		return BounceClassSoft, nil
+	case BounceClassUnknown:
+		return BounceClassUnknown, nil
+	default:
+		return "", fmt.Errorf("%w: bounce_class must be %q, %q or %q",
+			ErrInvalid, BounceClassHard, BounceClassSoft, BounceClassUnknown)
+	}
 }
 
 // evaluateAfterIngest re-runs the breaker for the campaign this event belongs to.

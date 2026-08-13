@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -246,5 +247,98 @@ func TestStatsReads(t *testing.T) {
 	}
 	if series[0].Inbox != 1 || series[1].Inbox != 3 || series[1].Spam != 1 {
 		t.Errorf("daily series unexpected: %+v", series)
+	}
+}
+
+// seedTransition inserts one transition row directly. The evaluator is the only
+// production writer and lives in coreapi, so the store's READ is what this file
+// exercises; the insert mirrors the columns that writer sets.
+func seedTransition(t *testing.T, f fixture, ws, mailbox uuid.UUID, toLane string, ago time.Duration) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO warmup_state_transitions (
+		     workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+		     from_lane, to_lane, lane_reason_code, lane_reason,
+		     placement_samples, spam_rate, bounce_samples, bounce_rate,
+		     complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
+		 VALUES ($1, $2, 'healthy', 'watch', 'spam_watch', 'spam placement rate above the watch threshold',
+		         'healthy', $3, 'lane_watch', 'moved to watch',
+		         40, 0.2, 200, 0.01, 1000, 0.0002, 0, 'warmup-phase1-v1', now() - $4::interval)`,
+		ws, mailbox, toLane, ago.String(),
+	); err != nil {
+		t.Fatalf("seed transition: %v", err)
+	}
+}
+
+// TestListTransitionsIsNewestFirstAndWorkspacePinned proves the three properties
+// the endpoint's contract rests on: ordering, the limit, and the workspace pin.
+// The pin is the one that matters — the mailbox id is caller-supplied, so a row
+// must never be reachable from another tenant's session.
+func TestListTransitionsIsNewestFirstAndWorkspacePinned(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	seedTransition(t, f, w.ID, mb.ID, "watch", 2*time.Hour)
+	seedTransition(t, f, w.ID, mb.ID, "quarantine", time.Hour)
+	seedTransition(t, f, w.ID, mb.ID, "recovery", time.Minute)
+
+	rows, err := store.ListTransitions(ctx, w.ID, mb.ID, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows, got %d", len(rows))
+	}
+	if rows[0].ToLane == nil || *rows[0].ToLane != "recovery" || rows[2].ToLane == nil || *rows[2].ToLane != "watch" {
+		t.Fatalf("not newest-first: %v %v", *rows[0].ToLane, *rows[2].ToLane)
+	}
+
+	limited, err := store.ListTransitions(ctx, w.ID, mb.ID, 2)
+	if err != nil {
+		t.Fatalf("list limited: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Fatalf("limit not applied: got %d want 2", len(limited))
+	}
+
+	other, err := f.q.CreateWorkspace(ctx, "Other "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("other workspace: %v", err)
+	}
+	foreign, err := store.ListTransitions(ctx, other.ID, mb.ID, 50)
+	if err != nil {
+		t.Fatalf("cross-tenant list: %v", err)
+	}
+	if len(foreign) != 0 {
+		t.Fatalf("cross-tenant read returned %d rows", len(foreign))
+	}
+}
+
+// TestMailboxInWorkspaceIsTheOwnershipGate proves the 404 test: true for this
+// workspace's mailbox (participant or not), false for another workspace's and
+// for a mailbox that does not exist.
+func TestMailboxInWorkspaceIsTheOwnershipGate(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	// Deliberately NOT a warmup participant: ownership, not participation, is the
+	// gate, because the transition trail outlives the participant row.
+	ok, err := store.MailboxInWorkspace(ctx, w.ID, mb.ID)
+	if err != nil {
+		t.Fatalf("owned: %v", err)
+	}
+	if !ok {
+		t.Fatalf("own mailbox must be visible even with no participant row")
+	}
+
+	other, err := f.q.CreateWorkspace(ctx, "Other "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("other workspace: %v", err)
+	}
+	if ok, err := store.MailboxInWorkspace(ctx, other.ID, mb.ID); err != nil || ok {
+		t.Fatalf("cross-tenant ownership: ok=%v err=%v, want false/nil", ok, err)
+	}
+	if ok, err := store.MailboxInWorkspace(ctx, w.ID, uuid.New()); err != nil || ok {
+		t.Fatalf("unknown mailbox: ok=%v err=%v, want false/nil", ok, err)
 	}
 }

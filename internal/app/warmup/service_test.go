@@ -29,6 +29,14 @@ type fakeStore struct {
 	// transient read failure (a NON-ErrNoRows error) on the merge-base read.
 	getParticipantErr error
 
+	// transitions is the decision history per mailbox, newest first.
+	// transitionWorkspace, when set, is the only workspace those rows belong to,
+	// modeling the query's workspace pin. transitionLimits records the limit each
+	// call received, so a test can prove the cap reached the store.
+	transitions         map[uuid.UUID][]Transition
+	transitionWorkspace uuid.UUID
+	transitionLimits    []int32
+
 	upsertCalls int
 }
 
@@ -38,6 +46,7 @@ func newFakeStore() *fakeStore {
 		ownedMailboxes: map[uuid.UUID]uuid.UUID{},
 		sentToday:      map[uuid.UUID]int32{},
 		dailyStats:     map[uuid.UUID][]DayStat{},
+		transitions:    map[uuid.UUID][]Transition{},
 	}
 }
 
@@ -103,6 +112,25 @@ func (s *fakeStore) SentToday(_ context.Context, _, mailboxID uuid.UUID) (int32,
 
 func (s *fakeStore) ListOverviewRows(_ context.Context, _ uuid.UUID) ([]OverviewRow, error) {
 	return s.overviewRows, nil
+}
+
+func (s *fakeStore) MailboxInWorkspace(_ context.Context, workspaceID, mailboxID uuid.UUID) (bool, error) {
+	owner, ok := s.ownedMailboxes[mailboxID]
+	return ok && owner == workspaceID, nil
+}
+
+// ListTransitions models the SQL: workspace-pinned, newest first, capped at the
+// limit the service resolved. The fake stores rows newest-first already.
+func (s *fakeStore) ListTransitions(_ context.Context, workspaceID, mailboxID uuid.UUID, limit int32) ([]Transition, error) {
+	s.transitionLimits = append(s.transitionLimits, limit)
+	rows := s.transitions[mailboxID]
+	if s.transitionWorkspace != uuid.Nil && s.transitionWorkspace != workspaceID {
+		return nil, nil
+	}
+	if int32(len(rows)) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 func ptrI32(v int32) *int32     { return &v }
@@ -401,5 +429,122 @@ func TestDisableIdempotent(t *testing.T) {
 	svc := NewService(newFakeStore())
 	if err := svc.DisableWarmup(context.Background(), ws, mb); err != nil {
 		t.Fatalf("disable of non-participant should be nil, got %v", err)
+	}
+}
+
+// strPtr is a local helper for the nullable lane fields.
+func strPtr(s string) *string { return &s }
+
+// TestListTransitionsForeignMailboxIs404 proves the ownership gate: a mailbox
+// that is not this workspace's is absent, not empty. Without the gate the caller
+// would get a 200 and an empty page for any uuid, which leaks nothing but does
+// tell a probe that the endpoint exists for ids it does not own.
+func TestListTransitionsForeignMailboxIs404(t *testing.T) {
+	ws, other, mb := uuid.New(), uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = other
+	svc := NewService(store)
+
+	if _, err := svc.ListTransitions(context.Background(), ws, mb, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound for a foreign mailbox, got %v", err)
+	}
+}
+
+// TestListTransitionsOwnedMailboxWithNoHistoryIsEmptyPage proves the 404 test is
+// OWNERSHIP, not participation: a mailbox in the workspace that never warmed up
+// returns an empty page, so the UI renders "no changes yet" rather than "gone".
+func TestListTransitionsOwnedMailboxWithNoHistoryIsEmptyPage(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	page, err := NewService(store).ListTransitions(context.Background(), ws, mb, 0)
+	if err != nil {
+		t.Fatalf("ListTransitions: %v", err)
+	}
+	if len(page.Transitions) != 0 {
+		t.Fatalf("want empty page, got %+v", page.Transitions)
+	}
+}
+
+// TestListTransitionsLimitBounds proves the contract's bounds are applied where
+// the store can see them: omitted resolves to 50, an oversized ask is capped at
+// 200, and a value inside the range passes through.
+func TestListTransitionsLimitBounds(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	svc := NewService(store)
+
+	for _, asked := range []int32{0, 1000, 25} {
+		if _, err := svc.ListTransitions(context.Background(), ws, mb, asked); err != nil {
+			t.Fatalf("ListTransitions(%d): %v", asked, err)
+		}
+	}
+	want := []int32{defaultTransitionLimit, maxTransitionLimit, 25}
+	if len(store.transitionLimits) != len(want) {
+		t.Fatalf("limits recorded: got %v want %v", store.transitionLimits, want)
+	}
+	for i, w := range want {
+		if store.transitionLimits[i] != w {
+			t.Fatalf("limit %d: got %d want %d", i, store.transitionLimits[i], w)
+		}
+	}
+}
+
+// TestListTransitionsMapsEveryContractField proves the wire shape carries every
+// required field, that a pre-lane row's lane fields serialize as null rather
+// than "", and that a stored REAL is not surfaced with its float32 artefacts.
+func TestListTransitionsMapsEveryContractField(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	id := uuid.New()
+	created := time.Date(2026, 8, 12, 9, 30, 0, 0, time.UTC)
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	store.transitions[mb] = []Transition{
+		{
+			ID: id, CreatedAt: pgtype.Timestamptz{Time: created, Valid: true},
+			FromState: "healthy", ToState: "watch",
+			ReasonCode: "spam_watch", Reason: "spam placement rate above the watch threshold",
+			FromLane: strPtr("healthy"), ToLane: strPtr("watch"),
+			LaneReasonCode: strPtr("lane_watch"), LaneReason: strPtr("moved to watch"),
+			PlacementSamples: 40, SpamRate: 0.15,
+			BounceSamples: 200, BounceRate: 0.02,
+			ComplaintSamples: 1000, ComplaintRate: 0.0003,
+			InvalidTokens: 2, PolicyVersion: "warmup-phase1-v1",
+		},
+		// A row written before pool lanes existed: all four lane columns NULL.
+		{ID: uuid.New(), CreatedAt: pgtype.Timestamptz{Time: created.Add(-time.Hour), Valid: true},
+			FromState: "unknown", ToState: "healthy", ReasonCode: "evidence_qualified",
+			Reason: "qualified", PolicyVersion: "warmup-phase0-v1"},
+	}
+
+	page, err := NewService(store).ListTransitions(context.Background(), ws, mb, 0)
+	if err != nil {
+		t.Fatalf("ListTransitions: %v", err)
+	}
+	if len(page.Transitions) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(page.Transitions))
+	}
+	got := page.Transitions[0]
+	if got.ID != id.String() || got.CreatedAt != created.Format(time.RFC3339) {
+		t.Fatalf("identity/timestamp wrong: %+v", got)
+	}
+	if got.FromState != "healthy" || got.ToState != "watch" ||
+		got.ReasonCode != "spam_watch" || got.PolicyVersion != "warmup-phase1-v1" {
+		t.Fatalf("health axis wrong: %+v", got)
+	}
+	if got.FromLane == nil || *got.FromLane != "healthy" || got.ToLane == nil || *got.ToLane != "watch" ||
+		got.LaneReasonCode == nil || *got.LaneReasonCode != "lane_watch" {
+		t.Fatalf("lane axis wrong: %+v", got)
+	}
+	if got.SpamRate != 0.15 || got.BounceRate != 0.02 || got.ComplaintRate != 0.0003 {
+		t.Fatalf("rates carry float32 artefacts: %v %v %v", got.SpamRate, got.BounceRate, got.ComplaintRate)
+	}
+	if got.PlacementSamples != 40 || got.BounceSamples != 200 || got.ComplaintSamples != 1000 || got.InvalidTokens != 2 {
+		t.Fatalf("samples wrong: %+v", got)
+	}
+	if pre := page.Transitions[1]; pre.FromLane != nil || pre.ToLane != nil ||
+		pre.LaneReasonCode != nil || pre.LaneReason != nil {
+		t.Fatalf("a pre-lane row must serialize its lane fields as null: %+v", pre)
 	}
 }

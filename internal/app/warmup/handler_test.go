@@ -188,6 +188,7 @@ func TestOverviewHappyPath(t *testing.T) {
 	store.overviewRows = []OverviewRow{{
 		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
 		StartedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}, HealthState: "healthy",
+		Lane: "watch", LaneReason: "held on watch pending clean evidence",
 		Email: "a@example.com", Inbox7d: 9, Spam7d: 1, TodaySent: 2,
 	}}
 	h := NewHandler(NewService(store))
@@ -205,5 +206,141 @@ func TestOverviewHappyPath(t *testing.T) {
 	}
 	if resp.Mailboxes[0].Email != "a@example.com" || resp.Mailboxes[0].InboxRate7d == nil || *resp.Mailboxes[0].InboxRate7d != 0.9 || resp.Mailboxes[0].PlacementSample7d != 10 {
 		t.Fatalf("overview mailbox wrong: %+v", resp.Mailboxes[0])
+	}
+}
+
+// The schema has REQUIRED lane/lane_reason on WarmupMailbox since lanes shipped,
+// but the query never selected them and the DTO never carried them — so the field
+// was absent from the JSON, arrived as undefined in the SPA, and every participant
+// rendered the "probation" badge whatever its real lane was. A required field that
+// is silently missing is worse than a wrong one: the client's safe fallback hides it.
+//
+// Asserted on the RAW JSON, not the decoded struct: decoding into WarmupMailboxDTO
+// would happily produce "" for an absent key and the test would pass over the bug.
+func TestOverviewCarriesTheLaneAxis(t *testing.T) {
+	ws := uuid.New()
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt:   pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+		HealthState: "healthy", HealthReason: "",
+		Lane: "quarantine", LaneReason: "quarantined: campaign hard-bounce rate above the pause threshold",
+		Email: "a@example.com", Inbox7d: 9, Spam7d: 1, TodaySent: 2,
+	}}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/overview", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Mailboxes []map[string]any `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Mailboxes) != 1 {
+		t.Fatalf("want one mailbox, got %d", len(raw.Mailboxes))
+	}
+	for _, key := range []string{"lane", "lane_reason"} {
+		if _, present := raw.Mailboxes[0][key]; !present {
+			t.Fatalf("%q is absent from the response; the schema requires it and the SPA falls back to probation without it", key)
+		}
+	}
+	if got := raw.Mailboxes[0]["lane"]; got != "quarantine" {
+		t.Fatalf("lane = %v, want quarantine — the participant's real lane, not a default", got)
+	}
+	if got, _ := raw.Mailboxes[0]["lane_reason"].(string); got == "" {
+		t.Fatal("lane_reason is empty; a withheld mailbox must say why")
+	}
+}
+
+// TestTransitionsRouteReturnsThePage proves the contract path, the JSON envelope
+// and the field names the SPA generates against: an object with a `transitions`
+// array whose rows carry snake_case keys and null (not "") lane fields on a
+// pre-lane row.
+func TestTransitionsRouteReturnsThePage(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	store.transitions[mb] = []Transition{{
+		ID: uuid.New(), CreatedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+		FromState: "unknown", ToState: "healthy",
+		ReasonCode: "evidence_qualified", Reason: "qualified placement evidence establishes health",
+		PolicyVersion: "warmup-phase1-v1",
+	}}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/mailboxes/"+mb.String()+"/transitions", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Transitions []map[string]any `json:"transitions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Transitions) != 1 {
+		t.Fatalf("want 1 transition, got %d: %s", len(raw.Transitions), w.Body.String())
+	}
+	row := raw.Transitions[0]
+	for _, key := range []string{
+		"id", "created_at", "from_state", "to_state", "reason_code", "reason",
+		"placement_samples", "spam_rate", "bounce_samples", "bounce_rate",
+		"complaint_samples", "complaint_rate", "invalid_tokens", "policy_version",
+	} {
+		if _, ok := row[key]; !ok {
+			t.Fatalf("required field %q missing from the payload: %s", key, w.Body.String())
+		}
+	}
+	if row["from_lane"] != nil || row["to_lane"] != nil {
+		t.Fatalf("pre-lane row must send null lanes, got %v/%v", row["from_lane"], row["to_lane"])
+	}
+}
+
+// TestTransitionsForeignMailboxIs404 proves the endpoint is workspace-pinned at
+// the HTTP seam: the workspace comes from the JWT, and a mailbox belonging to
+// another tenant is simply not there.
+func TestTransitionsForeignMailboxIs404(t *testing.T) {
+	ws, other, mb := uuid.New(), uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = other
+	store.transitions[mb] = []Transition{{ID: uuid.New(), FromState: "healthy", ToState: "watch"}}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/mailboxes/"+mb.String()+"/transitions", bearer(t, ws), "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "watch") {
+		t.Fatalf("404 body leaked another tenant's transition: %s", w.Body.String())
+	}
+}
+
+// TestTransitionsRejectsANonNumericLimit proves a malformed page size is a
+// caller error rather than something silently reinterpreted as the default.
+func TestTransitionsRejectsANonNumericLimit(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet,
+		"/warmup/mailboxes/"+mb.String()+"/transitions?limit=all", bearer(t, ws), "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestTransitionsRequiresAuth proves the endpoint is inside the authenticated
+// group: no bearer, no history.
+func TestTransitionsRequiresAuth(t *testing.T) {
+	mb := uuid.New()
+	h := NewHandler(NewService(newFakeStore()))
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/mailboxes/"+mb.String()+"/transitions", "", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", w.Code)
 	}
 }

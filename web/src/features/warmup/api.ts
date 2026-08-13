@@ -15,6 +15,12 @@ const warmupApi = api.enhanceEndpoints({
     getMailboxWarmup: {
       providesTags: (_result, _error, arg) => [{ type: 'Warmup', id: arg.id }],
     },
+    // Deliberately the same tag as the mailbox's detail: the history is written
+    // by the engine, not by this UI, and the one user action that changes what
+    // it means (leaving or rejoining the pool) already invalidates that tag.
+    listWarmupTransitions: {
+      providesTags: (_result, _error, arg) => [{ type: 'Warmup', id: arg.mailboxId }],
+    },
     enableMailboxWarmup: {
       invalidatesTags: (_result, _error, arg) => [
         { type: 'Warmup', id: 'OVERVIEW' },
@@ -33,6 +39,7 @@ const warmupApi = api.enhanceEndpoints({
 export const {
   useGetWarmupOverviewQuery,
   useGetMailboxWarmupQuery,
+  useListWarmupTransitionsQuery,
   useEnableMailboxWarmupMutation,
   useDisableMailboxWarmupMutation,
 } = warmupApi

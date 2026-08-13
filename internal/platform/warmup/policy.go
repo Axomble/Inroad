@@ -74,6 +74,29 @@ const ProbationDailyVolume = 5
 // earn healthy through fresh evidence, which is acceptance criterion 2.
 const QuarantineCooldown = 72 * time.Hour
 
+// LaneEvidenceGrace is how long a healthy-lane participant may go without
+// qualified evidence before it is returned to probation.
+//
+// It exists because losing SIGHT of a mailbox and finding something WRONG with it
+// are different events that deserve different reflexes. Without a grace, one
+// unqualified tick — a 7-day window sliding past its twentieth placement, a
+// partner that did not poll, a snapshot refresh that skipped a workspace —
+// demoted the mailbox on the next sweep and promoted it back on the one after:
+// two audit rows, and a day capped at ProbationDailyVolume for a mailbox nothing
+// was ever wrong with. Worse, the demotion is self-reinforcing: probation caps
+// output, fewer sends produce fewer placements, and the sample needed to
+// requalify takes days to rebuild. The cost of holding an unmeasured mailbox for
+// a few hours is far below the cost of that ratchet.
+//
+// It applies ONLY to the absence of evidence. A degraded health state, an auth
+// regression and a quarantine all still apply on the first sweep — containment
+// must never wait, and none of them route through this branch.
+//
+// Six hours is ~72 sweeps at the five-minute cadence, so no transient can survive
+// it, while a mailbox that has genuinely gone dark still leaves the healthy pool
+// the same day.
+const LaneEvidenceGrace = 6 * time.Hour
+
 // Signals are the materialized evidence for one participant, read from
 // warmup_signal_snapshots.
 //
@@ -93,16 +116,32 @@ type Signals struct {
 	// selector match is not evidence of an unsigned domain (see migration 000036).
 	AuthPassing bool
 
-	// EvidenceFresh reports whether the snapshot is recent enough to act on. A
-	// stale snapshot is treated as no evidence, never as health.
+	// EvidenceFresh reports whether the newest evidence ABOUT THIS MAILBOX is
+	// recent enough to act on. Stale evidence is treated as no evidence, never as
+	// health. It measures the age of the observations, not the age of the
+	// snapshot row that aggregates them — a snapshot is rewritten every sweep and
+	// so is always young, which made the earlier test vacuously true.
 	EvidenceFresh bool
+
+	// EvidenceLapsedSince is when this participant's health last FELL to unknown,
+	// i.e. when it stopped having qualified evidence; zero when that has never
+	// happened (or not since it was last proven). It anchors LaneEvidenceGrace and
+	// nothing else — it can neither promote nor contain.
+	EvidenceLapsedSince time.Time
 
 	Inbox int
 	Spam  int
 
-	CampaignDelivered   int
+	CampaignDelivered int
+	// CampaignHardBounces is SELF-OBSERVED: Inroad's own DSN parser classified the
+	// bounce. It carries full authority and can contain a mailbox.
 	CampaignHardBounces int
-	CampaignComplaints  int
+	// CampaignAssertedHardBounces was posted by a holder of deliverability:write.
+	// Real evidence, but the scope exists so an ingest credential cannot mutate
+	// campaigns — so it may reduce volume and it may not contain. Same posture
+	// invariant 39 gives the DNS advisory.
+	CampaignAssertedHardBounces int
+	CampaignComplaints          int
 
 	WarmupDelivered   int
 	WarmupHardBounces int
@@ -141,8 +180,11 @@ type Decision struct {
 
 	CampaignBounceSamples int
 	CampaignBounceRate    float64
-	WarmupBounceSamples   int
-	WarmupBounceRate      float64
+	// AssertedBounceRate is the feed-reported arm, reported separately because it
+	// is capped at watch and an operator needs to see which arm spoke.
+	AssertedBounceRate  float64
+	WarmupBounceSamples int
+	WarmupBounceRate    float64
 
 	ComplaintSamples int
 	ComplaintRate    float64
@@ -178,6 +220,7 @@ func evaluateHealth(s Signals) Decision {
 
 		CampaignBounceSamples: s.CampaignDelivered,
 		CampaignBounceRate:    qualifiedRate(s.CampaignHardBounces, s.CampaignDelivered, MinBounceSamples),
+		AssertedBounceRate:    qualifiedRate(s.CampaignAssertedHardBounces, s.CampaignDelivered, MinBounceSamples),
 		WarmupBounceSamples:   s.WarmupDelivered,
 		WarmupBounceRate:      qualifiedRate(s.WarmupHardBounces, s.WarmupDelivered, MinBounceSamples),
 
@@ -195,6 +238,15 @@ func evaluateHealth(s Signals) Decision {
 
 	applyBand(d.SpamRate, spamWatchRate, spamThrottleRate, spamPauseRate, "spam", "spam placement rate", worst)
 	applyBand(d.CampaignBounceRate, bounceWatchRate, bounceThrottleRate, bouncePauseRate, "campaign_bounce", "campaign hard-bounce rate", worst)
+	// Asserted evidence is capped at watch, whatever the rate. Uncapped, roughly
+	// seven forged POSTs reached StateThrottled -> degraded -> LaneQuarantine ->
+	// the whole domain withheld for 72h, un-clearable by the tenant. Watch reduces
+	// volume and surfaces the signal to an operator without letting an ingest
+	// credential contain anything.
+	if d.AssertedBounceRate > bounceWatchRate {
+		worst(StateWatch, "campaign_bounce_asserted_watch",
+			"reported campaign hard-bounce rate above the watch threshold (reported by the deliverability feed, so it reduces volume but does not contain)")
+	}
 	applyBand(d.WarmupBounceRate, bounceWatchRate, bounceThrottleRate, bouncePauseRate, "warmup_bounce", "warmup hard-bounce rate", worst)
 	applyBand(d.ComplaintRate, complaintWatchRate, complaintThrottleRate, complaintPauseRate, "complaint", "complaint rate", worst)
 
@@ -317,12 +369,60 @@ func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason stri
 			return LaneWatch, "lane_watch", "moved to watch: " + d.HealthReason
 		}
 		if !qualified {
-			// Evidence went stale or fell below the minimum sample. Leaving it in the
-			// healthy lane would let an unmeasured mailbox keep reaching healthy peers.
+			if holdsForEvidenceGrace(s, d, now) {
+				return LaneHealthy, "lane_evidence_grace",
+					"evidence lapsed recently: holding the healthy lane until the grace period elapses"
+			}
+			// Evidence went stale or fell below the minimum sample, and stayed that
+			// way. Leaving it in the healthy lane would let an unmeasured mailbox keep
+			// reaching healthy peers.
 			return LaneProbation, "lane_evidence_lapsed", "no fresh qualified evidence: returned to probation"
 		}
 		return LaneHealthy, "lane_healthy", "qualified clean evidence"
 	}
+}
+
+// holdsForEvidenceGrace reports whether a healthy-lane participant that failed to
+// qualify should keep its lane for now. See LaneEvidenceGrace for why the grace
+// exists.
+//
+// Three gates, each load-bearing:
+//
+//  1. Only StateUnknown qualifies for the hold. That state means exactly "no
+//     qualified evidence" — an ABSENCE. Every other way to miss qualification is a
+//     signal: watch and worse are handled by the branches above, and a healthy
+//     state that fails promotionAlarmed is a small pile of BAD evidence, which is
+//     information, not a blind spot, and still demotes immediately.
+//
+//  2. If the health axis is falling INTO unknown on this very evaluation, the
+//     lapse starts now, so it is inside any grace. The transition this tick writes
+//     (from a non-unknown state to unknown) is what EvidenceLapsedSince reads on
+//     every subsequent sweep, so the marker exists from the second tick onward.
+//
+//  3. Health that is ALREADY unknown with no recorded fall has no lapse to date
+//     from — a participant backfilled straight into the healthy lane, for
+//     instance. It is not held: an unbounded hold on an unmeasured mailbox is the
+//     failure mode the grace is supposed to bound, not create.
+func holdsForEvidenceGrace(s Signals, d Decision, now time.Time) bool {
+	// Alarming evidence is never "lack of evidence", so it is never graced —
+	// even when it is too thin to ESCALATE. A thin sample cannot punish (that
+	// needs the minimum, or false positives follow) but it must not buy a hold
+	// either: 25 hard bounces on 49 recipients reaches evaluateHealth's
+	// under-minimum branch, which rewrites health to unknown, and without this
+	// gate that mailbox kept the healthy lane and full ramp volume for 6h.
+	if promotionAlarmed(s) {
+		return false
+	}
+	if d.Health != StateUnknown {
+		return false
+	}
+	if normalizeState(s.CurrentHealth) != StateUnknown {
+		return true
+	}
+	if s.EvidenceLapsedSince.IsZero() {
+		return false
+	}
+	return now.Sub(s.EvidenceLapsedSince) < LaneEvidenceGrace
 }
 
 // LaneDailyVolume caps a lane's warmup output. Probation and recovery are
@@ -365,6 +465,43 @@ func LaneMayTakeNewLead(lane string) bool {
 	}
 }
 
+// NewLeadsWithheld reports whether a mailbox must be refused NEW campaign leads,
+// judging its own pool lane AND the worst lane on its organizational domain
+// (design §7: the gate is mailbox AND domain). It is the ONE place that decision
+// is made, so the preflight warning, the senders panel's cap_today and the
+// rotation's eligibility cannot drift apart — they had three copies of an
+// increasingly subtle expression between them.
+//
+// Domain scope exists because reputation is largely assessed per organizational
+// domain: a quarantined mailbox on a domain has almost certainly damaged the
+// standing of every other mailbox sending from it, so continuing to expand cold
+// volume there spends a reputation that is already in trouble.
+//
+// Replies to a human who already wrote back are governed separately and are
+// always allowed — see LaneMayTakeNewLead.
+func NewLeadsWithheld(mailboxLane, domainLane string) bool {
+	return laneWithholdsNewLeads(mailboxLane) || laneWithholdsNewLeads(domainLane)
+}
+
+// laneWithholdsNewLeads is NewLeadsWithheld for one lane value.
+//
+// Two lanes are deliberately exempt from the ones LaneMayTakeNewLead refuses:
+//
+//   - "" means the mailbox is not warming up at all (or its participant row is
+//     disabled, whose stored lane is frozen history rather than a live signal).
+//     Warmup is opt-in; not opting in cannot cost a mailbox its campaigns.
+//   - pending_auth is derived from sending_domains, which security.md invariant 39
+//     scopes as ADVISORY: "an advisory that turns out to be wrong must not be able
+//     to stop a campaign". A spoofed or merely un-swept DNS answer would otherwise
+//     block a launch, and a fresh install has no sending_domains row at all. It
+//     still withholds warmup traffic, which is Inroad's own mail.
+func laneWithholdsNewLeads(lane string) bool {
+	if lane == "" || lane == LanePendingAuth {
+		return false
+	}
+	return !LaneMayTakeNewLead(lane)
+}
+
 // LanesCompatible reports whether sender may send warmup to recipient. With no
 // sentinel lane, same-lane is the whole rule — simple enough to be provable,
 // which is the point: a healthy customer mailbox never receives traffic from a
@@ -385,6 +522,7 @@ func LanesCompatible(sender, recipient string) bool {
 // of bad evidence.
 func promotionAlarmed(s Signals) bool {
 	return alarming(s.CampaignHardBounces, s.CampaignDelivered, bounceWatchRate) ||
+		alarming(s.CampaignAssertedHardBounces, s.CampaignDelivered, bounceWatchRate) ||
 		alarming(s.WarmupHardBounces, s.WarmupDelivered, bounceWatchRate) ||
 		alarming(s.CampaignComplaints, s.CampaignDelivered, complaintWatchRate)
 }

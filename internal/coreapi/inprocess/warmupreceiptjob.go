@@ -188,7 +188,24 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 			}
 			return coreapi.WarmupEngagePlan{}, gerr
 		}
-		// Duplicate receipt. Already engaged (C5b ran) → nothing to do, empty plan.
+		// Duplicate receipt — but not necessarily the same OBSERVATION. A message
+		// seen in the inbox and later found in junk is the most important placement
+		// change there is, and first-observation-wins used to discard it.
+		//
+		// Applied BEFORE the engaged check, because whether we already engaged the
+		// message has nothing to do with where it ended up: the evidence must be
+		// corrected either way. It also runs before the plan is rebuilt below, so a
+		// still-unengaged receipt re-reads as spam and its plan rescues.
+		if in.Placement == placementSpam && dup.Placement != placementSpam {
+			reclassified, rerr := c.reclassifyToSpam(ctx, ws, sendID, recipient)
+			if rerr != nil {
+				return coreapi.WarmupEngagePlan{}, rerr
+			}
+			if reclassified {
+				dup.Placement = placementSpam
+			}
+		}
+		// Already engaged (C5b ran) → nothing left to do, empty plan.
 		if dup.Engaged {
 			return coreapi.WarmupEngagePlan{}, nil
 		}
@@ -475,6 +492,39 @@ func (c client) MarkWarmupEngaged(ctx context.Context, receiptID, workspaceID st
 	return tx.Commit(ctx)
 }
 
+// reclassifyToSpam promotes an already-recorded receipt's placement to spam and
+// carries the correction through to the evidence and the daily projection, in one
+// statement. It reports whether this call was the one that moved it.
+//
+// The write is monotone and exactly-once in SQL (see the query), so a re-poll of an
+// already-reclassified receipt changes nothing and cannot double-count. The error
+// is RETURNED rather than logged: unlike the plan rebuild around it, this is a
+// reputation signal, and dropping it silently is how the placement axis came to be
+// wrong in the first place. The poller retries, and the retry is a no-op if the
+// write in fact landed.
+func (c client) reclassifyToSpam(ctx context.Context, ws, sendID, recipient uuid.UUID) (bool, error) {
+	row, err := c.q.ReclassifyWarmupReceiptToSpam(ctx, gen.ReclassifyWarmupReceiptToSpamParams{
+		// warmup_receipts.warmup_send_id is nullable (the send FK nulls it on delete),
+		// so the parameter is the nullable form of an id we do have.
+		WorkspaceID: ws, WarmupSendID: pgtype.UUID{Bytes: sendID, Valid: true},
+		RecipientMailbox: recipient,
+	})
+	if err != nil {
+		return false, fmt.Errorf("coreapi: reclassify warmup receipt to spam: %w", err)
+	}
+	if row.Reclassified && !row.ObservationSuperseded {
+		// The receipt moved but no observation row carried the correction, so the
+		// policy is still reading the old placement. It happens when the observation
+		// has aged out of the 90-day retention, which is benign, and it would also
+		// happen if a writer ever stopped keying observations on the receipt id,
+		// which is not — and would be invisible without this.
+		slog.WarnContext(ctx, "warmup_placement_reclassified_without_evidence",
+			"workspace_id", ws.String(), "warmup_send_id", sendID.String(),
+			"recipient_mailbox", recipient.String())
+	}
+	return row.Reclassified, nil
+}
+
 // ListDueWarmupMailboxes returns the coarse sweep fan-out of enabled, non-paused
 // participants. See the coreapi.Client interface doc.
 func (c client) ListDueWarmupMailboxes(ctx context.Context) ([]coreapi.MailboxRef, error) {
@@ -520,11 +570,20 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// warmupEvidenceTTL is how old a snapshot may be before it stops counting as
-// evidence. Twice the five-minute sweep interval tolerates one missed tick; beyond
-// that the participant reads as unknown and cannot be promoted. Staleness must
-// never read as safety (design §8, acceptance criterion 3).
-const warmupEvidenceTTL = 10 * time.Minute
+// warmupEvidenceTTL is how old the newest OBSERVATION about a mailbox may be
+// before it stops counting as evidence. Beyond it the participant reads as
+// unknown and cannot be promoted: staleness must never read as safety (design §8,
+// acceptance criterion 3).
+//
+// It is a property of the evidence, not of the sweep. The previous value was
+// twice the sweep interval, which was right for the snapshot ROW's age but is
+// meaningless for observations: warmup deliberately skips weekends and ~4% of
+// weekdays (warmup.EffectiveDailyVolume), so a perfectly healthy participant can
+// legitimately produce nothing from Friday evening to Monday morning. Four days
+// clears any such gap while staying well inside the 7-day window that supplies
+// the placement samples, so a mailbox whose evidence is all older than this has
+// nothing left in that window to be judged on anyway.
+const warmupEvidenceTTL = 96 * time.Hour
 
 func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID, now time.Time) error {
 	rows, err := c.q.ListWarmupEvaluationRows(ctx, gen.ListWarmupEvaluationRowsParams{
@@ -542,17 +601,19 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 			// Computed by the DB clock (see the query): a participant enabled between
 			// the refresh and this read has no snapshot row at all, so the result is
 			// NULL, which must read as no evidence rather than as zeros that look clean.
-			EvidenceFresh:         r.EvidenceFresh != nil && *r.EvidenceFresh,
-			Inbox:                 int(r.PlacementInbox),
-			Spam:                  int(r.PlacementSpam),
-			CampaignDelivered:     int(r.CampaignDelivered),
-			CampaignHardBounces:   int(r.CampaignHardBounces),
-			CampaignComplaints:    int(r.CampaignComplaints),
-			WarmupDelivered:       int(r.WarmupDelivered),
-			WarmupHardBounces:     int(r.WarmupHardBounces),
-			ObserverTokenFailures: int(r.ObserverTokenFailures),
-			QuarantinedSince:      r.QuarantinedSince.Time,
-			PausedUntil:           r.PausedUntil.Time,
+			EvidenceFresh:               r.EvidenceFresh != nil && *r.EvidenceFresh,
+			EvidenceLapsedSince:         r.EvidenceLapsedSince.Time,
+			Inbox:                       int(r.PlacementInbox),
+			Spam:                        int(r.PlacementSpam),
+			CampaignDelivered:           int(r.CampaignDelivered),
+			CampaignHardBounces:         int(r.CampaignHardBounces),
+			CampaignAssertedHardBounces: int(r.CampaignAssertedHardBounces),
+			CampaignComplaints:          int(r.CampaignComplaints),
+			WarmupDelivered:             int(r.WarmupDelivered),
+			WarmupHardBounces:           int(r.WarmupHardBounces),
+			ObserverTokenFailures:       int(r.ObserverTokenFailures),
+			QuarantinedSince:            r.QuarantinedSince.Time,
+			PausedUntil:                 r.PausedUntil.Time,
 		}, now)
 
 		// The timed-block floor is applied INSIDE EvaluateParticipant, before the lane

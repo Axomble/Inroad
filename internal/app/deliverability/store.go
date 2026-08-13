@@ -124,11 +124,19 @@ type Risk struct {
 // EventInput is one ingested deliverability event. SendID is optional: most feeds
 // report an address, not our internal id, and an event without one still counts
 // at workspace scope — it simply attributes to no campaign.
+//
+// BounceClass discriminates a permanent failure from a transient one. Provider
+// feeds mix them (a full mailbox and a greylisting deferral arrive on the same
+// webhook as a nonexistent address), and ONLY 'hard' feeds the warmup
+// hard-bounce rate — counting a greylist as permanent pauses a healthy sender
+// for 72 hours. The service normalizes an omitted value to BounceClassUnknown,
+// which is excluded from that rate: under-counting is the safe direction.
 type EventInput struct {
 	Kind            string
 	Email           string
 	ProviderEventID string
 	SendID          *uuid.UUID
+	BounceClass     string
 }
 
 // Store is the repository interface this domain depends on, defined here by the
@@ -414,6 +422,7 @@ func (s *PgStore) Ingest(ctx context.Context, ws uuid.UUID, in EventInput) (bool
 	n, err := s.q.InsertDeliverabilityEvent(ctx, gen.InsertDeliverabilityEventParams{
 		WorkspaceID: ws, Kind: in.Kind, Email: in.Email,
 		SendID: optionalUUID(in.SendID), ProviderEventID: in.ProviderEventID,
+		BounceClass: in.BounceClass,
 	})
 	if err != nil {
 		return false, err

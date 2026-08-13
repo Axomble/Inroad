@@ -394,7 +394,21 @@ limit / abuse control here is tracked in the Deferred list below.
     against the tenant whose credential presented it. It requires
     `deliverability:write` rather than `campaigns:write`: an external bounce
     pipeline needs to report events and nothing else, so an ingest credential does
-    not also carry the authority to mutate campaigns. The scope is deliberately
+    not also carry the authority to mutate campaigns.
+
+    That last clause is enforced, not merely intended. `bounce_class='hard'` feeds
+    warmup's reputation engine, and warmup lanes can withhold new campaign leads —
+    so an uncapped ingest arm WOULD have let this scope quarantine a mailbox and,
+    through the domain gate, withhold every sibling on its sending domain for 72h,
+    with no way for the tenant to clear it. Feed-reported bounces are therefore
+    counted separately from the ones Inroad's own DSN parser observed
+    (`warmup_signal_snapshots.campaign_asserted_hard_bounces`) and capped at
+    `watch`: they reduce volume and surface to an operator, they never contain.
+    Self-observed evidence is unaffected. This is the same posture invariant 39
+    gives the DNS advisory — an assertion Inroad did not make itself may advise but
+    may not veto (`TestAssertedBouncesAdviseButCannotContain`). Asserted evidence
+    still blocks PROMOTION, because being unable to punish is not the same as
+    vouching. The scope is deliberately
     ABSENT from `OAuthGrantableScopes` — an ingested complaint suppresses an
     address workspace-wide and can trip a campaign's breaker, so a third party who
     could forge complaints could suppress a workspace's contacts and stop its
@@ -420,7 +434,14 @@ limit / abuse control here is tracked in the Deferred list below.
     bounce feeds include soft bounces (full mailbox, greylisting), and suppressing
     an address forever on a temporary failure is not recoverable by the operator;
     hard bounces are still suppressed where they are actually classified, in the
-    inbox poller.
+    inbox poller. The caller's own `bounce_class` (`hard`/`soft`/`unknown`) is
+    validated against that enum at the service boundary — a value outside it is a
+    422, never coerced — and forced to `unknown` for a `complaint`, where the
+    concept does not apply. Only `hard` feeds warmup's hard-bounce rate; an
+    omitted or unclassified value is EXCLUDED from it rather than assumed
+    permanent, because over-counting pauses a healthy sender for 72 hours while
+    under-counting only delays a true signal
+    (`TestOnlyAHardIngestedBounceFeedsTheWarmupHardBounceRate`).
 43. **The breaker runs outside the send transaction and can only ever pause, never
     fail a delivery.** Evaluation is a separate `deliverability:evaluate` task
     enqueued AFTER `MarkStepDelivered` commits, so it reads committed state only;
@@ -764,7 +785,12 @@ write history that never happened.
       wrote a trusted bounce against a different one
       (`TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender`).
     - `placement` requires a verified signed token AND a DB-proven send→recipient
-      binding.
+      binding. A later observation of the SAME receipt may only make the placement
+      worse (`inbox`/`other` → `spam`), superseding the row rather than adding one,
+      so one message is always one sample: a re-poll cannot inflate the evidence,
+      and the engager's own rescue of a spam message back into the inbox cannot
+      erase the evidence that the rescue was needed
+      (`TestPlacementReclassificationIsMonotoneAndCountsOnce`).
 
 53. **Containment cannot be cleared by the tenant.** `quarantine` and `blocked` are
     carried across a disable/re-enable: the participant row is deleted on disable,
@@ -779,6 +805,20 @@ write history that never happened.
     enforce it — the reply re-checks at engage time because the lane can move between
     a send and its answer. A healthy mailbox never exchanges warmup traffic with a
     probation, recovery, watch, quarantined, blocked or unauthenticated peer.
+
+    New CAMPAIGN leads are gated on the mailbox AND its organizational domain, and
+    both halves go through one predicate (`warmup.NewLeadsWithheld`) that the
+    preflight check, the senders panel's `cap_today` and the rotation all call, so a
+    displayed warning and an enforced block cannot drift. Domain scope is an
+    aggregate read — the worst lane among the workspace's ENABLED participants
+    sharing `lower(split_part(email,'@',2))` — not a second state machine and not a
+    second table. Only `quarantine` and `blocked` withhold. `pending_auth` never
+    does, on either half, because it is derived from the advisory DNS check that
+    invariant 39 forbids from stopping a campaign, and an empty lane means the
+    mailbox is not warming up at all
+    (`TestQuarantinedSiblingWithholdsItsWholeDomain`,
+    `TestComputePreflightNonContainingDomainLanesDoNotBlock`). Replies to a human who
+    already wrote back are exempt throughout.
 
 55. **Warmup evidence is bounded and retained.** `warmup_observations` is append-only
     and reachable by external senders, so the invalid-token idempotency key buckets on

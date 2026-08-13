@@ -52,6 +52,36 @@ WHERE mailbox_id = $1 AND workspace_id = $2;
 DELETE FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2;
 
+-- name: WarmupMailboxInWorkspace :one
+-- Does this mailbox belong to the caller's workspace? The transition history is
+-- readable for a mailbox that is NOT (or is no longer) a participant — the trail
+-- outlives the participant row, which is how containment survives a
+-- disable/re-enable — so participation cannot be the 404 test. Ownership is, and
+-- it is pinned on the workspace from the JWT, never a caller-supplied value.
+SELECT EXISTS (
+    SELECT 1 FROM mailboxes WHERE id = $1 AND workspace_id = $2
+) AS in_workspace;
+
+-- name: ListWarmupTransitions :many
+-- One mailbox's automated state-change history, newest first, workspace-pinned.
+-- Serves GET /warmup/mailboxes/{mailbox_id}/transitions: every row already names
+-- the metric, sample size and threshold that produced it, which is what lets an
+-- operator answer "why is this mailbox here and what clears it" without reading
+-- logs.
+--
+-- id breaks a created_at tie so paging is deterministic; the ordering otherwise
+-- matches idx_warmup_state_transitions_mailbox (workspace_id, mailbox_id,
+-- created_at DESC) exactly, so this is an index scan with a LIMIT rather than a
+-- sort of the whole history.
+SELECT id, created_at, from_state, to_state, reason_code, reason,
+       from_lane, to_lane, lane_reason_code, lane_reason,
+       placement_samples, spam_rate, bounce_samples, bounce_rate,
+       complaint_samples, complaint_rate, invalid_tokens, policy_version
+FROM warmup_state_transitions
+WHERE workspace_id = $1 AND mailbox_id = $2
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(row_limit);
+
 -- name: CountEnabledParticipants :one
 SELECT count(*) FROM warmup_participants
 WHERE workspace_id = $1 AND enabled;
@@ -89,6 +119,12 @@ WHERE mailbox_id = $1 AND workspace_id = $2
 SELECT
     p.mailbox_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
     p.reply_rate, p.started_at, p.health_state, p.health_reason,
+    -- The POOL ELIGIBILITY axis, alongside the reputation axis above. The schema
+    -- has required both since lanes shipped, but this query never selected them,
+    -- so the field was absent from the JSON, arrived as undefined in the SPA, and
+    -- every mailbox fell back to the "probation" badge — a wrong lane shown
+    -- confidently for every participant that was not actually in probation.
+    p.lane, p.lane_reason,
     m.email,
     COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
@@ -495,6 +531,91 @@ WITH candidate AS (
 SELECT EXISTS(SELECT 1 FROM candidate) AS matched,
        EXISTS(SELECT 1 FROM inserted) AS inserted;
 
+-- name: ReclassifyWarmupReceiptToSpam :one
+-- A message seen in the INBOX and later found in junk. First-observation-wins is
+-- right for idempotency but wrong for a reputation signal: spam-after-inbox is the
+-- single most important placement change there is, and the receipt upsert
+-- short-circuits before the observation write, so it used to be discarded.
+--
+-- The observation row is SUPERSEDED IN PLACE rather than joined by a second row.
+-- The idempotency key IS the receipt id, so a second row would need a different
+-- key — and the snapshot aggregation counts placement rows, so the same message
+-- would then be counted twice: once as inbox and once as spam, inflating the spam
+-- numerator, the placement denominator and the minimum-sample gate together.
+-- Deduplicating in the aggregation instead would mean grouping on a receipt id the
+-- observations table does not carry as a column. One row per message keeps
+-- "placement samples" meaning messages, which is what the thresholds are calibrated
+-- against.
+--
+-- MONOTONE, and that direction is load-bearing rather than defensive: the engager
+-- deliberately RESCUES spam messages into the inbox, so a later poll legitimately
+-- finds them there. Allowing spam -> inbox would let our own rescue erase the
+-- evidence that the rescue was needed. `placement <> 'spam'` is also what makes
+-- this exactly-once: a re-poll of an already-reclassified receipt matches no row,
+-- so nothing is written and no counter moves twice. Two concurrent pollers race on
+-- the receipt row lock and the loser re-evaluates the predicate against the
+-- winner's committed value, matching nothing.
+--
+-- observed_at advances to now() ONLY for a receipt still inside the placement
+-- window. The message being in spam now is genuinely current information, and
+-- filing it at the original observation time would leave a current fact outside
+-- the window that decides whether the participant is measured at all.
+--
+-- But it must not RESURRECT aged evidence. FetchJunk is deliberately stateless and
+-- rescans the newest ~100 junk messages every poll, and a message moved into Junk
+-- acquires a fresh high UID there — so without this bound, anyone with IMAP access
+-- to a RECIPIENT warmup mailbox (an in-workspace colleague, a shared inbox) could
+-- bulk-move 90 days of warmup history into Junk and mint up to 100 spam samples
+-- dated now, per poll, until the SENDER paused and its whole domain was withheld.
+-- Bounding the timestamp keeps the correction honest about WHAT without letting it
+-- rewrite WHEN: an aged message still has its placement and its daily counter
+-- corrected, it simply cannot re-enter the window that gates health.
+--
+-- The daily projection is corrected on the day the message was RECEIVED, which is
+-- where RecordWarmupSenderPlacementStat put the original count, and only the inbox
+-- counter it actually incremented is decremented ('other' incremented neither).
+-- Otherwise the overview and the deliverability score would keep reporting an inbox
+-- placement the policy has already recorded as spam.
+--
+-- `prior` is a second reference to the same row, read from the statement snapshot,
+-- which is how the pre-update placement is recovered: RETURNING would give the new
+-- value.
+WITH promoted AS (
+    UPDATE warmup_receipts r
+    SET placement = 'spam'
+    FROM warmup_receipts prior
+    JOIN warmup_sends s ON s.id = prior.warmup_send_id AND s.workspace_id = prior.workspace_id
+    WHERE prior.id = r.id
+      AND r.workspace_id = @workspace_id
+      AND r.warmup_send_id = @warmup_send_id
+      AND r.recipient_mailbox = @recipient_mailbox
+      AND r.placement <> 'spam'
+    RETURNING r.id, r.received_at, prior.placement AS prior_placement, s.from_mailbox
+), observation AS (
+    UPDATE warmup_observations o
+    SET placement = 'spam',
+        observed_at = CASE
+            WHEN p.received_at >= now() - interval '7 days' THEN now()
+            ELSE o.observed_at
+        END
+    FROM promoted p
+    WHERE o.workspace_id = @workspace_id
+      AND o.idempotency_key = 'receipt:' || p.id::text
+      AND o.kind = 'placement'
+    RETURNING o.id
+), projection AS (
+    UPDATE warmup_daily_stats d
+    SET inbox = greatest(d.inbox - CASE WHEN p.prior_placement = 'inbox' THEN 1 ELSE 0 END, 0),
+        spam  = d.spam + 1
+    FROM promoted p
+    WHERE d.mailbox_id = p.from_mailbox
+      AND d.workspace_id = @workspace_id
+      AND d.day = (p.received_at AT TIME ZONE 'utc')::date
+    RETURNING d.mailbox_id
+)
+SELECT EXISTS(SELECT 1 FROM promoted) AS reclassified,
+       EXISTS(SELECT 1 FROM observation) AS observation_superseded;
+
 -- name: GetWarmupReceiptByPair :one
 -- Disambiguates an UpsertWarmupReceipt that inserted zero rows: a workspace-pinned
 -- lookup on the same (send, recipient) pair. A hit means a genuine DUPLICATE (same
@@ -673,7 +794,7 @@ ORDER BY workspace_id;
 INSERT INTO warmup_signal_snapshots (
     workspace_id, mailbox_id, computed_at,
     placement_inbox, placement_spam,
-    campaign_delivered, campaign_hard_bounces, campaign_complaints,
+    campaign_delivered, campaign_hard_bounces, campaign_asserted_hard_bounces, campaign_complaints,
     warmup_delivered, warmup_hard_bounces,
     observer_token_failures, newest_evidence_at
 )
@@ -682,6 +803,7 @@ SELECT p.workspace_id, p.mailbox_id, now(),
        COALESCE(place.spam, 0)::int,
        COALESCE(camp.delivered, 0)::int,
        COALESCE(camp.hard_bounces, 0)::int,
+       COALESCE(camp.asserted_hard_bounces, 0)::int,
        COALESCE(camp.complaints, 0)::int,
        COALESCE(warm.delivered, 0)::int,
        COALESCE(warm.hard_bounces, 0)::int,
@@ -736,10 +858,11 @@ LEFT JOIN LATERAL (
             -- TWO arms, unioned on the send so a bounce counted by both is counted
             -- once. Neither alone is sufficient:
             --
-            -- (a) provider webhooks carry bounce_class, but NOTHING populates it
-            --     yet: POST /deliverability/events has no such field, so every row
-            --     is 'unknown' and this arm currently matches nothing. It is the
-            --     forward path, live the moment ingest classifies.
+            -- (a) provider webhooks carry bounce_class, populated at ingest from
+            --     the DeliverabilityEvent body and validated there against these
+            --     same three values. Rows written before the column existed, and
+            --     any feed that does not classify, are 'unknown' and stay out of
+            --     the numerator.
             -- (b) Inroad's OWN DSN parser already distinguishes hard bounces and
             --     stops the enrollment with stop_reason='bounced'. Without this arm
             --     the whole campaign hard-bounce guardrail is structurally zero —
@@ -750,21 +873,11 @@ LEFT JOIN LATERAL (
             -- which is the send that bounced. Phase 0 joined on
             -- (campaign_id, contact_id) with no sender identity, so a campaign
             -- rotating over M and N charged BOTH for one bounce.
+            -- SELF-OBSERVED only: the enrollment stopped as bounced because
+            -- Inroad's own DSN parser classified it. This arm can contain a
+            -- mailbox. Attributed through the LAST send before the enrollment
+            -- stopped, which is the send that bounced.
             SELECT count(*) FROM (
-                SELECT s.id
-                FROM deliverability_events de
-                JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
-                WHERE de.workspace_id = $1
-                  AND s.mailbox_id = p.mailbox_id
-                  AND de.kind = 'bounce'
-                  AND de.bounce_class = 'hard'
-                  AND de.received_at >= now() - interval '30 days'
-                  -- Bound the SEND to the same window and status as the denominator.
-                  -- A late DSN for an older send would otherwise count in the
-                  -- numerator against a denominator that excludes it.
-                  AND s.status = 'sent'
-                  AND s.sent_at >= now() - interval '30 days'
-                UNION
                 SELECT bounced.id
                 FROM sequence_enrollments se
                 JOIN LATERAL (
@@ -785,6 +898,23 @@ LEFT JOIN LATERAL (
                   AND bounced.mailbox_id = p.mailbox_id
             ) hard_bounced_sends
         ) AS hard_bounces,
+        (
+            -- ASSERTED by whoever holds deliverability:write. Real evidence, but
+            -- not self-observed, so the policy caps what it can do (see
+            -- assertedBand in policy.go). Same window and status bound as the
+            -- denominator: a late DSN for an older send must not count against a
+            -- denominator that excludes it.
+            SELECT count(DISTINCT s.id)
+            FROM deliverability_events de
+            JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
+            WHERE de.workspace_id = $1
+              AND s.mailbox_id = p.mailbox_id
+              AND de.kind = 'bounce'
+              AND de.bounce_class = 'hard'
+              AND de.received_at >= now() - interval '30 days'
+              AND s.status = 'sent'
+              AND s.sent_at >= now() - interval '30 days'
+        ) AS asserted_hard_bounces,
         (
             SELECT count(DISTINCT s.id)
             FROM deliverability_events de
@@ -843,17 +973,25 @@ LEFT JOIN LATERAL (
       AND o.observed_at >= now() - interval '7 days'
 ) tokens ON true
 LEFT JOIN LATERAL (
-    -- How old the newest underlying evidence is, either role. GREATEST ignores
-    -- NULLs, and each arm range-seeks its own index
-    -- (idx_warmup_observations_subject_time / _observer_time) instead of an OR that
-    -- could use neither. Reported for operators; the FRESHNESS decision is made on
-    -- computed_at, which advances every sweep whether or not evidence arrived.
-    SELECT GREATEST(
-        (SELECT max(o.observed_at) FROM warmup_observations o
-          WHERE o.workspace_id = $1 AND o.mailbox_id = p.mailbox_id),
-        (SELECT max(o.observed_at) FROM warmup_observations o
-          WHERE o.workspace_id = $1 AND o.observer_mailbox_id = p.mailbox_id)
-    ) AS newest_at
+    -- How old the newest evidence about THIS mailbox's own mail is. It drives the
+    -- freshness rule in ListWarmupEvaluationRows, so its definition is
+    -- load-bearing rather than informational.
+    --
+    -- SUBJECT-side and TRUSTED only, deliberately. The observer-side arm this
+    -- replaces counted invalid_token rows, which an external sender can cause by
+    -- emailing a connected mailbox — so anyone could have kept a mailbox's
+    -- evidence looking "fresh" without a single observation about its outbound
+    -- mail. attribution_trusted is the same gate the rate arms above use, and the
+    -- migration 000055 CHECK guarantees invalid_token rows can never set it.
+    -- NULL (no evidence at all) is preserved and must read as NOT fresh.
+    --
+    -- Range-seeks idx_warmup_observations_subject_time on its
+    -- (workspace_id, mailbox_id) prefix.
+    SELECT max(o.observed_at) AS newest_at
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.mailbox_id = p.mailbox_id
+      AND o.attribution_trusted
 ) evidence ON true
 WHERE p.workspace_id = $1 AND p.enabled
 ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
@@ -862,6 +1000,7 @@ ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
     placement_spam          = EXCLUDED.placement_spam,
     campaign_delivered      = EXCLUDED.campaign_delivered,
     campaign_hard_bounces   = EXCLUDED.campaign_hard_bounces,
+    campaign_asserted_hard_bounces = EXCLUDED.campaign_asserted_hard_bounces,
     campaign_complaints     = EXCLUDED.campaign_complaints,
     warmup_delivered        = EXCLUDED.warmup_delivered,
     warmup_hard_bounces     = EXCLUDED.warmup_hard_bounces,
@@ -896,23 +1035,33 @@ SELECT p.mailbox_id,
        p.lane,
        p.paused_until,
        (COALESCE(d.state, '') = 'passing' AND m.status = 'active')::boolean AS auth_passing,
-       -- Freshness is decided by the DATABASE clock on both sides. Comparing a
-       -- Go-injected clock against a DB-generated computed_at makes any app/DB
-       -- skew look like stale evidence, which fails CLOSED (a healthy mailbox
-       -- reads as unknown and stops being promotable) — quiet, and hard to
-       -- diagnose. The TTL still has one home: the caller passes it in seconds.
-       (s.computed_at IS NOT NULL
-        AND s.computed_at >= now() - make_interval(secs => sqlc.arg(evidence_ttl_seconds)::int)) AS evidence_fresh,
-       s.computed_at,
+       -- Freshness measures the age of the EVIDENCE, not the age of the snapshot.
+       --
+       -- computed_at is written by the upsert that runs immediately before this
+       -- read, in the same sweep, so a computed_at-based test was true for every
+       -- participant on every tick except one enabled between the two statements:
+       -- a staleness rule that could not detect staleness. newest_evidence_at is
+       -- the column that actually ages, and NULL — no evidence at all — reads as
+       -- NOT fresh, which is the direction acceptance criterion 3 requires
+       -- (absence of evidence is never health).
+       --
+       -- Still decided by the DATABASE clock on both sides. Comparing a
+       -- Go-injected clock against a DB-generated timestamp makes any app/DB skew
+       -- look like stale evidence, which fails CLOSED — quiet, and hard to
+       -- diagnose. The TTL keeps one home: the caller passes it in seconds.
+       (s.newest_evidence_at IS NOT NULL
+        AND s.newest_evidence_at >= now() - make_interval(secs => sqlc.arg(evidence_ttl_seconds)::int)) AS evidence_fresh,
        COALESCE(s.placement_inbox, 0)::int         AS placement_inbox,
        COALESCE(s.placement_spam, 0)::int          AS placement_spam,
        COALESCE(s.campaign_delivered, 0)::int      AS campaign_delivered,
        COALESCE(s.campaign_hard_bounces, 0)::int   AS campaign_hard_bounces,
+       COALESCE(s.campaign_asserted_hard_bounces, 0)::int AS campaign_asserted_hard_bounces,
        COALESCE(s.campaign_complaints, 0)::int     AS campaign_complaints,
        COALESCE(s.warmup_delivered, 0)::int        AS warmup_delivered,
        COALESCE(s.warmup_hard_bounces, 0)::int     AS warmup_hard_bounces,
        COALESCE(s.observer_token_failures, 0)::int AS observer_token_failures,
-       q.quarantined_since
+       q.quarantined_since,
+       lapse.evidence_lapsed_since
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
 LEFT JOIN warmup_signal_snapshots s
@@ -933,6 +1082,30 @@ LEFT JOIN LATERAL (
       -- extended the containment that improvement was supposed to end.
       AND t.from_lane IS DISTINCT FROM 'quarantine'
 ) q ON true
+LEFT JOIN LATERAL (
+    -- When the health axis last FELL to unknown — the moment this participant
+    -- stopped having qualified evidence. It anchors the healthy lane's grace
+    -- period (design §6 hysteresis): a lapse has to persist before it costs a
+    -- mailbox its lane, while a degraded signal still contains it on the first
+    -- sweep.
+    --
+    -- Derived from the transition trail rather than stored on the participant,
+    -- for the same reason quarantined_since is: the trail is append-only and
+    -- already records exactly this event, so there is no second source of truth
+    -- to drift.
+    --
+    -- from_state <> 'unknown' keeps it the moment of the FALL. Rows written while
+    -- already unknown (a lane move with no health change) carry
+    -- from_state = to_state = 'unknown', and counting those would restart the
+    -- grace every time anything else happened — the same defect the quarantine
+    -- cooldown had.
+    SELECT max(t.created_at)::timestamptz AS evidence_lapsed_since
+    FROM warmup_state_transitions t
+    WHERE t.workspace_id = p.workspace_id
+      AND t.mailbox_id = p.mailbox_id
+      AND t.to_state = 'unknown'
+      AND t.from_state <> 'unknown'
+) lapse ON true
 WHERE p.workspace_id = $1 AND p.enabled
 ORDER BY p.mailbox_id;
 
@@ -993,6 +1166,7 @@ WITH changed AS (
     SET health_state = @to_state,
         health_reason = @reason,
         lane = @to_lane,
+        lane_reason = sqlc.arg(lane_reason)::text,
         paused_until = sqlc.narg(paused_until)::timestamptz,
         updated_at = now()
     WHERE p.mailbox_id = @mailbox_id

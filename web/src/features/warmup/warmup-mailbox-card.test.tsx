@@ -1,4 +1,4 @@
-import { fireEvent, screen } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import type { Mailbox, WarmupMailbox } from '@/store/api'
@@ -33,6 +33,14 @@ const entry: WarmupMailbox = {
 // a DELETE to disable; steer each by method so we can fail only the disable call.
 let disableResponder: () => Response
 
+/** How many times the transition-history endpoint has been asked for. */
+function historyRequests(): number {
+  return vi.mocked(fetch).mock.calls.filter(([input]) => {
+    const url = input instanceof Request ? input.url : String(input)
+    return url.includes('/transitions')
+  }).length
+}
+
 beforeEach(() => {
   disableResponder = () => new Response(null, { status: 204, headers: jsonHeaders })
 
@@ -43,6 +51,10 @@ beforeEach(() => {
       // back to init for direct (url, init) calls.
       const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
       if (method === 'DELETE') return disableResponder()
+      const url = input instanceof Request ? input.url : String(input)
+      if (url.includes('/transitions')) {
+        return new Response(JSON.stringify({ transitions: [] }), { status: 200, headers: jsonHeaders })
+      }
       // Detail GET — minimal payload; series is short so the sparkline shows its
       // "not enough history" fallback rather than a chart.
       return new Response(
@@ -174,6 +186,28 @@ test('an empty lane reason renders no explanation line', () => {
   renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, lane_reason: '' }} />)
 
   expect(screen.queryByText(/pool status/i)).not.toBeInTheDocument()
+})
+
+// The history is per-mailbox and lives behind a disclosure on the mailbox's own
+// row, so a page of ten mailboxes issues no history requests until one is opened.
+test('the change history is not fetched until the operator opens it', async () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
+
+  const toggle = screen.getByRole('button', { name: /change history for a@example\.com/i })
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(historyRequests()).toBe(0)
+
+  fireEvent.click(toggle)
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await waitFor(() => expect(historyRequests()).toBe(1))
+  expect(await screen.findByText(/nothing has happened yet/i)).toBeInTheDocument()
+})
+
+test('a mailbox that is not warming up has no history to offer', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={undefined} />)
+
+  expect(screen.queryByRole('button', { name: /change history/i })).not.toBeInTheDocument()
 })
 
 test('a failed disable surfaces the inline error alert with the generic copy', async () => {

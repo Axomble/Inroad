@@ -924,3 +924,59 @@ func TestReportAndBreakerJudgeTheSameEvidence(t *testing.T) {
 		t.Fatalf("report verdict %q disagrees with breaker outcome %+v", rep.Verdict, out)
 	}
 }
+
+// TestIngestNormalizesBounceClass proves the value that reaches the store, which
+// is the only thing the warmup hard-bounce rate can filter on. A missing class is
+// 'unknown' (excluded from the rate) rather than assumed hard; case and padding
+// are tolerated because provider payloads are not tidy; and a complaint carries
+// 'unknown' whatever it sent, because the concept does not apply to it.
+func TestIngestNormalizesBounceClass(t *testing.T) {
+	cases := []struct {
+		name  string
+		kind  string
+		given string
+		want  string
+	}{
+		{name: "hard", kind: "bounce", given: "hard", want: BounceClassHard},
+		{name: "soft", kind: "bounce", given: "soft", want: BounceClassSoft},
+		{name: "omitted defaults to unknown", kind: "bounce", given: "", want: BounceClassUnknown},
+		{name: "explicit unknown", kind: "bounce", given: "unknown", want: BounceClassUnknown},
+		{name: "mixed case and padding", kind: "bounce", given: "  Hard ", want: BounceClassHard},
+		{name: "ignored on a complaint", kind: "complaint", given: "hard", want: BounceClassUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &fakeStore{ingestNew: true}
+			if _, err := newService(store).Ingest(context.Background(), testWS, EventInput{
+				Kind: c.kind, Email: "a@b.test", ProviderEventID: uuid.NewString(), BounceClass: c.given,
+			}); err != nil {
+				t.Fatalf("Ingest: %v", err)
+			}
+			if len(store.ingested) != 1 {
+				t.Fatalf("%d events recorded, want 1", len(store.ingested))
+			}
+			if got := store.ingested[0].BounceClass; got != c.want {
+				t.Fatalf("stored bounce_class = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestIngestRejectsAnUnknownBounceClass proves a value outside the enum is a
+// caller error, not something quietly filed as unclassified. A feed sending
+// "permanent" has a mapping bug, and coercing it would hide a signal the operator
+// believes is being counted.
+func TestIngestRejectsAnUnknownBounceClass(t *testing.T) {
+	for _, given := range []string{"permanent", "transient", "HARD_BOUNCE", "0"} {
+		store := &fakeStore{ingestNew: true}
+		_, err := newService(store).Ingest(context.Background(), testWS, EventInput{
+			Kind: "bounce", Email: "a@b.test", ProviderEventID: "e-" + given, BounceClass: given,
+		})
+		if !errors.Is(err, ErrInvalid) {
+			t.Fatalf("bounce_class %q: err = %v, want ErrInvalid", given, err)
+		}
+		if len(store.ingested) != 0 {
+			t.Fatalf("bounce_class %q was recorded anyway: %+v", given, store.ingested)
+		}
+	}
+}

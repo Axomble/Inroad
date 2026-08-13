@@ -1344,3 +1344,68 @@ func TestCampaignReportExplainsAnAutoPause(t *testing.T) {
 		t.Errorf("score = %d, want %d", rep.Score.Value, 100-deliverability.BouncePenalty)
 	}
 }
+
+// warmupCampaignHardBounces refreshes the workspace's warmup signal snapshot —
+// the SAME statement the evaluation sweep runs — and returns what it computed for
+// one mailbox. Reading the real snapshot, rather than asserting on the stored
+// column, is the point: the defect this covers was a rate whose arm filtered on a
+// column nothing ever populated, so a test that only checked the row would have
+// passed throughout.
+func (f *fixture) warmupCampaignHardBounces(t *testing.T, ctx context.Context, mailbox uuid.UUID) int32 {
+	t.Helper()
+	if _, err := f.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, f.ws); err != nil {
+		t.Fatalf("refresh warmup snapshot: %v", err)
+	}
+	var n int32
+	if err := f.pool.QueryRow(ctx,
+		`SELECT campaign_asserted_hard_bounces FROM warmup_signal_snapshots
+		  WHERE workspace_id = $1 AND mailbox_id = $2`, f.ws, mailbox).Scan(&n); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	return n
+}
+
+// TestOnlyAHardIngestedBounceFeedsTheWarmupHardBounceRate is the end-to-end proof
+// that the classification actually arrives where it is read. The warmup snapshot
+// filters bounce_class = 'hard'; before ingest populated the column every row was
+// 'unknown', so that arm matched nothing and the rule above it could never fire.
+//
+// Soft and unclassified stay OUT of the numerator deliberately: counting a
+// greylist or a full mailbox as permanent pauses a healthy sender for 72 hours,
+// while under-counting only delays a true signal.
+//
+// The arm read here is campaign_ASSERTED_hard_bounces, which is where a
+// feed-reported bounce belongs: it is evidence Inroad did not observe itself, so
+// the policy caps it at watch and it can never contain a mailbox (invariant 40,
+// TestAssertedBouncesAdviseButCannotContain). campaign_hard_bounces holds only the
+// self-observed arm. What this test proves is that the classification survives
+// ingest and reaches the snapshot — not that it can quarantine anything.
+func TestOnlyAHardIngestedBounceFeedsTheWarmupHardBounceRate(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	f.seedWarmupParticipant(t, ctx, f.mailbox, "unknown", "seed")
+
+	for _, class := range []string{BounceClassSoft, BounceClassUnknown, ""} {
+		sendID, _ := f.seedSend(t, ctx, time.Now())
+		if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+			Kind: "bounce", Email: uuid.NewString() + "@recipient.test",
+			ProviderEventID: "ev-" + uuid.NewString(), SendID: &sendID, BounceClass: class,
+		}); err != nil {
+			t.Fatalf("ingest %q: %v", class, err)
+		}
+	}
+	if got := f.warmupCampaignHardBounces(t, ctx, f.mailbox); got != 0 {
+		t.Fatalf("soft/unclassified bounces counted as hard: %d, want 0", got)
+	}
+
+	sendID, _ := f.seedSend(t, ctx, time.Now())
+	if _, err := f.service().Ingest(ctx, f.ws, EventInput{
+		Kind: "bounce", Email: uuid.NewString() + "@recipient.test",
+		ProviderEventID: "ev-" + uuid.NewString(), SendID: &sendID, BounceClass: BounceClassHard,
+	}); err != nil {
+		t.Fatalf("ingest hard: %v", err)
+	}
+	if got := f.warmupCampaignHardBounces(t, ctx, f.mailbox); got != 1 {
+		t.Fatalf("hard bounce did not reach the warmup rate: got %d, want 1", got)
+	}
+}

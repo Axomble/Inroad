@@ -84,6 +84,7 @@ SELECT cam.mailbox_id, m.email, m.provider, m.status,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
+       COALESCE(dl.lane, '')::text AS domain_lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cam.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -92,6 +93,36 @@ SELECT cam.mailbox_id, m.email, m.provider, m.status,
 FROM campaigns cam
 JOIN mailboxes m ON m.id = cam.mailbox_id AND m.workspace_id = cam.workspace_id
 LEFT JOIN warmup_participants wp ON wp.mailbox_id = cam.mailbox_id AND wp.workspace_id = cam.workspace_id
+LEFT JOIN LATERAL (
+    -- The worst lane on this mailbox's ORGANIZATIONAL DOMAIN (design §7: the
+    -- campaign gate is mailbox AND domain). An aggregate read over the mailboxes
+    -- that share lower(split_part(email,'@',2)) — deliberately not a second state
+    -- machine and not a second table, because the domain has no state of its own
+    -- to keep: it is exactly the worst of its members'.
+    --
+    -- Reputation is largely assessed per domain, so a quarantined mailbox has
+    -- almost certainly damaged the standing of every sibling sending from the same
+    -- one. Expanding cold volume from a sibling spends a reputation that is
+    -- already in trouble.
+    --
+    -- ENABLED participants only, matching the lane column above: a disabled row's
+    -- lane is frozen history, not a live signal. Includes the mailbox itself,
+    -- which costs nothing and keeps "worst on the domain" true rather than
+    -- "worst among the others". Which lanes actually WITHHOLD is Go's decision
+    -- (warmup.NewLeadsWithheld) — this ranking only orders severity.
+    SELECT wp2.lane
+    FROM warmup_participants wp2
+    JOIN mailboxes m2 ON m2.id = wp2.mailbox_id AND m2.workspace_id = wp2.workspace_id
+    WHERE wp2.workspace_id = cam.workspace_id
+      AND wp2.enabled
+      AND lower(split_part(m2.email, '@', 2)) = lower(split_part(m.email, '@', 2))
+    ORDER BY CASE wp2.lane
+               WHEN 'blocked' THEN 6 WHEN 'quarantine' THEN 5 WHEN 'pending_auth' THEN 4
+               WHEN 'recovery' THEN 3 WHEN 'probation' THEN 2 WHEN 'watch' THEN 1
+               ELSE 0 END DESC,
+             wp2.mailbox_id
+    LIMIT 1
+) dl ON true
 WHERE cam.id = $1 AND cam.workspace_id = $2
 `
 
@@ -112,6 +143,7 @@ type GetCampaignFallbackSenderRow struct {
 	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
 	HealthState      string             `json:"health_state"`
 	Lane             string             `json:"lane"`
+	DomainLane       string             `json:"domain_lane"`
 	SentToday        int64              `json:"sent_today"`
 }
 
@@ -137,6 +169,7 @@ func (q *Queries) GetCampaignFallbackSender(ctx context.Context, arg GetCampaign
 		&i.MailboxCreatedAt,
 		&i.HealthState,
 		&i.Lane,
+		&i.DomainLane,
 		&i.SentToday,
 	)
 	return i, err
@@ -190,6 +223,7 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
+       COALESCE(dl.lane, '')::text AS domain_lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -198,6 +232,36 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
 FROM campaign_senders cs
 JOIN mailboxes m ON m.id = cs.mailbox_id AND m.workspace_id = cs.workspace_id
 LEFT JOIN warmup_participants wp ON wp.mailbox_id = cs.mailbox_id AND wp.workspace_id = cs.workspace_id
+LEFT JOIN LATERAL (
+    -- The worst lane on this mailbox's ORGANIZATIONAL DOMAIN (design §7: the
+    -- campaign gate is mailbox AND domain). An aggregate read over the mailboxes
+    -- that share lower(split_part(email,'@',2)) — deliberately not a second state
+    -- machine and not a second table, because the domain has no state of its own
+    -- to keep: it is exactly the worst of its members'.
+    --
+    -- Reputation is largely assessed per domain, so a quarantined mailbox has
+    -- almost certainly damaged the standing of every sibling sending from the same
+    -- one. Expanding cold volume from a sibling spends a reputation that is
+    -- already in trouble.
+    --
+    -- ENABLED participants only, matching the lane column above: a disabled row's
+    -- lane is frozen history, not a live signal. Includes the mailbox itself,
+    -- which costs nothing and keeps "worst on the domain" true rather than
+    -- "worst among the others". Which lanes actually WITHHOLD is Go's decision
+    -- (warmup.NewLeadsWithheld) — this ranking only orders severity.
+    SELECT wp2.lane
+    FROM warmup_participants wp2
+    JOIN mailboxes m2 ON m2.id = wp2.mailbox_id AND m2.workspace_id = wp2.workspace_id
+    WHERE wp2.workspace_id = cs.workspace_id
+      AND wp2.enabled
+      AND lower(split_part(m2.email, '@', 2)) = lower(split_part(m.email, '@', 2))
+    ORDER BY CASE wp2.lane
+               WHEN 'blocked' THEN 6 WHEN 'quarantine' THEN 5 WHEN 'pending_auth' THEN 4
+               WHEN 'recovery' THEN 3 WHEN 'probation' THEN 2 WHEN 'watch' THEN 1
+               ELSE 0 END DESC,
+             wp2.mailbox_id
+    LIMIT 1
+) dl ON true
 WHERE cs.campaign_id = $1 AND cs.workspace_id = $2
 ORDER BY cs.mailbox_id
 `
@@ -223,6 +287,7 @@ type ListCampaignSenderCandidatesRow struct {
 	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
 	HealthState      string             `json:"health_state"`
 	Lane             string             `json:"lane"`
+	DomainLane       string             `json:"domain_lane"`
 	SentToday        int64              `json:"sent_today"`
 }
 
@@ -274,6 +339,7 @@ func (q *Queries) ListCampaignSenderCandidates(ctx context.Context, arg ListCamp
 			&i.MailboxCreatedAt,
 			&i.HealthState,
 			&i.Lane,
+			&i.DomainLane,
 			&i.SentToday,
 		); err != nil {
 			return nil, err
@@ -293,6 +359,7 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
        COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
+       COALESCE(dl.lane, '')::text AS domain_lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -301,6 +368,36 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
 FROM campaign_senders cs
 JOIN mailboxes m ON m.id = cs.mailbox_id AND m.workspace_id = cs.workspace_id
 LEFT JOIN warmup_participants wp ON wp.mailbox_id = cs.mailbox_id AND wp.workspace_id = cs.workspace_id
+LEFT JOIN LATERAL (
+    -- The worst lane on this mailbox's ORGANIZATIONAL DOMAIN (design §7: the
+    -- campaign gate is mailbox AND domain). An aggregate read over the mailboxes
+    -- that share lower(split_part(email,'@',2)) — deliberately not a second state
+    -- machine and not a second table, because the domain has no state of its own
+    -- to keep: it is exactly the worst of its members'.
+    --
+    -- Reputation is largely assessed per domain, so a quarantined mailbox has
+    -- almost certainly damaged the standing of every sibling sending from the same
+    -- one. Expanding cold volume from a sibling spends a reputation that is
+    -- already in trouble.
+    --
+    -- ENABLED participants only, matching the lane column above: a disabled row's
+    -- lane is frozen history, not a live signal. Includes the mailbox itself,
+    -- which costs nothing and keeps "worst on the domain" true rather than
+    -- "worst among the others". Which lanes actually WITHHOLD is Go's decision
+    -- (warmup.NewLeadsWithheld) — this ranking only orders severity.
+    SELECT wp2.lane
+    FROM warmup_participants wp2
+    JOIN mailboxes m2 ON m2.id = wp2.mailbox_id AND m2.workspace_id = wp2.workspace_id
+    WHERE wp2.workspace_id = cs.workspace_id
+      AND wp2.enabled
+      AND lower(split_part(m2.email, '@', 2)) = lower(split_part(m.email, '@', 2))
+    ORDER BY CASE wp2.lane
+               WHEN 'blocked' THEN 6 WHEN 'quarantine' THEN 5 WHEN 'pending_auth' THEN 4
+               WHEN 'recovery' THEN 3 WHEN 'probation' THEN 2 WHEN 'watch' THEN 1
+               ELSE 0 END DESC,
+             wp2.mailbox_id
+    LIMIT 1
+) dl ON true
 WHERE cs.campaign_id = $1 AND cs.workspace_id = $2
 ORDER BY m.email
 `
@@ -326,6 +423,7 @@ type ListCampaignSendersRow struct {
 	MailboxCreatedAt pgtype.Timestamptz `json:"mailbox_created_at"`
 	HealthState      string             `json:"health_state"`
 	Lane             string             `json:"lane"`
+	DomainLane       string             `json:"domain_lane"`
 	SentToday        int64              `json:"sent_today"`
 }
 
@@ -372,6 +470,7 @@ func (q *Queries) ListCampaignSenders(ctx context.Context, arg ListCampaignSende
 			&i.MailboxCreatedAt,
 			&i.HealthState,
 			&i.Lane,
+			&i.DomainLane,
 			&i.SentToday,
 		); err != nil {
 			return nil, err

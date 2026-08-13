@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,13 @@ const (
 	defaultReplyRate     float32 = 0.30
 
 	maxVolumeCeiling int32 = 200
+)
+
+// Transition history page bounds, mirroring the listWarmupTransitions contract
+// (limit: minimum 1, maximum 200, default 50).
+const (
+	defaultTransitionLimit int32 = 50
+	maxTransitionLimit     int32 = 200
 )
 
 // healthPaused is the one health_state that zeroes today's target: a paused
@@ -232,6 +240,8 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 			Enabled:           r.Enabled,
 			HealthState:       r.HealthState,
 			HealthReason:      r.HealthReason,
+			Lane:              r.Lane,
+			LaneReason:        r.LaneReason,
 			TodaySent:         r.TodaySent,
 			TodayTarget:       targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
 			PlacementSample7d: placementSample,
@@ -244,6 +254,79 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 		Active:    count >= 2,
 		Mailboxes: mailboxes,
 	}, nil
+}
+
+// ListTransitions returns one mailbox's automated decision history, newest
+// first. A mailbox that is not this workspace's is ErrNotFound (404); a mailbox
+// that is simply not (or no longer) a warmup participant is a 200 with whatever
+// history it accumulated, because the trail deliberately OUTLIVES the participant
+// row — that is how containment survives a disable/re-enable, and hiding it would
+// hide the reason a re-enabled mailbox came back quarantined.
+func (s *Service) ListTransitions(ctx context.Context, ws, mailboxID uuid.UUID, limit int32) (WarmupTransitionPageDTO, error) {
+	owned, err := s.store.MailboxInWorkspace(ctx, ws, mailboxID)
+	if err != nil {
+		return WarmupTransitionPageDTO{}, err
+	}
+	if !owned {
+		return WarmupTransitionPageDTO{}, ErrNotFound
+	}
+	rows, err := s.store.ListTransitions(ctx, ws, mailboxID, clampTransitionLimit(limit))
+	if err != nil {
+		return WarmupTransitionPageDTO{}, err
+	}
+	out := make([]WarmupTransitionDTO, len(rows))
+	for i, r := range rows {
+		out[i] = transitionDTO(r)
+	}
+	return WarmupTransitionPageDTO{Transitions: out}, nil
+}
+
+// clampTransitionLimit applies the contract's bounds (1..200, default 50). It
+// clamps rather than rejecting, because an out-of-range page size is a request
+// for "as much as you'll give me", not a caller error worth a 4xx — and the cap
+// exists to bound the server's work, which clamping achieves.
+func clampTransitionLimit(limit int32) int32 {
+	switch {
+	case limit <= 0:
+		return defaultTransitionLimit
+	case limit > maxTransitionLimit:
+		return maxTransitionLimit
+	default:
+		return limit
+	}
+}
+
+// transitionDTO maps a persisted transition onto the wire shape.
+func transitionDTO(t Transition) WarmupTransitionDTO {
+	return WarmupTransitionDTO{
+		ID:               t.ID.String(),
+		CreatedAt:        rfc3339(t.CreatedAt),
+		FromState:        t.FromState,
+		ToState:          t.ToState,
+		ReasonCode:       t.ReasonCode,
+		Reason:           t.Reason,
+		FromLane:         t.FromLane,
+		ToLane:           t.ToLane,
+		LaneReasonCode:   t.LaneReasonCode,
+		LaneReason:       t.LaneReason,
+		PlacementSamples: t.PlacementSamples,
+		SpamRate:         wireRate(t.SpamRate),
+		BounceSamples:    t.BounceSamples,
+		BounceRate:       wireRate(t.BounceRate),
+		ComplaintSamples: t.ComplaintSamples,
+		ComplaintRate:    wireRate(t.ComplaintRate),
+		InvalidTokens:    t.InvalidTokens,
+		PolicyVersion:    t.PolicyVersion,
+	}
+}
+
+// wireRate widens a stored REAL to the JSON number, rounding away the artefacts
+// of the float32 round-trip: 0.15 stored as REAL widens to 0.15000000596046448,
+// which is not a rate anyone measured. Six decimals is finer than the smallest
+// threshold the policy uses (0.0003) by two orders of magnitude, so nothing
+// meaningful is lost.
+func wireRate(r float32) float64 {
+	return math.Round(float64(r)*1e6) / 1e6
 }
 
 // participantDTO maps a persisted participant plus its computed today_sent into

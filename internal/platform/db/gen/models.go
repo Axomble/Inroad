@@ -1045,6 +1045,7 @@ type WarmupParticipant struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	Lane          string             `json:"lane"`
+	LaneReason    string             `json:"lane_reason"`
 }
 
 type WarmupReceipt struct {
@@ -1076,18 +1077,19 @@ type WarmupSend struct {
 }
 
 type WarmupSignalSnapshot struct {
-	WorkspaceID           uuid.UUID          `json:"workspace_id"`
-	MailboxID             uuid.UUID          `json:"mailbox_id"`
-	ComputedAt            pgtype.Timestamptz `json:"computed_at"`
-	PlacementInbox        int32              `json:"placement_inbox"`
-	PlacementSpam         int32              `json:"placement_spam"`
-	CampaignDelivered     int32              `json:"campaign_delivered"`
-	CampaignHardBounces   int32              `json:"campaign_hard_bounces"`
-	CampaignComplaints    int32              `json:"campaign_complaints"`
-	WarmupDelivered       int32              `json:"warmup_delivered"`
-	WarmupHardBounces     int32              `json:"warmup_hard_bounces"`
-	ObserverTokenFailures int32              `json:"observer_token_failures"`
-	NewestEvidenceAt      pgtype.Timestamptz `json:"newest_evidence_at"`
+	WorkspaceID                 uuid.UUID          `json:"workspace_id"`
+	MailboxID                   uuid.UUID          `json:"mailbox_id"`
+	ComputedAt                  pgtype.Timestamptz `json:"computed_at"`
+	PlacementInbox              int32              `json:"placement_inbox"`
+	PlacementSpam               int32              `json:"placement_spam"`
+	CampaignDelivered           int32              `json:"campaign_delivered"`
+	CampaignHardBounces         int32              `json:"campaign_hard_bounces"`
+	CampaignComplaints          int32              `json:"campaign_complaints"`
+	WarmupDelivered             int32              `json:"warmup_delivered"`
+	WarmupHardBounces           int32              `json:"warmup_hard_bounces"`
+	ObserverTokenFailures       int32              `json:"observer_token_failures"`
+	NewestEvidenceAt            pgtype.Timestamptz `json:"newest_evidence_at"`
+	CampaignAssertedHardBounces int32              `json:"campaign_asserted_hard_bounces"`
 }
 
 type WarmupStateTransition struct {
