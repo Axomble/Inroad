@@ -766,10 +766,11 @@ LEFT JOIN LATERAL (
             -- TWO arms, unioned on the send so a bounce counted by both is counted
             -- once. Neither alone is sufficient:
             --
-            -- (a) provider webhooks carry bounce_class, but NOTHING populates it
-            --     yet: POST /deliverability/events has no such field, so every row
-            --     is 'unknown' and this arm currently matches nothing. It is the
-            --     forward path, live the moment ingest classifies.
+            -- (a) provider webhooks carry bounce_class, populated at ingest from
+            --     the DeliverabilityEvent body and validated there against these
+            --     same three values. Rows written before the column existed, and
+            --     any feed that does not classify, are 'unknown' and stay out of
+            --     the numerator.
             -- (b) Inroad's OWN DSN parser already distinguishes hard bounces and
             --     stops the enrollment with stop_reason='bounced'. Without this arm
             --     the whole campaign hard-bounce guardrail is structurally zero —

@@ -101,12 +101,16 @@ type guardrailsRequest struct {
 	ComplaintPausePct *float64 `json:"complaint_pause_pct"`
 }
 
-// eventRequest is the ingest body (DeliverabilityEvent).
+// eventRequest is the ingest body (DeliverabilityEvent). bounce_class is
+// optional and a plain string rather than a pointer: the contract's default and
+// the value an absent field means are the same ('unknown'), so there is nothing
+// for a nil to say that "" does not.
 type eventRequest struct {
 	Kind            string  `json:"kind"`
 	Email           string  `json:"email"`
 	ProviderEventID string  `json:"provider_event_id"`
 	SendID          *string `json:"send_id"`
+	BounceClass     string  `json:"bounce_class"`
 }
 
 // round2 rounds a percentage to two decimals for the wire. The stored value keeps
@@ -305,7 +309,10 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	in := EventInput{Kind: req.Kind, Email: req.Email, ProviderEventID: req.ProviderEventID}
+	in := EventInput{
+		Kind: req.Kind, Email: req.Email, ProviderEventID: req.ProviderEventID,
+		BounceClass: req.BounceClass,
+	}
 	if req.SendID != nil && *req.SendID != "" {
 		id, err := uuid.Parse(*req.SendID)
 		if err != nil {

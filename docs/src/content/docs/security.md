@@ -420,7 +420,14 @@ limit / abuse control here is tracked in the Deferred list below.
     bounce feeds include soft bounces (full mailbox, greylisting), and suppressing
     an address forever on a temporary failure is not recoverable by the operator;
     hard bounces are still suppressed where they are actually classified, in the
-    inbox poller.
+    inbox poller. The caller's own `bounce_class` (`hard`/`soft`/`unknown`) is
+    validated against that enum at the service boundary — a value outside it is a
+    422, never coerced — and forced to `unknown` for a `complaint`, where the
+    concept does not apply. Only `hard` feeds warmup's hard-bounce rate; an
+    omitted or unclassified value is EXCLUDED from it rather than assumed
+    permanent, because over-counting pauses a healthy sender for 72 hours while
+    under-counting only delays a true signal
+    (`TestOnlyAHardIngestedBounceFeedsTheWarmupHardBounceRate`).
 43. **The breaker runs outside the send transaction and can only ever pause, never
     fail a delivery.** Evaluation is a separate `deliverability:evaluate` task
     enqueued AFTER `MarkStepDelivered` commits, so it reads committed state only;
