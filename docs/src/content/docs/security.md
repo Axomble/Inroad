@@ -394,7 +394,21 @@ limit / abuse control here is tracked in the Deferred list below.
     against the tenant whose credential presented it. It requires
     `deliverability:write` rather than `campaigns:write`: an external bounce
     pipeline needs to report events and nothing else, so an ingest credential does
-    not also carry the authority to mutate campaigns. The scope is deliberately
+    not also carry the authority to mutate campaigns.
+
+    That last clause is enforced, not merely intended. `bounce_class='hard'` feeds
+    warmup's reputation engine, and warmup lanes can withhold new campaign leads —
+    so an uncapped ingest arm WOULD have let this scope quarantine a mailbox and,
+    through the domain gate, withhold every sibling on its sending domain for 72h,
+    with no way for the tenant to clear it. Feed-reported bounces are therefore
+    counted separately from the ones Inroad's own DSN parser observed
+    (`warmup_signal_snapshots.campaign_asserted_hard_bounces`) and capped at
+    `watch`: they reduce volume and surface to an operator, they never contain.
+    Self-observed evidence is unaffected. This is the same posture invariant 39
+    gives the DNS advisory — an assertion Inroad did not make itself may advise but
+    may not veto (`TestAssertedBouncesAdviseButCannotContain`). Asserted evidence
+    still blocks PROMOTION, because being unable to punish is not the same as
+    vouching. The scope is deliberately
     ABSENT from `OAuthGrantableScopes` — an ingested complaint suppresses an
     address workspace-wide and can trip a campaign's breaker, so a third party who
     could forge complaints could suppress a workspace's contacts and stop its

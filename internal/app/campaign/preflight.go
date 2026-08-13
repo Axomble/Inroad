@@ -542,7 +542,11 @@ func checkWarmupHealth(in PreflightInput) PreflightCheck {
 // evidence, the other for another mailbox's — so a message that said only
 // "withheld" would send the operator to look at the wrong mailbox.
 func withheldSender(sd Sender) string {
-	if sd.Lane != nil && !warmup.LaneMayTakeNewLead(*sd.Lane) {
+	// pending_auth withholds nothing (invariant 39), so it can never be the cause
+	// here — but it fails LaneMayTakeNewLead, and without this guard a mailbox
+	// awaiting DNS whose DOMAIN was quarantined reported its own lane as the
+	// reason and pointed the operator at their DNS instead of the sibling.
+	if sd.Lane != nil && *sd.Lane != warmup.LanePendingAuth && !warmup.LaneMayTakeNewLead(*sd.Lane) {
 		return fmt.Sprintf("%s (%s)", sd.Email, *sd.Lane)
 	}
 	return fmt.Sprintf("%s (domain %s is %s)", sd.Email, domainOf(sd.Email), deref(sd.DomainLane))

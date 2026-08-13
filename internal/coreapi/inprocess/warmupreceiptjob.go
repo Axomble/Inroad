@@ -601,18 +601,19 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 			// Computed by the DB clock (see the query): a participant enabled between
 			// the refresh and this read has no snapshot row at all, so the result is
 			// NULL, which must read as no evidence rather than as zeros that look clean.
-			EvidenceFresh:         r.EvidenceFresh != nil && *r.EvidenceFresh,
-			EvidenceLapsedSince:   r.EvidenceLapsedSince.Time,
-			Inbox:                 int(r.PlacementInbox),
-			Spam:                  int(r.PlacementSpam),
-			CampaignDelivered:     int(r.CampaignDelivered),
-			CampaignHardBounces:   int(r.CampaignHardBounces),
-			CampaignComplaints:    int(r.CampaignComplaints),
-			WarmupDelivered:       int(r.WarmupDelivered),
-			WarmupHardBounces:     int(r.WarmupHardBounces),
-			ObserverTokenFailures: int(r.ObserverTokenFailures),
-			QuarantinedSince:      r.QuarantinedSince.Time,
-			PausedUntil:           r.PausedUntil.Time,
+			EvidenceFresh:               r.EvidenceFresh != nil && *r.EvidenceFresh,
+			EvidenceLapsedSince:         r.EvidenceLapsedSince.Time,
+			Inbox:                       int(r.PlacementInbox),
+			Spam:                        int(r.PlacementSpam),
+			CampaignDelivered:           int(r.CampaignDelivered),
+			CampaignHardBounces:         int(r.CampaignHardBounces),
+			CampaignAssertedHardBounces: int(r.CampaignAssertedHardBounces),
+			CampaignComplaints:          int(r.CampaignComplaints),
+			WarmupDelivered:             int(r.WarmupDelivered),
+			WarmupHardBounces:           int(r.WarmupHardBounces),
+			ObserverTokenFailures:       int(r.ObserverTokenFailures),
+			QuarantinedSince:            r.QuarantinedSince.Time,
+			PausedUntil:                 r.PausedUntil.Time,
 		}, now)
 
 		// The timed-block floor is applied INSIDE EvaluateParticipant, before the lane

@@ -31,7 +31,12 @@ func (h *Handler) Register(r chi.Router) {
 // a mailbox that is not currently a participant.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Get("/overview", h.overview)
-	r.Get("/mailboxes/{mailbox_id}/transitions", h.transitions)
+	// Scoped explicitly rather than relying on the mount. Both routes are
+	// session-only today, where a session principal implicitly holds every scope,
+	// so this changes nothing now — but the moment anyone moves this mount into
+	// the data plane, an unguarded handler becomes a real gap. The guard belongs
+	// with the route it protects.
+	r.With(auth.RequireScope(auth.ScopeMailboxesRead)).Get("/overview", h.overview)
+	r.With(auth.RequireScope(auth.ScopeMailboxesRead)).Get("/mailboxes/{mailbox_id}/transitions", h.transitions)
 	return r
 }

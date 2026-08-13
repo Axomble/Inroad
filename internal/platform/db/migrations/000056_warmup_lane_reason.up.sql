@@ -27,3 +27,18 @@ SET lane_reason = COALESCE((
         ORDER BY t.created_at DESC
         LIMIT 1
     ), '');
+
+-- Externally ASSERTED hard bounces, kept apart from the ones Inroad observed
+-- itself. Both are real evidence, but they carry different authority:
+-- sequence_enrollments rows come from our own DSN parser, whereas
+-- deliverability_events rows are whatever a holder of deliverability:write
+-- posted. That scope exists precisely so an ingest credential cannot mutate
+-- campaigns, and pooling the two arms handed it exactly that — roughly seven
+-- forged events quarantined a mailbox and withheld its whole domain for 72h,
+-- which the tenant then could not clear.
+--
+-- Split so the policy can treat asserted evidence the way invariant 39 already
+-- treats the DNS advisory: it may reduce volume, it may not contain.
+ALTER TABLE warmup_signal_snapshots
+    ADD COLUMN campaign_asserted_hard_bounces INT NOT NULL DEFAULT 0
+        CHECK (campaign_asserted_hard_bounces >= 0);

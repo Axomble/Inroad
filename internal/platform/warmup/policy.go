@@ -132,9 +132,16 @@ type Signals struct {
 	Inbox int
 	Spam  int
 
-	CampaignDelivered   int
+	CampaignDelivered int
+	// CampaignHardBounces is SELF-OBSERVED: Inroad's own DSN parser classified the
+	// bounce. It carries full authority and can contain a mailbox.
 	CampaignHardBounces int
-	CampaignComplaints  int
+	// CampaignAssertedHardBounces was posted by a holder of deliverability:write.
+	// Real evidence, but the scope exists so an ingest credential cannot mutate
+	// campaigns — so it may reduce volume and it may not contain. Same posture
+	// invariant 39 gives the DNS advisory.
+	CampaignAssertedHardBounces int
+	CampaignComplaints          int
 
 	WarmupDelivered   int
 	WarmupHardBounces int
@@ -173,8 +180,11 @@ type Decision struct {
 
 	CampaignBounceSamples int
 	CampaignBounceRate    float64
-	WarmupBounceSamples   int
-	WarmupBounceRate      float64
+	// AssertedBounceRate is the feed-reported arm, reported separately because it
+	// is capped at watch and an operator needs to see which arm spoke.
+	AssertedBounceRate  float64
+	WarmupBounceSamples int
+	WarmupBounceRate    float64
 
 	ComplaintSamples int
 	ComplaintRate    float64
@@ -210,6 +220,7 @@ func evaluateHealth(s Signals) Decision {
 
 		CampaignBounceSamples: s.CampaignDelivered,
 		CampaignBounceRate:    qualifiedRate(s.CampaignHardBounces, s.CampaignDelivered, MinBounceSamples),
+		AssertedBounceRate:    qualifiedRate(s.CampaignAssertedHardBounces, s.CampaignDelivered, MinBounceSamples),
 		WarmupBounceSamples:   s.WarmupDelivered,
 		WarmupBounceRate:      qualifiedRate(s.WarmupHardBounces, s.WarmupDelivered, MinBounceSamples),
 
@@ -227,6 +238,15 @@ func evaluateHealth(s Signals) Decision {
 
 	applyBand(d.SpamRate, spamWatchRate, spamThrottleRate, spamPauseRate, "spam", "spam placement rate", worst)
 	applyBand(d.CampaignBounceRate, bounceWatchRate, bounceThrottleRate, bouncePauseRate, "campaign_bounce", "campaign hard-bounce rate", worst)
+	// Asserted evidence is capped at watch, whatever the rate. Uncapped, roughly
+	// seven forged POSTs reached StateThrottled -> degraded -> LaneQuarantine ->
+	// the whole domain withheld for 72h, un-clearable by the tenant. Watch reduces
+	// volume and surfaces the signal to an operator without letting an ingest
+	// credential contain anything.
+	if d.AssertedBounceRate > bounceWatchRate {
+		worst(StateWatch, "campaign_bounce_asserted_watch",
+			"reported campaign hard-bounce rate above the watch threshold (reported by the deliverability feed, so it reduces volume but does not contain)")
+	}
 	applyBand(d.WarmupBounceRate, bounceWatchRate, bounceThrottleRate, bouncePauseRate, "warmup_bounce", "warmup hard-bounce rate", worst)
 	applyBand(d.ComplaintRate, complaintWatchRate, complaintThrottleRate, complaintPauseRate, "complaint", "complaint rate", worst)
 
@@ -384,6 +404,15 @@ func evaluateLane(s Signals, d Decision, now time.Time) (lane, code, reason stri
 //     instance. It is not held: an unbounded hold on an unmeasured mailbox is the
 //     failure mode the grace is supposed to bound, not create.
 func holdsForEvidenceGrace(s Signals, d Decision, now time.Time) bool {
+	// Alarming evidence is never "lack of evidence", so it is never graced —
+	// even when it is too thin to ESCALATE. A thin sample cannot punish (that
+	// needs the minimum, or false positives follow) but it must not buy a hold
+	// either: 25 hard bounces on 49 recipients reaches evaluateHealth's
+	// under-minimum branch, which rewrites health to unknown, and without this
+	// gate that mailbox kept the healthy lane and full ramp volume for 6h.
+	if promotionAlarmed(s) {
+		return false
+	}
 	if d.Health != StateUnknown {
 		return false
 	}
@@ -493,6 +522,7 @@ func LanesCompatible(sender, recipient string) bool {
 // of bad evidence.
 func promotionAlarmed(s Signals) bool {
 	return alarming(s.CampaignHardBounces, s.CampaignDelivered, bounceWatchRate) ||
+		alarming(s.CampaignAssertedHardBounces, s.CampaignDelivered, bounceWatchRate) ||
 		alarming(s.WarmupHardBounces, s.WarmupDelivered, bounceWatchRate) ||
 		alarming(s.CampaignComplaints, s.CampaignDelivered, complaintWatchRate)
 }

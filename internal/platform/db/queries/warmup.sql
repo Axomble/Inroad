@@ -556,9 +556,20 @@ SELECT EXISTS(SELECT 1 FROM candidate) AS matched,
 -- the receipt row lock and the loser re-evaluates the predicate against the
 -- winner's committed value, matching nothing.
 --
--- observed_at advances to now(): the message is in spam NOW. Filing the correction
--- at the original observation time would leave a current fact outside the freshness
--- window that decides whether the participant is measured at all.
+-- observed_at advances to now() ONLY for a receipt still inside the placement
+-- window. The message being in spam now is genuinely current information, and
+-- filing it at the original observation time would leave a current fact outside
+-- the window that decides whether the participant is measured at all.
+--
+-- But it must not RESURRECT aged evidence. FetchJunk is deliberately stateless and
+-- rescans the newest ~100 junk messages every poll, and a message moved into Junk
+-- acquires a fresh high UID there — so without this bound, anyone with IMAP access
+-- to a RECIPIENT warmup mailbox (an in-workspace colleague, a shared inbox) could
+-- bulk-move 90 days of warmup history into Junk and mint up to 100 spam samples
+-- dated now, per poll, until the SENDER paused and its whole domain was withheld.
+-- Bounding the timestamp keeps the correction honest about WHAT without letting it
+-- rewrite WHEN: an aged message still has its placement and its daily counter
+-- corrected, it simply cannot re-enter the window that gates health.
 --
 -- The daily projection is corrected on the day the message was RECEIVED, which is
 -- where RecordWarmupSenderPlacementStat put the original count, and only the inbox
@@ -582,7 +593,11 @@ WITH promoted AS (
     RETURNING r.id, r.received_at, prior.placement AS prior_placement, s.from_mailbox
 ), observation AS (
     UPDATE warmup_observations o
-    SET placement = 'spam', observed_at = now()
+    SET placement = 'spam',
+        observed_at = CASE
+            WHEN p.received_at >= now() - interval '7 days' THEN now()
+            ELSE o.observed_at
+        END
     FROM promoted p
     WHERE o.workspace_id = @workspace_id
       AND o.idempotency_key = 'receipt:' || p.id::text
@@ -779,7 +794,7 @@ ORDER BY workspace_id;
 INSERT INTO warmup_signal_snapshots (
     workspace_id, mailbox_id, computed_at,
     placement_inbox, placement_spam,
-    campaign_delivered, campaign_hard_bounces, campaign_complaints,
+    campaign_delivered, campaign_hard_bounces, campaign_asserted_hard_bounces, campaign_complaints,
     warmup_delivered, warmup_hard_bounces,
     observer_token_failures, newest_evidence_at
 )
@@ -788,6 +803,7 @@ SELECT p.workspace_id, p.mailbox_id, now(),
        COALESCE(place.spam, 0)::int,
        COALESCE(camp.delivered, 0)::int,
        COALESCE(camp.hard_bounces, 0)::int,
+       COALESCE(camp.asserted_hard_bounces, 0)::int,
        COALESCE(camp.complaints, 0)::int,
        COALESCE(warm.delivered, 0)::int,
        COALESCE(warm.hard_bounces, 0)::int,
@@ -857,21 +873,11 @@ LEFT JOIN LATERAL (
             -- which is the send that bounced. Phase 0 joined on
             -- (campaign_id, contact_id) with no sender identity, so a campaign
             -- rotating over M and N charged BOTH for one bounce.
+            -- SELF-OBSERVED only: the enrollment stopped as bounced because
+            -- Inroad's own DSN parser classified it. This arm can contain a
+            -- mailbox. Attributed through the LAST send before the enrollment
+            -- stopped, which is the send that bounced.
             SELECT count(*) FROM (
-                SELECT s.id
-                FROM deliverability_events de
-                JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
-                WHERE de.workspace_id = $1
-                  AND s.mailbox_id = p.mailbox_id
-                  AND de.kind = 'bounce'
-                  AND de.bounce_class = 'hard'
-                  AND de.received_at >= now() - interval '30 days'
-                  -- Bound the SEND to the same window and status as the denominator.
-                  -- A late DSN for an older send would otherwise count in the
-                  -- numerator against a denominator that excludes it.
-                  AND s.status = 'sent'
-                  AND s.sent_at >= now() - interval '30 days'
-                UNION
                 SELECT bounced.id
                 FROM sequence_enrollments se
                 JOIN LATERAL (
@@ -892,6 +898,23 @@ LEFT JOIN LATERAL (
                   AND bounced.mailbox_id = p.mailbox_id
             ) hard_bounced_sends
         ) AS hard_bounces,
+        (
+            -- ASSERTED by whoever holds deliverability:write. Real evidence, but
+            -- not self-observed, so the policy caps what it can do (see
+            -- assertedBand in policy.go). Same window and status bound as the
+            -- denominator: a late DSN for an older send must not count against a
+            -- denominator that excludes it.
+            SELECT count(DISTINCT s.id)
+            FROM deliverability_events de
+            JOIN sends s ON s.id = de.send_id AND s.workspace_id = de.workspace_id
+            WHERE de.workspace_id = $1
+              AND s.mailbox_id = p.mailbox_id
+              AND de.kind = 'bounce'
+              AND de.bounce_class = 'hard'
+              AND de.received_at >= now() - interval '30 days'
+              AND s.status = 'sent'
+              AND s.sent_at >= now() - interval '30 days'
+        ) AS asserted_hard_bounces,
         (
             SELECT count(DISTINCT s.id)
             FROM deliverability_events de
@@ -977,6 +1000,7 @@ ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
     placement_spam          = EXCLUDED.placement_spam,
     campaign_delivered      = EXCLUDED.campaign_delivered,
     campaign_hard_bounces   = EXCLUDED.campaign_hard_bounces,
+    campaign_asserted_hard_bounces = EXCLUDED.campaign_asserted_hard_bounces,
     campaign_complaints     = EXCLUDED.campaign_complaints,
     warmup_delivered        = EXCLUDED.warmup_delivered,
     warmup_hard_bounces     = EXCLUDED.warmup_hard_bounces,
@@ -1031,6 +1055,7 @@ SELECT p.mailbox_id,
        COALESCE(s.placement_spam, 0)::int          AS placement_spam,
        COALESCE(s.campaign_delivered, 0)::int      AS campaign_delivered,
        COALESCE(s.campaign_hard_bounces, 0)::int   AS campaign_hard_bounces,
+       COALESCE(s.campaign_asserted_hard_bounces, 0)::int AS campaign_asserted_hard_bounces,
        COALESCE(s.campaign_complaints, 0)::int     AS campaign_complaints,
        COALESCE(s.warmup_delivered, 0)::int        AS warmup_delivered,
        COALESCE(s.warmup_hard_bounces, 0)::int     AS warmup_hard_bounces,

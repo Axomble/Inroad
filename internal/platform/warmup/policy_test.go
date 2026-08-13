@@ -534,3 +534,53 @@ func TestNewLeadsWithheldGatesMailboxAndDomain(t *testing.T) {
 		})
 	}
 }
+
+// deliverability:write exists so an ingest credential cannot mutate campaigns.
+// Pooling feed-reported bounces with self-observed ones handed it exactly that:
+// ~7 forged events reached throttled -> degraded -> quarantine, which withholds
+// the mailbox's whole domain for 72h and which the tenant cannot clear. Asserted
+// evidence may reduce volume; it may not contain.
+func TestAssertedBouncesAdviseButCannotContain(t *testing.T) {
+	now := time.Now()
+	base := Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneHealthy, Inbox: 20,
+		CampaignDelivered: 200,
+	}
+
+	asserted := base
+	asserted.CampaignAssertedHardBounces = 60 // 30% reported — far past the pause band
+	d := EvaluateParticipant(asserted, now)
+	if stateRank(d.Health) > stateRank(StateWatch) {
+		t.Fatalf("health = %q (%s): feed-reported evidence must not exceed watch", d.Health, d.HealthReasonCode)
+	}
+	if LaneMaySend(d.Lane) == false || d.Lane == LaneQuarantine {
+		t.Fatalf("lane = %q: an ingest credential must not be able to contain a mailbox", d.Lane)
+	}
+
+	// The identical rate, self-observed, still contains — the cap is about the
+	// evidence's authority, not about tolerating bounces.
+	observed := base
+	observed.CampaignHardBounces = 60
+	d = EvaluateParticipant(observed, now)
+	if stateRank(d.Health) < stateRank(StateThrottled) {
+		t.Fatalf("health = %q: self-observed bounces at the same rate must still contain", d.Health)
+	}
+	if d.Lane != LaneQuarantine {
+		t.Fatalf("lane = %q, want quarantine for self-observed evidence", d.Lane)
+	}
+}
+
+// Advisory-for-containment is not the same as vouching: a mailbox the feed says is
+// bouncing must not be promoted into the healthy pool just because the evidence
+// cannot punish it.
+func TestAssertedBouncesStillBlockPromotion(t *testing.T) {
+	d := EvaluateParticipant(Signals{
+		AuthPassing: true, EvidenceFresh: true,
+		CurrentHealth: StateHealthy, CurrentLane: LaneProbation, Inbox: 20,
+		CampaignDelivered: 200, CampaignAssertedHardBounces: 60,
+	}, time.Now())
+	if d.Lane == LaneHealthy {
+		t.Fatal("a mailbox the feed reports as heavily bouncing must not join the healthy pool")
+	}
+}

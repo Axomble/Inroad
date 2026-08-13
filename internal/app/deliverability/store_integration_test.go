@@ -1358,7 +1358,7 @@ func (f *fixture) warmupCampaignHardBounces(t *testing.T, ctx context.Context, m
 	}
 	var n int32
 	if err := f.pool.QueryRow(ctx,
-		`SELECT campaign_hard_bounces FROM warmup_signal_snapshots
+		`SELECT campaign_asserted_hard_bounces FROM warmup_signal_snapshots
 		  WHERE workspace_id = $1 AND mailbox_id = $2`, f.ws, mailbox).Scan(&n); err != nil {
 		t.Fatalf("read snapshot: %v", err)
 	}
@@ -1373,6 +1373,13 @@ func (f *fixture) warmupCampaignHardBounces(t *testing.T, ctx context.Context, m
 // Soft and unclassified stay OUT of the numerator deliberately: counting a
 // greylist or a full mailbox as permanent pauses a healthy sender for 72 hours,
 // while under-counting only delays a true signal.
+//
+// The arm read here is campaign_ASSERTED_hard_bounces, which is where a
+// feed-reported bounce belongs: it is evidence Inroad did not observe itself, so
+// the policy caps it at watch and it can never contain a mailbox (invariant 40,
+// TestAssertedBouncesAdviseButCannotContain). campaign_hard_bounces holds only the
+// self-observed arm. What this test proves is that the classification survives
+// ingest and reaches the snapshot — not that it can quarantine anything.
 func TestOnlyAHardIngestedBounceFeedsTheWarmupHardBounceRate(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, ctx)
