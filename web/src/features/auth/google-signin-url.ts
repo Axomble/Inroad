@@ -1,3 +1,4 @@
+import { config } from '@/lib/config'
 import { safeReturnTo } from './return-to'
 
 /**
@@ -31,7 +32,7 @@ import { safeReturnTo } from './return-to'
  * critical path to save a redirect that already lands somewhere sensible.
  */
 export function googleSigninUrl(returnTo?: string): string {
-  const apiBase = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
+  const apiBase = config.apiBaseUrl
   const url = new URL(`${apiBase.replace(/\/$/, '')}/auth/oauth/google/start`, window.location.origin)
   const resume = safeReturnTo(returnTo)
   if (resume) url.searchParams.set('return_to', resume)

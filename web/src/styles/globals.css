@@ -299,9 +299,39 @@ body {
   padding: 0.75rem;
 }
 
+/* Assistant panel motion.
+ *
+ * Lives here rather than as Tailwind utilities on the element for two reasons:
+ * the reduced-motion block below can switch it off, and there must be no
+ * transition on `width`. The panel's width is dragged by a pointer, and easing
+ * it made the edge trail the cursor by ~60px and keep animating after release.
+ *
+ * Below `sm` the panel is a fixed overlay that slides in on `translate` (which
+ * is what Tailwind's translate-x-* utilities set). Above it, the panel is a flex
+ * item whose width pushes the workspace aside; that width change is deliberately
+ * instant, and `.agent-panel-body` supplies the perceived motion instead. */
+.agent-panel {
+  transition: translate 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes agent-panel-in {
+  from { opacity: 0; translate: 8px 0; }
+  to   { opacity: 1; translate: 0 0; }
+}
+
+.agent-panel-body {
+  animation: agent-panel-in 200ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .agent-pulse,
   .agent-shimmer {
+    animation: none;
+  }
+  .agent-panel {
+    transition: none;
+  }
+  .agent-panel-body {
     animation: none;
   }
 }

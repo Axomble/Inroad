@@ -1,6 +1,8 @@
 import { Link } from '@tanstack/react-router'
 import { Building2, ChartNoAxesColumn, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { config } from '@/lib/config'
+import { Button } from '@/components/ui/button'
 import { PulseCard } from './pulse-card'
 import { SidebarFooter } from './sidebar-footer'
 import { useNavCounts } from './use-nav-counts'
@@ -20,11 +22,15 @@ import { useNavCounts } from './use-nav-counts'
  * Counts come from `useNavCounts` and are all real; a nav row with nothing
  * truthful to show simply has no count (see that hook for why Contacts doesn't).
  */
-interface NavItem {
-  label: string
-  to: string
-  icon: LucideIcon
-}
+/**
+ * A row is either an in-app route (`to`) or an external link (`href`, opens a
+ * new tab) — never both. Docs are the only external row today: the manuals are
+ * the Astro/Starlight site under docs/, not an SPA page.
+ */
+type NavItem = { label: string; icon: LucideIcon } & (
+  | { to: string; href?: never }
+  | { href: string; to?: never }
+)
 
 interface NavGroup {
   /** Omitted for the first group so the nav doesn't open with a label. */
@@ -85,7 +91,7 @@ const NAV: NavGroup[] = [
       { label: 'Settings', to: '/app/settings', icon: Settings },
       // Stays top-level: it documents the API and MCP server for people
       // integrating with Inroad, which is not workspace administration.
-      { label: 'Docs & MCP', to: '/app/docs', icon: BookOpen },
+      { label: 'Docs & MCP', href: config.docsUrl, icon: BookOpen },
     ],
   },
 ]
@@ -94,15 +100,12 @@ const noop = () => undefined
 
 function NavRow({ item, count }: { item: NavItem; count?: number }) {
   const Icon = item.icon
-  return (
-    <Link
-      to={item.to}
-      className={cn(
-        'group relative flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-chrome-muted transition-colors',
-        'hover:bg-chrome-hover hover:text-chrome-text',
-      )}
-      activeProps={{ className: 'bg-chrome-hover font-medium text-chrome-text shadow-[inset_0_0_0_1px_var(--chrome-border)] before:absolute before:left-0 before:h-4 before:w-0.5 before:rounded-full before:bg-primary' }}
-    >
+  const rowClass = cn(
+    'group relative flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-chrome-muted transition-colors',
+    'hover:bg-chrome-hover hover:text-chrome-text',
+  )
+  const content = (
+    <>
       <Icon className="size-4 shrink-0" strokeWidth={1.75} aria-hidden="true" />
       <span className="truncate">{item.label}</span>
       {count != null && (
@@ -110,6 +113,25 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
         // demanding action.
         <span className="ml-auto rounded-md bg-chrome-surface px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-chrome-muted">{count}</span>
       )}
+    </>
+  )
+
+  // External rows (docs) open in a new tab and can never be "active".
+  if (item.href !== undefined) {
+    return (
+      <a href={item.href} target="_blank" rel="noreferrer" className={rowClass}>
+        {content}
+      </a>
+    )
+  }
+
+  return (
+    <Link
+      to={item.to}
+      className={rowClass}
+      activeProps={{ className: 'bg-chrome-hover font-medium text-chrome-text shadow-[inset_0_0_0_1px_var(--chrome-border)] before:absolute before:left-0 before:h-4 before:w-0.5 before:rounded-full before:bg-primary' }}
+    >
+      {content}
     </Link>
   )
 }
@@ -120,15 +142,19 @@ export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void })
   return (
     <div className="flex h-full w-64 flex-col overflow-y-auto bg-chrome px-3 pb-3 pt-4">
       <PulseCard />
-      <button
-        type="button"
+      {/* Inverse chrome, like the overview banner: near-black on the light
+          theme, near-white on the dark one (chrome-text/chrome swap roles).
+          Ghost variant as the base — the inverse fill replaces the tactile
+          physics on purpose, so this reads as chrome, not as a form control. */}
+      <Button
+        variant="ghost"
         onClick={onOpenAgent}
-        className="mb-4 flex h-9 items-center gap-2.5 rounded-lg border border-primary/25 bg-primary/10 px-2.5 text-[13px] font-medium text-chrome-text transition-colors hover:border-primary/45 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        className="mb-4 h-9 w-full justify-start gap-2.5 rounded-lg bg-chrome-text px-2.5 text-[13px] font-medium text-chrome hover:bg-chrome-text/90 hover:text-chrome focus-visible:ring-primary"
       >
         <Sparkles className="size-4 shrink-0 text-primary" strokeWidth={1.75} aria-hidden="true" />
-        <span>Ask Inroad</span>
-        <kbd className="ml-auto rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">@</kbd>
-      </button>
+        <span>Agent</span>
+        <kbd className="ml-auto rounded border border-chrome/30 px-1.5 py-0.5 font-mono text-[9px] text-chrome/70">@</kbd>
+      </Button>
       <nav aria-label="Primary" className="flex flex-col gap-5">
         {NAV.map((group, index) => {
           return (
@@ -139,7 +165,12 @@ export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void })
                 </div>
               )}
               {group.items.map((item) => (
-                <NavRow key={item.to} item={item} count={counts[item.to]} />
+                // Counts are keyed by route; external rows (href) have none.
+                <NavRow
+                  key={item.to ?? item.href}
+                  item={item}
+                  count={item.to !== undefined ? counts[item.to] : undefined}
+                />
               ))}
             </div>
           )

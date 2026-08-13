@@ -156,7 +156,16 @@ export function AgentPanel() {
   const panelRef = useRef<HTMLElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const resizeRef = useRef({ startX: 0, startWidth: width, nextWidth: width })
+  // `pointerId` is the drag's own record of being active, rather than
+  // `hasPointerCapture`: a cancelled gesture has already lost capture by the
+  // time pointercancel fires, so gating on capture would drop the commit and
+  // leave the inline width disagreeing with the store.
+  const resizeRef = useRef<{
+    pointerId: number | null
+    startX: number
+    startWidth: number
+    nextWidth: number
+  }>({ pointerId: null, startX: 0, startWidth: width, nextWidth: width })
   const promptCounterRef = useRef(0)
   const wasOpenRef = useRef(open)
   const [suggestedPrompt, setSuggestedPrompt] = useState<SuggestedPrompt | null>(null)
@@ -280,6 +289,16 @@ export function AgentPanel() {
     dispatch(setAgentPanelWidth(clamped))
   }
 
+  /** Settles a drag. Shared by pointerup and pointercancel — both end it. */
+  const endResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (resizeRef.current.pointerId !== event.pointerId) return
+    resizeRef.current.pointerId = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    dispatch(setAgentPanelWidth(resizeRef.current.nextWidth))
+  }
+
   const panelStyle = {
     '--agent-panel-width': `${width}px`,
   } as React.CSSProperties & { '--agent-panel-width': string }
@@ -301,7 +320,15 @@ export function AgentPanel() {
         inert={!open}
         style={panelStyle}
         className={cn(
-          'fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-border-strong bg-background shadow-2xl transition-transform sm:static sm:z-auto sm:w-[var(--agent-panel-width)] sm:shrink-0 sm:shadow-none sm:transition-[width]',
+          // `sm:relative`, not `sm:static`: the resize handle is absolutely
+          // positioned against this box. Under `static` its only containing
+          // block was the `translate-x-0` above — a mobile slide-in utility —
+          // and without that the handle jumps to the viewport's left edge.
+          //
+          // Motion lives in `.agent-panel` (globals.css) so reduced-motion can
+          // switch it off. Deliberately no width transition: it eased every
+          // pointer frame during a drag, leaving the edge trailing the cursor.
+          'agent-panel fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-border-strong bg-background shadow-2xl sm:relative sm:z-auto sm:w-[var(--agent-panel-width)] sm:shrink-0 sm:shadow-none',
           open ? 'translate-x-0' : 'translate-x-full sm:hidden',
         )}
       >
@@ -314,7 +341,12 @@ export function AgentPanel() {
           aria-valuemin={minPanelWidth}
           aria-valuemax={maxPanelWidth}
           aria-valuetext={`${width} pixels wide`}
-          className="absolute inset-y-0 -left-1 hidden w-2 cursor-col-resize touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:block"
+          // `z-10` is load-bearing: the strip deliberately overlaps the panel's
+          // own content by 4px, and `.agent-panel-body` holds a translate (so it
+          // paints as a stacking context). Without an explicit z-index the two
+          // tie and DOM order hands the inner half of the grab area to the
+          // content, so a drag started there never reaches this element.
+          className="group/resize absolute inset-y-0 -left-1 z-10 hidden w-2 cursor-col-resize touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:block"
           onKeyDown={(event) => {
             const delta =
               event.key === 'ArrowLeft' ? widthStep : event.key === 'ArrowRight' ? -widthStep : 0
@@ -332,86 +364,103 @@ export function AgentPanel() {
             }
           }}
           onPointerDown={(event) => {
-            resizeRef.current = { startX: event.clientX, startWidth: width, nextWidth: width }
+            resizeRef.current = {
+              pointerId: event.pointerId,
+              startX: event.clientX,
+              startWidth: width,
+              nextWidth: width,
+            }
             event.currentTarget.setPointerCapture(event.pointerId)
           }}
           onPointerMove={(event) => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+            if (resizeRef.current.pointerId !== event.pointerId) return
             const nextWidth = Math.max(
               minPanelWidth,
               Math.min(maxPanelWidth, resizeRef.current.startWidth + resizeRef.current.startX - event.clientX),
             )
             resizeRef.current.nextWidth = nextWidth
+            // Written straight to the node, not through state: the panel must
+            // land on the cursor this frame, and one redux action per pointer
+            // frame would also persist ~60 widths a second.
             panelRef.current?.style.setProperty('--agent-panel-width', `${nextWidth}px`)
           }}
-          onPointerUp={(event) => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
-            event.currentTarget.releasePointerCapture(event.pointerId)
-            dispatch(setAgentPanelWidth(resizeRef.current.nextWidth))
-          }}
-        />
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+        >
+          {/* The hit area stays 8px; this is the 2px line the eye can find. */}
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-transparent transition-colors group-hover/resize:bg-primary/60 group-active/resize:bg-primary"
+          />
+        </div>
 
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-2.5">
-          {page === 'history' && (
-            <Button size="icon-sm" variant="ghost" aria-label="Back to conversation" onClick={() => dispatch(setAgentPanelPage('chat'))}>
-              <ArrowLeft className="size-4" />
-            </Button>
-          )}
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[12px] font-semibold text-foreground">
-              {page === 'history' ? 'Conversation history' : (threadQuery.data?.title || 'Inroad assistant')}
-            </p>
-            {page === 'chat' && (
-              <p className="font-mono text-[8px] uppercase tracking-[0.14em] text-faint">
-                {threadQuery.data?.active_run_id ? 'Working' : 'Ready'}
-              </p>
+        {/* The contents, not the panel box, carry the entrance motion. The box
+            owns the width that pushes the workspace aside, and animating that
+            would reflow the whole page every frame — the defect this change
+            removes from the drag. Opacity and translate here are composited. */}
+        <div className="agent-panel-body flex min-h-0 flex-1 flex-col">
+          <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-2.5">
+            {page === 'history' && (
+              <Button size="icon-sm" variant="ghost" aria-label="Back to conversation" onClick={() => dispatch(setAgentPanelPage('chat'))}>
+                <ArrowLeft className="size-4" />
+              </Button>
             )}
-          </div>
-          {page === 'chat' && (
-            <>
-              <Button size="icon-sm" variant="ghost" aria-label="Conversation history" onClick={() => dispatch(setAgentPanelPage('history'))}>
-                <History className="size-4" />
-              </Button>
-              <Button size="icon-sm" variant="ghost" aria-label="New conversation" onClick={newConversation}>
-                <MessageSquarePlus className="size-4" />
-              </Button>
-            </>
-          )}
-          <Button ref={closeButtonRef} size="icon-sm" variant="ghost" aria-label="Close assistant" onClick={() => dispatch(setAgentPanelOpen(false))}>
-            <X className="size-4" />
-          </Button>
-        </header>
-
-        {page === 'history' ? (
-          <AgentHistory activeThreadId={threadId} onSelect={selectThread} onNew={newConversation} />
-        ) : (
-          <>
-            <StreamAnnouncer />
-            <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-              {!threadId && messageCount === 0 ? (
-                <EmptyConversation onPrompt={requestPrompt} />
-              ) : (
-                <MessageScroller
-                  loading={threadQuery.isLoading}
-                  approvalsByCall={approvalsByCall}
-                  scrollRef={scrollRef}
-                />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[12px] font-semibold text-foreground">
+                {page === 'history' ? 'Conversation history' : (threadQuery.data?.title || 'Inroad assistant')}
+              </p>
+              {page === 'chat' && (
+                <p className="font-mono text-[8px] uppercase tracking-[0.14em] text-faint">
+                  {threadQuery.data?.active_run_id ? 'Working' : 'Ready'}
+                </p>
               )}
             </div>
-            {streamError && (
-              <AgentAlert
-                message={streamError}
-                onDismiss={() => dispatch(setAgentStreamStatus('idle'))}
-              />
+            {page === 'chat' && (
+              <>
+                <Button size="icon-sm" variant="ghost" aria-label="Conversation history" onClick={() => dispatch(setAgentPanelPage('history'))}>
+                  <History className="size-4" />
+                </Button>
+                <Button size="icon-sm" variant="ghost" aria-label="New conversation" onClick={newConversation}>
+                  <MessageSquarePlus className="size-4" />
+                </Button>
+              </>
             )}
-            <AgentComposer
-              threadId={threadId}
-              activeRunId={threadQuery.data?.active_run_id ?? null}
-              onSelectThread={selectThread}
-              suggestedPrompt={suggestedPrompt}
-            />
-          </>
-        )}
+            <Button ref={closeButtonRef} size="icon-sm" variant="ghost" aria-label="Close assistant" onClick={() => dispatch(setAgentPanelOpen(false))}>
+              <X className="size-4" />
+            </Button>
+          </header>
+
+          {page === 'history' ? (
+            <AgentHistory activeThreadId={threadId} onSelect={selectThread} onNew={newConversation} />
+          ) : (
+            <>
+              <StreamAnnouncer />
+              <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                {!threadId && messageCount === 0 ? (
+                  <EmptyConversation onPrompt={requestPrompt} />
+                ) : (
+                  <MessageScroller
+                    loading={threadQuery.isLoading}
+                    approvalsByCall={approvalsByCall}
+                    scrollRef={scrollRef}
+                  />
+                )}
+              </div>
+              {streamError && (
+                <AgentAlert
+                  message={streamError}
+                  onDismiss={() => dispatch(setAgentStreamStatus('idle'))}
+                />
+              )}
+              <AgentComposer
+                threadId={threadId}
+                activeRunId={threadQuery.data?.active_run_id ?? null}
+                onSelectThread={selectThread}
+                suggestedPrompt={suggestedPrompt}
+              />
+            </>
+          )}
+        </div>
       </aside>
     </>
   )

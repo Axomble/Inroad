@@ -13,6 +13,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { ScrollDialogContent, ScrollDialogBody } from '@/components/shared/scroll-dialog'
 import { Page, PageTopbar, PageBody, SectionBar, EmptyBlock } from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
 import type { ApiKey } from '@/store/api'
@@ -287,7 +288,9 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
         if (!next && !revealed && !isLoading) onClose()
       }}
     >
-      <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+      {/* Wide enough for the two-column scope grid; header and actions stay
+          pinned while the form body scrolls. */}
+      <ScrollDialogContent className="sm:max-w-2xl">
         {revealed ? (
           <TokenReveal token={token} onDone={onClose} />
         ) : (
@@ -300,7 +303,7 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
               </AlertDialogDescription>
             </AlertDialogHeader>
 
-            <div className="flex flex-col gap-4">
+            <ScrollDialogBody>
               <div>
                 <Label htmlFor={nameId}>Name</Label>
                 <Input
@@ -403,7 +406,7 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
                   {error}
                 </p>
               )}
-            </div>
+            </ScrollDialogBody>
 
             <AlertDialogFooter>
               <Button variant="ghost" size="sm" onClick={onClose} disabled={isLoading}>
@@ -416,7 +419,7 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
             </AlertDialogFooter>
           </>
         )}
-      </AlertDialogContent>
+      </ScrollDialogContent>
     </AlertDialog>
   )
 }

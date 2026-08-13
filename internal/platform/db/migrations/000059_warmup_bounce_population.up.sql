@@ -1,3 +1,5 @@
+-- RENUMBERED from 000058 to sit above the renumbered pair-leases migration.
+--
 -- Name which bounce population a transition's bounce_samples/bounce_rate describe.
 --
 -- The engine keeps campaign and warmup hard bounces apart deliberately (000055):
@@ -15,7 +17,7 @@
 -- takes the population from the same call that picks the pair
 -- (warmup.Decision.DrivingBouncePair).
 ALTER TABLE warmup_state_transitions
-    ADD COLUMN bounce_population TEXT;
+    ADD COLUMN IF NOT EXISTS bounce_population TEXT;
 
 ALTER TABLE warmup_state_transitions
     ADD CONSTRAINT warmup_state_transitions_bounce_population_check

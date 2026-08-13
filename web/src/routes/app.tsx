@@ -2,6 +2,7 @@ import { createFileRoute, redirect, Outlet } from '@tanstack/react-router'
 import { runAuthBootstrap } from '@/features/auth/use-auth-bootstrap'
 import { AppShell } from '@/components/layout/app-shell'
 import { AuthHeader } from '@/features/auth/auth-header'
+import { WorkspaceSwitcher } from '@/features/auth/workspace-switcher'
 import { useAuthGuard } from '@/features/auth/use-auth-guard'
 import { UnverifiedBanner } from '@/features/auth/unverified-banner'
 import { WorkspaceOnboardingOverlay } from '@/features/auth/workspace-onboarding-overlay'
@@ -53,7 +54,16 @@ function AppLayout() {
           can take its own space above the shell without either overflowing
           or fighting AppShell's internal flex layout). */}
       <div className="min-h-0 flex-1">
-        <AppShell rightSlot={<AuthHeader />}>
+        <AppShell
+          leftSlot={
+            // Workspace identity sits beside the product mark, separated by a
+            // hairline; utilities (docs, assistant, theme, account) keep right.
+            <div className="hidden items-center border-l border-chrome-border pl-3 sm:flex">
+              <WorkspaceSwitcher />
+            </div>
+          }
+          rightSlot={<AuthHeader />}
+        >
           <Outlet />
         </AppShell>
       </div>

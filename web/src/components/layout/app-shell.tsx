@@ -33,9 +33,11 @@ const AgentPanel = lazy(() =>
  */
 export function AppShell({
   children,
+  leftSlot,
   rightSlot,
 }: {
   children: React.ReactNode
+  leftSlot?: React.ReactNode
   rightSlot?: React.ReactNode
 }) {
   const [navOpen, setNavOpen] = useState(false)
@@ -104,6 +106,7 @@ export function AppShell({
           onOpenPalette={() => setPaletteOpen(true)}
           agentOpen={agentOpen}
           onToggleAgent={toggleAgent}
+          leftSlot={leftSlot}
           rightSlot={rightSlot}
         />
 

@@ -240,16 +240,22 @@ export function MailboxesPage() {
         />
       </StatStrip>
 
-      {showConnect && (
-        <ConnectMailboxForm
-          onDone={({ warmupFailed }) => {
-            setShowConnect(false)
-            setWarmupNotEnabled(warmupFailed)
-          }}
-          onCancel={() => setShowConnect(false)}
-        />
-      )}
-
+      {/* While the SMTP form is open it IS the page body — one scroll region,
+          nothing competing below. The form is taller than a viewport, and as a
+          fixed sibling above the list its submit button was unreachable. The
+          list returns on connect or cancel. */}
+      {showConnect ? (
+        <PageBody>
+          <ConnectMailboxForm
+            onDone={({ warmupFailed }) => {
+              setShowConnect(false)
+              setWarmupNotEnabled(warmupFailed)
+            }}
+            onCancel={() => setShowConnect(false)}
+          />
+        </PageBody>
+      ) : (
+        <>
       {/* A failed domains load can't be told on the group headings themselves,
           so it says so once here rather than reading as "nothing to fix". */}
       {!isEmpty && domainsError && <DomainAuthNotice error={domainsError} />}
@@ -286,22 +292,20 @@ export function MailboxesPage() {
         </PageBody>
       ) : isEmpty ? (
         <PageBody>
-          {!showConnect && (
-            <EmptyBlock
-              title="No mailboxes connected"
-              description="Connect a Gmail or Microsoft 365 account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
-              action={
-                <ConnectMenu
-                  startingGmail={startingGmail}
-                  startingMicrosoft={startingMicrosoft}
-                  onGmail={onConnectGmail}
-                  onMicrosoft={onConnectMicrosoft}
-                  onSmtp={() => setShowConnect(true)}
-                  triggerLabel="Connect your first mailbox"
-                />
-              }
-            />
-          )}
+          <EmptyBlock
+            title="No mailboxes connected"
+            description="Connect a Gmail or Microsoft 365 account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
+            action={
+              <ConnectMenu
+                startingGmail={startingGmail}
+                startingMicrosoft={startingMicrosoft}
+                onGmail={onConnectGmail}
+                onMicrosoft={onConnectMicrosoft}
+                onSmtp={() => setShowConnect(true)}
+                triggerLabel="Connect your first mailbox"
+              />
+            }
+          />
         </PageBody>
       ) : (
         <>
@@ -353,6 +357,8 @@ export function MailboxesPage() {
 
           {/* No `↵ open` — mailbox rows have no detail view to open. */}
           <HintBar hints={LIST_NAV_HINTS_NO_OPEN} />
+        </>
+      )}
         </>
       )}
     </Page>

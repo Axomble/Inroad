@@ -4,9 +4,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { Notice } from '@/components/shared/notice-banner'
+import { ScrollDialogContent, ScrollDialogBody } from '@/components/shared/scroll-dialog'
 import {
   AlertDialog,
-  AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
@@ -112,7 +112,7 @@ export function DiscoverModelsDialog({
 
   return (
     <AlertDialog open onOpenChange={(next) => !next && !saving && onClose()}>
-      <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+      <ScrollDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Models on {providerTitle(provider)}</AlertDialogTitle>
           <AlertDialogDescription>
@@ -122,6 +122,7 @@ export function DiscoverModelsDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
 
+        <ScrollDialogBody>
         {discovery.isLoading || discovery.isUninitialized ? (
           <div className="flex flex-col gap-2" aria-label="Fetching models">
             {[0, 1, 2, 3].map((i) => (
@@ -217,6 +218,7 @@ export function DiscoverModelsDialog({
             </div>
           </div>
         )}
+        </ScrollDialogBody>
 
         <AlertDialogFooter>
           <Button variant="ghost" size="sm" onClick={() => onManualAdd()} disabled={saving}>
@@ -232,7 +234,7 @@ export function DiscoverModelsDialog({
             </Button>
           )}
         </AlertDialogFooter>
-      </AlertDialogContent>
+      </ScrollDialogContent>
     </AlertDialog>
   )
 }

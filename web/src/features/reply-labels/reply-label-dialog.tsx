@@ -9,12 +9,12 @@ import { Label } from '@/components/ui/label'
 import type { Notice } from '@/components/shared/notice-banner'
 import {
   AlertDialog,
-  AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { ScrollDialogContent, ScrollDialogBody } from '@/components/shared/scroll-dialog'
 import { useCreateReplyLabelMutation, useUpdateReplyLabelMutation, type ReplyLabel, type ReplyLabelInput } from './api'
 import { LABEL_FLAGS } from './label-flags'
 import { replyLabelErrorMessage } from './error-messages'
@@ -142,7 +142,7 @@ export function ReplyLabelDialog({
 
   return (
     <AlertDialog open onOpenChange={(next) => !next && !isSaving && onClose()}>
-      <AlertDialogContent className="max-h-[85vh] overflow-y-auto">
+      <ScrollDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>{initial ? `Edit “${initial.label}”` : 'New reply label'}</AlertDialogTitle>
           <AlertDialogDescription>
@@ -152,13 +152,16 @@ export function ReplyLabelDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
 
+        {/* The form owns both the scrolling fields and the pinned footer, so
+            Enter-to-submit keeps working while only the fields scroll. */}
         <form
-          className="flex flex-col gap-4"
+          className="flex min-h-0 flex-1 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault()
             void submit()
           }}
         >
+          <ScrollDialogBody>
           <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
             <div>
               <Label htmlFor={nameId}>Name</Label>
@@ -250,6 +253,7 @@ export function ReplyLabelDialog({
               {errors.root.message}
             </p>
           )}
+          </ScrollDialogBody>
 
           <AlertDialogFooter>
             <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={isSaving}>
@@ -261,7 +265,7 @@ export function ReplyLabelDialog({
             </Button>
           </AlertDialogFooter>
         </form>
-      </AlertDialogContent>
+      </ScrollDialogContent>
     </AlertDialog>
   )
 }

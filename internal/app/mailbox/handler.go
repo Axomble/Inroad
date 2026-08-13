@@ -285,7 +285,7 @@ func (h *Handler) oauthCallback(
 ) {
 	q := r.URL.Query()
 	redirect := func(query string) {
-		http.Redirect(w, r, h.appBaseURL+"/mailboxes?"+query+"&provider="+provider, http.StatusFound)
+		http.Redirect(w, r, h.appBaseURL+"/app/mailboxes?"+query+"&provider="+provider, http.StatusFound)
 	}
 	if q.Get("error") != "" || q.Get("code") == "" {
 		redirect("oauth_error=denied")

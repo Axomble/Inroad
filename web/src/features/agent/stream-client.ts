@@ -1,3 +1,4 @@
+import { config } from '@/lib/config'
 import type { AgentStreamEvent } from './stream-state'
 
 export interface SSEFrame {
@@ -22,7 +23,7 @@ export class AgentStreamHttpError extends Error {
 }
 
 function apiURL(path: string): string {
-  const base = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
+  const base = config.apiBaseUrl
   const normalized = base.endsWith('/') ? base.slice(0, -1) : base
   return new URL(`${normalized}${path}`, window.location.origin).toString()
 }
