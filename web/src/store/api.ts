@@ -2820,6 +2820,9 @@ export type WarmupTransition = {
   placement_samples: number;
   /** Confidence-adjusted, not the raw observed fraction: a 95% lower bound, so a thin sample reads lower than its point estimate. 0 when the minimum sample was not met. */
   spam_rate: number;
+  /** WHICH bounce population the samples and rate below describe. The engine keeps campaign and warmup hard bounces apart deliberately — pooling them let synthetic warmup traffic dilute a real campaign bounce rate below its own threshold — and the transition records whichever arm actually drove the decision, with its own denominator. Without this the row can read "campaign hard bounces crossed the pause threshold" beside a figure labelled only "hard bounces", or report a warmup-driven pause next to a campaign denominator of zero. Null on rows written before the split. */
+  bounce_population?: ("campaign" | "warmup") | null;
+  /** Denominator of the population named by bounce_population. */
   bounce_samples: number;
   /** Lower-bounded, like spam_rate. */
   bounce_rate: number;
