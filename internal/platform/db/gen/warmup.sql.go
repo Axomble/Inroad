@@ -466,6 +466,9 @@ func (q *Queries) GetWarmupDailyStats(ctx context.Context, arg GetWarmupDailySta
 
 const getWarmupEngageBundle = `-- name: GetWarmupEngageBundle :one
 SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
+       -- Same reasoning as GetWarmupSenderBundle: the reply is a NEW warmup send
+       -- and needs its own lease, minted on the database clock.
+       (now() + make_interval(secs => $3::int))::timestamptz AS lease_expires_at,
        r.source_folder, r.message_id,
        m.provider, m.imap_host, m.imap_port, m.imap_username,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,
@@ -477,8 +480,9 @@ WHERE r.id = $1 AND r.workspace_id = $2
 `
 
 type GetWarmupEngageBundleParams struct {
-	ID          uuid.UUID `json:"id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	LeaseSeconds int32     `json:"lease_seconds"`
 }
 
 type GetWarmupEngageBundleRow struct {
@@ -486,6 +490,7 @@ type GetWarmupEngageBundleRow struct {
 	WarmupSendID     pgtype.UUID        `json:"warmup_send_id"`
 	Placement        string             `json:"placement"`
 	ReceivedAt       pgtype.Timestamptz `json:"received_at"`
+	LeaseExpiresAt   pgtype.Timestamptz `json:"lease_expires_at"`
 	SourceFolder     string             `json:"source_folder"`
 	MessageID        string             `json:"message_id"`
 	Provider         string             `json:"provider"`
@@ -511,13 +516,14 @@ type GetWarmupEngageBundleRow struct {
 // (belt-and-braces). warmup_send_id is carried through so the caller can derive the
 // reply's receipt token. A foreign / vanished receipt yields pgx.ErrNoRows.
 func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngageBundleParams) (GetWarmupEngageBundleRow, error) {
-	row := q.db.QueryRow(ctx, getWarmupEngageBundle, arg.ID, arg.WorkspaceID)
+	row := q.db.QueryRow(ctx, getWarmupEngageBundle, arg.ID, arg.WorkspaceID, arg.LeaseSeconds)
 	var i GetWarmupEngageBundleRow
 	err := row.Scan(
 		&i.RecipientMailbox,
 		&i.WarmupSendID,
 		&i.Placement,
 		&i.ReceivedAt,
+		&i.LeaseExpiresAt,
 		&i.SourceFolder,
 		&i.MessageID,
 		&i.Provider,
@@ -703,6 +709,11 @@ const getWarmupSenderBundle = `-- name: GetWarmupSenderBundle :one
 
 SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
        p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
+       -- The lease expiry is minted HERE, from the database clock, because
+       -- ClaimWarmupSend compares it against the database clock. Computing it in
+       -- Go would put app/DB skew on both ends of a security check — the exact
+       -- mistake that made the Phase 1 freshness rule silently always-true.
+       (now() + make_interval(secs => $3::int))::timestamptz AS lease_expires_at,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext
 FROM warmup_participants p
@@ -711,8 +722,9 @@ WHERE p.mailbox_id = $1 AND p.workspace_id = $2
 `
 
 type GetWarmupSenderBundleParams struct {
-	MailboxID   uuid.UUID `json:"mailbox_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
+	MailboxID    uuid.UUID `json:"mailbox_id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	LeaseSeconds int32     `json:"lease_seconds"`
 }
 
 type GetWarmupSenderBundleRow struct {
@@ -726,6 +738,7 @@ type GetWarmupSenderBundleRow struct {
 	HealthState      string             `json:"health_state"`
 	Lane             string             `json:"lane"`
 	PausedUntil      pgtype.Timestamptz `json:"paused_until"`
+	LeaseExpiresAt   pgtype.Timestamptz `json:"lease_expires_at"`
 	Provider         string             `json:"provider"`
 	FromEmail        string             `json:"from_email"`
 	FromName         string             `json:"from_name"`
@@ -747,7 +760,7 @@ type GetWarmupSenderBundleRow struct {
 // workspace-pinned (belt-and-braces on the unguessable mailbox UUID); a foreign
 // pair yields no row.
 func (q *Queries) GetWarmupSenderBundle(ctx context.Context, arg GetWarmupSenderBundleParams) (GetWarmupSenderBundleRow, error) {
-	row := q.db.QueryRow(ctx, getWarmupSenderBundle, arg.MailboxID, arg.WorkspaceID)
+	row := q.db.QueryRow(ctx, getWarmupSenderBundle, arg.MailboxID, arg.WorkspaceID, arg.LeaseSeconds)
 	var i GetWarmupSenderBundleRow
 	err := row.Scan(
 		&i.WorkspaceID,
@@ -760,6 +773,7 @@ func (q *Queries) GetWarmupSenderBundle(ctx context.Context, arg GetWarmupSender
 		&i.HealthState,
 		&i.Lane,
 		&i.PausedUntil,
+		&i.LeaseExpiresAt,
 		&i.Provider,
 		&i.FromEmail,
 		&i.FromName,

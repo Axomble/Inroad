@@ -164,6 +164,11 @@ ORDER BY p.created_at DESC;
 -- pair yields no row.
 SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
        p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
+       -- The lease expiry is minted HERE, from the database clock, because
+       -- ClaimWarmupSend compares it against the database clock. Computing it in
+       -- Go would put app/DB skew on both ends of a security check — the exact
+       -- mistake that made the Phase 1 freshness rule silently always-true.
+       (now() + make_interval(secs => sqlc.arg(lease_seconds)::int))::timestamptz AS lease_expires_at,
        m.provider, m.email AS from_email, m.display_name AS from_name,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext, m.allow_plaintext
 FROM warmup_participants p
@@ -797,6 +802,9 @@ ON CONFLICT (mailbox_id, day) DO UPDATE SET
 -- (belt-and-braces). warmup_send_id is carried through so the caller can derive the
 -- reply's receipt token. A foreign / vanished receipt yields pgx.ErrNoRows.
 SELECT r.recipient_mailbox, r.warmup_send_id, r.placement, r.received_at,
+       -- Same reasoning as GetWarmupSenderBundle: the reply is a NEW warmup send
+       -- and needs its own lease, minted on the database clock.
+       (now() + make_interval(secs => sqlc.arg(lease_seconds)::int))::timestamptz AS lease_expires_at,
        r.source_folder, r.message_id,
        m.provider, m.imap_host, m.imap_port, m.imap_username,
        m.smtp_host, m.smtp_port, m.smtp_username, m.secret_ciphertext,

@@ -708,6 +708,15 @@ type WarmupSendJob struct {
 	// read-side; see the inprocess deriveWarmupSendID doc for why this replaces the
 	// spec's dueUnix (GetWarmupSendJob's signature carries no tick time).
 	SendID string
+	// The LEASE this send was decided under. ClaimWarmupSend refuses the send if
+	// the sender's lane has moved, the policy version has moved, or the expiry has
+	// passed — so an assignment cannot fire under a decision that no longer holds
+	// (reputation design acceptance criterion 7). LeaseExpiresAt is minted by the
+	// DATABASE at issue and compared against the DATABASE clock at claim; it never
+	// passes through a Go clock.
+	IssuedLane          string
+	IssuedPolicyVersion string
+	LeaseExpiresAt      time.Time
 	// ToEmail / FromEmail / FromName address the message envelope.
 	ToEmail   string
 	FromEmail string
