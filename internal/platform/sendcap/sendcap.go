@@ -11,6 +11,7 @@ package sendcap
 // do not depend on each other, and this one must stay free of anything but its
 // own arithmetic.
 const (
+	HealthUnknown   = "unknown"
 	HealthWatch     = "watch"
 	HealthThrottled = "throttled"
 	HealthPaused    = "paused"
@@ -44,6 +45,8 @@ func Effective(dailyCap, startCap, rampDays int, rampEnabled bool, ageDays int) 
 // silently halving a healthy mailbox on a typo would be worse than ignoring it.
 func ColdFactor(healthState string) float64 {
 	switch healthState {
+	case HealthUnknown:
+		return 0.5
 	case HealthWatch:
 		return 0.7
 	case HealthThrottled:

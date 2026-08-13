@@ -264,6 +264,26 @@ func TestRecordWarmupReceiptCrossTenant(t *testing.T) {
 	}
 }
 
+func TestRecordWarmupReceiptRejectsWrongSameWorkspaceRecipient(t *testing.T) {
+	ctx, f := setupWarmup(t)
+	sendID, _ := makeWarmupSend(t, ctx, f) // A sent to B.
+
+	plan, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sendID,
+		RecipientMailbox: f.a.String(), Placement: placementInbox,
+	})
+	if err != nil {
+		t.Fatalf("wrong same-workspace recipient: %v", err)
+	}
+	if plan.ReceiptID != "" {
+		t.Fatalf("wrong recipient returned engagement plan: %+v", plan)
+	}
+	_, inbox, spam, _ := todayStats(t, ctx, f, f.a)
+	if inbox != 0 || spam != 0 {
+		t.Fatalf("wrong recipient changed sender placement: inbox=%d spam=%d", inbox, spam)
+	}
+}
+
 // TestGetWarmupEngageJobLoadsTransport proves the engage job loads the recipient's
 // decrypted transport and a source folder, and that MarkWarmupEngaged is idempotent.
 func TestGetWarmupEngageJobAndMarkEngaged(t *testing.T) {
@@ -419,7 +439,7 @@ func dueContains(refs []coreapi.MailboxRef, id uuid.UUID) bool {
 // clean paused participant whose timed block has ELAPSED one level back down
 // (recovery), and — the timed-block floor — does NOT recover a clean participant
 // whose paused_until is still in the future.
-func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
+func TestEvaluateWarmupHealthTransitionsAndRespectsEvidence(t *testing.T) {
 	ctx, f := setupWarmup(t)
 
 	// A: seed a spammy trailing window attributed to A as the SENDER via a real A->B
@@ -430,14 +450,17 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse sendID: %v", err)
 	}
-	for i := 0; i < 6; i++ {
-		if err := f.q.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{WorkspaceID: f.ws1, WarmupSendID: sid, Placement: placementSpam}); err != nil {
-			t.Fatalf("seed A spam: %v", err)
+	for i := 0; i < 20; i++ {
+		placement := placementInbox
+		if i < 12 {
+			placement = placementSpam
 		}
-	}
-	for i := 0; i < 4; i++ {
-		if err := f.q.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{WorkspaceID: f.ws1, WarmupSendID: sid, Placement: placementInbox}); err != nil {
-			t.Fatalf("seed A inbox: %v", err)
+		if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+			WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+			ReceiptID: uuid.New(), Placement: placement,
+			ObservedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		}); err != nil {
+			t.Fatalf("seed A spam: %v", err)
 		}
 	}
 	// B: paused with a CLEAN window whose block has ELAPSED (paused_until in the past)
@@ -465,8 +488,13 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read A: %v", err)
 	}
-	if pa.HealthState != warmup.StatePaused {
-		t.Fatalf("A health = %q, want paused (60%% sender-attributed spam)", pa.HealthState)
+	// 12 spam of 20 is 60% observed, but the policy compares a Wilson 95% LOWER
+	// bound, which for that sample is ~38.7% — over the 30% throttle band, under the
+	// 50% pause band. Deliberate: 20 observations cannot establish a 50% rate with
+	// confidence, and Phase 0's false positives came from treating thin samples as
+	// certain. What matters here is that sender-attributed spam degrades A at all.
+	if pa.HealthState != warmup.StateThrottled {
+		t.Fatalf("A health = %q, want throttled (60%% observed sender-attributed spam bounds to ~38.7%%)", pa.HealthState)
 	}
 	if !pa.PausedUntil.Valid {
 		t.Fatalf("A paused_until not set on escalation")
@@ -476,8 +504,8 @@ func TestEvaluateWarmupHealthTransitionsAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read B: %v", err)
 	}
-	if pb.HealthState != warmup.StateThrottled {
-		t.Fatalf("B health = %q, want throttled (one-level recovery after block elapsed)", pb.HealthState)
+	if pb.HealthState != warmup.StatePaused {
+		t.Fatalf("B health = %q, want paused (recovery requires qualified placement evidence)", pb.HealthState)
 	}
 
 	pc, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: f.c, WorkspaceID: f.ws2})
@@ -536,4 +564,252 @@ func sid16(t *testing.T, s string) [16]byte {
 		t.Fatalf("parse send id: %v", err)
 	}
 	return u
+}
+
+// A mailbox the deploy migration demoted to `unknown` must be able to earn its way
+// back once it has qualified evidence. `unknown` shares healthy's rank (it is an
+// absence of evidence, not a degree of badness), so the evaluator's recovery-step
+// branch does not fire for unknown → healthy and the decision carried no reason
+// code — which warmup_state_transitions rejects, rolling back the participant
+// update in the same atomic statement. The mailbox then re-failed every sweep and
+// stayed unknown forever at half its cold-send cap. Asserts the promotion lands AND
+// that it is explained, because the missing explanation is what broke the write.
+func TestEvaluateWarmupHealthPromotesFromUnknownWithQualifiedEvidence(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sid := warmupSendUUID(t, ctx, f)
+	for i := 0; i < 20; i++ {
+		if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+			WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+			ReceiptID: uuid.New(), Placement: placementInbox,
+			ObservedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		}); err != nil {
+			t.Fatalf("seed clean placement %d: %v", i, err)
+		}
+	}
+	if err := f.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
+		MailboxID: f.a, WorkspaceID: f.ws1, HealthState: warmup.StateUnknown,
+		HealthReason: "not enough recent placement evidence",
+	}); err != nil {
+		t.Fatalf("seed A unknown: %v", err)
+	}
+
+	if err := f.core.EvaluateWarmupHealth(ctx); err != nil {
+		t.Fatalf("EvaluateWarmupHealth: %v", err)
+	}
+
+	pa, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: f.a, WorkspaceID: f.ws1})
+	if err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	if pa.HealthState != warmup.StateHealthy {
+		t.Fatalf("A health = %q, want healthy (20 clean placements qualify it)", pa.HealthState)
+	}
+
+	var reasonCode string
+	if err := f.raw.QueryRow(ctx,
+		`SELECT reason_code FROM warmup_state_transitions
+		 WHERE workspace_id = $1 AND mailbox_id = $2 AND from_state = 'unknown' AND to_state = 'healthy'`,
+		f.ws1, f.a).Scan(&reasonCode); err != nil {
+		t.Fatalf("no transition row recorded for unknown -> healthy: %v", err)
+	}
+	if reasonCode == "" {
+		t.Fatal("unknown -> healthy recorded with an empty reason_code")
+	}
+}
+
+// Deleting a mailbox that has warmup history must succeed. The observations table's
+// send FK nulls warmup_send_id when a send is deleted, so a CHECK requiring that
+// column for placements aborted the referential action: removing mailbox B cascaded
+// to the A→B send, which tried to null the column on A's surviving placement row and
+// failed the constraint. DELETE /mailboxes/{id} 500'd for every warmup participant.
+// Also asserts A's evidence OUTLIVES the send — deleting B must not erase what the
+// pool learned about A.
+func TestDeleteMailboxWithWarmupHistorySucceedsAndKeepsSenderEvidence(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sid := warmupSendUUID(t, ctx, f)
+	if err := f.q.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+		WorkspaceID: f.ws1, WarmupSendID: sid, RecipientMailbox: f.b,
+		ReceiptID: uuid.New(), Placement: placementInbox,
+		ObservedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}); err != nil {
+		t.Fatalf("seed placement: %v", err)
+	}
+
+	// B is the RECIPIENT. The surviving observation is attributed to A, so it is not
+	// cascaded away with B — it is exactly the row whose send anchor gets nulled.
+	n, err := f.q.DeleteMailbox(ctx, gen.DeleteMailboxParams{ID: f.b, WorkspaceID: f.ws1})
+	if err != nil {
+		t.Fatalf("DeleteMailbox with warmup history: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("DeleteMailbox affected %d rows, want 1", n)
+	}
+
+	var count int
+	var sendIDNull bool
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*), bool_and(warmup_send_id IS NULL) FROM warmup_observations
+		 WHERE workspace_id = $1 AND mailbox_id = $2 AND kind = 'placement'`,
+		f.ws1, f.a).Scan(&count, &sendIDNull); err != nil {
+		t.Fatalf("read A observations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("A placement observations = %d, want 1 (deleting the recipient must not erase the sender's evidence)", count)
+	}
+	if !sendIDNull {
+		t.Fatal("expected the deleted send's anchor to be nulled, not retained")
+	}
+}
+
+// warmupSendUUID drives one A->B send and returns its id parsed, which is the form
+// the observation writers take.
+func warmupSendUUID(t *testing.T, ctx context.Context, f warmupFixture) uuid.UUID {
+	t.Helper()
+	sendID, _ := makeWarmupSend(t, ctx, f)
+	u, err := uuid.Parse(sendID)
+	if err != nil {
+		t.Fatalf("parse send id: %v", err)
+	}
+	return u
+}
+
+// Original-Message-ID is parsed out of an inbound DSN body and is therefore fully
+// attacker-controlled. Without an observer binding, a forged DSN delivered to ANY
+// connected mailbox in the workspace — a public alias, a support inbox — writes a
+// TRUSTED hard bounce attributed to a DIFFERENT mailbox. Since Phase 1 that can
+// quarantine the sender and fail its campaign's preflight, so the binding is a
+// security control, not a filter.
+func TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sendID, _ := makeWarmupSend(t, ctx, f) // A -> B
+	messageID := "<" + sendID + "@acme.test>"
+
+	// B is a real, same-workspace mailbox — but it is the RECIPIENT, not the sender.
+	// A DSN for A's send arriving at B is either a misdelivery or a forgery.
+	matched, err := f.core.(coreapi.WarmupEvidenceClient).
+		RecordWarmupHardBounce(ctx, f.ws1.String(), messageID, f.b.String())
+	if err != nil {
+		t.Fatalf("RecordWarmupHardBounce: %v", err)
+	}
+	if matched {
+		t.Fatal("a DSN observed by a mailbox that did not send the message must not match")
+	}
+	assertWarmupHardBounces(t, ctx, f, f.a, 0)
+
+	// The same DSN arriving at the actual sender is the legitimate case.
+	matched, err = f.core.(coreapi.WarmupEvidenceClient).
+		RecordWarmupHardBounce(ctx, f.ws1.String(), messageID, f.a.String())
+	if err != nil {
+		t.Fatalf("RecordWarmupHardBounce (sender): %v", err)
+	}
+	if !matched {
+		t.Fatal("a DSN observed by the sending mailbox must match")
+	}
+	assertWarmupHardBounces(t, ctx, f, f.a, 1)
+}
+
+func assertWarmupHardBounces(t *testing.T, ctx context.Context, f warmupFixture, mailbox uuid.UUID, want int) {
+	t.Helper()
+	var got int
+	if err := f.raw.QueryRow(ctx,
+		`SELECT count(*) FROM warmup_observations
+		 WHERE workspace_id = $1 AND mailbox_id = $2 AND kind = 'hard_bounce'`,
+		f.ws1, mailbox).Scan(&got); err != nil {
+		t.Fatalf("count hard bounces: %v", err)
+	}
+	if got != want {
+		t.Fatalf("hard-bounce observations for %s = %d, want %d", mailbox, got, want)
+	}
+}
+
+// Disabling deletes the participant row, so a fresh enable would fall back to
+// lane='probation' — and DELETE-then-PUT is two calls any member with
+// mailboxes:write can make. That would release a quarantined or blocked mailbox
+// into a lane that may send and may take new campaign leads. The transition trail
+// survives the delete and is what restores containment.
+func TestReEnablingWarmupDoesNotClearContainment(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	for _, sealed := range []string{warmup.LaneQuarantine, warmup.LaneBlocked} {
+		t.Run(sealed, func(t *testing.T) {
+			if _, err := f.raw.Exec(ctx,
+				`INSERT INTO warmup_state_transitions (
+				    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+				    reason_code, reason, lane_reason_code, lane_reason,
+				    placement_samples, spam_rate, bounce_samples, bounce_rate,
+				    complaint_samples, complaint_rate, invalid_tokens, policy_version)
+				 VALUES ($1,$2,'healthy','healthy','healthy',$3,
+				         'health_unchanged','x','lane_quarantined','x',
+				         0,0,0,0,0,0,0,'test')`,
+				f.ws1, f.a, sealed); err != nil {
+				t.Fatalf("seed transition: %v", err)
+			}
+
+			if _, err := f.q.DisableWarmupParticipant(ctx, gen.DisableWarmupParticipantParams{
+				MailboxID: f.a, WorkspaceID: f.ws1,
+			}); err != nil {
+				t.Fatalf("disable: %v", err)
+			}
+			p, err := f.q.UpsertWarmupParticipant(ctx, gen.UpsertWarmupParticipantParams{
+				MailboxID: f.a, WorkspaceID: f.ws1,
+				StartVolume: 8, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+			})
+			if err != nil {
+				t.Fatalf("re-enable: %v", err)
+			}
+			if p.Lane != sealed {
+				t.Fatalf("lane after re-enable = %q, want %q: disable+enable must not release containment", p.Lane, sealed)
+			}
+		})
+	}
+}
+
+// The cooldown is derived from the newest transition that MOVED a participant into
+// quarantine. Health-only rows written WHILE quarantined carry
+// from_lane = to_lane = 'quarantine'; counting those restarted the clock every time
+// the mailbox made recovery progress, so improving extended the containment that
+// improvement was meant to end.
+func TestQuarantineCooldownIsNotRestartedByHealthOnlyTransitions(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	insert := func(fromLane, toLane string, ageHours int) {
+		t.Helper()
+		if _, err := f.raw.Exec(ctx,
+			`INSERT INTO warmup_state_transitions (
+			    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+			    reason_code, reason, lane_reason_code, lane_reason,
+			    placement_samples, spam_rate, bounce_samples, bounce_rate,
+			    complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
+			 VALUES ($1,$2,'paused','paused',$3,$4,'x','x','y','y',
+			         0,0,0,0,0,0,0,'test', now() - make_interval(hours => $5))`,
+			f.ws1, f.a, fromLane, toLane, ageHours); err != nil {
+			t.Fatalf("seed transition: %v", err)
+		}
+	}
+	insert(warmup.LaneHealthy, warmup.LaneQuarantine, 96) // entry, 96h ago
+	insert(warmup.LaneQuarantine, warmup.LaneQuarantine, 1)
+	insert(warmup.LaneQuarantine, warmup.LaneQuarantine, 0) // held rows since
+
+	rows, err := f.q.ListWarmupEvaluationRows(ctx, gen.ListWarmupEvaluationRowsParams{
+		WorkspaceID: f.ws1, EvidenceTtlSeconds: 600,
+	})
+	if err != nil {
+		t.Fatalf("ListWarmupEvaluationRows: %v", err)
+	}
+	var since time.Time
+	for _, r := range rows {
+		if r.MailboxID == f.a {
+			since = r.QuarantinedSince.Time
+		}
+	}
+	if since.IsZero() {
+		t.Fatal("no quarantine entry time derived")
+	}
+	if elapsed := time.Since(since); elapsed < warmup.QuarantineCooldown {
+		t.Fatalf("quarantined_since is %s ago, want >= the %s cooldown: held rows must not restart the clock",
+			elapsed.Round(time.Hour), warmup.QuarantineCooldown)
+	}
 }

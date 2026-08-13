@@ -4248,7 +4248,7 @@ components:
           type: string
           nullable: true
           description: "Read-only warmup health; null when the mailbox is not warming up."
-          enum: [healthy, watch, throttled, paused, null]
+          enum: [unknown, healthy, watch, throttled, paused, null]
         sending:
           type: boolean
           description: >-
@@ -4412,8 +4412,17 @@ components:
         reply_rate: { type: number, minimum: 0, maximum: 1, description: probability a warmup send is an in-thread reply }
     WarmupParticipant:
       type: object
-      description: One mailbox's warmup enrollment state.
-      required: [mailbox_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, health_state, health_reason, started_at, today_sent, today_target]
+      description: >-
+        One mailbox's warmup enrollment state. health_state and lane are two
+        independent axes and neither implies the other: health_state is SENDER
+        REPUTATION (how this mailbox's outbound mail performs), lane is POOL
+        ELIGIBILITY (which peers it may exchange warmup traffic with, and
+        whether it may take new campaign leads). A mailbox can be
+        reputation-healthy and still sit in probation because it has not proven
+        itself yet, or sit in quarantine while its last measured reputation was
+        fine. Clients must not present either axis as a synonym for the other,
+        and must not order the two enums against each other.
+      required: [mailbox_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, health_state, health_reason, lane, started_at, today_sent, today_target]
       properties:
         mailbox_id: { type: string, format: uuid }
         enabled: { type: boolean }
@@ -4423,26 +4432,62 @@ components:
         reply_rate: { type: number }
         health_state:
           type: string
-          enum: [healthy, watch, throttled, paused]
-          description: reputation state derived from inbox-placement and behavior signals
+          enum: [unknown, healthy, watch, throttled, paused]
+          description: >-
+            SENDER REPUTATION axis — the verdict on this mailbox's outbound mail,
+            derived from inbox-placement and behavior signals. Carries no claim
+            about pool eligibility; see lane for that.
         health_reason: { type: string, description: human-readable explanation of a non-healthy state }
+        lane:
+          type: string
+          enum: [pending_auth, probation, healthy, watch, recovery, quarantine, blocked]
+          description: >-
+            POOL ELIGIBILITY axis — which peers this mailbox may exchange warmup
+            traffic with (selection pairs same-lane only) and whether it may
+            take new campaign leads. pending_auth = authentication and ownership
+            not proven yet, no warmup and no new leads. probation = gathering
+            evidence at a floor volume in its own lane, reduced leads.
+            healthy = full participation. watch = reduced volume while a signal
+            is diagnosed. recovery = earning its way back at a floor volume in
+            its own lane. quarantine = withheld from the pool and new campaign
+            leads blocked; exit needs fresh qualifying evidence, never elapsed
+            time alone. blocked = withheld until an operator approves re-entry.
+            Clients must treat an unrecognized value as unproven (probation),
+            never as healthy.
         started_at: { type: string, format: date-time }
         today_sent: { type: integer, description: warmup emails sent by this mailbox today }
         today_target: { type: integer, description: "today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this." }
     WarmupMailbox:
       type: object
-      description: A participant enriched with rolling placement rates for the overview.
-      required: [mailbox_id, email, enabled, health_state, health_reason, today_sent, today_target, inbox_rate_7d, spam_rate_7d]
+      description: >-
+        A participant enriched with rolling placement rates for the overview.
+        health_state and lane are the two independent axes described on
+        WarmupParticipant — reputation and pool eligibility respectively — so a
+        row may pair any health_state with any lane.
+      required: [mailbox_id, email, enabled, health_state, health_reason, lane, lane_reason, today_sent, today_target, placement_sample_7d, inbox_rate_7d, spam_rate_7d]
       properties:
         mailbox_id: { type: string, format: uuid }
         email: { type: string }
         enabled: { type: boolean }
-        health_state: { type: string, enum: [healthy, watch, throttled, paused] }
+        health_state:
+          type: string
+          enum: [unknown, healthy, watch, throttled, paused]
+          description: SENDER REPUTATION axis (see WarmupParticipant.health_state)
         health_reason: { type: string }
+        lane:
+          type: string
+          enum: [pending_auth, probation, healthy, watch, recovery, quarantine, blocked]
+          description: POOL ELIGIBILITY axis (see WarmupParticipant.lane)
+        lane_reason:
+          type: string
+          description: >-
+            human-readable explanation of the current lane — what put the mailbox
+            there and what clears it. Empty for a lane that needs no explanation.
         today_sent: { type: integer }
         today_target: { type: integer }
-        inbox_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal" }
-        spam_rate_7d: { type: number, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1)" }
+        placement_sample_7d: { type: integer, format: int64, description: "trusted inbox plus spam placement observations in the trailing 7 days" }
+        inbox_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed" }
+        spam_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed" }
     WarmupOverview:
       type: object
       description: >-
@@ -4493,13 +4538,22 @@ components:
             error: { type: integer }
         warmup:
           type: object
-          description: enabled warmup participants bucketed by live health; at_risk = throttled + paused
-          required: [pool, healthy, watch, at_risk]
+          description: >-
+            Enabled warmup participants counted on both warmup axes.
+            unknown/healthy/watch/at_risk bucket the SENDER REPUTATION axis
+            (health_state; at_risk = throttled + paused); probation and
+            quarantine count the POOL ELIGIBILITY axis (lane). The two axes are
+            independent, so a participant appears in one bucket per axis and the
+            counts across axes overlap — only the reputation buckets sum to pool.
+          required: [pool, unknown, healthy, watch, at_risk, probation, quarantine]
           properties:
             pool: { type: integer }
+            unknown: { type: integer, description: enabled participants without enough evidence for a health verdict }
             healthy: { type: integer }
             watch: { type: integer }
             at_risk: { type: integer }
+            probation: { type: integer, description: "participants gathering evidence: lane in (probation, recovery) — sending at a floor volume in their own lane, not yet cleared for the healthy pool" }
+            quarantine: { type: integer, description: "participants withheld from the pool: lane in (quarantine, blocked) — exchanging no warmup mail and blocked from taking new campaign leads. pending_auth is excluded; an unproven domain is already reported by the dmarc_failing attention row." }
         campaigns:
           type: object
           required: [total, running, draft, paused]

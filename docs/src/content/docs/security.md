@@ -375,7 +375,11 @@ limit / abuse control here is tracked in the Deferred list below.
     `internal/platform/dnsauth` (how much work one request can cause).
 39. **The domain check is informational and workspace-pinned.** Nothing on the
     send path reads `sending_domains` — an advisory that turns out to be wrong
-    must not be able to stop a campaign — and every row is
+    must not be able to stop a campaign. Warmup's `pending_auth` lane is derived
+    from it and therefore WARNS rather than failing campaign preflight, and
+    contributes no capacity reduction; it withholds only warmup traffic, which is
+    Inroad's own mail. A spoofed or un-swept DNS answer can pause warmup, never a
+    campaign (`TestComputePreflightPendingAuthWarnsRatherThanBlocking`). Every row is
     `workspace_id`-scoped, so two tenants sending from the same domain keep
     separate verdicts (`TestSendingDomainsAreWorkspacePinned`). The response DTO
     carries only public DNS data (records already published to the world), and no
@@ -734,6 +738,53 @@ paths even on a single shared client.
     one, and no path should be able to strip a password. A password reset on a
     federated account legitimately GIVES it a password — that is account recovery
     for an address the provider already verified.
+
+## Warmup pool lanes and evidence
+
+Warmup carries two independent axes. `health_state` is sender reputation — how the
+mailbox's outbound mail performs. `lane` is pool eligibility — who it may exchange
+traffic with, and whether it may take new campaign leads. They are decided in one
+pass and written in one CAS statement guarded on both `from_state` and `from_lane`,
+so "quarantined but healthy" is unrepresentable and two racing evaluators cannot
+write history that never happened.
+
+52. **Evidence is never attributed on an attacker's say-so.** An inbound message can
+    claim anything, so every warmup observation must be bound to something the
+    attacker does not control before it can gate health.
+    - `invalid_token` rows are recorded against `observer_mailbox_id` only, never a
+      claimed sender, with `attribution_trusted = false`. Two CHECK constraints
+      (`warmup_observations_invalid_token_untrusted`,
+      `..._unattributed`) make this structural — the database refuses the unsafe row
+      rather than the writer remembering to omit it. Otherwise anyone able to email a
+      connected mailbox could throttle a mailbox they do not own.
+    - `hard_bounce` rows from an inbound DSN additionally require
+      `warmup_sends.from_mailbox = <the mailbox that observed the DSN>`.
+      `Original-Message-ID` is parsed from the DSN body and is fully
+      attacker-controlled; without the binding a forged DSN to any connected mailbox
+      wrote a trusted bounce against a different one
+      (`TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender`).
+    - `placement` requires a verified signed token AND a DB-proven send→recipient
+      binding.
+
+53. **Containment cannot be cleared by the tenant.** `quarantine` and `blocked` are
+    carried across a disable/re-enable: the participant row is deleted on disable,
+    but `warmup_state_transitions` survives and the last sealed lane is restored on
+    re-entry (`TestReEnablingWarmupDoesNotClearContainment`). The quarantine cooldown
+    is derived only from transitions that MOVED a participant into quarantine, so
+    health-only rows written while quarantined cannot restart the clock. An auth
+    regression cannot launder a quarantine into probation.
+
+54. **Lane isolation holds on every outbound path.** Partner selection, the due-send
+    job, the campaign rotation's `availableToday`, and the engagement REPLY all
+    enforce it — the reply re-checks at engage time because the lane can move between
+    a send and its answer. A healthy mailbox never exchanges warmup traffic with a
+    probation, recovery, watch, quarantined, blocked or unauthenticated peer.
+
+55. **Warmup evidence is bounded and retained.** `warmup_observations` is append-only
+    and reachable by external senders, so the invalid-token idempotency key buckets on
+    (mailbox, UTC date, reason) rather than hashing an attacker-controlled header, and
+    a 90-day purge runs in the maintenance sweep — comfortably beyond the widest
+    30-day read window.
 
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only

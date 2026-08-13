@@ -19,6 +19,7 @@ export const healthMeta: Record<
   WarmupHealth,
   { label: string; text: string; dot: string; bg: string }
 > = {
+  unknown: { label: 'Needs evidence', text: 'text-muted-foreground', dot: 'bg-muted-foreground', bg: 'bg-surface-2' },
   healthy: { label: 'Healthy', text: 'text-ok', dot: 'bg-ok', bg: 'bg-ok/12' },
   watch: { label: 'Watch', text: 'text-warn', dot: 'bg-warn', bg: 'bg-warn/12' },
   throttled: { label: 'Throttled', text: 'text-warm', dot: 'bg-warm', bg: 'bg-warm/12' },
@@ -27,12 +28,13 @@ export const healthMeta: Record<
 
 /**
  * Narrow an arbitrary backend string to a known WarmupHealth; anything
- * unexpected falls back to `healthy` so a card never renders a blank badge.
+ * unexpected falls back to `unknown` so missing evidence is never presented as
+ * a healthy verdict and a card never renders a blank badge.
  * (The generated type is already a closed union, but the JSON boundary is
  * untyped, so we validate what actually crossed it.)
  */
 export function toWarmupHealth(value: string | null | undefined): WarmupHealth {
-  return knownWarmupHealth(value) ?? 'healthy'
+  return knownWarmupHealth(value) ?? 'unknown'
 }
 
 /**

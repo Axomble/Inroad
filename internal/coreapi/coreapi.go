@@ -50,6 +50,14 @@ type InboxCaptureClient interface {
 	StoreInboundMessage(context.Context, InboxMessageInput) error
 }
 
+// WarmupEvidenceClient is an optional inbox capability. It keeps token failures
+// and warmup DSNs on the control-plane side without widening Client for workers
+// that never inspect inbound mail.
+type WarmupEvidenceClient interface {
+	RecordWarmupTokenFailure(ctx context.Context, workspaceID, recipientMailbox, fingerprint, reasonCode string) error
+	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (matched bool, err error)
+}
+
 // ReplyLabelClient is an optional execution-plane capability (same reasoning as
 // the two above) that resolves a classified reply key to the workspace's label
 // row, so the inbox poller can dispatch on the label's ROLE FLAGS instead of a
@@ -300,13 +308,13 @@ type Client interface {
 	// RecordWarmupReceipt is called by the inbox poller when it detects a warmup
 	// message (verified X-Inroad-Warmup token, §7). It idempotently upserts the
 	// warmup_receipts row (UNIQUE on (warmup_send_id, recipient_mailbox)) and, ONLY
-	// on a genuinely NEW receipt, bumps the RECIPIENT's warmup_daily_stats
-	// received/inbox/spam for its placement observation and returns the deterministic
+	// on a genuinely NEW receipt, bumps recipient volume, records sender-attributed
+	// placement evidence, and returns the deterministic
 	// engagement plan (rescue-if-spam, always mark-read, seeded reply decision, and
 	// the humanized engage dwell). A DUPLICATE receipt (a re-poll) returns a
-	// zero-value WarmupEngagePlan so it can never double-engage or double-count. The
-	// receipt insert is self-enforcing on the recipient's workspace, so a foreign
-	// recipient yields ErrCrossTenant. workspace_id is pinned.
+	// stored deterministic plan while still unengaged, then a zero plan after
+	// engagement. The receipt insert proves the send's intended recipient as well
+	// as workspace ownership; foreign recipients fail closed. workspace_id is pinned.
 	RecordWarmupReceipt(ctx context.Context, in WarmupReceiptInput) (WarmupEngagePlan, error)
 	// GetWarmupEngageJob loads what the engage worker needs to act on one received
 	// warmup message: the recipient's decrypted send transport (for the reply), the
@@ -331,8 +339,7 @@ type Client interface {
 	// that can never send now (disabled, or a live pause window). Global fan-out.
 	ListDueWarmupMailboxes(ctx context.Context) ([]MailboxRef, error)
 	// EvaluateWarmupHealth recomputes each enabled participant's health_state from its
-	// trailing-window signals (spam-placement rate over warmup_daily_stats; bounce and
-	// invalid-token signals are 0 in v1, which has no persistence for them) and
+	// qualified placement, bounce, complaint, and trusted token evidence, and
 	// persists ONLY actual state transitions (escalation to the worst warranted level,
 	// or a one-level recovery step on a clean window), setting the pause window per
 	// the resulting state. Called on the sweep tick. Global fan-out; each write is

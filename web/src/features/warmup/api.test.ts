@@ -3,6 +3,7 @@ import { api } from '@/store/api'
 import type {
   WarmupOverview,
   WarmupDetail,
+  WarmupMailbox,
   WarmupParticipant,
   WarmupSettings,
   GetMailboxWarmupApiArg,
@@ -46,8 +47,15 @@ test('the generated warmup types keep the fields the UI depends on', () => {
     received: number
   }>()
   expectTypeOf<WarmupParticipant['health_state']>().toEqualTypeOf<
-    'healthy' | 'watch' | 'throttled' | 'paused'
+    'unknown' | 'healthy' | 'watch' | 'throttled' | 'paused'
   >()
+  // Reputation and pool eligibility are separate axes with separate
+  // vocabularies; the lane enum must stay whole (a dropped value would silently
+  // fall back to `probation` at runtime) and must not collapse into health's.
+  expectTypeOf<WarmupParticipant['lane']>().toEqualTypeOf<
+    'pending_auth' | 'probation' | 'healthy' | 'watch' | 'recovery' | 'quarantine' | 'blocked'
+  >()
+  expectTypeOf<WarmupMailbox>().toMatchObjectType<{ lane_reason: string }>()
   expectTypeOf<GetMailboxWarmupApiArg>().toMatchObjectType<{ id: string }>()
   expectTypeOf<WarmupSettings>().toMatchObjectType<{ start_volume?: number }>()
 })

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -91,6 +92,12 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	if !b.Enabled || b.HealthState == warmup.StatePaused || (b.PausedUntil.Valid && b.PausedUntil.Time.After(now)) {
 		return coreapi.WarmupSendJob{Skip: true}, nil
 	}
+	// Lane gate, checked separately from health because they are separate axes: a
+	// pending_auth, quarantined or blocked mailbox emits nothing regardless of how
+	// its last measured reputation looked.
+	if !warmup.LaneMaySend(b.Lane) {
+		return coreapi.WarmupSendJob{Skip: true}, nil
+	}
 
 	// Over today's target → skip.
 	sentToday, err := c.q.GetWarmupSentToday(ctx, gen.GetWarmupSentTodayParams{MailboxID: mbID, WorkspaceID: ws})
@@ -99,8 +106,22 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	}
 	days := int(now.Sub(b.StartedAt.Time).Hours() / 24)
 	target := warmup.RampTarget(int(b.StartVolume), int(b.MaxVolume), int(b.RampIncrement), days)
+	// The lane ceiling is a POLICY decision and applies to the ramp target, before
+	// the day-shape multiplies it: probation and recovery gather evidence at a
+	// bounded blast radius (5/day) no matter how far their ramp has progressed.
+	target = warmup.LaneDailyVolume(b.Lane, target)
 	effective := warmup.EffectiveDailyVolume(target, mailboxID, now)
 	if int(sentToday) >= effective {
+		return coreapi.WarmupSendJob{Skip: true}, nil
+	}
+	partnerCount, err := c.q.CountEligibleWarmupPartners(ctx, gen.CountEligibleWarmupPartnersParams{
+		WorkspaceID: ws, MailboxID: mbID,
+	})
+	if err != nil {
+		return coreapi.WarmupSendJob{}, err
+	}
+	pairCap := warmup.PairDailyCap(effective, int(partnerCount))
+	if pairCap == 0 {
 		return coreapi.WarmupSendJob{Skip: true}, nil
 	}
 
@@ -109,7 +130,10 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	// decision's seed is unchanged from before this tuning (partner spread for new
 	// threads is preserved); when a reply is wanted we may instead target a
 	// repliable partner below, but the new-thread fallback stays on this one.
-	spreadPartner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{WorkspaceID: ws, MailboxID: mbID})
+	spreadPartner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{
+		WorkspaceID: ws, MailboxID: mbID, MaxPairSends: int32(pairCap),
+		CooldownSince: pgtype.Timestamptz{Time: now.Add(-warmup.PairCooldown), Valid: true},
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No eligible partner (workspace has <2 usable participants) → skip.
@@ -147,7 +171,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		// of the under-realized reply_rate). No repliable partner → fall through to
 		// the new-thread path on the spread partner, unchanged.
 		rp, rerr := c.q.SelectWarmupReplyPartner(ctx, gen.SelectWarmupReplyPartnerParams{
-			WorkspaceID: ws, SenderMailbox: mbID, MaxTurn: int32(warmup.MaxContentTurns()),
+			WorkspaceID: ws, MailboxID: mbID, MaxTurn: int32(warmup.MaxContentTurns()), MaxPairSends: int32(pairCap),
 		})
 		switch {
 		case rerr == nil:

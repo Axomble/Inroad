@@ -485,6 +485,7 @@ type DeliverabilityEvent struct {
 	SendID          pgtype.UUID        `json:"send_id"`
 	ProviderEventID string             `json:"provider_event_id"`
 	ReceivedAt      pgtype.Timestamptz `json:"received_at"`
+	BounceClass     string             `json:"bounce_class"`
 }
 
 type EmailOtpCode struct {
@@ -1013,6 +1014,22 @@ type WarmupDailyStat struct {
 	Replies     int32       `json:"replies"`
 }
 
+type WarmupObservation struct {
+	ID                 uuid.UUID          `json:"id"`
+	WorkspaceID        uuid.UUID          `json:"workspace_id"`
+	MailboxID          pgtype.UUID        `json:"mailbox_id"`
+	ObserverMailboxID  pgtype.UUID        `json:"observer_mailbox_id"`
+	WarmupSendID       pgtype.UUID        `json:"warmup_send_id"`
+	Kind               string             `json:"kind"`
+	Placement          *string            `json:"placement"`
+	Source             string             `json:"source"`
+	ReasonCode         string             `json:"reason_code"`
+	AttributionTrusted bool               `json:"attribution_trusted"`
+	IdempotencyKey     string             `json:"idempotency_key"`
+	ObservedAt         pgtype.Timestamptz `json:"observed_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type WarmupParticipant struct {
 	MailboxID     uuid.UUID          `json:"mailbox_id"`
 	WorkspaceID   uuid.UUID          `json:"workspace_id"`
@@ -1027,6 +1044,7 @@ type WarmupParticipant struct {
 	PausedUntil   pgtype.Timestamptz `json:"paused_until"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	Lane          string             `json:"lane"`
 }
 
 type WarmupReceipt struct {
@@ -1055,6 +1073,44 @@ type WarmupSend struct {
 	SentAt      pgtype.Timestamptz `json:"sent_at"`
 	LastError   string             `json:"last_error"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WarmupSignalSnapshot struct {
+	WorkspaceID           uuid.UUID          `json:"workspace_id"`
+	MailboxID             uuid.UUID          `json:"mailbox_id"`
+	ComputedAt            pgtype.Timestamptz `json:"computed_at"`
+	PlacementInbox        int32              `json:"placement_inbox"`
+	PlacementSpam         int32              `json:"placement_spam"`
+	CampaignDelivered     int32              `json:"campaign_delivered"`
+	CampaignHardBounces   int32              `json:"campaign_hard_bounces"`
+	CampaignComplaints    int32              `json:"campaign_complaints"`
+	WarmupDelivered       int32              `json:"warmup_delivered"`
+	WarmupHardBounces     int32              `json:"warmup_hard_bounces"`
+	ObserverTokenFailures int32              `json:"observer_token_failures"`
+	NewestEvidenceAt      pgtype.Timestamptz `json:"newest_evidence_at"`
+}
+
+type WarmupStateTransition struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	MailboxID        uuid.UUID          `json:"mailbox_id"`
+	FromState        string             `json:"from_state"`
+	ToState          string             `json:"to_state"`
+	ReasonCode       string             `json:"reason_code"`
+	Reason           string             `json:"reason"`
+	PlacementSamples int32              `json:"placement_samples"`
+	SpamRate         float32            `json:"spam_rate"`
+	BounceSamples    int32              `json:"bounce_samples"`
+	BounceRate       float32            `json:"bounce_rate"`
+	ComplaintSamples int32              `json:"complaint_samples"`
+	ComplaintRate    float32            `json:"complaint_rate"`
+	InvalidTokens    int32              `json:"invalid_tokens"`
+	PolicyVersion    string             `json:"policy_version"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	FromLane         *string            `json:"from_lane"`
+	ToLane           *string            `json:"to_lane"`
+	LaneReasonCode   *string            `json:"lane_reason_code"`
+	LaneReason       *string            `json:"lane_reason"`
 }
 
 type WarmupThread struct {

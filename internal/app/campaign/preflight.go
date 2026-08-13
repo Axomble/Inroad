@@ -11,6 +11,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/sendcap"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // Preflight check ids. The exact strings are the wire contract (GET
@@ -456,31 +457,76 @@ func checkDailyLimit(in PreflightInput) PreflightCheck {
 	}
 }
 
-// checkWarmupHealth warns when any pool mailbox is currently throttled or
-// paused by the warmup engine -- the campaign can still launch, but will send
-// slower than its configured caps promise.
+// checkWarmupHealth reports on both warmup axes, which bite differently.
+//
+// A pool LANE that may not take new leads (quarantine, blocked, pending_auth) is a
+// FAIL: those mailboxes are withheld from the pool entirely, so launching would
+// either send nothing or silently concentrate the whole campaign on the remaining
+// senders. This is the first case where this check can stop a launch, so the
+// message names the lane and what clears it rather than reporting a bare score.
+//
+// Reduced capacity — a degraded health state, or a low-volume evidence-gathering
+// lane — stays a WARNING: the campaign can launch, it will just send slower than
+// its configured caps promise.
 func checkWarmupHealth(in PreflightInput) PreflightCheck {
-	var affected []string
+	var withheld, unauthenticated, reduced []string
 	for _, sd := range in.Senders {
-		if sd.HealthState == nil {
+		// pending_auth is driven by sending_domains, which security.md invariant 39
+		// scopes as ADVISORY: "an advisory that turns out to be wrong must not be able
+		// to stop a campaign". A spoofed or merely un-swept DNS answer would otherwise
+		// block a launch, and a fresh install has no sending_domains row at all. It
+		// still WARNS, and warmup itself still refuses to send unauthenticated mail
+		// (LaneMaySend is false) — the advisory just cannot veto a campaign.
+		if sd.Lane != nil && *sd.Lane == warmup.LanePendingAuth {
+			unauthenticated = append(unauthenticated, sd.Email)
 			continue
 		}
-		switch *sd.HealthState {
-		case sendcap.HealthThrottled, sendcap.HealthPaused:
-			affected = append(affected, sd.Email)
+		if sd.Lane != nil && !warmup.LaneMayTakeNewLead(*sd.Lane) {
+			withheld = append(withheld, fmt.Sprintf("%s (%s)", sd.Email, *sd.Lane))
+			continue
+		}
+		degraded := false
+		if sd.HealthState != nil {
+			switch *sd.HealthState {
+			case sendcap.HealthUnknown, sendcap.HealthWatch, sendcap.HealthThrottled, sendcap.HealthPaused:
+				degraded = true
+			}
+		}
+		gathering := sd.Lane != nil && (*sd.Lane == warmup.LaneProbation || *sd.Lane == warmup.LaneRecovery)
+		if degraded || gathering {
+			reduced = append(reduced, sd.Email)
 		}
 	}
-	if len(affected) > 0 {
+	if len(withheld) > 0 {
+		return PreflightCheck{
+			ID: CheckWarmupHealth, Severity: SeverityFail,
+			Title:  "Senders withheld from the warmup pool",
+			Detail: fmt.Sprintf("These mailboxes cannot take new leads: %s.", strings.Join(withheld, ", ")),
+			Remedy: "A withheld mailbox rejoins the pool by passing domain authentication " +
+				"and then earning a clean evidence window; a blocked one needs operator approval. " +
+				"Remove them from the pool to launch now. Replies to existing conversations are unaffected.",
+		}
+	}
+	if len(unauthenticated) > 0 {
 		return PreflightCheck{
 			ID: CheckWarmupHealth, Severity: SeverityWarn,
-			Title:  "Warmup health limiting some senders",
-			Detail: fmt.Sprintf("Throttled or paused by warmup health: %s.", strings.Join(affected, ", ")),
+			Title:  "Domain authentication has not passed for some senders",
+			Detail: fmt.Sprintf("SPF/DMARC has not been confirmed for: %s.", strings.Join(unauthenticated, ", ")),
+			Remedy: "Publish SPF and DMARC for these domains. Warmup is paused for them until the " +
+				"next DNS check passes; campaigns can still launch.",
+		}
+	}
+	if len(reduced) > 0 {
+		return PreflightCheck{
+			ID: CheckWarmupHealth, Severity: SeverityWarn,
+			Title:  "Warmup evidence or health limiting some senders",
+			Detail: fmt.Sprintf("Warmup has reduced capacity for: %s.", strings.Join(reduced, ", ")),
 			Remedy: "Wait for warmup health to recover, or adjust the sender pool.",
 		}
 	}
 	return PreflightCheck{
 		ID: CheckWarmupHealth, Severity: SeverityPass,
-		Title: "Warmup health normal", Detail: "No pool mailbox is throttled or paused by warmup health.",
+		Title: "Warmup health normal", Detail: "No pool mailbox is withheld or capacity-limited by warmup.",
 	}
 }
 

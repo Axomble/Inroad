@@ -177,6 +177,7 @@ func (q *Queries) GetPulseMailboxCounts(ctx context.Context, workspaceID uuid.UU
 
 const getPulseWarmupCounts = `-- name: GetPulseWarmupCounts :one
 SELECT COUNT(*)::bigint                                                       AS pool,
+       COUNT(*) FILTER (WHERE health_state = 'unknown')::bigint               AS unknown,
        COUNT(*) FILTER (WHERE health_state = 'healthy')::bigint               AS healthy,
        COUNT(*) FILTER (WHERE health_state = 'watch')::bigint                 AS watch,
        COUNT(*) FILTER (WHERE health_state IN ('throttled', 'paused'))::bigint AS at_risk
@@ -186,6 +187,7 @@ WHERE workspace_id = $1 AND enabled
 
 type GetPulseWarmupCountsRow struct {
 	Pool    int64 `json:"pool"`
+	Unknown int64 `json:"unknown"`
 	Healthy int64 `json:"healthy"`
 	Watch   int64 `json:"watch"`
 	AtRisk  int64 `json:"at_risk"`
@@ -200,6 +202,7 @@ func (q *Queries) GetPulseWarmupCounts(ctx context.Context, workspaceID uuid.UUI
 	var i GetPulseWarmupCountsRow
 	err := row.Scan(
 		&i.Pool,
+		&i.Unknown,
 		&i.Healthy,
 		&i.Watch,
 		&i.AtRisk,

@@ -20,7 +20,7 @@ const jsonHeaders = { 'content-type': 'application/json' }
 function healthyPulse(): WorkspacePulse {
   return {
     mailboxes: { total: 12, active: 12, paused: 0, error: 0 },
-    warmup: { pool: 6, healthy: 6, watch: 0, at_risk: 0 },
+    warmup: { pool: 6, unknown: 0, healthy: 6, watch: 0, at_risk: 0, probation: 0, quarantine: 0 },
     campaigns: { total: 8, running: 3, draft: 4, paused: 1 },
     contacts: { total: 1243 },
     sending: { sent_today: 247, daily_cap: 600 },
@@ -110,6 +110,48 @@ test('every server attention kind renders its operator label, not the fallback',
   // None fell through to the humanized `kind.replace` fallback.
   expect(screen.queryByText(/dmarc failing/i)).not.toBeInTheDocument()
   expect(screen.queryByText(/cap consumed/i)).not.toBeInTheDocument()
+})
+
+// The warmup line condenses two independent axes (pool lane + reputation) into
+// one string, so which fact wins is a product decision worth pinning: withheld
+// (no warmup mail AND no new campaign leads) beats a reputation verdict that only
+// reduces volume, and "proving" still beats claiming the pool is all healthy.
+test.each([
+  [{ quarantine: 2, at_risk: 3, watch: 4, unknown: 5, probation: 6 }, '2 withheld'],
+  [{ quarantine: 0, at_risk: 3, watch: 4, unknown: 5, probation: 6 }, '3 at risk'],
+  [{ quarantine: 0, at_risk: 0, watch: 4, unknown: 5, probation: 6 }, '4 on watch'],
+  [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 5, probation: 6 }, '5 need evidence'],
+  [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 0, probation: 6 }, '6 proving'],
+  [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 0, probation: 0 }, 'all healthy'],
+])('the warmup line reports %o as "%s"', async (counts, expected) => {
+  const payload = healthyPulse()
+  payload.warmup = { ...payload.warmup, ...counts }
+  // The line only renders in the attention form, so give the card a row.
+  payload.attention = [
+    { kind: 'mailbox_error', severity: 'danger', count: 1, reason: 'auth failed', href: '/app/mailboxes' },
+  ]
+  pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<PulseCard />, { preloadedState: authed })
+
+  const line = await screen.findByText(new RegExp(`warming · ${expected}`, 'i'))
+  expect(line.closest('a')).toHaveAttribute('href', '/app/warmup')
+})
+
+// A withheld mailbox is the one warmup state that stops campaigns, so it must not
+// be masked by a louder-sounding reputation bucket that happens to be non-zero.
+test('a withheld mailbox is not hidden behind a concurrent at-risk count', async () => {
+  const payload = healthyPulse()
+  payload.warmup = { ...payload.warmup, quarantine: 1, at_risk: 4, watch: 2 }
+  payload.attention = [
+    { kind: 'senders_gated', severity: 'warn', count: 4, reason: 'throttled', href: '/app/warmup' },
+  ]
+  pulseResponder = () => new Response(JSON.stringify(payload), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<PulseCard />, { preloadedState: authed })
+
+  expect(await screen.findByText(/warming · 1 withheld/i)).toBeInTheDocument()
+  expect(screen.queryByText(/4 at risk/i)).not.toBeInTheDocument()
 })
 
 // The outcome line is the card's only answer to "is it working?", so it has

@@ -2683,10 +2683,19 @@ export type WarmupParticipant = {
   max_volume: number;
   ramp_increment: number;
   reply_rate: number;
-  /** reputation state derived from inbox-placement and behavior signals */
-  health_state: "healthy" | "watch" | "throttled" | "paused";
+  /** SENDER REPUTATION axis — the verdict on this mailbox's outbound mail, derived from inbox-placement and behavior signals. Carries no claim about pool eligibility; see lane for that. */
+  health_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
   /** human-readable explanation of a non-healthy state */
   health_reason: string;
+  /** POOL ELIGIBILITY axis — which peers this mailbox may exchange warmup traffic with (selection pairs same-lane only) and whether it may take new campaign leads. pending_auth = authentication and ownership not proven yet, no warmup and no new leads. probation = gathering evidence at a floor volume in its own lane, reduced leads. healthy = full participation. watch = reduced volume while a signal is diagnosed. recovery = earning its way back at a floor volume in its own lane. quarantine = withheld from the pool and new campaign leads blocked; exit needs fresh qualifying evidence, never elapsed time alone. blocked = withheld until an operator approves re-entry. Clients must treat an unrecognized value as unproven (probation), never as healthy. */
+  lane:
+    | "pending_auth"
+    | "probation"
+    | "healthy"
+    | "watch"
+    | "recovery"
+    | "quarantine"
+    | "blocked";
   started_at: string;
   /** warmup emails sent by this mailbox today */
   today_sent: number;
@@ -2725,14 +2734,28 @@ export type WarmupMailbox = {
   mailbox_id: string;
   email: string;
   enabled: boolean;
-  health_state: "healthy" | "watch" | "throttled" | "paused";
+  /** SENDER REPUTATION axis (see WarmupParticipant.health_state) */
+  health_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
   health_reason: string;
+  /** POOL ELIGIBILITY axis (see WarmupParticipant.lane) */
+  lane:
+    | "pending_auth"
+    | "probation"
+    | "healthy"
+    | "watch"
+    | "recovery"
+    | "quarantine"
+    | "blocked";
+  /** human-readable explanation of the current lane — what put the mailbox there and what clears it. Empty for a lane that needs no explanation. */
+  lane_reason: string;
   today_sent: number;
   today_target: number;
-  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1) — a sender-deliverability signal */
-  inbox_rate_7d: number;
-  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1) */
-  spam_rate_7d: number;
+  /** trusted inbox plus spam placement observations in the trailing 7 days */
+  placement_sample_7d: number;
+  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed */
+  inbox_rate_7d: number | null;
+  /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed */
+  spam_rate_7d: number | null;
 };
 export type WarmupOverview = {
   pool_size: number;
@@ -2756,12 +2779,18 @@ export type Pulse = {
     paused: number;
     error: number;
   };
-  /** enabled warmup participants bucketed by live health; at_risk = throttled + paused */
+  /** Enabled warmup participants counted on both warmup axes. unknown/healthy/watch/at_risk bucket the SENDER REPUTATION axis (health_state; at_risk = throttled + paused); probation and quarantine count the POOL ELIGIBILITY axis (lane). The two axes are independent, so a participant appears in one bucket per axis and the counts across axes overlap — only the reputation buckets sum to pool. */
   warmup: {
     pool: number;
+    /** enabled participants without enough evidence for a health verdict */
+    unknown: number;
     healthy: number;
     watch: number;
     at_risk: number;
+    /** participants gathering evidence: lane in (probation, recovery) — sending at a floor volume in their own lane, not yet cleared for the healthy pool */
+    probation: number;
+    /** participants withheld from the pool: lane in (quarantine, blocked) — exchanging no warmup mail and blocked from taking new campaign leads. pending_auth is excluded; an unproven domain is already reported by the dmarc_failing attention row. */
+    quarantine: number;
   };
   campaigns: {
     total: number;
@@ -3459,7 +3488,8 @@ export type CampaignSender = {
   assigned_count: number;
   last_assigned_at?: string | null;
   /** Read-only warmup health; null when the mailbox is not warming up. */
-  health_state?: ("healthy" | "watch" | "throttled" | "paused" | null) | null;
+  health_state?:
+    ("unknown" | "healthy" | "watch" | "throttled" | "paused" | null) | null;
   /** Read-only. False when this mailbox is not taking cold volume right now — paused by warmup, held out of rotation, or an inactive mailbox. */
   sending?: boolean;
   /** Read-only effective cap for today, after ramp and after warmup-health scaling. */

@@ -8,24 +8,11 @@ import (
 	"time"
 )
 
-// Health states, ordered from best to worst. These exact strings are the shared
-// contract pinned by migration 000018's CHECK constraint on
-// warmup_participants.health_state.
-const (
-	StateHealthy   = "healthy"
-	StateWatch     = "watch"
-	StateThrottled = "throttled"
-	StatePaused    = "paused"
-)
-
-// Health thresholds (spec §8), evaluated over a trailing window by the caller.
-const (
-	spamWatchRate     = 0.15 // spam placement above this → watch
-	spamThrottleRate  = 0.30 // → throttled
-	spamPauseRate     = 0.50 // → paused
-	bounceSpikeRate   = 0.10 // hard-bounce rate above this → paused
-	invalidTokenLimit = 3    // sustained invalid/tampered tokens → throttled
-)
+// This file owns SCHEDULING only: how much a mailbox sends on a given day, when
+// each send lands, and how long a simulated recipient waits before acting.
+// Reputation policy — health states, lanes, thresholds, transitions — lives in
+// policy.go. The split matters because the two change for unrelated reasons: a
+// day-shape tweak should never require rereading the state machine.
 
 // wakingStartHour / wakingEndHour bound the recipient-local window in which
 // warmup traffic and engagement are allowed. 07:00 inclusive, 22:00 exclusive.
@@ -130,6 +117,9 @@ func DailyVolumeFactor(mailboxID string, day time.Time) float64 {
 // that is the point of the coarse variation. Note the ramp itself is anchored on
 // calendar time (see RampTarget's daysWarming), so a quiet day never rewinds the
 // ramp; it only lowers that one day's quota.
+//
+// Lane capping is applied SEPARATELY by warmup.LaneDailyVolume: a probation
+// mailbox's ceiling is a policy decision, not a day-shape one.
 func EffectiveDailyVolume(target int, mailboxID string, day time.Time) int {
 	if target <= 0 {
 		return 0
@@ -140,6 +130,21 @@ func EffectiveDailyVolume(target int, mailboxID string, day time.Time) int {
 		return 1
 	}
 	return v
+}
+
+const PairCooldown = 24 * time.Hour
+
+// PairDailyCap prevents a sender from concentrating its daily volume on one
+// recipient while still allowing the full target across the eligible pool.
+func PairDailyCap(target, eligiblePartners int) int {
+	if target <= 0 || eligiblePartners <= 0 {
+		return 0
+	}
+	perPartner := (target + eligiblePartners - 1) / eligiblePartners
+	if perPartner < 1 {
+		return 1
+	}
+	return perPartner
 }
 
 // NextSpacing is the delay before the index-th send of a day whose target volume
@@ -229,114 +234,6 @@ func DeferToWakingHours(t time.Time, loc *time.Location) time.Time {
 		morning = morning.AddDate(0, 0, 1)
 	}
 	return morning
-}
-
-// HealthState computes the next health state from the trailing-window signals and
-// the current state. Escalation is immediate to the worst warranted level;
-// recovery is gradual — a clean window steps the state down exactly one level, so
-// a paused mailbox climbs paused→throttled→watch→healthy over successive clean
-// evaluations rather than snapping back. It returns the new state and a
-// human-readable reason.
-func HealthState(spamRate, bounceRate float64, invalidTokens int, current string) (state, reason string) {
-	want, wantReason := worstSignalState(spamRate, bounceRate, invalidTokens)
-	curRank := stateRank(current)
-	wantRank := stateRank(want)
-
-	switch {
-	case wantRank > curRank:
-		return want, wantReason
-	case wantRank < curRank:
-		lower := stateAtRank(curRank - 1)
-		if lower == StateHealthy {
-			return StateHealthy, ""
-		}
-		if want == StateHealthy {
-			return lower, "clean window: recovering, stepping down from " + normalizeState(current)
-		}
-		// Signals improved but aren't fully clean: still step down exactly one
-		// level, but report the persisting signal rather than falsely claiming a
-		// clean window.
-		return lower, "improving, stepping down from " + normalizeState(current) + " to " + lower + " (" + wantReason + ")"
-	default:
-		if want == StateHealthy {
-			return StateHealthy, ""
-		}
-		return want, wantReason
-	}
-}
-
-// IsRecovery reports whether a health transition from->to is a recovery (a step
-// toward a healthier state) rather than an escalation to a worse one. from == to is
-// not a recovery.
-func IsRecovery(from, to string) bool {
-	return stateRank(to) < stateRank(from)
-}
-
-// ShouldApplyTransition reports whether a computed health transition should be
-// persisted now. A no-op (from == to) is never applied. An ESCALATION to a worse
-// state always applies immediately. A RECOVERY (step down to a healthier state) is
-// held back while the timed block is still in force (pausedUntil in the future),
-// enforcing the 24h/72h dwell so a mailbox can't walk paused→throttled→watch→healthy
-// on back-to-back 5-minute sweeps. A zero/elapsed pausedUntil never blocks recovery.
-func ShouldApplyTransition(from, to string, pausedUntil, now time.Time) bool {
-	if from == to {
-		return false
-	}
-	if IsRecovery(from, to) && pausedUntil.After(now) {
-		return false
-	}
-	return true
-}
-
-// worstSignalState maps the raw signals to the worst state they warrant, checked
-// most-severe first.
-func worstSignalState(spamRate, bounceRate float64, invalidTokens int) (state, reason string) {
-	switch {
-	case spamRate > spamPauseRate:
-		return StatePaused, "spam placement rate above 50%"
-	case bounceRate > bounceSpikeRate:
-		return StatePaused, "hard-bounce spike"
-	case spamRate > spamThrottleRate:
-		return StateThrottled, "spam placement rate above 30%"
-	case invalidTokens >= invalidTokenLimit:
-		return StateThrottled, "repeated invalid or tampered warmup tokens"
-	case spamRate > spamWatchRate:
-		return StateWatch, "spam placement rate above 15%"
-	default:
-		return StateHealthy, ""
-	}
-}
-
-// stateRank orders the states; an unknown/empty current state is treated as
-// healthy so recovery math never underflows.
-func stateRank(state string) int {
-	switch state {
-	case StateWatch:
-		return 1
-	case StateThrottled:
-		return 2
-	case StatePaused:
-		return 3
-	default:
-		return 0
-	}
-}
-
-func stateAtRank(rank int) string {
-	switch rank {
-	case 1:
-		return StateWatch
-	case 2:
-		return StateThrottled
-	case 3:
-		return StatePaused
-	default:
-		return StateHealthy
-	}
-}
-
-func normalizeState(state string) string {
-	return stateAtRank(stateRank(state))
 }
 
 // hashU64 is the package's shared deterministic hash: a SHA-256 over the

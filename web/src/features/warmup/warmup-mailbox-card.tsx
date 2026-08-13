@@ -4,8 +4,10 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { httpStatus } from '@/lib/rtk-error'
+import { laneMeta, toWarmupLane } from '@/lib/warmup-lane'
 import type { Mailbox, WarmupMailbox } from '@/store/api'
 import { HealthBadge } from '@/components/shared/health-badge'
+import { LaneBadge } from '@/components/shared/lane-badge'
 import { WarmupSettingsForm } from './warmup-settings-form'
 import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api'
 
@@ -15,7 +17,8 @@ import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api
 const WarmupSparkline = lazy(() => import('./warmup-sparkline'))
 
 /** 0..1 fraction to a whole-percent string, e.g. 0.83 -> "83%". */
-function formatPct(value: number): string {
+function formatPct(value: number | null): string {
+  if (value == null) return 'Not measured'
   return `${Math.round(value * 100)}%`
 }
 
@@ -59,24 +62,33 @@ export function WarmupMailboxCard({
     <li className="border-b border-border">
       <div className="flex flex-col items-stretch gap-3 px-4 py-3 sm:flex-row sm:items-center sm:gap-4 sm:px-5">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="truncate text-[13.5px] font-medium text-foreground">{mailbox.email}</span>
             {enrolled && entry ? (
-              <HealthBadge state={entry.health_state} reason={entry.health_reason} />
+              <>
+                {/* Two independent axes, two deliberately different chip shapes:
+                    reputation (pill) then pool eligibility (squared, axis named). */}
+                <HealthBadge state={entry.health_state} reason={entry.health_reason} />
+                <LaneBadge lane={entry.lane} />
+              </>
             ) : (
               <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">Not warming</span>
             )}
           </div>
           {enrolled && entry && (
-            <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-muted-foreground">
-              <RampProgress sent={entry.today_sent} target={entry.today_target} />
-              <span>
-                inbox 7d <span className="tabular-nums text-foreground">{formatPct(entry.inbox_rate_7d)}</span>
-              </span>
-              <span>
-                spam 7d <span className="tabular-nums text-foreground">{formatPct(entry.spam_rate_7d)}</span>
-              </span>
-            </div>
+            <>
+              <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-muted-foreground">
+                <RampProgress sent={entry.today_sent} target={entry.today_target} />
+                <span>
+                  inbox 7d <span className="tabular-nums text-foreground">{formatPct(entry.inbox_rate_7d)}</span>
+                </span>
+                <span>
+                  spam 7d <span className="tabular-nums text-foreground">{formatPct(entry.spam_rate_7d)}</span>
+                </span>
+                <span className="tabular-nums">{entry.placement_sample_7d} observations</span>
+              </div>
+              <LaneReason lane={entry.lane} reason={entry.lane_reason} />
+            </>
           )}
         </div>
 
@@ -128,6 +140,24 @@ export function WarmupMailboxCard({
         />
       )}
     </li>
+  )
+}
+
+/**
+ * The server's explanation of the current lane — what put the mailbox there and
+ * what clears it (§7 of the phase-1 design requires the condition be named, not
+ * scored). Rendered as a line rather than a `title` tooltip because a withheld
+ * mailbox takes no new campaign leads, which is too consequential to hide behind
+ * a hover; the lane's own tone ties the sentence to the chip above it, and the
+ * screen-reader prefix names the axis for anyone who can't see that link.
+ */
+function LaneReason({ lane, reason }: { lane: string; reason: string }) {
+  if (!reason) return null
+  return (
+    <p className={cn('mt-1 text-[11px] leading-snug', laneMeta[toWarmupLane(lane)].text)}>
+      <span className="sr-only">Pool status: </span>
+      {reason}
+    </p>
   )
 }
 

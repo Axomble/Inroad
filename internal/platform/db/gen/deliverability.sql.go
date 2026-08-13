@@ -149,7 +149,7 @@ SELECT
                  AND (cardinality($3::uuid[]) = 0
                       OR p.mailbox_id = ANY($3::uuid[]))
                ORDER BY CASE p.health_state
-                          WHEN 'paused' THEN 4 WHEN 'throttled' THEN 3 WHEN 'watch' THEN 2 ELSE 1 END DESC
+                          WHEN 'paused' THEN 5 WHEN 'throttled' THEN 4 WHEN 'watch' THEN 3 WHEN 'unknown' THEN 2 ELSE 1 END DESC
                LIMIT 1), '')::text AS warmup_state,
     COALESCE((SELECT d.state FROM sending_domains d
                WHERE d.workspace_id = $1

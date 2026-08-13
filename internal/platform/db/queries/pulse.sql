@@ -21,6 +21,7 @@ WHERE workspace_id = $1;
 -- at_risk folds 'throttled' and 'paused' together — both mean the engine is
 -- actively holding volume back.
 SELECT COUNT(*)::bigint                                                       AS pool,
+       COUNT(*) FILTER (WHERE health_state = 'unknown')::bigint               AS unknown,
        COUNT(*) FILTER (WHERE health_state = 'healthy')::bigint               AS healthy,
        COUNT(*) FILTER (WHERE health_state = 'watch')::bigint                 AS watch,
        COUNT(*) FILTER (WHERE health_state IN ('throttled', 'paused'))::bigint AS at_risk

@@ -102,10 +102,34 @@ stateDiagram-v2
     paused --> healthy: Manual Unpause & Verification
 ```
 
+### Two axes: health and lane
+
+Warmup tracks two independent things. **Health** is your mailbox's sending
+reputation. **Lane** is its standing in the pool — who it exchanges warmup mail
+with, and whether it may take new campaign leads. A mailbox can be reputation-healthy
+and still sit in `probation` because it has not yet proven itself, or sit in
+`quarantine` while its last measured reputation looked fine.
+
+| Lane | Meaning | Warmup | New campaign leads |
+| :--- | :--- | :--- | :--- |
+| `pending_auth` | SPF/DMARC not confirmed for the domain. | Paused | Allowed (the DNS check is advisory) |
+| `probation` | Gathering evidence; not yet proven. | 5/day, probation peers only | Allowed, reduced |
+| `healthy` | Qualified clean evidence. | Full ramp, healthy peers only | Allowed |
+| `watch` | Early degradation being diagnosed. | Reduced, watch peers only | Allowed, reduced |
+| `recovery` | Requalifying after quarantine. | 5/day, recovery peers only | Allowed, reduced |
+| `quarantine` | Withheld from the pool. | None | **Blocked** |
+| `blocked` | Manual review required. | None | **Blocked** |
+
+Lanes never mix: a healthy mailbox only ever exchanges warmup mail with other
+healthy mailboxes. Time alone never returns a mailbox to the healthy lane — it has
+to earn it with fresh evidence. Replies to a human who already wrote back are never
+blocked, whatever the lane.
+
 ### Health States & Action Thresholds
 
 | State | Health Criteria | System Action |
 | :--- | :--- | :--- |
+| `unknown` | Not enough recent evidence to judge. | Treated as unproven, never as healthy: reduced cold-send capacity until evidence arrives. |
 | `healthy` | Spam placement < 5%, Bounce rate < 2%. | Normal ramp-up schedule proceeds according to configuration. |
 | `watch` | Spam placement between 5% and 15%. | Ramp-up paused; sending volume capped at current daily rate. Alert triggered. |
 | `throttled` | Spam placement > 15% or sudden bounce surge. | Warmup volume automatically reduced by 50%. Associated campaigns auto-throttled. |
@@ -136,3 +160,12 @@ Content-Type: application/json
 GET /api/v1/warmup/mailboxes/550e8400-e29b-41d4-a716-446655440000/stats
 Authorization: Bearer <jwt_token>
 ```
+
+:::note[How thresholds are actually applied]
+The percentages above are the thresholds, but a rate is only acted on once there is
+enough evidence to support it, and it is compared using a 95% confidence **lower
+bound** rather than the raw observed percentage. One complaint out of a hundred sends
+is a 1% observed rate but is not evidence of a 1% rate, so it does not pause a
+mailbox. This deliberately makes the engine slower to punish and slower to promote
+than the raw numbers suggest.
+:::

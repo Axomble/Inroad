@@ -107,6 +107,8 @@ services:
   migrate:
     <<: *go-build
     environment: *go-env
+    # Clear the production entrypoint so dev runs migrations through Go.
+    entrypoint: []
     command: go run ./cmd/migrate up
     depends_on:
       postgres: { condition: service_healthy }

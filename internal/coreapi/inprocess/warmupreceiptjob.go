@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -144,7 +145,7 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	qtx := c.q.WithTx(tx)
 
 	row, err := qtx.UpsertWarmupReceipt(ctx, gen.UpsertWarmupReceiptParams{
-		WorkspaceID: ws, WarmupSendID: sendUUID, RecipientMailbox: recipient, Placement: in.Placement,
+		WorkspaceID: ws, WarmupSendID: sendID, RecipientMailbox: recipient, Placement: in.Placement,
 		SourceFolder: in.SourceFolder, MessageID: in.MessageID,
 	})
 	if err != nil {
@@ -162,7 +163,28 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		})
 		if gerr != nil {
 			if errors.Is(gerr, pgx.ErrNoRows) {
-				return coreapi.WarmupEngagePlan{}, coreapi.ErrCrossTenant
+				_, perr := c.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{
+					MailboxID: recipient, WorkspaceID: ws,
+				})
+				if perr == nil {
+					// A valid-HMAC token presented against a send it was NOT addressed to
+					// is the highest-signal indicator of token compromise or replay in the
+					// system. Losing it silently — as this did — means an active forgery
+					// leaves no trace at all when the write fails.
+					if oerr := c.q.RecordWarmupTokenFailureObservation(ctx, gen.RecordWarmupTokenFailureObservationParams{
+						WorkspaceID: ws, RecipientMailbox: recipient,
+						ReasonCode: "receipt_binding_mismatch",
+					}); oerr != nil {
+						slog.Warn("warmup_binding_mismatch_evidence_lost",
+							"workspace_id", ws.String(), "mailbox_id", recipient.String(),
+							"warmup_send_id", sendID.String(), "err", oerr)
+					}
+					return coreapi.WarmupEngagePlan{}, nil
+				}
+				if errors.Is(perr, pgx.ErrNoRows) {
+					return coreapi.WarmupEngagePlan{}, coreapi.ErrCrossTenant
+				}
+				return coreapi.WarmupEngagePlan{}, perr
 			}
 			return coreapi.WarmupEngagePlan{}, gerr
 		}
@@ -222,6 +244,12 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	}
 	if err := qtx.RecordWarmupSenderPlacementStat(ctx, gen.RecordWarmupSenderPlacementStatParams{
 		WorkspaceID: ws, WarmupSendID: sendID, Placement: in.Placement,
+	}); err != nil {
+		return coreapi.WarmupEngagePlan{}, err
+	}
+	if err := qtx.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
+		WorkspaceID: ws, WarmupSendID: sendID, RecipientMailbox: recipient,
+		ReceiptID: row.ID, Placement: in.Placement, ObservedAt: row.ReceivedAt,
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}
@@ -293,10 +321,18 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 	// Reply only when the seeded decision says so AND the thread still has a turn to
 	// send; an exhausted / deleted thread means DoReply resolves to false.
 	doReply := warmup.ReplyDecision(seed, float64(b.ReplyRate))
+	// The replier's lane can have moved since the message arrived — minutes to hours,
+	// and a receipt can be re-engaged later still. Partner selection proved
+	// compatibility at SEND time only, so without re-checking here a mailbox that has
+	// since been quarantined keeps emitting warmup mail. Rescue and mark-read are
+	// inbound-only and remain allowed; only the outbound reply is withheld.
+	if doReply && !warmup.LaneMaySend(b.Lane) {
+		doReply = false
+	}
 
 	var reply coreapi.WarmupSendJob
 	if doReply {
-		built, ok, berr := c.buildWarmupReply(ctx, rid, b.RecipientMailbox, ws)
+		built, ok, berr := c.buildWarmupReply(ctx, rid, b.RecipientMailbox, ws, b.Lane)
 		if berr != nil {
 			return coreapi.WarmupEngageJob{}, berr
 		}
@@ -350,7 +386,7 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 // reclaim the existing 'sent' row (recover-forward) rather than re-send. The returned job
 // carries everything the claim/send/finalize path needs EXCEPT transport, which the caller
 // fills from the recipient's already-decrypted credentials.
-func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID) (coreapi.WarmupSendJob, bool, error) {
+func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws uuid.UUID, replierLane string) (coreapi.WarmupSendJob, bool, error) {
 	th, err := c.q.GetWarmupReplyThread(ctx, gen.GetWarmupReplyThreadParams{ID: receiptID, WorkspaceID: ws})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -365,6 +401,13 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 	body, ok := warmup.Reply(content, int(th.Turn))
 	if !ok {
 		return coreapi.WarmupSendJob{}, false, nil // thread exhausted → no reply
+	}
+	// Re-check isolation against the ORIGINAL sender's CURRENT lane. A healthy peer
+	// must not receive from a mailbox that has left the healthy pool since the
+	// outbound send, and vice versa. An empty sender lane means that mailbox is no
+	// longer a warmup participant, so there is no thread left to continue.
+	if !warmup.LanesCompatible(replierLane, th.SenderLane) {
+		return coreapi.WarmupSendJob{}, false, nil
 	}
 
 	// Anchor the reply's warmup_sends id to the IMMUTABLE receipt id (one receipt maps to
@@ -452,41 +495,95 @@ func (c client) ListDueWarmupMailboxes(ctx context.Context) ([]coreapi.MailboxRe
 // update error is accumulated (errors.Join) and evaluation CONTINUES for the rest,
 // so one bad row never stalls health eval for every mailbox.
 func (c client) EvaluateWarmupHealth(ctx context.Context) error {
-	rows, err := c.q.ListWarmupHealthSignals(ctx)
+	workspaces, err := c.q.ListWorkspacesWithWarmupParticipants(ctx)
 	if err != nil {
 		return err
 	}
 	now := c.now().UTC()
 	var errs []error
-	for _, r := range rows {
-		// spamRate is "of MY sent warmup mail, the fraction that landed in spam" —
-		// spam / (inbox + spam), both SENDER-attributed (spec §4/§8). inbox+spam == 0
-		// (no recent sends observed) yields rate 0 → healthy.
-		sent := r.Inbox + r.Spam
-		var spamRate float64
-		if sent > 0 {
-			spamRate = float64(r.Spam) / float64(sent)
-		}
-		// Bounce rate and invalid-token count have no persistence in the v1 schema,
-		// so they are 0 here (documented gap); spam-placement rate is the only live
-		// signal. HealthState escalates immediately and recovers one level per clean
-		// window.
-		state, reason := warmup.HealthState(spamRate, 0, 0, r.HealthState)
-		// Timed-block floor (spec §8): an escalation to a worse state applies
-		// immediately, but a recovery (step down) is held back while paused_until is
-		// still in the future — so recovery can't bypass the 72h/24h dwell by walking
-		// paused→throttled→watch→healthy on consecutive 5-minute sweeps.
-		if !warmup.ShouldApplyTransition(r.HealthState, state, r.PausedUntil.Time, now) {
+	for _, ws := range workspaces {
+		// Signals are aggregated ONCE per workspace, not recomputed per participant.
+		// The Phase 0 sweep ran eight correlated subqueries for every enabled mailbox
+		// on every tick, including an arm no index could serve.
+		if _, err := c.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, ws); err != nil {
+			// Skip this workspace rather than evaluating it on stale evidence. The
+			// previous snapshot survives and the staleness rule below will refuse to
+			// promote on it, so a persistent refresh failure degrades to "no
+			// promotions" rather than to wrong ones.
+			errs = append(errs, fmt.Errorf("warmup: refresh signals for workspace %s: %w", ws, err))
 			continue
 		}
-		if err := c.q.UpdateWarmupHealth(ctx, gen.UpdateWarmupHealthParams{
-			MailboxID:    r.MailboxID,
-			WorkspaceID:  r.WorkspaceID,
-			HealthState:  state,
-			HealthReason: reason,
-			PausedUntil:  warmupPausedUntil(state, now),
+		if err := c.evaluateWorkspaceParticipants(ctx, ws, now); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// warmupEvidenceTTL is how old a snapshot may be before it stops counting as
+// evidence. Twice the five-minute sweep interval tolerates one missed tick; beyond
+// that the participant reads as unknown and cannot be promoted. Staleness must
+// never read as safety (design §8, acceptance criterion 3).
+const warmupEvidenceTTL = 10 * time.Minute
+
+func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID, now time.Time) error {
+	rows, err := c.q.ListWarmupEvaluationRows(ctx, gen.ListWarmupEvaluationRowsParams{
+		WorkspaceID: ws, EvidenceTtlSeconds: int32(warmupEvidenceTTL / time.Second),
+	})
+	if err != nil {
+		return fmt.Errorf("warmup: list participants for workspace %s: %w", ws, err)
+	}
+	var errs []error
+	for _, r := range rows {
+		decision := warmup.EvaluateParticipant(warmup.Signals{
+			CurrentHealth: r.HealthState,
+			CurrentLane:   r.Lane,
+			AuthPassing:   r.AuthPassing,
+			// Computed by the DB clock (see the query): a participant enabled between
+			// the refresh and this read has no snapshot row at all, so the result is
+			// NULL, which must read as no evidence rather than as zeros that look clean.
+			EvidenceFresh:         r.EvidenceFresh != nil && *r.EvidenceFresh,
+			Inbox:                 int(r.PlacementInbox),
+			Spam:                  int(r.PlacementSpam),
+			CampaignDelivered:     int(r.CampaignDelivered),
+			CampaignHardBounces:   int(r.CampaignHardBounces),
+			CampaignComplaints:    int(r.CampaignComplaints),
+			WarmupDelivered:       int(r.WarmupDelivered),
+			WarmupHardBounces:     int(r.WarmupHardBounces),
+			ObserverTokenFailures: int(r.ObserverTokenFailures),
+			QuarantinedSince:      r.QuarantinedSince.Time,
+			PausedUntil:           r.PausedUntil.Time,
+		}, now)
+
+		// The timed-block floor is applied INSIDE EvaluateParticipant, before the lane
+		// is derived, so a held health recovery cannot leak into a lane promotion.
+
+		if !warmup.ShouldApplyTransition(r.HealthState, decision.Health, r.Lane, decision.Lane) {
+			continue
+		}
+		bounceSamples, bounceRate := decision.CampaignBounceSamples, decision.CampaignBounceRate
+		if decision.WarmupBounceRate > decision.CampaignBounceRate {
+			bounceSamples, bounceRate = decision.WarmupBounceSamples, decision.WarmupBounceRate
+		}
+		if _, err := c.q.ApplyWarmupParticipantTransition(ctx, gen.ApplyWarmupParticipantTransitionParams{
+			MailboxID: r.MailboxID, WorkspaceID: r.WorkspaceID,
+			FromState: r.HealthState, ToState: decision.Health,
+			FromLane: r.Lane, ToLane: decision.Lane,
+			ReasonCode: decision.HealthReasonCode, Reason: decision.HealthReason,
+			LaneReasonCode: decision.LaneReasonCode, LaneReason: decision.LaneReason,
+			PausedUntil:      warmupPausedUntil(decision.Health, now),
+			PlacementSamples: int32(decision.PlacementSamples), SpamRate: float32(decision.SpamRate),
+			// One bounce column pair, carrying the arm that actually DROVE the
+			// decision with ITS OWN denominator. Recording the campaign pair
+			// unconditionally meant a warmup-driven pause wrote
+			// reason_code='warmup_bounce_pause' next to rate 0.0 / samples 0 — a row
+			// that cannot explain itself, which is the Phase 0 defect this table
+			// exists to fix.
+			BounceSamples: int32(bounceSamples), BounceRate: float32(bounceRate),
+			ComplaintSamples: int32(decision.ComplaintSamples), ComplaintRate: float32(decision.ComplaintRate),
+			InvalidTokens: int32(decision.ObserverTokenFailures), PolicyVersion: warmup.PolicyVersion,
 		}); err != nil {
-			errs = append(errs, fmt.Errorf("warmup: update health for mailbox %s: %w", r.MailboxID.String(), err))
+			errs = append(errs, fmt.Errorf("warmup: apply transition for mailbox %s: %w", r.MailboxID.String(), err))
 			continue
 		}
 	}

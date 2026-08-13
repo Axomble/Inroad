@@ -3,7 +3,6 @@ package warmup
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -355,57 +354,11 @@ func TestDeferToWakingHours(t *testing.T) {
 	}
 }
 
-func TestHealthStateTransitions(t *testing.T) {
-	cases := []struct {
-		name          string
-		spam, bounce  float64
-		invalidTokens int
-		current       string
-		wantState     string
-	}{
-		{"clean stays healthy", 0.05, 0.0, 0, StateHealthy, StateHealthy},
-		{"spam over 15 -> watch", 0.20, 0.0, 0, StateHealthy, StateWatch},
-		{"spam over 30 -> throttled", 0.35, 0.0, 0, StateHealthy, StateThrottled},
-		{"spam over 50 -> paused", 0.60, 0.0, 0, StateHealthy, StatePaused},
-		{"bounce spike -> paused", 0.0, 0.20, 0, StateHealthy, StatePaused},
-		{"invalid tokens -> throttled", 0.0, 0.0, 3, StateHealthy, StateThrottled},
-		{"escalation is immediate", 0.60, 0.0, 0, StateWatch, StatePaused},
-		{"recover paused -> throttled on clean", 0.0, 0.0, 0, StatePaused, StateThrottled},
-		{"recover throttled -> watch on clean", 0.0, 0.0, 0, StateThrottled, StateWatch},
-		{"recover watch -> healthy on clean", 0.0, 0.0, 0, StateWatch, StateHealthy},
-		{"partial recovery steps one level toward health", 0.20, 0.0, 0, StatePaused, StateThrottled},
-		{"holds level when signals match state", 0.20, 0.0, 0, StateWatch, StateWatch},
-		{"unknown current treated as healthy", 0.20, 0.0, 0, "bogus", StateWatch},
+func TestPairDailyCap(t *testing.T) {
+	if got := PairDailyCap(10, 3); got != 4 {
+		t.Fatalf("PairDailyCap(10, 3) = %d, want 4", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, reason := HealthState(tc.spam, tc.bounce, tc.invalidTokens, tc.current)
-			if got != tc.wantState {
-				t.Fatalf("state = %q, want %q (reason %q)", got, tc.wantState, reason)
-			}
-			if got != StateHealthy && reason == "" {
-				t.Fatalf("expected a non-empty reason for non-healthy state %q", got)
-			}
-			if got == StateHealthy && reason != "" {
-				t.Fatalf("expected empty reason for healthy, got %q", reason)
-			}
-		})
-	}
-}
-
-// TestHealthStatePartialRecoveryReason pins that a step-down whose window is NOT
-// clean — signals still warrant a non-healthy level, just a milder one — reports
-// the persisting signal and never falsely claims a clean window. State is still a
-// single step toward health (paused -> throttled); only the reason is at issue.
-func TestHealthStatePartialRecoveryReason(t *testing.T) {
-	got, reason := HealthState(0.20, 0.0, 0, StatePaused) // spam 0.20 warrants watch
-	if got != StateThrottled {
-		t.Fatalf("state = %q, want %q (reason %q)", got, StateThrottled, reason)
-	}
-	if strings.Contains(reason, "clean window") {
-		t.Fatalf("reason must not claim a clean window while signals persist: %q", reason)
-	}
-	if !strings.Contains(reason, "15%") {
-		t.Fatalf("reason should surface the still-present signal, got %q", reason)
+	if PairDailyCap(10, 0) != 0 || PairDailyCap(0, 3) != 0 {
+		t.Fatal("empty target or partner pool must produce a zero pair cap")
 	}
 }

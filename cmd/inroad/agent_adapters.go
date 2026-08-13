@@ -192,7 +192,7 @@ func (a deliverabilityToolAdapter) Snapshot(ctx context.Context, ws uuid.UUID) (
 	return agenttool.Snapshot{
 		MailboxesTotal: row.Mailboxes.Total, MailboxesActive: row.Mailboxes.Active,
 		MailboxesPaused: row.Mailboxes.Paused, MailboxesError: row.Mailboxes.Error,
-		WarmupPool: row.Warmup.Pool, WarmupHealthy: row.Warmup.Healthy,
+		WarmupPool: row.Warmup.Pool, WarmupUnknown: row.Warmup.Unknown, WarmupHealthy: row.Warmup.Healthy,
 		WarmupWatch: row.Warmup.Watch, WarmupAtRisk: row.Warmup.AtRisk,
 		CampaignsTotal: row.Campaigns.Total, CampaignsRunning: row.Campaigns.Running,
 		CampaignsDraft: row.Campaigns.Draft, CampaignsPaused: row.Campaigns.Paused,
@@ -224,7 +224,8 @@ func (a warmupTools) Overview(ctx context.Context, ws uuid.UUID) (agenttool.Warm
 			MailboxID: id, Email: mailbox.Email, Enabled: mailbox.Enabled,
 			HealthState: mailbox.HealthState, HealthReason: mailbox.HealthReason,
 			TodaySent: mailbox.TodaySent, TodayTarget: mailbox.TodayTarget,
-			InboxRate7d: mailbox.InboxRate7d, SpamRate7d: mailbox.SpamRate7d,
+			PlacementSample7d: mailbox.PlacementSample7d,
+			InboxRate7d:       mailbox.InboxRate7d, SpamRate7d: mailbox.SpamRate7d,
 		}
 	}
 	return out, nil

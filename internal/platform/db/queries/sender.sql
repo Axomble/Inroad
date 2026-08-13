@@ -22,6 +22,7 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
+       COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -45,6 +46,7 @@ SELECT cam.mailbox_id, m.email, m.provider, m.status,
        m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
+       COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cam.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
@@ -95,6 +97,7 @@ SELECT cs.mailbox_id, cs.weight, cs.enabled, cs.assigned_count, cs.last_assigned
        m.status AS mailbox_status, m.daily_cap, m.ramp_enabled, m.ramp_start_cap, m.ramp_days,
        m.created_at AS mailbox_created_at,
        COALESCE(CASE WHEN wp.enabled THEN wp.health_state END, '')::text AS health_state,
+       COALESCE(CASE WHEN wp.enabled THEN wp.lane END, '')::text AS lane,
        (SELECT count(*) FROM sends s
          WHERE s.mailbox_id = cs.mailbox_id AND s.status = 'sent'
            AND s.sent_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'

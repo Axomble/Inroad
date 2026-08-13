@@ -2,6 +2,8 @@ package inbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -118,6 +120,17 @@ type warmupHook struct {
 // mail (the core deliverability health signal) and persists its cursor.
 func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher, graph GraphFetcher, classifier *replyclassify.Classifier, warmupSecret []byte, enq WarmupEngageEnqueuer) func(context.Context, *asynq.Task) error {
 	hook := warmupHook{secret: warmupSecret, enq: enq}
+	// Resolve the optional evidence capability ONCE, at wiring time, and say so
+	// loudly if it is missing. Discovering it per message meant a core that does not
+	// implement it degraded in silence — and the consequence is worse than lost
+	// evidence: the warmup DSN then falls through to FindSendByMessageID/MarkBounced
+	// and bounces a CAMPAIGN enrollment, inverting the isolation this hook exists to
+	// enforce. A signature change has already caused exactly that failure once.
+	if _, ok := core.(coreapi.WarmupEvidenceClient); !ok {
+		slog.Error("inbox_poll_warmup_evidence_unavailable",
+			"impact", "warmup token failures and warmup DSNs will not be recorded, "+
+				"and warmup DSNs may be misclassified as campaign bounces")
+	}
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPollPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -283,19 +296,30 @@ func graphJunkScan(g GraphFetcher) apiJunkScan {
 // yields ok=false — NOT warmup — so the caller falls through to normal
 // reply/bounce classification UNCHANGED (spec §9.3). The header alone is never
 // trusted: the token is HMAC-verified before the message is treated as warmup.
-func detectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, bool) {
+type warmupDetection uint8
+
+const (
+	warmupAbsent warmupDetection = iota
+	warmupInvalid
+	warmupWrongWorkspace
+	warmupValid
+)
+
+func inspectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, warmupDetection, string) {
 	token := msg.Header.Get(warmup.HeaderWarmup)
 	if token == "" {
-		return warmup.Payload{}, false
+		return warmup.Payload{}, warmupAbsent, ""
 	}
+	sum := sha256.Sum256([]byte(token))
+	fingerprint := hex.EncodeToString(sum[:])
 	payload, ok := warmup.Verify(token, secret)
 	if !ok {
-		return warmup.Payload{}, false
+		return warmup.Payload{}, warmupInvalid, fingerprint
 	}
 	if payload.WorkspaceID != workspaceID {
-		return warmup.Payload{}, false
+		return warmup.Payload{}, warmupWrongWorkspace, fingerprint
 	}
-	return payload, true
+	return payload, warmupValid, fingerprint
 }
 
 // processInbound is the warmup receipt-detection HOOK in front of campaign
@@ -307,13 +331,31 @@ func detectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (w
 // A non-warmup message falls through to processMessage unchanged. placement is
 // "inbox" here (INBOX pass); sourceFolder is the provider inbox label.
 func processInbound(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, msg mail.InboundMessage, placement, sourceFolder string, replies, bounces *int) (bool, error) {
-	if payload, ok := detectWarmup(msg, hook.secret, p.WorkspaceID); ok {
+	payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
+	if detection == warmupValid {
 		if err := recordWarmup(ctx, core, hook, p, payload, msg, placement, sourceFolder); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
-	return processMessage(ctx, core, classifier, p.WorkspaceID, msg, replies, bounces)
+	if detection == warmupInvalid || detection == warmupWrongWorkspace {
+		reason := "invalid_signature"
+		if detection == warmupWrongWorkspace {
+			reason = "workspace_mismatch"
+		}
+		recordWarmupTokenFailure(ctx, core, p, fingerprint, reason)
+	}
+	return processMessage(ctx, core, classifier, p.WorkspaceID, p.MailboxID, msg, replies, bounces)
+}
+
+func recordWarmupTokenFailure(ctx context.Context, core coreapi.Client, p queue.InboxPollPayload, fingerprint, reason string) {
+	evidence, ok := core.(coreapi.WarmupEvidenceClient)
+	if !ok {
+		return
+	}
+	if err := evidence.RecordWarmupTokenFailure(ctx, p.WorkspaceID, p.MailboxID, fingerprint, reason); err != nil {
+		slog.Warn("inbox_poll_warmup_token_evidence_failed", "mailbox_id", p.MailboxID, "reason", reason, "err", err)
+	}
 }
 
 // recordWarmup records a detected warmup message's receipt (idempotent, spec §7)
@@ -385,8 +427,14 @@ func apiJunkFolderLabel(provider string) string {
 // poll: the stateless rescan retries it. Non-warmup junk is skipped.
 func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, msgs []mail.InboundMessage, folder string) {
 	for _, msg := range msgs {
-		payload, ok := detectWarmup(msg, hook.secret, p.WorkspaceID)
-		if !ok {
+		payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
+		if detection != warmupValid {
+			switch detection {
+			case warmupInvalid:
+				recordWarmupTokenFailure(ctx, core, p, fingerprint, "invalid_signature")
+			case warmupWrongWorkspace:
+				recordWarmupTokenFailure(ctx, core, p, fingerprint, "workspace_mismatch")
+			}
 			continue // non-warmup junk is ignored — never classified
 		}
 		if err := recordWarmup(ctx, core, hook, p, payload, msg, placementSpam, folder); err != nil {
@@ -430,13 +478,23 @@ func logJunkScanErr(err error, p queue.InboxPollPayload, provider string) {
 // whether the message matched (a bounce or a stopping/suppressing reply) — used
 // only for the skipped-count in the poll summary log; an automated tag reports
 // false so it counts as skipped rather than a reply.
-func processMessage(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, workspaceID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
+func processMessage(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, workspaceID, mailboxID string, msg mail.InboundMessage, replies, bounces *int) (bool, error) {
 	d := ParseDSN(msg.Header, msg.ContentType, msg.Body)
 	if d.Kind != NotABounce {
 		// A DSN is never also a reply — always handled here, never falls
 		// through to the reply-matching path below.
 		switch d.Kind {
 		case HardBounce:
+			if evidence, ok := core.(coreapi.WarmupEvidenceClient); ok {
+				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, d.OriginalMessageID, mailboxID)
+				if err != nil {
+					return false, err
+				}
+				if matched {
+					*bounces++
+					return true, nil
+				}
+			}
 			s, err := core.FindSendByMessageID(ctx, workspaceID, d.OriginalMessageID)
 			if err != nil {
 				if errors.Is(err, coreapi.ErrNoMatch) {

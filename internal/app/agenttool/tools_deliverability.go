@@ -48,12 +48,12 @@ type CampaignHealth struct {
 // Snapshot is the workspace pulse: the O(1) "what is happening right now"
 // payload the console header reads, in the shape a model can summarise.
 type Snapshot struct {
-	MailboxesTotal, MailboxesActive, MailboxesPaused, MailboxesError  int64
-	WarmupPool, WarmupHealthy, WarmupWatch, WarmupAtRisk              int64
-	CampaignsTotal, CampaignsRunning, CampaignsDraft, CampaignsPaused int64
-	ContactsTotal                                                     int64
-	SentToday, DailyCap                                               int64
-	Attention                                                         []SnapshotAttention
+	MailboxesTotal, MailboxesActive, MailboxesPaused, MailboxesError    int64
+	WarmupPool, WarmupUnknown, WarmupHealthy, WarmupWatch, WarmupAtRisk int64
+	CampaignsTotal, CampaignsRunning, CampaignsDraft, CampaignsPaused   int64
+	ContactsTotal                                                       int64
+	SentToday, DailyCap                                                 int64
+	Attention                                                           []SnapshotAttention
 }
 
 // SnapshotAttention is one server-defined "needs attention" row, carried
@@ -212,7 +212,7 @@ func renderSnapshot(s Snapshot, limit int) map[string]any {
 			"paused": s.MailboxesPaused, "error": s.MailboxesError,
 		},
 		"warmup": map[string]int64{
-			"pool": s.WarmupPool, "healthy": s.WarmupHealthy,
+			"pool": s.WarmupPool, "unknown": s.WarmupUnknown, "healthy": s.WarmupHealthy,
 			"watch": s.WarmupWatch, "at_risk": s.WarmupAtRisk,
 		},
 		"campaigns": map[string]int64{

@@ -353,7 +353,7 @@ func TestOverviewActiveThreshold(t *testing.T) {
 	if m.TodayTarget != 14 { // day 5 ramp
 		t.Fatalf("today_target: got %d want 14", m.TodayTarget)
 	}
-	if m.InboxRate7d != 0.8 || m.SpamRate7d != 0.2 { // 8/10, 2/10
+	if m.InboxRate7d == nil || m.SpamRate7d == nil || *m.InboxRate7d != 0.8 || *m.SpamRate7d != 0.2 || m.PlacementSample7d != 10 { // 8/10, 2/10
 		t.Fatalf("placement rates: got inbox=%v spam=%v", m.InboxRate7d, m.SpamRate7d)
 	}
 
@@ -368,8 +368,8 @@ func TestOverviewActiveThreshold(t *testing.T) {
 	}
 }
 
-// TestOverviewZeroPlacementRate proves an empty 7-day window yields rate 0 (no
-// divide-by-zero) and a paused row reports today_target 0.
+// TestOverviewZeroPlacementRate proves an empty 7-day window yields no measured
+// rate (not a fabricated zero) and a paused row reports today_target 0.
 func TestOverviewZeroPlacementRateAndPaused(t *testing.T) {
 	ws := uuid.New()
 	row := OverviewRow{
@@ -386,8 +386,8 @@ func TestOverviewZeroPlacementRateAndPaused(t *testing.T) {
 		t.Fatalf("overview: %v", err)
 	}
 	m := ov.Mailboxes[0]
-	if m.InboxRate7d != 0 || m.SpamRate7d != 0 {
-		t.Fatalf("empty window must be 0 rate: %+v", m)
+	if m.InboxRate7d != nil || m.SpamRate7d != nil || m.PlacementSample7d != 0 {
+		t.Fatalf("empty window must be unmeasured: %+v", m)
 	}
 	if m.TodayTarget != 0 {
 		t.Fatalf("paused today_target: got %d want 0", m.TodayTarget)

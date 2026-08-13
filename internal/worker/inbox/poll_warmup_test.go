@@ -3,6 +3,7 @@ package inbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +31,13 @@ var warmupSecret = []byte("warmup-signing-secret")
 // serves both the classification path (embedded methods) and the warmup path.
 type warmupStubCore struct {
 	*stubCore
-	receipts  []coreapi.WarmupReceiptInput
-	plan      coreapi.WarmupEngagePlan
-	recordErr error
+	receipts            []coreapi.WarmupReceiptInput
+	plan                coreapi.WarmupEngagePlan
+	recordErr           error
+	tokenFailures       []string
+	hardBounceObservers []string
+	hardBounceIDs       []string
+	hardBounceMatched   bool
 }
 
 func (w *warmupStubCore) RecordWarmupReceipt(_ context.Context, in coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error) {
@@ -42,6 +47,23 @@ func (w *warmupStubCore) RecordWarmupReceipt(_ context.Context, in coreapi.Warmu
 	}
 	return w.plan, nil
 }
+
+func (w *warmupStubCore) RecordWarmupTokenFailure(_ context.Context, _, _, fingerprint, reasonCode string) error {
+	w.tokenFailures = append(w.tokenFailures, reasonCode+":"+fingerprint)
+	return nil
+}
+
+func (w *warmupStubCore) RecordWarmupHardBounce(_ context.Context, _, messageID, observerMailbox string) (bool, error) {
+	w.hardBounceIDs = append(w.hardBounceIDs, messageID)
+	w.hardBounceObservers = append(w.hardBounceObservers, observerMailbox)
+	return w.hardBounceMatched, nil
+}
+
+// Compile-time proof that the stub still satisfies the optional capability. A
+// signature change previously made this assertion fail at RUNTIME instead, and the
+// poller silently fell through to campaign classification — which is precisely the
+// harm the capability exists to prevent.
+var _ coreapi.WarmupEvidenceClient = (*warmupStubCore)(nil)
 
 // spyEngageEnqueuer records warmup:engage enqueues instead of touching Redis.
 type spyEngageEnqueuer struct {
@@ -207,6 +229,28 @@ func TestPollForgedWarmupTokenFallsThroughToClassification(t *testing.T) {
 	if len(core.replied) != 1 || core.replied[0] != "e1" {
 		t.Fatalf("a forged-token message must be classified normally (MarkReplied e1), got %v", core.replied)
 	}
+	if len(core.tokenFailures) != 1 || !strings.HasPrefix(core.tokenFailures[0], "invalid_signature:") {
+		t.Fatalf("forged token evidence = %v", core.tokenFailures)
+	}
+}
+
+func TestPollWarmupHardBounceIsAttributedBeforeCampaignBounce(t *testing.T) {
+	core := newWarmupCore(t)
+	core.hardBounceMatched = true
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, hardBounceDSN)},
+	}
+
+	if err := runWarmupPoll(t, core, reader, &spyEngageEnqueuer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.hardBounceIDs) != 1 || core.hardBounceIDs[0] != "<orig@x>" {
+		t.Fatalf("warmup DSN ids = %v", core.hardBounceIDs)
+	}
+	if len(core.bounced) != 0 {
+		t.Fatalf("warmup DSN reached campaign bounce handling: %v", core.bounced)
+	}
 }
 
 // TestPollWrongWorkspaceWarmupTokenFallsThroughToClassification proves the
@@ -230,6 +274,9 @@ func TestPollWrongWorkspaceWarmupTokenFallsThroughToClassification(t *testing.T)
 	}
 	if len(core.replied) != 1 || core.replied[0] != "e1" {
 		t.Fatalf("a wrong-workspace message must be classified normally, got %v", core.replied)
+	}
+	if len(core.tokenFailures) != 1 || !strings.HasPrefix(core.tokenFailures[0], "workspace_mismatch:") {
+		t.Fatalf("wrong-workspace token evidence = %v", core.tokenFailures)
 	}
 }
 
