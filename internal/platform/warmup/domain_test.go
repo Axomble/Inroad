@@ -91,3 +91,49 @@ func TestWorstLanesByDomainIgnoresAddressesWithNoDomain(t *testing.T) {
 		t.Fatalf("lanes = %v, want none: an address with no domain groups nothing", lanes)
 	}
 }
+
+// The gate exists because a provider penalising acme.com penalises every mailbox on
+// it — the workspace controls the domain, so its mailboxes share standing. That is
+// untrue of gmail.com: Google does not penalise alice@gmail.com for bob@gmail.com's
+// spam, and cheap consumer mailboxes are common in cold email, so treating them as
+// one reputation unit stops campaigns for mailboxes that are genuinely unaffected.
+func TestConsumerProviderMailboxesDoNotShareDomainReputation(t *testing.T) {
+	for _, email := range []string{
+		"alice@gmail.com", "bob@outlook.com", "c@yahoo.com", "d@icloud.com", "e@proton.me",
+	} {
+		if SharesDomainReputation(email) {
+			t.Errorf("%s: a consumer mailbox must not share a domain verdict with strangers", email)
+		}
+	}
+	// A business on Google Workspace sends from its OWN domain, which IS shared.
+	for _, email := range []string{"ops@acme.com", "sales@mail.acme.co.uk"} {
+		if !SharesDomainReputation(email) {
+			t.Errorf("%s: a workspace-controlled domain must still be gated as shared", email)
+		}
+	}
+}
+
+// Both sides of the map must apply the same rule. Building it with one definition of
+// "shares a domain" and reading it with another is the defect shape this subsystem
+// has produced repeatedly.
+func TestAConsumerMailboxIsNeitherCountedNorWithheld(t *testing.T) {
+	lanes := WorstLanesByDomain([]MailboxLane{
+		{Email: "quarantined@gmail.com", Lane: LaneQuarantine},
+		{Email: "healthy@gmail.com", Lane: LaneHealthy},
+		{Email: "quarantined@acme.com", Lane: LaneQuarantine},
+		{Email: "healthy@acme.com", Lane: LaneHealthy},
+	})
+
+	// It did not contribute...
+	if got := lanes["gmail.com"]; got != "" {
+		t.Errorf("gmail.com acquired a domain verdict %q from unrelated tenants", got)
+	}
+	// ...and it is not withheld by one.
+	if got := lanes.For("healthy@gmail.com"); got != "" {
+		t.Errorf("a consumer mailbox was withheld by lane %q it cannot share", got)
+	}
+	// The custom domain still behaves exactly as before: worst lane wins.
+	if got := lanes.For("healthy@acme.com"); got != LaneQuarantine {
+		t.Errorf("acme.com domain lane = %q, want quarantine — a real shared domain must still gate", got)
+	}
+}
