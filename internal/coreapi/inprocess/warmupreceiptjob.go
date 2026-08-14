@@ -142,6 +142,16 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	if !validPlacement(in.Placement) {
 		return coreapi.WarmupEngagePlan{}, fmt.Errorf("coreapi: invalid warmup placement %q", in.Placement)
 	}
+	// Defence in depth for the pairing the poller now guarantees. The database also
+	// refuses this row, but a CHECK violation surfaces as a constraint error deep in
+	// the receipt transaction, which the poll treats as retryable — so it returns
+	// before advancing the inbox cursor and the mailbox stops processing ANY inbound
+	// mail, re-failing identically forever. Failing here instead names the caller's
+	// bug in one clear error the poll can log and move past.
+	if in.Placement == placementTabbed && !in.TabCapable {
+		return coreapi.WarmupEngagePlan{}, fmt.Errorf(
+			"coreapi: warmup placement %q requires a tab-capable reading path", in.Placement)
+	}
 	sendUUID := pgtype.UUID{Bytes: sendID, Valid: true}
 
 	tx, err := c.pool.Begin(ctx)

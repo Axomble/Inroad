@@ -151,7 +151,18 @@ func warmupPlacement(path readingPath, category string) string {
 	if path.folderPlacement != placementInbox {
 		return path.folderPlacement
 	}
-	if category != "" {
+	// A tab is only recordable by a path that could SEE tabs. The database refuses
+	// ('tabbed', tab_capable=false) — and that refusal is expensive: the CHECK aborts
+	// the receipt transaction, recordWarmup propagates, and the poll returns BEFORE
+	// SetInboxCursor, so the message is re-fetched and the pass fails identically
+	// forever. Every inbound signal for that mailbox stops advancing — campaign
+	// replies and bounce detection included, not just one lost observation.
+	//
+	// The capability and the category used to be decided in different places from
+	// different inputs, with no compile-time link, so constructing that row was a
+	// plain Go bug away. Deciding both here makes the pairing local and the
+	// impossible row unconstructable rather than merely rejected.
+	if category != "" && path.tabCapable {
 		return placementTabbed
 	}
 	return placementInbox
@@ -242,7 +253,14 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		}
 
 		var replies, bounces, skipped int
-		path := inboxPath(providerTabCapable(job.Provider))
+		// Literal false, not providerTabCapable(job.Provider): this branch is the IMAP
+		// transport, which cannot report a tab whatever the provider column says.
+		// Deriving it from the provider read as though Gmail-over-IMAP would be
+		// tab-capable — and if that route were ever added, every inbox landing would
+		// be counted tab-capable while the reader could never produce a numerator, so
+		// the tabbed rate would pin at a confident 0%. That is the "untested pool
+		// reads clean" failure the separate denominator exists to prevent.
+		path := inboxPath(false)
 		for _, msg := range msgs {
 			matched, err := processInbound(ctx, core, classifier, hook, p, msg, path, &replies, &bounces)
 			if err != nil {

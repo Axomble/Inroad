@@ -547,7 +547,13 @@ func TestWarmupPlacementResolvesTheFolderAndTheTab(t *testing.T) {
 	}{
 		{"inbox with no tab", inboxPath(true), "", placementInbox},
 		{"inbox with a tab", inboxPath(true), "promotions", placementTabbed},
-		{"a tab reported by a path that cannot see tabs is still honoured", inboxPath(false), "promotions", placementTabbed},
+		// A path that cannot see tabs must not record one, even handed a category.
+		// ('tabbed', tab_capable=false) is refused by the database, and that refusal
+		// aborts the receipt transaction, so the poll returns before SetInboxCursor
+		// and EVERY inbound signal for the mailbox stops advancing — campaign replies
+		// and bounces too — re-failing identically on every subsequent pass. The row
+		// is not merely invalid, it is unconstructable.
+		{"a tab from a path that cannot see tabs is not recorded as one", inboxPath(false), "promotions", placementInbox},
 		{"junk with no tab", junkPath("Junk", false), "", placementSpam},
 		{"junk with a tab is spam", junkPath("SPAM", true), "promotions", placementSpam},
 	}
