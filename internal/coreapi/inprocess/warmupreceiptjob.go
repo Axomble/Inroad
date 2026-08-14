@@ -668,10 +668,10 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 		if !warmup.ShouldApplyTransition(r.HealthState, decision.Health, r.Lane, decision.Lane) {
 			continue
 		}
-		bounceSamples, bounceRate := decision.CampaignBounceSamples, decision.CampaignBounceRate
-		if decision.WarmupBounceRate > decision.CampaignBounceRate {
-			bounceSamples, bounceRate = decision.WarmupBounceSamples, decision.WarmupBounceRate
-		}
+		// One call, three values: the population and the pair that belongs to it.
+		// Picking them separately here is how a row came to carry a campaign
+		// denominator under a warmup-driven reason code.
+		bouncePopulation, bounceSamples, bounceRate := decision.DrivingBouncePair()
 		if _, err := c.q.ApplyWarmupParticipantTransition(ctx, gen.ApplyWarmupParticipantTransitionParams{
 			MailboxID: r.MailboxID, WorkspaceID: r.WorkspaceID,
 			FromState: r.HealthState, ToState: decision.Health,
@@ -681,12 +681,14 @@ func (c client) evaluateWorkspaceParticipants(ctx context.Context, ws uuid.UUID,
 			PausedUntil:      warmupPausedUntil(decision.Health, now),
 			PlacementSamples: int32(decision.PlacementSamples), SpamRate: float32(decision.SpamRate),
 			// One bounce column pair, carrying the arm that actually DROVE the
-			// decision with ITS OWN denominator. Recording the campaign pair
-			// unconditionally meant a warmup-driven pause wrote
+			// decision with ITS OWN denominator, and NAMING that arm. Recording the
+			// campaign pair unconditionally meant a warmup-driven pause wrote
 			// reason_code='warmup_bounce_pause' next to rate 0.0 / samples 0 — a row
 			// that cannot explain itself, which is the Phase 0 defect this table
-			// exists to fix.
-			BounceSamples: int32(bounceSamples), BounceRate: float32(bounceRate),
+			// exists to fix. Leaving the population off meant the fixed row still
+			// reported a denominator no reader could attribute.
+			BouncePopulation: bouncePopulation,
+			BounceSamples:    int32(bounceSamples), BounceRate: float32(bounceRate),
 			ComplaintSamples: int32(decision.ComplaintSamples), ComplaintRate: float32(decision.ComplaintRate),
 			InvalidTokens: int32(decision.ObserverTokenFailures), PolicyVersion: warmup.PolicyVersion,
 		}); err != nil {

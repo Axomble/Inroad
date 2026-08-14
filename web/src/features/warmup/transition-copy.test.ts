@@ -200,3 +200,57 @@ describe('evidence readings', () => {
     )
   })
 })
+
+describe('bounce population', () => {
+  function bounceRow(overrides: Partial<WarmupTransition>) {
+    const found = evidenceRows(transition(overrides)).find((r) => /hard bounces/i.test(r.label))
+    if (!found) throw new Error('no hard-bounce evidence row')
+    return found
+  }
+
+  // The two populations are kept apart because pooling them let synthetic warmup
+  // traffic dilute a real campaign bounce rate below its own threshold. A row that
+  // does not say which one it counted hands the operator a number they cannot
+  // attribute — and "campaign hard bounces crossed the threshold" beside a
+  // warmup denominator reads as a contradiction.
+  it('names the campaign population and says whose mail it counted', () => {
+    const r = bounceRow({ bounce_population: 'campaign', bounce_rate: 0.12, bounce_samples: 200 })
+    expect(r.label).toMatch(/campaign/i)
+    expect(r.detail).toMatch(/real recipients/i)
+  })
+
+  it('names the warmup population and marks it synthetic', () => {
+    const r = bounceRow({ bounce_population: 'warmup', bounce_rate: 0.12, bounce_samples: 200 })
+    expect(r.label).toMatch(/warmup/i)
+    expect(r.detail).toMatch(/synthetic/i)
+    // The distinction is the point: warmup mail never reaches a campaign contact.
+    expect(r.detail).not.toMatch(/real recipients/i)
+  })
+
+  // Pre-split rows genuinely do not know. Attributing one would invent exactly the
+  // trust the split exists to establish.
+  it('says the population is unrecorded rather than guessing', () => {
+    for (const value of [null, undefined]) {
+      const r = bounceRow({ bounce_population: value as never, bounce_rate: 0.12, bounce_samples: 200 })
+      expect(r.label).toBe('Hard bounces')
+      expect(r.detail).toMatch(/not recorded|predates/i)
+      expect(r.detail).not.toMatch(/real recipients|synthetic/i)
+    }
+  })
+
+  // An arm a newer server knows about and this build does not must not be folded
+  // into either named population.
+  it('does not fold an unknown population into campaign or warmup', () => {
+    const r = bounceRow({ bounce_population: 'relay' as never, bounce_rate: 0.12, bounce_samples: 200 })
+    expect(r.label).toMatch(/relay/i)
+    expect(r.detail).not.toMatch(/real recipients|synthetic/i)
+  })
+
+  // The population label must not cost the lower-bound treatment: a rate of 0 over
+  // a real sample is a floor, not a measurement, and must never read as a clean 0%.
+  it('keeps the lower-bounded zero honest under a named population', () => {
+    const r = bounceRow({ bounce_population: 'campaign', bounce_rate: 0, bounce_samples: 5 })
+    expect(r.value).toMatch(/not established/i)
+    expect(r.value).not.toMatch(/\b0(\.0+)?\s*%/)
+  })
+})

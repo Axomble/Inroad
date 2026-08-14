@@ -25,7 +25,7 @@ func TestEligibleCandidatesGatesOnWarmupHealth(t *testing.T) {
 		withHealth(candidateRow(watch, 1, true, mailboxStatusActive, 100, 0), sendcap.HealthWatch),
 		withHealth(candidateRow(throttled, 1, true, mailboxStatusActive, 100, 0), sendcap.HealthThrottled),
 		withHealth(candidateRow(paused, 1, true, mailboxStatusActive, 100, 0), sendcap.HealthPaused),
-	})
+	}, noDomainLanes)
 	remaining := map[string]int{}
 	for _, c := range got {
 		remaining[c.MailboxID] = c.RemainingToday
@@ -47,7 +47,7 @@ func TestEligibleCandidatesDropsADegradedMailboxAtItsScaledCap(t *testing.T) {
 	// Ramped cap 100, throttled to 50, and it has already sent 50 today.
 	got := eligibleCandidates([]gen.ListCampaignSenderCandidatesRow{
 		withHealth(candidateRow(id, 1, true, mailboxStatusActive, 100, 50), sendcap.HealthThrottled),
-	})
+	}, noDomainLanes)
 	if len(got) != 0 {
 		t.Errorf("eligible = %+v, want none: 50 sent already fills a throttled cap of 50", got)
 	}
@@ -59,7 +59,7 @@ func TestEligibleCandidatesDropsADegradedMailboxAtItsScaledCap(t *testing.T) {
 // cannot be re-routed to another mailbox, so it has to wait.
 func TestExhaustedPoolDefersRatherThanStopping(t *testing.T) {
 	paused := withHealth(candidateRow(uuid.New(), 1, true, mailboxStatusActive, 100, 0), sendcap.HealthPaused)
-	s, err := client{}.exhaustedPoolSender(gen.GetStepEnrollmentBundleRow{}, []gen.ListCampaignSenderCandidatesRow{paused})
+	s, err := client{}.exhaustedPoolSender(gen.GetStepEnrollmentBundleRow{}, []gen.ListCampaignSenderCandidatesRow{paused}, noDomainLanes)
 	if err != nil {
 		t.Fatalf("exhaustedPoolSender: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestExhaustedPoolDefersRatherThanStopping(t *testing.T) {
 // enrollment. The explicit flag is what keeps it a deferral.
 func TestExhaustedPoolFlagsAPausedMailboxWithNoCap(t *testing.T) {
 	paused := withHealth(candidateRow(uuid.New(), 1, true, mailboxStatusActive, 0, 0), sendcap.HealthPaused)
-	s, err := client{}.exhaustedPoolSender(gen.GetStepEnrollmentBundleRow{}, []gen.ListCampaignSenderCandidatesRow{paused})
+	s, err := client{}.exhaustedPoolSender(gen.GetStepEnrollmentBundleRow{}, []gen.ListCampaignSenderCandidatesRow{paused}, noDomainLanes)
 	if err != nil {
 		t.Fatalf("exhaustedPoolSender: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestExhaustedPoolDoesNotClaimHealthWhenMerelyCapped(t *testing.T) {
 		candidateRow(uuid.New(), 1, true, mailboxStatusActive, 40, 40), // at cap
 		candidateRow(uuid.New(), 1, false, mailboxStatusActive, 60, 0), // disabled
 	}
-	s, err := client{}.exhaustedPoolSender(gen.GetStepEnrollmentBundleRow{}, rows)
+	s, err := client{}.exhaustedPoolSender(gen.GetStepEnrollmentBundleRow{}, rows, noDomainLanes)
 	if err != nil {
 		t.Fatalf("exhaustedPoolSender: %v", err)
 	}

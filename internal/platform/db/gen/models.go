@@ -1118,6 +1118,7 @@ type WarmupStateTransition struct {
 	ToLane           *string            `json:"to_lane"`
 	LaneReasonCode   *string            `json:"lane_reason_code"`
 	LaneReason       *string            `json:"lane_reason"`
+	BouncePopulation *string            `json:"bounce_population"`
 }
 
 type WarmupThread struct {

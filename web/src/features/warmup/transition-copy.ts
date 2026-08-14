@@ -218,6 +218,78 @@ function rateRow(label: string, subject: string, rate: number, samples: number):
 }
 
 /**
+ * How one bounce population is named and described.
+ *
+ * The engine keeps campaign and warmup hard bounces on separate counters on
+ * purpose — pooling them let synthetic warmup traffic dilute a real campaign
+ * bounce rate below its own threshold — and a transition records whichever arm
+ * drove the decision, with that arm's own denominator. So the row has to say
+ * which one it is: "campaign hard bounces crossed the pause threshold" beside a
+ * figure labelled only "hard bounces" is a number an operator cannot attribute,
+ * and a warmup-driven pause beside what looks like a campaign denominator of
+ * zero reads as a contradiction.
+ */
+interface BouncePopulationCopy {
+  /** Names the population in the row's own label, not in a tooltip. */
+  label: string
+  /** What the denominator counted, dropped into the rate's qualifying sentence. */
+  subject: string
+  /** Whose mail this is, in words — `campaign`/`warmup` mean nothing on their own. */
+  note: string
+}
+
+const BOUNCE_POPULATIONS: Record<string, BouncePopulationCopy> = {
+  campaign: {
+    label: 'Campaign hard bounces',
+    subject: 'campaign delivery',
+    note: 'Real recipients: mail this mailbox sent to campaign contacts.',
+  },
+  warmup: {
+    label: 'Warmup hard bounces',
+    subject: 'warmup delivery',
+    note: 'Synthetic traffic: warmup mail between your own mailboxes, never campaign recipients.',
+  },
+}
+
+/**
+ * Rows written before the counters were split carry no population. Saying so is
+ * the honest reading: the figure is real, but nothing records whose mail it
+ * counted, and picking a side would invent the very attribution the split exists
+ * to make trustworthy.
+ */
+const UNRECORDED_BOUNCE_POPULATION: BouncePopulationCopy = {
+  label: 'Hard bounces',
+  subject: 'delivery',
+  note: 'Which mail this counted was not recorded — the entry predates the campaign/warmup split, so it can be attributed to neither.',
+}
+
+function bouncePopulationCopy(population: WarmupTransition['bounce_population']): BouncePopulationCopy {
+  const code = population?.trim() ?? ''
+  if (!code) return UNRECORDED_BOUNCE_POPULATION
+  const known = BOUNCE_POPULATIONS[code]
+  if (known) return known
+  // An arm this build has not learned. Same last resort the reason codes get:
+  // humanised, never the raw token, and never quietly folded into campaign or
+  // warmup — an unrecognised population is still not one of the two named ones.
+  const name = humanizeCode(code)
+  const lower = name.toLowerCase()
+  return {
+    label: `${name} hard bounces`,
+    subject: `${lower} delivery`,
+    note: `Counted against the ${lower} population, which this build has no description for.`,
+  }
+}
+
+/** The hard-bounce row, scoped to the population the engine actually judged. */
+function bounceRow(transition: WarmupTransition): EvidenceRow {
+  const population = bouncePopulationCopy(transition.bounce_population)
+  const row = rateRow(population.label, population.subject, transition.bounce_rate, transition.bounce_samples)
+  // The population leads: it scopes everything the rest of the sentence says,
+  // including the "0 is a floor, not a measurement" qualifier below it.
+  return { ...row, detail: `${population.note} ${row.detail}` }
+}
+
+/**
  * The evidence behind one transition, in the order an operator triages it. The
  * forged-token count is appended only when non-zero, and is labelled as the
  * observer-side signal it is: it describes mail this mailbox RECEIVED and never
@@ -226,7 +298,7 @@ function rateRow(label: string, subject: string, rate: number, samples: number):
 export function evidenceRows(transition: WarmupTransition): EvidenceRow[] {
   const rows: EvidenceRow[] = [
     rateRow('Spam placement', 'placement', transition.spam_rate, transition.placement_samples),
-    rateRow('Hard bounces', 'delivery', transition.bounce_rate, transition.bounce_samples),
+    bounceRow(transition),
     rateRow('Complaints', 'delivery', transition.complaint_rate, transition.complaint_samples),
   ]
   if (transition.invalid_tokens > 0) {

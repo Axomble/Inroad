@@ -810,15 +810,42 @@ write history that never happened.
     both halves go through one predicate (`warmup.NewLeadsWithheld`) that the
     preflight check, the senders panel's `cap_today` and the rotation all call, so a
     displayed warning and an enforced block cannot drift. Domain scope is an
-    aggregate read — the worst lane among the workspace's ENABLED participants
-    sharing `lower(split_part(email,'@',2))` — not a second state machine and not a
-    second table. Only `quarantine` and `blocked` withhold. `pending_auth` never
-    does, on either half, because it is derived from the advisory DNS check that
-    invariant 39 forbids from stopping a campaign, and an empty lane means the
-    mailbox is not warming up at all
-    (`TestQuarantinedSiblingWithholdsItsWholeDomain`,
+    aggregate read — the worst lane among the workspace's ENABLED participants on
+    the same organizational domain — not a second state machine and not a second
+    table. Only `quarantine` and `blocked` withhold. `pending_auth` never does, on
+    either half, because it is derived from the advisory DNS check that invariant 39
+    forbids from stopping a campaign, and an empty lane means the mailbox is not
+    warming up at all (`TestQuarantinedSiblingWithholdsItsWholeDomain`,
     `TestComputePreflightNonContainingDomainLanesDoNotBlock`). Replies to a human who
     already wrote back are exempt throughout.
+
+    "Organizational domain" means the registrable domain (eTLD+1), so a quarantined
+    `a@example.com` withholds `b@mail.example.com`: providers largely inherit
+    reputation across subdomains. It is derived in exactly ONE place,
+    `warmup.OrganizationalDomain` (Go, at read time) — SQL has no public-suffix data
+    and a stored column would freeze the answer at the list version in force when
+    the mailbox was connected. A host the list cannot resolve falls back to the
+    exact host: narrower, never wider
+    (`TestQuarantineOnASubdomainWithholdsTheParentDomainOnTheSendPath`,
+    `TestQuarantineOnAnUnrelatedDomainDoesNotWithhold`). This is deliberately NOT
+    the scope `sending_domains` uses — SPF/DKIM/DMARC are published per host, so the
+    DNS advisory stays keyed on the exact host.
+
+    The domain half is workspace-pinned like everything else: two tenants sending
+    from the same domain — a shared parent company, a reseller, the same public
+    provider — never see each other's containment, and one tenant cannot stop
+    another's campaigns by quarantining a mailbox
+    (`TestForeignQuarantineOnTheSameDomainWithholdsNothing`,
+    `TestForeignQuarantineDoesNotWithholdTheFallbackSender`).
+
+    KNOWN LIMITATION: eTLD+1 does not help the free-provider case, and slightly
+    widens it. `gmail.com` is its own registrable domain, so a workspace sending
+    entirely from `@gmail.com` shares one organizational domain and quarantining one
+    of its mailboxes withholds the rest. An exclusion list of "public" providers is
+    not the fix — any list maintained here would be incomplete, would go stale, and
+    would be a second answer to "which mailboxes share a reputation". The blast
+    radius is bounded to one workspace's own mailboxes, and containment failing
+    CLOSED is the direction this subsystem prefers.
 
 55. **Warmup evidence is bounded and retained.** `warmup_observations` is append-only
     and reachable by external senders, so the invalid-token idempotency key buckets on

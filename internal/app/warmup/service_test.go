@@ -508,11 +508,14 @@ func TestListTransitionsMapsEveryContractField(t *testing.T) {
 			FromLane: strPtr("healthy"), ToLane: strPtr("watch"),
 			LaneReasonCode: strPtr("lane_watch"), LaneReason: strPtr("moved to watch"),
 			PlacementSamples: 40, SpamRate: 0.15,
-			BounceSamples: 200, BounceRate: 0.02,
+			BouncePopulation: strPtr("campaign"),
+			BounceSamples:    200, BounceRate: 0.02,
 			ComplaintSamples: 1000, ComplaintRate: 0.0003,
 			InvalidTokens: 2, PolicyVersion: "warmup-phase1-v1",
 		},
-		// A row written before pool lanes existed: all four lane columns NULL.
+		// A row written before pool lanes existed: all four lane columns NULL, and
+		// no bounce_population either — that row genuinely does not know which arm
+		// spoke, and guessing would put a false claim in an append-only trail.
 		{ID: uuid.New(), CreatedAt: pgtype.Timestamptz{Time: created.Add(-time.Hour), Valid: true},
 			FromState: "unknown", ToState: "healthy", ReasonCode: "evidence_qualified",
 			Reason: "qualified", PolicyVersion: "warmup-phase0-v1"},
@@ -543,8 +546,14 @@ func TestListTransitionsMapsEveryContractField(t *testing.T) {
 	if got.PlacementSamples != 40 || got.BounceSamples != 200 || got.ComplaintSamples != 1000 || got.InvalidTokens != 2 {
 		t.Fatalf("samples wrong: %+v", got)
 	}
+	// The bounce pair is meaningless without the population it counted: 200 samples
+	// at 2% is a claim about campaign mail or about warmup mail, never about
+	// "bounces".
+	if got.BouncePopulation == nil || *got.BouncePopulation != "campaign" {
+		t.Fatalf("bounce_population = %v, want campaign — the bounce pair must name its arm", got.BouncePopulation)
+	}
 	if pre := page.Transitions[1]; pre.FromLane != nil || pre.ToLane != nil ||
-		pre.LaneReasonCode != nil || pre.LaneReason != nil {
-		t.Fatalf("a pre-lane row must serialize its lane fields as null: %+v", pre)
+		pre.LaneReasonCode != nil || pre.LaneReason != nil || pre.BouncePopulation != nil {
+		t.Fatalf("a pre-lane row must serialize its lane and population fields as null: %+v", pre)
 	}
 }

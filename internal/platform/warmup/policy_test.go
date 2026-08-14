@@ -585,6 +585,76 @@ func TestAssertedBouncesStillBlockPromotion(t *testing.T) {
 	}
 }
 
+// warmup_state_transitions has ONE bounce column pair, so the recorded pair must
+// name which population it counted. Without the label a row reads "campaign hard
+// bounces crossed the pause threshold" beside a figure labelled only "hard
+// bounces", or reports a warmup-driven pause next to a campaign denominator of
+// zero — a row that cannot explain itself.
+func TestDrivingBouncePopulationNamesTheArmItReports(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         Signals
+		population string
+		samples    int
+	}{
+		{
+			// Clean synthetic traffic alongside real campaign bounces: the campaign
+			// arm drove it, and 200 is the denominator the rate belongs to.
+			name: "campaign bounces drive the decision",
+			in: Signals{
+				CampaignDelivered: 200, CampaignHardBounces: 20,
+				WarmupDelivered: 1200, WarmupHardBounces: 0,
+			},
+			population: BouncePopulationCampaign, samples: 200,
+		},
+		{
+			// The Phase 0 defect in miniature: recording the campaign pair
+			// unconditionally wrote reason_code='warmup_bounce_pause' next to
+			// samples 0 / rate 0.
+			name: "warmup bounces drive the decision",
+			in: Signals{
+				CampaignDelivered: 0, CampaignHardBounces: 0,
+				WarmupDelivered: 300, WarmupHardBounces: 60,
+			},
+			population: BouncePopulationWarmup, samples: 300,
+		},
+		{
+			// Neither arm bounced. The campaign population is the one an operator
+			// is asking about, and a tie is not a warmup finding.
+			name: "no bounces at all reports the campaign population",
+			in: Signals{
+				CampaignDelivered: 200, WarmupDelivered: 300,
+			},
+			population: BouncePopulationCampaign, samples: 200,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.in.AuthPassing, tc.in.EvidenceFresh = true, true
+			tc.in.CurrentHealth, tc.in.Inbox = StateHealthy, 20
+			d := EvaluateParticipant(tc.in, time.Now())
+
+			population, samples, rate := d.DrivingBouncePair()
+			if population != tc.population {
+				t.Fatalf("population = %q, want %q", population, tc.population)
+			}
+			if samples != tc.samples {
+				t.Fatalf("samples = %d, want %d — the denominator must belong to the population named",
+					samples, tc.samples)
+			}
+			// The rate must come from the SAME arm as the samples: a label paired
+			// with the other arm's figures is worse than no label at all.
+			wantRate := d.CampaignBounceRate
+			if tc.population == BouncePopulationWarmup {
+				wantRate = d.WarmupBounceRate
+			}
+			if rate != wantRate {
+				t.Fatalf("rate = %v, want %v (the %s arm's own rate)", rate, wantRate, tc.population)
+			}
+		})
+	}
+}
+
 func TestLeaseValid(t *testing.T) {
 	now := time.Now()
 	fresh := IssueLease(LaneHealthy, now)

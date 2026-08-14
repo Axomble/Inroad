@@ -689,6 +689,23 @@ func TestComputePreflightDomainLaneWithholdsAHealthyMailbox(t *testing.T) {
 	}
 }
 
+// The message must name the domain the LANE actually describes. The gate groups
+// by organizational domain, so a mailbox on mail.shared.test is contained by
+// shared.test — and printing the mailbox's own host would send the operator
+// looking for a containment on a domain that has none.
+func TestComputePreflightNamesTheOrganizationalDomainThatWithheld(t *testing.T) {
+	healthy, mailboxLane, domainLane := "healthy", "healthy", "quarantine"
+	in := healthyInput()
+	in.Senders = []campaign.Sender{{
+		Email: "clean@mail.shared.test", Enabled: true, Status: "active", CapToday: 10,
+		HealthState: &healthy, Lane: &mailboxLane, DomainLane: &domainLane,
+	}}
+	c := findCheck(t, campaign.ComputePreflight(in), campaign.CheckWarmupHealth)
+	if !strings.Contains(c.Detail, "domain shared.test") {
+		t.Errorf("detail %q must name the organizational domain shared.test, not the mailbox's own host", c.Detail)
+	}
+}
+
 // The domain gate must not overreach. A sibling in an evidence-gathering lane, or
 // one whose DNS advisory has not passed, restricts nothing: only containment
 // (quarantine/blocked) withholds leads, and pending_auth in particular is an

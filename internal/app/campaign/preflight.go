@@ -549,7 +549,11 @@ func withheldSender(sd Sender) string {
 	if sd.Lane != nil && *sd.Lane != warmup.LanePendingAuth && !warmup.LaneMayTakeNewLead(*sd.Lane) {
 		return fmt.Sprintf("%s (%s)", sd.Email, *sd.Lane)
 	}
-	return fmt.Sprintf("%s (domain %s is %s)", sd.Email, domainOf(sd.Email), deref(sd.DomainLane))
+	// The ORGANIZATIONAL domain, which is the one the lane describes — a mailbox on
+	// mail.acme.test is contained by acme.test, and naming its own host would send
+	// the operator looking for a containment on a domain that has none.
+	return fmt.Sprintf("%s (domain %s is %s)", sd.Email,
+		warmup.OrganizationalDomain(sd.Email), deref(sd.DomainLane))
 }
 
 // deref reads an optional lane as the empty string, which every lane predicate
@@ -563,6 +567,13 @@ func deref(s *string) string {
 
 // senderDomains returns the distinct, lower-cased domains the pool sends
 // from, sorted for a deterministic detail message.
+//
+// The exact HOST, deliberately, and NOT the organizational domain the warmup gate
+// groups by: these keys index in.DomainAuth, which sending_domains stores per host
+// because SPF/DKIM/DMARC are published per host. mail.acme.test can authenticate
+// while acme.test does not. The two questions are different — "which DNS name is
+// this" versus "whose reputation does this spend" — so they legitimately have
+// different answers (see warmup.OrganizationalDomain).
 func senderDomains(senders []Sender) []string {
 	seen := make(map[string]struct{}, len(senders))
 	out := make([]string, 0, len(senders))
