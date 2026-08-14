@@ -102,6 +102,11 @@ const (
 // empty host, which is a misconfigured mailbox that will fail to send anyway.
 // Never Unknown: this classification always completes, since it reads columns
 // that are already in hand (judgement 3).
+//
+// It answers "who does this mailbox SUBMIT through". For "where was mail to this
+// mailbox DELIVERED" — what a warmup destination route records — use
+// FromRecipient: smtp_host is the outbound relay, and an smtp mailbox can submit
+// through SendGrid while its inbound MX is Google Workspace.
 func FromMailbox(provider, smtpHost string) ESP {
 	switch provider {
 	case providerGmail:
@@ -121,6 +126,58 @@ func FromMailbox(provider, smtpHost string) ESP {
 	default:
 		return Other
 	}
+}
+
+// FromRecipient classifies where mail to a RECIPIENT mailbox was delivered, from
+// that mailbox's transport tag and the recipient_domains MX cache's answer for
+// its domain (cachedESP; "" for a miss).
+//
+// Not FromMailbox, and the difference is the whole point: FromMailbox reads
+// smtp_host, which is the OUTBOUND relay. An smtp mailbox can submit through
+// SendGrid while its inbound MX is Google Workspace, so classifying a delivery by
+// the relay would file it under a destination the message never reached — and
+// permanently, because the observation it lands on is immutable.
+//
+// The API providers are conclusive and outrank the cache: a gmail/m365 mailbox IS
+// hosted there, so no MX record can contradict it. A Workspace tenant fronted by a
+// third-party filter caches as Other (FromMX reads the primary MX) while the
+// mailbox is still Google's — the provider is the better evidence in that case,
+// not merely the cheaper one.
+//
+// For an smtp mailbox the cache is the only evidence there is, and a miss is
+// Unknown — never Other, and never a DNS lookup. This runs on the warmup receipt
+// path, where resolving would put a network round trip in front of a write whose
+// failure wedges the poll cursor and stops ALL inbound processing for the mailbox.
+// The recipientesp sweep does the resolving, off the hot path; until it has, the
+// honest answer is "we have not resolved this domain".
+//
+// Pure by design: it is table-testable, and the two facts it reads (a transport
+// tag, a cached string) are both already in hand at the call site.
+func FromRecipient(provider, cachedESP string) ESP {
+	switch provider {
+	case providerGmail:
+		return Google
+	case providerM365:
+		return Microsoft
+	}
+	// Validated rather than converted: cachedESP crosses a boundary (a Postgres
+	// column, and one whose vocabulary a future migration could widen). An
+	// unrecognised value read straight through would become a route of its own in
+	// a matrix that GROUPs BY it, which is a silent failure; Unknown is the state
+	// that already means "no classification to trust".
+	//
+	// UNREACHABLE TODAY, and kept deliberately. recipient_domains.esp carries its
+	// own CHECK over the same four values (migration 000048) and the reader's JOIN
+	// drops rows whose lookup never completed, so the only value that reaches here
+	// outside the vocabulary is "", which the observation INSERT already coalesces
+	// to 'unknown'. No test can exercise this branch without first widening that
+	// CHECK — stated plainly rather than left to imply a live guard, because a
+	// reader who assumed it was load-bearing might drop the SQL-side defences that
+	// actually are.
+	if !Valid(cachedESP) {
+		return Unknown
+	}
+	return ESP(cachedESP)
 }
 
 // googleMXHosts are the MX suffixes Google publishes: Workspace

@@ -552,3 +552,170 @@ func seedIdentityObservation(t *testing.T, f fixture, ws, mailbox uuid.UUID, key
 		t.Fatalf("seed identity observation %s: %v", key, err)
 	}
 }
+
+// The route matrix is where the per-route denominator either holds or silently
+// does not, and a unit test over the service cannot prove it: the service divides
+// whatever the SQL counted.
+//
+// The fixture makes the pooled answer visibly wrong. Google is 38 inbox / 2 spam
+// (5% spam) and Microsoft is 10 / 15 (60%); pooled they read 26%, which describes
+// neither route and would send an operator after the healthy one. It also mixes
+// tab capability into a single route, because the tabbed rate keeps its OWN
+// denominator inside the cell.
+func TestListRoutesGroupsByDestinationWithPerRouteDenominators(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	// The pooled comparison at the end reads the overview, which only reports
+	// participants.
+	if _, err := store.UpsertParticipant(ctx, UpsertParams{
+		MailboxID: mb.ID, WorkspaceID: w.ID,
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+	}); err != nil {
+		t.Fatalf("seed participant: %v", err)
+	}
+	seedRoutedObservations(t, f, w.ID, mb.ID, "google", "inbox", true, 18)
+	seedRoutedObservations(t, f, w.ID, mb.ID, "google", "inbox", false, 18)
+	seedRoutedObservations(t, f, w.ID, mb.ID, "google", "tabbed", true, 2)
+	seedRoutedObservations(t, f, w.ID, mb.ID, "google", "spam", true, 2)
+	seedRoutedObservations(t, f, w.ID, mb.ID, "microsoft", "inbox", false, 10)
+	seedRoutedObservations(t, f, w.ID, mb.ID, "microsoft", "spam", false, 15)
+
+	rows, err := store.ListRoutes(ctx, w.ID, mb.ID)
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 routes, got %d: %+v", len(rows), rows)
+	}
+
+	// Ordered by destination_esp, so the UI and every assertion below are stable.
+	if rows[0].DestinationESP != "google" || rows[1].DestinationESP != "microsoft" {
+		t.Fatalf("routes came back as %s, %s — want google, microsoft in destination order",
+			rows[0].DestinationESP, rows[1].DestinationESP)
+	}
+
+	google, microsoft := rows[0], rows[1]
+	if google.Inbox7d != 38 || google.Spam7d != 2 {
+		t.Errorf("google = %d inbox / %d spam, want 38/2 (the 2 tabbed landings count on the inbox side)",
+			google.Inbox7d, google.Spam7d)
+	}
+	if google.Tabbed7d != 2 || google.TabCapable7d != 20 {
+		t.Errorf("google tabbed pair = %d/%d, want 2/20 — the tabbed rate's denominator is the "+
+			"categorisable landings ON THIS ROUTE, not the route's placements and not the pool's",
+			google.Tabbed7d, google.TabCapable7d)
+	}
+	if microsoft.Inbox7d != 10 || microsoft.Spam7d != 15 {
+		t.Errorf("microsoft = %d inbox / %d spam, want 10/15", microsoft.Inbox7d, microsoft.Spam7d)
+	}
+	if microsoft.TabCapable7d != 0 {
+		t.Errorf("microsoft tab_capable_7d = %d, want 0: nothing that observed this route could report "+
+			"a category", microsoft.TabCapable7d)
+	}
+	// The split must sum to the pooled total the overview reports, or the matrix and
+	// the headline number on the same screen disagree about the same mail.
+	overview, err := store.ListOverviewRows(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("list overview rows: %v", err)
+	}
+	if len(overview) != 1 {
+		t.Fatalf("want 1 overview row, got %d", len(overview))
+	}
+	if got, want := google.Inbox7d+microsoft.Inbox7d, overview[0].Inbox7d; got != want {
+		t.Errorf("routes sum to %d inbox placements, the overview reports %d: the split disagrees with "+
+			"the total it came from", got, want)
+	}
+	if got, want := google.Spam7d+microsoft.Spam7d, overview[0].Spam7d; got != want {
+		t.Errorf("routes sum to %d spam placements, the overview reports %d", got, want)
+	}
+}
+
+// `unknown` and `other` are DIFFERENT routes and must never collapse into one.
+// "we have not resolved this domain" and "we resolved it and it is neither Google
+// nor Microsoft" are different facts; merging them would report an unmeasured
+// destination as a measured one.
+func TestListRoutesKeepsUnknownAndOtherApart(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	seedRoutedObservations(t, f, w.ID, mb.ID, "other", "inbox", false, 4)
+	seedRoutedObservations(t, f, w.ID, mb.ID, "unknown", "inbox", false, 7)
+
+	rows, err := store.ListRoutes(ctx, w.ID, mb.ID)
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 routes, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].DestinationESP != "other" || rows[0].Inbox7d != 4 {
+		t.Errorf("route[0] = %+v, want other with 4 inbox placements", rows[0])
+	}
+	if rows[1].DestinationESP != "unknown" || rows[1].Inbox7d != 7 {
+		t.Errorf("route[1] = %+v, want unknown with 7 inbox placements", rows[1])
+	}
+}
+
+// The window and the tenant pin, which are the two ways this read could quietly
+// report someone else's mail: an observation from outside the trailing 7 days, and
+// one belonging to another workspace's mailbox of the same id.
+func TestListRoutesIsWindowedAndWorkspacePinned(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	seedRoutedObservations(t, f, w.ID, mb.ID, "google", "inbox", false, 3)
+	seedAgedRoutedObservations(t, f, w.ID, mb.ID, "microsoft", "inbox", 8*24*time.Hour, 5)
+
+	rows, err := store.ListRoutes(ctx, w.ID, mb.ID)
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DestinationESP != "google" {
+		t.Fatalf("routes = %+v, want only the google route: an 8-day-old observation is outside the "+
+			"7-day window", rows)
+	}
+
+	other, err := f.q.CreateWorkspace(ctx, "Route other "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("other workspace: %v", err)
+	}
+	foreign, err := store.ListRoutes(ctx, other.ID, mb.ID)
+	if err != nil {
+		t.Fatalf("list routes for the foreign workspace: %v", err)
+	}
+	if len(foreign) != 0 {
+		t.Errorf("another workspace read %d routes for this mailbox, want 0", len(foreign))
+	}
+}
+
+// seedRoutedObservations writes n trusted sender-attributed placement rows against
+// one destination route, observed now.
+func seedRoutedObservations(t *testing.T, f fixture, ws, mailbox uuid.UUID,
+	destination, placement string, tabCapable bool, n int) {
+	t.Helper()
+	seedAgedRoutedObservationsWithCapability(t, f, ws, mailbox, destination, placement, tabCapable, 0, n)
+}
+
+// seedAgedRoutedObservations is the same at an explicit age, for the window.
+func seedAgedRoutedObservations(t *testing.T, f fixture, ws, mailbox uuid.UUID,
+	destination, placement string, age time.Duration, n int) {
+	t.Helper()
+	seedAgedRoutedObservationsWithCapability(t, f, ws, mailbox, destination, placement, false, age, n)
+}
+
+func seedAgedRoutedObservationsWithCapability(t *testing.T, f fixture, ws, mailbox uuid.UUID,
+	destination, placement string, tabCapable bool, age time.Duration, n int) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, placement, tab_capable,
+		                                  destination_esp, source, attribution_trusted,
+		                                  idempotency_key, observed_at)
+		 SELECT $1, $2, 'placement', $3::text, $4::boolean, $5::text, 'warmup_receipt', true,
+		        'route:' || $5::text || ':' || $3::text || ':' || $4::boolean::text || ':'
+		               || $6::text || ':' || g::text,
+		        now() - $6::interval
+		   FROM generate_series(1, $7) g`,
+		ws, mailbox, placement, tabCapable, destination, age.String(), n); err != nil {
+		t.Fatalf("seed %s observations to %s: %v", placement, destination, err)
+	}
+}

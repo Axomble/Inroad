@@ -214,7 +214,53 @@ func (s *Service) GetWarmupDetail(ctx context.Context, ws, mailboxID uuid.UUID) 
 	for i, d := range stats {
 		series[i] = dayStatDTO(d)
 	}
-	return WarmupDetailDTO{Participant: s.participantDTO(p, sent), Series: series}, nil
+	routes, err := s.store.ListRoutes(ctx, ws, mailboxID)
+	if err != nil {
+		return WarmupDetailDTO{}, err
+	}
+	// make, not a nil slice: `routes` is always present and `[]` when nothing was
+	// observed, because an absent key arrives as undefined and sends a client down a
+	// fallback path that looks identical to "no mail was sent".
+	matrix := make([]WarmupRouteDTO, len(routes))
+	for i, r := range routes {
+		matrix[i] = routeDTO(r)
+	}
+	return WarmupDetailDTO{Participant: s.participantDTO(p, sent), Series: series, Routes: matrix}, nil
+}
+
+// routeDTO maps one destination route onto the wire shape, applying the sample
+// floor to its own denominator.
+//
+// A route below pwarmup.MinPlacementSamples reports its counts and NO rates. The
+// EXISTING constant is reused rather than a per-route minimum invented: the
+// question "is this rate proven" does not change because the population was split,
+// and a second threshold would be a second thing to keep in step with the first.
+//
+// It maps only; it decides nothing. No caller may branch a health state, lane or
+// promotion on the result — and the reason differs from the tabbed rate's, which
+// is why it is written here rather than assumed. A tab is structurally
+// unobservable over IMAP, so gating it would penalise a whole provider class
+// permanently. A per-route rate is observable everywhere the route exists; what is
+// missing is CALIBRATION, and that expires. Before wiring a threshold to one of
+// these, read design §7 — the distinction is the reason this slice ships before the
+// one that would consume it.
+func routeDTO(r RouteRow) WarmupRouteDTO {
+	sample := r.Inbox7d + r.Spam7d
+	route := WarmupRouteDTO{
+		DestinationESP:     r.DestinationESP,
+		PlacementSample7d:  sample,
+		TabCapableSample7d: r.TabCapable7d,
+	}
+	if sample < int64(pwarmup.MinPlacementSamples) {
+		return route // not established: the counts are reported, the rates are null
+	}
+	route.InboxRate7d = placementRate(r.Inbox7d, sample)
+	route.SpamRate7d = placementRate(r.Spam7d, sample)
+	// The tabbed rate keeps its own denominator INSIDE the route, for the reason it
+	// has one at all: observations whose reader could never name a tab must not
+	// dilute it toward zero and make an untested route read clean.
+	route.TabbedRate7d = placementRate(r.Tabbed7d, r.TabCapable7d)
+	return route
 }
 
 // GetOverview returns the workspace warmup summary: pool size (enabled

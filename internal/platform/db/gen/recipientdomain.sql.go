@@ -62,7 +62,7 @@ func (q *Queries) GetRecipientDomainESP(ctx context.Context, arg GetRecipientDom
 }
 
 const listStaleRecipientDomains = `-- name: ListStaleRecipientDomains :many
-SELECT DISTINCT
+SELECT
     e.workspace_id,
     lower(split_part(ct.email, '@', 2))::text AS domain
 FROM sequence_enrollments e
@@ -73,14 +73,24 @@ LEFT JOIN recipient_domains rd
 WHERE e.status = 'active'
   AND e.mailbox_id IS NULL
   AND position('@' in ct.email) > 0
-  AND (rd.checked_at IS NULL OR rd.checked_at < $1)
+  AND (rd.checked_at IS NULL OR rd.checked_at < $2)
+UNION
+SELECT
+    m.workspace_id,
+    lower(split_part(m.email, '@', 2))::text AS domain
+FROM mailboxes m
+LEFT JOIN recipient_domains rd
+       ON rd.workspace_id = m.workspace_id
+      AND rd.domain = lower(split_part(m.email, '@', 2))
+WHERE position('@' in m.email) > 0
+  AND (rd.checked_at IS NULL OR rd.checked_at < $2)
 ORDER BY 1, 2
-LIMIT $2
+LIMIT $1
 `
 
 type ListStaleRecipientDomainsParams struct {
-	Cutoff   pgtype.Timestamptz `json:"cutoff"`
 	RowLimit int32              `json:"row_limit"`
+	Cutoff   pgtype.Timestamptz `json:"cutoff"`
 }
 
 type ListStaleRecipientDomainsRow struct {
@@ -88,11 +98,27 @@ type ListStaleRecipientDomainsRow struct {
 	Domain      string    `json:"domain"`
 }
 
-// The sweep's fan-out. Deliberately NOT "every contact domain": only domains of
-// contacts on an ACTIVE enrollment that has no mailbox pinned yet, which is
+// The sweep's fan-out, from TWO domain sources.
+//
+// Arm 1 — contact domains. Deliberately NOT "every contact domain": only domains
+// of contacts on an ACTIVE enrollment that has no mailbox pinned yet, which is
 // exactly the set where ESP matching can still change an outcome (the sender is
 // pinned write-once at the first send and a thread is never re-routed). That
 // bound is what keeps a table sized by the contact list from being filled by it.
+//
+// Arm 2 — the workspace's OWN connected mailbox domains (warmup route matrix,
+// design §4). Warmup partners are the workspace's own mailboxes, so these are the
+// only domains a warmup DESTINATION can resolve to; without them a pool of
+// self-hosted SMTP mailboxes classifies as entirely `unknown` — a route matrix
+// with one unresolved row, for precisely the audience most likely to self-host.
+// Derived from mailboxes.email exactly as ListStaleSendingDomains derives its own
+// set, so a newly connected mailbox's domain appears immediately. The volume is
+// trivial against arm 1: a workspace's mailbox domains number in the handfuls.
+//
+// UNION rather than UNION ALL because a domain that is both a contact domain and
+// a mailbox domain is ONE cache row, and the write-back would otherwise resolve it
+// twice per tick. It also removes the duplicates each arm can produce on its own,
+// which is why neither arm restates DISTINCT.
 //
 // Global across workspaces by design — it is infrastructure maintenance, not a
 // tenant read — and each row carries the workspace its write-back is pinned to.
@@ -100,7 +126,7 @@ type ListStaleRecipientDomainsRow struct {
 // LIMIT bounds one tick's work so a large import cannot turn a sweep into an
 // unbounded DNS run; whatever is left stays stale and the next tick takes it.
 func (q *Queries) ListStaleRecipientDomains(ctx context.Context, arg ListStaleRecipientDomainsParams) ([]ListStaleRecipientDomainsRow, error) {
-	rows, err := q.db.Query(ctx, listStaleRecipientDomains, arg.Cutoff, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listStaleRecipientDomains, arg.RowLimit, arg.Cutoff)
 	if err != nil {
 		return nil, err
 	}

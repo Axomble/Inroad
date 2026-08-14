@@ -13,6 +13,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -100,6 +101,45 @@ func domainOrEmpty(d string) string {
 		return ""
 	}
 	return d
+}
+
+// resolveDestinationESP answers "where was this message DELIVERED" for one warmup
+// receipt, from the recipient mailbox's transport tag and the recipient_domains MX
+// cache (slice C design §4). The answer is recorded on the observation, so it is
+// resolved once, here, at the instant the message was seen.
+//
+// NOT esp.FromMailbox, which is the function closest to hand and the wrong one: it
+// reads smtp_host, the OUTBOUND relay, and an smtp mailbox can submit through
+// SendGrid while its inbound MX is Google Workspace. Delivery is decided by the
+// recipient domain's MX.
+//
+// It never resolves DNS and never fails the receipt. A cache miss is 'unknown',
+// which is the semantic that cache already documents, and a read error degrades to
+// the same value rather than propagating: this write's failure returns the poll
+// before SetInboxCursor, so the mailbox stops processing ALL inbound mail — campaign
+// replies and bounces included — over a column design §7 lets nothing read. Nothing
+// is hidden by degrading, either: a database that cannot serve this point lookup
+// cannot serve the five statements of the receipt transaction that follows, so a
+// real outage still surfaces there. The error is logged rather than discarded.
+//
+// Run BEFORE the transaction opens, deliberately. Inside it, a failed statement
+// aborts the whole transaction, so there would be nothing left to degrade INTO; and
+// issuing it on the pool while the transaction holds a connection would check out a
+// second one per receipt, which is a pool-exhaustion deadlock waiting for load.
+func (c client) resolveDestinationESP(ctx context.Context, ws, recipient uuid.UUID) string {
+	row, err := c.q.GetWarmupRecipientDestination(ctx, gen.GetWarmupRecipientDestinationParams{
+		MailboxID: recipient, WorkspaceID: ws,
+	})
+	if err != nil {
+		// ErrNoRows means the recipient is not this workspace's mailbox, which the
+		// receipt itself refuses moments later (ErrCrossTenant) — not worth a log.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.WarnContext(ctx, "warmup_destination_unresolved",
+				"workspace_id", ws.String(), "recipient_mailbox", recipient.String(), "err", err)
+		}
+		return string(esp.Unknown)
+	}
+	return string(esp.FromRecipient(row.Provider, row.CachedEsp))
 }
 
 // warmupReceiptSeed is the stable per-receipt seed the deterministic engage plan
@@ -217,6 +257,10 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 			"coreapi: warmup placement %q requires a tab-capable reading path", in.Placement)
 	}
 	sendUUID := pgtype.UUID{Bytes: sendID, Valid: true}
+	// Resolved before the transaction opens; see resolveDestinationESP for why it
+	// cannot live inside one. Only the fresh-insert path below writes it — a
+	// duplicate receipt must keep the route it was measured on (design §5).
+	destination := c.resolveDestinationESP(ctx, ws, recipient)
 
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
@@ -365,6 +409,11 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		SpfResult:        verdictOrUnknown(in.SPFResult),
 		DkimResult:       verdictOrUnknown(in.DKIMResult),
 		DmarcResult:      verdictOrUnknown(in.DMARCResult),
+		// Where this message was DELIVERED, resolved at the top of this call. Recorded
+		// rather than derived at read time for the same reason as TabCapable above: a
+		// recipient that migrates providers, or a domain whose MX changes, must not
+		// rewrite which route historical observations were measured on (design §5).
+		DestinationEsp: destination,
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}

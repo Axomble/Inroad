@@ -53,6 +53,62 @@ func TestFromMailboxIsNeverUnknown(t *testing.T) {
 	}
 }
 
+// FromRecipient answers a different question from FromMailbox — "where was this
+// delivered", not "who does this mailbox submit through" — so its cases are the
+// recipient's transport tag and the MX cache, never smtp_host.
+func TestFromRecipient(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		provider  string
+		cachedESP string
+		want      ESP
+	}{
+		{"gmail is conclusive with no cache entry", "gmail", "", Google},
+		{"m365 is conclusive with no cache entry", "m365", "", Microsoft},
+		// A Workspace tenant behind a third-party filter caches as Other (FromMX
+		// reads the PRIMARY MX). The mailbox is still hosted at Google and that is
+		// where the mail was delivered, so the provider wins over the cache.
+		{"gmail wins over a filtered MX", "gmail", "other", Google},
+		{"m365 wins over a filtered MX", "m365", "other", Microsoft},
+		{"smtp takes a google cache hit", "smtp", "google", Google},
+		{"smtp takes a microsoft cache hit", "smtp", "microsoft", Microsoft},
+		// The two states this classifier must never collapse (esp's judgement 3):
+		// Other is "resolved, and it is neither"; Unknown is "not resolved".
+		{"smtp keeps a resolved other", "smtp", "other", Other},
+		{"smtp cache miss is unknown, not other", "smtp", "", Unknown},
+		{"smtp cache holding unknown stays unknown", "smtp", "unknown", Unknown},
+		// A value outside the vocabulary is a boundary failure (a hand-edited row,
+		// a widened cache), not a route. It reads Unknown rather than being trusted
+		// into a matrix that GROUPs BY it.
+		{"an out-of-vocabulary cache value is unknown", "smtp", "gmail", Unknown},
+		{"cache values are not case-folded", "smtp", "Google", Unknown},
+		{"an unrecognised transport falls through to the cache", "", "google", Google},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FromRecipient(tc.provider, tc.cachedESP); got != tc.want {
+				t.Errorf("FromRecipient(%q, %q) = %q, want %q", tc.provider, tc.cachedESP, got, tc.want)
+			}
+		})
+	}
+}
+
+// The reason this function exists at all, as an assertion rather than a comment.
+// An smtp mailbox that SUBMITS through SendGrid while its inbound MX is Google
+// classifies as Other by its relay and Google by its MX; a route recorded from
+// FromMailbox would file every message delivered to that mailbox under the wrong
+// destination, permanently, because the observation is immutable.
+func TestFromRecipientDisagreesWithFromMailboxOnARelayFrontedMailbox(t *testing.T) {
+	const provider, relay, mxCache = "smtp", "smtp.sendgrid.net", "google"
+	if got := FromMailbox(provider, relay); got != Other {
+		t.Fatalf("FromMailbox(%q, %q) = %q, want other — the fixture no longer sets up the disagreement",
+			provider, relay, got)
+	}
+	if got := FromRecipient(provider, mxCache); got != Google {
+		t.Errorf("FromRecipient(%q, %q) = %q, want google: delivery is decided by the recipient domain's "+
+			"MX, not by the relay that mailbox sends through", provider, mxCache, got)
+	}
+}
+
 func TestFromMX(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

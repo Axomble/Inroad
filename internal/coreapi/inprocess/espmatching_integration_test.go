@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -85,6 +86,70 @@ func espFixture(t *testing.T) (context.Context, poolFixture) {
 	f.addSender(t, ctx, f.mailboxA, 1, true)
 	f.addSender(t, ctx, f.mailboxB, 100, true)
 	return ctx, f
+}
+
+// staleFanOutIncludes reports whether (workspace, domain) is in the sweep's
+// fan-out, reading the query WITHOUT the seam's per-tick row bound.
+//
+// The bound has to be stepped around, not honoured, for a presence assertion to
+// mean anything here. The fan-out is GLOBAL and the seam takes the first 500 rows
+// ordered by (workspace_id, domain), while the shared test database accumulates
+// workspaces across every run — so whether a freshly created workspace's row is on
+// that page depends on where a random uuid sorts. Worse for the absence direction:
+// a truncated page makes "the domain dropped off the list" pass for a domain that
+// is still very much on it, which is a guard that proves nothing.
+//
+// The seam's own plumbing (its cutoff, its bound, its write-back) is covered by
+// TestSweepSeamListsRecordsAndEvicts's espSweepCore assertion and by
+// worker/recipientesp's handler tests; what this reads is the domain SOURCE.
+func staleFanOutIncludes(t *testing.T, ctx context.Context, q *gen.Queries, ws uuid.UUID, domain string) bool {
+	t.Helper()
+	rows, err := q.ListStaleRecipientDomains(ctx, gen.ListStaleRecipientDomainsParams{
+		Cutoff:   pgtype.Timestamptz{Time: time.Now().Add(-sweepStaleWindow), Valid: true},
+		RowLimit: 100000,
+	})
+	if err != nil {
+		t.Fatalf("list stale recipient domains: %v", err)
+	}
+	for _, r := range rows {
+		if r.WorkspaceID == ws && r.Domain == domain {
+			return true
+		}
+	}
+	return false
+}
+
+// The pool's OWN mailbox domains are part of the fan-out (design §4). Without
+// them a workspace of self-hosted SMTP mailboxes classifies every warmup
+// destination as `unknown` — a route matrix with one unresolved row, for
+// precisely the audience most likely to self-host.
+//
+// The fixture isolates the widening: acme.test is where this workspace's OWN
+// mailboxes live and NO contact is enrolled there, so the enrollment arm cannot
+// put it on the list. The volume this adds is trivial by construction — a
+// workspace's mailbox domains number in the handfuls, against a contact list
+// sized in the thousands.
+func TestSweepFanOutIncludesTheWorkspacesOwnMailboxDomains(t *testing.T) {
+	ctx, f := espFixture(t)
+	sweep := f.espSweepCore(t)
+
+	if !staleFanOutIncludes(t, ctx, f.q, f.ws, "acme.test") {
+		t.Fatal("the workspace's own mailbox domain is not in the sweep's fan-out: every warmup " +
+			"destination in a self-hosted pool would classify as unknown, which is a matrix with one " +
+			"unresolved row and no information in it")
+	}
+
+	// And it behaves like any other classified domain: a completed answer takes it
+	// off the list rather than being re-resolved every tick.
+	if err := sweep.RecordRecipientDomainESP(ctx, coreapi.RecipientDomainESP{
+		WorkspaceID: f.ws.String(), Domain: "acme.test", ESP: "google", MXHost: "aspmx.l.google.com",
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if staleFanOutIncludes(t, ctx, f.q, f.ws, "acme.test") {
+		t.Error("a freshly classified mailbox domain stayed on the stale list: the sweep would re-resolve " +
+			"it on every tick")
+	}
 }
 
 // The payoff: a Google recipient is assigned the Google mailbox even though the
@@ -179,18 +244,12 @@ func TestSweepSeamListsRecordsAndEvicts(t *testing.T) {
 	sweep := f.espSweepCore(t)
 	enrollmentID := f.enrollAt(t, ctx, "sweepable.test")
 
+	// Read without the seam's 500-row page: the fan-out is global over a shared test
+	// database, so a page can truncate this workspace away and make both directions
+	// of the assertion below meaningless. See staleFanOutIncludes.
 	listed := func() bool {
 		t.Helper()
-		refs, err := sweep.ListStaleRecipientDomains(ctx, sweepStaleWindow)
-		if err != nil {
-			t.Fatalf("list stale: %v", err)
-		}
-		for _, r := range refs {
-			if r.WorkspaceID == f.ws.String() && r.Domain == "sweepable.test" {
-				return true
-			}
-		}
-		return false
+		return staleFanOutIncludes(t, ctx, f.q, f.ws, "sweepable.test")
 	}
 
 	if !listed() {

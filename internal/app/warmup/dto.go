@@ -66,6 +66,41 @@ func dayStatFromGen(s gen.WarmupDailyStat) DayStat {
 	}
 }
 
+// RouteRow is one (destination ESP, trailing-7-day counters) cell of a mailbox's
+// route matrix: how its warmup mail placed at ONE destination.
+//
+// The counters are exactly the four the overview rollup produces, and for the same
+// reasons — Inbox7d INCLUDES the tabbed landings (a tab is a sub-location inside
+// the inbox), and TabCapable7d is the tabbed rate's own denominator. The
+// difference is only the grouping, so a route's numbers are read the same way a
+// mailbox's pooled numbers are, one destination at a time.
+//
+// The rates are NOT computed here: the service turns these into the wire DTO,
+// where the sample floor is applied. Keeping the store's view as counts is what
+// makes the per-route denominator visible at the boundary instead of implied.
+type RouteRow struct {
+	// DestinationESP is esp.ESP's vocabulary: google | microsoft | other | unknown.
+	// `unknown` means the destination was never resolved (no MX cache entry when the
+	// message arrived, or an observation older than routes); `other` means it WAS
+	// resolved and is neither Google nor Microsoft. Collapsing them would tell an
+	// operator they measured a route nobody looked at.
+	DestinationESP string
+	Inbox7d        int64
+	Spam7d         int64
+	Tabbed7d       int64
+	TabCapable7d   int64
+}
+
+func routeRowFromGen(r gen.ListWarmupRoutesRow) RouteRow {
+	return RouteRow{
+		DestinationESP: r.DestinationEsp,
+		Inbox7d:        r.Inbox7d,
+		Spam7d:         r.Spam7d,
+		Tabbed7d:       r.Tabbed7d,
+		TabCapable7d:   r.TabCapable7d,
+	}
+}
+
 // UpsertParams carries the ramp settings for enabling or updating a
 // participant. It is a domain-owned struct (not the generated params type) so
 // the Store interface stays free of gen references, keeping the seam minimal.
@@ -331,11 +366,63 @@ type WarmupDayStatDTO struct {
 	Replies  int32  `json:"replies"`
 }
 
-// WarmupDetailDTO is the WarmupDetail schema: one participant plus its daily
-// series (oldest first, up to 30 days).
+// WarmupRouteDTO is one row of the WarmupDetail route matrix: how this mailbox's
+// warmup mail placed at ONE destination over the trailing 7 days.
+//
+// It is on the DETAIL endpoint and not the overview deliberately — a matrix on
+// every row of the pool list would bloat it — and it is the single most actionable
+// thing the engine can tell an operator: "your mail to Microsoft is going to spam"
+// has an obvious next step where "your spam rate is 14%" does not.
+//
+// Reported for visibility only. No threshold, lane or promotion decision reads a
+// per-route rate, and the reason is NOT the one the tabbed rate and the auth
+// verdicts give. Those are structurally unobservable on a whole provider class, so
+// gating them would penalise that class forever. A per-route rate is fully
+// observable wherever the route exists; what is missing is CALIBRATION — nobody has
+// yet seen what a normal Google→Microsoft warmup spam rate looks like in this
+// system, so a threshold set today would be a guess dressed as a policy. That
+// condition expires once real matrices exist, which is exactly why this ships
+// before the slice that would consume it (design §7).
+type WarmupRouteDTO struct {
+	// DestinationESP is google | microsoft | other | unknown — where the mail was
+	// DELIVERED, decided by the recipient domain's MX and recorded on each
+	// observation when it arrived, never re-derived from a mailbox's current row.
+	DestinationESP string `json:"destination_esp"`
+	// PlacementSample7d is THIS route's own denominator: inbox-side plus spam
+	// placements on this route alone, never the mailbox's pooled total. Splitting a
+	// window by destination shrinks every cell — a four-route pool quarters every
+	// denominator — which is why the sample travels with the rates rather than being
+	// left for the reader to assume.
+	PlacementSample7d int64 `json:"placement_sample_7d"`
+	// The three rates are NULL — never 0.0 — when this route has fewer than
+	// MinPlacementSamples placements. An unproven route is not a clean one, and a
+	// zero would read as a measurement on a cell that has barely been sampled.
+	InboxRate7d *float64 `json:"inbox_rate_7d"`
+	SpamRate7d  *float64 `json:"spam_rate_7d"`
+	// TabbedRate7d keeps its OWN denominator inside the route, exactly as it does on
+	// the overview: the categorisable landings, not the route's placements. It is
+	// additionally null when nothing that observed this route could report a
+	// category at all.
+	TabbedRate7d       *float64 `json:"tabbed_rate_7d"`
+	TabCapableSample7d int64    `json:"tab_capable_sample_7d"`
+}
+
+// WarmupDetailDTO is the WarmupDetail schema: one participant, its daily series
+// (oldest first, up to 30 days), and its destination-route matrix.
+//
+// Routes is never null — `[]` when nothing was observed — and is ordered by
+// destination_esp so the UI and the tests are stable.
+//
+// A pool whose mailboxes are all on one ESP has exactly ONE route, and that is not
+// "clean across the board": it is one cell, and it says nothing whatsoever about
+// how this mailbox's mail performs anywhere else. Warmup partners are the
+// workspace's own mailboxes, so the routes measurable here are exactly the ESPs
+// present in that pool and no others (design §3). A client rendering this must say
+// "one route in this pool" rather than presenting a single clean row as a matrix.
 type WarmupDetailDTO struct {
 	Participant WarmupParticipantDTO `json:"participant"`
 	Series      []WarmupDayStatDTO   `json:"series"`
+	Routes      []WarmupRouteDTO     `json:"routes"`
 }
 
 // WarmupTransitionDTO is the WarmupTransition schema: one automated state change

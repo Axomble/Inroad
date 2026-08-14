@@ -232,6 +232,58 @@ LEFT JOIN (
 WHERE p.workspace_id = $1
 ORDER BY p.created_at DESC;
 
+-- name: ListWarmupRoutes :many
+-- One mailbox's destination-route matrix for GET /mailboxes/{id}/warmup: the same
+-- trailing-7-day SENDER placement counters the overview rollup produces, grouped
+-- by WHERE THE MAIL WAS DELIVERED (design §6).
+--
+-- Computed at read time, exactly as the tabbed rate is, and deliberately NOT
+-- materialized into a snapshot table: a second lifecycle to keep in step with the
+-- observations is the "two things that must agree" shape every repeated defect in
+-- this subsystem has taken.
+--
+-- The population is IDENTICAL to the overview's rollup — kind='placement',
+-- attribution_trusted, inside 7 days, attributed to o.mailbox_id as the SENDER —
+-- so a route's counters sum to the mailbox's pooled counters and the split can
+-- never disagree with the total it came from. The counter definitions are kept
+-- textually identical to ListWarmupOverviewRows and
+-- UpsertWarmupSignalSnapshotsForWorkspace for the same reason.
+--
+-- Each route carries its OWN sample; the rates are computed over that count and
+-- never over the mailbox's pooled total. That is the third application of this
+-- rule in this subsystem (bounce populations, then tab capability), so it is
+-- applied here before it becomes a defect rather than after — and it matters more
+-- here than anywhere it has been applied before, because splitting a window by
+-- destination shrinks every cell.
+--
+-- A group whose placements are all 'other' reports a sample of 0 with real
+-- counters behind it, which is honest: mail reached that destination, and none of
+-- it was scoreable as inbox or spam.
+--
+-- Served by idx_warmup_observations_subject_time (workspace_id, mailbox_id, kind,
+-- observed_at DESC) — the same index the overview and the snapshot refresh use, so
+-- this grouping needs none of its own.
+SELECT
+    o.destination_esp,
+    count(*) FILTER (WHERE o.placement IN ('inbox','tabbed'))::bigint AS inbox_7d,
+    count(*) FILTER (WHERE o.placement = 'spam')::bigint             AS spam_7d,
+    count(*) FILTER (WHERE o.placement = 'tabbed')::bigint           AS tabbed_7d,
+    count(*) FILTER (WHERE o.tab_capable AND o.placement IN ('inbox','tabbed'))::bigint AS tab_capable_7d
+FROM warmup_observations o
+-- mailbox_id is nullable on this table (a token-failure observation retains no
+-- claimed sender), so the argument is cast to make it the non-null uuid the domain
+-- actually holds rather than a pgtype.UUID nobody at this boundary can produce.
+WHERE o.workspace_id = sqlc.arg(workspace_id)
+  AND o.mailbox_id = sqlc.arg(mailbox_id)::uuid
+  AND o.kind = 'placement'
+  AND o.attribution_trusted
+  AND o.observed_at >= now() - interval '7 days'
+GROUP BY o.destination_esp
+-- Deterministic so the UI and the tests are stable. Alphabetical on the esp
+-- vocabulary is google, microsoft, other, unknown — resolved routes first, the
+-- unresolved bucket last, which is also the order an operator reads them in.
+ORDER BY o.destination_esp;
+
 -- ============================================================================
 -- Send path (spec §4/§6) — the control⇄execution seam's warmup read/claim
 -- surface. Every statement is workspace_id-pinned; every INSERT of a
@@ -674,10 +726,21 @@ RETURNING id, received_at;
 -- different job and stays in the Go seam, so the vocabulary lives in exactly two
 -- places that must agree — the CHECK in 000061 and coreapi's verdictOrUnknown —
 -- rather than three.
+--
+-- destination_esp is WHERE THIS MESSAGE WAS DELIVERED, resolved by the caller from
+-- the recipient's provider or the recipient_domains MX cache (esp.FromRecipient).
+-- It is recorded here, at receipt time, for exactly the reason tab_capable is:
+-- deriving it at read time from the recipient mailbox's CURRENT row would let a
+-- provider migration or an MX change retroactively re-bucket history, and a route
+-- matrix that silently re-buckets its own history is worse than none.
+--
+-- An empty value takes the 'unknown' default on the same grounds as the verdicts
+-- above — a caller that predates routes must not hit the 000062 CHECK and abort a
+-- receipt over a column design §7 lets nothing read.
 INSERT INTO warmup_observations (
     workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
     kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at,
-    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result
+    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result, destination_esp
 )
 SELECT s.workspace_id, s.from_mailbox, sqlc.arg(recipient_mailbox)::uuid, s.id,
        'placement', sqlc.arg(placement)::text, sqlc.arg(tab_capable)::boolean,
@@ -686,12 +749,42 @@ SELECT s.workspace_id, s.from_mailbox, sqlc.arg(recipient_mailbox)::uuid, s.id,
        sqlc.arg(dkim_domain)::text, sqlc.arg(return_path_domain)::text,
        COALESCE(NULLIF(sqlc.arg(spf_result)::text, ''), 'unknown'),
        COALESCE(NULLIF(sqlc.arg(dkim_result)::text, ''), 'unknown'),
-       COALESCE(NULLIF(sqlc.arg(dmarc_result)::text, ''), 'unknown')
+       COALESCE(NULLIF(sqlc.arg(dmarc_result)::text, ''), 'unknown'),
+       COALESCE(NULLIF(sqlc.arg(destination_esp)::text, ''), 'unknown')
 FROM warmup_sends s
 WHERE s.id = sqlc.arg(warmup_send_id)
   AND s.workspace_id = sqlc.arg(workspace_id)
   AND s.to_mailbox = sqlc.arg(recipient_mailbox)
 ON CONFLICT (workspace_id, idempotency_key) DO NOTHING;
+
+-- name: GetWarmupRecipientDestination :one
+-- The two facts esp.FromRecipient needs to say WHERE a warmup message was
+-- delivered: the recipient mailbox's transport tag, and — for an smtp mailbox,
+-- where the tag decides nothing — the MX cache's completed answer for its domain.
+--
+-- Read on the warmup receipt path, so it is deliberately a pair of point lookups:
+-- mailboxes by its primary key (pinned to the workspace), recipient_domains by the
+-- (workspace_id, domain) UNIQUE. No DNS, ever. The recipientesp sweep is what
+-- resolves, off the hot path; a receipt that blocked on a resolver would put a
+-- network round trip in front of a write whose failure returns before
+-- SetInboxCursor and stops ALL inbound processing for the mailbox.
+--
+-- The domain key is lower(split_part(email,'@',2)) — byte-identical to what the
+-- sweep's fan-out projects and to what esp.Domain reproduces in Go. Any other
+-- normalisation here would seek a key nothing ever writes and every read would miss.
+--
+-- checked_at IS NOT NULL lives in the JOIN, matching GetRecipientDomainESP: a row
+-- whose lookup never completed carries the 'unknown' default, and returning it
+-- would be indistinguishable from a real answer of "neither". A miss yields '' and
+-- the caller reads that as unknown.
+SELECT m.provider,
+       COALESCE(rd.esp, '')::text AS cached_esp
+FROM mailboxes m
+LEFT JOIN recipient_domains rd
+       ON rd.workspace_id = m.workspace_id
+      AND rd.domain = lower(split_part(m.email, '@', 2))
+      AND rd.checked_at IS NOT NULL
+WHERE m.id = sqlc.arg(mailbox_id) AND m.workspace_id = sqlc.arg(workspace_id);
 
 -- name: RecordWarmupTokenFailureObservation :exec
 -- Untrusted token failures retain no claimed sender. The recipient mailbox is

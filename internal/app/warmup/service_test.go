@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // fakeStore is an in-memory Store for unit-testing Service without a database.
@@ -24,6 +26,9 @@ type fakeStore struct {
 	dailyStats     map[uuid.UUID][]DayStat
 	overviewRows   []OverviewRow
 	enabledCount   int64
+	// routes is the per-destination breakdown by mailbox, already ordered as the
+	// query returns it (the ORDER BY is asserted against Postgres, not here).
+	routes map[uuid.UUID][]RouteRow
 
 	// getParticipantErr, when non-nil, is returned by GetParticipant to model a
 	// transient read failure (a NON-ErrNoRows error) on the merge-base read.
@@ -47,6 +52,7 @@ func newFakeStore() *fakeStore {
 		sentToday:      map[uuid.UUID]int32{},
 		dailyStats:     map[uuid.UUID][]DayStat{},
 		transitions:    map[uuid.UUID][]Transition{},
+		routes:         map[uuid.UUID][]RouteRow{},
 	}
 }
 
@@ -112,6 +118,16 @@ func (s *fakeStore) SentToday(_ context.Context, _, mailboxID uuid.UUID) (int32,
 
 func (s *fakeStore) ListOverviewRows(_ context.Context, _ uuid.UUID) ([]OverviewRow, error) {
 	return s.overviewRows, nil
+}
+
+// ListRoutes models the workspace pin the SQL enforces: a mailbox read under the
+// wrong workspace has no routes, exactly as the WHERE clause returns none.
+func (s *fakeStore) ListRoutes(_ context.Context, workspaceID, mailboxID uuid.UUID) ([]RouteRow, error) {
+	p, ok := s.participants[mailboxID]
+	if !ok || p.WorkspaceID != workspaceID {
+		return nil, nil
+	}
+	return s.routes[mailboxID], nil
 }
 
 func (s *fakeStore) MailboxInWorkspace(_ context.Context, workspaceID, mailboxID uuid.UUID) (bool, error) {
@@ -703,5 +719,143 @@ func TestOverviewIdentityIsNullWhenNoObservationCarriedOne(t *testing.T) {
 	if got := ov.Mailboxes[0].Identity; got != nil {
 		t.Fatalf("identity = %+v, want nil: no observation has carried identity facts, which is "+
 			"not the same fact as an unsigned sender with no verdicts", *got)
+	}
+}
+
+// THE denominator rule, for the third time in this subsystem (bounce populations,
+// tab capability, and now routes): each route's rates are computed over ITS OWN
+// sample count, never over the mailbox's pooled total.
+//
+// The fixture makes the two answers far apart on purpose. Per route the spam rates
+// are 5% and 60%; pooled they would both read 26% — a number that describes neither
+// route and would have an operator chasing a Google problem that does not exist
+// while missing a Microsoft one that does.
+func TestDetailRouteRatesUsePerRouteDenominators(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.participants[mb] = routeParticipant(ws, mb)
+	store.routes[mb] = []RouteRow{
+		{DestinationESP: "google", Inbox7d: 38, Spam7d: 2, Tabbed7d: 2, TabCapable7d: 20},
+		{DestinationESP: "microsoft", Inbox7d: 10, Spam7d: 15},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC))
+
+	d, err := svc.GetWarmupDetail(context.Background(), ws, mb)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if len(d.Routes) != 2 {
+		t.Fatalf("got %d routes, want 2: %+v", len(d.Routes), d.Routes)
+	}
+
+	google, microsoft := d.Routes[0], d.Routes[1]
+	if google.PlacementSample7d != 40 || microsoft.PlacementSample7d != 25 {
+		t.Fatalf("samples = %d/%d, want 40/25", google.PlacementSample7d, microsoft.PlacementSample7d)
+	}
+	assertRate(t, "google spam_rate_7d", google.SpamRate7d, 0.05)
+	assertRate(t, "google inbox_rate_7d", google.InboxRate7d, 0.95)
+	assertRate(t, "microsoft spam_rate_7d", microsoft.SpamRate7d, 0.60)
+	assertRate(t, "microsoft inbox_rate_7d", microsoft.InboxRate7d, 0.40)
+
+	// The tabbed rate keeps its OWN denominator inside the route, exactly as it does
+	// on the overview: 2 of 20 categorisable landings, not 2 of the route's 40.
+	assertRate(t, "google tabbed_rate_7d", google.TabbedRate7d, 0.1)
+	if google.TabCapableSample7d != 20 {
+		t.Errorf("google tab_capable_sample_7d = %d, want 20", google.TabCapableSample7d)
+	}
+	if microsoft.TabbedRate7d != nil {
+		t.Errorf("microsoft tabbed_rate_7d = %v, want null: nothing that observed this route could "+
+			"report a category, and 0.0 would read as a confident clean rate", *microsoft.TabbedRate7d)
+	}
+}
+
+// Splitting a window by destination shrinks every cell, so the existing sample
+// floor matters more here than anywhere it has been applied before — a four-route
+// pool quarters every denominator. A route under it reports its sample and NO
+// rates: absence of evidence is not a clean rate.
+func TestDetailRouteBelowTheSampleFloorReportsNoRates(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	// Derived from the EXISTING constant rather than a literal, so the fixture
+	// cannot drift away from the floor it is testing — and so a per-route minimum
+	// invented later fails here instead of quietly replacing this one.
+	floor := int64(pwarmup.MinPlacementSamples)
+	store := newFakeStore()
+	store.participants[mb] = routeParticipant(ws, mb)
+	store.routes[mb] = []RouteRow{
+		// One sample short of the floor, and every one of them spam: the rate this
+		// suppresses would be an alarming 100% computed from a handful of messages.
+		{DestinationESP: "microsoft", Inbox7d: 0, Spam7d: floor - 1, TabCapable7d: floor - 1},
+		{DestinationESP: "unknown", Inbox7d: floor, Spam7d: 0, TabCapable7d: floor},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC))
+
+	d, err := svc.GetWarmupDetail(context.Background(), ws, mb)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	thin, established := d.Routes[0], d.Routes[1]
+
+	if thin.PlacementSample7d != floor-1 {
+		t.Errorf("placement_sample_7d = %d, want %d: the count is reported even when the rates are not",
+			thin.PlacementSample7d, floor-1)
+	}
+	for name, rate := range map[string]*float64{
+		"inbox_rate_7d":  thin.InboxRate7d,
+		"spam_rate_7d":   thin.SpamRate7d,
+		"tabbed_rate_7d": thin.TabbedRate7d,
+	} {
+		if rate != nil {
+			t.Errorf("%s = %v on a %d-sample route, want null: below MinPlacementSamples (%d) a route "+
+				"is not established", name, *rate, thin.PlacementSample7d, floor)
+		}
+	}
+	// The floor is the EXISTING constant, not a per-route invention: one more sample
+	// than the thin route has is exactly what establishes the other one.
+	if established.SpamRate7d == nil || established.InboxRate7d == nil {
+		t.Fatalf("a %d-sample route reports no rates; MinPlacementSamples is %d, so it qualifies",
+			established.PlacementSample7d, floor)
+	}
+}
+
+// Always present, `[]` and never null: a client distinguishing "no rows" from
+// "field missing" is a distinction with no meaning, and the absent form is the one
+// that arrives as `undefined` and takes a UI down a fallback path.
+func TestDetailRoutesAreAnEmptySliceWhenNothingWasObserved(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.participants[mb] = routeParticipant(ws, mb)
+	svc := withNow(NewService(store), time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC))
+
+	d, err := svc.GetWarmupDetail(context.Background(), ws, mb)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	if d.Routes == nil {
+		t.Fatal("routes is nil, want an empty slice: it serializes as null and the SPA reads undefined")
+	}
+	if len(d.Routes) != 0 {
+		t.Fatalf("routes = %+v, want empty", d.Routes)
+	}
+}
+
+// routeParticipant is the minimal enabled participant the route tests hang off.
+func routeParticipant(ws, mb uuid.UUID) Participant {
+	return Participant{
+		MailboxID: mb, WorkspaceID: ws, Enabled: true,
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3, HealthState: "healthy",
+		StartedAt: pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+	}
+}
+
+// assertRate compares a nullable wire rate against an exact expectation, within a
+// tolerance that only absorbs float representation.
+func assertRate(t *testing.T, name string, got *float64, want float64) {
+	t.Helper()
+	if got == nil {
+		t.Errorf("%s = null, want %v", name, want)
+		return
+	}
+	if diff := *got - want; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("%s = %v, want %v", name, *got, want)
 	}
 }

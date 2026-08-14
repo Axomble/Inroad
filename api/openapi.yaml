@@ -4695,6 +4695,72 @@ components:
           type: array
           description: daily stats, oldest first, up to 30 days
           items: { $ref: '#/components/schemas/WarmupDayStat' }
+        routes:
+          type: array
+          description: >-
+            Placement split by WHERE THE MAIL WAS DELIVERED — the destination ESP, decided
+            by the recipient domain's MX. Each route carries its OWN sample count and its
+            rates are computed over that count, never the mailbox's pooled total. Empty
+            when nothing has been observed. Reported for visibility only: no threshold,
+            lane or promotion decision reads any of it.
+            Warmup partners are the workspace's own connected mailboxes, so the only routes
+            observable are the ESPs in that pool: a single-ESP workspace reports ONE route,
+            and a client must render that as "one destination observed" rather than as a
+            matrix that happens to have one clean row — it says nothing about delivery to
+            any provider absent from the pool. `unknown` is not a fourth provider: it means
+            the recipient domain's MX has not been resolved yet, and must never render
+            beside google/microsoft/other as if it were a destination. `other` is its
+            opposite — resolved, and neither Google nor Microsoft.
+          items:
+            type: object
+            required: [destination_esp, placement_sample_7d, inbox_rate_7d, spam_rate_7d, tabbed_rate_7d, tab_capable_sample_7d]
+            properties:
+              destination_esp:
+                type: string
+                enum: [google, microsoft, other, unknown]
+                description: >-
+                  Where the mail was delivered, from the recipient's own provider or the
+                  recipient domain's MX cache — never from the sender's relay. Recorded on
+                  the observation at receipt time, so a later provider or MX change does
+                  not rewrite which route historical mail was measured on. unknown = not
+                  resolved yet (an absence of lookup); other = resolved, and neither Google
+                  nor Microsoft (a finding). The two must not render alike.
+              placement_sample_7d:
+                type: integer
+                format: int64
+                description: >-
+                  Inbox plus spam placement observations ON THIS ROUTE in the trailing 7
+                  days — the denominator of this row's inbox and spam rates, and never the
+                  mailbox's pooled placement_sample_7d.
+              inbox_rate_7d:
+                type: number
+                nullable: true
+                description: >-
+                  Fraction of this route's placements that reached the inbox (0..1). Null
+                  when this route is below the placement sample floor: not established, not
+                  zero. Splitting a window by destination shrinks every count, so null is
+                  common here rather than exceptional.
+              spam_rate_7d:
+                type: number
+                nullable: true
+                description: >-
+                  Fraction of this route's placements that landed in spam (0..1). Null when
+                  this route is below the placement sample floor — not established, and
+                  never to be rendered as a clean 0%.
+              tabbed_rate_7d:
+                type: number
+                nullable: true
+                description: >-
+                  Fraction of this route's tab-capable placements that landed in a tab
+                  rather than the primary inbox (0..1), over tab_capable_sample_7d. Null
+                  when nothing observing this route could report a category.
+              tab_capable_sample_7d:
+                type: integer
+                format: int64
+                description: >-
+                  Inbox-side placements on this route whose reader could have seen a tab —
+                  the denominator of this row's tabbed_rate_7d, and smaller than this row's
+                  placement_sample_7d by construction.
     Pulse:
       type: object
       description: >-
