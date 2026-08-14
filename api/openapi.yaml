@@ -4606,6 +4606,26 @@ components:
         today_sent: { type: integer }
         today_target: { type: integer }
         placement_sample_7d: { type: integer, format: int64, description: "trusted inbox plus spam placement observations in the trailing 7 days" }
+        tabbed_rate_7d:
+          type: number
+          nullable: true
+          description: >-
+            Of this mailbox's warmup mail that a provider could categorise, the
+            fraction that landed in a TAB (Gmail Promotions/Updates/Social/Forums)
+            rather than the primary inbox. Null when nothing observed it could report
+            a category — which is the honest answer for IMAP, where tabs do not exist
+            as a concept, and must be rendered as "not detectable for this provider"
+            rather than as a clean zero. Reported for visibility only: no threshold,
+            lane or promotion decision reads it, because a signal invisible on a whole
+            provider class must not gate anything.
+        tab_capable_sample_7d:
+          type: integer
+          format: int64
+          description: >-
+            Placement observations in the window whose reader could have seen a tab —
+            the denominator of tabbed_rate_7d. Counted separately because pooling
+            observations that structurally cannot report a tab would dilute the rate
+            toward zero and make an untested pool read clean.
         inbox_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed" }
         spam_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed" }
     WarmupOverview:
