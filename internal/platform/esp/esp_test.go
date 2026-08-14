@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -261,3 +262,59 @@ func TestLookup(t *testing.T) {
 		}
 	}
 }
+
+// A name that cannot resolve must not become a persisted verdict.
+//
+// Go's resolver rejects a syntactically impossible name locally and reports it as
+// a DNSError with IsNotFound set — the same shape as a genuine NXDOMAIN. Lookup
+// used to map that to (Other, ok=true), a COMPLETED classification. Because the
+// sweep's writer trims the domain key while the fan-out does not, that verdict
+// landed on the trimmed domain's row: a mailbox at "a@ example.com" pinned
+// example.com to Other, hid it from re-lookup for a full staleness window, and
+// filed every warmup observation to it under the wrong destination route —
+// permanently, since observations are immutable.
+func TestLookupRefusesNamesThatCannotResolve(t *testing.T) {
+	unresolvable := []string{
+		" example.com", "example.com ", "exa mple.com",
+		".example.com", "example.com.", "-example.com", "example..com",
+		"<script>alert(1)</script>", "a@b.com",
+		strings.Repeat("a", 254) + ".com",
+		"",
+	}
+	for _, name := range unresolvable {
+		t.Run(name, func(t *testing.T) {
+			got, mx, ok := Lookup(context.Background(), refusingResolver{t}, name)
+			if ok {
+				t.Errorf("Lookup(%q) = (%v, %q, ok=true); an unresolvable name is not a completed classification", name, got, mx)
+			}
+			if got != Unknown {
+				t.Errorf("Lookup(%q) = %v, want Unknown — Other means \"checked, and it is neither\"", name, got)
+			}
+		})
+	}
+}
+
+// refusingResolver fails the test if it is called at all: an unresolvable name
+// must be rejected BEFORE a query is attempted, so the guard cannot be satisfied
+// by a resolver that happens to error.
+type refusingResolver struct{ t *testing.T }
+
+func (r refusingResolver) LookupMX(_ context.Context, name string) ([]*net.MX, error) {
+	r.t.Errorf("resolver was asked about %q, which should have been refused before any lookup", name)
+	return nil, nil
+}
+
+// The converse: a name that CAN resolve still reaches the resolver, so the guard
+// above cannot be over-tightened into refusing everything.
+func TestLookupStillResolvesOrdinaryNames(t *testing.T) {
+	for _, name := range []string{"example.com", "mail.example.co.uk", "xn--bcher-kva.example", "a-b.example.com", "under_score.example.com"} {
+		got, _, ok := Lookup(context.Background(), stubMX{[]*net.MX{{Host: "aspmx.l.google.com.", Pref: 1}}}, name)
+		if !ok || got != Google {
+			t.Errorf("Lookup(%q) = (%v, ok=%v), want (Google, ok=true)", name, got, ok)
+		}
+	}
+}
+
+type stubMX struct{ recs []*net.MX }
+
+func (s stubMX) LookupMX(context.Context, string) ([]*net.MX, error) { return s.recs, nil }

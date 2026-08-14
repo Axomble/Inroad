@@ -899,6 +899,24 @@ write history that never happened.
     is gated separately by `sending_domains` and the `pending_auth` lane, from DNS we
     resolve ourselves. Before wiring a threshold to `dmarc_result`, re-read this.
 
+57. **The warmup destination route is influenceable within a workspace, and must
+    not be treated as attacker-independent evidence.** `warmup_observations.destination_esp`
+    records where a warmup message was delivered, resolved from the recipient
+    mailbox's provider and the `recipient_domains` MX cache — never from the
+    message, so no header or envelope value can set it. But warmup partners are
+    the workspace's own mailboxes, so whoever controls a mailbox domain's MX
+    controls which route that mailbox's observations file under: point the MX at
+    Google, junk everything that arrives, and the `google` route's spam rate for
+    that workspace's senders drops.
+    This is safe **only** while nothing reads a per-route rate. No threshold, lane,
+    health state or promotion decision does today, and the route columns appear in
+    exactly two statements (`ListWarmupRoutes`, `RecordWarmupPlacementObservation`).
+    The design's stated reason for not gating is that no calibration data exists
+    yet — **that reason expires and this one does not.** A slice that starts gating
+    on route rates needs the same treatment invariant 52 gives the placement axis:
+    the evidence must be bound to something the attacker does not control. Read
+    this before wiring an exposure budget.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

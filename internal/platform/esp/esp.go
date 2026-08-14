@@ -286,7 +286,7 @@ func NewResolver() Resolver { return net.DefaultResolver }
 // mxHost is the primary MX as observed, kept for operator diagnosis: when a
 // domain reads Other, the host is the only thing that explains why.
 func Lookup(ctx context.Context, res Resolver, domain string) (result ESP, mxHost string, ok bool) {
-	if domain == "" {
+	if !resolvableName(domain) {
 		return Unknown, "", false
 	}
 	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
@@ -296,6 +296,17 @@ func Lookup(ctx context.Context, res Resolver, domain string) (result ESP, mxHos
 		// A domain with no MX resolves as an error on most resolvers. That is a
 		// completed answer, not a failure — the domain simply is not on Google or
 		// Microsoft — so it is recorded as Other and not retried every sweep.
+		//
+		// This is why resolvableName above is load-bearing rather than tidy. Go's
+		// resolver rejects a syntactically impossible name BEFORE sending a packet
+		// and reports it as IsNotFound, indistinguishable here from a real "no such
+		// domain". Recording that as Other would persist a verdict about a name
+		// nobody ever asked DNS about — and, because the writer trims the key while
+		// the sweep's fan-out does not, it would land on the TRIMMED domain's row.
+		// A mailbox at "a@ example.com" would pin example.com to Other, hiding it
+		// from re-lookup for a full staleness window and filing every warmup
+		// observation to it under the wrong route, permanently, since observations
+		// are immutable by design.
 		if isNotFound(err) {
 			return Other, "", true
 		}
@@ -313,6 +324,39 @@ func Lookup(ctx context.Context, res Resolver, domain string) (result ESP, mxHos
 	}
 	return FromMX(hosts), normalizeHost(hosts[0]), true
 }
+
+// resolvableName reports whether a string is worth asking a resolver about.
+//
+// Go's resolver rejects a syntactically impossible name locally and returns a
+// DNSError with IsNotFound set — the same shape as a genuine NXDOMAIN — so
+// without this check a malformed name becomes a persisted verdict of Other. A
+// name that could never resolve is not evidence about anyone's DNS, and the
+// esp package's own rule is that Other means "checked, and it is neither".
+//
+// Deliberately narrow: it rejects what cannot be a hostname (whitespace, empty
+// labels, leading/trailing dots or hyphens, over-length) and does not attempt to
+// be a full RFC 1035 validator. Anything it lets through and DNS rejects is
+// still classified the same way it always was.
+func resolvableName(domain string) bool {
+	if domain == "" || len(domain) > maxDomainNameLength {
+		return false
+	}
+	if strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") ||
+		strings.HasPrefix(domain, "-") || strings.Contains(domain, "..") {
+		return false
+	}
+	for i := 0; i < len(domain); i++ {
+		switch c := domain[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// maxDomainNameLength is RFC 1035's limit on a domain name.
+const maxDomainNameLength = 253
 
 // isNotFound reports whether err means "the name has no MX" rather than "we
 // could not find out". Read from *net.DNSError.IsNotFound (which covers both

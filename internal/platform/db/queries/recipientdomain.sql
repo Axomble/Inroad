@@ -64,6 +64,18 @@ LEFT JOIN recipient_domains rd
 WHERE e.status = 'active'
   AND e.mailbox_id IS NULL
   AND position('@' in ct.email) > 0
+  -- A domain with surrounding whitespace can never resolve, and must not be
+  -- swept. Go's resolver rejects such a name locally and reports IsNotFound,
+  -- which esp.Lookup would otherwise have recorded as a completed 'other' — and
+  -- the writer trims the key, so that verdict would land on the TRIMMED domain's
+  -- row and pin a real domain to the wrong ESP. esp.resolvableName refuses it
+  -- now, but then the row is never written, so it stays stale and is re-emitted
+  -- every tick against the global LIMIT. Excluding it here is what keeps the
+  -- budget from draining. The key derivation itself is deliberately NOT changed:
+  -- lower(split_part(email,'@',2)) is shared with sendingdomain.sql and
+  -- deliverability.sql, and trimming it in one place only would create the very
+  -- disagreement this guards against.
+  AND split_part(ct.email, '@', 2) = btrim(split_part(ct.email, '@', 2))
   AND (rd.checked_at IS NULL OR rd.checked_at < @cutoff)
 UNION
 SELECT
@@ -74,6 +86,18 @@ LEFT JOIN recipient_domains rd
        ON rd.workspace_id = m.workspace_id
       AND rd.domain = lower(split_part(m.email, '@', 2))
 WHERE position('@' in m.email) > 0
+  -- A domain with surrounding whitespace can never resolve, and must not be
+  -- swept. Go's resolver rejects such a name locally and reports IsNotFound,
+  -- which esp.Lookup would otherwise have recorded as a completed 'other' — and
+  -- the writer trims the key, so that verdict would land on the TRIMMED domain's
+  -- row and pin a real domain to the wrong ESP. esp.resolvableName refuses it
+  -- now, but then the row is never written, so it stays stale and is re-emitted
+  -- every tick against the global LIMIT. Excluding it here is what keeps the
+  -- budget from draining. The key derivation itself is deliberately NOT changed:
+  -- lower(split_part(email,'@',2)) is shared with sendingdomain.sql and
+  -- deliverability.sql, and trimming it in one place only would create the very
+  -- disagreement this guards against.
+  AND split_part(m.email, '@', 2) = btrim(split_part(m.email, '@', 2))
   AND (rd.checked_at IS NULL OR rd.checked_at < @cutoff)
 ORDER BY 1, 2
 LIMIT @row_limit;
