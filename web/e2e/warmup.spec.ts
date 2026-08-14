@@ -264,7 +264,7 @@ test('a lower-bounded zero renders as unestablished, never as a clean percentage
 test('a mailbox nothing could categorise says so, and shows no tabbed percentage', async ({ page }) => {
   const proving = card(page, 'proving@acme.test')
 
-  await expect(proving).toContainText('Not detectable for this provider')
+  await expect(proving).toContainText('Not detectable — no partner could report a tab')
   // Scoped to the tabbed metric: the row legitimately shows inbox and spam
   // percentages, so only "a figure directly after the tabbed label" is the defect.
   await expect(proving).not.toContainText(/tabbed 7d\s*[<\d]/)

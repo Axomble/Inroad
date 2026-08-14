@@ -266,7 +266,7 @@ function TabbedPlacement({
           </span>
         </>
       ) : (
-        <span className="text-foreground">Not detectable for this provider</span>
+        <span className="text-foreground">Not detectable — no partner could report a tab</span>
       )}
       {/* Wrapped as a unit: on a phone this line breaks, and "· gates" / "nothing"
           split across two lines reads worse than moving the whole note down. */}

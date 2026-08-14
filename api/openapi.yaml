@@ -4612,10 +4612,13 @@ components:
           description: >-
             Of this mailbox's warmup mail that a provider could categorise, the
             fraction that landed in a TAB (Gmail Promotions/Updates/Social/Forums)
-            rather than the primary inbox. Null when nothing observed it could report
-            a category — which is the honest answer for IMAP, where tabs do not exist
-            as a concept, and must be rendered as "not detectable for this provider"
-            rather than as a clean zero. Reported for visibility only: no threshold,
+            rather than the primary inbox. Null when nothing that OBSERVED this
+            mailbox's mail could report a category. Note whose capability that is:
+            placement is attributed to the SENDER but recorded by the RECIPIENT's
+            poller, so a Gmail sender whose warmup partners are all IMAP reports null
+            even though its own provider could categorise perfectly well. Render it as
+            "no partner could report a tab", never as a clean zero, and never as a
+            statement about this mailbox's own provider. Reported for visibility only: no threshold,
             lane or promotion decision reads it, because a signal invisible on a whole
             provider class must not gate anything.
         tab_capable_sample_7d:

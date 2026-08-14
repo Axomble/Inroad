@@ -127,9 +127,27 @@ test('an undetectable tabbed rate is words, never a percentage', () => {
     />,
   )
 
-  expect(tabbedText()).toMatch(/not detectable for this provider/i)
+  expect(tabbedText()).toMatch(/not detectable — no partner could report a tab/i)
   // Not merely "0%": ANY figure here is a measurement claim nothing made.
   expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
+})
+
+// Placement is attributed to the SENDER but recorded by the RECIPIENT's poller, so tab
+// capability is the PARTNER's property, not this mailbox's. An earlier draft of this copy
+// said "not detectable for this provider", which sends an operator to inspect the Gmail
+// mailbox in front of them when the limitation is entirely on the peers it exchanges
+// with. Same shape as preflight once blaming pending_auth for a refusal its DOMAIN
+// caused: a true-sounding message pointing at the wrong subject.
+test('does not blame this mailbox\'s own provider for a partner limitation', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, tabbed_rate_7d: null, tab_capable_sample_7d: 0 }}
+    />,
+  )
+
+  expect(tabbedText()).not.toMatch(/this provider/i)
+  expect(tabbedText()).toMatch(/partner/i)
 })
 
 // Both fields are optional in the contract, so an older server omits them
@@ -139,7 +157,7 @@ test('an undetectable tabbed rate is words, never a percentage', () => {
 test('a payload with no tabbed fields at all is undetectable, not zero', () => {
   renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
 
-  expect(tabbedText()).toMatch(/not detectable for this provider/i)
+  expect(tabbedText()).toMatch(/not detectable — no partner could report a tab/i)
   expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
 })
 
@@ -188,7 +206,7 @@ test('a rate over zero tab-capable observations is not presented as a measuremen
     />,
   )
 
-  expect(tabbedText()).toMatch(/not detectable for this provider/i)
+  expect(tabbedText()).toMatch(/not detectable — no partner could report a tab/i)
   expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
 })
 
