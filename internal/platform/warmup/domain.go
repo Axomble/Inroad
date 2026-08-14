@@ -40,12 +40,50 @@ import (
 // published per host, so the exact host is the right answer there. This asks
 // "whose reputation does this spend", which is broader by design.
 //
-// KNOWN LIMITATION: eTLD+1 does not help the free-provider case, and slightly
-// widens it. gmail.com maps to itself, so a workspace sending entirely from
-// @gmail.com shares one organizational domain and quarantining one mailbox
-// withholds the rest. An exclusion list of "public" providers is not the fix —
-// any list we invented would be wrong, unmaintained, and a second answer to the
-// question above. See security.md invariant 54.
+// CONSUMER PROVIDERS ARE NOT A SHARED-REPUTATION UNIT. The gate exists because a
+// provider that penalises acme.com penalises every mailbox on it — the workspace
+// controls the domain, so its mailboxes genuinely share standing. That is simply
+// untrue of gmail.com: Google does not penalise alice@gmail.com because
+// bob@gmail.com sent spam, and the two are usually different customers entirely.
+//
+// eTLD+1 does not distinguish them (gmail.com is its own registrable domain), and
+// no DNS signal does either — consumer providers publish SPF and DMARC just as a
+// custom domain does. So the distinction has to be named, and it is named below.
+//
+// An earlier note here argued against any list on the grounds that a list would be
+// wrong and unmaintained. That is right about a LARGE list and wrong about this
+// one: the set of consumer mail domains a cold-email tool actually meets is a
+// dozen names, they do not churn, and being absent from it fails in the CURRENT
+// direction (treat as shared), so an omission costs over-containment rather than
+// under-containment. Cheap Gmail mailboxes are common in cold email, so this is a
+// live case, not a hypothetical.
+
+// consumerMailDomains are registrable domains where a shared domain does NOT imply
+// shared sender reputation, because the tenants are unrelated strangers rather than
+// one workspace's mailboxes. Deliberately minimal: only domains whose whole purpose
+// is per-person consumer mailboxes. A business on Google Workspace or M365 sends
+// from its OWN domain, which is not here and is correctly gated as shared.
+//
+// Missing an entry means that domain is treated as shared — over-containment, the
+// same behaviour as before this list existed. That is the safe direction for an
+// omission, which is why the list can afford to be short.
+var consumerMailDomains = map[string]bool{
+	"gmail.com": true, "googlemail.com": true,
+	"outlook.com": true, "hotmail.com": true, "live.com": true, "msn.com": true,
+	"yahoo.com": true, "ymail.com": true, "aol.com": true,
+	"icloud.com": true, "me.com": true, "mac.com": true,
+	"proton.me": true, "protonmail.com": true,
+	"gmx.com": true, "gmx.net": true, "mail.com": true, "zoho.com": true,
+	"yandex.com": true, "yandex.ru": true, "qq.com": true, "163.com": true,
+}
+
+// SharesDomainReputation reports whether mailboxes on this address's organizational
+// domain plausibly share sender standing, and therefore whether one being contained
+// should withhold its siblings.
+func SharesDomainReputation(email string) bool {
+	domain := OrganizationalDomain(email)
+	return domain != "" && !consumerMailDomains[domain]
+}
 
 // OrganizationalDomain returns the registrable domain (eTLD+1) of an email
 // address, lower-cased: the unit the gate groups mailboxes by. Empty when the
@@ -110,10 +148,12 @@ type DomainLanes map[string]string
 func WorstLanesByDomain(participants []MailboxLane) DomainLanes {
 	out := make(DomainLanes, len(participants))
 	for _, p := range participants {
-		domain := OrganizationalDomain(p.Email)
-		if domain == "" {
+		// A consumer-provider mailbox contributes nothing to a domain verdict: its
+		// neighbours are strangers, not this workspace's other senders.
+		if !SharesDomainReputation(p.Email) {
 			continue
 		}
+		domain := OrganizationalDomain(p.Email)
 		if current, ok := out[domain]; !ok || laneSeverity(p.Lane) > laneSeverity(current) {
 			out[domain] = p.Lane
 		}
@@ -125,11 +165,14 @@ func WorstLanesByDomain(participants []MailboxLane) DomainLanes {
 // no participant is warming up there — which every lane predicate already reads
 // as "not gated".
 func (d DomainLanes) For(email string) string {
-	domain := OrganizationalDomain(email)
-	if domain == "" {
+	// Symmetric with the fold: a consumer-provider mailbox is never withheld by a
+	// domain verdict, because it never contributed to one. Checked on BOTH sides so
+	// the map cannot be read with a different rule than it was built with — the
+	// "two things that must agree" shape this subsystem keeps producing.
+	if !SharesDomainReputation(email) {
 		return ""
 	}
-	return d[domain]
+	return d[OrganizationalDomain(email)]
 }
 
 // laneSeverity orders lanes by how contained they are, so "worst on the domain"
