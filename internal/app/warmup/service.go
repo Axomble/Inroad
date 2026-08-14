@@ -253,6 +253,7 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 			TabCapableSample7d: r.TabCapable7d,
 			InboxRate7d:        placementRate(r.Inbox7d, placementSample),
 			SpamRate7d:         placementRate(r.Spam7d, placementSample),
+			Identity:           identityDTO(r),
 		}
 	}
 	return WarmupOverviewDTO{
@@ -408,6 +409,35 @@ func dayStatDTO(d DayStat) WarmupDayStatDTO {
 		Inbox:    d.Inbox,
 		Spam:     d.Spam,
 		Replies:  d.Replies,
+	}
+}
+
+// identityDTO renders the row's identity facts, or nil when none were observed.
+//
+// The timestamp is the ONLY presence test, because the query COALESCEs the other
+// five to their column defaults: two empty domains and three unknown verdicts is
+// both what a LEFT JOIN miss produces and a perfectly legal observation of an
+// unsigned message
+// that no receiver reported on. Distinguishing them by inspecting those values
+// would collapse "nobody has looked" into "we looked and saw nothing", which is
+// exactly the absence-is-not-a-verdict discipline this signal is built on.
+//
+// It maps only; it decides nothing. No caller may branch a health state, lane or
+// promotion on the result (design §7) — the verdicts are permanently unknown for
+// any provider that stamps none, so gating on them would penalise a whole provider
+// class for our inability to observe it, and DNS-verifiable authentication posture
+// is already gated by sending_domains and the pending_auth lane.
+func identityDTO(r OverviewRow) *WarmupIdentityDTO {
+	if !r.IdentityObservedAt.Valid {
+		return nil
+	}
+	return &WarmupIdentityDTO{
+		DKIMDomain:       r.IdentityDKIMDomain,
+		ReturnPathDomain: r.IdentityReturnPathDomain,
+		SPFResult:        r.IdentitySPFResult,
+		DKIMResult:       r.IdentityDKIMResult,
+		DMARCResult:      r.IdentityDMARCResult,
+		ObservedAt:       rfc3339(r.IdentityObservedAt),
 	}
 }
 

@@ -631,3 +631,77 @@ func TestListTransitionsMapsEveryContractField(t *testing.T) {
 		t.Fatalf("a pre-lane row must serialize its lane and population fields as null: %+v", pre)
 	}
 }
+
+// The identity block is emitted whole, from the latest observation that carried
+// one, with observed_at so the reader can judge how stale it is. It is metadata:
+// health_state, lane and every rate beside it must read identically to a row
+// without it, which is asserted here rather than assumed.
+func TestOverviewCarriesTheLatestObservedIdentity(t *testing.T) {
+	ws := uuid.New()
+	observed := time.Date(2026, 8, 14, 9, 30, 0, 0, time.UTC)
+	row := OverviewRow{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt:   pgtype.Timestamptz{Time: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+		HealthState: "healthy", Lane: "healthy", Email: "signed@example.com",
+		Inbox7d: 40, Spam7d: 10,
+		IdentityDKIMDomain: "acme.test", IdentityReturnPathDomain: "mail.acme.test",
+		IdentitySPFResult: "pass", IdentityDKIMResult: "pass", IdentityDMARCResult: "fail",
+		IdentityObservedAt: pgtype.Timestamptz{Time: observed, Valid: true},
+	}
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{row}
+	svc := withNow(NewService(store), time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	m := ov.Mailboxes[0]
+	if m.Identity == nil {
+		t.Fatal("identity is null for a mailbox whose latest observation carried one")
+	}
+	want := WarmupIdentityDTO{
+		DKIMDomain: "acme.test", ReturnPathDomain: "mail.acme.test",
+		SPFResult: "pass", DKIMResult: "pass", DMARCResult: "fail",
+		ObservedAt: "2026-08-14T09:30:00Z",
+	}
+	if *m.Identity != want {
+		t.Errorf("identity = %+v, want %+v", *m.Identity, want)
+	}
+	// Metadata, not evidence: nothing an operator or the engine reads may move.
+	if m.HealthState != "healthy" || m.Lane != "healthy" || m.PlacementSample7d != 50 {
+		t.Errorf("recording an identity moved a decision input: health=%q lane=%q sample=%d",
+			m.HealthState, m.Lane, m.PlacementSample7d)
+	}
+}
+
+// Null, not a block of defaults. Two empty domains and three unknown verdicts is
+// what every observation written before identity extraction carries, so emitting it would
+// state "we looked and found nothing" about a message nobody ever looked at — and
+// would leave the UI no way to distinguish an unsigned sender from an unobserved
+// one. The presence of the timestamp is the only signal that says which.
+func TestOverviewIdentityIsNullWhenNoObservationCarriedOne(t *testing.T) {
+	ws := uuid.New()
+	row := OverviewRow{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt:   pgtype.Timestamptz{Time: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+		HealthState: "healthy", Lane: "healthy", Email: "quiet@example.com",
+		Inbox7d: 30, Spam7d: 2,
+		// What the LEFT JOIN miss produces: the column defaults, and no timestamp.
+		IdentitySPFResult: "unknown", IdentityDKIMResult: "unknown", IdentityDMARCResult: "unknown",
+	}
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{row}
+	svc := withNow(NewService(store), time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if got := ov.Mailboxes[0].Identity; got != nil {
+		t.Fatalf("identity = %+v, want nil: no observation has carried identity facts, which is "+
+			"not the same fact as an unsigned sender with no verdicts", *got)
+	}
+}

@@ -38,6 +38,70 @@ func validPlacement(p string) bool {
 	return p == placementInbox || p == placementTabbed || p == placementSpam || p == placementOther
 }
 
+// verdictUnknown is the recorded answer whenever the receiver did not tell us, or
+// told us something this vocabulary does not carry. Absence of a verdict is not a
+// verdict (design §3.1): it is never upgraded to a pass and never to a fail.
+const verdictUnknown = warmup.AuthUnknown
+
+// authVerdicts is the exact set the warmup_observations_auth_results_check CHECK
+// (migration 000061) accepts.
+//
+// Built from warmup's own constants rather than restating the five strings. The
+// producer (warmup.ExtractIdentity), this seam, and the CHECK all have to agree,
+// and every defect this subsystem has shipped has been two things that were
+// supposed to agree and drifted. Two of the three can share a definition, so they
+// do; the CHECK cannot, which is exactly why the guard test that writes each value
+// through to Postgres earns its place.
+var authVerdicts = map[string]bool{
+	warmup.AuthPass:    true,
+	warmup.AuthFail:    true,
+	warmup.AuthNeutral: true,
+	warmup.AuthNone:    true,
+	warmup.AuthUnknown: true,
+}
+
+// verdictOrUnknown coerces anything outside the vocabulary — including the empty
+// string a caller that predates identity extraction sends — to "unknown".
+//
+// It COERCES where validPlacement above REFUSES, and the asymmetry is deliberate.
+// A placement is the reputation evidence, so a caller that gets it wrong should
+// hear about it. An identity is metadata on that evidence and gates nothing
+// (design §7), so rejecting one would cost the observation it hangs off: the CHECK
+// aborts the receipt transaction, the poll returns before SetInboxCursor, and the
+// mailbox stops processing ALL inbound mail — campaign replies and bounces
+// included. That is the tabbed-capability bug's shape, and design §8 forbids
+// repeating it for a field no decision reads.
+//
+// Case is not folded and near-misses ("softfail") are not mapped. Doing either
+// would fork the parse warmup.ExtractIdentity owns into a second implementation
+// that could disagree with it; "unknown" is the honest answer for a value this
+// layer does not recognise.
+func verdictOrUnknown(v string) string {
+	if authVerdicts[v] {
+		return v
+	}
+	return verdictUnknown
+}
+
+// maxDomainLength is RFC 1035's limit on a domain name. A longer string is not a
+// domain that was parsed badly, it is not a domain.
+const maxDomainLength = 253
+
+// domainOrEmpty drops anything too long to be a domain name. The columns have no
+// CHECK to violate, so the concern is not the transaction but an unbounded,
+// header-derived string persisted in an append-only table — the growth-by-external-
+// input shape that already forced the token-failure evidence to bucket its rows.
+//
+// Over-length yields "" rather than a truncation: "" already means "absent or
+// unparseable" (design §5), while a truncated domain is a DIFFERENT domain and
+// would group this observation under a fault domain it has nothing to do with.
+func domainOrEmpty(d string) string {
+	if len(d) > maxDomainLength {
+		return ""
+	}
+	return d
+}
+
 // warmupReceiptSeed is the stable per-receipt seed the deterministic engage plan
 // is built from. Both RecordWarmupReceipt (at insert time) and GetWarmupEngageJob
 // (later, from the reloaded row) build it from the SAME (receipt id, recipient,
@@ -289,6 +353,18 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		// migrated between providers must not make this row claim a capability the
 		// reader never had (design §5).
 		TabCapable: in.TabCapable,
+		// Identity facts, normalised HERE rather than trusted from the caller. The
+		// 000061 CHECK would reject an unrecognised verdict by aborting THIS
+		// transaction — taking the receipt, the placement and both stat writes with it
+		// — and the poll would then return before SetInboxCursor and re-fail
+		// identically on every pass. Coercing costs one unknown verdict; refusing
+		// costs the mailbox's entire inbound pipeline, over a field design §7 lets
+		// nothing read.
+		DkimDomain:       domainOrEmpty(in.DKIMDomain),
+		ReturnPathDomain: domainOrEmpty(in.ReturnPathDomain),
+		SpfResult:        verdictOrUnknown(in.SPFResult),
+		DkimResult:       verdictOrUnknown(in.DKIMResult),
+		DmarcResult:      verdictOrUnknown(in.DMARCResult),
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}

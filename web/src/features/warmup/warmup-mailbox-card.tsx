@@ -1,5 +1,5 @@
 import { Suspense, lazy, useId, useState } from 'react'
-import { Flame, History, Loader2, Settings2 } from 'lucide-react'
+import { Fingerprint, Flame, History, Loader2, Settings2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -8,6 +8,7 @@ import { laneMeta, toWarmupLane } from '@/lib/warmup-lane'
 import type { Mailbox, WarmupMailbox } from '@/store/api'
 import { HealthBadge } from '@/components/shared/health-badge'
 import { LaneBadge } from '@/components/shared/lane-badge'
+import { WarmupIdentityPanel } from './warmup-identity-panel'
 import { WarmupSettingsForm } from './warmup-settings-form'
 import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api'
 
@@ -60,8 +61,10 @@ export function WarmupMailboxCard({
   const enrolled = !!entry?.enabled
   const [editing, setEditing] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  const [showIdentity, setShowIdentity] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const historyId = useId()
+  const identityId = useId()
 
   // Detail (series + full participant) is only needed for the sparkline and to
   // prefill the settings form, so it's skipped for non-participants.
@@ -115,6 +118,17 @@ export function WarmupMailboxCard({
               <Button
                 variant="ghost"
                 size="xs"
+                onClick={() => setShowIdentity((v) => !v)}
+                aria-expanded={showIdentity}
+                aria-controls={identityId}
+                aria-label={`Sending identity for ${mailbox.email}`}
+              >
+                <Fingerprint className="size-3.5" />
+                Identity
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => setShowHistory((v) => !v)}
                 aria-expanded={showHistory}
                 aria-controls={historyId}
@@ -152,6 +166,17 @@ export function WarmupMailboxCard({
           ) : null}
         </div>
       )}
+
+      {/*
+        The observed sending identity, on the same in-place disclosure the
+        history uses. Collapsed by default because it is diagnostic detail — six
+        facts that answer "why is this failing", a question nobody asks until the
+        metrics above have already raised it — and because none of it gates
+        anything, so it must not sit where a gating figure sits.
+      */}
+      <div id={identityId}>
+        {enrolled && entry && showIdentity && <WarmupIdentityPanel identity={entry.identity} />}
+      </div>
 
       {/*
         The history sits on the mailbox's own row rather than in a page-level

@@ -4641,6 +4641,28 @@ components:
             read clean.
         inbox_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed" }
         spam_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed" }
+        identity:
+          type: object
+          nullable: true
+          description: >-
+            The latest observed SENDING identity of this mailbox's warmup mail and the
+            receiving provider's authentication verdicts on it. Null when no observation
+            has yet carried identity facts. Reported for visibility only: no threshold,
+            lane, or promotion decision reads any of it.
+            The three verdicts separate an absence from a finding, and a UI that renders
+            them alike is wrong: `unknown` means no Authentication-Results header could be
+            trusted to speak for the receiving system (RFC 8601 §5), so nobody reported a
+            verdict — permanent for a provider that stamps none, and never a failure —
+            whereas `none` IS the receiver's finding, that it checked and there was no
+            SPF record, no signature, or no DMARC record to check against.
+          required: [dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result, observed_at]
+          properties:
+            dkim_domain:        { type: string, description: "the DKIM d= signing domain, as the EXACT host and lower-cased; empty when the mail was unsigned or the signature was unparseable" }
+            return_path_domain: { type: string, description: "host of the Return-Path address, EXACT and lower-cased; empty when absent or a null return path (the <> a bounce carries). Deliberately not folded to the organizational domain the reputation gate groups on: authentication identities are published per host, so folding bounce.example.com into example.com would erase the distinction between a failing signing identity and its healthy siblings." }
+            spf_result:         { type: string, enum: [pass, fail, neutral, none, unknown] }
+            dkim_result:        { type: string, enum: [pass, fail, neutral, none, unknown] }
+            dmarc_result:       { type: string, enum: [pass, fail, neutral, none, unknown] }
+            observed_at:        { type: string, format: date-time }
     WarmupOverview:
       type: object
       description: >-

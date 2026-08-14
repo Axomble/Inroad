@@ -454,3 +454,101 @@ func TestMailboxInWorkspaceIsTheOwnershipGate(t *testing.T) {
 		t.Fatalf("unknown mailbox: ok=%v err=%v, want false/nil", ok, err)
 	}
 }
+
+// The overview read carries the LATEST identity per mailbox, and this is the half a
+// service unit test cannot prove: the service is handed whatever the SQL picked, so
+// "latest" and "attributed to the sender" are properties of the query alone.
+//
+// The fixture makes picking the wrong row visible rather than merely wrong: the
+// stale identity and the current one disagree on every field, and a bare
+// all-defaults row sits ABOVE both in time. That last row is the trap — it is what
+// every observation written before identity extraction looks like, and taking it as
+// "latest" would report a confidently unsigned, unauthenticated mailbox for one that
+// simply had one un-extracted poll.
+func TestOverviewRowsCarryTheLatestIdentityFacts(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	if _, err := store.UpsertParticipant(ctx, UpsertParams{
+		MailboxID: mb.ID, WorkspaceID: w.ID,
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+	}); err != nil {
+		t.Fatalf("seed participant: %v", err)
+	}
+	seedIdentityObservation(t, f, w.ID, mb.ID, "id-old", "3 hours",
+		"old.test", "bounce.old.test", "fail", "fail", "fail")
+	seedIdentityObservation(t, f, w.ID, mb.ID, "id-new", "1 hour",
+		"acme.test", "bounce.acme.test", "pass", "pass", "none")
+	// Newest of all, and carrying nothing: a plain placement observation.
+	seedPlacementObservations(t, f, w.ID, mb.ID, "inbox", false, 1)
+
+	rows, err := store.ListOverviewRows(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("list overview rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 overview row, got %d", len(rows))
+	}
+	got := rows[0]
+	if !got.IdentityObservedAt.Valid {
+		t.Fatal("identity_observed_at is NULL though two observations carried identity facts")
+	}
+	if got.IdentityDKIMDomain != "acme.test" || got.IdentityReturnPathDomain != "bounce.acme.test" {
+		t.Errorf("domains = %q/%q, want acme.test/bounce.acme.test (the 1-hour-old row, not the 3-hour one)",
+			got.IdentityDKIMDomain, got.IdentityReturnPathDomain)
+	}
+	if got.IdentitySPFResult != "pass" || got.IdentityDKIMResult != "pass" || got.IdentityDMARCResult != "none" {
+		t.Errorf("verdicts = %q/%q/%q, want pass/pass/none: the newest row carrying facts wins, and an "+
+			"all-default row is not a set of facts",
+			got.IdentitySPFResult, got.IdentityDKIMResult, got.IdentityDMARCResult)
+	}
+}
+
+// Null identity for a mailbox that has placement observations but none carrying
+// identity facts — the state of every mailbox on the day this ships. It must not
+// read as an unsigned sender whose mail failed every check, which is what the
+// column defaults say if they are surfaced.
+func TestOverviewRowsReportNoIdentityWhenNoneWasObserved(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	if _, err := store.UpsertParticipant(ctx, UpsertParams{
+		MailboxID: mb.ID, WorkspaceID: w.ID,
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+	}); err != nil {
+		t.Fatalf("seed participant: %v", err)
+	}
+	seedPlacementObservations(t, f, w.ID, mb.ID, "inbox", false, 6)
+	seedPlacementObservations(t, f, w.ID, mb.ID, "spam", false, 2)
+
+	rows, err := store.ListOverviewRows(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("list overview rows: %v", err)
+	}
+	got := rows[0]
+	if got.IdentityObservedAt.Valid {
+		t.Fatalf("identity_observed_at is set (%v) for a mailbox whose 8 observations all carry the "+
+			"column defaults — the read must distinguish 'nobody looked' from 'we looked and saw nothing'",
+			got.IdentityObservedAt.Time)
+	}
+	// The placement evidence beside it is unaffected.
+	if got.Inbox7d != 6 || got.Spam7d != 2 {
+		t.Errorf("inbox_7d/spam_7d = %d/%d, want 6/2", got.Inbox7d, got.Spam7d)
+	}
+}
+
+// seedIdentityObservation writes one trusted sender-attributed placement row
+// carrying identity facts, observed `ago` in the past.
+func seedIdentityObservation(t *testing.T, f fixture, ws, mailbox uuid.UUID, key, ago,
+	dkimDomain, returnPath, spf, dkim, dmarc string) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, placement, tab_capable,
+		                                  source, attribution_trusted, idempotency_key, observed_at,
+		                                  dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result)
+		 VALUES ($1, $2, 'placement', 'inbox', false, 'warmup_receipt', true, $3,
+		         now() - $4::interval, $5, $6, $7, $8, $9)`,
+		ws, mailbox, key, ago, dkimDomain, returnPath, spf, dkim, dmarc); err != nil {
+		t.Fatalf("seed identity observation %s: %v", key, err)
+	}
+}

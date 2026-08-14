@@ -74,19 +74,22 @@ func seedMailboxes(ctx context.Context, q *gen.Queries, ws uuid.UUID) ([]uuid.UU
 
 	ids := make([]uuid.UUID, 0, len(specs))
 	for _, s := range specs {
-		// Ports are always set, even for gmail/m365 where the transport is the
-		// provider API and the columns go unread: 000028 constrains both to
-		// 1..65535, so leaving them at the zero value fails the insert.
+		// Ports are SMTP-only. 000028 constrained both to 1..65535 for every
+		// provider, and 000057 replaced that with a provider-aware CHECK requiring
+		// gmail/m365 to carry 0 — the transport for those is the provider API, so a
+		// port is not merely unread but wrong. Seeding the old defaults for all
+		// three made `go run ./cmd/seed` fail the CHECK on a fresh database, which
+		// broke the documented `make dev` bootstrap.
 		params := gen.CreateMailboxParams{
 			WorkspaceID: ws, Provider: s.provider, Email: s.email, DisplayName: s.name,
 			SecretCiphertext: seedCiphertext,
-			SmtpPort:         defaultSMTPPort, ImapPort: defaultIMAPPort,
-			DailyCap: s.cap, MinIntervalSeconds: 120,
+			DailyCap:         s.cap, MinIntervalSeconds: 120,
 			RampEnabled: true, RampStartCap: seedRampStartCa, RampDays: seedRampDays,
 		}
-		// Hosts and usernames, though, are SMTP-only: inventing them for an API
-		// transport would misrepresent how that connection actually works.
+		// Hosts and usernames are SMTP-only for the same reason: inventing them for
+		// an API transport would misrepresent how that connection actually works.
 		if s.provider == "smtp" {
+			params.SmtpPort, params.ImapPort = defaultSMTPPort, defaultIMAPPort
 			params.SmtpHost, params.SmtpUsername = "smtp.example.com", s.email
 			params.ImapHost, params.ImapUsername = "imap.example.com", s.email
 		}

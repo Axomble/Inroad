@@ -2777,6 +2777,17 @@ export type WarmupMailbox = {
   inbox_rate_7d: number | null;
   /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed */
   spam_rate_7d: number | null;
+  /** The latest observed SENDING identity of this mailbox's warmup mail and the receiving provider's authentication verdicts on it. Null when no observation has yet carried identity facts. Reported for visibility only: no threshold, lane, or promotion decision reads any of it. The three verdicts separate an absence from a finding, and a UI that renders them alike is wrong: `unknown` means no Authentication-Results header could be trusted to speak for the receiving system (RFC 8601 §5), so nobody reported a verdict — permanent for a provider that stamps none, and never a failure — whereas `none` IS the receiver's finding, that it checked and there was no SPF record, no signature, or no DMARC record to check against. */
+  identity?: {
+    /** the DKIM d= signing domain, as the EXACT host and lower-cased; empty when the mail was unsigned or the signature was unparseable */
+    dkim_domain: string;
+    /** host of the Return-Path address, EXACT and lower-cased; empty when absent or a null return path (the <> a bounce carries). Deliberately not folded to the organizational domain the reputation gate groups on: authentication identities are published per host, so folding bounce.example.com into example.com would erase the distinction between a failing signing identity and its healthy siblings. */
+    return_path_domain: string;
+    spf_result: "pass" | "fail" | "neutral" | "none" | "unknown";
+    dkim_result: "pass" | "fail" | "neutral" | "none" | "unknown";
+    dmarc_result: "pass" | "fail" | "neutral" | "none" | "unknown";
+    observed_at: string;
+  } | null;
 };
 export type WarmupOverview = {
   pool_size: number;

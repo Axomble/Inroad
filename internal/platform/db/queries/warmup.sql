@@ -131,6 +131,21 @@ SELECT
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
     COALESCE(wk.tabbed, 0)::bigint      AS tabbed_7d,
     COALESCE(wk.tab_capable, 0)::bigint AS tab_capable_7d,
+    -- The LATEST identity this mailbox's mail was seen sending under, and the
+    -- verdicts the receiver reached on it. identity_observed_at is the presence
+    -- signal: NULL means no observation carrying identity facts exists, and the
+    -- read layer emits `identity: null` rather than a row of confident defaults
+    -- that would claim we observed an unsigned message.
+    --
+    -- Every value below is COALESCEd to its column default so the LEFT JOIN miss is
+    -- expressed in exactly ONE place (the timestamp) instead of six independently
+    -- nullable fields the reader would have to agree about.
+    COALESCE(idf.dkim_domain, '')::text          AS identity_dkim_domain,
+    COALESCE(idf.return_path_domain, '')::text   AS identity_return_path_domain,
+    COALESCE(idf.spf_result, 'unknown')::text    AS identity_spf_result,
+    COALESCE(idf.dkim_result, 'unknown')::text   AS identity_dkim_result,
+    COALESCE(idf.dmarc_result, 'unknown')::text  AS identity_dmarc_result,
+    idf.observed_at                              AS identity_observed_at,
     COALESCE(td.sent, 0)::int     AS today_sent
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
@@ -174,6 +189,41 @@ LEFT JOIN (
       AND o.observed_at >= now() - interval '7 days'
     GROUP BY o.mailbox_id
 ) wk ON wk.mailbox_id = p.mailbox_id
+LEFT JOIN (
+    -- The most recent observation of this mailbox that actually carried identity
+    -- facts. Attribution is the SAME as the placement rollup above — o.mailbox_id,
+    -- kind = 'placement', attribution_trusted — because it IS the same row: the
+    -- identity was written onto the placement observation. Attributing it any other
+    -- way would report the sending identity of whoever polled the message.
+    --
+    -- No 7-day window, unlike the rate above, and the difference is deliberate. A
+    -- rate over a stale window is a wrong number; an identity is a STATE, and the
+    -- last one observed stays the truth until a newer one contradicts it. Windowing
+    -- it would make a mailbox that has been paused for eight days report "no
+    -- identity" when we know perfectly well what it signs with. observed_at ships
+    -- with the value precisely so the reader can judge that staleness itself.
+    --
+    -- The all-default row is EXCLUDED rather than returned. Every observation
+    -- written before 000061, and every one from a caller that does not extract
+    -- identity, carries ('', '', 'unknown', 'unknown', 'unknown') — surfacing that
+    -- as an identity would state "we looked and saw nothing" for a row where
+    -- nobody looked, and would make `identity: null` unreachable.
+    --
+    -- Served by idx_warmup_observations_subject_time (workspace_id, mailbox_id,
+    -- kind, observed_at DESC), which is exactly the DISTINCT ON's sort order, so
+    -- this needs no index of its own.
+    SELECT DISTINCT ON (o.mailbox_id)
+           o.mailbox_id, o.dkim_domain, o.return_path_domain,
+           o.spf_result, o.dkim_result, o.dmarc_result, o.observed_at
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.kind = 'placement'
+      AND o.attribution_trusted
+      AND (o.dkim_domain <> '' OR o.return_path_domain <> ''
+           OR o.spf_result <> 'unknown' OR o.dkim_result <> 'unknown'
+           OR o.dmarc_result <> 'unknown')
+    ORDER BY o.mailbox_id, o.observed_at DESC
+) idf ON idf.mailbox_id = p.mailbox_id
 LEFT JOIN (
     SELECT s.mailbox_id, s.sent
     FROM warmup_daily_stats s
@@ -603,14 +653,40 @@ RETURNING id, received_at;
 -- retroactively claim a capability the reader never had. It is also the tabbed
 -- rate's denominator (design §5), so a wrong value here dilutes a rate rather than
 -- merely mislabelling a row.
+--
+-- The five identity columns come from the same caller, extracted from the message's
+-- own headers by warmup.ExtractIdentity. They are attributed to the SENDER
+-- (s.from_mailbox, like the placement beside them) even though the verdicts are the
+-- RECEIVER's: "how did our mail authenticate on arrival" is a fact about the mail we
+-- sent, not about the mailbox that read it.
+--
+-- An EMPTY verdict is treated as "not supplied" and becomes 'unknown' — the same
+-- value the column DEFAULT gives a caller that omits the column entirely. The zero
+-- value has to mean something safe HERE, not merely in the Go seam above this
+-- query: a caller that predates identity extraction sends five empty strings, ''
+-- is not in the 000061 vocabulary, and the CHECK would abort this whole
+-- transaction — the receipt, the placement and both stat writes with it — over
+-- metadata that gates nothing (design §7/§8). Every direct caller of this query,
+-- including the helpers that seed evidence in tests, therefore keeps working
+-- unchanged rather than being a constraint violation waiting to happen.
+--
+-- Coercing an unrecognised but NON-empty verdict ('softfail', 'temperror') is a
+-- different job and stays in the Go seam, so the vocabulary lives in exactly two
+-- places that must agree — the CHECK in 000061 and coreapi's verdictOrUnknown —
+-- rather than three.
 INSERT INTO warmup_observations (
     workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
-    kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at
+    kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at,
+    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result
 )
 SELECT s.workspace_id, s.from_mailbox, sqlc.arg(recipient_mailbox)::uuid, s.id,
        'placement', sqlc.arg(placement)::text, sqlc.arg(tab_capable)::boolean,
        'warmup_receipt', true,
-       'receipt:' || sqlc.arg(receipt_id)::uuid::text, sqlc.arg(observed_at)::timestamptz
+       'receipt:' || sqlc.arg(receipt_id)::uuid::text, sqlc.arg(observed_at)::timestamptz,
+       sqlc.arg(dkim_domain)::text, sqlc.arg(return_path_domain)::text,
+       COALESCE(NULLIF(sqlc.arg(spf_result)::text, ''), 'unknown'),
+       COALESCE(NULLIF(sqlc.arg(dkim_result)::text, ''), 'unknown'),
+       COALESCE(NULLIF(sqlc.arg(dmarc_result)::text, ''), 'unknown')
 FROM warmup_sends s
 WHERE s.id = sqlc.arg(warmup_send_id)
   AND s.workspace_id = sqlc.arg(workspace_id)

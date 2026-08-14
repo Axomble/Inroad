@@ -72,8 +72,14 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 		if err != nil {
 			return coreapi.InboxPollJob{}, err
 		}
+		// Email comes from the mailbox row, NOT from ImapUsername: this branch's
+		// mailboxes authenticate by OAuth and their IMAP login column is empty. These
+		// are also the only two providers that stamp Authentication-Results, so an
+		// empty address here would make the one identity signal we can actually
+		// observe permanently unreadable (design §6).
 		return coreapi.InboxPollJob{
 			Provider: m.Provider, AccessToken: []byte(at), Cursor: m.InboxCursor,
+			Email: m.Email,
 		}, nil
 	}
 	sealer, err := c.keyring.SealerFor(ctx, ws)
@@ -84,10 +90,15 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 	if err != nil {
 		return coreapi.InboxPollJob{}, err
 	}
+	// Email is the mailbox's own address and Username its IMAP login. They are
+	// frequently the same string and are not the same thing — a login may be a bare
+	// account name — so the identity extractor is given the address, which is what an
+	// authserv-id can be compared against.
 	return coreapi.InboxPollJob{
 		Provider: "smtp",
 		Host:     m.ImapHost, Port: int(m.ImapPort), Username: m.ImapUsername, Password: password,
 		LastSeenUID: uint32(m.InboxLastSeenUid), UIDValidity: uint32(m.InboxUidValidity),
+		Email: m.Email,
 	}, nil
 }
 

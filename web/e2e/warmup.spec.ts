@@ -38,6 +38,11 @@ const json = (body: unknown) => ({
  * below, deliberately: tab capability belongs to the reader that produced each
  * observation (design §5), never to the mailbox row, so the UI must take these
  * readings from the payload and not from `provider`.
+ *
+ * And they carry the three observed-identity shapes, which fail the same way:
+ * fully stamped (with a genuine `fail` and a `none` that must not read alike),
+ * never stamped (permanently `unknown`, which is our blind spot and not their
+ * failure), and never observed at all.
  */
 const OVERVIEW = {
   pool_size: 3,
@@ -60,6 +65,22 @@ const OVERVIEW = {
       tab_capable_sample_7d: 25,
       inbox_rate_7d: 0.9,
       spam_rate_7d: 0.1,
+      // Fully stamped: the receiver reported on all three checks, and two of the
+      // answers are the ones most often rendered as each other. `spf_result:
+      // fail` is a genuine negative and must read as one — while saying it gates
+      // nothing, because this mailbox is withheld for its CAMPAIGN BOUNCE rate
+      // (see lane_reason above) and an operator who "fixes" SPF to get it back
+      // into the pool has been sent to the wrong problem entirely. `dmarc_result:
+      // none` is the receiver saying it looked and found no DMARC record — a
+      // finding, and not the same statement as the row below.
+      identity: {
+        dkim_domain: 'acme.test',
+        return_path_domain: 'bounces.acme.test',
+        spf_result: 'fail',
+        dkim_result: 'pass',
+        dmarc_result: 'none',
+        observed_at: '2026-08-14T08:15:00Z',
+      },
     },
     {
       mailbox_id: 'mailbox-proving',
@@ -77,6 +98,22 @@ const OVERVIEW = {
       tab_capable_sample_7d: 0,
       inbox_rate_7d: null,
       spam_rate_7d: null,
+      // Never stamped: this mailbox's partners run providers that write no
+      // Authentication-Results anyone can be trusted for (RFC 8601 §5), so all
+      // three verdicts are permanently `unknown`. That is an absence of
+      // observation on OUR side, not a bad result on theirs — three red "fail"
+      // chips here would report broken authentication that nobody ever reported,
+      // for the whole class of providers that stamp nothing. The empty
+      // dkim_domain is the same kind of gap: unsigned (or unparseable), which is
+      // a fact to state, not a cell to leave blank.
+      identity: {
+        dkim_domain: '',
+        return_path_domain: 'proving.acme.test',
+        spf_result: 'unknown',
+        dkim_result: 'unknown',
+        dmarc_result: 'unknown',
+        observed_at: '2026-08-14T07:00:00Z',
+      },
     },
     {
       mailbox_id: 'mailbox-primary',
@@ -95,6 +132,11 @@ const OVERVIEW = {
       tab_capable_sample_7d: 18,
       inbox_rate_7d: 0.97,
       spam_rate_7d: 0.03,
+      // Nothing observed yet: no warmup message from this mailbox has been polled
+      // with identity facts on it. Distinct from the row above, and rendering the
+      // two alike is the defect — five "unknown" verdicts here would claim five
+      // checks came back empty when in truth no message has been read at all.
+      identity: null,
     },
   ],
 }
@@ -211,6 +253,24 @@ function historyPanel(page: Page) {
   return page.getByText('Change history', { exact: true }).locator('..')
 }
 
+/**
+ * Opens the observed-identity disclosure and returns the region it controls,
+ * resolved through `aria-controls` — the same hop a screen reader makes, so the
+ * scoping is the accessibility wiring rather than a selector maintained beside
+ * it. Scoping matters here: the metrics row on the same card already carries a
+ * "gates nothing" note, so a card-wide assertion would pass on the wrong text.
+ */
+async function openIdentity(page: Page, email: string) {
+  const toggle = page.getByRole('button', { name: `Sending identity for ${email}` })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+  const region = await toggle.getAttribute('aria-controls')
+  expect(region, 'the identity disclosure must name the region it controls').toBeTruthy()
+  return page.locator(`[id="${region}"]`)
+}
+
 async function signIn(page: Page) {
   await page.goto('/')
   await page.getByLabel('Email').fill('demo@inroad.test')
@@ -291,6 +351,78 @@ test('a measured zero renders as 0%, not as an absence', async ({ page }) => {
 
   await expect(primary).toContainText('tabbed 7d 0% of 18 tab-capable · gates nothing')
   await expect(primary).not.toContainText(/not detectable/i)
+})
+
+// The two verdicts a browser is most likely to flatten into one another. `none`
+// is the receiver reporting that it looked and there was no DMARC record;
+// `unknown` is nobody having reported anything. Asserted across two cards in one
+// test, because the defect is not what either says on its own — it is the two
+// saying the same thing.
+test('a checked-and-absent verdict and an unreported one do not read alike', async ({ page }) => {
+  const stamped = await openIdentity(page, 'withheld@acme.test')
+  await expect(stamped).toContainText(/no DMARC record/i)
+  await expect(stamped).toContainText(/looked and found/i)
+  // All three of this mailbox's verdicts were reported, so the unreported
+  // wording must appear nowhere on it. This is the assertion that catches a
+  // collapse: the explanatory sentence alone still reads plausibly when `none`
+  // is quietly given `unknown`'s words, and only the verdict itself gives it away.
+  await expect(stamped).not.toContainText(/not reported by the receiver/i)
+
+  const neverStamped = await openIdentity(page, 'proving@acme.test')
+  await expect(neverStamped).toContainText(/not reported by the receiver/i)
+  await expect(neverStamped).not.toContainText(/looked and found/i)
+  await expect(neverStamped).not.toContainText(/no DMARC record/i)
+})
+
+// A failing verdict is a real negative and reads as one — and it decides
+// nothing: this mailbox is withheld over its campaign bounce rate, so an
+// operator who reads the SPF failure as the reason has been sent to fix the
+// wrong thing. Same marker the tabbed rate carries, for the same reason.
+test('a failing verdict is visible and says plainly that it gates nothing', async ({ page }) => {
+  const identity = await openIdentity(page, 'withheld@acme.test')
+
+  await expect(identity).toContainText(/fail[^·]*· gates nothing/)
+  await expect(identity).toContainText(/no threshold, lane or promotion decision reads any of it/i)
+  // The identity is one observation, and a dated one — not a live configuration.
+  await expect(identity).toContainText(/observed/i)
+})
+
+// A provider that stamps no Authentication-Results leaves a mailbox permanently
+// unknown. Presenting that as failure would tell an operator their
+// authentication is broken on the strength of a check nobody ran.
+test('a never-stamped mailbox reads as unobserved, never as failing', async ({ page }) => {
+  const identity = await openIdentity(page, 'proving@acme.test')
+
+  await expect(identity).toContainText(/not reported by the receiver/i)
+  await expect(identity).toContainText(/absence of observation, not a failed check/i)
+  // And the silence is named as normal and permanent, so three unreported rows
+  // do not read as three things to go and fix.
+  await expect(identity).toContainText(/stay unreported however well the mail authenticates/i)
+  // Nothing failed, so nothing carries the failure disclaimer either.
+  await expect(identity).not.toContainText(/· gates nothing/)
+  // And the limitation is the partner's, not this mailbox's own provider.
+  await expect(identity).not.toContainText(/this provider|your provider/i)
+})
+
+// An unsigned message has no d= domain. Rendering the gap as a gap makes it look
+// like the panel failed to load a value that exists.
+test('an unsigned message says it was not signed', async ({ page }) => {
+  const identity = await openIdentity(page, 'proving@acme.test')
+
+  await expect(identity).toContainText('DKIM signing domain')
+  await expect(identity).toContainText(/not signed/i)
+})
+
+// No observation has carried identity facts yet, which is not the same as five
+// checks coming back empty — and is the reading a "default everything to
+// unknown" implementation would silently produce.
+test('a mailbox with no observed identity says so, and reports no verdicts', async ({ page }) => {
+  const identity = await openIdentity(page, 'primary@acme.test')
+
+  await expect(identity).toContainText(/has been observed with identity facts yet/i)
+  await expect(identity).toContainText(/not a failed check/i)
+  await expect(identity).not.toContainText(/not reported by the receiver/i)
+  await expect(identity).not.toContainText('DKIM signing domain')
 })
 
 test('an entry predating pool lanes says so instead of inventing a lane', async ({ page }) => {

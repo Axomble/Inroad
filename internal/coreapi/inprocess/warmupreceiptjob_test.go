@@ -256,3 +256,50 @@ func TestTabbedPlacementRequiresATabCapablePath(t *testing.T) {
 		t.Fatalf("error = %v; it must name the missing capability, not surface as a constraint violation", err)
 	}
 }
+
+// The identity verdicts take the OPPOSITE decision to validPlacement above, and the
+// asymmetry is the point. A placement is the evidence itself, so a caller that
+// supplies a bad one is told; an identity is metadata ON that evidence and gates
+// nothing, so a bad one must never cost the receipt (design §8). The DB CHECK would
+// abort the whole transaction, the poll would return before SetInboxCursor, and the
+// mailbox would stop processing ALL inbound mail — the tabbed-capability bug's exact
+// shape, for a field no decision reads.
+//
+// The zero-valued struct is the case that would actually happen: any caller that has
+// not been taught about identity yet sends five empty strings.
+func TestVerdictOrUnknownNeverProducesAValueTheCheckRejects(t *testing.T) {
+	for _, ok := range []string{"pass", "fail", "neutral", "none", "unknown"} {
+		if got := verdictOrUnknown(ok); got != ok {
+			t.Errorf("verdictOrUnknown(%q) = %q, want it unchanged", ok, got)
+		}
+	}
+	// "softfail" and "temperror" are REAL RFC 8601 results that this vocabulary
+	// deliberately does not carry, so they are the likeliest thing to arrive from a
+	// widened extractor. "Pass" is not case-folded here on purpose: folding it would
+	// be a second implementation of the parse the extractor owns, and unknown is the
+	// safe direction — never a pass, never a fail (design §3.1).
+	for _, outside := range []string{"", "softfail", "temperror", "Pass", "PASS", "dkim=pass"} {
+		if got := verdictOrUnknown(outside); got != "unknown" {
+			t.Errorf("verdictOrUnknown(%q) = %q, want \"unknown\": a value the CHECK rejects aborts "+
+				"the receipt transaction and wedges the poll cursor", outside, got)
+		}
+	}
+}
+
+// The domains have no CHECK to violate, so the risk is different: an unbounded
+// attacker-influenced string persisted in an append-only table. Over-long is not
+// truncated, because a truncated domain is a WRONG domain that would group this
+// observation under a fault domain it does not belong to. Empty already means
+// "absent or unparseable" (design §5), which is exactly what this is.
+func TestDomainOrEmptyRejectsWhatCannotBeADomain(t *testing.T) {
+	for _, ok := range []string{"", "acme.test", "mail.acme.co.uk"} {
+		if got := domainOrEmpty(ok); got != ok {
+			t.Errorf("domainOrEmpty(%q) = %q, want it unchanged", ok, got)
+		}
+	}
+	overlong := strings.Repeat("a", maxDomainLength+1)
+	if got := domainOrEmpty(overlong); got != "" {
+		t.Errorf("domainOrEmpty(<%d chars>) = %q, want \"\": longer than a domain name can be, and "+
+			"truncating it would invent a fault-domain grouping key", len(overlong), got)
+	}
+}

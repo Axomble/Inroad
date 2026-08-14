@@ -94,7 +94,18 @@ func SharesDomainReputation(email string) bool {
 // exact host. That is the pre-eTLD+1 grouping: narrower than intended, never
 // wider, and never a bucket that lumps unrelated hosts together.
 func OrganizationalDomain(email string) string {
-	host := addressHost(email)
+	return registrableHost(addressHost(email))
+}
+
+// registrableHost is the eTLD+1 of an already-extracted host.
+//
+// Split out from OrganizationalDomain because the identity extractor compares an
+// `authserv-id` — a bare hostname, never an address — against a mailbox's domain,
+// and both sides of that comparison must be folded by the SAME rule. A second
+// implementation of "what domain is this" is exactly what the comment at the top
+// of this file exists to prevent, and a comparison whose two sides fold
+// differently fails open: it would decline to trust the receiver's own header.
+func registrableHost(host string) string {
 	if host == "" {
 		return ""
 	}
