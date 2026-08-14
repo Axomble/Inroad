@@ -116,16 +116,110 @@ func TestExtractIdentity(t *testing.T) {
 			want:     Identity{SPFResult: AuthNeutral, DKIMResult: AuthPass, DMARCResult: AuthNone},
 		},
 		{
-			// An untrusted header ABOVE the receiver's must be skipped rather than
-			// ending the search — otherwise anyone who can prepend a header blinds
-			// the extractor entirely.
-			name: "an untrusted header above the receiver's is skipped, not fatal",
+			// The INVERSE of what this test asserted before, and the change is the
+			// security fix. Skipping an untrusted header and continuing down the
+			// message was exploitable: wherever the receiver's own stamp fails the
+			// trust check, the scan walks past it and believes a forged header
+			// below. Only the topmost is considered now, so an untrusted one at the
+			// top yields unknown. Nothing legitimate is lost — the sender cannot
+			// prepend above the receiving MTA — and unknown gates nothing.
+			name: "an untrusted topmost header yields unknown rather than a search",
 			raw: strings.Join([]string{
 				"Authentication-Results: evil.test; dkim=pass; spf=pass; dmarc=pass",
 				"Authentication-Results: mx.google.com; dkim=fail; spf=none; dmarc=fail",
 			}, "\r\n"),
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
-			want:     Identity{SPFResult: AuthNone, DKIMResult: AuthFail, DMARCResult: AuthFail},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// HIGH 1 from the security audit, as a permanent test. A shared consumer
+			// domain is not a trust unit: nobody with an @gmail.com mailbox owns
+			// gmail.com's MTAs. It was worse than a blind spot — Gmail's genuine
+			// stamp folds to google.com, which does NOT equal gmail.com, so the real
+			// verdict failed the check and the forgery was the only candidate left.
+			name: "a consumer-domain mailbox does not treat its own domain as a trust unit",
+			raw: strings.Join([]string{
+				"Authentication-Results: mx.google.com; dkim=fail; spf=fail; dmarc=fail",
+				"Authentication-Results: gmail.com; dkim=pass; spf=pass; dmarc=pass",
+			}, "\r\n"),
+			receiver: Receiver{Address: gmailRecipient, Provider: "smtp"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// The case that ISOLATES the consumer-domain rule. With a genuine header
+			// on top, topmost-only already saves us; here the relay stamps NOTHING,
+			// so the forgery is the only candidate and the trust rule is the sole
+			// defence. This is the configuration the audit exploited.
+			name: "a relay that stamps nothing does not let a consumer-domain forgery stand",
+			raw: strings.Join([]string{
+				"Authentication-Results: gmail.com; dkim=pass; spf=pass; dmarc=pass",
+			}, "\r\n"),
+			receiver: Receiver{Address: gmailRecipient, Provider: "smtp"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// The other half of MEDIUM 3. An unterminated quote used to leave the
+			// remainder parsed as ordinary content, so "; dmarc=pass" inside it
+			// became a methodspec — and the doc comment claimed the opposite was
+			// happening, which is the "two things that must agree" drift again.
+			name: "an unterminated quote makes the header untrusted",
+			raw: strings.Join([]string{
+				`Authentication-Results: mx.google.com; dkim=fail; spf=pass smtp.mailfrom="oops (c) ; dmarc=pass ; more`,
+			}, "\r\n"),
+			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// HIGH 2. Exchange Online omits the authserv-id and opens with a
+			// methodspec, so the old parser read "spf=fail" AS the id, could not
+			// fold it, skipped the genuine header, and fell through to a forgery
+			// naming outlook.com. Every m365 mailbox was silently unknown, and the
+			// allowlist matched only forged headers.
+			name: "an Exchange Online header with no authserv-id is the receiver's own",
+			raw: strings.Join([]string{
+				"Authentication-Results: spf=fail (sender IP is 10.0.0.1) smtp.mailfrom=evil.test; dkim=fail (no sig) header.d=evil.test;dmarc=fail action=oreject header.from=evil.test;compauth=fail reason=001",
+				"Authentication-Results: outlook.com; dkim=pass; spf=pass; dmarc=pass",
+			}, "\r\n"),
+			receiver: Receiver{Address: "alice@contoso.com", Provider: "m365"},
+			want:     Identity{SPFResult: AuthFail, DKIMResult: AuthFail, DMARCResult: AuthFail},
+		},
+		{
+			// The id-less form is accepted ONLY for a mailbox we know is on m365.
+			// For anyone else it is unattributable, and accepting it would let a
+			// relay that stamps nothing be impersonated by a forgery that simply
+			// omits the id.
+			name: "an id-less header is not believed for a non-m365 mailbox",
+			raw: strings.Join([]string{
+				"Authentication-Results: spf=pass smtp.mailfrom=evil.test; dkim=pass; dmarc=pass",
+			}, "\r\n"),
+			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// MEDIUM 3. Closing the receiver's own comment EARLY with a ')' spills
+			// attacker text into the methodspec stream ahead of the genuine verdict,
+			// where first-occurrence-wins locks it in. Truncating at the damage does
+			// not help — the injection precedes it — but closing early leaves the
+			// receiver's own ')' unbalanced, so the whole header is refused.
+			name: "a comment closed early by injected text makes the header untrusted",
+			raw: strings.Join([]string{
+				"Authentication-Results: mx.google.com; spf=pass (google.com: domain of a)x; dmarc=pass; z@evil.test designates 10.0.0.1) smtp.mailfrom=a@evil.test; dmarc=fail",
+			}, "\r\n"),
+			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// LOW 5. Anything <= 253 bytes used to be persisted verbatim as a
+			// "domain". Rejected outright rather than sanitised: a repaired string
+			// is a DIFFERENT domain and would file this observation under a fault
+			// domain it has nothing to do with.
+			name: "a d= value that is not a hostname is not stored as one",
+			raw: strings.Join([]string{
+				`DKIM-Signature: v=1; a=rsa-sha256; d=<script>alert(1)</script>; s=s1; b=abc==`,
+				"Return-Path: <bounce@ok.test>",
+			}, "\r\n"),
+			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
+			want:     Identity{ReturnPathDomain: "ok.test", SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
 		{
 			// A comment carrying both delimiters this parser splits on. Parsed
@@ -262,6 +356,10 @@ func TestUnidentifiableReceiverTrustsNothing(t *testing.T) {
 		{},
 		{Address: "not-an-address", Provider: "smtp"},
 		{Address: "", Provider: "smtp"},
+		// The one that reaches the provider allowlist. Without the address guard
+		// this trusted mx.google.com on the strength of a provider string alone.
+		{Address: "", Provider: "gmail"},
+		{Address: "   ", Provider: "gmail"},
 	} {
 		got := ExtractIdentity(h, r)
 		if got.DKIMResult != AuthUnknown || got.SPFResult != AuthUnknown || got.DMARCResult != AuthUnknown {

@@ -40,7 +40,9 @@ const (
 // mailbox, not the sender.
 //
 // Provider is here, and not merely Address, because the provider allowlist in
-// receiverStamped is unsafe without it. See that function.
+// expectedAuthservDomains is unsafe without it, and because for a mailbox on a
+// SHARED consumer domain the address cannot vouch for anything at all. See that
+// function.
 type Receiver struct {
 	Address  string // the polled mailbox's own email address
 	Provider string // "gmail" | "m365" | "smtp"
@@ -121,8 +123,8 @@ func headerValues(h netmail.Header, key string) []string {
 // this column does not have.
 func dkimSigningDomain(h netmail.Header) string {
 	for _, sig := range headerValues(h, "DKIM-Signature") {
-		if d := tagValue(sig, "d"); d != "" {
-			return strings.ToLower(strings.TrimSuffix(d, "."))
+		if d := plausibleDomain(tagValue(sig, "d")); d != "" {
+			return d
 		}
 	}
 	return ""
@@ -159,13 +161,13 @@ func returnPathDomain(h netmail.Header) string {
 		return ""
 	}
 	if addr, err := netmail.ParseAddress(raw); err == nil {
-		return addressHost(addr.Address)
+		return plausibleDomain(addressHost(addr.Address))
 	}
 	// "<>" — the null return path every bounce carries — is not a parseable
 	// address, and neither are several forms real MTAs emit. Strip the angle
 	// brackets and take the host directly rather than discarding a domain that is
 	// plainly there. A null return path has no host and correctly yields "".
-	return addressHost(strings.Trim(raw, "<> \t"))
+	return plausibleDomain(addressHost(strings.Trim(raw, "<> \t")))
 }
 
 // authVerdicts is one Authentication-Results header's three interesting methods.
@@ -187,17 +189,60 @@ type authVerdicts struct{ spf, dkim, dmarc string }
 // permanently unknown on this axis. That is honest, and it is the reason none of
 // this may gate anything.
 func trustedAuthResults(h netmail.Header, r Receiver) (authVerdicts, bool) {
-	for _, raw := range headerValues(h, "Authentication-Results") {
-		id, methodspecs, ok := strings.Cut(stripComments(raw), ";")
-		if !ok {
-			continue // an authserv-id with no methodspecs states nothing
-		}
-		if !receiverStamped(authservID(id), r) {
-			continue
-		}
-		return parseVerdicts(methodspecs), true
+	values := headerValues(h, "Authentication-Results")
+	if len(values) == 0 {
+		return authVerdicts{}, false
 	}
-	return authVerdicts{}, false
+	// ONLY the topmost, and this is the correction that matters. Scanning for the
+	// first TRUSTED header was exploitable: where the receiver's own stamp fails
+	// the trust check for any reason, the scan walks PAST it to a forged header
+	// below and believes that instead. The sender cannot prepend above the
+	// receiving MTA, so restricting the search to index 0 loses nothing legitimate
+	// and removes the walk entirely.
+	//
+	// A topmost header we cannot vouch for yields unknown rather than a search. An
+	// attacker who could somehow blind us that way gains nothing: unknown gates
+	// nothing (see ExtractIdentity), so the failure is in the safe direction.
+	top, wellFormed := stripComments(values[0])
+	if !wellFormed {
+		return authVerdicts{}, false
+	}
+
+	// Exchange Online omits the authserv-id entirely and opens with a methodspec.
+	// Only a mailbox WE know is hosted on m365 may take this path: for anyone else
+	// an id-less header is unattributable, and accepting it would let a relay that
+	// stamps nothing be impersonated by a forgery that simply omits the id.
+	if !hasAuthservID(top) {
+		if !strings.EqualFold(r.Provider, providerM365) {
+			return authVerdicts{}, false
+		}
+		return parseVerdicts(top), true
+	}
+
+	id, methodspecs, ok := strings.Cut(top, ";")
+	if !ok {
+		return authVerdicts{}, false // an authserv-id with no methodspecs states nothing
+	}
+	if !receiverStamped(authservID(id), r) {
+		return authVerdicts{}, false
+	}
+	return parseVerdicts(methodspecs), true
+}
+
+// hasAuthservID reports whether the header opens with an authserv-id rather than
+// going straight into methodspecs.
+//
+// RFC 8601 §2.2 requires the id; Exchange Online does not send one. The two are
+// told apart by the only structural difference that survives comment stripping: an
+// authserv-id is a bare token, while a methodspec is "method=result", so an '=' in
+// the first token means there was no id.
+func hasAuthservID(value string) bool {
+	head, _, _ := strings.Cut(value, ";")
+	fields := strings.Fields(head)
+	if len(fields) == 0 {
+		return false
+	}
+	return !strings.Contains(fields[0], "=")
 }
 
 // authservID is the identifier at the head of an Authentication-Results header,
@@ -210,45 +255,88 @@ func authservID(head string) string {
 	return fields[0]
 }
 
+// providerM365 is the mailbox provider whose receiver omits the authserv-id.
+const providerM365 = "m365"
+
 // providerAuthservDomains are the authserv-id domains each hosted provider stamps
-// with. Keyed BY PROVIDER, which is the whole point — see receiverStamped.
+// with. Keyed BY PROVIDER, which is the whole point — see expectedAuthservDomains.
 var providerAuthservDomains = map[string][]string{
-	"gmail": {"google.com"},
-	"m365":  {"outlook.com", "microsoft.com"},
+	"gmail":      {"google.com"},
+	providerM365: {"outlook.com", "microsoft.com"},
+}
+
+// expectedAuthservDomains is the set of authserv-id domains that could legitimately
+// belong to THIS receiver, derived only from what our own database says about the
+// mailbox — never from the message.
+//
+// Two sources, in order:
+//
+//  1. The provider we connected the mailbox as. An assertion that the mailbox is
+//     hosted there, so that host's stamp is the receiver's own by construction.
+//  2. Failing that, the address's own organizational domain — but ONLY when the
+//     workspace plausibly controls it.
+//
+// That last clause is the fix for a real hole. "The authserv-id folds to the same
+// eTLD+1 as the recipient's address" is proof of nothing on a SHARED consumer
+// domain: nobody who has an @gmail.com mailbox owns gmail.com's MTAs, so a forged
+// "Authentication-Results: gmail.com; dkim=pass" satisfied the test. It was worse
+// than a blind spot, because Gmail's genuine stamp says mx.google.com, which folds
+// to google.com and does NOT equal gmail.com — so the real verdict failed the
+// check, the old scan walked past it, and the forgery was the only candidate left.
+//
+// SharesDomainReputation is exactly the predicate for "is this domain a trust
+// unit", and it already exists with a curated list. Reusing it keeps ONE
+// derivation of that question, which is this package's standing rule; the hole
+// existed because this function asked it a second way.
+//
+// The consequence is deliberate: a consumer mailbox connected over raw IMAP gets
+// unknown verdicts, because nothing we can check distinguishes its provider's
+// stamp from a stranger's. Connected as gmail or m365 — the normal path — rule 1
+// covers it.
+func expectedAuthservDomains(r Receiver) []string {
+	// A receiver we cannot name is not a receiver. Both fields come from the same
+	// mailbox row, so this costs nothing in practice and removes the shape where a
+	// caller that failed to resolve the mailbox still reaches the allowlist.
+	if strings.TrimSpace(r.Address) == "" {
+		return nil
+	}
+	if ds := providerAuthservDomains[strings.ToLower(r.Provider)]; len(ds) > 0 {
+		return ds
+	}
+	// False for a consumer domain AND for an unparseable or empty address, so a
+	// caller that failed to resolve the mailbox trusts nothing rather than
+	// everything — a lookup failure must not fail open in the one function whose
+	// job is to fail closed.
+	if !SharesDomainReputation(r.Address) {
+		return nil
+	}
+	if own := OrganizationalDomain(r.Address); own != "" {
+		return []string{own}
+	}
+	return nil
 }
 
 // receiverStamped reports whether an authserv-id identifies the system that
 // received this message.
 //
-// Two ways to qualify, and the second is the one with a trap in it:
-//
-//  1. The authserv-id shares an organizational domain with the recipient's own
-//     address — a self-hosted receiver whose MX lives in its own domain.
-//  2. It is a known identifier of the recipient's OWN provider.
-//
-// Rule 2 is gated on r.Provider, and that gate is the security property. A bare
-// allowlist — "trust mx.google.com" — is exploitable: an attacker delivering to
-// an IMAP mailbox, which stamps no Authentication-Results at all, could put a
-// forged "Authentication-Results: mx.google.com; dkim=pass" at the top of the
-// message and it would be the only candidate, so it would be believed. Requiring
-// the recipient to actually BE on Gmail removes that: a real Gmail mailbox always
-// has Gmail's own header above the forged one, and an IMAP mailbox never consults
-// the allowlist.
+// The authserv-id is folded to its eTLD+1 and compared against the set derived
+// from our own record of the mailbox (expectedAuthservDomains). Both sides go
+// through registrableHost, because a comparison whose sides fold differently
+// fails open — it would decline to trust the receiver's own header.
 //
 // The residual, stated plainly: a self-hosted receiver that stamps nothing, whose
-// attacker forges an authserv-id in the recipient's own domain, is believed. That
-// cannot be closed without knowing the receiving MTA's identity, which we do not.
-// It is bounded by the fact that reaching this code needs a live warmup token, so
-// the mitigation is token secrecy — the same residual placement already carries.
+// attacker forges an authserv-id inside the domain that workspace controls, is
+// believed. That cannot be closed without knowing the receiving MTA's identity,
+// which we do not. It is bounded by the fact that reaching this code needs a live
+// warmup token, so the mitigation is token secrecy — the same residual placement
+// already carries. It is NOT the consumer-domain case, which is a different
+// domain shared with strangers and is now refused outright.
 func receiverStamped(authservID string, r Receiver) bool {
 	host := registrableHost(strings.ToLower(strings.TrimSuffix(authservID, ".")))
 	if host == "" {
 		return false
 	}
-	if own := OrganizationalDomain(r.Address); own != "" && host == own {
-		return true
-	}
-	for _, d := range providerAuthservDomains[strings.ToLower(r.Provider)] {
+	for _, d := range expectedAuthservDomains(r) {
 		if host == d {
 			return true
 		}
@@ -321,7 +409,8 @@ func normalizeAuthResult(result string) string {
 	}
 }
 
-// stripComments removes RFC 5322 comments and preserves everything else.
+// stripComments removes RFC 5322 comments, and reports whether the header was
+// structurally sound.
 //
 // Not cosmetic: comments are where providers put free text, and that text
 // routinely contains the very delimiters this file splits on. Gmail emits
@@ -333,19 +422,26 @@ func normalizeAuthResult(result string) string {
 // parentheses, and a backslash escapes the next byte in both — so all three are
 // tracked rather than the string being scanned for a matching ')'.
 //
-// An unterminated comment or quote consumes the remainder, which degrades to
-// unknown verdicts. That is the safe direction, and the only alternative — parsing
-// past the damage — is how a malformed header gets to assert a pass.
-func stripComments(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
+// **Any structural anomaly makes the whole header untrusted**, which is stricter
+// than truncating and is the point. An attacker whose address lands inside the
+// receiver's own comment can close that comment EARLY with a ')' and have the rest
+// of their text read as methodspecs — arriving before the receiver's genuine
+// verdict, which "first occurrence wins" then locks in. Truncating at the damage
+// does not help, because the injected text precedes it. What does help is that
+// closing early leaves the receiver's own ')' unbalanced, so refusing any header
+// with an unbalanced close, an unterminated comment, or an unterminated quote
+// catches the injection at the cost of discarding genuinely malformed headers.
+// Discarding them yields unknown, which gates nothing.
+func stripComments(s string) (string, bool) {
+	out := make([]byte, 0, len(s))
 	depth, quoted := 0, false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == '\\' && i+1 < len(s) && (quoted || depth > 0) {
+			// A quoted-pair escapes whatever follows, so neither the backslash nor
+			// the escaped byte can close a string or a comment.
 			if depth == 0 {
-				b.WriteByte(c)
-				b.WriteByte(s[i+1])
+				out = append(out, c, s[i+1])
 			}
 			i++
 			continue
@@ -356,27 +452,62 @@ func stripComments(s string) string {
 				quoted = false
 			}
 			if depth == 0 {
-				b.WriteByte(c)
+				out = append(out, c)
 			}
 		case c == '"':
 			quoted = true
 			if depth == 0 {
-				b.WriteByte(c)
+				out = append(out, c)
 			}
 		case c == '(':
 			depth++
 		case c == ')':
 			if depth == 0 {
-				b.WriteByte(c) // unbalanced close: not a comment, so it is content
-				continue
+				return "", false // unbalanced close — see the note above
 			}
 			depth--
 			if depth == 0 {
-				b.WriteByte(' ') // a comment separates tokens; do not join them
+				out = append(out, ' ') // a comment separates tokens; do not join them
 			}
 		case depth == 0:
-			b.WriteByte(c)
+			out = append(out, c)
 		}
 	}
-	return b.String()
+	if depth > 0 || quoted {
+		return "", false
+	}
+	return string(out), true
+}
+
+// maxDomainLength is RFC 1035's limit on a domain name.
+const maxDomainLength = 253
+
+// plausibleDomain lower-cases a header-derived host and returns "" unless it could
+// actually be a domain name.
+//
+// The columns these feed have no CHECK to violate, so the concern is not the
+// transaction: it is that "" already means "absent or unparseable" while anything
+// else is read downstream AS a domain, and a header can carry any bytes at all.
+// Length alone is not enough — 200 bytes of markup or control characters is not a
+// domain that was parsed badly, it is not a domain. Rejecting outright rather than
+// sanitising keeps one meaning for "": a repaired string would be a DIFFERENT
+// domain and would file the observation under a fault domain it has nothing to do
+// with.
+func plausibleDomain(host string) string {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" || len(host) > maxDomainLength {
+		return ""
+	}
+	if strings.HasPrefix(host, ".") || strings.HasPrefix(host, "-") || strings.Contains(host, "..") {
+		return ""
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '-', c == '_':
+		default:
+			return ""
+		}
+	}
+	return host
 }

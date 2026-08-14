@@ -866,6 +866,39 @@ write history that never happened.
     a 90-day purge runs in the maintenance sweep — comfortably beyond the widest
     30-day read window.
 
+56. **A receiver's authentication verdict is believed only from a header that
+    receiver demonstrably wrote.** `warmup_observations` records the SPF/DKIM/DMARC
+    results the receiving provider reached (`spf_result`, `dkim_result`,
+    `dmarc_result`) plus the sending identity (`dkim_domain`, `return_path_domain`).
+    All five come from headers INSIDE a message, so the trust rule is the control
+    (`warmup.ExtractIdentity`, RFC 8601 §5):
+    - **Only the topmost `Authentication-Results` is considered.** A receiving MTA
+      prepends its own, so a sender's forgery is necessarily below it. Scanning for
+      the first *trusted* header instead was exploitable: wherever the receiver's own
+      stamp failed the check, the scan walked past it to a forged header below.
+    - **The authserv-id must match a domain derived from our own database** — the
+      provider we connected the mailbox as, or the mailbox's organizational domain
+      but ONLY where `SharesDomainReputation` says the workspace plausibly controls
+      it. A shared consumer domain is not a trust unit: nobody with an `@gmail.com`
+      mailbox owns `gmail.com`'s MTAs, and Gmail's genuine stamp says
+      `mx.google.com`, so accepting `gmail.com` believed a forgery *instead of* the
+      real verdict.
+    - **Exchange Online omits the authserv-id**, so an id-less header is accepted
+      only for a mailbox we know is on `m365`. For anyone else it is unattributable.
+    - **A structurally damaged header is refused entirely**, not parsed as far as it
+      goes. Closing the receiver's own comment early with a `)` spills attacker text
+      into the methodspec stream ahead of the genuine verdict; refusing any header
+      with an unbalanced close, unterminated comment or unterminated quote catches it.
+    - No match yields `unknown` on all three. Absence of a verdict is never a pass
+      and never a fail.
+    **None of these five columns gates anything** — no threshold, lane, health state
+    or promotion decision reads them. That is deliberate and load-bearing: the
+    verdicts are `unknown` for every provider that stamps none, so gating would
+    penalise a whole provider class for our inability to observe it, and it would
+    make attacker-influenced headers reach pool eligibility. Authentication posture
+    is gated separately by `sending_domains` and the `pending_auth` lane, from DNS we
+    resolve ourselves. Before wiring a threshold to `dmarc_result`, re-read this.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
