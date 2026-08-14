@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -224,5 +225,78 @@ func seedPlacementsWithIdentity(t *testing.T, ctx context.Context, f warmupFixtu
 		); err != nil {
 			t.Fatalf("seed identity placement %d: %v", i, err)
 		}
+	}
+}
+
+// Identity facts are read through a subquery the overview join adds, and this pins
+// the observable property: one workspace's signing domain and auth verdicts never
+// appear on another's overview row.
+//
+// What it does NOT prove, stated because the comment would otherwise imply it:
+// deleting `WHERE o.workspace_id = $1` from that subquery does not make this fail.
+// Verified by doing it. The subquery joins on `idf.mailbox_id = p.mailbox_id`, and
+// a mailbox id is a globally unique UUID belonging to exactly one workspace, so
+// ws2's participants cannot match ws1's observations however wide the subquery
+// reads. The pin there is defense in depth; the join key is the actual barrier.
+//
+// It still earns its place. It catches the changes that WOULD leak — a join
+// widened to a non-unique key (email, domain, provider), or an outer participant
+// list that stopped being workspace-scoped — and those are exactly the refactors
+// someone reaches for when adding the next slice's fault-domain rollups.
+//
+// The positive control matters as much as the negative one: without it, a query
+// that returned nothing at all for ws1 would pass this test while being entirely
+// broken.
+func TestIdentityFactsDoNotCrossWorkspaces(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	// ws2's mailbox has to be a participant, or the overview returns no rows for it
+	// and the negative assertion is vacuous.
+	if _, err := f.q.UpsertWarmupParticipant(ctx, gen.UpsertWarmupParticipantParams{
+		MailboxID: f.c, WorkspaceID: f.ws2, StartVolume: 8, MaxVolume: 40, RampIncrement: 2,
+	}); err != nil {
+		t.Fatalf("make ws2 mailbox a participant: %v", err)
+	}
+
+	secret := identityFacts{
+		dkimDomain: "signing.ws1-private.test", returnPathDomain: "bounce.ws1-private.test",
+		spf: warmup.AuthFail, dkim: warmup.AuthFail, dmarc: warmup.AuthFail,
+	}
+	sid := warmupSendUUID(t, ctx, f)
+	seedPlacementsWithIdentity(t, ctx, f, sid, f.b, 1, placementInbox, secret)
+
+	foreign, err := f.q.ListWarmupOverviewRows(ctx, f.ws2)
+	if err != nil {
+		t.Fatalf("overview for ws2: %v", err)
+	}
+	if len(foreign) == 0 {
+		t.Fatal("ws2 returned no overview rows, so this test would pass vacuously")
+	}
+	for _, r := range foreign {
+		if r.IdentityDkimDomain != "" || r.IdentityReturnPathDomain != "" || r.IdentityObservedAt.Valid {
+			t.Errorf("ws2 row %s carries ws1's identity: dkim=%q return_path=%q observed=%v",
+				r.MailboxID, r.IdentityDkimDomain, r.IdentityReturnPathDomain, r.IdentityObservedAt.Valid)
+		}
+		// Unknown is the honest default for an unobserved mailbox; anything else
+		// means a verdict leaked across the boundary.
+		if r.IdentitySpfResult != warmup.AuthUnknown || r.IdentityDkimResult != warmup.AuthUnknown ||
+			r.IdentityDmarcResult != warmup.AuthUnknown {
+			t.Errorf("ws2 row %s carries ws1's verdicts: spf=%q dkim=%q dmarc=%q",
+				r.MailboxID, r.IdentitySpfResult, r.IdentityDkimResult, r.IdentityDmarcResult)
+		}
+	}
+
+	own, err := f.q.ListWarmupOverviewRows(ctx, f.ws1)
+	if err != nil {
+		t.Fatalf("overview for ws1: %v", err)
+	}
+	var sawOwn bool
+	for _, r := range own {
+		if r.MailboxID == f.a && r.IdentityDkimDomain == secret.dkimDomain {
+			sawOwn = true
+		}
+	}
+	if !sawOwn {
+		t.Error("ws1 cannot see its OWN identity facts — the negative assertion above proves nothing")
 	}
 }

@@ -48,10 +48,8 @@ func TestExtractIdentity(t *testing.T) {
 		},
 		{
 			name: "m365 stamps under its own authserv-id",
-			raw: strings.Join([]string{
-				"Authentication-Results: spf.protection.outlook.com; dkim=fail; spf=softfail; dmarc=none",
+			raw: "Authentication-Results: spf.protection.outlook.com; dkim=fail; spf=softfail; dmarc=none" + "\r\n" +
 				"Return-Path: <bounce@send.acme.test>",
-			}, "\r\n"),
 			receiver: Receiver{Address: "alice@contoso.com", Provider: "m365"},
 			want: Identity{
 				ReturnPathDomain: "send.acme.test",
@@ -61,10 +59,8 @@ func TestExtractIdentity(t *testing.T) {
 		},
 		{
 			name: "an unsigned message through a relay that stamps nothing establishes nothing",
-			raw: strings.Join([]string{
-				"Subject: hello",
+			raw: "Subject: hello" + "\r\n" +
 				"Return-Path: <bounce@send.acme.test>",
-			}, "\r\n"),
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{ReturnPathDomain: "send.acme.test", SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -94,10 +90,8 @@ func TestExtractIdentity(t *testing.T) {
 			// header is the ONLY candidate and would be believed on the strength of
 			// naming Google.
 			name: "an IMAP mailbox does not believe a header claiming to be Gmail's",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.google.com; dkim=pass; spf=pass; dmarc=pass",
+			raw: "Authentication-Results: mx.google.com; dkim=pass; spf=pass; dmarc=pass" + "\r\n" +
 				"DKIM-Signature: v=1; a=rsa-sha256; d=send.acme.test; s=s1; b=abc==",
-			}, "\r\n"),
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want: Identity{
 				DKIMDomain: "send.acme.test",
@@ -108,10 +102,8 @@ func TestExtractIdentity(t *testing.T) {
 			// The converse: a self-hosted receiver whose MX lives in its own
 			// organizational domain IS the receiving system, and must be trusted, or
 			// self-hosters — the product's core audience — observe nothing ever.
-			name: "a self-hosted receiver in the recipient's own domain is trusted",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.acme.test; dkim=pass; spf=neutral; dmarc=none",
-			}, "\r\n"),
+			name:     "a self-hosted receiver in the recipient's own domain is trusted",
+			raw:      "Authentication-Results: mx.acme.test; dkim=pass; spf=neutral; dmarc=none",
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{SPFResult: AuthNeutral, DKIMResult: AuthPass, DMARCResult: AuthNone},
 		},
@@ -124,10 +116,8 @@ func TestExtractIdentity(t *testing.T) {
 			// top yields unknown. Nothing legitimate is lost — the sender cannot
 			// prepend above the receiving MTA — and unknown gates nothing.
 			name: "an untrusted topmost header yields unknown rather than a search",
-			raw: strings.Join([]string{
-				"Authentication-Results: evil.test; dkim=pass; spf=pass; dmarc=pass",
+			raw: "Authentication-Results: evil.test; dkim=pass; spf=pass; dmarc=pass" + "\r\n" +
 				"Authentication-Results: mx.google.com; dkim=fail; spf=none; dmarc=fail",
-			}, "\r\n"),
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -138,10 +128,8 @@ func TestExtractIdentity(t *testing.T) {
 			// stamp folds to google.com, which does NOT equal gmail.com, so the real
 			// verdict failed the check and the forgery was the only candidate left.
 			name: "a consumer-domain mailbox does not treat its own domain as a trust unit",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.google.com; dkim=fail; spf=fail; dmarc=fail",
+			raw: "Authentication-Results: mx.google.com; dkim=fail; spf=fail; dmarc=fail" + "\r\n" +
 				"Authentication-Results: gmail.com; dkim=pass; spf=pass; dmarc=pass",
-			}, "\r\n"),
 			receiver: Receiver{Address: gmailRecipient, Provider: "smtp"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -150,10 +138,8 @@ func TestExtractIdentity(t *testing.T) {
 			// on top, topmost-only already saves us; here the relay stamps NOTHING,
 			// so the forgery is the only candidate and the trust rule is the sole
 			// defence. This is the configuration the audit exploited.
-			name: "a relay that stamps nothing does not let a consumer-domain forgery stand",
-			raw: strings.Join([]string{
-				"Authentication-Results: gmail.com; dkim=pass; spf=pass; dmarc=pass",
-			}, "\r\n"),
+			name:     "a relay that stamps nothing does not let a consumer-domain forgery stand",
+			raw:      "Authentication-Results: gmail.com; dkim=pass; spf=pass; dmarc=pass",
 			receiver: Receiver{Address: gmailRecipient, Provider: "smtp"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -162,10 +148,8 @@ func TestExtractIdentity(t *testing.T) {
 			// remainder parsed as ordinary content, so "; dmarc=pass" inside it
 			// became a methodspec — and the doc comment claimed the opposite was
 			// happening, which is the "two things that must agree" drift again.
-			name: "an unterminated quote makes the header untrusted",
-			raw: strings.Join([]string{
-				`Authentication-Results: mx.google.com; dkim=fail; spf=pass smtp.mailfrom="oops (c) ; dmarc=pass ; more`,
-			}, "\r\n"),
+			name:     "an unterminated quote makes the header untrusted",
+			raw:      `Authentication-Results: mx.google.com; dkim=fail; spf=pass smtp.mailfrom="oops (c) ; dmarc=pass ; more`,
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -176,10 +160,8 @@ func TestExtractIdentity(t *testing.T) {
 			// naming outlook.com. Every m365 mailbox was silently unknown, and the
 			// allowlist matched only forged headers.
 			name: "an Exchange Online header with no authserv-id is the receiver's own",
-			raw: strings.Join([]string{
-				"Authentication-Results: spf=fail (sender IP is 10.0.0.1) smtp.mailfrom=evil.test; dkim=fail (no sig) header.d=evil.test;dmarc=fail action=oreject header.from=evil.test;compauth=fail reason=001",
+			raw: "Authentication-Results: spf=fail (sender IP is 10.0.0.1) smtp.mailfrom=evil.test; dkim=fail (no sig) header.d=evil.test;dmarc=fail action=oreject header.from=evil.test;compauth=fail reason=001" + "\r\n" +
 				"Authentication-Results: outlook.com; dkim=pass; spf=pass; dmarc=pass",
-			}, "\r\n"),
 			receiver: Receiver{Address: "alice@contoso.com", Provider: "m365"},
 			want:     Identity{SPFResult: AuthFail, DKIMResult: AuthFail, DMARCResult: AuthFail},
 		},
@@ -188,10 +170,8 @@ func TestExtractIdentity(t *testing.T) {
 			// For anyone else it is unattributable, and accepting it would let a
 			// relay that stamps nothing be impersonated by a forgery that simply
 			// omits the id.
-			name: "an id-less header is not believed for a non-m365 mailbox",
-			raw: strings.Join([]string{
-				"Authentication-Results: spf=pass smtp.mailfrom=evil.test; dkim=pass; dmarc=pass",
-			}, "\r\n"),
+			name:     "an id-less header is not believed for a non-m365 mailbox",
+			raw:      "Authentication-Results: spf=pass smtp.mailfrom=evil.test; dkim=pass; dmarc=pass",
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -201,11 +181,41 @@ func TestExtractIdentity(t *testing.T) {
 			// where first-occurrence-wins locks it in. Truncating at the damage does
 			// not help — the injection precedes it — but closing early leaves the
 			// receiver's own ')' unbalanced, so the whole header is refused.
-			name: "a comment closed early by injected text makes the header untrusted",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.google.com; spf=pass (google.com: domain of a)x; dmarc=pass; z@evil.test designates 10.0.0.1) smtp.mailfrom=a@evil.test; dmarc=fail",
-			}, "\r\n"),
+			name:     "a comment closed early by injected text makes the header untrusted",
+			raw:      "Authentication-Results: mx.google.com; spf=pass (google.com: domain of a)x; dmarc=pass; z@evil.test designates 10.0.0.1) smtp.mailfrom=a@evil.test; dmarc=fail",
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// Topmost-only is now strict, so a stack of untrusted headers above the
+			// receiver's must NOT be walked through to reach it. Pins the behaviour
+			// that replaced the scan, which no other case states directly.
+			name: "several stacked untrusted headers do not expose the receiver's own",
+			raw: "Authentication-Results: a.evil.test; dkim=pass" + "\r\n" +
+				"Authentication-Results: b.evil.test; dkim=pass" + "\r\n" +
+				"Authentication-Results: c.evil.test; dkim=pass" + "\r\n" +
+				"Authentication-Results: mx.google.com; dkim=fail; spf=fail; dmarc=fail",
+			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// A punycode authserv-id must not be folded into, or confused with, the
+			// ASCII domain it imitates. registrableHost does not normalize IDN, so
+			// these are distinct strings and the comparison simply fails — asserted
+			// rather than assumed, because a future normalization would silently
+			// make a homograph match.
+			name:     "a punycode homograph of the recipient's domain is not the recipient's domain",
+			raw:      "Authentication-Results: xn--acme-3va.test; dkim=pass; spf=pass; dmarc=pass",
+			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
+			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
+		},
+		{
+			// An IP literal cannot be an organizational domain. publicsuffix falls
+			// back to the exact host, so this must compare unequal to every real
+			// domain rather than matching one.
+			name:     "an IP-literal authserv-id matches nothing",
+			raw:      "Authentication-Results: 10.0.0.1; dkim=pass; spf=pass; dmarc=pass",
+			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
 		{
@@ -214,47 +224,37 @@ func TestExtractIdentity(t *testing.T) {
 			// is a DIFFERENT domain and would file this observation under a fault
 			// domain it has nothing to do with.
 			name: "a d= value that is not a hostname is not stored as one",
-			raw: strings.Join([]string{
-				`DKIM-Signature: v=1; a=rsa-sha256; d=<script>alert(1)</script>; s=s1; b=abc==`,
+			raw: `DKIM-Signature: v=1; a=rsa-sha256; d=<script>alert(1)</script>; s=s1; b=abc==` + "\r\n" +
 				"Return-Path: <bounce@ok.test>",
-			}, "\r\n"),
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{ReturnPathDomain: "ok.test", SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
 		{
 			// A comment carrying both delimiters this parser splits on. Parsed
 			// naively, the "dkim=pass" inside the parentheses becomes a methodspec.
-			name: "a comment containing a semicolon and an equals sign is not a methodspec",
-			raw: strings.Join([]string{
-				`Authentication-Results: mx.google.com; spf=fail (google.com: bad; dkim=pass ; end) smtp.mailfrom=x@y.test; dmarc=fail`,
-			}, "\r\n"),
+			name:     "a comment containing a semicolon and an equals sign is not a methodspec",
+			raw:      `Authentication-Results: mx.google.com; spf=fail (google.com: bad; dkim=pass ; end) smtp.mailfrom=x@y.test; dmarc=fail`,
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
 			want:     Identity{SPFResult: AuthFail, DKIMResult: AuthUnknown, DMARCResult: AuthFail},
 		},
 		{
-			name: "an authserv-id version number and a method version are both tolerated",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.google.com 1; dkim/1=pass; spf=pass",
-			}, "\r\n"),
+			name:     "an authserv-id version number and a method version are both tolerated",
+			raw:      "Authentication-Results: mx.google.com 1; dkim/1=pass; spf=pass",
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
 			want:     Identity{SPFResult: AuthPass, DKIMResult: AuthPass, DMARCResult: AuthUnknown},
 		},
 		{
 			// First occurrence wins even when it normalizes to unknown: a later pass
 			// must not upgrade an earlier result this vocabulary could not express.
-			name: "the first result for a method wins over a later, kinder one",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.google.com; dkim=permerror; dkim=pass",
-			}, "\r\n"),
+			name:     "the first result for a method wins over a later, kinder one",
+			raw:      "Authentication-Results: mx.google.com; dkim=permerror; dkim=pass",
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
 		{
 			name: "a signature with no d= yields to the next one that has it",
-			raw: strings.Join([]string{
-				"DKIM-Signature: v=1; a=rsa-sha256; s=s1; b=abc==",
+			raw: "DKIM-Signature: v=1; a=rsa-sha256; s=s1; b=abc==" + "\r\n" +
 				"DKIM-Signature: v=1; a=rsa-sha256; d=Send.Acme.Test.; s=s2; b=def==",
-			}, "\r\n"),
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{DKIMDomain: "send.acme.test", SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -262,10 +262,8 @@ func TestExtractIdentity(t *testing.T) {
 			// Folding may split a tag value across lines; the unfolded value carries
 			// the continuation whitespace into the middle of the domain.
 			name: "folding whitespace inside a d= value is removed",
-			raw: strings.Join([]string{
-				"DKIM-Signature: v=1; a=rsa-sha256; d=send.",
+			raw: "DKIM-Signature: v=1; a=rsa-sha256; d=send." + "\r\n" +
 				"\tacme.test; s=s1; b=abc==",
-			}, "\r\n"),
 			receiver: Receiver{Address: selfRecipient, Provider: "smtp"},
 			want:     Identity{DKIMDomain: "send.acme.test", SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
@@ -285,10 +283,8 @@ func TestExtractIdentity(t *testing.T) {
 			want:     Identity{ReturnPathDomain: "mail.send.acme.test", SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
 		{
-			name: "an authserv-id with no methodspecs states nothing",
-			raw: strings.Join([]string{
-				"Authentication-Results: mx.google.com",
-			}, "\r\n"),
+			name:     "an authserv-id with no methodspecs states nothing",
+			raw:      "Authentication-Results: mx.google.com",
 			receiver: Receiver{Address: gmailRecipient, Provider: "gmail"},
 			want:     Identity{SPFResult: AuthUnknown, DKIMResult: AuthUnknown, DMARCResult: AuthUnknown},
 		},
