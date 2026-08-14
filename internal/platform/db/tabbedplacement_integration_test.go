@@ -69,8 +69,12 @@ func TestTabbedPlacementMigrationRollsBackAndForwardAgain(t *testing.T) {
 			"the numerator of the tabbed rate can now exceed its denominator")
 	}
 
-	if err := db.MigrateDown(dsn); err != nil {
-		t.Fatalf("migrate down: %v", err)
+	// Down to 000059, i.e. undo 000060 — named as a VERSION rather than as "one
+	// step", because one step stopped meaning this migration the moment 000061
+	// landed: the rollback then undid the newer migration and this test failed on
+	// its own tabbed assertions for a reason that had nothing to do with 000060.
+	if err := db.MigrateTo(dsn, 59); err != nil {
+		t.Fatalf("migrate down to 000059: %v", err)
 	}
 
 	// Rolled back: the evidence survives, demoted to what it said before tabs

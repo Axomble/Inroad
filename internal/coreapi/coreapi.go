@@ -620,6 +620,21 @@ type InboxPollJob struct {
 	Password    []byte
 	LastSeenUID uint32
 	UIDValidity uint32
+	// Email is the polled mailbox's OWN address, carried so the poller can tell
+	// warmup.ExtractIdentity which system received the message it is parsing.
+	//
+	// Username is not a substitute and the difference is load-bearing: it is the
+	// IMAP login, and it is EMPTY for gmail and m365 — precisely the two providers
+	// that stamp Authentication-Results. Without a receiver address the identity
+	// extractor can match no authserv-id, so every verdict degrades to unknown and
+	// the check that makes the trusted-header rule hold rather than usually hold
+	// (design §6) never runs.
+	//
+	// Set on EVERY provider branch, from the mailbox row the job query already
+	// reads. Populating only the IMAP branch would leave the API providers silently
+	// unmeasurable — the failure that would look exactly like a provider that
+	// stamps nothing.
+	Email string
 }
 
 // SendRef identifies the send an inbound reply/bounce matched, and the
@@ -783,6 +798,35 @@ type WarmupReceiptInput struct {
 	// are all IMAP therefore has no measurable tabbed rate, which is the honest
 	// answer and not a statement about its own mailbox.
 	TabCapable bool
+	// The sending identity this message carried and the RECEIVER's verdicts on it,
+	// produced by warmup.ExtractIdentity from the message's own headers (design §4).
+	//
+	// Attributed to the SENDER alongside the placement, because "how did our mail
+	// authenticate on arrival" is a fact about the mail we sent — the recipient
+	// merely reported it. DKIMDomain/ReturnPathDomain are "" when absent or
+	// unparseable; the verdicts are "pass"|"fail"|"neutral"|"none"|"unknown", and
+	// "unknown" whenever no Authentication-Results header could be trusted to speak
+	// for the receiving system (RFC 8601 §5).
+	//
+	// A ZERO-VALUED input is legal on purpose. The implementation normalises all
+	// five before they reach the database, so a caller that predates identity
+	// extraction — or an extractor that grows a value this vocabulary does not carry
+	// — records "unknown" rather than aborting the receipt transaction on a CHECK.
+	// Design §8 makes that a requirement: the observation is the reputation signal
+	// and the identity is metadata on it, so a parse problem must never wedge the
+	// poll cursor and stop ALL inbound processing for the mailbox.
+	//
+	// NOTHING GATES ON THESE (design §7). No threshold, lane, health state, or
+	// promotion decision may read them: they are permanently unknown for any
+	// provider that stamps no results, so gating would penalise a whole provider
+	// class for our inability to observe it — and authentication posture is already
+	// gated, separately and correctly, by sending_domains and the pending_auth lane,
+	// which act on DNS we resolve ourselves rather than on a header mail carried.
+	DKIMDomain       string
+	ReturnPathDomain string
+	SPFResult        string
+	DKIMResult       string
+	DMARCResult      string
 }
 
 // WarmupEngagePlan is what a recipient should do about a newly received warmup

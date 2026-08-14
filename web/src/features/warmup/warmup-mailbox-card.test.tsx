@@ -347,6 +347,78 @@ test('a mailbox that is not warming up has no history to offer', () => {
   expect(screen.queryByRole('button', { name: /change history/i })).not.toBeInTheDocument()
 })
 
+/** The identity disclosure, reached the way a screen reader reaches it. */
+function identityToggle(): HTMLElement {
+  return screen.getByRole('button', { name: /sending identity for a@example\.com/i })
+}
+
+// Diagnostic detail, so it stays collapsed: the metrics line above it carries
+// the figures that gate anything, and six authentication facts sitting beside
+// them would read as more of the same.
+test('the observed identity is collapsed until the operator opens it', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{
+        ...entry,
+        identity: {
+          dkim_domain: 'acme.test',
+          return_path_domain: 'acme.test',
+          spf_result: 'pass',
+          dkim_result: 'pass',
+          dmarc_result: 'fail',
+          observed_at: '2026-08-14T09:30:00Z',
+        },
+      }}
+    />,
+  )
+
+  const toggle = identityToggle()
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(screen.queryByText('DKIM signing domain')).not.toBeInTheDocument()
+
+  fireEvent.click(toggle)
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByText('DKIM signing domain')).toBeInTheDocument()
+  // The failing verdict arrives with its disclaimer, not on its own.
+  expect(document.querySelector('[data-slot="warmup-identity"]')?.textContent).toMatch(
+    /fail[^·]*· gates nothing/,
+  )
+})
+
+// The disclosure opens whether or not there is anything behind it: a mailbox
+// with no observed identity is told that, rather than being left to read a
+// missing control as a missing capability.
+test('a mailbox with no observed identity still opens, and says nothing was seen', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, identity: null }} />)
+
+  fireEvent.click(identityToggle())
+
+  expect(screen.getByText(/has been observed with identity facts yet/i)).toBeInTheDocument()
+})
+
+test('a mailbox that is not warming up has no identity to show', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={undefined} />)
+
+  expect(screen.queryByRole('button', { name: /sending identity/i })).not.toBeInTheDocument()
+})
+
+// Two disclosures on one row, and each has to open its own panel — an operator
+// asking "what was this signed as" must not be handed the change history.
+test('the identity and history disclosures are independent', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
+
+  fireEvent.click(identityToggle())
+
+  expect(document.querySelector('[data-slot="warmup-identity"]')).not.toBeNull()
+  expect(screen.getByRole('button', { name: /change history for a@example\.com/i })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  )
+  expect(historyRequests()).toBe(0)
+})
+
 test('a failed disable surfaces the inline error alert with the generic copy', async () => {
   disableResponder = () =>
     new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: jsonHeaders })

@@ -38,6 +38,31 @@ func MigrateDown(url string) (err error) {
 	return nil
 }
 
+// MigrateTo rolls the schema to an exact version, applying or reverting whatever
+// is needed to get there.
+//
+// It exists for the rollback tests, and it exists because MigrateDown does not
+// serve them. "Roll back one step" means "undo MY migration" only while mine is
+// the newest, so every such test silently starts rolling back somebody ELSE's
+// migration the day the next one lands — and then fails with an assertion about
+// its own columns that has nothing to do with the cause. That has now happened
+// once (000060's rollback test, when 000061 was added).
+//
+// A test that names the version it wants to land on is correct no matter how many
+// migrations follow it: MigrateTo(dsn, N-1) undoes migration N whatever N+1, N+2
+// do later.
+func MigrateTo(url string, version uint) (err error) {
+	m, err := newMigrator(url)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, closeMigrator(m)) }()
+	if err := m.Migrate(version); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return err
+	}
+	return nil
+}
+
 func newMigrator(url string) (*migrate.Migrate, error) {
 	src, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {

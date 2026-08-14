@@ -417,3 +417,86 @@ func TestTransitionsRequiresAuth(t *testing.T) {
 		t.Fatalf("want 401, got %d", w.Code)
 	}
 }
+
+// The wire contract for identity, asserted on the raw JSON rather than the DTO,
+// because the two failures this guards are both invisible to a typed decode.
+//
+// An ABSENT `identity` key and a NULL one decode to the same nil, and the client
+// cannot tell "this deployment predates identity" from "nothing observed yet" — the
+// undefined-reads-as-a-default bug the lane field already shipped once.
+//
+// A block of empty defaults would decode as a perfectly valid identity, so a
+// mailbox nobody has observed would render as one whose mail is unsigned and
+// unauthenticated: an alarming, entirely fabricated finding.
+func TestOverviewEmitsIdentityAsNullOrAWholeBlock(t *testing.T) {
+	ws := uuid.New()
+	observed := time.Date(2026, 8, 14, 9, 30, 0, 0, time.UTC)
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{
+		{
+			MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+			StartedAt:   pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+			HealthState: "healthy", Lane: "healthy", Email: "signed@example.com",
+			Inbox7d: 10, Spam7d: 0, TodaySent: 2,
+			IdentityDKIMDomain: "acme.test", IdentityReturnPathDomain: "mail.acme.test",
+			IdentitySPFResult: "pass", IdentityDKIMResult: "pass", IdentityDMARCResult: "none",
+			IdentityObservedAt: pgtype.Timestamptz{Time: observed, Valid: true},
+		},
+		{
+			MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+			StartedAt:   pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+			HealthState: "healthy", Lane: "healthy", Email: "unobserved@example.com",
+			Inbox7d: 10, Spam7d: 0, TodaySent: 2,
+			IdentitySPFResult: "unknown", IdentityDKIMResult: "unknown", IdentityDMARCResult: "unknown",
+		},
+	}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/overview", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Mailboxes []map[string]any `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Mailboxes) != 2 {
+		t.Fatalf("want two mailboxes, got %d", len(raw.Mailboxes))
+	}
+
+	signed, unobserved := raw.Mailboxes[0], raw.Mailboxes[1]
+	for i, mailbox := range raw.Mailboxes {
+		if _, present := mailbox["identity"]; !present {
+			t.Fatalf("mailbox %d: \"identity\" is absent; an absent key reads as undefined, which a "+
+				"client cannot tell from an explicit null", i)
+		}
+	}
+	if got := unobserved["identity"]; got != nil {
+		t.Errorf("identity = %v for a mailbox with no observed facts, want null: a block of empty "+
+			"defaults would render an unobserved mailbox as an unsigned, unauthenticated one", got)
+	}
+
+	block, ok := signed["identity"].(map[string]any)
+	if !ok {
+		t.Fatalf("identity = %v, want an object", signed["identity"])
+	}
+	want := map[string]any{
+		"dkim_domain":        "acme.test",
+		"return_path_domain": "mail.acme.test",
+		"spf_result":         "pass",
+		"dkim_result":        "pass",
+		"dmarc_result":       "none",
+		"observed_at":        "2026-08-14T09:30:00Z",
+	}
+	if len(block) != len(want) {
+		t.Errorf("identity has %d keys %v, want exactly %d", len(block), block, len(want))
+	}
+	for key, wantValue := range want {
+		if got := block[key]; got != wantValue {
+			t.Errorf("identity.%s = %v, want %v", key, got, wantValue)
+		}
+	}
+}

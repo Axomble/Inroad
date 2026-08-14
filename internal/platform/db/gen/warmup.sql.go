@@ -1141,6 +1141,21 @@ SELECT
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
     COALESCE(wk.tabbed, 0)::bigint      AS tabbed_7d,
     COALESCE(wk.tab_capable, 0)::bigint AS tab_capable_7d,
+    -- The LATEST identity this mailbox's mail was seen sending under, and the
+    -- verdicts the receiver reached on it. identity_observed_at is the presence
+    -- signal: NULL means no observation carrying identity facts exists, and the
+    -- read layer emits ` + "`" + `identity: null` + "`" + ` rather than a row of confident defaults
+    -- that would claim we observed an unsigned message.
+    --
+    -- Every value below is COALESCEd to its column default so the LEFT JOIN miss is
+    -- expressed in exactly ONE place (the timestamp) instead of six independently
+    -- nullable fields the reader would have to agree about.
+    COALESCE(idf.dkim_domain, '')::text          AS identity_dkim_domain,
+    COALESCE(idf.return_path_domain, '')::text   AS identity_return_path_domain,
+    COALESCE(idf.spf_result, 'unknown')::text    AS identity_spf_result,
+    COALESCE(idf.dkim_result, 'unknown')::text   AS identity_dkim_result,
+    COALESCE(idf.dmarc_result, 'unknown')::text  AS identity_dmarc_result,
+    idf.observed_at                              AS identity_observed_at,
     COALESCE(td.sent, 0)::int     AS today_sent
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
@@ -1185,6 +1200,41 @@ LEFT JOIN (
     GROUP BY o.mailbox_id
 ) wk ON wk.mailbox_id = p.mailbox_id
 LEFT JOIN (
+    -- The most recent observation of this mailbox that actually carried identity
+    -- facts. Attribution is the SAME as the placement rollup above — o.mailbox_id,
+    -- kind = 'placement', attribution_trusted — because it IS the same row: the
+    -- identity was written onto the placement observation. Attributing it any other
+    -- way would report the sending identity of whoever polled the message.
+    --
+    -- No 7-day window, unlike the rate above, and the difference is deliberate. A
+    -- rate over a stale window is a wrong number; an identity is a STATE, and the
+    -- last one observed stays the truth until a newer one contradicts it. Windowing
+    -- it would make a mailbox that has been paused for eight days report "no
+    -- identity" when we know perfectly well what it signs with. observed_at ships
+    -- with the value precisely so the reader can judge that staleness itself.
+    --
+    -- The all-default row is EXCLUDED rather than returned. Every observation
+    -- written before 000061, and every one from a caller that does not extract
+    -- identity, carries ('', '', 'unknown', 'unknown', 'unknown') — surfacing that
+    -- as an identity would state "we looked and saw nothing" for a row where
+    -- nobody looked, and would make ` + "`" + `identity: null` + "`" + ` unreachable.
+    --
+    -- Served by idx_warmup_observations_subject_time (workspace_id, mailbox_id,
+    -- kind, observed_at DESC), which is exactly the DISTINCT ON's sort order, so
+    -- this needs no index of its own.
+    SELECT DISTINCT ON (o.mailbox_id)
+           o.mailbox_id, o.dkim_domain, o.return_path_domain,
+           o.spf_result, o.dkim_result, o.dmarc_result, o.observed_at
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.kind = 'placement'
+      AND o.attribution_trusted
+      AND (o.dkim_domain <> '' OR o.return_path_domain <> ''
+           OR o.spf_result <> 'unknown' OR o.dkim_result <> 'unknown'
+           OR o.dmarc_result <> 'unknown')
+    ORDER BY o.mailbox_id, o.observed_at DESC
+) idf ON idf.mailbox_id = p.mailbox_id
+LEFT JOIN (
     SELECT s.mailbox_id, s.sent
     FROM warmup_daily_stats s
     WHERE s.workspace_id = $1 AND s.day = CURRENT_DATE
@@ -1194,23 +1244,29 @@ ORDER BY p.created_at DESC
 `
 
 type ListWarmupOverviewRowsRow struct {
-	MailboxID     uuid.UUID          `json:"mailbox_id"`
-	Enabled       bool               `json:"enabled"`
-	StartVolume   int32              `json:"start_volume"`
-	MaxVolume     int32              `json:"max_volume"`
-	RampIncrement int32              `json:"ramp_increment"`
-	ReplyRate     float32            `json:"reply_rate"`
-	StartedAt     pgtype.Timestamptz `json:"started_at"`
-	HealthState   string             `json:"health_state"`
-	HealthReason  string             `json:"health_reason"`
-	Lane          string             `json:"lane"`
-	LaneReason    string             `json:"lane_reason"`
-	Email         string             `json:"email"`
-	Inbox7d       int64              `json:"inbox_7d"`
-	Spam7d        int64              `json:"spam_7d"`
-	Tabbed7d      int64              `json:"tabbed_7d"`
-	TabCapable7d  int64              `json:"tab_capable_7d"`
-	TodaySent     int32              `json:"today_sent"`
+	MailboxID                uuid.UUID          `json:"mailbox_id"`
+	Enabled                  bool               `json:"enabled"`
+	StartVolume              int32              `json:"start_volume"`
+	MaxVolume                int32              `json:"max_volume"`
+	RampIncrement            int32              `json:"ramp_increment"`
+	ReplyRate                float32            `json:"reply_rate"`
+	StartedAt                pgtype.Timestamptz `json:"started_at"`
+	HealthState              string             `json:"health_state"`
+	HealthReason             string             `json:"health_reason"`
+	Lane                     string             `json:"lane"`
+	LaneReason               string             `json:"lane_reason"`
+	Email                    string             `json:"email"`
+	Inbox7d                  int64              `json:"inbox_7d"`
+	Spam7d                   int64              `json:"spam_7d"`
+	Tabbed7d                 int64              `json:"tabbed_7d"`
+	TabCapable7d             int64              `json:"tab_capable_7d"`
+	IdentityDkimDomain       string             `json:"identity_dkim_domain"`
+	IdentityReturnPathDomain string             `json:"identity_return_path_domain"`
+	IdentitySpfResult        string             `json:"identity_spf_result"`
+	IdentityDkimResult       string             `json:"identity_dkim_result"`
+	IdentityDmarcResult      string             `json:"identity_dmarc_result"`
+	IdentityObservedAt       pgtype.Timestamptz `json:"identity_observed_at"`
+	TodaySent                int32              `json:"today_sent"`
 }
 
 // One workspace-pinned row per participant for GET /warmup/overview: the
@@ -1246,6 +1302,12 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 			&i.Spam7d,
 			&i.Tabbed7d,
 			&i.TabCapable7d,
+			&i.IdentityDkimDomain,
+			&i.IdentityReturnPathDomain,
+			&i.IdentitySpfResult,
+			&i.IdentityDkimResult,
+			&i.IdentityDmarcResult,
+			&i.IdentityObservedAt,
 			&i.TodaySent,
 		); err != nil {
 			return nil, err
@@ -1591,15 +1653,20 @@ func (q *Queries) RecordWarmupHardBounceObservation(ctx context.Context, arg Rec
 const recordWarmupPlacementObservation = `-- name: RecordWarmupPlacementObservation :exec
 INSERT INTO warmup_observations (
     workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
-    kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at
+    kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at,
+    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result
 )
 SELECT s.workspace_id, s.from_mailbox, $1::uuid, s.id,
        'placement', $2::text, $3::boolean,
        'warmup_receipt', true,
-       'receipt:' || $4::uuid::text, $5::timestamptz
+       'receipt:' || $4::uuid::text, $5::timestamptz,
+       $6::text, $7::text,
+       COALESCE(NULLIF($8::text, ''), 'unknown'),
+       COALESCE(NULLIF($9::text, ''), 'unknown'),
+       COALESCE(NULLIF($10::text, ''), 'unknown')
 FROM warmup_sends s
-WHERE s.id = $6
-  AND s.workspace_id = $7
+WHERE s.id = $11
+  AND s.workspace_id = $12
   AND s.to_mailbox = $1
 ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
 `
@@ -1610,6 +1677,11 @@ type RecordWarmupPlacementObservationParams struct {
 	TabCapable       bool               `json:"tab_capable"`
 	ReceiptID        uuid.UUID          `json:"receipt_id"`
 	ObservedAt       pgtype.Timestamptz `json:"observed_at"`
+	DkimDomain       string             `json:"dkim_domain"`
+	ReturnPathDomain string             `json:"return_path_domain"`
+	SpfResult        string             `json:"spf_result"`
+	DkimResult       string             `json:"dkim_result"`
+	DmarcResult      string             `json:"dmarc_result"`
 	WarmupSendID     uuid.UUID          `json:"warmup_send_id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
 }
@@ -1624,6 +1696,27 @@ type RecordWarmupPlacementObservationParams struct {
 // retroactively claim a capability the reader never had. It is also the tabbed
 // rate's denominator (design §5), so a wrong value here dilutes a rate rather than
 // merely mislabelling a row.
+//
+// The five identity columns come from the same caller, extracted from the message's
+// own headers by warmup.ExtractIdentity. They are attributed to the SENDER
+// (s.from_mailbox, like the placement beside them) even though the verdicts are the
+// RECEIVER's: "how did our mail authenticate on arrival" is a fact about the mail we
+// sent, not about the mailbox that read it.
+//
+// An EMPTY verdict is treated as "not supplied" and becomes 'unknown' — the same
+// value the column DEFAULT gives a caller that omits the column entirely. The zero
+// value has to mean something safe HERE, not merely in the Go seam above this
+// query: a caller that predates identity extraction sends five empty strings, ”
+// is not in the 000061 vocabulary, and the CHECK would abort this whole
+// transaction — the receipt, the placement and both stat writes with it — over
+// metadata that gates nothing (design §7/§8). Every direct caller of this query,
+// including the helpers that seed evidence in tests, therefore keeps working
+// unchanged rather than being a constraint violation waiting to happen.
+//
+// Coercing an unrecognised but NON-empty verdict ('softfail', 'temperror') is a
+// different job and stays in the Go seam, so the vocabulary lives in exactly two
+// places that must agree — the CHECK in 000061 and coreapi's verdictOrUnknown —
+// rather than three.
 func (q *Queries) RecordWarmupPlacementObservation(ctx context.Context, arg RecordWarmupPlacementObservationParams) error {
 	_, err := q.db.Exec(ctx, recordWarmupPlacementObservation,
 		arg.RecipientMailbox,
@@ -1631,6 +1724,11 @@ func (q *Queries) RecordWarmupPlacementObservation(ctx context.Context, arg Reco
 		arg.TabCapable,
 		arg.ReceiptID,
 		arg.ObservedAt,
+		arg.DkimDomain,
+		arg.ReturnPathDomain,
+		arg.SpfResult,
+		arg.DkimResult,
+		arg.DmarcResult,
 		arg.WarmupSendID,
 		arg.WorkspaceID,
 	)

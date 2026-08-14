@@ -110,7 +110,27 @@ type OverviewRow struct {
 	// undetectable on an entire provider class.
 	Tabbed7d     int64
 	TabCapable7d int64
-	TodaySent    int32
+	// The LATEST identity this mailbox's warmup mail was observed sending under and
+	// the verdicts its receivers reached on it (design §4). Attributed to the SENDER
+	// exactly as the placement counters above are, because it IS the same
+	// observation row.
+	//
+	// IdentityObservedAt is the PRESENCE signal, and the only one: the five values
+	// beside it are COALESCEd to their column defaults by the query, so a mailbox
+	// with no identity facts is indistinguishable from a genuinely unsigned one
+	// except by the missing timestamp. A reader that tests any other field is
+	// reading a default as an observation.
+	//
+	// Not windowed to 7 days like the rates above: an identity is a state, not a
+	// rate, and the last one seen remains true until a newer one contradicts it.
+	// observed_at travels to the client so it can judge the staleness itself.
+	IdentityDKIMDomain       string
+	IdentityReturnPathDomain string
+	IdentitySPFResult        string
+	IdentityDKIMResult       string
+	IdentityDMARCResult      string
+	IdentityObservedAt       pgtype.Timestamptz
+	TodaySent                int32
 }
 
 func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
@@ -131,7 +151,14 @@ func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
 		Spam7d:        r.Spam7d,
 		Tabbed7d:      r.Tabbed7d,
 		TabCapable7d:  r.TabCapable7d,
-		TodaySent:     r.TodaySent,
+
+		IdentityDKIMDomain:       r.IdentityDkimDomain,
+		IdentityReturnPathDomain: r.IdentityReturnPathDomain,
+		IdentitySPFResult:        r.IdentitySpfResult,
+		IdentityDKIMResult:       r.IdentityDkimResult,
+		IdentityDMARCResult:      r.IdentityDmarcResult,
+		IdentityObservedAt:       r.IdentityObservedAt,
+		TodaySent:                r.TodaySent,
 	}
 }
 
@@ -250,6 +277,40 @@ type WarmupMailboxDTO struct {
 	TabCapableSample7d int64    `json:"tab_capable_sample_7d"`
 	InboxRate7d        *float64 `json:"inbox_rate_7d"`
 	SpamRate7d         *float64 `json:"spam_rate_7d"`
+	// Identity is NULL — not a block of empty defaults — when no observation of this
+	// mailbox has carried identity facts. The two are different facts and a client
+	// must be able to tell them apart: an unsigned sender that a receiver reported on
+	// is a finding, while a mailbox nobody has observed yet is an absence.
+	//
+	// Reported for visibility only, like the tabbed rate above: no threshold, lane or
+	// promotion decision reads any of it (design §7).
+	Identity *WarmupIdentityDTO `json:"identity"`
+}
+
+// WarmupIdentityDTO is the WarmupMailbox.identity schema: the latest observed
+// SENDING identity of a mailbox's warmup mail, and the verdicts the RECEIVING
+// providers reached on it.
+//
+// The domains are "" when absent or unparseable, because absent and unparseable
+// are the same fact to a reader and one representation avoids a three-way
+// condition at every use (design §5).
+//
+// `unknown` and `none` are NOT the same verdict and a UI that renders them alike
+// is wrong. `unknown` means no Authentication-Results header could be trusted to
+// speak for the receiving system (RFC 8601 §5) — nobody reported anything, which
+// is permanent for a provider that stamps nothing and is never a failure. `none`
+// is the receiver's actual finding: it checked, and there was no SPF record, no
+// signature, or no DMARC policy to check against.
+type WarmupIdentityDTO struct {
+	DKIMDomain       string `json:"dkim_domain"`
+	ReturnPathDomain string `json:"return_path_domain"`
+	SPFResult        string `json:"spf_result"`
+	DKIMResult       string `json:"dkim_result"`
+	DMARCResult      string `json:"dmarc_result"`
+	// ObservedAt is RFC3339 UTC. It ships with the verdicts because they are not
+	// windowed: an identity observed months ago is still reported, and only this
+	// tells the client how much to trust it.
+	ObservedAt string `json:"observed_at"`
 }
 
 // WarmupOverviewDTO is the WarmupOverview schema: the pool summary plus per

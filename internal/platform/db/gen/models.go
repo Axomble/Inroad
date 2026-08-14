@@ -1029,6 +1029,11 @@ type WarmupObservation struct {
 	ObservedAt         pgtype.Timestamptz `json:"observed_at"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 	TabCapable         bool               `json:"tab_capable"`
+	DkimDomain         string             `json:"dkim_domain"`
+	ReturnPathDomain   string             `json:"return_path_domain"`
+	SpfResult          string             `json:"spf_result"`
+	DkimResult         string             `json:"dkim_result"`
+	DmarcResult        string             `json:"dmarc_result"`
 }
 
 type WarmupParticipant struct {

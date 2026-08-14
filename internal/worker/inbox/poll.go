@@ -169,12 +169,27 @@ func warmupPlacement(path readingPath, category string) string {
 }
 
 // warmupHook carries the warmup receipt-detection dependencies threaded through
-// the poll path: the HMAC secret that verifies the X-Inroad-Warmup token and the
-// enqueuer for the delayed warmup:engage follow-up. It is the seam that keeps
-// warmup mail ISOLATED from campaign reply/bounce classification (spec §9.4).
+// the poll path: the HMAC secret that verifies the X-Inroad-Warmup token, the
+// enqueuer for the delayed warmup:engage follow-up, and who the polled mailbox IS.
+// It is the seam that keeps warmup mail ISOLATED from campaign reply/bounce
+// classification (spec §9.4).
+//
+// The receiver lives HERE rather than on readingPath, though both describe the
+// reader, because the two have different lifetimes: a readingPath is built per
+// folder pass (INBOX, then junk) while the receiver is one fact about the mailbox
+// for the whole poll. Putting a per-poll constant in a per-pass struct would imply
+// it could differ between passes, and it cannot.
+//
+// The stronger reason is what it would sit NEXT TO. readingPath.tabCapable is a
+// property of the READER and deliberately not derived from the mailbox's provider
+// (see its comment). Placing receiver.Provider beside it would put the exact
+// derivation that comment forbids within arm's reach of anyone editing the struct
+// — and the IMAP branch, which passes tabCapable=false literally, is where that
+// mistake has already been made once.
 type warmupHook struct {
-	secret []byte
-	enq    WarmupEngageEnqueuer
+	secret   []byte
+	enq      WarmupEngageEnqueuer
+	receiver warmup.Receiver
 }
 
 // PollHandler returns an asynq handler for inbox:poll tasks. It dispatches on
@@ -193,7 +208,6 @@ type warmupHook struct {
 // also best-effort scans the provider's spam/junk folder for spam-placed warmup
 // mail (the core deliverability health signal) and persists its cursor.
 func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetcher, graph GraphFetcher, classifier *replyclassify.Classifier, warmupSecret []byte, enq WarmupEngageEnqueuer) func(context.Context, *asynq.Task) error {
-	hook := warmupHook{secret: warmupSecret, enq: enq}
 	// Resolve the optional evidence capability ONCE, at wiring time, and say so
 	// loudly if it is missing. Discovering it per message meant a core that does not
 	// implement it degraded in silence — and the consequence is worse than lost
@@ -214,6 +228,21 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		job, err := core.GetInboxPollJob(ctx, p.MailboxID, p.WorkspaceID)
 		if err != nil {
 			return err
+		}
+
+		// Built per poll, inside the closure, because the receiver is per mailbox
+		// while the secret and the enqueuer are per process. Assembling it once at
+		// wiring time and assigning the receiver here would mutate a value shared by
+		// every concurrent poll — a data race that would attribute one mailbox's
+		// identity verdicts to another's mail.
+		//
+		// job.Provider is already the vocabulary warmup.Receiver expects
+		// ("gmail"|"m365"|"smtp") on every branch below, and job.Email is the mailbox's
+		// own address on every branch too — deliberately not job.Username, which is the
+		// IMAP login and empty for exactly the providers that stamp results.
+		hook := warmupHook{
+			secret: warmupSecret, enq: enq,
+			receiver: warmup.Receiver{Address: job.Email, Provider: job.Provider},
 		}
 
 		if job.Provider == "gmail" {
@@ -449,7 +478,19 @@ func recordWarmupTokenFailure(ctx context.Context, core coreapi.Client, p queue.
 // found in, both persisted so C5b's engager can relocate the exact message. A
 // duplicate re-poll returns an empty plan (ReceiptID ""), so no engage is
 // re-enqueued.
+//
+// The sending identity is extracted here too (design §6), from the headers of a
+// message that has ALREADY passed HMAC token verification — which is what makes
+// reading headers acceptable at all in a path whose last two live findings were
+// both forged inputs. warmup.ExtractIdentity is pure and cannot fail: it returns
+// unknown verdicts and empty domains rather than an error, so nothing about the
+// identity can stop the receipt or hold back the poll cursor.
 func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, payload warmup.Payload, msg mail.InboundMessage, path readingPath) error {
+	// Whose verdicts these are is decided by hook.receiver: only an
+	// Authentication-Results header stamped by THIS mailbox's own system is
+	// believed, so the extractor is told which system that is. Everything below the
+	// receiving boundary is sender-influenceable (design §3.1).
+	identity := warmup.ExtractIdentity(msg.Header, hook.receiver)
 	plan, err := core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
 		WorkspaceID:      p.WorkspaceID,
 		WarmupSendID:     payload.WarmupSendID,
@@ -461,6 +502,12 @@ func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p q
 		// it stays true of the row: a mailbox migrated between providers must not make
 		// this observation claim a capability the reader never had.
 		TabCapable: path.tabCapable,
+		// Metadata on the observation, never a reason to refuse it (design §7/§8).
+		DKIMDomain:       identity.DKIMDomain,
+		ReturnPathDomain: identity.ReturnPathDomain,
+		SPFResult:        identity.SPFResult,
+		DKIMResult:       identity.DKIMResult,
+		DMARCResult:      identity.DMARCResult,
 	})
 	if err != nil {
 		return err
