@@ -1,8 +1,12 @@
 package inprocess
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/warmup"
@@ -228,5 +232,27 @@ func TestValidPlacement(t *testing.T) {
 		if validPlacement(bad) {
 			t.Errorf("validPlacement(%q) = true, want false", bad)
 		}
+	}
+}
+
+// The database refuses ('tabbed', tab_capable=false), but a CHECK violation arrives
+// as a constraint error inside the receipt transaction, which the poll treats as
+// retryable — so it returns before advancing the inbox cursor and the mailbox stops
+// processing ANY inbound mail, re-failing identically on every pass. Campaign reply
+// and bounce detection stop with it. Failing at the seam names the caller's bug in
+// one error the poll can log and move past.
+func TestTabbedPlacementRequiresATabCapablePath(t *testing.T) {
+	_, err := client{}.RecordWarmupReceipt(context.Background(), coreapi.WarmupReceiptInput{
+		WorkspaceID:      uuid.NewString(),
+		WarmupSendID:     uuid.NewString(),
+		RecipientMailbox: uuid.NewString(),
+		Placement:        placementTabbed,
+		TabCapable:       false,
+	})
+	if err == nil {
+		t.Fatal("a tabbed placement from a path that cannot see tabs was accepted")
+	}
+	if !strings.Contains(err.Error(), "tab-capable") {
+		t.Fatalf("error = %v; it must name the missing capability, not surface as a constraint violation", err)
 	}
 }

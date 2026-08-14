@@ -256,6 +256,74 @@ func TestOverviewCarriesTheLaneAxis(t *testing.T) {
 	}
 }
 
+// The tabbed pair is asserted on the RAW JSON for the reason the lane axis is: the
+// UI has to tell "no tab was ever detectable here" from "tabs were detectable and
+// none were used", and BOTH of those arrive as a falsy value through a decoded
+// struct. tabbed_rate_7d must be present and NULL with an empty denominator — never
+// 0.0, which reads as a confident clean rate for a mailbox whose tabs are merely
+// invisible.
+//
+// The keys are asserted present even though the schema does not list them as
+// required, because an absent key is the same `undefined` the lane bug produced: a
+// client's safe fallback then hides the difference the field exists to express.
+func TestOverviewCarriesTheTabbedPairAndNullsAnUnmeasurableRate(t *testing.T) {
+	ws := uuid.New()
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{
+		{
+			MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+			StartedAt:   pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+			HealthState: "healthy", Lane: "healthy", Email: "gmail@example.com",
+			Inbox7d: 10, Spam7d: 0, Tabbed7d: 4, TabCapable7d: 10, TodaySent: 2,
+		},
+		{
+			MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+			StartedAt:   pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+			HealthState: "healthy", Lane: "healthy", Email: "imap@example.com",
+			Inbox7d: 10, Spam7d: 0, Tabbed7d: 0, TabCapable7d: 0, TodaySent: 2,
+		},
+	}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/warmup/overview", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Mailboxes []map[string]any `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Mailboxes) != 2 {
+		t.Fatalf("want two mailboxes, got %d", len(raw.Mailboxes))
+	}
+	for i, mailbox := range raw.Mailboxes {
+		for _, key := range []string{"tabbed_rate_7d", "tab_capable_sample_7d"} {
+			if _, present := mailbox[key]; !present {
+				t.Fatalf("mailbox %d: %q is absent from the response; an absent key reads as undefined, "+
+					"which the client cannot tell from a measured value", i, key)
+			}
+		}
+	}
+
+	gmail, imap := raw.Mailboxes[0], raw.Mailboxes[1]
+	if got := gmail["tabbed_rate_7d"]; got != 0.4 {
+		t.Errorf("gmail tabbed_rate_7d = %v, want 0.4 (4 of 10 tab-capable)", got)
+	}
+	if got := gmail["tab_capable_sample_7d"]; got != float64(10) {
+		t.Errorf("gmail tab_capable_sample_7d = %v, want 10", got)
+	}
+	if got := imap["tabbed_rate_7d"]; got != nil {
+		t.Errorf("imap tabbed_rate_7d = %v, want null: nothing observing this mailbox could report a category, "+
+			"and a zero would read as a confident clean rate", got)
+	}
+	if got := imap["tab_capable_sample_7d"]; got != float64(0) {
+		t.Errorf("imap tab_capable_sample_7d = %v, want 0", got)
+	}
+}
+
 // TestTransitionsRouteReturnsThePage proves the contract path, the JSON envelope
 // and the field names the SPA generates against: an object with a `transitions`
 // array whose rows carry snake_case keys and null (not "") lane fields on a

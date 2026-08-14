@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	netmail "net/mail"
 	"strconv"
+	"strings"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
@@ -50,8 +51,9 @@ type GmailReader struct {
 	// (users.history.list); returns errGmailHistoryExpired on a 404.
 	historyFn func(ctx context.Context, srv *gmail.Service, startHistoryID string, maxN int) (msgIDs []string, newCursor string, err error)
 	// getFn fetches one message and returns its decoded RFC822 bytes
-	// (users.messages.get, format=RAW, base64url-decoded).
-	getFn func(ctx context.Context, srv *gmail.Service, msgID string) (raw []byte, err error)
+	// (users.messages.get, format=RAW, base64url-decoded) plus the message's
+	// labelIds — the ONLY place a Gmail tab is observable.
+	getFn func(ctx context.Context, srv *gmail.Service, msgID string) (raw []byte, labels []string, err error)
 	// spamListFn lists the ids of the most-recent messages carrying the SPAM
 	// label (users.messages.list, labelIds=SPAM), for warmup spam-placement
 	// detection. nil = the real call (gmailSpamList).
@@ -112,13 +114,13 @@ func (g *GmailReader) Fetch(ctx context.Context, accessToken, sinceHistoryID str
 	grp.SetLimit(gmailGetConcurrency)
 	for i, id := range msgIDs {
 		grp.Go(func() error {
-			raw, err := g.get(gctx, srv, id)
+			raw, labels, err := g.get(gctx, srv, id)
 			if err != nil {
 				return err
 			}
 			// Indexed write: processMessage is order-independent, but a distinct
 			// slot per goroutine avoids a data race without a mutex.
-			out[i] = parseInbound(raw)
+			out[i] = parseInbound(raw, labels)
 			return nil
 		})
 	}
@@ -172,7 +174,10 @@ func collectHistory(records []*gmail.History, respHistoryID uint64, nextPageToke
 // it. A parse failure is tolerated (best-effort empty header/body) so one
 // malformed message never fails the whole poll pass. UID is left zero — Gmail
 // tracks position by the historyId cursor, not per-message UIDs.
-func parseInbound(raw []byte) InboundMessage {
+//
+// labels are the API's labelIds for this message, which no RFC822 header carries:
+// they are how a Gmail tab becomes observable at all.
+func parseInbound(raw []byte, labels []string) InboundMessage {
 	msg, _ := netmail.ReadMessage(bytes.NewReader(raw))
 	var header netmail.Header
 	var postHeaderBody []byte
@@ -181,10 +186,52 @@ func parseInbound(raw []byte) InboundMessage {
 		postHeaderBody, _ = io.ReadAll(msg.Body)
 	}
 	return InboundMessage{
-		Header:      header,
-		ContentType: header.Get("Content-Type"),
-		Body:        postHeaderBody,
+		Header:            header,
+		ContentType:       header.Get("Content-Type"),
+		Body:              postHeaderBody,
+		PlacementCategory: gmailPlacementCategory(labels),
 	}
+}
+
+// Gmail's category labels. The four tabs are the observable ones;
+// CATEGORY_PERSONAL names the PRIMARY tab, which is not a tab landing at all.
+const (
+	gmailCategoryPrefix  = "CATEGORY_"
+	gmailCategoryPrimary = "PERSONAL"
+)
+
+// gmailPlacementCategory reduces a message's labelIds to the TAB it was filed
+// under, or "" for the primary inbox — the only positively-observed tab signal any
+// provider gives us.
+//
+// Three rules, each load-bearing:
+//
+//   - CATEGORY_PERSONAL is the primary tab, so it names NO tab. Gmail applies it to
+//     ordinary inbox mail, so treating it as a tab would report a ~100% tabbed rate
+//     for precisely the mailboxes whose mail lands where we want it.
+//   - An UNRECOGNISED category (Gmail adds one) IS a tab. It is a category; the
+//     alternative is silently recording it as the primary inbox, which is the
+//     optimistic direction, and optimism is the wrong default for a reputation
+//     signal.
+//   - SPAM wins over any category, wherever it appears in the list. A spam-foldered
+//     message is not in the inbox at all, so no tab applies to it.
+//
+// The first tab wins so the result does not depend on label order, which the API
+// makes no promise about.
+func gmailPlacementCategory(labels []string) string {
+	tab := ""
+	for _, label := range labels {
+		if label == gmailLabelSpam {
+			return ""
+		}
+		if tab != "" || !strings.HasPrefix(label, gmailCategoryPrefix) {
+			continue
+		}
+		if name := strings.TrimPrefix(label, gmailCategoryPrefix); name != gmailCategoryPrimary {
+			tab = strings.ToLower(name)
+		}
+	}
+	return tab
 }
 
 // FetchSpam best-effort returns the most-recent (bounded) messages Gmail routed
@@ -211,11 +258,11 @@ func (g *GmailReader) FetchSpam(ctx context.Context, accessToken string, maxN in
 	grp.SetLimit(gmailGetConcurrency)
 	for i, id := range msgIDs {
 		grp.Go(func() error {
-			raw, err := g.get(gctx, srv, id)
+			raw, labels, err := g.get(gctx, srv, id)
 			if err != nil {
 				return err
 			}
-			out[i] = parseInbound(raw)
+			out[i] = parseInbound(raw, labels)
 			return nil
 		})
 	}
@@ -273,7 +320,7 @@ func (g *GmailReader) history(ctx context.Context, srv *gmail.Service, startHist
 	return gmailHistory(ctx, srv, startHistoryID, maxN)
 }
 
-func (g *GmailReader) get(ctx context.Context, srv *gmail.Service, msgID string) ([]byte, error) {
+func (g *GmailReader) get(ctx context.Context, srv *gmail.Service, msgID string) ([]byte, []string, error) {
 	if g.getFn != nil {
 		return g.getFn(ctx, srv, msgID)
 	}
@@ -330,15 +377,29 @@ func gmailHistory(ctx context.Context, srv *gmail.Service, startHistoryID string
 }
 
 // gmailGetRAW fetches one message as RFC822 (format=RAW) and base64url-decodes
-// it to the same bytes NetInboxReader hands to netmail.ReadMessage.
-func gmailGetRAW(ctx context.Context, srv *gmail.Service, msgID string) ([]byte, error) {
+// it to the same bytes NetInboxReader hands to netmail.ReadMessage, along with the
+// message's labelIds.
+//
+// The labels cost nothing extra: format=RAW already returns them on the same
+// Message this call was making anyway, and they were previously dropped one line
+// before use — which is why every Gmail Promotions landing was recorded as a
+// primary-inbox landing.
+func gmailGetRAW(ctx context.Context, srv *gmail.Service, msgID string) ([]byte, []string, error) {
 	m, err := srv.Users.Messages.Get("me", msgID).Format("RAW").Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("gmail: messages.get: %w", err)
+		return nil, nil, fmt.Errorf("gmail: messages.get: %w", err)
 	}
+	return gmailMessageRAW(m)
+}
+
+// gmailMessageRAW is everything gmailGetRAW does apart from the network call: the
+// base64url decode and the labels. Split out so the part that can be wrong is
+// testable — the call above is stubbed away in every test, and "return the labels
+// the API gave us" is exactly the line that was missing.
+func gmailMessageRAW(m *gmail.Message) ([]byte, []string, error) {
 	raw, err := base64.URLEncoding.DecodeString(m.Raw)
 	if err != nil {
-		return nil, fmt.Errorf("gmail: decode raw: %w", err)
+		return nil, nil, fmt.Errorf("gmail: decode raw: %w", err)
 	}
-	return raw, nil
+	return raw, m.LabelIds, nil
 }

@@ -1028,6 +1028,7 @@ type WarmupObservation struct {
 	IdempotencyKey     string             `json:"idempotency_key"`
 	ObservedAt         pgtype.Timestamptz `json:"observed_at"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	TabCapable         bool               `json:"tab_capable"`
 }
 
 type WarmupParticipant struct {
@@ -1095,6 +1096,8 @@ type WarmupSignalSnapshot struct {
 	ObserverTokenFailures       int32              `json:"observer_token_failures"`
 	NewestEvidenceAt            pgtype.Timestamptz `json:"newest_evidence_at"`
 	CampaignAssertedHardBounces int32              `json:"campaign_asserted_hard_bounces"`
+	PlacementTabbed             int32              `json:"placement_tabbed"`
+	PlacementTabCapable         int32              `json:"placement_tab_capable"`
 }
 
 type WarmupStateTransition struct {

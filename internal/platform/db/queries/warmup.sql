@@ -129,13 +129,44 @@ SELECT
     m.email,
     COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
+    COALESCE(wk.tabbed, 0)::bigint      AS tabbed_7d,
+    COALESCE(wk.tab_capable, 0)::bigint AS tab_capable_7d,
     COALESCE(td.sent, 0)::int     AS today_sent
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
 LEFT JOIN (
     SELECT o.mailbox_id,
-           count(*) FILTER (WHERE o.placement = 'inbox') AS inbox,
-           count(*) FILTER (WHERE o.placement = 'spam') AS spam
+           -- 'tabbed' counts on the INBOX side. A tabbed message did land in the
+           -- inbox — the tab is a sub-location within it — so inbox_rate_7d and
+           -- placement_sample_7d keep exactly the values they had when a Gmail
+           -- Promotions landing was recorded as 'inbox'.
+           count(*) FILTER (WHERE o.placement IN ('inbox','tabbed')) AS inbox,
+           count(*) FILTER (WHERE o.placement = 'spam') AS spam,
+           -- The tabbed rate and ITS OWN denominator (design §5). The denominator is
+           -- inbox-side placements whose READER could have named a tab, and both
+           -- restrictions are load-bearing:
+           --
+           --   * tab_capable, because tabs are structurally undetectable over IMAP —
+           --     pooling rows that can never report one dilutes the rate toward zero
+           --     and makes an untested pool read clean, the same defect the bounce
+           --     denominators had;
+           --   * inbox-side, because the rate means "landed in a tab RATHER THAN the
+           --     primary inbox". A spam landing is in no tab, so counting it would
+           --     fold the spam rate into the tabbed one and a mailbox with a spam
+           --     problem would read as having less of a tab problem.
+           --
+           -- WHOSE capability this is matters when reading the result: placement is
+           -- attributed to the SENDER (o.mailbox_id) but tab_capable was recorded by
+           -- the RECIPIENT's poller, so this denominator counts what a mailbox's
+           -- PARTNERS could see. A Gmail sender whose peers are all IMAP has no
+           -- measurable tabbed rate — a fact about the pool it warms against, not
+           -- about its own provider.
+           --
+           -- Kept textually identical to the same arms in
+           -- UpsertWarmupSignalSnapshotsForWorkspace, which materializes the same two
+           -- numbers for the sweep.
+           count(*) FILTER (WHERE o.placement = 'tabbed') AS tabbed,
+           count(*) FILTER (WHERE o.tab_capable AND o.placement IN ('inbox','tabbed')) AS tab_capable
     FROM warmup_observations o
     WHERE o.workspace_id = $1
       AND o.kind = 'placement'
@@ -564,12 +595,21 @@ RETURNING id, received_at;
 -- name: RecordWarmupPlacementObservation :exec
 -- Immutable counterpart of the daily placement projection. Runs in the same
 -- transaction as a newly inserted receipt; the receipt id is the idempotency key.
+--
+-- tab_capable comes from the CALLER, which is the poller that actually read the
+-- message, and describes the READING PATH: could it have identified a provider tab
+-- at all? It is stored rather than derived from mailboxes.provider at read time,
+-- because a mailbox migrated between providers would otherwise make this row
+-- retroactively claim a capability the reader never had. It is also the tabbed
+-- rate's denominator (design §5), so a wrong value here dilutes a rate rather than
+-- merely mislabelling a row.
 INSERT INTO warmup_observations (
     workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
-    kind, placement, source, attribution_trusted, idempotency_key, observed_at
+    kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at
 )
 SELECT s.workspace_id, s.from_mailbox, sqlc.arg(recipient_mailbox)::uuid, s.id,
-       'placement', sqlc.arg(placement)::text, 'warmup_receipt', true,
+       'placement', sqlc.arg(placement)::text, sqlc.arg(tab_capable)::boolean,
+       'warmup_receipt', true,
        'receipt:' || sqlc.arg(receipt_id)::uuid::text, sqlc.arg(observed_at)::timestamptz
 FROM warmup_sends s
 WHERE s.id = sqlc.arg(warmup_send_id)
@@ -670,6 +710,10 @@ SELECT EXISTS(SELECT 1 FROM candidate) AS matched,
 -- "placement samples" meaning messages, which is what the thresholds are calibrated
 -- against.
 --
+-- A 'tabbed' receipt supersedes to spam on the same rule: tabbed is an inbox-side
+-- value, so finding the message in junk later is the same correction it is for
+-- 'inbox'.
+--
 -- MONOTONE, and that direction is load-bearing rather than defensive: the engager
 -- deliberately RESCUES spam messages into the inbox, so a later poll legitimately
 -- finds them there. Allowing spam -> inbox would let our own rescue erase the
@@ -696,7 +740,8 @@ SELECT EXISTS(SELECT 1 FROM candidate) AS matched,
 --
 -- The daily projection is corrected on the day the message was RECEIVED, which is
 -- where RecordWarmupSenderPlacementStat put the original count, and only the inbox
--- counter it actually incremented is decremented ('other' incremented neither).
+-- counter it actually incremented is decremented ('other' incremented neither;
+-- 'tabbed' incremented the inbox counter, so it is decremented the same way).
 -- Otherwise the overview and the deliverability score would keep reporting an inbox
 -- placement the policy has already recorded as spam.
 --
@@ -728,7 +773,7 @@ WITH promoted AS (
     RETURNING o.id
 ), projection AS (
     UPDATE warmup_daily_stats d
-    SET inbox = greatest(d.inbox - CASE WHEN p.prior_placement = 'inbox' THEN 1 ELSE 0 END, 0),
+    SET inbox = greatest(d.inbox - CASE WHEN p.prior_placement IN ('inbox','tabbed') THEN 1 ELSE 0 END, 0),
         spam  = d.spam + 1
     FROM promoted p
     WHERE d.mailbox_id = p.from_mailbox
@@ -782,9 +827,16 @@ ON CONFLICT (mailbox_id, day) DO UPDATE SET
 -- counter. SELF-ENFORCING tenancy: the INSERT ... SELECT emits a row ONLY when the
 -- send truly belongs to the workspace, so a foreign (send, workspace) pair inserts
 -- zero rows; the resolved (sender, workspace) pairing is proven by the same join.
+--
+-- 'tabbed' counts on the INBOX side, because a tabbed message did land in the inbox
+-- — the tab is a sub-location within it. That keeps this projection reporting the
+-- same number it reported when a Gmail Promotions landing was recorded as 'inbox',
+-- so the overview series and the deliverability score do not move for a vocabulary
+-- change that observed nothing new. It also keeps the projection agreeing with the
+-- observations table, which the spam reclassification below depends on.
 INSERT INTO warmup_daily_stats (mailbox_id, workspace_id, day, inbox, spam)
 SELECT s.from_mailbox, s.workspace_id, CURRENT_DATE,
-       CASE WHEN sqlc.arg(placement)::text = 'inbox' THEN 1 ELSE 0 END,
+       CASE WHEN sqlc.arg(placement)::text IN ('inbox','tabbed') THEN 1 ELSE 0 END,
        CASE WHEN sqlc.arg(placement)::text = 'spam'  THEN 1 ELSE 0 END
 FROM warmup_sends s
 WHERE s.id = sqlc.arg(warmup_send_id) AND s.workspace_id = sqlc.arg(workspace_id)
@@ -919,7 +971,7 @@ ORDER BY workspace_id;
 -- $1 pins the workspace on the outer WHERE and on every subquery.
 INSERT INTO warmup_signal_snapshots (
     workspace_id, mailbox_id, computed_at,
-    placement_inbox, placement_spam,
+    placement_inbox, placement_spam, placement_tabbed, placement_tab_capable,
     campaign_delivered, campaign_hard_bounces, campaign_asserted_hard_bounces, campaign_complaints,
     warmup_delivered, warmup_hard_bounces,
     observer_token_failures, newest_evidence_at
@@ -927,6 +979,8 @@ INSERT INTO warmup_signal_snapshots (
 SELECT p.workspace_id, p.mailbox_id, now(),
        COALESCE(place.inbox, 0)::int,
        COALESCE(place.spam, 0)::int,
+       COALESCE(place.tabbed, 0)::int,
+       COALESCE(place.tab_capable, 0)::int,
        COALESCE(camp.delivered, 0)::int,
        COALESCE(camp.hard_bounces, 0)::int,
        COALESCE(camp.asserted_hard_bounces, 0)::int,
@@ -939,8 +993,20 @@ FROM warmup_participants p
 LEFT JOIN LATERAL (
     -- Placement is SENDER-attributed (security invariant 29): a warmup message
     -- landing in spam degrades whoever SENT it, not the mailbox that observed it.
-    SELECT count(*) FILTER (WHERE o.placement = 'inbox') AS inbox,
-           count(*) FILTER (WHERE o.placement = 'spam') AS spam
+    -- 'tabbed' counts on the INBOX side, so every threshold, minimum-sample gate
+    -- and rate keeps the value it had for the same evidence. Making this arm strict
+    -- would silently drop every Gmail Promotions landing out of the placement
+    -- denominator, push the mailbox under MinPlacementSamples and demote it to
+    -- `unknown` because of a vocabulary change that observed nothing new.
+    SELECT count(*) FILTER (WHERE o.placement IN ('inbox','tabbed')) AS inbox,
+           count(*) FILTER (WHERE o.placement = 'spam') AS spam,
+           -- The tabbed pair, materialized for operator visibility and for
+           -- calibrating a later slice against real data. NOTHING in the policy reads
+           -- it: see the note on ListWarmupEvaluationRows, which deliberately does not
+           -- select these columns. Textually identical to the arms in
+           -- ListWarmupOverviewRows.
+           count(*) FILTER (WHERE o.placement = 'tabbed') AS tabbed,
+           count(*) FILTER (WHERE o.tab_capable AND o.placement IN ('inbox','tabbed')) AS tab_capable
     FROM warmup_observations o
     WHERE o.workspace_id = $1
       AND o.mailbox_id = p.mailbox_id
@@ -1124,6 +1190,8 @@ ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
     computed_at             = EXCLUDED.computed_at,
     placement_inbox         = EXCLUDED.placement_inbox,
     placement_spam          = EXCLUDED.placement_spam,
+    placement_tabbed        = EXCLUDED.placement_tabbed,
+    placement_tab_capable   = EXCLUDED.placement_tab_capable,
     campaign_delivered      = EXCLUDED.campaign_delivered,
     campaign_hard_bounces   = EXCLUDED.campaign_hard_bounces,
     campaign_asserted_hard_bounces = EXCLUDED.campaign_asserted_hard_bounces,
@@ -1155,6 +1223,16 @@ ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
 -- quarantined_since is derived from the transition trail rather than stored on the
 -- participant: the newest row that MOVED it into quarantine. It gates the cooldown
 -- only — elapsing is necessary but never sufficient (acceptance criterion 2).
+--
+-- placement_tabbed / placement_tab_capable are DELIBERATELY NOT SELECTED here. The
+-- tabbed signal gates nothing: it is undetectable on an entire provider class, so a
+-- threshold on it would make promotion unreachable for every SMTP mailbox, or demand
+-- assuming primary placement where we cannot see — inventing evidence, which is the
+-- failure this engine keeps being corrected for. Adding them to this SELECT is the
+-- first step of wiring it into a decision, so it should be a deliberate act with a
+-- design behind it rather than a convenience; the snapshot columns exist for
+-- operator visibility and to calibrate a later slice against real data.
+-- (TestWideningThePlacementVocabularyChangesNoHealthStateAndNoLane is the guard.)
 SELECT p.mailbox_id,
        p.workspace_id,
        p.health_state,

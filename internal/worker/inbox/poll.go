@@ -83,16 +83,90 @@ type apiJunkScan func(ctx context.Context, accessToken string, maxN int) ([]mail
 const junkScanBatch = 100
 
 // Placement values recorded on a warmup receipt (spec §3). These exact strings
-// match the warmup_receipts.placement CHECK constraint.
+// match the warmup_receipts.placement CHECK constraint (widened by migration
+// 000060 for tabbed).
+//
+// placementTabbed is recorded ONLY when a provider positively identifies a tab.
+// `inbox` deliberately keeps meaning "landed in the inbox" rather than being
+// redefined as "primary": one column cannot mean "primary inbox" on Gmail and
+// "inbox, tab unknowable" on IMAP, differing by a provider the reader does not
+// record.
 const (
-	placementInbox = "inbox"
-	placementSpam  = "spam"
+	placementInbox  = "inbox"
+	placementTabbed = "tabbed"
+	placementSpam   = "spam"
 )
+
+// providerGmail is the one provider whose reader can observe a tab. m365 is
+// excluded on purpose: Graph's inferenceClassification (focused|other) is a
+// per-user RELEVANCE guess, not a delivery category, and IMAP has no concept of a
+// tab at all.
+const providerGmail = "gmail"
 
 // sourceFolderInbox is the canonical source-folder label for a message found in
 // the primary inbox across all providers (IMAP "INBOX", the Gmail INBOX label,
 // the Graph Inbox folder), so C5b's engager can act on it uniformly.
 const sourceFolderInbox = "INBOX"
+
+// readingPath is what ONE poll pass can say about a message it found: which folder
+// it was scanning (hence the placement), the provider's label for that folder, and
+// whether that path could have identified a tab at all.
+//
+// tabCapable lives HERE, on the path, and is recorded on the observation — not
+// derived later from mailboxes.provider. A mailbox migrated between providers would
+// otherwise make historical observations retroactively claim a capability the
+// reader that wrote them never had.
+type readingPath struct {
+	folderPlacement string
+	sourceFolder    string
+	tabCapable      bool
+}
+
+// inboxPath is the INBOX pass of any provider.
+func inboxPath(tabCapable bool) readingPath {
+	return readingPath{folderPlacement: placementInbox, sourceFolder: sourceFolderInbox, tabCapable: tabCapable}
+}
+
+// junkPath is the spam/junk scan, whose folder label varies by provider (Junk /
+// SPAM / JunkEmail) so the engager can act on the exact message.
+func junkPath(folder string, tabCapable bool) readingPath {
+	return readingPath{folderPlacement: placementSpam, sourceFolder: folder, tabCapable: tabCapable}
+}
+
+// providerTabCapable reports whether this provider's reader could have identified a
+// tab. It is asked ONCE per poll pass, from the path that is about to read, so the
+// answer is recorded alongside the evidence rather than re-derived from the mailbox
+// row afterwards.
+func providerTabCapable(provider string) bool { return provider == providerGmail }
+
+// warmupPlacement resolves the placement to record from the folder the path was
+// scanning and the tab the provider named.
+//
+// The folder wins: a spam-foldered message is not in the inbox at all, so no tab
+// applies to it however the provider also categorised it. The Gmail reader already
+// clears the category for a SPAM-labelled message, and this does not rely on that —
+// the two guards are independent, and the one that decides the recorded value is
+// this one.
+func warmupPlacement(path readingPath, category string) string {
+	if path.folderPlacement != placementInbox {
+		return path.folderPlacement
+	}
+	// A tab is only recordable by a path that could SEE tabs. The database refuses
+	// ('tabbed', tab_capable=false) — and that refusal is expensive: the CHECK aborts
+	// the receipt transaction, recordWarmup propagates, and the poll returns BEFORE
+	// SetInboxCursor, so the message is re-fetched and the pass fails identically
+	// forever. Every inbound signal for that mailbox stops advancing — campaign
+	// replies and bounce detection included, not just one lost observation.
+	//
+	// The capability and the category used to be decided in different places from
+	// different inputs, with no compile-time link, so constructing that row was a
+	// plain Go bug away. Deciding both here makes the pairing local and the
+	// impossible row unconstructable rather than merely rejected.
+	if category != "" && path.tabCapable {
+		return placementTabbed
+	}
+	return placementInbox
+}
 
 // warmupHook carries the warmup receipt-detection dependencies threaded through
 // the poll path: the HMAC secret that verifies the X-Inroad-Warmup token and the
@@ -179,8 +253,16 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		}
 
 		var replies, bounces, skipped int
+		// Literal false, not providerTabCapable(job.Provider): this branch is the IMAP
+		// transport, which cannot report a tab whatever the provider column says.
+		// Deriving it from the provider read as though Gmail-over-IMAP would be
+		// tab-capable — and if that route were ever added, every inbox landing would
+		// be counted tab-capable while the reader could never produce a numerator, so
+		// the tabbed rate would pin at a confident 0%. That is the "untested pool
+		// reads clean" failure the separate denominator exists to prevent.
+		path := inboxPath(false)
 		for _, msg := range msgs {
-			matched, err := processInbound(ctx, core, classifier, hook, p, msg, placementInbox, sourceFolderInbox, &replies, &bounces)
+			matched, err := processInbound(ctx, core, classifier, hook, p, msg, path, &replies, &bounces)
 			if err != nil {
 				return err
 			}
@@ -194,7 +276,7 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		// fails the poll — the scan is stateless + idempotent, so a junk hiccup is
 		// retried on the next poll without holding back the INBOX cursor advance.
 		if js, ok := reader.(imapJunkScanner); ok {
-			scanIMAPJunk(ctx, core, hook, js, cfg, p)
+			scanIMAPJunk(ctx, core, hook, js, cfg, p, path.tabCapable)
 		}
 
 		slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID,
@@ -249,8 +331,9 @@ func pollAPI(ctx context.Context, core coreapi.Client, reader apiFetcher, classi
 	}
 
 	var replies, bounces, skipped int
+	tabCapable := providerTabCapable(provider)
 	for _, msg := range msgs {
-		matched, err := processInbound(ctx, core, classifier, hook, p, msg, placementInbox, sourceFolderInbox, &replies, &bounces)
+		matched, err := processInbound(ctx, core, classifier, hook, p, msg, inboxPath(tabCapable), &replies, &bounces)
 		if err != nil {
 			return err
 		}
@@ -263,7 +346,7 @@ func pollAPI(ctx context.Context, core coreapi.Client, reader apiFetcher, classi
 	// as the IMAP path. Skipped when the provider reader lacks the capability
 	// (junkScan == nil).
 	if junkScan != nil {
-		scanAPIJunk(ctx, core, hook, junkScan, string(job.AccessToken), provider, p)
+		scanAPIJunk(ctx, core, hook, junkScan, string(job.AccessToken), provider, p, tabCapable)
 	}
 
 	slog.Info("inbox_poll_processed", "mailbox_id", p.MailboxID, "provider", provider,
@@ -328,12 +411,12 @@ func inspectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (
 // never reaches reply/bounce classification, so warmup mail can never stop,
 // suppress, or bounce a campaign enrollment. It reports matched=false for warmup
 // (it is neither a reply nor a bounce — counted as skipped in the poll summary).
-// A non-warmup message falls through to processMessage unchanged. placement is
-// "inbox" here (INBOX pass); sourceFolder is the provider inbox label.
-func processInbound(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, msg mail.InboundMessage, placement, sourceFolder string, replies, bounces *int) (bool, error) {
+// A non-warmup message falls through to processMessage unchanged. path describes
+// which folder this pass was reading and what it could observe about a tab.
+func processInbound(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, msg mail.InboundMessage, path readingPath, replies, bounces *int) (bool, error) {
 	payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
 	if detection == warmupValid {
-		if err := recordWarmup(ctx, core, hook, p, payload, msg, placement, sourceFolder); err != nil {
+		if err := recordWarmup(ctx, core, hook, p, payload, msg, path); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -366,14 +449,18 @@ func recordWarmupTokenFailure(ctx context.Context, core coreapi.Client, p queue.
 // found in, both persisted so C5b's engager can relocate the exact message. A
 // duplicate re-poll returns an empty plan (ReceiptID ""), so no engage is
 // re-enqueued.
-func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, payload warmup.Payload, msg mail.InboundMessage, placement, sourceFolder string) error {
+func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, payload warmup.Payload, msg mail.InboundMessage, path readingPath) error {
 	plan, err := core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
 		WorkspaceID:      p.WorkspaceID,
 		WarmupSendID:     payload.WarmupSendID,
 		RecipientMailbox: p.MailboxID,
-		Placement:        placement,
-		SourceFolder:     sourceFolder,
+		Placement:        warmupPlacement(path, msg.PlacementCategory),
+		SourceFolder:     path.sourceFolder,
 		MessageID:        msg.Header.Get("Message-ID"),
+		// The READER's capability, not the mailbox's. Recorded with the evidence so
+		// it stays true of the row: a mailbox migrated between providers must not make
+		// this observation claim a capability the reader never had.
+		TabCapable: path.tabCapable,
 	})
 	if err != nil {
 		return err
@@ -391,25 +478,25 @@ func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p q
 // stateless + idempotent, so anything missed is retried next poll without holding
 // back the INBOX cursor. Non-warmup junk mail is deliberately ignored (never
 // classified): the junk scan exists only to observe warmup placement.
-func scanIMAPJunk(ctx context.Context, core coreapi.Client, hook warmupHook, js imapJunkScanner, cfg mail.IMAPConfig, p queue.InboxPollPayload) {
+func scanIMAPJunk(ctx context.Context, core coreapi.Client, hook warmupHook, js imapJunkScanner, cfg mail.IMAPConfig, p queue.InboxPollPayload, tabCapable bool) {
 	msgs, folder, err := js.FetchJunk(cfg, junkScanBatch)
 	if err != nil {
 		logJunkScanErr(err, p, "imap")
 		return
 	}
-	scanJunkForWarmup(ctx, core, hook, p, msgs, folder)
+	scanJunkForWarmup(ctx, core, hook, p, msgs, junkPath(folder, tabCapable))
 }
 
 // scanAPIJunk is the API-provider (gmail SPAM / m365 JunkEmail) counterpart of
 // scanIMAPJunk. Same isolation + no-fail policy. The provider-specific source
 // folder label (SPAM vs JunkEmail) is recorded for the engager.
-func scanAPIJunk(ctx context.Context, core coreapi.Client, hook warmupHook, junkScan apiJunkScan, accessToken, provider string, p queue.InboxPollPayload) {
+func scanAPIJunk(ctx context.Context, core coreapi.Client, hook warmupHook, junkScan apiJunkScan, accessToken, provider string, p queue.InboxPollPayload, tabCapable bool) {
 	msgs, err := junkScan(ctx, accessToken, junkScanBatch)
 	if err != nil {
 		logJunkScanErr(err, p, provider)
 		return
 	}
-	scanJunkForWarmup(ctx, core, hook, p, msgs, apiJunkFolderLabel(provider))
+	scanJunkForWarmup(ctx, core, hook, p, msgs, junkPath(apiJunkFolderLabel(provider), tabCapable))
 }
 
 // apiJunkFolderLabel is the source-folder label recorded for a spam-placed API
@@ -425,7 +512,7 @@ func apiJunkFolderLabel(provider string) string {
 // a junk batch. A record error stops this batch (returned via logJunkScanErr at
 // the caller is not applicable here — errors are logged inline) but never the
 // poll: the stateless rescan retries it. Non-warmup junk is skipped.
-func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, msgs []mail.InboundMessage, folder string) {
+func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, msgs []mail.InboundMessage, path readingPath) {
 	for _, msg := range msgs {
 		payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
 		if detection != warmupValid {
@@ -437,7 +524,7 @@ func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook
 			}
 			continue // non-warmup junk is ignored — never classified
 		}
-		if err := recordWarmup(ctx, core, hook, p, payload, msg, placementSpam, folder); err != nil {
+		if err := recordWarmup(ctx, core, hook, p, payload, msg, path); err != nil {
 			slog.Warn("inbox_poll_junk_warmup_record_failed", "mailbox_id", p.MailboxID, "err", err)
 			// keep scanning the rest of the batch; the failed one is idempotently
 			// retried on the next poll's rescan.

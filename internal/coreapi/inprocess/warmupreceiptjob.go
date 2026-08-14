@@ -17,18 +17,25 @@ import (
 )
 
 // Warmup placement values (spec §4). These exact strings match the
-// warmup_receipts.placement CHECK constraint (migration 000018).
+// warmup_receipts.placement CHECK constraint (migration 000018, widened for
+// 'tabbed' by 000060).
+//
+// 'tabbed' is recorded ONLY when a provider positively identified a tab. 'inbox'
+// keeps meaning "landed in the inbox" and is deliberately NOT redefined as
+// "primary", because one value cannot mean "primary inbox" on Gmail and "inbox, tab
+// unknowable" on IMAP — differing by a provider the reader does not record.
 const (
-	placementInbox = "inbox"
-	placementSpam  = "spam"
-	placementOther = "other"
+	placementInbox  = "inbox"
+	placementTabbed = "tabbed"
+	placementSpam   = "spam"
+	placementOther  = "other"
 )
 
-// validPlacement reports whether p is one of the three allowed placements. The DB
-// CHECK enforces this too, but validating at the seam fails loud with a clear
-// error instead of a constraint violation deep in a transaction.
+// validPlacement reports whether p is one of the allowed placements. The DB CHECK
+// enforces this too, but validating at the seam fails loud with a clear error
+// instead of a constraint violation deep in a transaction.
 func validPlacement(p string) bool {
-	return p == placementInbox || p == placementSpam || p == placementOther
+	return p == placementInbox || p == placementTabbed || p == placementSpam || p == placementOther
 }
 
 // warmupReceiptSeed is the stable per-receipt seed the deterministic engage plan
@@ -134,6 +141,16 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	}
 	if !validPlacement(in.Placement) {
 		return coreapi.WarmupEngagePlan{}, fmt.Errorf("coreapi: invalid warmup placement %q", in.Placement)
+	}
+	// Defence in depth for the pairing the poller now guarantees. The database also
+	// refuses this row, but a CHECK violation surfaces as a constraint error deep in
+	// the receipt transaction, which the poll treats as retryable — so it returns
+	// before advancing the inbox cursor and the mailbox stops processing ANY inbound
+	// mail, re-failing identically forever. Failing here instead names the caller's
+	// bug in one clear error the poll can log and move past.
+	if in.Placement == placementTabbed && !in.TabCapable {
+		return coreapi.WarmupEngagePlan{}, fmt.Errorf(
+			"coreapi: warmup placement %q requires a tab-capable reading path", in.Placement)
 	}
 	sendUUID := pgtype.UUID{Bytes: sendID, Valid: true}
 
@@ -267,6 +284,11 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	if err := qtx.RecordWarmupPlacementObservation(ctx, gen.RecordWarmupPlacementObservationParams{
 		WorkspaceID: ws, WarmupSendID: sendID, RecipientMailbox: recipient,
 		ReceiptID: row.ID, Placement: in.Placement, ObservedAt: row.ReceivedAt,
+		// The capability of the READER that produced this observation, taken from the
+		// poller rather than re-derived from the mailbox's current provider: a mailbox
+		// migrated between providers must not make this row claim a capability the
+		// reader never had (design §5).
+		TabCapable: in.TabCapable,
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}

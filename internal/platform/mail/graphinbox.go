@@ -148,7 +148,13 @@ func (g *GraphReader) Fetch(ctx context.Context, accessToken, sinceCursor string
 			}
 			// Indexed write: processMessage is order-independent, but a distinct
 			// slot per goroutine avoids a data race without a mutex.
-			out[i] = parseInbound(raw)
+			//
+			// No labels: Graph has no tabs. Its nearest concept,
+			// inferenceClassification (focused|other), is a per-user RELEVANCE guess
+			// rather than a delivery category, and reporting it as a tab would put two
+			// meanings in one column — which is the defect the tabbed placement work
+			// exists to remove.
+			out[i] = parseInbound(raw, nil)
 			return nil
 		})
 	}
@@ -237,7 +243,7 @@ func (g *GraphReader) FetchJunk(ctx context.Context, accessToken string, maxN in
 			if err != nil {
 				return err
 			}
-			out[i] = parseInbound(raw)
+			out[i] = parseInbound(raw, nil) // no labels: Graph has no tabs (see Fetch)
 			return nil
 		})
 	}

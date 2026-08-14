@@ -25,12 +25,22 @@ const json = (body: unknown) => ({
 })
 
 /**
- * Two participants whose two axes DISAGREE, which is the whole point of the split:
- * the first is reputation-healthy but withheld from the pool, the second is the
- * reverse. A UI that collapsed the axes would render these identically.
+ * Three participants, each carrying a shape that renders dishonestly if the copy
+ * rules are dropped.
+ *
+ * The first two have two axes that DISAGREE, which is the whole point of the
+ * split: reputation-healthy but withheld from the pool, and the reverse. A UI that
+ * collapsed the axes would render these identically.
+ *
+ * They also cover the three tabbed-placement readings: a measured rate over its
+ * own smaller denominator, an absence nothing could measure, and a genuine
+ * measured zero. Every mailbox is served as provider `smtp` by the mailboxes route
+ * below, deliberately: tab capability belongs to the reader that produced each
+ * observation (design §5), never to the mailbox row, so the UI must take these
+ * readings from the payload and not from `provider`.
  */
 const OVERVIEW = {
-  pool_size: 2,
+  pool_size: 3,
   active: true,
   mailboxes: [
     {
@@ -44,6 +54,10 @@ const OVERVIEW = {
       today_sent: 0,
       today_target: 0,
       placement_sample_7d: 40,
+      // 25 of those 40 observations came from a reader that could see a tab, so
+      // the tabbed rate's denominator is its own number, not the 40 beside it.
+      tabbed_rate_7d: 0.35,
+      tab_capable_sample_7d: 25,
       inbox_rate_7d: 0.9,
       spam_rate_7d: 0.1,
     },
@@ -58,8 +72,29 @@ const OVERVIEW = {
       today_sent: 2,
       today_target: 5,
       placement_sample_7d: 3,
+      // Nothing that observed this mailbox could report a category. Not "no tabs".
+      tabbed_rate_7d: null,
+      tab_capable_sample_7d: 0,
       inbox_rate_7d: null,
       spam_rate_7d: null,
+    },
+    {
+      mailbox_id: 'mailbox-primary',
+      email: 'primary@acme.test',
+      enabled: true,
+      health_state: 'healthy',
+      health_reason: '',
+      lane: 'healthy',
+      lane_reason: '',
+      today_sent: 6,
+      today_target: 6,
+      placement_sample_7d: 30,
+      // Zero over a REAL sample: everything a reader could categorise landed in
+      // the primary inbox. A measurement, and the opposite of the row above.
+      tabbed_rate_7d: 0,
+      tab_capable_sample_7d: 18,
+      inbox_rate_7d: 0.97,
+      spam_rate_7d: 0.03,
     },
   ],
 }
@@ -220,6 +255,42 @@ test('a lower-bounded zero renders as unestablished, never as a clean percentage
   await expect(panel).toBeVisible()
   await expect(panel).toContainText(/not established/i)
   await expect(panel).not.toContainText(/\b0(\.0+)?\s*%/)
+})
+
+// Tabs do not exist as a concept over IMAP, so a null tabbed rate means nothing
+// observing this mailbox could report a category. A 0% here would tell an operator
+// their mail has perfect primary placement on the strength of a measurement that
+// never happened — the same silent-fallback class as the missing `lane` above.
+test('a mailbox nothing could categorise says so, and shows no tabbed percentage', async ({ page }) => {
+  const proving = card(page, 'proving@acme.test')
+
+  await expect(proving).toContainText('Not detectable — no partner could report a tab')
+  // Scoped to the tabbed metric: the row legitimately shows inbox and spam
+  // percentages, so only "a figure directly after the tabbed label" is the defect.
+  await expect(proving).not.toContainText(/tabbed 7d\s*[<\d]/)
+  // And it is not read as a penalty: nothing gates on this number.
+  await expect(proving).toContainText(/tabbed 7d[^·]*· gates nothing/)
+})
+
+// The tabbed denominator is smaller than the placement one by construction, so the
+// rate has to arrive with its own sample count or an operator compares two
+// different populations.
+test('a measured tabbed rate carries its own denominator, not the observations count', async ({ page }) => {
+  const withheld = card(page, 'withheld@acme.test')
+
+  await expect(withheld).toContainText('tabbed 7d 35% of 25 tab-capable · gates nothing')
+  await expect(withheld).toContainText('40 observations')
+  await expect(withheld).not.toContainText(/not detectable/i)
+})
+
+// The inverse of the null case, and the one a "falsy means unknown" implementation
+// gets wrong: zero over a real sample is a measurement — everything a reader could
+// categorise reached the primary inbox — and must render as the 0% it is.
+test('a measured zero renders as 0%, not as an absence', async ({ page }) => {
+  const primary = card(page, 'primary@acme.test')
+
+  await expect(primary).toContainText('tabbed 7d 0% of 18 tab-capable · gates nothing')
+  await expect(primary).not.toContainText(/not detectable/i)
 })
 
 test('an entry predating pool lanes says so instead of inventing a lane', async ({ page }) => {

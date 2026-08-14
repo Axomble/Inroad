@@ -422,6 +422,80 @@ func TestOverviewZeroPlacementRateAndPaused(t *testing.T) {
 	}
 }
 
+// The tabbed rate is reported over ITS OWN denominator: the placements whose reader
+// could have named a tab. Here 3 of 12 tab-capable observations were tabbed (25%)
+// while the mailbox has 40 inbox-side placements in total — the 8% that pooling them
+// would produce is the bounce-denominator defect applied to a new signal.
+//
+// The inbox rate is asserted alongside on purpose: tabbed landings stay on the inbox
+// side of it, so widening the vocabulary must not move a number the operator was
+// already reading.
+func TestOverviewTabbedRateUsesTheTabCapableDenominator(t *testing.T) {
+	ws := uuid.New()
+	row := OverviewRow{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt:   pgtype.Timestamptz{Time: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+		HealthState: "healthy", Email: "t@example.com",
+		Inbox7d: 40, Spam7d: 10, Tabbed7d: 3, TabCapable7d: 12,
+	}
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{row}
+	svc := withNow(NewService(store), time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	m := ov.Mailboxes[0]
+	if m.TabCapableSample7d != 12 {
+		t.Fatalf("tab_capable_sample_7d = %d, want 12", m.TabCapableSample7d)
+	}
+	if m.TabbedRate7d == nil {
+		t.Fatal("tabbed_rate_7d is null with 12 tab-capable observations to measure")
+	}
+	if *m.TabbedRate7d != 0.25 {
+		t.Fatalf("tabbed_rate_7d = %v, want 0.25 (3 of 12 tab-capable, not 3 of 50)", *m.TabbedRate7d)
+	}
+	if m.InboxRate7d == nil || *m.InboxRate7d != 0.8 || m.PlacementSample7d != 50 {
+		t.Fatalf("the inbox-side numbers moved: inbox=%v sample=%d, want 0.8 / 50",
+			m.InboxRate7d, m.PlacementSample7d)
+	}
+}
+
+// Null, never 0.0, when nothing observing the mailbox could report a category. A
+// zero would read as a confident clean rate for a mailbox whose tabs are simply
+// invisible — which is every SMTP mailbox, i.e. most of a self-hosted pool.
+func TestOverviewTabbedRateIsNullWhenNothingCouldReportATab(t *testing.T) {
+	ws := uuid.New()
+	row := OverviewRow{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt:   pgtype.Timestamptz{Time: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+		HealthState: "healthy", Email: "imap@example.com",
+		Inbox7d: 30, Spam7d: 2, Tabbed7d: 0, TabCapable7d: 0,
+	}
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{row}
+	svc := withNow(NewService(store), time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	m := ov.Mailboxes[0]
+	if m.TabbedRate7d != nil {
+		t.Fatalf("tabbed_rate_7d = %v, want null: a rate over no measurable population is not zero", *m.TabbedRate7d)
+	}
+	if m.TabCapableSample7d != 0 {
+		t.Fatalf("tab_capable_sample_7d = %d, want 0", m.TabCapableSample7d)
+	}
+	// The placement rates a whole provider class CAN report are unaffected.
+	if m.InboxRate7d == nil || m.PlacementSample7d != 32 {
+		t.Fatalf("inbox-side numbers wrong: inbox=%v sample=%d", m.InboxRate7d, m.PlacementSample7d)
+	}
+}
+
 // TestDisableIdempotent proves disabling a never-enrolled mailbox is a clean
 // success (matches the 204 contract).
 func TestDisableIdempotent(t *testing.T) {

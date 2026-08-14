@@ -21,9 +21,17 @@ const WarmupSparkline = lazy(() => import('./warmup-sparkline'))
 // page of ten collapsed rows should pay for.
 const WarmupTransitionsPanel = lazy(() => import('./warmup-transitions-panel'))
 
-/** 0..1 fraction to a whole-percent string, e.g. 0.83 -> "83%". */
+/**
+ * 0..1 fraction to a whole-percent string, e.g. 0.83 -> "83%".
+ *
+ * A rate that is positive but rounds to nothing reads as "<1%", never "0%".
+ * Every rate on this row is read as evidence about whether a mailbox is clean, so
+ * rounding a real signal down to a confident zero is the same false-clean reading
+ * this screen keeps having to remove — just a smaller one.
+ */
 function formatPct(value: number | null): string {
   if (value == null) return 'Not measured'
+  if (value > 0 && value < 0.005) return '<1%'
   return `${Math.round(value * 100)}%`
 }
 
@@ -33,8 +41,9 @@ function disableErrorMessage(status?: number): string {
 }
 
 /**
- * One mailbox's warmup state on the overview: health, today's ramp progress,
- * 7-day inbox-placement rate, and a 30-day sparkline for enrolled mailboxes;
+ * One mailbox's warmup state on the overview: health, today's ramp progress, the
+ * 7-day placement rates (inbox, spam, and tabbed where a provider can see tabs at
+ * all), and a 30-day sparkline for enrolled mailboxes;
  * an enable affordance for the rest. All enable/disable/settings actions live
  * here (the mailboxes feature can't import warmup UI), with inline error and
  * loading states throughout.
@@ -93,6 +102,7 @@ export function WarmupMailboxCard({
                   spam 7d <span className="tabular-nums text-foreground">{formatPct(entry.spam_rate_7d)}</span>
                 </span>
                 <span className="tabular-nums">{entry.placement_sample_7d} observations</span>
+                <TabbedPlacement rate={entry.tabbed_rate_7d} tabCapableSamples={entry.tab_capable_sample_7d} />
               </div>
               <LaneReason lane={entry.lane} reason={entry.lane_reason} />
             </>
@@ -190,6 +200,78 @@ function LaneReason({ lane, reason }: { lane: string; reason: string }) {
       <span className="sr-only">Pool status: </span>
       {reason}
     </p>
+  )
+}
+
+/**
+ * What may honestly be said about a mailbox's tabbed-placement rate.
+ *
+ * `null` is not "no tabs". Tabs are structurally undetectable over IMAP — they do
+ * not exist as a concept there — so an absent rate means nothing observing this
+ * mailbox could report a category, and a percentage would claim a measurement
+ * that never happened. A rate arriving with no tab-capable observations behind it
+ * is the same absence in the shape of a contradiction (a fraction of a population
+ * of zero), and is read the same way.
+ *
+ * A rate of 0 over a real sample is the opposite case and stays a measurement:
+ * everything a provider could categorise landed in the primary inbox, which is
+ * the only good news this metric can deliver.
+ *
+ * Both fields are optional in the contract, so `undefined` — a server that does
+ * not report them yet — lands in the undetectable branch too, rather than
+ * defaulting to a clean zero the way an omitted `lane` once defaulted to
+ * "Proving" on every card.
+ */
+type TabbedReading = { detected: false } | { detected: true; pct: string; tabCapableSamples: number }
+
+function tabbedReading(rate: number | null | undefined, tabCapableSamples: number | undefined): TabbedReading {
+  const samples = tabCapableSamples ?? 0
+  if (rate == null || samples <= 0) return { detected: false }
+  return { detected: true, pct: formatPct(rate), tabCapableSamples: samples }
+}
+
+/**
+ * The share of warmup mail that landed in a tab (Gmail Promotions and friends)
+ * rather than the primary inbox — the number that stops a mailbox reporting a
+ * 100% inbox rate on mail almost nobody opens.
+ *
+ * It carries its own sample count because its denominator is NOT the observations
+ * figure beside it: only observations whose reader could have seen a tab count
+ * here, so 35% and "40 observations" describe two different populations and must
+ * not be left to be read as one.
+ *
+ * And it says it gates nothing, because it does: no threshold, lane or promotion
+ * decision reads it (design §8 — gating on a signal invisible across a whole
+ * provider class would make promotion unreachable for every SMTP mailbox). That
+ * note is on both branches: beside a rate so a high one is never mistaken for the
+ * reason a mailbox is throttled, and beside the absence so "not detectable" is
+ * never read as a penalty for using IMAP.
+ */
+function TabbedPlacement({
+  rate,
+  tabCapableSamples,
+}: {
+  rate: number | null | undefined
+  tabCapableSamples: number | undefined
+}) {
+  const reading = tabbedReading(rate, tabCapableSamples)
+  return (
+    <span data-slot="tabbed-placement">
+      tabbed 7d{' '}
+      {reading.detected ? (
+        <>
+          <span className="tabular-nums text-foreground">{reading.pct}</span>{' '}
+          <span className="whitespace-nowrap tabular-nums">
+            of {reading.tabCapableSamples.toLocaleString()} tab-capable
+          </span>
+        </>
+      ) : (
+        <span className="text-foreground">Not detectable — no partner could report a tab</span>
+      )}
+      {/* Wrapped as a unit: on a phone this line breaks, and "· gates" / "nothing"
+          split across two lines reads worse than moving the whole note down. */}
+      <span className="whitespace-nowrap text-faint"> · gates nothing</span>
+    </span>
   )
 }
 
