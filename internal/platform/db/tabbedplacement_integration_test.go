@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -154,7 +155,7 @@ func assertPlacement(t *testing.T, ctx context.Context, pool gen.DBTX, query str
 	t.Helper()
 	var got string
 	if err := pool.QueryRow(ctx, query, arg).Scan(&got); err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			t.Fatalf("%s: the row is gone — a rollback must not destroy reputation evidence", query)
 		}
 		t.Fatalf("%s: %v", query, err)
