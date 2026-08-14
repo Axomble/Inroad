@@ -155,6 +155,13 @@ LEFT JOIN (
            --     fold the spam rate into the tabbed one and a mailbox with a spam
            --     problem would read as having less of a tab problem.
            --
+           -- WHOSE capability this is matters when reading the result: placement is
+           -- attributed to the SENDER (o.mailbox_id) but tab_capable was recorded by
+           -- the RECIPIENT's poller, so this denominator counts what a mailbox's
+           -- PARTNERS could see. A Gmail sender whose peers are all IMAP has no
+           -- measurable tabbed rate — a fact about the pool it warms against, not
+           -- about its own provider.
+           --
            -- Kept textually identical to the same arms in
            -- UpsertWarmupSignalSnapshotsForWorkspace, which materializes the same two
            -- numbers for the sweep.

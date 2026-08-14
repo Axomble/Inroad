@@ -228,11 +228,17 @@ type WarmupMailboxDTO struct {
 	PlacementSample7d int64  `json:"placement_sample_7d"`
 	// TabbedRate7d is the fraction of this mailbox's categorisable warmup mail that
 	// landed in a TAB rather than the primary inbox. NULL — never 0.0 — when nothing
-	// observing it could report a category, which is the honest answer for IMAP,
-	// where tabs do not exist as a concept. A zero would read as a confident clean
-	// rate for a mailbox whose tabs are merely invisible, i.e. for most of a
-	// self-hosted pool, so the UI must render null as "not detectable for this
-	// provider".
+	// that OBSERVED this mailbox's mail could report a category. A zero would read as
+	// a confident clean rate for a mailbox whose tabs are merely invisible, i.e. for
+	// most of a self-hosted pool.
+	//
+	// Note WHOSE capability decides it. Placement is attributed to the SENDER but
+	// recorded by the RECIPIENT's poller (Inbox7d works the same way), so the
+	// capability that fills this denominator belongs to the PARTNERS: a Gmail sender
+	// whose warmup peers are all IMAP reports null even though its own provider
+	// categorises perfectly well. The UI must therefore say "no partner could report
+	// a tab" and never make a statement about this mailbox's own provider — that
+	// would point an operator at a mailbox that is working fine.
 	//
 	// Reported for visibility only: no threshold, lane or promotion decision reads
 	// it. A signal invisible on a whole provider class must not gate anything, or

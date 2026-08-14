@@ -776,6 +776,12 @@ type WarmupReceiptInput struct {
 	// reader never had. It is also the tabbed rate's denominator, which is why
 	// pooling non-capable observations into it would dilute the rate toward zero and
 	// make an untested pool read clean.
+	//
+	// The reader here is the RECIPIENT's poller, while the placement it produces is
+	// attributed to the SENDER — so the aggregated rate is gated on what a mailbox's
+	// PARTNERS could see, not on its own provider. A Gmail sender whose warmup peers
+	// are all IMAP therefore has no measurable tabbed rate, which is the honest
+	// answer and not a statement about its own mailbox.
 	TabCapable bool
 }
 
