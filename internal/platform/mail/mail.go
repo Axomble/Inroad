@@ -47,6 +47,19 @@ type InboundMessage struct {
 	Header      netmail.Header // parsed RFC5322 header (From, In-Reply-To, References, Auto-Submitted, Content-Type, Message-ID)
 	ContentType string
 	Body        []byte // message body AFTER the top-level headers (not the raw message)
+	// PlacementCategory names the provider TAB this message was filed under
+	// ("promotions", "updates", "social", "forums", or a category Gmail adds
+	// later), and is empty when it was filed under none.
+	//
+	// Empty deliberately does NOT distinguish "no tab" from "this transport cannot
+	// report tabs" — IMAP has no concept of a tab and Graph reports a different
+	// thing entirely, so both leave it empty, as does a Gmail message in the
+	// primary inbox. Whether the reading path COULD have seen a tab is therefore
+	// not inferable from this field and is recorded separately, by the poller, from
+	// the path that produced the message (warmup_observations.tab_capable). Reading
+	// capability off an empty string here would count every IMAP landing as
+	// confirmed-primary, which is inventing evidence.
+	PlacementCategory string
 }
 
 // InboxReader polls a mailbox for new messages. Domains depend on this
