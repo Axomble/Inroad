@@ -76,6 +76,37 @@ func DSN(t *testing.T) string {
 	return withPoolLimits(dsn)
 }
 
+// ScratchDSN returns a DSN for a database of the calling test's own — created
+// empty here and DROPPED when the test finishes.
+//
+// It exists for the one thing the shared test database cannot serve: rolling a
+// migration BACK. Every package's setup migrates the shared database to the newest
+// version and `make test-integration` runs four packages at once, so a down
+// migration there drops a column another package is selecting at that moment. A
+// down path is still worth exercising — a broken one is otherwise discovered
+// during an incident, at the worst possible time — so it gets its own database.
+//
+// The name is suffixed rather than random so a crashed run leaves one
+// recognisable database behind instead of accumulating them; the DROP up front
+// makes the next run's schema clean regardless.
+func ScratchDSN(t *testing.T, name string) string {
+	t.Helper()
+	scratch := replaceDatabase(resolve(), "inroad_scratch_"+name)
+	drop := func() {
+		// FORCE terminates any leftover backend: a pool the test forgot to close
+		// would otherwise make DROP fail and strand the database.
+		if err := adminExec(scratch, `DROP DATABASE IF EXISTS %s WITH (FORCE)`); err != nil {
+			t.Errorf("dbtest: dropping scratch database %s: %v", redact(scratch), err)
+		}
+	}
+	drop() // a previous crashed run may have left it behind, with a half-rolled-back schema
+	if err := adminExec(scratch, `CREATE DATABASE %s`); err != nil {
+		t.Fatalf("dbtest: creating scratch database %s: %v", redact(scratch), err)
+	}
+	t.Cleanup(drop)
+	return withPoolLimits(scratch)
+}
+
 // withPoolLimits pins the pool size in the DSN so db.Connect's server-sized floor
 // does not apply to a test process. pool_min_conns=0 on top of the cap means a
 // package holds only the connections it is actually using, instead of keeping
@@ -157,16 +188,29 @@ func withTestSuffix(dsn string) (string, bool) {
 	return out, true
 }
 
-// ensureDatabase creates the target database if it is missing, by connecting to
-// the server's maintenance database. A duplicate error means a concurrent package
-// won the race, which is fine.
+// ensureDatabase creates the target database if it is missing. A duplicate error
+// means a concurrent package won the race, which is fine.
 func ensureDatabase(dsn string) error {
+	err := adminExec(dsn, `CREATE DATABASE %s`)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == duplicateDatabase {
+		return nil
+	}
+	return err
+}
+
+// adminExec runs one statement that cannot run inside the target database itself
+// (CREATE/DROP DATABASE), from a short-lived connection to the server's
+// maintenance database. stmt is a format string with a single %s for the target
+// database identifier: an identifier cannot be a bind parameter, so it is
+// double-quoted here, and it comes from a parsed DSN rather than from anything
+// user-supplied at runtime.
+func adminExec(dsn, stmt string) error {
 	cfg, err := pgconn.ParseConfig(dsn)
 	if err != nil {
 		return fmt.Errorf("parse dsn: %w", err)
 	}
-	target := cfg.Database
-	if target == "" {
+	if cfg.Database == "" {
 		return errors.New("dsn has no database name")
 	}
 
@@ -180,23 +224,17 @@ func ensureDatabase(dsn string) error {
 	adminDSN := db.WithoutPoolParams(replaceDatabase(dsn, "postgres"))
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
-		// Nothing to create against — surface the real reason (server down,
-		// wrong port) rather than a later, more confusing migration failure.
+		// Nothing to act against — surface the real reason (server down, wrong
+		// port) rather than a later, more confusing migration failure.
 		return fmt.Errorf("connect to maintenance database: %w", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
-	// The identifier cannot be parameterised; it is quoted instead, and it comes
-	// from a parsed DSN rather than anything user-supplied at runtime.
-	_, err = conn.Exec(ctx, `CREATE DATABASE "`+strings.ReplaceAll(target, `"`, `""`)+`"`)
-	if err == nil {
-		return nil
+	quoted := `"` + strings.ReplaceAll(cfg.Database, `"`, `""`) + `"`
+	if _, err := conn.Exec(ctx, fmt.Sprintf(stmt, quoted)); err != nil {
+		return fmt.Errorf("%q on database %q: %w", stmt, cfg.Database, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == duplicateDatabase {
-		return nil
-	}
-	return fmt.Errorf("create database %q: %w", target, err)
+	return nil
 }
 
 // replaceDatabase swaps the database name in a postgres URL, preserving
