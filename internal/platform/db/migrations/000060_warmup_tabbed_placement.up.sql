@@ -39,6 +39,24 @@ ALTER TABLE warmup_observations ADD CONSTRAINT warmup_observations_placement_che
 ALTER TABLE warmup_observations
     ADD COLUMN tab_capable BOOLEAN NOT NULL DEFAULT false;
 
+-- A positively-identified tab implies a reader that could see labels, so
+-- ('tabbed', tab_capable = false) is not a row that can honestly exist.
+--
+-- Refused at the INSERT rather than absorbed by the aggregation, because the blast
+-- radius differs by orders of magnitude. Left representable, such a row makes the
+-- tabbed rate's numerator exceed its denominator, and the snapshot CHECK below then
+-- catches it by aborting the refresh for the WHOLE WORKSPACE — one mis-recorded row
+-- stops promotions for every participant in that tenant, logged and easy to miss.
+-- Failing the single INSERT that is wrong keeps the blast radius at the row and
+-- names the writer that produced it. Same reasoning as 000055 turning the
+-- invalid-token safeguard into constraints instead of trusting one INSERT.
+--
+-- No existing row can violate it: 'tabbed' does not exist as a value until the
+-- CHECK widened above, in this same migration.
+ALTER TABLE warmup_observations
+    ADD CONSTRAINT warmup_observations_tabbed_requires_capability
+    CHECK (placement <> 'tabbed' OR tab_capable);
+
 -- Materialized per participant beside placement_inbox/placement_spam, for the
 -- reason those exist: the sweep computes evidence once per workspace rather than
 -- re-deriving it per participant on every tick.

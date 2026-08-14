@@ -748,11 +748,16 @@ type WarmupSendJob struct {
 // WarmupReceiptInput is the poller's report of one detected warmup message: the
 // pinned workspace, the warmup_send_id decoded from the verified X-Inroad-Warmup
 // token, the recipient mailbox that observed it, and its Placement (one of
-// "inbox" | "spam" | "other"). SourceFolder + MessageID are the receipt locator:
-// the provider folder the message was found in (e.g. "INBOX" | "Junk" | "SPAM" |
-// "JunkEmail") and its RFC822 Message-ID, persisted so the engage worker (C5b)
-// can relocate/rescue/mark-read the exact message. All ids are strings at the
+// "inbox" | "tabbed" | "spam" | "other"). SourceFolder + MessageID are the receipt
+// locator: the provider folder the message was found in (e.g. "INBOX" | "Junk" |
+// "SPAM" | "JunkEmail") and its RFC822 Message-ID, persisted so the engage worker
+// (C5b) can relocate/rescue/mark-read the exact message. All ids are strings at the
 // seam; the impl parses and pins them.
+//
+// "tabbed" is reported ONLY when a provider positively identified a tab (today:
+// Gmail's CATEGORY_* labels). "inbox" keeps meaning "landed in the inbox" and is
+// NOT redefined as "primary", because one value cannot mean "primary inbox" on
+// Gmail and "inbox, tab unknowable" on IMAP.
 type WarmupReceiptInput struct {
 	WorkspaceID      string
 	WarmupSendID     string
@@ -760,6 +765,18 @@ type WarmupReceiptInput struct {
 	Placement        string
 	SourceFolder     string
 	MessageID        string
+	// TabCapable reports whether the READING PATH that produced this observation
+	// could have identified a tab at all — true for the Gmail API reader, false for
+	// IMAP (no such concept) and Graph (inferenceClassification is a relevance
+	// guess, not a delivery category).
+	//
+	// It is a property of the reader, so it is recorded with the evidence rather than
+	// derived from mailboxes.provider afterwards: a mailbox migrated between
+	// providers would otherwise make historical observations claim a capability the
+	// reader never had. It is also the tabbed rate's denominator, which is why
+	// pooling non-capable observations into it would dilute the rate toward zero and
+	// make an untested pool read clean.
+	TabCapable bool
 }
 
 // WarmupEngagePlan is what a recipient should do about a newly received warmup

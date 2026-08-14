@@ -52,6 +52,22 @@ func TestTabbedPlacementMigrationRollsBackAndForwardAgain(t *testing.T) {
 	receiptID := insertTabbedReceipt(t, ctx, pool, ws, mailbox)
 	insertTabbedObservation(t, ctx, pool, ws, mailbox, "roundtrip-1")
 
+	// A positively-identified tab implies a reader that could see labels, so
+	// ('tabbed', tab_capable=false) is not a row that can honestly exist — and it is
+	// worth refusing at the INSERT rather than absorbing later. Left representable,
+	// it makes the tabbed rate's numerator able to exceed its denominator, which the
+	// snapshot's own CHECK then catches by aborting the refresh for the whole
+	// WORKSPACE: one mis-recorded row would stop promotions for every participant in
+	// that tenant. (Observed for real while proving these tests fail on a revert.)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, placement, source,
+		                                  attribution_trusted, tab_capable, idempotency_key)
+		 VALUES ($1, $2, 'placement', 'tabbed', 'warmup_receipt', true, false, 'incapable-tab')`,
+		ws, mailbox); err == nil {
+		t.Fatal("a tabbed placement was accepted from a reader that could not see tabs: " +
+			"the numerator of the tabbed rate can now exceed its denominator")
+	}
+
 	if err := db.MigrateDown(dsn); err != nil {
 		t.Fatalf("migrate down: %v", err)
 	}

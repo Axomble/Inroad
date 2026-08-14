@@ -23,6 +23,9 @@ ALTER TABLE warmup_signal_snapshots
     DROP COLUMN IF EXISTS placement_tabbed,
     DROP COLUMN IF EXISTS placement_tab_capable;
 
+-- Dropping tab_capable takes warmup_observations_tabbed_requires_capability with
+-- it, which is why the placement rewrite above has to come first: the constraint
+-- forbids exactly the rows that rewrite removes.
 ALTER TABLE warmup_observations DROP COLUMN IF EXISTS tab_capable;
 
 -- Re-add the EXACT prior definitions (migration 000018 for receipts, 000054 for

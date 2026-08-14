@@ -389,6 +389,177 @@ func TestPollGmailSpamWarmupRecordedAsSpam(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Provider-native tabbed placement (Phase 2 slice A). Gmail's Promotions tab IS
+// the inbox as far as this poller used to count, so a mailbox whose warmup mail
+// reliably landed there reported a 100% inbox rate. Two facts are recorded now:
+// WHICH tab (when a provider positively identifies one) and whether the reading
+// path could have identified one AT ALL.
+// ---------------------------------------------------------------------------
+
+// withCategory is the provider tab mail.GmailReader resolved from labelIds. IMAP
+// and Graph always leave it empty, which is why the capability is not inferable
+// from it.
+func withCategory(msg mail.InboundMessage, category string) mail.InboundMessage {
+	msg.PlacementCategory = category
+	return msg
+}
+
+// The headline: a Gmail message Gmail itself filed under Promotions is recorded
+// `tabbed`, not `inbox`. The observation also records that the reader COULD see the
+// tab, which is what keeps the tabbed rate's denominator honest.
+func TestPollGmailPromotionsIsRecordedAsTabbedAndTabCapable(t *testing.T) {
+	core := &warmupStubCore{
+		stubCore: &stubCore{job: coreapi.InboxPollJob{Provider: "gmail", AccessToken: []byte("tok"), Cursor: "1000"}},
+		plan:     coreapi.WarmupEngagePlan{ReceiptID: "rcpt-tab", EngageAfter: time.Minute},
+	}
+	token := warmupToken(t, warmupSecret, pollWS, "send-tab")
+	gmail := &fakeSpamGmail{inboxMsgs: []mail.InboundMessage{
+		withCategory(warmupMsg(t, 0, token, "<wm-tab@warm>", "<none@x>"), "promotions"),
+	}}
+
+	if err := PollHandler(core, nil, gmail, nil, replyclassify.New(nil), warmupSecret, &spyEngageEnqueuer{})(context.Background(), pollTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(core.receipts))
+	}
+	got := core.receipts[0]
+	if got.Placement != placementTabbed {
+		t.Errorf("placement = %q, want %q: a Promotions landing is not a primary-inbox landing", got.Placement, placementTabbed)
+	}
+	if !got.TabCapable {
+		t.Error("TabCapable = false for a Gmail reader that just read a category label")
+	}
+}
+
+// The other half of the same reader, and the arm that makes a Gmail mailbox's
+// tabbed rate mean anything: a message Gmail filed in the PRIMARY inbox is `inbox`
+// with the capability still TRUE. Gmail positively told us there was no tab, so the
+// observation belongs in the denominator.
+func TestPollGmailPrimaryInboxStaysInboxButRemainsTabCapable(t *testing.T) {
+	core := &warmupStubCore{
+		stubCore: &stubCore{job: coreapi.InboxPollJob{Provider: "gmail", AccessToken: []byte("tok"), Cursor: "1000"}},
+		plan:     coreapi.WarmupEngagePlan{ReceiptID: "rcpt-primary", EngageAfter: time.Minute},
+	}
+	token := warmupToken(t, warmupSecret, pollWS, "send-primary")
+	gmail := &fakeSpamGmail{inboxMsgs: []mail.InboundMessage{
+		warmupMsg(t, 0, token, "<wm-primary@warm>", "<none@x>"), // no category: the primary tab
+	}}
+
+	if err := PollHandler(core, nil, gmail, nil, replyclassify.New(nil), warmupSecret, &spyEngageEnqueuer{})(context.Background(), pollTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(core.receipts))
+	}
+	got := core.receipts[0]
+	if got.Placement != placementInbox {
+		t.Errorf("placement = %q, want inbox", got.Placement)
+	}
+	if !got.TabCapable {
+		t.Error("TabCapable = false: Gmail reported no category, which is evidence of the primary inbox, not an absence of evidence")
+	}
+}
+
+// IMAP has no concept of a tab, so an inbox landing there is `inbox` with the
+// capability FALSE. Recording true would pool observations that structurally cannot
+// report a tab into the rate's denominator and dilute it toward zero — making an
+// untested pool read clean, which is the defect the bounce denominators had.
+func TestPollIMAPInboxIsNotTabCapable(t *testing.T) {
+	core := newWarmupCore(t)
+	token := warmupToken(t, warmupSecret, pollWS, "send-imap")
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{warmupMsg(t, 11, token, "<wm-imap@warm>", "<none@x>")},
+	}
+
+	if err := runWarmupPoll(t, core, reader, &spyEngageEnqueuer{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(core.receipts))
+	}
+	got := core.receipts[0]
+	if got.Placement != placementInbox {
+		t.Errorf("placement = %q, want inbox", got.Placement)
+	}
+	if got.TabCapable {
+		t.Error("TabCapable = true over IMAP, where a tab is not observable at all")
+	}
+}
+
+// m365 is not tab-capable either. Graph's nearest concept,
+// inferenceClassification (focused|other), is a per-user RELEVANCE guess rather
+// than a delivery category; reporting it as a tab would put two meanings in one
+// column.
+func TestPollM365InboxIsNotTabCapable(t *testing.T) {
+	core := &warmupStubCore{
+		stubCore: &stubCore{job: coreapi.InboxPollJob{Provider: "m365", AccessToken: []byte("tok"), Cursor: "delta-old"}},
+		plan:     coreapi.WarmupEngagePlan{ReceiptID: "rcpt-m365", EngageAfter: time.Minute},
+	}
+	token := warmupToken(t, warmupSecret, pollWS, "send-m365")
+	graph := &fakeJunkGraph{inboxMsgs: []mail.InboundMessage{warmupMsg(t, 0, token, "<wm-m365@warm>", "<none@x>")}}
+
+	if err := PollHandler(core, nil, nil, graph, replyclassify.New(nil), warmupSecret, &spyEngageEnqueuer{})(context.Background(), pollTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(core.receipts))
+	}
+	if core.receipts[0].TabCapable {
+		t.Error("TabCapable = true for a Graph reader, which reports relevance rather than tabs")
+	}
+}
+
+// Spam wins over any tab, and the poller must not rely on the transport having
+// cleared the category for it: the folder it was SCANNING is what decides the
+// placement. A spam-foldered message is not in the inbox at all, so no tab applies.
+func TestPollGmailSpamWithACategoryIsStillSpam(t *testing.T) {
+	core := &warmupStubCore{
+		stubCore: &stubCore{job: coreapi.InboxPollJob{Provider: "gmail", AccessToken: []byte("tok"), Cursor: "1000"}},
+		plan:     coreapi.WarmupEngagePlan{ReceiptID: "rcpt-spam-tab", EngageAfter: time.Minute},
+	}
+	token := warmupToken(t, warmupSecret, pollWS, "send-spam-tab")
+	gmail := &fakeSpamGmail{spamMsgs: []mail.InboundMessage{
+		withCategory(warmupMsg(t, 0, token, "<wm-spam-tab@warm>", "<none@x>"), "promotions"),
+	}}
+
+	if err := PollHandler(core, nil, gmail, nil, replyclassify.New(nil), warmupSecret, &spyEngageEnqueuer{})(context.Background(), pollTask(t)); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.receipts) != 1 {
+		t.Fatalf("expected 1 receipt, got %d", len(core.receipts))
+	}
+	if got := core.receipts[0].Placement; got != placementSpam {
+		t.Errorf("placement = %q, want spam: a tab cannot apply to a message that is not in the inbox", got)
+	}
+}
+
+// The whole placement decision, pure: which folder the path was scanning, and what
+// the provider said about a tab.
+func TestWarmupPlacementResolvesTheFolderAndTheTab(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     readingPath
+		category string
+		want     string
+	}{
+		{"inbox with no tab", inboxPath(true), "", placementInbox},
+		{"inbox with a tab", inboxPath(true), "promotions", placementTabbed},
+		{"a tab reported by a path that cannot see tabs is still honoured", inboxPath(false), "promotions", placementTabbed},
+		{"junk with no tab", junkPath("Junk", false), "", placementSpam},
+		{"junk with a tab is spam", junkPath("SPAM", true), "promotions", placementSpam},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := warmupPlacement(tc.path, tc.category); got != tc.want {
+				t.Errorf("warmupPlacement(%+v, %q) = %q, want %q", tc.path, tc.category, got, tc.want)
+			}
+		})
+	}
+}
+
 // fakeJunkGraph is a GraphFetcher that also implements graphJunkScanner, so the
 // m365 branch exercises the JunkEmail-folder placement scan (the Graph parallel of
 // fakeSpamGmail).
