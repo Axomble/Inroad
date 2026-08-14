@@ -106,6 +106,125 @@ test('an empty placement window is shown as not measured', () => {
   expect(screen.getByText('Needs evidence')).toBeInTheDocument()
 })
 
+/**
+ * The tabbed-placement metric alone. Scoped deliberately: the row also renders an
+ * inbox and a spam percentage, so an assertion that "no percentage is shown" is
+ * only meaningful against this one element.
+ */
+function tabbedText(): string {
+  return document.querySelector('[data-slot="tabbed-placement"]')?.textContent ?? ''
+}
+
+// Tabs are structurally undetectable over IMAP — they do not exist as a concept
+// there — so `null` means "nothing observing this mailbox could report a
+// category", NOT "no tabs". A percentage here would tell an operator their SMTP
+// mailbox has perfect primary placement when nothing measured it at all.
+test('an undetectable tabbed rate is words, never a percentage', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, tabbed_rate_7d: null, tab_capable_sample_7d: 0 }}
+    />,
+  )
+
+  expect(tabbedText()).toMatch(/not detectable for this provider/i)
+  // Not merely "0%": ANY figure here is a measurement claim nothing made.
+  expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
+})
+
+// Both fields are optional in the contract, so an older server omits them
+// entirely. That absence must read the same as an explicit null — the silent
+// fallback that shipped once (`lane` omitted, every card read "Proving") is the
+// failure this asserts against.
+test('a payload with no tabbed fields at all is undetectable, not zero', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
+
+  expect(tabbedText()).toMatch(/not detectable for this provider/i)
+  expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
+})
+
+// The tabbed denominator is not the observations count beside it: only readers
+// that could have seen a tab contribute. Showing the rate without its own sample
+// invites comparing 35% against a 40-observation inbox rate — two populations.
+test('a measured tabbed rate carries its own tab-capable sample count', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, placement_sample_7d: 40, tabbed_rate_7d: 0.35, tab_capable_sample_7d: 25 }}
+    />,
+  )
+
+  expect(tabbedText()).toMatch(/35%/)
+  expect(tabbedText()).toMatch(/25 tab-capable/)
+  expect(tabbedText()).not.toMatch(/not detectable/i)
+  // The inbox/spam denominator stays its own number, unshared.
+  expect(screen.getByText('40 observations')).toBeInTheDocument()
+})
+
+// The opposite case, and the one a "falsy means unknown" implementation gets
+// wrong: 0 over a real tab-capable sample IS a measurement — every categorisable
+// message landed in the primary inbox — and hiding it behind "not detectable"
+// would throw away the only good news this metric can deliver.
+test('a zero rate over real tab-capable observations renders as a measured 0%', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, tabbed_rate_7d: 0, tab_capable_sample_7d: 18 }}
+    />,
+  )
+
+  expect(tabbedText()).toMatch(/\b0%/)
+  expect(tabbedText()).toMatch(/18 tab-capable/)
+  expect(tabbedText()).not.toMatch(/not detectable/i)
+})
+
+// A rate with no denominator behind it is a contradiction, and the safe reading
+// of a contradiction is the absence — never a printed fraction of nothing.
+test('a rate over zero tab-capable observations is not presented as a measurement', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, tabbed_rate_7d: 0.5, tab_capable_sample_7d: 0 }}
+    />,
+  )
+
+  expect(tabbedText()).toMatch(/not detectable for this provider/i)
+  expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
+})
+
+// Nothing reads this number — no threshold, no lane, no promotion bar (design
+// §8). It has to say so in both states: beside a rate so a high one isn't read as
+// the reason for a throttle, and beside the absence so an SMTP operator doesn't
+// read "not detectable" as a penalty.
+test('the tabbed rate states that it gates nothing, measured or not', () => {
+  const { unmount } = renderWithProviders(
+    <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, tabbed_rate_7d: 0.6, tab_capable_sample_7d: 30 }} />,
+  )
+  expect(tabbedText()).toMatch(/gates nothing/i)
+
+  unmount()
+  renderWithProviders(
+    <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, tabbed_rate_7d: null, tab_capable_sample_7d: 0 }} />,
+  )
+  expect(tabbedText()).toMatch(/gates nothing/i)
+})
+
+// Rounding a real signal down to "0%" is the same false-clean reading in a
+// smaller costume, and it applies to the gating rates too.
+test('a positive rate too small to round to a whole percent is not shown as zero', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, spam_rate_7d: 0.003, tabbed_rate_7d: 0.003, tab_capable_sample_7d: 300 }}
+    />,
+  )
+
+  expect(tabbedText()).toMatch(/<1%/)
+  expect(tabbedText()).not.toMatch(/\b0%/)
+  // One vocabulary, not two: the gating spam rate reads the same way.
+  expect(screen.getAllByText('<1%')).toHaveLength(2)
+})
+
 /** The two axis chips as an operator reads them: [reputation, pool]. */
 function badgeText(): { health: string | undefined; lane: string | undefined } {
   return {
