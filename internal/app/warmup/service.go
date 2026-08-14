@@ -245,8 +245,14 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 			TodaySent:         r.TodaySent,
 			TodayTarget:       targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
 			PlacementSample7d: placementSample,
-			InboxRate7d:       placementRate(r.Inbox7d, placementSample),
-			SpamRate7d:        placementRate(r.Spam7d, placementSample),
+			// The tabbed rate is measured over its OWN denominator: only the
+			// observations whose reader could have named a tab. Pooling the rest would
+			// dilute it toward zero, so a pool of IMAP mailboxes — most of a self-hosted
+			// deployment — would report a clean tab rate it never measured.
+			TabbedRate7d:       placementRate(r.Tabbed7d, r.TabCapable7d),
+			TabCapableSample7d: r.TabCapable7d,
+			InboxRate7d:        placementRate(r.Inbox7d, placementSample),
+			SpamRate7d:         placementRate(r.Spam7d, placementSample),
 		}
 	}
 	return WarmupOverviewDTO{

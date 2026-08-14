@@ -786,11 +786,24 @@ write history that never happened.
       (`TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender`).
     - `placement` requires a verified signed token AND a DB-proven send→recipient
       binding. A later observation of the SAME receipt may only make the placement
-      worse (`inbox`/`other` → `spam`), superseding the row rather than adding one,
-      so one message is always one sample: a re-poll cannot inflate the evidence,
-      and the engager's own rescue of a spam message back into the inbox cannot
-      erase the evidence that the rescue was needed
+      worse (`inbox`/`tabbed`/`other` → `spam`), superseding the row rather than
+      adding one, so one message is always one sample: a re-poll cannot inflate the
+      evidence, and the engager's own rescue of a spam message back into the inbox
+      cannot erase the evidence that the rescue was needed
       (`TestPlacementReclassificationIsMonotoneAndCountsOnce`).
+    - `tabbed` is recorded only when a provider POSITIVELY identifies a tab, and
+      `tab_capable` records whether the reading path could have identified one. Both
+      are written from the poller that read the message, never derived from
+      `mailboxes.provider` afterwards: a mailbox migrated between providers would
+      otherwise make historical observations claim a capability the reader never had.
+      `('tabbed', tab_capable = false)` is refused by a CHECK, because that row makes
+      the tabbed rate's numerator exceed its denominator and the snapshot's own CHECK
+      then aborts the refresh for a whole WORKSPACE — one bad row would stop
+      promotions for every participant in the tenant. The tabbed rate gates NOTHING:
+      the signal is undetectable on an entire provider class, so a threshold on it
+      would make promotion unreachable for every SMTP mailbox or demand assuming
+      primary placement where we cannot see
+      (`TestWideningThePlacementVocabularyChangesNoHealthStateAndNoLane`).
 
 53. **Containment cannot be cleared by the tenant.** `quarantine` and `blocked` are
     carried across a disable/re-enable: the participant row is deleted on disable,

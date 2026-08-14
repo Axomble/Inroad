@@ -84,6 +84,11 @@ type UpsertParams struct {
 // read. Inbox7d/Spam7d are the numerator/denominator inputs the service turns
 // into inbox_rate_7d / spam_rate_7d; the denominator is Inbox7d+Spam7d (observed
 // placements of this mailbox's SENT warmup mail), not received volume.
+//
+// Tabbed7d/TabCapable7d are the tabbed rate and ITS OWN denominator. Inbox7d
+// already INCLUDES the tabbed landings (a tabbed message landed in the inbox), so
+// the two pairs are not disjoint by design: the tab is a sub-location within the
+// inbox, and reporting it must not move inbox_rate_7d.
 type OverviewRow struct {
 	MailboxID     uuid.UUID
 	Enabled       bool
@@ -99,7 +104,13 @@ type OverviewRow struct {
 	Email         string
 	Inbox7d       int64
 	Spam7d        int64
-	TodaySent     int32
+	// Tabbed7d counts placements a provider positively identified as a tab.
+	// TabCapable7d counts the inbox-side placements whose READER could have
+	// identified one — the only honest denominator for a rate over a signal that is
+	// undetectable on an entire provider class.
+	Tabbed7d     int64
+	TabCapable7d int64
+	TodaySent    int32
 }
 
 func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
@@ -118,6 +129,8 @@ func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
 		Email:         r.Email,
 		Inbox7d:       r.Inbox7d,
 		Spam7d:        r.Spam7d,
+		Tabbed7d:      r.Tabbed7d,
+		TabCapable7d:  r.TabCapable7d,
 		TodaySent:     r.TodaySent,
 	}
 }
@@ -208,13 +221,29 @@ type WarmupMailboxDTO struct {
 	// The POOL ELIGIBILITY axis. Required by the schema since lanes shipped, but
 	// unpopulated until now, so the SPA saw undefined and rendered every mailbox as
 	// "probation" regardless of its real lane.
-	Lane              string   `json:"lane"`
-	LaneReason        string   `json:"lane_reason"`
-	TodaySent         int32    `json:"today_sent"`
-	TodayTarget       int32    `json:"today_target"`
-	PlacementSample7d int64    `json:"placement_sample_7d"`
-	InboxRate7d       *float64 `json:"inbox_rate_7d"`
-	SpamRate7d        *float64 `json:"spam_rate_7d"`
+	Lane              string `json:"lane"`
+	LaneReason        string `json:"lane_reason"`
+	TodaySent         int32  `json:"today_sent"`
+	TodayTarget       int32  `json:"today_target"`
+	PlacementSample7d int64  `json:"placement_sample_7d"`
+	// TabbedRate7d is the fraction of this mailbox's categorisable warmup mail that
+	// landed in a TAB rather than the primary inbox. NULL — never 0.0 — when nothing
+	// observing it could report a category, which is the honest answer for IMAP,
+	// where tabs do not exist as a concept. A zero would read as a confident clean
+	// rate for a mailbox whose tabs are merely invisible, i.e. for most of a
+	// self-hosted pool, so the UI must render null as "not detectable for this
+	// provider".
+	//
+	// Reported for visibility only: no threshold, lane or promotion decision reads
+	// it. A signal invisible on a whole provider class must not gate anything, or
+	// promotion becomes unreachable for every SMTP mailbox.
+	TabbedRate7d *float64 `json:"tabbed_rate_7d"`
+	// TabCapableSample7d is TabbedRate7d's denominator, counted separately because
+	// pooling observations that structurally cannot report a tab would dilute the
+	// rate toward zero and make an untested pool read clean.
+	TabCapableSample7d int64    `json:"tab_capable_sample_7d"`
+	InboxRate7d        *float64 `json:"inbox_rate_7d"`
+	SpamRate7d         *float64 `json:"spam_rate_7d"`
 }
 
 // WarmupOverviewDTO is the WarmupOverview schema: the pool summary plus per

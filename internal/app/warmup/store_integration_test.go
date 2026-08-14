@@ -361,6 +361,71 @@ func seedTransitionWithPopulation(t *testing.T, f fixture, ws, mailbox uuid.UUID
 	}
 }
 
+// The overview read has to carry the tabbed pair with the RIGHT denominator, which
+// is the half of this feature a unit test over the service cannot prove: the
+// service is handed whatever the SQL counted.
+//
+// The fixture mixes what a real pool mixes — a Gmail mailbox whose reader can name a
+// tab, and IMAP observations that structurally cannot report one — and pins the
+// three ways this can go wrong: the tabbed landings must stay inside the inbox-side
+// sample (dropping them would push the mailbox under MinPlacementSamples elsewhere),
+// the non-capable rows must stay OUT of the tabbed denominator (pooling them dilutes
+// the rate toward zero), and a spam landing must not enter it either (it is in no
+// tab, so counting it would fold the spam rate into the tabbed one).
+func TestOverviewRowsCarryTheTabbedPairWithItsOwnDenominator(t *testing.T) {
+	f := setup(t)
+	ctx, store, w, mb := f.ctx, f.store, f.ws, f.mb
+
+	if _, err := store.UpsertParticipant(ctx, UpsertParams{
+		MailboxID: mb.ID, WorkspaceID: w.ID,
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+	}); err != nil {
+		t.Fatalf("seed participant: %v", err)
+	}
+	seedPlacementObservations(t, f, w.ID, mb.ID, "inbox", true, 6)   // Gmail, primary
+	seedPlacementObservations(t, f, w.ID, mb.ID, "tabbed", true, 2)  // Gmail, a tab
+	seedPlacementObservations(t, f, w.ID, mb.ID, "inbox", false, 12) // IMAP: no tab observable
+	seedPlacementObservations(t, f, w.ID, mb.ID, "spam", true, 5)    // Gmail, junk: in no tab
+
+	rows, err := store.ListOverviewRows(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("list overview rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 overview row, got %d", len(rows))
+	}
+	got := rows[0]
+	if got.Inbox7d != 20 {
+		t.Errorf("inbox_7d = %d, want 20 (6 primary + 12 IMAP + 2 tabbed: a tabbed message landed in the inbox)", got.Inbox7d)
+	}
+	if got.Spam7d != 5 {
+		t.Errorf("spam_7d = %d, want 5", got.Spam7d)
+	}
+	if got.Tabbed7d != 2 {
+		t.Errorf("tabbed_7d = %d, want 2", got.Tabbed7d)
+	}
+	if got.TabCapable7d != 8 {
+		t.Errorf("tab_capable_7d = %d, want 8 (the 6 primary + 2 tabbed Gmail observations only): "+
+			"the 12 IMAP rows cannot report a tab and the 5 spam rows are in no tab", got.TabCapable7d)
+	}
+}
+
+// seedPlacementObservations writes n trusted sender-attributed placement rows
+// directly. The observation WRITER is exercised in coreapi's integration tests; this
+// file is about the overview READ, so the rows are inserted rather than earned.
+func seedPlacementObservations(t *testing.T, f fixture, ws, mailbox uuid.UUID, placement string, tabCapable bool, n int) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx,
+		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, placement, tab_capable,
+		                                  source, attribution_trusted, idempotency_key)
+		 SELECT $1, $2, 'placement', $3::text, $4::boolean, 'warmup_receipt', true,
+		        'ov:' || $3::text || ':' || $4::boolean::text || ':' || g::text
+		   FROM generate_series(1, $5) g`,
+		ws, mailbox, placement, tabCapable, n); err != nil {
+		t.Fatalf("seed %s observations: %v", placement, err)
+	}
+}
+
 // TestMailboxInWorkspaceIsTheOwnershipGate proves the 404 test: true for this
 // workspace's mailbox (participant or not), false for another workspace's and
 // for a mailbox that does not exist.
