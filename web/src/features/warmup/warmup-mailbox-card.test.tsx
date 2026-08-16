@@ -419,6 +419,65 @@ test('the identity and history disclosures are independent', () => {
   expect(historyRequests()).toBe(0)
 })
 
+/** The destination-route disclosure, reached the way a screen reader reaches it. */
+function routesToggle(): HTMLElement {
+  return screen.getByRole('button', { name: /destination routes for a@example\.com/i })
+}
+
+// Diagnostic detail behind a lazy chunk, so the matrix must not be mounted until
+// it is asked for: it answers "which route is failing", a question raised only
+// once the pooled rates on the row above have already looked wrong, and it gates
+// nothing — so it must not sit where a gating figure sits.
+test('the destination routes are collapsed until the operator opens them', async () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
+
+  const toggle = routesToggle()
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+  // The REGION the toggle controls, asserted empty — not merely "no matrix
+  // marker yet". A lazily-mounted panel is in the DOM as its Suspense fallback
+  // from its very first commit, so a missing `[data-slot="warmup-routes"]` is
+  // equally true of a panel that mounts eagerly and is still loading its chunk,
+  // and that assertion would pass on the regression it exists to catch.
+  const region = document.getElementById(toggle.getAttribute('aria-controls') ?? '')
+  expect(region, 'the routes disclosure must name the region it controls').not.toBeNull()
+  expect(region?.childElementCount).toBe(0)
+
+  fireEvent.click(toggle)
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  // The detail payload the card already holds carries no routes, so the panel
+  // opens on the absence rather than on an empty matrix of clean headings.
+  expect(await screen.findByText(/no route to report/i)).toBeInTheDocument()
+})
+
+// Three disclosures on one row now. Opening the routes must not open the other
+// two, and — the reason this is asserted rather than assumed — must not fetch the
+// history either, since the matrix rides on the detail query the card already
+// issued and costs no request of its own.
+test('opening the routes opens neither the identity nor the history', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
+
+  fireEvent.click(routesToggle())
+
+  expect(document.querySelector('[data-slot="warmup-identity"]')).toBeNull()
+  expect(screen.getByRole('button', { name: /sending identity for a@example\.com/i })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  )
+  expect(screen.getByRole('button', { name: /change history for a@example\.com/i })).toHaveAttribute(
+    'aria-expanded',
+    'false',
+  )
+  expect(historyRequests()).toBe(0)
+})
+
+test('a mailbox that is not warming up has no routes to show', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={undefined} />)
+
+  expect(screen.queryByRole('button', { name: /destination routes/i })).not.toBeInTheDocument()
+})
+
 test('a failed disable surfaces the inline error alert with the generic copy', async () => {
   disableResponder = () =>
     new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: jsonHeaders })

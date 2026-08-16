@@ -102,6 +102,11 @@ const (
 // empty host, which is a misconfigured mailbox that will fail to send anyway.
 // Never Unknown: this classification always completes, since it reads columns
 // that are already in hand (judgement 3).
+//
+// It answers "who does this mailbox SUBMIT through". For "where was mail to this
+// mailbox DELIVERED" — what a warmup destination route records — use
+// FromRecipient: smtp_host is the outbound relay, and an smtp mailbox can submit
+// through SendGrid while its inbound MX is Google Workspace.
 func FromMailbox(provider, smtpHost string) ESP {
 	switch provider {
 	case providerGmail:
@@ -121,6 +126,58 @@ func FromMailbox(provider, smtpHost string) ESP {
 	default:
 		return Other
 	}
+}
+
+// FromRecipient classifies where mail to a RECIPIENT mailbox was delivered, from
+// that mailbox's transport tag and the recipient_domains MX cache's answer for
+// its domain (cachedESP; "" for a miss).
+//
+// Not FromMailbox, and the difference is the whole point: FromMailbox reads
+// smtp_host, which is the OUTBOUND relay. An smtp mailbox can submit through
+// SendGrid while its inbound MX is Google Workspace, so classifying a delivery by
+// the relay would file it under a destination the message never reached — and
+// permanently, because the observation it lands on is immutable.
+//
+// The API providers are conclusive and outrank the cache: a gmail/m365 mailbox IS
+// hosted there, so no MX record can contradict it. A Workspace tenant fronted by a
+// third-party filter caches as Other (FromMX reads the primary MX) while the
+// mailbox is still Google's — the provider is the better evidence in that case,
+// not merely the cheaper one.
+//
+// For an smtp mailbox the cache is the only evidence there is, and a miss is
+// Unknown — never Other, and never a DNS lookup. This runs on the warmup receipt
+// path, where resolving would put a network round trip in front of a write whose
+// failure wedges the poll cursor and stops ALL inbound processing for the mailbox.
+// The recipientesp sweep does the resolving, off the hot path; until it has, the
+// honest answer is "we have not resolved this domain".
+//
+// Pure by design: it is table-testable, and the two facts it reads (a transport
+// tag, a cached string) are both already in hand at the call site.
+func FromRecipient(provider, cachedESP string) ESP {
+	switch provider {
+	case providerGmail:
+		return Google
+	case providerM365:
+		return Microsoft
+	}
+	// Validated rather than converted: cachedESP crosses a boundary (a Postgres
+	// column, and one whose vocabulary a future migration could widen). An
+	// unrecognised value read straight through would become a route of its own in
+	// a matrix that GROUPs BY it, which is a silent failure; Unknown is the state
+	// that already means "no classification to trust".
+	//
+	// UNREACHABLE TODAY, and kept deliberately. recipient_domains.esp carries its
+	// own CHECK over the same four values (migration 000048) and the reader's JOIN
+	// drops rows whose lookup never completed, so the only value that reaches here
+	// outside the vocabulary is "", which the observation INSERT already coalesces
+	// to 'unknown'. No test can exercise this branch without first widening that
+	// CHECK — stated plainly rather than left to imply a live guard, because a
+	// reader who assumed it was load-bearing might drop the SQL-side defences that
+	// actually are.
+	if !Valid(cachedESP) {
+		return Unknown
+	}
+	return ESP(cachedESP)
 }
 
 // googleMXHosts are the MX suffixes Google publishes: Workspace
@@ -229,7 +286,7 @@ func NewResolver() Resolver { return net.DefaultResolver }
 // mxHost is the primary MX as observed, kept for operator diagnosis: when a
 // domain reads Other, the host is the only thing that explains why.
 func Lookup(ctx context.Context, res Resolver, domain string) (result ESP, mxHost string, ok bool) {
-	if domain == "" {
+	if !resolvableName(domain) {
 		return Unknown, "", false
 	}
 	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
@@ -239,6 +296,17 @@ func Lookup(ctx context.Context, res Resolver, domain string) (result ESP, mxHos
 		// A domain with no MX resolves as an error on most resolvers. That is a
 		// completed answer, not a failure — the domain simply is not on Google or
 		// Microsoft — so it is recorded as Other and not retried every sweep.
+		//
+		// This is why resolvableName above is load-bearing rather than tidy. Go's
+		// resolver rejects a syntactically impossible name BEFORE sending a packet
+		// and reports it as IsNotFound, indistinguishable here from a real "no such
+		// domain". Recording that as Other would persist a verdict about a name
+		// nobody ever asked DNS about — and, because the writer trims the key while
+		// the sweep's fan-out does not, it would land on the TRIMMED domain's row.
+		// A mailbox at "a@ example.com" would pin example.com to Other, hiding it
+		// from re-lookup for a full staleness window and filing every warmup
+		// observation to it under the wrong route, permanently, since observations
+		// are immutable by design.
 		if isNotFound(err) {
 			return Other, "", true
 		}
@@ -256,6 +324,39 @@ func Lookup(ctx context.Context, res Resolver, domain string) (result ESP, mxHos
 	}
 	return FromMX(hosts), normalizeHost(hosts[0]), true
 }
+
+// resolvableName reports whether a string is worth asking a resolver about.
+//
+// Go's resolver rejects a syntactically impossible name locally and returns a
+// DNSError with IsNotFound set — the same shape as a genuine NXDOMAIN — so
+// without this check a malformed name becomes a persisted verdict of Other. A
+// name that could never resolve is not evidence about anyone's DNS, and the
+// esp package's own rule is that Other means "checked, and it is neither".
+//
+// Deliberately narrow: it rejects what cannot be a hostname (whitespace, empty
+// labels, leading/trailing dots or hyphens, over-length) and does not attempt to
+// be a full RFC 1035 validator. Anything it lets through and DNS rejects is
+// still classified the same way it always was.
+func resolvableName(domain string) bool {
+	if domain == "" || len(domain) > maxDomainNameLength {
+		return false
+	}
+	if strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") ||
+		strings.HasPrefix(domain, "-") || strings.Contains(domain, "..") {
+		return false
+	}
+	for i := 0; i < len(domain); i++ {
+		switch c := domain[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// maxDomainNameLength is RFC 1035's limit on a domain name.
+const maxDomainNameLength = 253
 
 // isNotFound reports whether err means "the name has no MX" rather than "we
 // could not find out". Read from *net.DNSError.IsNotFound (which covers both

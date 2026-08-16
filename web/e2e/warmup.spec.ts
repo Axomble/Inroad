@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 /**
  * The warmup pool surfaces in a real browser.
@@ -142,6 +142,136 @@ const OVERVIEW = {
 }
 
 /**
+ * Destination-route matrices, keyed by mailbox id and served from the warmup
+ * DETAIL endpoint each enrolled card already fetches for its sparkline — so the
+ * routes disclosure costs a lazy chunk and no request of its own.
+ *
+ * Three shapes, each of which renders dishonestly the moment a copy rule is
+ * dropped:
+ *
+ * `mailbox-withheld` is the headline case and the reason the split exists at all:
+ * mail to Google is clean, and mail to Microsoft goes to spam more than half the
+ * time. Pooled into one rate those two collapse into a single blended number that
+ * understates the Microsoft problem and slanders the Google route, so the rows
+ * have to show visibly different figures over visibly different denominators —
+ * 55% of 60 and 1% of 400 are not comparable, and a matrix invites exactly that
+ * comparison. It also carries the two destinations most likely to be flattened
+ * into each other: `other` is RESOLVED and merely neither Google nor Microsoft (a
+ * finding about the receiver), while `unknown` is our MX lookup not having
+ * happened (a gap on our side). Rendering `unknown` as a fourth provider beside
+ * the other three invents a place the mail was delivered to.
+ *
+ * `mailbox-primary` is a single-ESP pool, which design §3 calls the worst
+ * misreading this feature enables. Warmup partners are the workspace's OWN
+ * connected mailboxes, so an all-Google pool can only ever be measured against
+ * Google — and this one is spotless: 100% inbox and a genuine measured 0% spam. A
+ * tidy one-row matrix would tell its operator that their Microsoft delivery is
+ * healthy when no warmup mail was ever sent to Microsoft.
+ *
+ * `mailbox-proving` is §8's degradation: the MX sweep is behind, so the single row
+ * records no destination at all and every rate is under the sample floor. Naming a
+ * provider here would invent one, and a null rate rendered as a clean 0% would
+ * report a result from evidence nobody has.
+ *
+ * Every tab-capable count is a subset of its own row's placement count, because
+ * that is the only shape the server can produce: a route with 4 observations
+ * cannot have 60 tab-capable ones, and a fixture that says otherwise tests a
+ * rendering that will never happen.
+ */
+const ROUTES: Record<string, unknown[]> = {
+  'mailbox-withheld': [
+    {
+      destination_esp: 'google',
+      placement_sample_7d: 400,
+      inbox_rate_7d: 0.99,
+      spam_rate_7d: 0.01,
+      tabbed_rate_7d: 0.12,
+      tab_capable_sample_7d: 300,
+    },
+    {
+      destination_esp: 'microsoft',
+      placement_sample_7d: 60,
+      inbox_rate_7d: 0.45,
+      spam_rate_7d: 0.55,
+      // Nothing that received this route's mail could report a category, which is
+      // an absence — not a clean primary inbox on the one route that is failing.
+      tabbed_rate_7d: null,
+      tab_capable_sample_7d: 0,
+    },
+    {
+      destination_esp: 'other',
+      placement_sample_7d: 24,
+      // Zero over real samples, on BOTH kinds of denominator: no mail on this
+      // route went to spam, and everything a reader could categorise reached the
+      // primary inbox. Measurements, and the only good news the matrix can
+      // deliver — a "falsy means unknown" implementation throws all three away.
+      // The placement zero is deliberate: the tabbed rate has its own null
+      // handling, so a matrix whose only zero is a tabbed one leaves the
+      // placement path untested.
+      inbox_rate_7d: 1,
+      spam_rate_7d: 0,
+      tabbed_rate_7d: 0,
+      tab_capable_sample_7d: 6,
+    },
+    {
+      destination_esp: 'unknown',
+      placement_sample_7d: 9,
+      inbox_rate_7d: null,
+      spam_rate_7d: null,
+      tabbed_rate_7d: null,
+      tab_capable_sample_7d: 0,
+    },
+  ],
+  'mailbox-primary': [
+    {
+      destination_esp: 'google',
+      placement_sample_7d: 120,
+      inbox_rate_7d: 1,
+      spam_rate_7d: 0,
+      tabbed_rate_7d: 0.05,
+      tab_capable_sample_7d: 40,
+    },
+  ],
+  'mailbox-proving': [
+    {
+      destination_esp: 'unknown',
+      placement_sample_7d: 7,
+      inbox_rate_7d: null,
+      spam_rate_7d: null,
+      tabbed_rate_7d: null,
+      tab_capable_sample_7d: 0,
+    },
+  ],
+}
+
+/**
+ * The detail payload behind one mailbox's card. `series` is deliberately empty:
+ * the sparkline is not what these fixtures are about, and its "not enough history
+ * yet" line keeps the card's own text clear of the matrix under test.
+ */
+function warmupDetail(mailboxId: string) {
+  const entry = OVERVIEW.mailboxes.find((m) => m.mailbox_id === mailboxId)
+  return {
+    participant: {
+      mailbox_id: mailboxId,
+      enabled: true,
+      start_volume: 4,
+      max_volume: 40,
+      ramp_increment: 2,
+      reply_rate: 0.3,
+      health_state: entry?.health_state ?? 'unknown',
+      health_reason: entry?.health_reason ?? '',
+      lane: entry?.lane ?? 'probation',
+      started_at: '2026-08-01T00:00:00Z',
+      today_sent: entry?.today_sent ?? 0,
+      today_target: entry?.today_target ?? 0,
+    },
+    series: [],
+    routes: ROUTES[mailboxId] ?? [],
+  }
+}
+
+/**
  * One transition carrying the two shapes most likely to be rendered dishonestly: a
  * spam rate of 0 over a REAL sample (a floor below the policy minimum, not a
  * measurement), and no recorded lane (an entry predating pool lanes).
@@ -206,6 +336,12 @@ async function mockApi(page: Page) {
     }
     if (path.endsWith('/warmup/overview')) return route.fulfill(json(OVERVIEW))
 
+    // One mailbox's warmup detail — the series behind its sparkline and the
+    // destination-route matrix behind its Routes disclosure. Matched before the
+    // bare `/mailboxes` list below, which this path does not end with.
+    const detail = /\/mailboxes\/([^/]+)\/warmup$/.exec(path)
+    if (detail) return route.fulfill(json(warmupDetail(detail[1] ?? '')))
+
     if (path.endsWith('/pulse')) {
       return route.fulfill(json({
         mailboxes: { total: 2, active: 2, paused: 0, error: 0 },
@@ -269,6 +405,62 @@ async function openIdentity(page: Page, email: string) {
   const region = await toggle.getAttribute('aria-controls')
   expect(region, 'the identity disclosure must name the region it controls').toBeTruthy()
   return page.locator(`[id="${region}"]`)
+}
+
+/**
+ * Opens the destination-route disclosure and returns the matrix it controls,
+ * resolved through `aria-controls` — the same hop a screen reader makes. Scoping
+ * to the panel is not cosmetic: the metrics row on the same card and the identity
+ * panel beside it BOTH carry a "gates nothing" note, so a card-wide assertion
+ * about this one would pass on somebody else's sentence.
+ */
+async function openRoutes(page: Page, email: string) {
+  const toggle = page.getByRole('button', { name: `Destination routes for ${email}` })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+  const region = await toggle.getAttribute('aria-controls')
+  expect(region, 'the routes disclosure must name the region it controls').toBeTruthy()
+  const panel = page.locator(`[id="${region}"] [data-slot="warmup-routes"]`)
+  await expect(panel).toBeVisible()
+  return panel
+}
+
+/**
+ * One destination's row, found through the name the MATRIX gives it rather than
+ * the contract token — so a row that quietly renders `unknown` as a provider
+ * cannot be found under the name it should have had.
+ *
+ * Matched on the destination node alone. The unresolved row's explanation names
+ * "Another provider" on purpose, to disown it, so a whole-row text filter would
+ * return two rows for one destination and the collapse this guards against would
+ * pass unnoticed. The inner locator is built from `page` because Playwright
+ * re-anchors it to the row it is filtering.
+ */
+function routeRow(page: Page, panel: Locator, destination: string | RegExp): Locator {
+  return panel
+    .locator('tbody tr')
+    .filter({ has: page.locator('[data-slot="route-destination"]', { hasText: destination }) })
+}
+
+/** The row's rendered destination name, without the sentence explaining it. */
+function destinationOf(row: Locator): Locator {
+  return row.locator('[data-slot="route-destination"]')
+}
+
+/**
+ * One row's rate VALUES in column order, without their populations or their
+ * explanatory sentences. Scoped for the same reason the destination is: a spam
+ * rate that silently became "Not established" still reads plausibly when the
+ * surrounding sample text is swept into the comparison.
+ */
+function ratesOf(row: Locator): Locator {
+  return row.locator('[data-slot="route-rate"]')
+}
+
+function populationsOf(row: Locator): Locator {
+  return row.locator('[data-slot="route-population"]')
 }
 
 async function signIn(page: Page) {
@@ -432,4 +624,160 @@ test('an entry predating pool lanes says so instead of inventing a lane', async 
   await expect(panel).toContainText(/predates pool lanes|no pool lane/i)
   // The bounce figure is attributed, so the operator can tell whose mail it counted.
   await expect(panel).toContainText(/campaign/i)
+})
+
+/* ------------------------------------------------- destination-route matrix */
+
+// The matrix carries the largest copy table on this screen and answers a question
+// nobody asks until the pooled rates above have already looked wrong, so it ships
+// as a lazy chunk behind a disclosure. A page of ten collapsed cards must not
+// mount ten of them.
+test('the destination matrix is not mounted until the operator opens it', async ({ page }) => {
+  const withheld = card(page, 'withheld@acme.test')
+  await expect(withheld).toBeVisible()
+
+  // The REGION the toggle controls, asserted to have no CHILD ELEMENTS — not
+  // merely "no matrix anywhere on the card", and not `toBeEmpty()`.
+  //
+  // A lazily-mounted panel occupies its region as a Suspense fallback from its
+  // first commit, so "the matrix has not appeared yet" is equally true of a panel
+  // that mounts eagerly and is still fetching its chunk. And `toBeEmpty()` is no
+  // better: it asserts the node has no TEXT, while the fallback is a skeleton —
+  // child elements, not a word between them. Verified against the revert: with
+  // the panel mounted eagerly, `toBeEmpty()` passed and this counts 1.
+  const toggle = page.getByRole('button', { name: 'Destination routes for withheld@acme.test' })
+  const region = await toggle.getAttribute('aria-controls')
+  expect(region, 'the routes disclosure must name the region it controls').toBeTruthy()
+  await expect(page.locator(`[id="${region}"] > *`)).toHaveCount(0)
+
+  const panel = await openRoutes(page, 'withheld@acme.test')
+
+  await expect(panel.getByRole('table')).toBeVisible()
+})
+
+// THE case the split exists for. Pooled, these two destinations report one
+// blended number that understates the Microsoft problem and slanders the Google
+// route; split, they are plainly two different findings — and each is legible
+// only against its own denominator, since 55% of 60 and 1% of 400 are not the
+// same population.
+test('a clean route and a failing one read as two findings, each over its own sample', async ({ page }) => {
+  const panel = await openRoutes(page, 'withheld@acme.test')
+  const google = routeRow(page, panel, 'Google')
+  const microsoft = routeRow(page, panel, 'Microsoft')
+
+  await expect(ratesOf(google)).toHaveText(['99%', '1%', '12%'])
+  await expect(ratesOf(microsoft)).toHaveText(['45%', '55%', 'Not detectable'])
+
+  await expect(populationsOf(google).first()).toHaveText('of 400 observations on this route')
+  await expect(populationsOf(microsoft).first()).toHaveText('of 60 observations on this route')
+  // The failing route's tabbed cell is an absence, not a clean primary inbox —
+  // the reading that would otherwise soften the row that matters most.
+  await expect(microsoft).toContainText(/not a clean primary-inbox result/i)
+
+  // Four destinations is a matrix and stands on its own; warning about a
+  // single-route pool that isn't one trains an operator to skip the note in the
+  // one case where it matters.
+  await expect(panel.locator('[data-slot="route-sole-destination"]')).toHaveCount(0)
+})
+
+// `unknown` is not a fourth provider — it is the recipient domain's MX having not
+// been resolved, so nobody recorded where the mail went. `other` is its opposite:
+// resolved, and merely neither Google nor Microsoft. Rendered alike, they tell an
+// operator we know where mail was delivered when we do not.
+test('an unresolved destination is not a fourth provider, and is not "another provider"', async ({ page }) => {
+  const panel = await openRoutes(page, 'withheld@acme.test')
+  const other = routeRow(page, panel, 'Another provider')
+  const unresolved = routeRow(page, panel, /not resolved/i)
+
+  await expect(destinationOf(unresolved)).toHaveText('Destination not resolved')
+  await expect(destinationOf(unresolved)).not.toHaveText(/provider|google|microsoft/i)
+  await expect(destinationOf(other)).toHaveText('Another provider')
+
+  // The sentences say which of the two facts each row is, and neither borrows the
+  // other's. Asserted on the rows, not the names, because that is where a
+  // collapse would hide.
+  await expect(other).toContainText(/resolved, and neither Google nor Microsoft/i)
+  await expect(other).not.toContainText(/has not been resolved yet/i)
+  await expect(unresolved).toContainText(/has not been resolved yet/i)
+
+  // And the raw contract token never reaches the screen at all.
+  await expect(panel).not.toContainText(/\bunknown\b/i)
+})
+
+// The pair a "falsy means unknown" implementation gets wrong, asserted inside ONE
+// matrix so neither reading can be explained away by the fixture: 0% spam over 24
+// observations is the only good news this feature can deliver, and a null over 9
+// observations is a rate nobody has yet — printed as 0% it would be a clean result
+// invented out of thin evidence.
+//
+// The measured zero is asserted on the whole row, placement columns included. A
+// tabbed zero alone would leave the placement path untested, because the two rates
+// answer a null through different functions — and the revert that collapses only
+// the placement one then sails past.
+test('a measured zero and an unestablished rate are different readings in one matrix', async ({ page }) => {
+  const panel = await openRoutes(page, 'withheld@acme.test')
+  const other = routeRow(page, panel, 'Another provider')
+  const unresolved = routeRow(page, panel, /not resolved/i)
+
+  await expect(ratesOf(other)).toHaveText(['100%', '0%', '0%'])
+  await expect(ratesOf(unresolved)).toHaveText(['Not established', 'Not established', 'Not detectable'])
+  await expect(unresolved).toContainText(/not a zero/i)
+  // Over its own nine observations, not the 400 on the Google row above it.
+  await expect(populationsOf(unresolved).first()).toHaveText('over 9 observations on this route')
+})
+
+// Design §3, and the guard most likely to be quietly broken later. Warmup partners
+// are the workspace's OWN mailboxes, so an all-Google pool has been measured
+// against Google and nothing else. This row is spotless — 100% inbox, a genuine
+// measured 0% spam — which is exactly why a bare one-row matrix would tell its
+// operator that their Microsoft delivery is healthy when no warmup mail was ever
+// sent to Microsoft.
+test('a single-destination pool is warned about, above the clean row it qualifies', async ({ page }) => {
+  const panel = await openRoutes(page, 'primary@acme.test')
+  const note = panel.locator('[data-slot="route-sole-destination"]')
+
+  await expect(note).toContainText(/only one destination observed: Google/i)
+  await expect(note).toContainText(/says nothing about how it is delivered to any other provider/i)
+  await expect(note).toContainText(/one clean row is not a clean matrix/i)
+  // It names why, so the limitation is understood rather than merely warned about.
+  await expect(note).toContainText(/your own connected mailboxes/i)
+  await expect(ratesOf(routeRow(page, panel, 'Google'))).toHaveText(['100%', '0%', '5%'])
+
+  // Physically above the matrix, not merely earlier in the DOM: a footnote reaches
+  // an operator after they have already drawn the wrong conclusion from a green
+  // row, and only a laid-out browser can tell the two apart.
+  const noteBox = await note.boundingBox()
+  const tableBox = await panel.getByRole('table').boundingBox()
+  if (!noteBox || !tableBox) throw new Error('the note and the matrix must both be laid out')
+  expect(noteBox.y + noteBox.height).toBeLessThanOrEqual(tableBox.y)
+})
+
+// §8's degradation, in the browser: the MX sweep is behind, so the whole matrix is
+// one row that records no destination. Naming a provider here would invent one,
+// and the sole-destination note has to say that nothing is known about ANY of
+// them — not that one was observed.
+test('a matrix that is one unresolved row says nothing is known about any provider', async ({ page }) => {
+  const panel = await openRoutes(page, 'proving@acme.test')
+  const note = panel.locator('[data-slot="route-sole-destination"]')
+  const unresolved = routeRow(page, panel, /not resolved/i)
+
+  await expect(note).toContainText(/only one destination observed, and it is not resolved/i)
+  await expect(note).toContainText(/nothing about delivery to Google, to Microsoft, or to anywhere else/i)
+  await expect(destinationOf(unresolved)).toHaveText('Destination not resolved')
+  await expect(ratesOf(unresolved)).toHaveText(['Not established', 'Not established', 'Not detectable'])
+  // One row, and it is the only one — no invented Google or Microsoft beside it.
+  await expect(panel.locator('tbody tr')).toHaveCount(1)
+})
+
+// Design §7, and deliberately NOT the sentence the tabbed rate and the identity
+// panel carry. Those gate nothing because their signals are structurally
+// unobservable on a whole provider class. A route rate is observable everywhere
+// the route exists; what is missing is calibration — and that condition is meant
+// to expire, where "cannot be observed" would outlive it.
+test('the matrix says it gates nothing, and gives the calibration reason', async ({ page }) => {
+  const panel = await openRoutes(page, 'withheld@acme.test')
+
+  await expect(panel).toContainText(/no threshold, lane or promotion decision reads any of it/i)
+  await expect(panel).toContainText(/nobody has yet seen what a normal per-route rate looks like/i)
+  await expect(panel).toContainText(/it can, on every provider/i)
 })

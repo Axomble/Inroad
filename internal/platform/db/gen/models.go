@@ -1034,6 +1034,7 @@ type WarmupObservation struct {
 	SpfResult          string             `json:"spf_result"`
 	DkimResult         string             `json:"dkim_result"`
 	DmarcResult        string             `json:"dmarc_result"`
+	DestinationEsp     string             `json:"destination_esp"`
 }
 
 type WarmupParticipant struct {

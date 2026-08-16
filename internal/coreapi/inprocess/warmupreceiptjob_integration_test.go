@@ -945,6 +945,38 @@ func withWallClock(t *testing.T, f warmupFixture) warmupFixture {
 	return f
 }
 
+// seedWarmupSendRow inserts a SENT warmup send directly, bypassing the scheduler.
+//
+// The scheduler is the wrong dependency for a test that only needs a send row to
+// hang observations off. warmupSendFrom goes through GetWarmupSendJob, which
+// consults warmup.EffectiveDailyVolume — and that hashes the mailbox id into a
+// per-day skip decision. setupWarmup pins the clock to a day generous to both
+// fixture mailboxes, but the guard tests call withWallClock to compare evaluator
+// timestamps against Postgres now(), which throws that pinning away. So they rolled
+// the volume dice against today's real date with a fresh random uuid, and lost
+// about one run in eight, reporting only "job={Skip:true}".
+//
+// Seeding the row makes those tests deterministic AND narrows what they assert: a
+// guard about whether recording X changes health or lane should not also be a test
+// of the send scheduler.
+func seedWarmupSendRow(t *testing.T, ctx context.Context, f warmupFixture, from, to uuid.UUID) uuid.UUID {
+	t.Helper()
+	thread, send := uuid.New(), uuid.New()
+	if _, err := f.raw.Exec(ctx,
+		`INSERT INTO warmup_threads (id, workspace_id, sender_mailbox, partner_mailbox, subject, content_key)
+		 VALUES ($1, $2, $3, $4, 'seeded thread', 'seed')`,
+		thread, f.ws1, from, to); err != nil {
+		t.Fatalf("seed warmup thread: %v", err)
+	}
+	if _, err := f.raw.Exec(ctx,
+		`INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox, status, token, message_id, sent_at)
+		 VALUES ($1, $2, $3, $4, $5, 'sent', 'seeded-token', $6, now())`,
+		send, f.ws1, thread, from, to, "<"+send.String()+"@acme.test>"); err != nil {
+		t.Fatalf("seed warmup send: %v", err)
+	}
+	return send
+}
+
 func participantAxes(t *testing.T, ctx context.Context, f warmupFixture, mailbox uuid.UUID) (health, lane string) {
 	t.Helper()
 	p, err := f.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: mailbox, WorkspaceID: f.ws1})

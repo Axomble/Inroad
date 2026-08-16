@@ -38,6 +38,9 @@ type Store interface {
 	DailyStats(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]DayStat, error)
 	SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int32, error)
 	ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error)
+	// ListRoutes returns one mailbox's trailing-7-day placement counters split by
+	// the destination each message was delivered to, ordered by destination_esp.
+	ListRoutes(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]RouteRow, error)
 	// MailboxInWorkspace reports whether the mailbox belongs to this workspace.
 	// It is the ownership gate for reads whose subject outlives the participant
 	// row, where "is a participant" would be the wrong 404 test.
@@ -141,6 +144,25 @@ func (s *PgStore) ListTransitions(ctx context.Context, workspaceID, mailboxID uu
 	out := make([]Transition, len(rows))
 	for i, r := range rows {
 		out[i] = transitionFromGen(r)
+	}
+	return out, nil
+}
+
+// ListRoutes returns the mailbox's trailing-7-day placement counters grouped by
+// the destination its mail was delivered to — the read behind the detail
+// endpoint's route matrix. Workspace-pinned, and empty for a mailbox with no
+// observations in the window (which the service renders as `routes: []`).
+func (s *PgStore) ListRoutes(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]RouteRow, error) {
+	rows, err := s.q.ListWarmupRoutes(ctx, gen.ListWarmupRoutesParams{
+		WorkspaceID: workspaceID,
+		MailboxID:   mailboxID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RouteRow, len(rows))
+	for i, r := range rows {
+		out[i] = routeRowFromGen(r)
 	}
 	return out, nil
 }

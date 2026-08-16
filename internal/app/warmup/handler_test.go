@@ -500,3 +500,104 @@ func TestOverviewEmitsIdentityAsNullOrAWholeBlock(t *testing.T) {
 		}
 	}
 }
+
+// The route matrix is asserted on the RAW JSON, for the reason the lane axis and
+// the tabbed pair are: every field of this contract has a falsy form that a
+// decoded struct cannot tell from an absent one. A missing `routes` arrives as
+// `undefined` and takes the UI down a no-data path; a `tabbed_rate_7d` of 0.0
+// arrives as a confident clean rate for a route nothing could categorise.
+//
+// It also pins the wire NAMES. The frontend is written against this exact shape,
+// and a Go field renamed without its tag is a silently empty panel.
+func TestDetailCarriesTheRouteMatrixWithNullRatesBelowTheFloor(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.participants[mb] = Participant{
+		MailboxID: mb, WorkspaceID: ws, Enabled: true, StartVolume: 4, MaxVolume: 40,
+		RampIncrement: 2, ReplyRate: 0.3, HealthState: "healthy",
+		StartedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+	}
+	store.routes[mb] = []RouteRow{
+		{DestinationESP: "google", Inbox7d: 38, Spam7d: 2, Tabbed7d: 2, TabCapable7d: 20},
+		{DestinationESP: "unknown", Inbox7d: 3, Spam7d: 0},
+	}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/"+mb.String()+"/warmup", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw struct {
+		Routes []map[string]any `json:"routes"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw.Routes) != 2 {
+		t.Fatalf("want two routes, got %d: %s", len(raw.Routes), w.Body.String())
+	}
+
+	established, thin := raw.Routes[0], raw.Routes[1]
+	for _, key := range []string{
+		"destination_esp", "placement_sample_7d", "inbox_rate_7d",
+		"spam_rate_7d", "tabbed_rate_7d", "tab_capable_sample_7d",
+	} {
+		if _, present := established[key]; !present {
+			t.Fatalf("%q is absent from a route; the client reads undefined and cannot tell an "+
+				"unmeasured route from a clean one", key)
+		}
+	}
+	if got := established["destination_esp"]; got != "google" {
+		t.Errorf("destination_esp = %v, want google", got)
+	}
+	if got := established["placement_sample_7d"]; got != float64(40) {
+		t.Errorf("placement_sample_7d = %v, want 40", got)
+	}
+	if got := established["spam_rate_7d"]; got != 0.05 {
+		t.Errorf("spam_rate_7d = %v, want 0.05 — 2 of THIS route's 40 samples", got)
+	}
+	if got := established["tabbed_rate_7d"]; got != 0.1 {
+		t.Errorf("tabbed_rate_7d = %v, want 0.1 — 2 of the route's 20 categorisable landings", got)
+	}
+
+	// The thin route: present, counted, and explicitly null on all three rates.
+	if got := thin["placement_sample_7d"]; got != float64(3) {
+		t.Errorf("placement_sample_7d = %v, want 3", got)
+	}
+	for _, key := range []string{"inbox_rate_7d", "spam_rate_7d", "tabbed_rate_7d"} {
+		if got := thin[key]; got != nil {
+			t.Errorf("%s = %v on a 3-sample route, want null: a rate under the sample floor is not "+
+				"established, and 0.0 or 1.0 from three messages reads as a measurement", key, got)
+		}
+	}
+}
+
+// `routes: []`, never absent and never null. The empty array is what says "we
+// looked and nothing was observed"; the absent key is indistinguishable from a
+// server that does not implement routes at all.
+func TestDetailRoutesIsAnEmptyArrayWhenNothingWasObserved(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.participants[mb] = Participant{
+		MailboxID: mb, WorkspaceID: ws, Enabled: true, StartVolume: 4, MaxVolume: 40,
+		RampIncrement: 2, ReplyRate: 0.3, HealthState: "healthy",
+		StartedAt: pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+	}
+	h := NewHandler(NewService(store))
+
+	w := do(t, authedRouter(h), http.MethodGet, "/"+mb.String()+"/warmup", bearer(t, ws), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, present := raw["routes"]
+	if !present {
+		t.Fatal("routes is absent from the detail response")
+	}
+	if string(got) != "[]" {
+		t.Errorf("routes = %s, want []", got)
+	}
+}

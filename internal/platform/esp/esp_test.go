@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,62 @@ func TestFromMailboxIsNeverUnknown(t *testing.T) {
 				t.Errorf("FromMailbox(%q, %q) = unknown", provider, host)
 			}
 		}
+	}
+}
+
+// FromRecipient answers a different question from FromMailbox — "where was this
+// delivered", not "who does this mailbox submit through" — so its cases are the
+// recipient's transport tag and the MX cache, never smtp_host.
+func TestFromRecipient(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		provider  string
+		cachedESP string
+		want      ESP
+	}{
+		{"gmail is conclusive with no cache entry", "gmail", "", Google},
+		{"m365 is conclusive with no cache entry", "m365", "", Microsoft},
+		// A Workspace tenant behind a third-party filter caches as Other (FromMX
+		// reads the PRIMARY MX). The mailbox is still hosted at Google and that is
+		// where the mail was delivered, so the provider wins over the cache.
+		{"gmail wins over a filtered MX", "gmail", "other", Google},
+		{"m365 wins over a filtered MX", "m365", "other", Microsoft},
+		{"smtp takes a google cache hit", "smtp", "google", Google},
+		{"smtp takes a microsoft cache hit", "smtp", "microsoft", Microsoft},
+		// The two states this classifier must never collapse (esp's judgement 3):
+		// Other is "resolved, and it is neither"; Unknown is "not resolved".
+		{"smtp keeps a resolved other", "smtp", "other", Other},
+		{"smtp cache miss is unknown, not other", "smtp", "", Unknown},
+		{"smtp cache holding unknown stays unknown", "smtp", "unknown", Unknown},
+		// A value outside the vocabulary is a boundary failure (a hand-edited row,
+		// a widened cache), not a route. It reads Unknown rather than being trusted
+		// into a matrix that GROUPs BY it.
+		{"an out-of-vocabulary cache value is unknown", "smtp", "gmail", Unknown},
+		{"cache values are not case-folded", "smtp", "Google", Unknown},
+		{"an unrecognised transport falls through to the cache", "", "google", Google},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FromRecipient(tc.provider, tc.cachedESP); got != tc.want {
+				t.Errorf("FromRecipient(%q, %q) = %q, want %q", tc.provider, tc.cachedESP, got, tc.want)
+			}
+		})
+	}
+}
+
+// The reason this function exists at all, as an assertion rather than a comment.
+// An smtp mailbox that SUBMITS through SendGrid while its inbound MX is Google
+// classifies as Other by its relay and Google by its MX; a route recorded from
+// FromMailbox would file every message delivered to that mailbox under the wrong
+// destination, permanently, because the observation is immutable.
+func TestFromRecipientDisagreesWithFromMailboxOnARelayFrontedMailbox(t *testing.T) {
+	const provider, relay, mxCache = "smtp", "smtp.sendgrid.net", "google"
+	if got := FromMailbox(provider, relay); got != Other {
+		t.Fatalf("FromMailbox(%q, %q) = %q, want other — the fixture no longer sets up the disagreement",
+			provider, relay, got)
+	}
+	if got := FromRecipient(provider, mxCache); got != Google {
+		t.Errorf("FromRecipient(%q, %q) = %q, want google: delivery is decided by the recipient domain's "+
+			"MX, not by the relay that mailbox sends through", provider, mxCache, got)
 	}
 }
 
@@ -205,3 +262,59 @@ func TestLookup(t *testing.T) {
 		}
 	}
 }
+
+// A name that cannot resolve must not become a persisted verdict.
+//
+// Go's resolver rejects a syntactically impossible name locally and reports it as
+// a DNSError with IsNotFound set — the same shape as a genuine NXDOMAIN. Lookup
+// used to map that to (Other, ok=true), a COMPLETED classification. Because the
+// sweep's writer trims the domain key while the fan-out does not, that verdict
+// landed on the trimmed domain's row: a mailbox at "a@ example.com" pinned
+// example.com to Other, hid it from re-lookup for a full staleness window, and
+// filed every warmup observation to it under the wrong destination route —
+// permanently, since observations are immutable.
+func TestLookupRefusesNamesThatCannotResolve(t *testing.T) {
+	unresolvable := []string{
+		" example.com", "example.com ", "exa mple.com",
+		".example.com", "example.com.", "-example.com", "example..com",
+		"<script>alert(1)</script>", "a@b.com",
+		strings.Repeat("a", 254) + ".com",
+		"",
+	}
+	for _, name := range unresolvable {
+		t.Run(name, func(t *testing.T) {
+			got, mx, ok := Lookup(context.Background(), refusingResolver{t}, name)
+			if ok {
+				t.Errorf("Lookup(%q) = (%v, %q, ok=true); an unresolvable name is not a completed classification", name, got, mx)
+			}
+			if got != Unknown {
+				t.Errorf("Lookup(%q) = %v, want Unknown — Other means \"checked, and it is neither\"", name, got)
+			}
+		})
+	}
+}
+
+// refusingResolver fails the test if it is called at all: an unresolvable name
+// must be rejected BEFORE a query is attempted, so the guard cannot be satisfied
+// by a resolver that happens to error.
+type refusingResolver struct{ t *testing.T }
+
+func (r refusingResolver) LookupMX(_ context.Context, name string) ([]*net.MX, error) {
+	r.t.Errorf("resolver was asked about %q, which should have been refused before any lookup", name)
+	return nil, nil
+}
+
+// The converse: a name that CAN resolve still reaches the resolver, so the guard
+// above cannot be over-tightened into refusing everything.
+func TestLookupStillResolvesOrdinaryNames(t *testing.T) {
+	for _, name := range []string{"example.com", "mail.example.co.uk", "xn--bcher-kva.example", "a-b.example.com", "under_score.example.com"} {
+		got, _, ok := Lookup(context.Background(), stubMX{[]*net.MX{{Host: "aspmx.l.google.com.", Pref: 1}}}, name)
+		if !ok || got != Google {
+			t.Errorf("Lookup(%q) = (%v, ok=%v), want (Google, ok=true)", name, got, ok)
+		}
+	}
+}
+
+type stubMX struct{ recs []*net.MX }
+
+func (s stubMX) LookupMX(context.Context, string) ([]*net.MX, error) { return s.recs, nil }

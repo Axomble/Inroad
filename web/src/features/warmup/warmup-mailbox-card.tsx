@@ -1,5 +1,5 @@
 import { Suspense, lazy, useId, useState } from 'react'
-import { Fingerprint, Flame, History, Loader2, Settings2 } from 'lucide-react'
+import { Fingerprint, Flame, History, Loader2, Route, Settings2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -21,6 +21,11 @@ const WarmupSparkline = lazy(() => import('./warmup-sparkline'))
 // reason: it carries its own copy tables and its own request, neither of which a
 // page of ten collapsed rows should pay for.
 const WarmupTransitionsPanel = lazy(() => import('./warmup-transitions-panel'))
+
+// The destination-route matrix is opt-in too, and carries the largest copy table
+// on this screen. Its data rides on the detail query this card already issues, so
+// opening it costs a chunk and no request.
+const WarmupRoutesPanel = lazy(() => import('./warmup-routes-panel'))
 
 /**
  * 0..1 fraction to a whole-percent string, e.g. 0.83 -> "83%".
@@ -62,9 +67,11 @@ export function WarmupMailboxCard({
   const [editing, setEditing] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showIdentity, setShowIdentity] = useState(false)
+  const [showRoutes, setShowRoutes] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const historyId = useId()
   const identityId = useId()
+  const routesId = useId()
 
   // Detail (series + full participant) is only needed for the sparkline and to
   // prefill the settings form, so it's skipped for non-participants.
@@ -129,6 +136,17 @@ export function WarmupMailboxCard({
               <Button
                 variant="ghost"
                 size="xs"
+                onClick={() => setShowRoutes((v) => !v)}
+                aria-expanded={showRoutes}
+                aria-controls={routesId}
+                aria-label={`Destination routes for ${mailbox.email}`}
+              >
+                <Route className="size-3.5" />
+                Routes
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={() => setShowHistory((v) => !v)}
                 aria-expanded={showHistory}
                 aria-controls={historyId}
@@ -176,6 +194,21 @@ export function WarmupMailboxCard({
       */}
       <div id={identityId}>
         {enrolled && entry && showIdentity && <WarmupIdentityPanel identity={entry.identity} />}
+      </div>
+
+      {/*
+        Where this mailbox's mail was delivered, split by destination. Collapsed
+        for the same two reasons the identity panel is: it answers "which route
+        is failing", a question raised only once the pooled rates above have
+        already looked wrong, and it gates nothing — so it must not sit where a
+        gating figure sits.
+      */}
+      <div id={routesId}>
+        {enrolled && showRoutes && (
+          <Suspense fallback={<div className="border-t border-border px-5 py-3"><Skeleton className="h-16 w-full" /></div>}>
+            <WarmupRoutesPanel mailboxId={id} />
+          </Suspense>
+        )}
       </div>
 
       {/*

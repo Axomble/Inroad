@@ -176,8 +176,8 @@ func TestRecordingIdentitiesChangesNoHealthStateAndNoLane(t *testing.T) {
 	f = withWallClock(t, f)
 	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
 
-	aToB := warmupSendUUID(t, ctx, f)      // sender A, observed by B
-	bToA := warmupSendFrom(t, ctx, f, f.b) // sender B, observed by A
+	aToB := seedWarmupSendRow(t, ctx, f, f.a, f.b) // sender A, observed by B
+	bToA := seedWarmupSendRow(t, ctx, f, f.b, f.a) // sender B, observed by A
 
 	// Identical evidence: 25 trusted inbox placements each, same instant, same
 	// reader capability. The ONLY difference is the identity metadata on B's rows.
@@ -262,7 +262,7 @@ func TestIdentityFactsDoNotCrossWorkspaces(t *testing.T) {
 		dkimDomain: "signing.ws1-private.test", returnPathDomain: "bounce.ws1-private.test",
 		spf: warmup.AuthFail, dkim: warmup.AuthFail, dmarc: warmup.AuthFail,
 	}
-	sid := warmupSendUUID(t, ctx, f)
+	sid := seedWarmupSendRow(t, ctx, f, f.a, f.b)
 	seedPlacementsWithIdentity(t, ctx, f, sid, f.b, 1, placementInbox, secret)
 
 	foreign, err := f.q.ListWarmupOverviewRows(ctx, f.ws2)

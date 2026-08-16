@@ -4,10 +4,12 @@ package inprocess
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -85,6 +87,70 @@ func espFixture(t *testing.T) (context.Context, poolFixture) {
 	f.addSender(t, ctx, f.mailboxA, 1, true)
 	f.addSender(t, ctx, f.mailboxB, 100, true)
 	return ctx, f
+}
+
+// staleFanOutIncludes reports whether (workspace, domain) is in the sweep's
+// fan-out, reading the query WITHOUT the seam's per-tick row bound.
+//
+// The bound has to be stepped around, not honoured, for a presence assertion to
+// mean anything here. The fan-out is GLOBAL and the seam takes the first 500 rows
+// ordered by (workspace_id, domain), while the shared test database accumulates
+// workspaces across every run — so whether a freshly created workspace's row is on
+// that page depends on where a random uuid sorts. Worse for the absence direction:
+// a truncated page makes "the domain dropped off the list" pass for a domain that
+// is still very much on it, which is a guard that proves nothing.
+//
+// The seam's own plumbing (its cutoff, its bound, its write-back) is covered by
+// TestSweepSeamListsRecordsAndEvicts's espSweepCore assertion and by
+// worker/recipientesp's handler tests; what this reads is the domain SOURCE.
+func staleFanOutIncludes(t *testing.T, ctx context.Context, q *gen.Queries, ws uuid.UUID, domain string) bool {
+	t.Helper()
+	rows, err := q.ListStaleRecipientDomains(ctx, gen.ListStaleRecipientDomainsParams{
+		Cutoff:   pgtype.Timestamptz{Time: time.Now().Add(-sweepStaleWindow), Valid: true},
+		RowLimit: 100000,
+	})
+	if err != nil {
+		t.Fatalf("list stale recipient domains: %v", err)
+	}
+	for _, r := range rows {
+		if r.WorkspaceID == ws && r.Domain == domain {
+			return true
+		}
+	}
+	return false
+}
+
+// The pool's OWN mailbox domains are part of the fan-out (design §4). Without
+// them a workspace of self-hosted SMTP mailboxes classifies every warmup
+// destination as `unknown` — a route matrix with one unresolved row, for
+// precisely the audience most likely to self-host.
+//
+// The fixture isolates the widening: acme.test is where this workspace's OWN
+// mailboxes live and NO contact is enrolled there, so the enrollment arm cannot
+// put it on the list. The volume this adds is trivial by construction — a
+// workspace's mailbox domains number in the handfuls, against a contact list
+// sized in the thousands.
+func TestSweepFanOutIncludesTheWorkspacesOwnMailboxDomains(t *testing.T) {
+	ctx, f := espFixture(t)
+	sweep := f.espSweepCore(t)
+
+	if !staleFanOutIncludes(t, ctx, f.q, f.ws, "acme.test") {
+		t.Fatal("the workspace's own mailbox domain is not in the sweep's fan-out: every warmup " +
+			"destination in a self-hosted pool would classify as unknown, which is a matrix with one " +
+			"unresolved row and no information in it")
+	}
+
+	// And it behaves like any other classified domain: a completed answer takes it
+	// off the list rather than being re-resolved every tick.
+	if err := sweep.RecordRecipientDomainESP(ctx, coreapi.RecipientDomainESP{
+		WorkspaceID: f.ws.String(), Domain: "acme.test", ESP: "google", MXHost: "aspmx.l.google.com",
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	if staleFanOutIncludes(t, ctx, f.q, f.ws, "acme.test") {
+		t.Error("a freshly classified mailbox domain stayed on the stale list: the sweep would re-resolve " +
+			"it on every tick")
+	}
 }
 
 // The payoff: a Google recipient is assigned the Google mailbox even though the
@@ -179,18 +245,12 @@ func TestSweepSeamListsRecordsAndEvicts(t *testing.T) {
 	sweep := f.espSweepCore(t)
 	enrollmentID := f.enrollAt(t, ctx, "sweepable.test")
 
+	// Read without the seam's 500-row page: the fan-out is global over a shared test
+	// database, so a page can truncate this workspace away and make both directions
+	// of the assertion below meaningless. See staleFanOutIncludes.
 	listed := func() bool {
 		t.Helper()
-		refs, err := sweep.ListStaleRecipientDomains(ctx, sweepStaleWindow)
-		if err != nil {
-			t.Fatalf("list stale: %v", err)
-		}
-		for _, r := range refs {
-			if r.WorkspaceID == f.ws.String() && r.Domain == "sweepable.test" {
-				return true
-			}
-		}
-		return false
+		return staleFanOutIncludes(t, ctx, f.q, f.ws, "sweepable.test")
 	}
 
 	if !listed() {
@@ -249,5 +309,49 @@ func TestRecordRejectsAnIncompleteLookup(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Errorf("%d rows written for an incomplete lookup, want 0", rows)
+	}
+}
+
+// A domain that can never resolve must not be swept.
+//
+// The sweep's fan-out projects lower(split_part(email,'@',2)) with no trim, while
+// RecordRecipientDomainESP trims before writing. Those two keys disagreeing is
+// what made a mailbox at "a@ acme.test" dangerous: Go's resolver rejects the
+// malformed name locally and reports IsNotFound, esp.Lookup used to read that as a
+// COMPLETED classification of Other, and the trimmed write-back landed it on
+// acme.test — pinning a real domain to the wrong ESP for a full staleness window
+// and filing its warmup observations under the wrong destination route, forever,
+// since observations are immutable.
+//
+// esp.resolvableName refuses the name now, so nothing is written. But then the row
+// is never satisfied, stays stale, and is re-emitted on every tick against the
+// fan-out's global LIMIT — so the query has to drop it too. This asserts the query
+// half; esp_test.go asserts the resolver half.
+func TestStaleFanOutSkipsDomainsThatCannotResolve(t *testing.T) {
+	ctx, f := setupPool(t)
+
+	// The legitimate mailbox domain must still be swept — otherwise this test could
+	// pass by the fan-out returning nothing at all.
+	if !staleFanOutIncludes(t, ctx, f.q, f.ws, "acme.test") {
+		t.Fatal("the fixture's own mailbox domain is not in the fan-out; this test would prove nothing")
+	}
+
+	for _, email := range []string{"pad@ acme.test", "pad@acme.test ", "pad@ acme.test "} {
+		if _, err := f.pool.Exec(ctx,
+			`UPDATE mailboxes SET email = $1 WHERE id = $2 AND workspace_id = $3`,
+			email, f.mailboxA, f.ws); err != nil {
+			t.Fatalf("set mailbox email %q: %v", email, err)
+		}
+		domain := strings.SplitN(email, "@", 2)[1]
+		if staleFanOutIncludes(t, ctx, f.q, f.ws, domain) {
+			t.Errorf("fan-out emitted %q, which cannot resolve — one DNS attempt per tick, forever, "+
+				"against a global LIMIT shared with every other tenant", domain)
+		}
+		// Deliberately NOT asserted here: that the padded domain was not folded into
+		// the trimmed one. The fixture's second mailbox still sits at acme.test, so
+		// the trimmed domain is in the fan-out for a legitimate reason and the
+		// assertion could not tell folding from a sibling. The property that matters
+		// — the key derivation stays byte-identical to sendingdomain.sql's — is held
+		// by not changing it, and the SQL comment says so.
 	}
 }
