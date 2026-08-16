@@ -251,3 +251,55 @@ test('no observed routes reads as nothing observed', () => {
 test('a server that does not report routes reads as nothing observed', () => {
   expect(routesReading(undefined).kind).toBe('unobserved')
 })
+
+/** The sole-destination note, or null. */
+function noteOf(...routes: WarmupRoute[]): string | null {
+  const reading = routesReading(routes)
+  if (reading.kind !== 'observed') throw new Error(`expected observed routes, got ${reading.kind}`)
+  return reading.soleNote
+}
+
+// The note counts RESOLVED destinations, not rows.
+//
+// An unresolved row names no provider, so {Google, unresolved} confirms exactly
+// one provider — the same fact {Google} alone carries. Keying the note on row
+// count meant the two-row shape silently lost the warning while looking MORE
+// informative than the one-row shape it is equivalent to, which is the worse of
+// the two failures: an operator who sees two rows believes they are comparing
+// destinations.
+test('one resolved destination beside an unresolved row still warns', () => {
+  const note = noteOf(route({ destination_esp: 'google' }), route({ destination_esp: 'unknown' }))
+
+  expect(note).toMatch(/only one destination resolved/i)
+  expect(note).toMatch(/Google/)
+  // And it must not claim only one destination was OBSERVED — two rows were.
+  expect(note).not.toMatch(/only one destination observed/i)
+})
+
+test('two resolved destinations are a real matrix and carry no note', () => {
+  expect(noteOf(route({ destination_esp: 'google' }), route({ destination_esp: 'microsoft' }))).toBeNull()
+})
+
+// The unresolved row must not suppress the note by padding the count to two.
+test('two resolved destinations plus an unresolved row still carry no note', () => {
+  const note = noteOf(
+    route({ destination_esp: 'google' }),
+    route({ destination_esp: 'microsoft' }),
+    route({ destination_esp: 'unknown' }),
+  )
+  expect(note).toBeNull()
+})
+
+// `other` is a resolved destination — checked, and it is neither Google nor
+// Microsoft — so it counts toward the total the same way the named two do.
+test('other counts as a resolved destination', () => {
+  expect(noteOf(route({ destination_esp: 'google' }), route({ destination_esp: 'other' }))).toBeNull()
+  expect(noteOf(route({ destination_esp: 'other' }), route({ destination_esp: 'unknown' })))
+    .toMatch(/only one destination resolved/i)
+})
+
+test('a sole unresolved row says nothing was resolved at all', () => {
+  const note = noteOf(route({ destination_esp: 'unknown' }))
+  expect(note).toMatch(/not resolved/i)
+  expect(note).not.toMatch(/only one destination resolved/i)
+})

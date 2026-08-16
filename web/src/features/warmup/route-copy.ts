@@ -319,9 +319,12 @@ function routeReading(route: WarmupRoute): RouteReading {
  * observed" — so the limitation is the first thing read, not a footnote under a
  * clean percentage.
  */
-function soleDestinationNote(only: RouteReading): string {
+function soleDestinationNote(only: RouteReading, alone: boolean): string {
   if (!only.resolved) {
     return "Only one destination observed, and it is not resolved — nothing recorded where this mailbox's mail was actually delivered. So this says nothing about delivery to Google, to Microsoft, or to anywhere else, and it is not a matrix. Routes fill in once the MX sweep resolves the recipient domains."
+  }
+  if (!alone) {
+    return `Only one destination resolved: ${only.inSentence}. The unresolved row names no provider — it is mail the MX sweep has not classified yet — so ${only.inSentence} is still the only place this mailbox's mail has been measured going. This says nothing about how it is delivered to any other provider, and one clean row is not a clean matrix.`
   }
   return `Only one destination observed: ${only.inSentence}. Warmup partners are your own connected mailboxes, so this mailbox's mail has only ever been measured on its way to ${only.inSentence} — this says nothing about how it is delivered to any other provider, and one clean row is not a clean matrix. Connect a mailbox on another provider to measure a second route.`
 }
@@ -338,6 +341,17 @@ export function routesReading(routes: WarmupDetail['routes']): RoutesReading {
   if (rows.length === 0) return { kind: 'unobserved', message: ROUTES_UNOBSERVED }
 
   const readings = rows.map(routeReading)
-  const only = readings.length === 1 ? readings[0] : undefined
-  return { kind: 'observed', routes: readings, soleNote: only ? soleDestinationNote(only) : null }
+
+  // Counted over RESOLVED destinations, not rows. An unresolved row names no
+  // provider, so a {Google, unresolved} matrix confirms exactly one provider —
+  // the same fact a {Google}-only matrix carries, and it needs the same warning.
+  // Keying on rows.length meant the two-row shape silently lost it while looking
+  // more informative than the one-row shape it is equivalent to.
+  const resolved = readings.filter((r) => r.resolved)
+  const only = resolved.length === 1 ? resolved[0] : resolved.length === 0 ? readings[0] : undefined
+  return {
+    kind: 'observed',
+    routes: readings,
+    soleNote: only ? soleDestinationNote(only, readings.length === 1) : null,
+  }
 }

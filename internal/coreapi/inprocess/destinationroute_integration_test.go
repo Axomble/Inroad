@@ -298,8 +298,8 @@ func TestRecordingDestinationRoutesChangesNoHealthStateAndNoLane(t *testing.T) {
 	f = withWallClock(t, f)
 	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
 
-	aToB := warmupSendUUID(t, ctx, f)      // sender A, observed by B
-	bToA := warmupSendFrom(t, ctx, f, f.b) // sender B, observed by A
+	aToB := seedWarmupSendRow(t, ctx, f, f.a, f.b) // sender A, observed by B
+	bToA := seedWarmupSendRow(t, ctx, f, f.b, f.a) // sender B, observed by A
 	seedRoutedPlacements(t, ctx, f, aToB, f.b, 25, placementInbox, "unknown")
 	seedRoutedPlacements(t, ctx, f, bToA, f.a, 25, placementInbox, "microsoft")
 

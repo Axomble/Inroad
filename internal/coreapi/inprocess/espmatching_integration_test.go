@@ -4,6 +4,7 @@ package inprocess
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,5 +309,49 @@ func TestRecordRejectsAnIncompleteLookup(t *testing.T) {
 	}
 	if rows != 0 {
 		t.Errorf("%d rows written for an incomplete lookup, want 0", rows)
+	}
+}
+
+// A domain that can never resolve must not be swept.
+//
+// The sweep's fan-out projects lower(split_part(email,'@',2)) with no trim, while
+// RecordRecipientDomainESP trims before writing. Those two keys disagreeing is
+// what made a mailbox at "a@ acme.test" dangerous: Go's resolver rejects the
+// malformed name locally and reports IsNotFound, esp.Lookup used to read that as a
+// COMPLETED classification of Other, and the trimmed write-back landed it on
+// acme.test — pinning a real domain to the wrong ESP for a full staleness window
+// and filing its warmup observations under the wrong destination route, forever,
+// since observations are immutable.
+//
+// esp.resolvableName refuses the name now, so nothing is written. But then the row
+// is never satisfied, stays stale, and is re-emitted on every tick against the
+// fan-out's global LIMIT — so the query has to drop it too. This asserts the query
+// half; esp_test.go asserts the resolver half.
+func TestStaleFanOutSkipsDomainsThatCannotResolve(t *testing.T) {
+	ctx, f := setupPool(t)
+
+	// The legitimate mailbox domain must still be swept — otherwise this test could
+	// pass by the fan-out returning nothing at all.
+	if !staleFanOutIncludes(t, ctx, f.q, f.ws, "acme.test") {
+		t.Fatal("the fixture's own mailbox domain is not in the fan-out; this test would prove nothing")
+	}
+
+	for _, email := range []string{"pad@ acme.test", "pad@acme.test ", "pad@ acme.test "} {
+		if _, err := f.pool.Exec(ctx,
+			`UPDATE mailboxes SET email = $1 WHERE id = $2 AND workspace_id = $3`,
+			email, f.mailboxA, f.ws); err != nil {
+			t.Fatalf("set mailbox email %q: %v", email, err)
+		}
+		domain := strings.SplitN(email, "@", 2)[1]
+		if staleFanOutIncludes(t, ctx, f.q, f.ws, domain) {
+			t.Errorf("fan-out emitted %q, which cannot resolve — one DNS attempt per tick, forever, "+
+				"against a global LIMIT shared with every other tenant", domain)
+		}
+		// Deliberately NOT asserted here: that the padded domain was not folded into
+		// the trimmed one. The fixture's second mailbox still sits at acme.test, so
+		// the trimmed domain is in the fan-out for a legitimate reason and the
+		// assertion could not tell folding from a sibling. The property that matters
+		// — the key derivation stays byte-identical to sendingdomain.sql's — is held
+		// by not changing it, and the SQL comment says so.
 	}
 }

@@ -117,7 +117,7 @@ func TestIMAPPlacementIsRecordedAsNotTabCapable(t *testing.T) {
 // band a later slice might set.
 func TestTabbedDenominatorCountsOnlyTabCapableObservations(t *testing.T) {
 	ctx, f := setupWarmup(t)
-	sid := warmupSendUUID(t, ctx, f)
+	sid := seedWarmupSendRow(t, ctx, f, f.a, f.b)
 
 	seedPlacementsWithCapability(t, ctx, f, sid, 10, placementInbox, true)  // Gmail, primary
 	seedPlacementsWithCapability(t, ctx, f, sid, 5, placementTabbed, true)  // Gmail, a tab
@@ -172,8 +172,8 @@ func TestWideningThePlacementVocabularyChangesNoHealthStateAndNoLane(t *testing.
 	f = withWallClock(t, f)
 	seedAuthPassing(t, ctx, f, f.ws1, "acme.test")
 
-	aToB := warmupSendUUID(t, ctx, f)      // sender A, observed by B
-	bToA := warmupSendFrom(t, ctx, f, f.b) // sender B, observed by A
+	aToB := seedWarmupSendRow(t, ctx, f, f.a, f.b) // sender A, observed by B
+	bToA := seedWarmupSendRow(t, ctx, f, f.b, f.a) // sender B, observed by A
 	seedPlacementsFor(t, ctx, f, aToB, f.b, 25, placementInbox, false)
 	seedPlacementsFor(t, ctx, f, bToA, f.a, 25, placementTabbed, true)
 

@@ -124,7 +124,9 @@ func setupWarmup(t *testing.T) (context.Context, warmupFixture) {
 	// fixture that needs more than one send in a day passes on a Tuesday and fails on
 	// a Saturday. (It did: TestRecordWarmupReceiptSenderAttribution went red on main
 	// when CI ran on Saturday 2026-08-08.)
-	pinned := warmupBusyDay(t, a)
+	// Both mailboxes: the day-shape jitter is seeded per mailbox id, so a day
+	// generous to A can still skip B, and several tests drive sends from B.
+	pinned := warmupBusyDay(t, a, b)
 	if impl, ok := core.(client); ok {
 		impl.now = func() time.Time { return pinned }
 		core = impl
@@ -136,26 +138,40 @@ func setupWarmup(t *testing.T) (context.Context, warmupFixture) {
 }
 
 // warmupBusyDay returns noon UTC on the first day, from today forward, whose
-// day-shape grants mailbox mbx at least warmupFixtureSends sends. It asks the REAL
-// policy (warmup.EffectiveDailyVolume) rather than hardcoding a date, so it stays
-// correct if the weekend/skip-day tuning changes.
+// day-shape grants EVERY named mailbox at least warmupFixtureSends sends. It asks
+// the REAL policy (warmup.EffectiveDailyVolume) rather than hardcoding a date, so
+// it stays correct if the weekend/skip-day tuning changes.
+//
+// Every mailbox, not just the first, because EffectiveDailyVolume hashes the
+// mailbox id into its skip-day decision: a day generous to A can skip B entirely.
+// It took one argument until three tests across two slices started driving sends
+// from B, each then failing on roughly one run in eight with nothing more useful
+// than "job={Skip:true}". A fixture that guarantees volume for the mailbox a test
+// does not use is not a guarantee.
 //
 // It uses the participant's START volume (8) as the target, which is a conservative
 // lower bound: EffectiveDailyVolume is monotonic in target, and the ramp only ever
 // raises it above the start, so a day that clears the bar at 8 clears it for real.
 // Scanning FORWARD keeps the pinned instant at or after the participant's started_at,
 // so ramp day counts stay non-negative.
-func warmupBusyDay(t *testing.T, mbx uuid.UUID) time.Time {
+func warmupBusyDay(t *testing.T, mailboxes ...uuid.UUID) time.Time {
 	t.Helper()
 	const startVolume = 8
 	day := time.Now().UTC().Truncate(24 * time.Hour)
 	for i := 0; i < 21; i++ {
 		candidate := day.AddDate(0, 0, i).Add(12 * time.Hour) // noon: inside waking hours
-		if warmup.EffectiveDailyVolume(startVolume, mbx.String(), candidate) >= warmupFixtureSends {
+		generous := true
+		for _, mbx := range mailboxes {
+			if warmup.EffectiveDailyVolume(startVolume, mbx.String(), candidate) < warmupFixtureSends {
+				generous = false
+				break
+			}
+		}
+		if generous {
 			return candidate
 		}
 	}
-	t.Fatalf("no day in the next 3 weeks grants mailbox %s >= %d warmup sends", mbx, warmupFixtureSends)
+	t.Fatalf("no day in the next 3 weeks grants all of %v >= %d warmup sends each", mailboxes, warmupFixtureSends)
 	return time.Time{}
 }
 
