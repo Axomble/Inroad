@@ -9,6 +9,51 @@ import (
 	"context"
 )
 
+const purgeDeadWorkers = `-- name: PurgeDeadWorkers :one
+WITH dead AS (
+    SELECT worker_id FROM workers
+    WHERE last_seen_at < now() - interval '24 hours'
+    ORDER BY last_seen_at LIMIT 5000
+),
+deleted_assignments AS (
+    DELETE FROM mailbox_worker_assignments
+    WHERE worker_id IN (SELECT worker_id FROM dead)
+    RETURNING 1
+),
+deleted_workers AS (
+    DELETE FROM workers
+    WHERE worker_id IN (SELECT worker_id FROM dead)
+    RETURNING 1
+)
+SELECT (
+    (SELECT count(*) FROM deleted_assignments) +
+    (SELECT count(*) FROM deleted_workers)
+)::bigint AS deleted_rows
+`
+
+// Reap worker registry rows long past the assigner's live window, together with
+// the mailbox assignments pinned to them.
+//
+// The retention here (24h) is deliberately far wider than the 15m live window the
+// assigner uses. Those two windows answer different questions: 15m decides "may
+// this worker take new work", and a worker crossing it already has its mailboxes
+// reassigned on next resolve. This one decides "will this worker ever come back",
+// where a wide margin costs nothing — a stale row is inert once the assigner
+// stops trusting it — and a narrow one would churn rows for a worker restarting
+// under its own id. Deleting the assignments too keeps the least-loaded pick
+// honest: it counts assignments per worker, so rows owned by long-gone workers
+// would otherwise permanently inflate a dead worker's load and skew balancing.
+//
+// workers is global infra state, not tenant data, hence no workspace pin (see
+// migration 000017). Assignments cascade-delete with their mailbox/workspace
+// already; this covers the case where both parents live on but the worker died.
+func (q *Queries) PurgeDeadWorkers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, purgeDeadWorkers)
+	var deleted_rows int64
+	err := row.Scan(&deleted_rows)
+	return deleted_rows, err
+}
+
 const purgeExpiredIdempotencyKeys = `-- name: PurgeExpiredIdempotencyKeys :one
 WITH deleted_idempotency_keys AS (
     DELETE FROM idempotency_keys

@@ -50,28 +50,42 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", fmt.Errorf("coreapi: parse workspace id: %w", err)
 	}
 
-	// 1. Idempotent: an existing assignment wins unchanged (workspace-pinned, so
-	//    a foreign workspace_id matches zero rows and falls through to a fresh
-	//    assignment scoped to ITS own workspace).
-	existing, err := c.q.GetMailboxWorkerAssignment(ctx, gen.GetMailboxWorkerAssignmentParams{
-		MailboxID: mbID, WorkspaceID: wsID,
+	liveSince := pgtype.Timestamptz{Time: time.Now().Add(-workerLiveWindow), Valid: true}
+
+	// 1. Idempotent: an existing assignment to a LIVE worker wins unchanged
+	//    (workspace-pinned, so a foreign workspace_id matches zero rows and falls
+	//    through to a fresh assignment scoped to ITS own workspace).
+	//
+	//    Liveness is checked here, not just when first assigning. An assignment
+	//    whose worker stopped heartbeating routes to a queue no process consumes,
+	//    and those tasks neither run nor fail nor alert — the mailbox goes quiet
+	//    until someone deletes the row by hand. Every rolling deploy under a
+	//    scheduler that changes instance identity produces exactly that state, so
+	//    a stranded assignment is treated as no assignment and reassigned below.
+	existing, err := c.q.GetLiveMailboxWorkerAssignment(ctx, gen.GetLiveMailboxWorkerAssignmentParams{
+		MailboxID: mbID, WorkspaceID: wsID, LiveSince: liveSince,
 	})
 	switch {
 	case err == nil:
 		return queueForWorker(existing), nil
 	case errors.Is(err, pgx.ErrNoRows):
-		// no assignment yet — fall through to a first assignment
+		// No assignment, or one pinned to a worker that has gone silent — both
+		// fall through to pick a live worker.
 	default:
 		return "", fmt.Errorf("coreapi: load assignment: %w", err)
 	}
 
 	// 2. Pick the least-loaded LIVE worker (heartbeat within the live window).
-	liveSince := pgtype.Timestamptz{Time: time.Now().Add(-workerLiveWindow), Valid: true}
 	workerID, err := c.q.PickLeastLoadedWorker(ctx, liveSince)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		// 3. No live worker (single-node dev): shared default queue, no persist —
-		//    so a real worker can claim this mailbox once it comes online.
+		// 3. No live worker (single-node dev, or the whole fleet mid-restart):
+		//    shared default queue, no persist — so a real worker can claim this
+		//    mailbox once it comes online. Any stale row from a dead worker is
+		//    left in place rather than deleted here: this path runs on the send
+		//    hot path, the row is already being ignored by step 1's liveness
+		//    join, and step 4 overwrites it as soon as a live worker exists.
+		//    Reaping it is the maintenance job's business, not the sender's.
 		return "", nil
 	case err != nil:
 		return "", fmt.Errorf("coreapi: pick least-loaded worker: %w", err)
@@ -82,10 +96,13 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 	//    the SendJob resolver's own pin), so a mismatched pair inserts zero rows and
 	//    RETURNING yields ErrNoRows here — distinct from step 3's no-live-worker
 	//    ErrNoRows, which was on PickLeastLoadedWorker and returned "" WITHOUT
-	//    reaching this insert. ON CONFLICT keeps the row that won a concurrent
-	//    first-send race and returns ITS worker_id, so both racers agree.
+	//    reaching this insert. On conflict the row is kept for a LIVE incumbent
+	//    (so both racers in a concurrent first-send agree) and handed to workerID
+	//    when the incumbent has gone silent (so a stranded mailbox actually moves).
+	//    liveSince makes that decision inside the statement, keeping it atomic
+	//    against another worker reassigning the same mailbox.
 	assigned, err := c.q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
-		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID,
+		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, LiveSince: liveSince,
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

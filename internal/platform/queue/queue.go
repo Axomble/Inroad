@@ -22,8 +22,38 @@ import (
 //     (asynq's default is 25).
 //   - taskRetention keeps a finished task briefly for post-run inspection.
 const (
-	sendMaxRetry  = 5
+	sendMaxRetry = 5
+	// pollMaxRetry is deliberately lower than sendMaxRetry. A poll that keeps
+	// failing is re-fanned-out by the next sweep minutes later, so giving up
+	// early costs one interval of latency and never a lost message — whereas
+	// cycling a broken poll 5+ times just holds worker slots.
+	pollMaxRetry  = 2
 	taskRetention = 24 * time.Hour
+)
+
+// Per-task handler ceilings. asynq applies 30 minutes when a task carries no
+// Timeout, which is far longer than any handler here should hold a worker slot:
+// with WorkerConcurrency at 10, a handful of mailboxes on a slow provider can
+// occupy every slot and stall sends and sweeps behind them. When the timeout
+// fires asynq cancels the handler's context and retries the task, so these are
+// ceilings on one attempt, not on the work overall.
+//
+// Each is set well clear of the underlying dial timeouts (mail.dialTimeout 15s
+// for IMAP, 30s for SMTP) so a slow-but-progressing provider is not cut off
+// mid-pass; the point is to bound a wedged handler, not a slow one.
+const (
+	// A poll pass fetches up to fetchBatchSize messages plus a junk scan, each
+	// with its own dial, and makes several coreapi calls per message — so it
+	// gets the widest ceiling. A poll cut short loses nothing: the next sweep
+	// re-fans it out and the poller resumes from what it has already recorded.
+	pollTimeout = 5 * time.Minute
+	// One send is one SMTP conversation. Kept tight so a hung provider frees the
+	// slot quickly; the row-claim, not this, is what prevents a double send when
+	// a timed-out attempt is retried.
+	sendTimeout = 2 * time.Minute
+	// Fan-out sweeps are DB-plus-Redis work with no provider dial, but they walk
+	// the whole active fleet one mailbox at a time, so they need room at scale.
+	sweepTimeout = 10 * time.Minute
 )
 
 const TaskWarmupTick = "warmup:tick"
@@ -102,6 +132,11 @@ type InboxPollPayload struct {
 // TaskInboxSweep is the periodic reconcile that enqueues an inbox:poll task
 // for every active mailbox.
 const TaskInboxSweep = "inbox:sweep"
+
+// inboxSweepInterval is how often inbox:sweep fans out. It drives both the
+// scheduler registration and the inbox:poll dedup bucket, so the two cannot
+// drift apart — a bucket shorter than the interval would stop deduplicating.
+const inboxSweepInterval = 3 * time.Minute
 
 const TaskTestSend = "testsend:send"
 
@@ -207,6 +242,7 @@ func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time,
 	}, bus.Options{
 		At:       t,
 		MaxRetry: sendMaxRetry,
+		Timeout:  sendTimeout,
 	})
 }
 
@@ -236,6 +272,7 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 	}, bus.Options{
 		In:       d,
 		MaxRetry: sendMaxRetry,
+		Timeout:  sendTimeout,
 	})
 }
 
@@ -292,6 +329,7 @@ func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time,
 	opts = append(opts,
 		asynq.TaskID(taskID),
 		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),
 	)
 	return c.enqueue(asynq.NewTask(TaskSequenceAdvance, b), opts...)
@@ -311,6 +349,7 @@ func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) e
 		asynq.TaskID(fmt.Sprintf("deliverability:%s:%d", campaignID, bucket.Unix())),
 		asynq.ProcessAt(bucket),
 		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),
 	)
 }
@@ -373,18 +412,56 @@ func (c *Client) EnqueueInboxReplySend(threadID, bodyText, workspaceID string) e
 	return c.enqueue(asynq.NewTask(TaskInboxReplySend, b),
 		asynq.TaskID(taskID),
 		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),
 	)
 }
 
-// EnqueueInboxPoll enqueues an inbox:poll task for immediate processing.
+// inboxPollTaskID is the dedup key for one mailbox's poll within one sweep
+// interval: every replica's sweep in the same interval computes the same bucket,
+// so their enqueues collapse to a single task. Split out of EnqueueInboxPoll (as
+// warmupTickTaskID and testSendTaskID are) so the bucketing is unit-testable
+// without a live Redis — it is the whole correctness argument for the dedup.
+func inboxPollTaskID(mailboxID string, now time.Time) string {
+	return fmt.Sprintf("inbox-poll:%s:%d", mailboxID, now.Truncate(inboxSweepInterval).Unix())
+}
+
+// EnqueueInboxPoll enqueues an inbox:poll task for immediate processing, keyed
+// on (mailbox, sweep-interval bucket) so concurrent fan-outs for the same
+// mailbox in the same interval collapse to one poll.
+//
+// Every worker process runs its own scheduler, so inbox:sweep fires once per
+// replica per interval. Without a TaskID that meant N replicas each opening a
+// real IMAP connection per mailbox per interval — a provider rate-limit problem
+// and pure waste, since the extra polls read the same messages. Bucketing by
+// interval rather than using a bare mailbox key keeps the dedup window bounded:
+// a poll that has already run does not suppress the next interval's.
+//
+// Collapsing is safe for the same reason it is in enqueueAdvance: nothing here
+// is the correctness guarantee. Poll processing is idempotent per message (the
+// poller records what it has seen), so a dropped duplicate only saves work.
+//
+// Careful with the two windows: asynq keeps a finished task's id reserved for
+// its Retention, so an id stays blocked well after it ran. That is harmless only
+// because each bucket mints a DISTINCT id — the block expires long before the
+// same id could recur. Shortening the bucket below taskRetention (or dropping
+// the bucket for a bare per-mailbox key) would make a completed poll suppress
+// every later one and silently stop polling. TestInboxPollTaskID pins both
+// halves: same interval collapses, next interval does not.
+// Retries are deliberately bounded lower than a send's — a poll that fails is
+// re-fanned-out by the next sweep a few minutes later, so exhausting retries
+// costs one interval of latency, not a lost message.
 func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 	b, err := json.Marshal(InboxPollPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	_, err = c.inner.Enqueue(asynq.NewTask(TaskInboxPoll, b))
-	return err
+	return c.enqueue(asynq.NewTask(TaskInboxPoll, b),
+		asynq.TaskID(inboxPollTaskID(mailboxID, time.Now())),
+		asynq.MaxRetry(pollMaxRetry),
+		asynq.Timeout(pollTimeout),
+		asynq.Retention(taskRetention),
+	)
 }
 
 // Publish makes *Client satisfy bus.Dispatcher, so the new warmup and routing
@@ -461,28 +538,28 @@ func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
 // RegisterSweepEnrollments registers the periodic due-enrollment reconcile.
 // Runs every 5 minutes to match the enrollment sweeper's "> 5 minutes" window.
 func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskSweepEnrollments, nil))
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskSweepEnrollments, nil), asynq.Timeout(sweepTimeout))
 	return err
 }
 
-// RegisterInboxSweep registers the periodic inbox:sweep. Runs every 3
-// minutes to fan out inbox:poll tasks for every active mailbox.
+// RegisterInboxSweep registers the periodic inbox:sweep. Runs every
+// inboxSweepInterval to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 3m", asynq.NewTask(TaskInboxSweep, nil))
+	_, err := sch.Register("@every "+inboxSweepInterval.String(), asynq.NewTask(TaskInboxSweep, nil), asynq.Timeout(sweepTimeout))
 	return err
 }
 
 // RegisterWarmupSweep registers the periodic warmup:sweep. Runs every 5 minutes
 // to fan out a warmup:tick for every due participant and recompute health.
 func RegisterWarmupSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil))
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil), asynq.Timeout(sweepTimeout))
 	return err
 }
 
 // RegisterMaintenanceCleanup registers the low-frequency retention pass. The
 // handler is idempotent, so scheduler restarts and retries are safe.
 func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 24h", asynq.NewTask(TaskMaintenanceCleanup, nil))
+	_, err := sch.Register("@every 24h", asynq.NewTask(TaskMaintenanceCleanup, nil), asynq.Timeout(sweepTimeout))
 	return err
 }
 
@@ -492,7 +569,7 @@ func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
 // soon a domain whose lookup failed is retried, while the window is what stops
 // it from re-resolving the same records twelve times a day.
 func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 1h", asynq.NewTask(TaskDomainAuthSweep, nil))
+	_, err := sch.Register("@every 1h", asynq.NewTask(TaskDomainAuthSweep, nil), asynq.Timeout(sweepTimeout))
 	return err
 }
 
@@ -508,7 +585,7 @@ func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
 // write is an idempotent upsert and eviction is a range delete, so two ticks
 // racing over the same domain converge on the same row.
 func RegisterRecipientESPSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskRecipientESPSweep, nil))
+	_, err := sch.Register("@every 5m", asynq.NewTask(TaskRecipientESPSweep, nil), asynq.Timeout(sweepTimeout))
 	return err
 }
 
