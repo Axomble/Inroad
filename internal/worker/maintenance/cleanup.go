@@ -23,6 +23,10 @@ type Cleaner interface {
 	// HTTP-layer concern, and its retention is driven by the widest window any
 	// reputation query reads (30 days) plus margin.
 	PurgeWarmupObservations(ctx context.Context) (deleted int64, err error)
+	// PurgeDeadWorkers reaps worker-registry rows long past the assigner's live
+	// window plus the mailbox assignments pinned to them. Separate again: this is
+	// global infrastructure state, not a security artifact or an HTTP concern.
+	PurgeDeadWorkers(ctx context.Context) (deleted int64, err error)
 }
 
 // CleanupHandler purges expired security artifacts, expired Idempotency-Key
@@ -48,6 +52,12 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired warmup observations purged", "rows", observationsDeleted)
+
+		workersDeleted, err := core.PurgeDeadWorkers(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "dead workers and their assignments purged", "rows", workersDeleted)
 		return nil
 	}
 }

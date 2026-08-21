@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,6 +78,41 @@ func TestInboxPollPayloadRoundTrip(t *testing.T) {
 	}
 	if TaskInboxSweep != "inbox:sweep" || TaskInboxPoll != "inbox:poll" {
 		t.Errorf("task name drift: %q %q", TaskInboxSweep, TaskInboxPoll)
+	}
+}
+
+// TestInboxPollTaskID proves the dedup key collapses every replica's sweep within
+// one interval to a single poll, while a later interval still gets its own key.
+//
+// Both halves matter. Without the first, N replicas each open a real IMAP
+// connection per mailbox per interval — a provider rate-limit problem for zero
+// gain, since the extra polls read the same messages. Without the second, a
+// mailbox that has been polled once would never be polled again.
+func TestInboxPollTaskID(t *testing.T) {
+	// A bucket boundary, so the truncation is exercised rather than accidentally
+	// landing mid-interval.
+	base := time.Unix(1_700_000_000, 0).Truncate(inboxSweepInterval)
+	a := inboxPollTaskID("mb-1", base)
+
+	// Every instant inside the interval — start, middle, and the last moment before
+	// the next bucket — shares one key.
+	for _, offset := range []time.Duration{0, inboxSweepInterval / 2, inboxSweepInterval - time.Nanosecond} {
+		if got := inboxPollTaskID("mb-1", base.Add(offset)); got != a {
+			t.Fatalf("offset %s must share the bucket key: %q != %q", offset, got, a)
+		}
+	}
+	// The next interval is a genuinely new poll, so the dedup window is bounded.
+	if got := inboxPollTaskID("mb-1", base.Add(inboxSweepInterval)); got == a {
+		t.Fatalf("the next interval must get a distinct key: %q == %q", got, a)
+	}
+	// Different mailboxes never suppress each other.
+	if inboxPollTaskID("mb-2", base) == a {
+		t.Fatal("different mailboxes must get distinct keys")
+	}
+	// The key is namespaced, so it cannot collide with warmup/testsend/reply keys
+	// in asynq's shared task-id space.
+	if !strings.HasPrefix(a, "inbox-poll:mb-1:") {
+		t.Fatalf("task id = %q, want an inbox-poll:mb-1: prefix", a)
 	}
 }
 

@@ -9,6 +9,7 @@
 //	Options.At   -> asynq.ProcessAt (delayed delivery; precedence over In)
 //	Options.In   -> asynq.ProcessIn
 //	Options.MaxRetry -> asynq.MaxRetry (0 = asynq default)
+//	Options.Timeout  -> asynq.Timeout  (0 = asynq default, 30m)
 //	RegisterPeriodic -> asynq.Scheduler.Register
 //
 // The "ErrTaskIDConflict is success" dedup rule (a duplicate enqueue of an
@@ -60,7 +61,7 @@ func (d *Dispatcher) Publish(ctx context.Context, j bus.Job, o bus.Options) erro
 // only when the corresponding field is set so zero values fall through to
 // asynq's defaults.
 func asynqOptions(j bus.Job, o bus.Options) []asynq.Option {
-	opts := make([]asynq.Option, 0, 4)
+	opts := make([]asynq.Option, 0, 5)
 	if j.Key != "" {
 		opts = append(opts, asynq.TaskID(j.Key))
 	}
@@ -77,6 +78,9 @@ func asynqOptions(j bus.Job, o bus.Options) []asynq.Option {
 	}
 	if o.MaxRetry != 0 {
 		opts = append(opts, asynq.MaxRetry(o.MaxRetry))
+	}
+	if o.Timeout > 0 {
+		opts = append(opts, asynq.Timeout(o.Timeout))
 	}
 	return opts
 }

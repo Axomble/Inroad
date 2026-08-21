@@ -19,9 +19,12 @@ type cleanupCore struct {
 	idempotencyErr      error
 	observationsDeleted int64
 	observationsErr     error
+	workersDeleted      int64
+	workersErr          error
 	called              bool
 	idempotencyCalled   bool
 	observationsCalled  bool
+	workersCalled       bool
 }
 
 func (c *cleanupCore) CleanupExpired(context.Context) (int64, error) {
@@ -39,8 +42,13 @@ func (c *cleanupCore) PurgeWarmupObservations(context.Context) (int64, error) {
 	return c.observationsDeleted, c.observationsErr
 }
 
+func (c *cleanupCore) PurgeDeadWorkers(context.Context) (int64, error) {
+	c.workersCalled = true
+	return c.workersDeleted, c.workersErr
+}
+
 func TestCleanupHandler(t *testing.T) {
-	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7}
+	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2}
 	if err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -52,6 +60,22 @@ func TestCleanupHandler(t *testing.T) {
 	}
 	if !core.observationsCalled {
 		t.Fatal("PurgeWarmupObservations was not called")
+	}
+	if !core.workersCalled {
+		t.Fatal("PurgeDeadWorkers was not called")
+	}
+}
+
+// A dead worker's rows are inert for routing (the assigner's liveness join
+// already ignores them) but they keep inflating that worker's count in the
+// least-loaded pick, so a failed reap has to surface for retry rather than
+// quietly skewing assignment balance forever.
+func TestCleanupHandlerReturnsErrorOnDeadWorkerPurgeFailure(t *testing.T) {
+	want := errors.New("db unavailable")
+	core := &cleanupCore{workersErr: want}
+	err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
+	if !errors.Is(err, want) {
+		t.Fatalf("handler error = %v, want %v", err, want)
 	}
 }
 

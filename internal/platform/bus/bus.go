@@ -32,6 +32,11 @@ type Options struct {
 	At       time.Time     // deliver at (zero = now); takes precedence over In
 	In       time.Duration // or deliver after (0 = now)
 	MaxRetry int           // 0 = transport default
+	// Timeout bounds ONE handler attempt: past it the transport cancels the
+	// handler's context and the job becomes eligible for retry. 0 = transport
+	// default. It is a ceiling on an attempt, not on the work overall — a job
+	// that legitimately needs longer should be split, not given a wider ceiling.
+	Timeout time.Duration
 }
 
 // Dispatcher publishes jobs. redisbus (asynq) is the only impl in v1.

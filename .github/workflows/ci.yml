@@ -98,6 +98,13 @@ jobs:
           # linter config sets `generated: lax`, so it skips sqlc output that
           # `go vet ./...` still checks. It is not on the critical path.
           go vet ./...
+          # Again with the integration tag, because the untagged pass cannot see
+          # //go:build integration files at all: a renamed query or changed
+          # params struct breaks every integration test in a package while
+          # `go build`, `go vet` and `go test` all stay green. That happened —
+          # this is the check that would have caught it, and it needs no
+          # database (vet type-checks, it does not run).
+          go vet -tags=integration ./...
           # `sqlc diff` needs no database (it regenerates and compares); only
           # `sqlc vet`, which PREPAREs against a live schema, does — that runs in
           # the integration job.

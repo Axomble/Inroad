@@ -250,10 +250,15 @@ limit / abuse control here is tracked in the Deferred list below.
     egresses through, so a caller can't pin or divert traffic.
 24. **Assignment is tenant-scoped; the worker registry is not tenant data.**
     `mailbox_worker_assignments` is `workspace_id`-pinned (invariant 4): a mailbox
-    is assigned/read only within its own workspace, and the assignment is
-    idempotent (`ON CONFLICT` keeps a single race winner). The `workers` heartbeat
-    registry is global infrastructure state — it holds no tenant rows and is never
-    returned on a tenant-facing API.
+    is assigned/read only within its own workspace. The assignment is idempotent
+    while its worker stays live (`ON CONFLICT` keeps a single race winner); an
+    assignment whose worker stopped heartbeating is treated as absent and
+    reassigned, so "the pin never moves" is NOT a guarantee to rely on. What does
+    not move is the tenant: `DO UPDATE` never writes `workspace_id`, and a
+    mismatched (mailbox, workspace) pair yields zero source rows from the
+    `INSERT … SELECT`, so it never reaches the conflict clause at all. The
+    `workers` heartbeat registry is global infrastructure state — it holds no
+    tenant rows and is never returned on a tenant-facing API.
 
 ## Warm-up engine
 25. **Warm-up mail is strictly isolated from campaign reply/bounce handling.** The

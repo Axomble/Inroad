@@ -1,0 +1,46 @@
+import { describe, expect, test } from 'vitest'
+import { healthMeta, knownWarmupHealth, toWarmupHealth } from '../warmup-health'
+
+describe('warmup health mapping', () => {
+  // Each state maps to a distinct label AND a distinct color token, so the four
+  // states are tellable apart by text alone (color is redundant reinforcement).
+  test.each([
+    ['unknown', 'Needs evidence', 'text-muted-foreground', 'bg-muted-foreground'],
+    ['healthy', 'Healthy', 'text-ok', 'bg-ok'],
+    ['watch', 'Watch', 'text-warn', 'bg-warn'],
+    ['throttled', 'Throttled', 'text-warm', 'bg-warm'],
+    ['paused', 'Paused', 'text-danger', 'bg-danger'],
+  ] as const)('%s -> %s / %s / %s', (state, label, text, dot) => {
+    const meta = healthMeta[state]
+    expect(meta.label).toBe(label)
+    expect(meta.text).toBe(text)
+    expect(meta.dot).toBe(dot)
+  })
+
+  test('every state has a unique color token (no two states share a hue)', () => {
+    const texts = Object.values(healthMeta).map((m) => m.text)
+    const dots = Object.values(healthMeta).map((m) => m.dot)
+    expect(new Set(texts).size).toBe(texts.length)
+    expect(new Set(dots).size).toBe(dots.length)
+  })
+
+  test('an unknown or absent value falls back to needs-evidence rather than healthy', () => {
+    expect(toWarmupHealth('bogus')).toBe('unknown')
+    expect(toWarmupHealth(null)).toBe('unknown')
+    expect(toWarmupHealth(undefined)).toBe('unknown')
+  })
+
+  test('a known state string narrows to itself', () => {
+    expect(toWarmupHealth('throttled')).toBe('throttled')
+  })
+
+  // A campaign sender that isn't warming up has no health state at all, and
+  // presenting that as "healthy" would be an assertion the backend never made.
+  test('the fallback-free narrowing keeps absent and unknown states distinct from healthy', () => {
+    expect(knownWarmupHealth('watch')).toBe('watch')
+    expect(knownWarmupHealth(null)).toBeNull()
+    expect(knownWarmupHealth(undefined)).toBeNull()
+    expect(knownWarmupHealth('')).toBeNull()
+    expect(knownWarmupHealth('bogus')).toBeNull()
+  })
+})
