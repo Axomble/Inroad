@@ -108,13 +108,29 @@ type Incident struct {
 // sentence an operator reads and can dismiss; it is not tolerable for a threshold
 // that withholds sending.
 //
-// And the route dimension rests on destination_esp, which security.md invariant 57
-// records as influenceable WITHIN a workspace: whoever controls a mailbox domain's
-// MX controls which route its observations file under. An incident derived from that
-// axis inherits the influenceability. That reason does not expire when calibration
-// data arrives, so slice E cannot gate on a fault domain by inheriting "D proved the
-// correlation is real" — it has to bind the evidence to something the attacker does
-// not control, the way invariant 52 binds the placement axis.
+// And THREE of the four dimensions are influenceable within a workspace, which is a
+// weaker attacker than it first looks:
+//
+//   - destination_route rests on destination_esp — security.md invariant 57, whoever
+//     controls a mailbox domain's MX;
+//   - signing_domain and return_path_domain are read straight off DKIM-Signature d=
+//     and Return-Path by ExtractIdentity, BEFORE and outside the authserv-id trust
+//     rule, which gates only the SPF/DKIM/DMARC verdicts. So they need no MX control
+//     at all: read/write on ONE warmup recipient mailbox is enough to deliver a
+//     crafted copy of a token-carrying message and choose the value recorded against
+//     every sender that mails it.
+//
+// What that CANNOT do is invent a member: Members comes only from participants the
+// evaluator already marked degraded, over evidence invariant 52 binds. What it can do
+// is decide which correlation ranks highest, and the pulse card names only the
+// strongest — so an influenced dimension can displace a true finding from that one
+// line. The warmup overview lists every finding with its arithmetic, which is the
+// complete view and the reason that displacement is survivable.
+//
+// None of this expires when calibration data arrives. Slice E cannot gate on a fault
+// domain by inheriting "D proved the correlation is real" — it has to bind the
+// evidence to something the attacker does not control, the way invariant 52 binds the
+// placement axis, and for the identity dimensions that means more than invariant 57.
 //
 // Results are sorted strongest-first and are deterministic for a given input, so a
 // UI and a test see the same order.

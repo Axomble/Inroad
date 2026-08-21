@@ -903,6 +903,13 @@ write history that never happened.
     make attacker-influenced headers reach pool eligibility. Authentication posture
     is gated separately by `sending_domains` and the `pending_auth` lane, from DNS we
     resolve ourselves. Before wiring a threshold to `dmarc_result`, re-read this.
+    **Note which two of the five this rule does NOT protect.** It gates the three
+    verdicts only. `dkim_domain` and `return_path_domain` are read off the message
+    before it runs, so they are sender-written and unverified — and since slice D they
+    feed `warmup.DetectIncidents`, whose output is rendered on the pulse card. That
+    inference gates nothing (invariant 58), but the two columns are influenceable by
+    anyone with read/write on one warmup recipient mailbox, which is weaker than
+    invariant 57's MX controller.
 
 57. **The warmup destination route is influenceable within a workspace, and must
     not be treated as attacker-independent evidence.** `warmup_observations.destination_esp`
@@ -915,12 +922,39 @@ write history that never happened.
     that workspace's senders drops.
     This is safe **only** while nothing reads a per-route rate. No threshold, lane,
     health state or promotion decision does today, and the route columns appear in
-    exactly two statements (`ListWarmupRoutes`, `RecordWarmupPlacementObservation`).
+    exactly three statements: `RecordWarmupPlacementObservation` writes them,
+    `ListWarmupRoutes` aggregates the matrix, and `ListWarmupIncidentParticipants`
+    feeds `warmup.DetectIncidents`. **Keep this enumeration current** — it is the
+    tripwire by which a later reviewer finds every route consumer, and it is the
+    third entry, the correlated-incident fold, that first turns route data into a
+    derived claim rendered outside the warmup page (the pulse attention row).
     The design's stated reason for not gating is that no calibration data exists
     yet — **that reason expires and this one does not.** A slice that starts gating
     on route rates needs the same treatment invariant 52 gives the placement axis:
     the evidence must be bound to something the attacker does not control. Read
     this before wiring an exposure budget.
+
+58. **A correlated incident is an inference over influenceable inputs, and gates
+    nothing.** `warmup.DetectIncidents` groups degraded participants by a shared
+    fault dimension — destination route, DKIM signing domain, return-path domain, or
+    sender organizational domain — and reports concentration as a lift over the rest
+    of the pool. It is computed at read time, persists nothing, and no threshold,
+    lane, health state or promotion decision reads it.
+    **Three of the four dimensions are steerable inside a workspace, and two of them
+    by a weaker actor than invariant 57 describes.** `destination_esp` needs MX
+    control. `dkim_domain` and `return_path_domain` do not: `ExtractIdentity` reads
+    them straight off `DKIM-Signature d=` and `Return-Path` *before* the invariant-56
+    trust rule, which gates only the SPF/DKIM/DMARC verdicts — so read/write on one
+    warmup recipient mailbox is enough to deliver a crafted copy of a token-carrying
+    message and choose the value recorded against every sender that mails it.
+    What that cannot do is fabricate a member: membership comes only from
+    participants the evaluator already marked degraded, over evidence invariant 52
+    binds. What it can do is decide which correlation ranks highest, and the pulse
+    card names only the strongest — so an influenced dimension can displace a true
+    finding from that line. Survivable only because the warmup overview lists every
+    finding with its arithmetic and discloses its cap. Do not make the pulse row the
+    only place a correlation is reported, and do not gate on any of this without
+    binding the identity dimensions the way invariant 52 binds placement.
 
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only

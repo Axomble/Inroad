@@ -119,13 +119,28 @@ func (s *Service) Get(ctx context.Context, workspaceID uuid.UUID) (Pulse, error)
 //
 // The read is SKIPPED unless a sender is actually gated, because there is no row to
 // attribute otherwise. /pulse is polled by every open console session roughly every
-// 45 seconds, and this is the only consumer, so a healthy workspace pays nothing for a
-// feature that only speaks when something is already wrong.
+// 45 seconds, and this is the only consumer.
+//
+// Note what gated() counts, because it is broader than "something is wrong": unknown
+// is in it, and unknown is the default health state of every newly connected mailbox.
+// So a workspace holding one unmeasured mailbox runs this read on every poll. That is
+// the right coupling — the row exists for an unknown mailbox because an unknown
+// mailbox really is being limited, and we only attribute a row that exists — but it
+// is not free, and measuring it beat guessing: 100 participants at the 7-day ceiling
+// of ~300 placement observations each is ~10ms, index-only on
+// idx_warmup_observations_subject_time, all buffer hits.
 //
 // Only the STRONGEST finding is named. Two dimensions frequently describe the same
 // fault from different angles — a signing domain and the sender domain it lives on —
 // so counting "and 2 more" would inflate one problem into three on a card whose whole
 // job is to be trusted. The warmup overview shows every finding with its arithmetic.
+//
+// That selection is also where an influenced dimension bites: two of the four are
+// steerable by an actor with read/write on a single warmup recipient mailbox (see
+// warmup.DetectIncidents), so a fabricated high-lift cohort can DISPLACE a true
+// finding from this one line. Survivable rather than fine, and only because the
+// overview this row links to lists every finding, capped and disclosed. Do not turn
+// this line into the only place a correlation is reported.
 func (s *Service) strongestWarmupIncident(ctx context.Context, workspaceID uuid.UUID, capToday capacity) *warmup.Incident {
 	if capToday.gated() == 0 {
 		return nil

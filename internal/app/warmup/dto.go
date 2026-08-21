@@ -363,10 +363,12 @@ type WarmupIdentityDTO struct {
 //
 // Reported for visibility only. Nothing gates on an incident, and unlike the tabbed
 // rate and the route matrix this needs TWO reasons (design §7): the three detection
-// constants are uncalibrated guesses, AND the route dimension rests on
-// destination_esp, which security.md invariant 57 records as influenceable within a
-// workspace — whoever controls a mailbox domain's MX controls which route its
-// observations file under. The first reason expires when calibration data exists.
+// constants are uncalibrated guesses, AND three of the four dimensions are
+// influenceable within a workspace. destination_esp is invariant 57's MX controller;
+// signing_domain and return_path_domain are weaker still, read off the message's own
+// DKIM-Signature and Return-Path before the authserv-id trust rule (which gates only
+// the SPF/DKIM/DMARC verdicts), so read/write on one warmup recipient mailbox is
+// enough. The first reason expires when calibration data exists.
 // The second does not, so a later slice that gates on a fault domain has to bind its
 // evidence to something the attacker does not control (the way invariant 52 binds
 // the placement axis) and cannot inherit "slice D proved the correlation is real".
