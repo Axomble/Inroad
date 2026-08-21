@@ -466,3 +466,28 @@ test('the panel says it gates nothing, and gives both reasons', () => {
   expect(INCIDENTS_GATES_NOTHING).toMatch(/guesses nobody has calibrated/i)
   expect(INCIDENTS_GATES_NOTHING).toMatch(/steerable by whoever controls a mailbox domain's MX/i)
 })
+
+// Two empty-state reasons can be true at once: a pool of 3 is below the floor AND
+// has only one degraded mailbox. The order the code checks them in decides which
+// sentence an operator reads, and nothing pinned it — a refactor could swap them
+// silently.
+//
+// One-degraded wins, and that is the right way round: one mailbox cannot correlate
+// with anything at ANY pool size, so it is the more fundamental reason. Telling an
+// operator "grow your pool" would imply that growing it might attribute this
+// degradation, which it would not.
+test('one degraded mailbox outranks a below-floor pool as the reason', () => {
+  const message = messageOf([], pool(3, (i) => (i === 0 ? { health_state: 'paused' } : {})))
+
+  expect(message).toMatch(/one mailbox on its own cannot correlate/i)
+  expect(message).not.toMatch(/not enough pool to look/i)
+})
+
+// And with two degraded in the same undersized pool, the floor becomes the true
+// reason — proving the branch above is a priority and not an unconditional override.
+test('two degraded in a below-floor pool reports the floor', () => {
+  const message = messageOf([], pool(3, (i) => (i < 2 ? { health_state: 'paused' } : {})))
+
+  expect(message).toMatch(/not enough pool to look/i)
+  expect(message).not.toMatch(/one mailbox on its own cannot correlate/i)
+})

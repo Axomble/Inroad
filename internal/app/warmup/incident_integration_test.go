@@ -387,3 +387,77 @@ func TestDisabledParticipantsAreNotEvidence(t *testing.T) {
 			"pattern — it is those two mailboxes restated", after.Incidents)
 	}
 }
+
+// The DESTINATION ROUTE dimension, driven end to end over real rows.
+//
+// Every other positive finding in this package correlates on signing_domain, because
+// incidentCohort seeds `destination_esp = 'unknown'`. So the route dimension — the one
+// security.md invariants 57 and 58 single out, because it is steerable inside a
+// workspace and it is what an attacker would use to displace a true finding — was
+// only ever proven in the pure fold. The SQL projection that feeds it real
+// destination_esp values was not covered by any positive assertion.
+//
+// The fixture ISOLATES the route: signing domains and addresses are distinct per
+// mailbox, so route is the only dimension that can correlate. The assertion checks
+// for exactly one incident, which is what makes that isolation load-bearing rather
+// than decorative.
+func TestOverviewReportsARouteConcentratedIncident(t *testing.T) {
+	f := setup(t)
+	ws := f.ws.ID
+
+	// Inside: three mailboxes whose warmup mail is delivered to Microsoft, two of
+	// them contained on the LANE axis.
+	members := []string{}
+	for i := 1; i <= 3; i++ {
+		mb := incidentMailbox(t, f, ws, "ms", fmt.Sprintf("ms%d.test", i))
+		health, lane := pwarmup.StateHealthy, pwarmup.LaneHealthy
+		if i <= 2 {
+			lane = pwarmup.LaneQuarantine
+			members = append(members, mb.String())
+		}
+		enrollParticipant(t, f, ws, mb, health, lane)
+		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("ms-%d", i), time.Hour,
+			"microsoft", fmt.Sprintf("sign-ms%d.test", i), "", true)
+	}
+	// Outside: three clean mailboxes delivered to Google.
+	for i := 1; i <= 3; i++ {
+		mb := incidentMailbox(t, f, ws, "goog", fmt.Sprintf("goog%d.test", i))
+		enrollParticipant(t, f, ws, mb, pwarmup.StateHealthy, pwarmup.LaneHealthy)
+		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("goog-%d", i), time.Hour,
+			"google", fmt.Sprintf("sign-goog%d.test", i), "", true)
+	}
+
+	ov, err := NewService(f.store).GetOverview(f.ctx, ws)
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.Incidents) != 1 {
+		t.Fatalf("incidents = %+v, want exactly one — the fixture isolates the route, so a "+
+			"second finding means another dimension correlated and this no longer tests routes", ov.Incidents)
+	}
+	got := ov.Incidents[0]
+	if got.Dimension != "destination_route" || got.Value != "microsoft" {
+		t.Fatalf("incident names %s=%q, want destination_route=microsoft", got.Dimension, got.Value)
+	}
+	if got.CohortSize != 3 || got.DegradedInside != 2 || got.CohortOutside != 3 || got.DegradedOutside != 0 {
+		t.Errorf("arithmetic = %+v, want cohort 3 / inside 2 / outside 3 / degraded outside 0", got)
+	}
+	// 67% inside against the continuity-corrected 17% outside.
+	if got.Lift != 4 {
+		t.Errorf("lift = %v, want 4", got.Lift)
+	}
+	if len(got.MemberMailboxIDs) != 2 {
+		t.Fatalf("members = %v, want the two contained mailboxes", got.MemberMailboxIDs)
+	}
+	for _, want := range members {
+		found := false
+		for _, member := range got.MemberMailboxIDs {
+			if member == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("member %s missing from %v", want, got.MemberMailboxIDs)
+		}
+	}
+}

@@ -366,3 +366,54 @@ func TestMinIncidentPoolIsTheSmallestPoolThatCanReportAnything(t *testing.T) {
 			"claims this size can, so the published floor is too low", MinIncidentPool)
 	}
 }
+
+// The headline shape this feature exists for, and until now only a hand-authored
+// frontend fixture rendered it: ONE cohort that correlates on several dimensions at
+// once, because a single fault often has several names. A relay change shows up as a
+// route AND as the signing domain that relay signs for.
+//
+// DetectIncidents' own doc comment promises both are reported and that "which
+// dimension carries the correlation is the actionable part". Nothing verified it —
+// the sort test uses two cohorts with DIFFERENT members, so it could not have caught
+// a fold that silently kept only the first dimension to match.
+func TestDetectIncidentsReportsOneCohortOnEveryDimensionItShares(t *testing.T) {
+	pool := clean(20)
+	// Three mailboxes sharing everything: route, signing domain, return path, and —
+	// via their addresses — one organizational domain.
+	for i := 0; i < 3; i++ {
+		pool = append(pool, IncidentInput{
+			MailboxID: fmt.Sprintf("shared-%d", i),
+			Email:     fmt.Sprintf("shared-%d@acme.test", i),
+			Degraded:  true,
+			Route:     "microsoft", SigningDomain: "mail.acme.test", ReturnPathDomain: "bounce.acme.test",
+		})
+	}
+
+	got := DetectIncidents(pool)
+
+	byDimension := map[string]Incident{}
+	for _, in := range got {
+		byDimension[in.Dimension] = in
+	}
+	for _, want := range []string{DimensionRoute, DimensionSigning, DimensionReturnPath, DimensionSenderDomain} {
+		if _, ok := byDimension[want]; !ok {
+			t.Errorf("no %s incident; one fault with several names must be reported under each, "+
+				"because which dimension carries it is what an operator acts on. got %+v", want, got)
+		}
+	}
+
+	// Same three mailboxes every time. A dimension that reported a DIFFERENT
+	// membership would mean the cohorts were built from different participants,
+	// which is the bug this assertion exists to catch.
+	for dimension, in := range byDimension {
+		if len(in.Members) != 3 {
+			t.Errorf("%s named %d members, want the same 3: %v", dimension, len(in.Members), in.Members)
+			continue
+		}
+		for i, id := range in.Members {
+			if want := fmt.Sprintf("shared-%d", i); id != want {
+				t.Errorf("%s member %d = %q, want %q", dimension, i, id, want)
+			}
+		}
+	}
+}
