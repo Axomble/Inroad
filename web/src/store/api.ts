@@ -2806,8 +2806,30 @@ export type WarmupMailbox = {
 };
 export type WarmupOverview = {
   pool_size: number;
+  /** The smallest pool in which correlated-incident detection can find anything: enough participants to form a cohort AND at least one outside it to compare against. Served so the UI can tell "we looked and found no shared cause" from "this pool is too small to look", which are different answers and must not render alike. It is here rather than hardcoded client-side because it is derived from a backend policy constant, and a client copy would drift the moment that constant is recalibrated — leaving the UI claiming it searched a pool the server never examined. */
+  incidents_min_pool: number;
   active: boolean;
   mailboxes: WarmupMailbox[];
+  /** Degradation that is CONCENTRATED in one fault dimension — several mailboxes degrading through one destination route, signing domain, return path, or sender domain. Derived at read time from observations, never persisted. A correlation, not a cause. Empty when no dimension shows concentration. Reported for visibility only: no threshold, lane or promotion decision reads any of it. */
+  incidents: {
+    dimension:
+      | "destination_route"
+      | "signing_domain"
+      | "return_path_domain"
+      | "sender_domain";
+    /** the shared value, e.g. a signing domain or an ESP name */
+    value: string;
+    /** the DEGRADED members of the cohort */
+    member_mailbox_ids: string[];
+    /** participants carrying this value, degraded or not */
+    cohort_size: number;
+    degraded_inside: number;
+    /** the rest of the pool */
+    cohort_outside: number;
+    degraded_outside: number;
+    /** how many times more degraded the cohort is than the rest of the pool */
+    lift: number;
+  }[];
 };
 export type WarmupTransition = {
   id: string;

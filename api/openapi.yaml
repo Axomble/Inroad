@@ -4668,13 +4668,44 @@ components:
       description: >-
         Workspace warmup summary. pool_size is the number of enabled participants;
         warmup needs at least 2 to exchange mail (active is true when pool_size>=2).
-      required: [pool_size, active, mailboxes]
+      required: [pool_size, active, mailboxes, incidents, incidents_min_pool]
       properties:
         pool_size: { type: integer }
+        incidents_min_pool:
+          type: integer
+          description: >-
+            The smallest pool in which correlated-incident detection can find
+            anything: enough participants to form a cohort AND at least one outside
+            it to compare against. Served so the UI can tell "we looked and found no
+            shared cause" from "this pool is too small to look", which are different
+            answers and must not render alike. It is here rather than hardcoded
+            client-side because it is derived from a backend policy constant, and a
+            client copy would drift the moment that constant is recalibrated —
+            leaving the UI claiming it searched a pool the server never examined.
         active: { type: boolean }
         mailboxes:
           type: array
           items: { $ref: '#/components/schemas/WarmupMailbox' }
+        incidents:
+          type: array
+          description: >-
+            Degradation that is CONCENTRATED in one fault dimension — several mailboxes
+            degrading through one destination route, signing domain, return path, or sender
+            domain. Derived at read time from observations, never persisted. A correlation,
+            not a cause. Empty when no dimension shows concentration. Reported for
+            visibility only: no threshold, lane or promotion decision reads any of it.
+          items:
+            type: object
+            required: [dimension, value, member_mailbox_ids, cohort_size, degraded_inside, cohort_outside, degraded_outside, lift]
+            properties:
+              dimension:          { type: string, enum: [destination_route, signing_domain, return_path_domain, sender_domain] }
+              value:              { type: string, description: "the shared value, e.g. a signing domain or an ESP name" }
+              member_mailbox_ids: { type: array, items: { type: string }, description: "the DEGRADED members of the cohort" }
+              cohort_size:        { type: integer, description: "participants carrying this value, degraded or not" }
+              degraded_inside:    { type: integer }
+              cohort_outside:     { type: integer, description: "the rest of the pool" }
+              degraded_outside:   { type: integer }
+              lift:               { type: number, description: "how many times more degraded the cohort is than the rest of the pool" }
     WarmupDayStat:
       type: object
       required: [day, sent, received, inbox, spam, replies]

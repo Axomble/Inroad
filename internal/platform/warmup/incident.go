@@ -44,6 +44,17 @@ const (
 	MinIncidentLift = 2.0
 )
 
+// MinIncidentPool is the smallest pool detection can find anything in: a full
+// cohort, plus at least one participant outside it to compare against.
+//
+// Served to clients rather than left for them to derive. A UI has to tell "we
+// looked across the degraded mailboxes and found no shared cause" from "this pool
+// is too small to look" — different answers that must not render alike — and a
+// client-side copy of this number would drift the moment the constants above are
+// recalibrated, leaving the UI claiming it searched a pool the server never
+// examined.
+const MinIncidentPool = MinIncidentCohort + 1
+
 // unresolvedDimensionValues are values that are the ABSENCE of a classification
 // rather than one. Grouping on them would correlate on our own ignorance, and it
 // would fire hardest on the pools carrying the least data — the opposite of useful.

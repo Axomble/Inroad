@@ -9,6 +9,7 @@ import type { WarmupHealth } from '@/lib/warmup-health'
 // live here rather than being injected into the mailboxes page.
 import { useListMailboxesQuery } from '@/features/mailboxes/api'
 import { useGetWarmupOverviewQuery } from './api'
+import { WarmupIncidentsPanel } from './warmup-incidents-panel'
 import { WarmupMailboxCard } from './warmup-mailbox-card'
 
 export function WarmupPage() {
@@ -73,11 +74,26 @@ export function WarmupPage() {
             description="Connect a mailbox first, then enable warmup on it here. Warmup builds sender reputation by exchanging low-volume mail between your own opted-in mailboxes."
           />
         ) : (
-          <ul>
-            {mailboxes.map((m) => (
-              <WarmupMailboxCard key={m.id ?? ''} mailbox={m} entry={entryById.get(m.id ?? '')} />
-            ))}
-          </ul>
+          <>
+            {/*
+              Above the list, because an incident is a statement about SEVERAL
+              mailboxes: buried in one card's disclosure it would be four
+              identical panels an operator has to diff by hand, which is the work
+              it exists to remove. Nothing is rendered when the overview failed to
+              load — `incidents` is then undefined, and "no shared cause found"
+              beside a load error would claim a search nobody ran.
+            */}
+            <WarmupIncidentsPanel
+              incidents={overview?.incidents}
+              pool={entries}
+              minPool={overview?.incidents_min_pool}
+            />
+            <ul>
+              {mailboxes.map((m) => (
+                <WarmupMailboxCard key={m.id ?? ''} mailbox={m} entry={entryById.get(m.id ?? '')} />
+              ))}
+            </ul>
+          </>
         )}
       </PageBody>
     </Page>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
@@ -303,10 +304,74 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 		}
 	}
 	return WarmupOverviewDTO{
-		PoolSize:  int(count),
-		Active:    count >= 2,
-		Mailboxes: mailboxes,
+		PoolSize:         int(count),
+		Active:           count >= 2,
+		Mailboxes:        mailboxes,
+		Incidents:        s.incidents(ctx, ws),
+		IncidentsMinPool: pwarmup.MinIncidentPool,
 	}, nil
+}
+
+// incidents detects correlated degradation across the pool's fault dimensions and
+// renders it, arithmetic included.
+//
+// IT RETURNS NO ERROR, and that is the design (§9, last bullet). The overview is the
+// operator's window into a degrading pool, and it must not go dark because an
+// INFERENCE over data it is already showing could not be computed. A failure is
+// logged and degrades to "no incidents" — which reads as "nothing shared was found",
+// the same as a healthy pool. That conflation is the accepted cost: the alternative
+// is a 500 that hides the mailbox rows, the health states and the placement rates
+// too, all of which are still true.
+func (s *Service) incidents(ctx context.Context, ws uuid.UUID) []WarmupIncidentDTO {
+	participants, err := s.store.ListIncidentParticipants(ctx, ws)
+	if err != nil {
+		slog.ErrorContext(ctx, "warmup_incident_detection_failed", "workspace_id", ws, "err", err)
+		return []WarmupIncidentDTO{}
+	}
+	found := pwarmup.DetectIncidents(participants)
+	// make, not a nil slice: `incidents` is always present and `[]` when nothing
+	// correlated, because an absent key arrives as undefined and sends a client down a
+	// fallback path that looks identical to "detection did not run".
+	out := make([]WarmupIncidentDTO, len(found))
+	for i, in := range found {
+		out[i] = incidentDTO(in)
+	}
+	return out
+}
+
+// incidentDTO maps one detected correlation onto the wire shape. The order it
+// arrives in is the detector's (strongest lift first, then a total order) and is NOT
+// re-sorted here: a second opinion about which finding matters most is exactly the
+// kind of duplicated ranking this subsystem keeps having to remove.
+func incidentDTO(in pwarmup.Incident) WarmupIncidentDTO {
+	// Members are always a list, never null: an incident with no named members cannot
+	// occur (MinIncidentMembers is 2), so a nil here would only ever be a mapping bug
+	// rendered as an empty state.
+	members := in.Members
+	if members == nil {
+		members = []string{}
+	}
+	return WarmupIncidentDTO{
+		Dimension:        in.Dimension,
+		Value:            in.Value,
+		MemberMailboxIDs: members,
+		CohortSize:       in.CohortSize,
+		DegradedInside:   in.DegradedInside,
+		CohortOutside:    in.CohortOutside,
+		DegradedOutside:  in.DegradedOutside,
+		Lift:             roundLift(in.Lift),
+	}
+}
+
+// roundLift trims a lift to two decimals for the wire.
+//
+// Separate from wireRate, which widens a stored float32 REAL and needs six decimals
+// to stay finer than the smallest threshold the policy compares against. A lift
+// crosses no threshold and is an estimate over counts that are frequently single
+// digits: two decimals distinguishes the findings that differ (2.1 from 12) and
+// declines to publish twelve more digits the pool cannot support.
+func roundLift(lift float64) float64 {
+	return math.Round(lift*100) / 100
 }
 
 // ListTransitions returns one mailbox's automated decision history, newest

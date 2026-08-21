@@ -300,3 +300,69 @@ func TestDetectIncidentsHandlesAnEmptyPool(t *testing.T) {
 			"where nil becomes null and an empty slice becomes [] — the contract says []")
 	}
 }
+
+// MinIncidentPool is published to clients so a UI can say "this pool is too small
+// to look" instead of "we looked and found nothing". That makes it a CLAIM about
+// the detector, and nothing else here checks the claim: the detector enforces
+// MinIncidentCohort and the empty-outside rule separately and never reads
+// MinIncidentPool at all, so the constant could drift out of agreement with the
+// behaviour it advertises and every other test would stay green.
+//
+// So this brute-forces the boundary. Below the floor, NO arrangement of
+// participants — any assignment of values, any subset degraded — may produce an
+// incident. At the floor, at least one must.
+func TestMinIncidentPoolIsTheSmallestPoolThatCanReportAnything(t *testing.T) {
+	// Every assignment of `n` participants to `values` groups, crossed with every
+	// subset of them degraded.
+	arrangements := func(n int, values []string) [][]IncidentInput {
+		var out [][]IncidentInput
+		total := 1
+		for i := 0; i < n; i++ {
+			total *= len(values)
+		}
+		for combo := 0; combo < total; combo++ {
+			for mask := 0; mask < (1 << n); mask++ {
+				pool := make([]IncidentInput, 0, n)
+				c := combo
+				for i := 0; i < n; i++ {
+					v := values[c%len(values)]
+					c /= len(values)
+					pool = append(pool, IncidentInput{
+						MailboxID: fmt.Sprintf("m%d", i),
+						// One organizational domain per group, so the sender-domain
+						// dimension is exercised alongside the observed three rather
+						// than being accidentally unique per participant.
+						Email:    fmt.Sprintf("m%d@%s", i, v),
+						Degraded: mask&(1<<i) != 0,
+						Route:    v, SigningDomain: v, ReturnPathDomain: v,
+					})
+				}
+				out = append(out, pool)
+			}
+		}
+		return out
+	}
+
+	values := []string{"a.test", "b.test", "c.test"}
+
+	below := MinIncidentPool - 1
+	for _, pool := range arrangements(below, values) {
+		if got := DetectIncidents(pool); len(got) != 0 {
+			t.Fatalf("a pool of %d produced %+v; MinIncidentPool claims %d is the smallest "+
+				"pool that can report anything, so the published floor is too high",
+				below, got, MinIncidentPool)
+		}
+	}
+
+	var reported bool
+	for _, pool := range arrangements(MinIncidentPool, values) {
+		if len(DetectIncidents(pool)) != 0 {
+			reported = true
+			break
+		}
+	}
+	if !reported {
+		t.Errorf("no arrangement of %d participants produced an incident; MinIncidentPool "+
+			"claims this size can, so the published floor is too low", MinIncidentPool)
+	}
+}

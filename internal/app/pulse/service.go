@@ -3,6 +3,7 @@ package pulse
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/sendcap"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // Attention severities, worst first. The service sorts rows by this rank so
@@ -97,8 +99,51 @@ func (s *Service) Get(ctx context.Context, workspaceID uuid.UUID) (Pulse, error)
 		Contacts:  ContactCounts{Total: contacts},
 		Sending:   SendingStatus{SentToday: sentToday, DailyCap: capToday.dailyCap},
 		Inbox:     InboxCounts{Unread: inbox.Unread, Interested: inbox.Interested},
-		Attention: attention(mb, capToday, dmarc, sentToday),
+		Attention: attention(attentionInputs{
+			mailboxes: mb,
+			capToday:  capToday,
+			dmarc:     dmarc,
+			sentToday: sentToday,
+			incident:  s.strongestWarmupIncident(ctx, workspaceID, capToday),
+		}),
 	}, nil
+}
+
+// strongestWarmupIncident returns the correlation that best explains why warmup
+// health is gating senders, or nil when there is nothing to explain or nothing shared
+// to blame.
+//
+// IT RETURNS NO ERROR (design §9, last bullet). A failed inference must not fail the
+// pulse: the row falls back to narrating its per-state counts, which is what it said
+// before this slice and is still true. Logged, never swallowed silently.
+//
+// The read is SKIPPED unless a sender is actually gated, because there is no row to
+// attribute otherwise. /pulse is polled by every open console session roughly every
+// 45 seconds, and this is the only consumer, so a healthy workspace pays nothing for a
+// feature that only speaks when something is already wrong.
+//
+// Only the STRONGEST finding is named. Two dimensions frequently describe the same
+// fault from different angles — a signing domain and the sender domain it lives on —
+// so counting "and 2 more" would inflate one problem into three on a card whose whole
+// job is to be trusted. The warmup overview shows every finding with its arithmetic.
+func (s *Service) strongestWarmupIncident(ctx context.Context, workspaceID uuid.UUID, capToday capacity) *warmup.Incident {
+	if capToday.gated() == 0 {
+		return nil
+	}
+	participants, err := s.store.WarmupIncidentParticipants(ctx, workspaceID)
+	if err != nil {
+		slog.ErrorContext(ctx, "pulse_warmup_incident_detection_failed",
+			"workspace_id", workspaceID, "err", err)
+		return nil
+	}
+	found := warmup.DetectIncidents(participants)
+	if len(found) == 0 {
+		return nil
+	}
+	// DetectIncidents already sorts strongest-first and deterministically, so the head
+	// is the finding to name. Re-ranking here would be a second opinion about which
+	// correlation matters most.
+	return &found[0]
 }
 
 // capacity is the workspace's cold-send picture for today, derived from the
@@ -142,9 +187,25 @@ func (s *Service) capacityOf(rows []gen.ListPulseSenderCapacityRow) capacity {
 	return c
 }
 
+// attentionInputs are the facts the producers run over — one struct rather than a
+// growing positional list, so adding a producer's input cannot silently reorder an
+// existing one's.
+type attentionInputs struct {
+	mailboxes gen.GetPulseMailboxCountsRow
+	capToday  capacity
+	dmarc     gen.GetPulseDmarcAttentionRow
+	sentToday int64
+	// incident is the shared cause behind the gated senders, or nil when none was
+	// found. It ATTRIBUTES the senders_gated row and never produces a row of its own:
+	// a second row about the same mailboxes would double-count exactly the thing
+	// correlating them exists to collapse (design §8).
+	incident *warmup.Incident
+}
+
 // attention runs the producers and returns their rows worst-first. Each
 // producer only emits when it can state a truthful reason from real data.
-func attention(mb gen.GetPulseMailboxCountsRow, capToday capacity, dmarc gen.GetPulseDmarcAttentionRow, sentToday int64) []Attention {
+func attention(in attentionInputs) []Attention {
+	mb, capToday, dmarc, sentToday := in.mailboxes, in.capToday, in.dmarc, in.sentToday
 	rows := make([]Attention, 0, 4)
 	if mb.Error > 0 {
 		rows = append(rows, Attention{
@@ -155,8 +216,10 @@ func attention(mb gen.GetPulseMailboxCountsRow, capToday capacity, dmarc gen.Get
 	}
 	if capToday.gated() > 0 {
 		rows = append(rows, Attention{
+			// Kind, severity and count are UNCHANGED by attribution: this is the same row
+			// saying the same thing about the same mailboxes, with a better explanation.
 			Kind: kindSendersGated, Severity: SeverityWarn, Count: capToday.gated(),
-			Reason: gatedReason(capToday),
+			Reason: gatedReason(capToday, in.incident),
 			Href:   "/app/mailboxes",
 		})
 	}
@@ -194,9 +257,24 @@ func mailboxErrorReason(stored string) string {
 	return "mailbox in error state"
 }
 
-// gatedReason narrates WHICH health states are limiting sending, from the
-// per-state counts — e.g. "warmup health limiting sending: 2 throttled, 1 paused".
-func gatedReason(c capacity) string {
+// gatedPrefix keeps the row recognisable across both of its forms: whichever tail
+// follows, the fact being reported is still that warmup health is holding volume back.
+const gatedPrefix = "warmup health limiting sending: "
+
+// gatedReason explains why warmup health is limiting sending.
+//
+// With a detected incident it NAMES THE SHARED THING — "4 mailboxes degrading through
+// one signing domain (mail.acme.test)" — instead of enumerating states. That is the
+// whole behaviour change of this slice: an operator told "3 throttled, 1 paused" has
+// to diff four mailboxes by hand to notice they all sign as one domain.
+//
+// Without one it falls back to the per-state counts, which is the honest answer: "no
+// shared cause found" is information, and inventing an explanation from an
+// unconcentrated pool would be worse than a count.
+func gatedReason(c capacity, incident *warmup.Incident) string {
+	if incident != nil {
+		return gatedPrefix + incidentCause(*incident)
+	}
 	parts := make([]string, 0, 4)
 	if c.unknown > 0 {
 		parts = append(parts, fmt.Sprintf("%d need evidence", c.unknown))
@@ -210,7 +288,37 @@ func gatedReason(c capacity) string {
 	if c.paused > 0 {
 		parts = append(parts, fmt.Sprintf("%d paused", c.paused))
 	}
-	return "warmup health limiting sending: " + strings.Join(parts, ", ")
+	return gatedPrefix + strings.Join(parts, ", ")
+}
+
+// incidentCause is the attributed tail of the senders_gated reason.
+//
+// "degrading THROUGH one X" deliberately, not "because of": an incident is a
+// correlation and never a cause (design §8). The value is named in full because a
+// finding an operator cannot act on is not worth a row, and the member count is the
+// incident's OWN — the degraded mailboxes inside the cohort, which is a different and
+// separately-labelled population from the row's count of gated senders (that one
+// includes mailboxes merely lacking evidence, and excludes lane-only containment).
+func incidentCause(in warmup.Incident) string {
+	label, ok := incidentDimensionLabels[in.Dimension]
+	if !ok {
+		// A dimension added to the fold and not to the labels reads a little
+		// mechanically, and that is the correct failure: a sentence with a hole in it, or
+		// worse a plausible wrong noun, is not a better outcome.
+		label = in.Dimension
+	}
+	return fmt.Sprintf("%d mailboxes degrading through one %s (%s)", in.DegradedInside, label, in.Value)
+}
+
+// incidentDimensionLabels turn the wire vocabulary into the noun an operator reads.
+// A dimension with no label here would render as an empty noun, so the fallback names
+// the raw dimension instead — a new fault dimension must never produce a sentence
+// with a hole in it.
+var incidentDimensionLabels = map[string]string{
+	warmup.DimensionRoute:        "destination route",
+	warmup.DimensionSigning:      "signing domain",
+	warmup.DimensionReturnPath:   "return path domain",
+	warmup.DimensionSenderDomain: "sender domain",
 }
 
 // dmarcReason names one offending domain (the query's deterministic sample)
