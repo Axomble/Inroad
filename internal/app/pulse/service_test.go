@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // fakeStore returns canned aggregate rows; err (when set) is returned by
@@ -26,6 +28,15 @@ type fakeStore struct {
 	dmarc    gen.GetPulseDmarcAttentionRow
 	inbox    gen.GetInboxPulseCountsRow
 	err      error
+
+	// incidentParticipants is the pool the correlation fold runs over.
+	// incidentParticipantsErr fails ONLY that read (err would fail every one, which
+	// cannot show that a failed inference leaves the rest of the payload standing).
+	// incidentReads counts the calls, so a test can prove the read is skipped when no
+	// row could be attributed.
+	incidentParticipants    []pwarmup.IncidentInput
+	incidentParticipantsErr error
+	incidentReads           int
 }
 
 func (f *fakeStore) MailboxCounts(context.Context, uuid.UUID) (gen.GetPulseMailboxCountsRow, error) {
@@ -49,6 +60,13 @@ func (f *fakeStore) DmarcAttention(context.Context, uuid.UUID) (gen.GetPulseDmar
 }
 func (f *fakeStore) InboxCounts(context.Context, uuid.UUID) (gen.GetInboxPulseCountsRow, error) {
 	return f.inbox, f.err
+}
+func (f *fakeStore) WarmupIncidentParticipants(context.Context, uuid.UUID) ([]pwarmup.IncidentInput, error) {
+	f.incidentReads++
+	if f.incidentParticipantsErr != nil {
+		return nil, f.incidentParticipantsErr
+	}
+	return f.incidentParticipants, nil
 }
 
 // testNow is the pinned clock every test's service runs on, so ramp-age
@@ -326,6 +344,173 @@ func TestAttentionSeverityOrdering(t *testing.T) {
 		if i >= len(kinds) || kinds[i] != wantKinds[i] || sevs[i] != wantSevs[i] {
 			t.Fatalf("attention order = %v / %v, want %v / %v", kinds, sevs, wantKinds, wantSevs)
 		}
+	}
+}
+
+// gatedPool is the capacity fixture every incident test below shares: four
+// throttled senders and one healthy one, so the senders_gated row fires with a
+// count of 4 whether or not a cause is found.
+func gatedPool() []gen.ListPulseSenderCapacityRow {
+	return []gen.ListPulseSenderCapacityRow{
+		capRow(50, false, "throttled", 40),
+		capRow(50, false, "throttled", 40),
+		capRow(50, false, "throttled", 40),
+		capRow(50, false, "throttled", 40),
+		capRow(50, false, "healthy", 40),
+	}
+}
+
+// degradingThroughOneSigningDomain is a pool whose degradation is CONCENTRATED: four
+// of five mailboxes signing as mail.acme.test are degrading, against twenty others
+// where two are. Every address is on its own organizational domain so the
+// sender_domain dimension cannot form a cohort and the finding is unambiguous.
+func degradingThroughOneSigningDomain() []pwarmup.IncidentInput {
+	pool := []pwarmup.IncidentInput{}
+	for i := 1; i <= 4; i++ {
+		pool = append(pool, pwarmup.IncidentInput{
+			MailboxID: fmt.Sprintf("in-%d", i), Email: fmt.Sprintf("m%d@in%d.test", i, i),
+			Degraded: true, SigningDomain: "mail.acme.test",
+		})
+	}
+	pool = append(pool, pwarmup.IncidentInput{
+		MailboxID: "in-5", Email: "m5@in5.test", SigningDomain: "mail.acme.test",
+	})
+	for i := 1; i <= 20; i++ {
+		pool = append(pool, pwarmup.IncidentInput{
+			MailboxID: fmt.Sprintf("out-%d", i), Email: fmt.Sprintf("o%d@out%d.test", i, i),
+			Degraded: i <= 2, SigningDomain: fmt.Sprintf("own%d.test", i),
+		})
+	}
+	return pool
+}
+
+// The whole behaviour change of the slice: the attention row stops reporting an
+// unattributed count and NAMES the shared thing instead.
+func TestSendersGatedNamesTheCauseWhenOneIsFound(t *testing.T) {
+	svc := newService(&fakeStore{
+		caps:                 gatedPool(),
+		incidentParticipants: degradingThroughOneSigningDomain(),
+	})
+	p, err := svc.Get(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(p.Attention) != 1 {
+		t.Fatalf("attention = %+v, want the single senders_gated row", p.Attention)
+	}
+	got := p.Attention[0]
+	want := "warmup health limiting sending: 4 mailboxes degrading through one signing domain (mail.acme.test)"
+	if got.Reason != want {
+		t.Errorf("reason = %q, want %q", got.Reason, want)
+	}
+	if got.Kind != kindSendersGated || got.Severity != SeverityWarn {
+		t.Errorf("row = %+v, want the existing senders_gated/warn row, attributed rather than replaced", got)
+	}
+}
+
+// ATTRIBUTED, NOT ADDITIONAL (design §8). Naming the cause must not produce a second
+// row restating the same mailboxes — that would double-count the very thing this
+// slice exists to collapse.
+//
+// The two payloads are built from the SAME capacity fixture and differ only in
+// whether the pool correlates, so the assertion isolates the property: same number of
+// rows, same kinds, same counts, and only the reason moves.
+func TestAttributingAnIncidentAddsNoRowAndCountsNothingTwice(t *testing.T) {
+	unattributed, err := newService(&fakeStore{caps: gatedPool()}).Get(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("Get (no incident): %v", err)
+	}
+	attributed, err := newService(&fakeStore{
+		caps:                 gatedPool(),
+		incidentParticipants: degradingThroughOneSigningDomain(),
+	}).Get(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("Get (incident): %v", err)
+	}
+
+	if len(attributed.Attention) != len(unattributed.Attention) {
+		t.Fatalf("attributing a cause changed the row count: %+v vs %+v",
+			attributed.Attention, unattributed.Attention)
+	}
+	for i := range attributed.Attention {
+		got, base := attributed.Attention[i], unattributed.Attention[i]
+		if got.Kind != base.Kind || got.Severity != base.Severity || got.Count != base.Count {
+			t.Errorf("row %d = %+v, want the same kind/severity/count as %+v — an attributed row is the "+
+				"SAME row, so the gated mailboxes must be counted exactly once", i, got, base)
+		}
+	}
+	if attributed.Attention[0].Reason == unattributed.Attention[0].Reason {
+		t.Fatal("the reason did not change, so this test cannot tell an attributed row from an " +
+			"unattributed one")
+	}
+}
+
+// A pool that shares nothing keeps the per-state narration: "no shared cause" is a
+// real answer, and inventing one from an unconcentrated pool would be worse than a
+// count.
+func TestSendersGatedKeepsTheStateCountsWhenNothingCorrelates(t *testing.T) {
+	pool := []pwarmup.IncidentInput{}
+	for i := 1; i <= 6; i++ {
+		pool = append(pool, pwarmup.IncidentInput{
+			MailboxID: fmt.Sprintf("m-%d", i), Email: fmt.Sprintf("m%d@own%d.test", i, i),
+			Degraded: true, SigningDomain: fmt.Sprintf("sign%d.test", i),
+		})
+	}
+	svc := newService(&fakeStore{
+		caps:                 []gen.ListPulseSenderCapacityRow{capRow(50, false, "throttled", 40)},
+		incidentParticipants: pool,
+	})
+	p, err := svc.Get(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(p.Attention) != 1 {
+		t.Fatalf("attention = %+v, want one senders_gated row", p.Attention)
+	}
+	if want := "warmup health limiting sending: 1 throttled"; p.Attention[0].Reason != want {
+		t.Errorf("reason = %q, want %q", p.Attention[0].Reason, want)
+	}
+}
+
+// Detection must never fail a read (design §9). A failed incident read leaves the
+// pulse intact and the row narrating its counts — the operator loses the attribution,
+// not the card.
+func TestPulseSurvivesAFailedIncidentRead(t *testing.T) {
+	svc := newService(&fakeStore{
+		caps:                    gatedPool(),
+		incidentParticipants:    degradingThroughOneSigningDomain(),
+		incidentParticipantsErr: errors.New("detection exploded"),
+	})
+	p, err := svc.Get(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("a failed inference must not fail the pulse: %v", err)
+	}
+	if len(p.Attention) != 1 {
+		t.Fatalf("attention = %+v, want the senders_gated row", p.Attention)
+	}
+	if want := "warmup health limiting sending: 4 throttled"; p.Attention[0].Reason != want {
+		t.Errorf("reason = %q, want the unattributed fallback %q", p.Attention[0].Reason, want)
+	}
+}
+
+// The read is skipped entirely when no sender is gated, because there is no row to
+// attribute. /pulse is polled by every open console session every ~45 seconds, so a
+// query that can change nothing must not run: a healthy workspace pays nothing for a
+// feature that only speaks when something is wrong.
+func TestNoIncidentReadWhenNothingIsGated(t *testing.T) {
+	store := &fakeStore{
+		caps:                 []gen.ListPulseSenderCapacityRow{capRow(50, false, "healthy", 40)},
+		incidentParticipants: degradingThroughOneSigningDomain(),
+	}
+	p, err := newService(store).Get(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(p.Attention) != 0 {
+		t.Fatalf("attention = %+v, want none: no sender is gated", p.Attention)
+	}
+	if store.incidentReads != 0 {
+		t.Errorf("the incident read ran %d times for a workspace with no gated sender", store.incidentReads)
 	}
 }
 
