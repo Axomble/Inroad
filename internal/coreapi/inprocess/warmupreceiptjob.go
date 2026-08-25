@@ -748,13 +748,7 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 		// Signals are aggregated ONCE per workspace, not recomputed per participant.
 		// The Phase 0 sweep ran eight correlated subqueries for every enabled mailbox
 		// on every tick, including an arm no index could serve.
-		if _, err := c.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, gen.UpsertWarmupSignalSnapshotsForWorkspaceParams{
-			WorkspaceID: ws,
-			// Whose placement reports do not count. Resolved per workspace, never
-			// across, because an exclusion derived from one tenant's pool has no
-			// business removing another's evidence.
-			DiscountedObservers: c.discountedObservers(ctx, ws),
-		}); err != nil {
+		if _, err := c.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, ws); err != nil {
 			// Skip this workspace rather than evaluating it on stale evidence. The
 			// previous snapshot survives and the staleness rule below will refuse to
 			// promote on it, so a persistent refresh failure degrades to "no
@@ -767,64 +761,6 @@ func (c client) EvaluateWarmupHealth(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// discountedObservers resolves which mailboxes' placement reports must NOT count as
-// evidence about the senders that mailed them, for one workspace.
-//
-// IT NEVER FAILS, and that is a deliberate asymmetry rather than a swallowed error.
-// The exclusion is an improvement to the evidence; the refresh is the evidence. If
-// this read breaks, proceeding with an EMPTY list reproduces exactly the behaviour
-// that shipped before observer trust existed — the hole stays open for one sweep —
-// whereas failing the refresh leaves the WHOLE workspace on a stale snapshot, which
-// blocks every promotion and every containment the fresh evidence would have
-// justified. The failure is logged at error level because a persistently failing
-// trust read means the gate is silently off.
-//
-// One extra aggregate statement per workspace per sweep, which keeps the "bounded
-// number of statements per WORKSPACE" property the Phase 1 refresh was built for
-// (design §3.1): it is a single grouped scan of the same 7-day window the refresh
-// already reads, on the observer index migration 000054 created for it.
-func (c client) discountedObservers(ctx context.Context, ws uuid.UUID) []uuid.UUID {
-	rows, err := c.q.ListWarmupObserverStats(ctx, ws)
-	if err != nil {
-		slog.ErrorContext(ctx, "warmup_observer_trust_unavailable",
-			"workspace_id", ws.String(), "err", err)
-		// NOT nil. A nil slice binds as a NULL array, and the refresh's predicate
-		// guards against that too, but the contract this function promises its caller
-		// is "an empty exclusion", so it returns one.
-		return []uuid.UUID{}
-	}
-	// The same projection app/warmup's PgStore makes for the operator-visible half.
-	// The two cannot share it — an app package and the control<->execution seam do not
-	// import each other — and the part that must not be duplicated, the rule itself,
-	// is the platform detector both call.
-	stats := make([]warmup.ObserverStats, 0, len(rows))
-	byID := make(map[string]uuid.UUID, len(rows))
-	for _, r := range rows {
-		// Nullable column (a deleted observer is SET NULL) that the query already
-		// filters out, so this only ever skips a row the type system cannot rule out.
-		if !r.ObserverMailboxID.Valid {
-			continue
-		}
-		id := uuid.UUID(r.ObserverMailboxID.Bytes)
-		byID[id.String()] = id
-		stats = append(stats, warmup.ObserverStats{
-			ObserverMailboxID: id.String(), Cohort: r.DestinationEsp,
-			Spam: int(r.Spam), Total: int(r.Total),
-		})
-	}
-	// The detector's order is preserved, so the bound array reads the same way the
-	// overview renders it. An observer discounted in two cohorts appears twice, which
-	// a membership test does not care about.
-	ids := warmup.DiscountedObserverIDs(warmup.DiscountObservers(stats))
-	out := make([]uuid.UUID, 0, len(ids))
-	for _, id := range ids {
-		if parsed, ok := byID[id]; ok {
-			out = append(out, parsed)
-		}
-	}
-	return out
 }
 
 // warmupEvidenceTTL is how old the newest OBSERVATION about a mailbox may be

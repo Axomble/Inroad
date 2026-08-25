@@ -1353,11 +1353,7 @@ func TestCampaignReportExplainsAnAutoPause(t *testing.T) {
 // passed throughout.
 func (f *fixture) warmupCampaignHardBounces(t *testing.T, ctx context.Context, mailbox uuid.UUID) int32 {
 	t.Helper()
-	// No observer is discounted: this fixture is about the campaign bounce arm, and
-	// an empty exclusion list is what the refresh does when every observer is trusted.
-	if _, err := f.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, gen.UpsertWarmupSignalSnapshotsForWorkspaceParams{
-		WorkspaceID: f.ws, DiscountedObservers: []uuid.UUID{},
-	}); err != nil {
+	if _, err := f.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, f.ws); err != nil {
 		t.Fatalf("refresh warmup snapshot: %v", err)
 	}
 	var n int32

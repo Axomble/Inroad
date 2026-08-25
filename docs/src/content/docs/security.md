@@ -922,9 +922,12 @@ write history that never happened.
     that workspace's senders drops.
     This is safe **only** while nothing reads a per-route rate. No threshold, lane,
     health state or promotion decision does today, and the route columns appear in
-    exactly three statements: `RecordWarmupPlacementObservation` writes them,
-    `ListWarmupRoutes` aggregates the matrix, and `ListWarmupIncidentParticipants`
-    feeds `warmup.DetectIncidents`. **Keep this enumeration current** — it is the
+    exactly four statements: `RecordWarmupPlacementObservation` writes them,
+    `ListWarmupRoutes` aggregates the matrix, `ListWarmupIncidentParticipants` feeds
+    `warmup.DetectIncidents`, and `ListWarmupObserverStats` feeds
+    `warmup.DiscountObservers`. The fourth was very nearly the breach: observer trust
+    shipped as a gate in review and was cut back to disclosure precisely because this
+    rule says a route-derived rate may not decide a health state (invariant 59). **Keep this enumeration current** — it is the
     tripwire by which a later reviewer finds every route consumer, and it is the
     third entry, the correlated-incident fold, that first turns route data into a
     derived claim rendered outside the warmup page (the pulse attention row).
@@ -955,6 +958,28 @@ write history that never happened.
     finding with its arithmetic and discloses its cap. Do not make the pulse row the
     only place a correlation is reported, and do not gate on any of this without
     binding the identity dimensions the way invariant 52 binds placement.
+
+59. **Observer trust is measured and published; it removes nothing.** Placement is
+    sender-attributed but recipient-observed, so a mailbox that reports everything it
+    receives as spam degrades every sender that mails it. `warmup.DiscountObservers`
+    names those observers — 20+ observations, a 30% absolute floor, and 3x the peer
+    rate within the observer's own provider cohort — and the overview publishes each
+    verdict with its arithmetic. **Nothing acts on it.** The hole stays open.
+    The reason is that the cohort is dilutable: an attacker who adds clean volume to a
+    cohort drags the peer baseline down until an HONEST observer clears the multiple,
+    silencing the mailbox that would have reported their spam. Reproduced — 150 clean
+    observations discounted an honest 35/100 observer beside a strict 25/100 peer.
+    Peer floors (≥2 peer mailboxes, and peers clearing the same sample minimum) raise
+    the price without closing it.
+    Applying it anyway would trade a hole that makes senders look WORSE than they are
+    — visible, self-limiting, costing only sending — for one that makes them look
+    BETTER, silently. Under-containment is the dangerous direction here.
+    **Before this can gate:** the cohort key must be bound to something the attacker
+    does not control, and invariant 57's rule against a route-derived rate reaching
+    policy must be satisfied or consciously retired. Two known evasions survive
+    regardless and should not be read as closed: an observer parked just under the 30%
+    floor is untouchable, and one that junks a single victim rather than everything
+    sits near the pool average at any volume.
 
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only

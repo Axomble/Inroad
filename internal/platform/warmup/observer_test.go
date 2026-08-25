@@ -102,9 +102,14 @@ func TestDiscountObserversNeverJudgesACohortOfOne(t *testing.T) {
 // measured against and hide itself — worst where the cohort is small, which is where
 // one bad observer does the most damage.
 func TestDiscountObserversExcludesItselfFromItsOwnBaseline(t *testing.T) {
-	// One clean peer, and a hostile observer carrying ten times the volume. Pooled,
-	// the cohort rate is dragged up to ~82% and the hostile observer looks typical.
-	in := []ObserverStats{obs("clean", "google", 1, 100), obs("hostile", "google", 900, 1000)}
+	// Two clean peers (the minimum baseline), and a hostile observer carrying five
+	// times their combined volume. Pooled, the cohort rate is dragged up to ~75% and
+	// the hostile observer looks typical.
+	in := []ObserverStats{
+		obs("clean-a", "google", 1, 100),
+		obs("clean-b", "google", 1, 100),
+		obs("hostile", "google", 900, 1000),
+	}
 
 	got := discountedIDs(t, in)
 	if !got["hostile"] {
@@ -214,5 +219,84 @@ func TestDiscountObserversLetsAMilderOutlierHideBehindAnExtremeOne(t *testing.T)
 	if got["mild"] {
 		t.Error("the milder observer was discounted; this test documents that it is NOT, " +
 			"and if that changed the comment above should change with it")
+	}
+}
+
+// The dilution attack, and the reason nothing gates on this yet.
+//
+// An attacker who adds clean volume to a cohort drags the baseline down until an
+// HONEST observer clears the multiple — silencing the mailbox that would have
+// reported their spam. Confirmed against the shipped detector before the peer floors
+// existed: 150 clean observations turned an honest 35/100 observer, sitting beside a
+// genuinely strict 25/100 peer, into a discounted one at lift 3.50.
+//
+// The floors below raise the price (the attacker now needs two mailboxes and real
+// volume) but do NOT close it, which is why the result is disclosed and not applied.
+func TestDiscountObserversStillYieldsToCohortDilution(t *testing.T) {
+	honest := obs("honest", "microsoft", 35, 100)
+	strict := obs("strict-peer", "microsoft", 25, 100)
+	if got := DiscountObservers([]ObserverStats{honest, strict}); len(got) != 0 {
+		t.Fatalf("an honest observer was discounted before any dilution: %+v", got)
+	}
+
+	diluted := DiscountObservers([]ObserverStats{
+		honest, strict,
+		obs("attacker-a", "microsoft", 0, 150),
+		obs("attacker-b", "microsoft", 0, 150),
+	})
+	var silenced bool
+	for _, d := range diluted {
+		if d.ObserverMailboxID == "honest" {
+			silenced = true
+		}
+	}
+	if !silenced {
+		t.Skip("dilution no longer silences an honest observer — if this became true on " +
+			"purpose, the gate deferred in security.md invariant 59 can be reconsidered")
+	}
+}
+
+// A single peer is not a baseline. Five clean observations from one mailbox could
+// otherwise delete an observer's entire spam record.
+func TestDiscountObserversNeedsMoreThanOnePeerMailbox(t *testing.T) {
+	// The lone peer carries 100 observations, so the SAMPLE floor is satisfied and
+	// only the mailbox floor can refuse this — otherwise the two guards overlap and
+	// neither is tested.
+	in := []ObserverStats{obs("subject", "google", 30, 100), obs("lone-peer", "google", 0, 100)}
+
+	if got := discountedIDs(t, in); got["subject"] {
+		t.Errorf("a single peer mailbox was treated as a baseline: %+v", DiscountObservers(in))
+	}
+}
+
+// And the peers must clear the same sample floor the accused does.
+func TestDiscountObserversNeedsAPeerBaselineWorthComparingTo(t *testing.T) {
+	in := []ObserverStats{
+		obs("subject", "google", 30, 100),
+		obs("peer-a", "google", 0, 8),
+		obs("peer-b", "google", 0, 8),
+	}
+
+	if got := discountedIDs(t, in); got["subject"] {
+		t.Errorf("sixteen peer observations were treated as a baseline: %+v", DiscountObservers(in))
+	}
+}
+
+// `unknown` is the destination_esp DEFAULT, so every observation written before
+// migration 000062 carries it, as does any mailbox the MX sweep has not reached.
+// Judging that bucket pools Google against Microsoft — the exact comparison the
+// cohort exists to prevent. DetectIncidents already refuses it and gates nothing.
+func TestDiscountObserversNeverJudgesAnUnresolvedCohort(t *testing.T) {
+	for _, unresolved := range []string{"unknown", "", "  ", "UNKNOWN"} {
+		t.Run(unresolved, func(t *testing.T) {
+			in := []ObserverStats{
+				obs("hostile", unresolved, 90, 100),
+				obs("peer-a", unresolved, 1, 100),
+				obs("peer-b", unresolved, 1, 100),
+			}
+			if got := DiscountObservers(in); len(got) != 0 {
+				t.Errorf("judged the unresolved cohort %q: %+v", unresolved, got)
+			}
+		})
 	}
 }

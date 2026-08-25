@@ -1121,7 +1121,11 @@ func TestOverviewReportsADiscountedObserverWithItsArithmetic(t *testing.T) {
 func hostileObserverPool() []pwarmup.ObserverStats {
 	return []pwarmup.ObserverStats{
 		{ObserverMailboxID: "hostile", Cohort: "microsoft", Spam: 44, Total: 50},
-		{ObserverMailboxID: "peer", Cohort: "microsoft", Spam: 6, Total: 50},
+		// Split across two mailboxes, combining to the same 6/50: a baseline has to be
+		// more than one peer's opinion (MinObserverPeers), and the split leaves the
+		// cohort rate and the lift this test pins exactly where they were.
+		{ObserverMailboxID: "peer-a", Cohort: "microsoft", Spam: 3, Total: 25},
+		{ObserverMailboxID: "peer-b", Cohort: "microsoft", Spam: 3, Total: 25},
 	}
 }
 
@@ -1140,7 +1144,8 @@ func TestOverviewDoesNotDiscountAStrictButNormalObserver(t *testing.T) {
 	store.enabledCount = 3
 	store.observerStats = []pwarmup.ObserverStats{
 		{ObserverMailboxID: "strict", Cohort: "microsoft", Spam: 20, Total: 50},
-		{ObserverMailboxID: "peer", Cohort: "microsoft", Spam: 40, Total: 200},
+		{ObserverMailboxID: "peer-a", Cohort: "microsoft", Spam: 20, Total: 100},
+		{ObserverMailboxID: "peer-b", Cohort: "microsoft", Spam: 20, Total: 100},
 	}
 	svc := withNow(NewService(store), time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
 

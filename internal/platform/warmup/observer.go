@@ -1,6 +1,9 @@
 package warmup
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Observer trust: whose reports count as evidence.
 //
@@ -32,6 +35,10 @@ const (
 	// well within normal variation and not evidence of anything. Without this, the
 	// cleaner the pool, the more easily an ordinary observer trips the multiple.
 	MinObserverSpamRate = 0.30
+	// MinObserverPeers is how many OTHER mailboxes must be in the cohort before it is
+	// a baseline rather than one mailbox's opinion. A single peer carrying five clean
+	// observations could otherwise condemn an observer with a full record.
+	MinObserverPeers = 2
 )
 
 // ObserverStats is one observer's reporting record over the window, alongside the
@@ -65,11 +72,29 @@ type DiscountedObserver struct {
 // DiscountObservers returns the observers whose placement reports must be excluded
 // from every sender's evidence. Pure: no clock, no I/O, no DB.
 //
-// **This one DOES gate**, unlike Phase 2's slices, and deliberately so: it removes
-// attacker-influenceable evidence rather than adding a threshold on top of it, which
-// is the direction invariant 52 asks for. Excluding a wild outlier is defensible
-// without knowing what a normal rate looks like — which is why this does not wait for
-// the calibration data an exposure budget needs.
+// **This gates NOTHING, and that is a reversal.** It was written to remove hostile
+// reports from the evidence the health policy reads, which is the direction invariant
+// 52 asks for. A security audit killed that, and the reason is worth keeping because
+// it will be the same reason next time.
+//
+// The cohort is DILUTABLE. An attacker who adds clean volume to a cohort drags the
+// peer baseline down until an HONEST observer clears the multiple — silencing the
+// mailbox that would have reported their spam and flattering their own sender.
+// Reproduced before the peer floors below existed: 150 clean observations discounted
+// an honest 35/100 observer sitting beside a genuinely strict 25/100 peer.
+//
+// Under-containment is the dangerous direction in a reputation engine. The hole this
+// was meant to close makes senders look WORSE than they are — visible, self-limiting,
+// and it costs sending. The gate would have added a way to make them look BETTER than
+// they are, silently, which is the failure this subsystem exists to prevent. So the
+// verdicts are published and applied to nothing.
+//
+// The cohort is also route-derived (destination_esp), and security.md invariant 57
+// says in as many words that nothing gating may read a per-route rate. Gating here
+// would have breached an invariant written two slices ago for exactly this case.
+//
+// What the gate needs before it can land: a cohort key bound to something the
+// attacker does not control. See invariant 59.
 //
 // The cohort rate an observer is measured against EXCLUDES that observer. Otherwise a
 // mailbox that dominates its cohort raises the very baseline it is being compared to
@@ -80,12 +105,22 @@ type DiscountedObserver struct {
 // "the only Microsoft mailbox in the pool" as an outlier would discard the pool's
 // only evidence about Microsoft.
 func DiscountObservers(observers []ObserverStats) []DiscountedObserver {
-	type totals struct{ spam, total int }
+	type totals struct{ spam, total, mailboxes int }
 	cohorts := map[string]totals{}
 	for _, o := range observers {
+		// An unresolved cohort is not a cohort. `unknown` is the destination_esp
+		// column's DEFAULT, so every observation written before migration 000062
+		// carries it, as does any mailbox whose domain the MX sweep has not reached
+		// — pooling those judges a Google mailbox against a Microsoft one, which is
+		// exactly the unfair comparison the cohort exists to prevent. DetectIncidents
+		// already refuses this and gates nothing; refusing it here matters more.
+		if unresolvedDimensionValues[strings.ToLower(strings.TrimSpace(o.Cohort))] {
+			continue
+		}
 		t := cohorts[o.Cohort]
 		t.spam += o.Spam
 		t.total += o.Total
+		t.mailboxes++
 		cohorts[o.Cohort] = t
 	}
 
@@ -102,16 +137,15 @@ func DiscountObservers(observers []ObserverStats) []DiscountedObserver {
 		// The cohort WITHOUT this observer.
 		peers := cohorts[o.Cohort]
 		peerSpam, peerTotal := peers.spam-o.Spam, peers.total-o.Total
-		// A cohort of one: nothing to be an outlier against.
+		// The baseline must be evidence, not one mailbox's opinion. Both floors are
+		// the accused's own floors applied to the peers, and their absence was a real
+		// hole: five clean observations from a single peer could condemn an observer
+		// with a full record, worst exactly where a bad observer does the most damage.
 		//
-		// OVER-DETERMINED TODAY, and kept — the same shape as the incident fold's
-		// empty-outside guard. With no peers the continuity-corrected rate becomes
-		// 0.5/0 = +Inf and the lift collapses to 0, which fails the bar anyway;
-		// verified by reverting this, and no test noticed. It stays because relying
-		// on IEEE infinity for a correctness property is not a design, and because
-		// this is the one thing that would still hold if ObserverSpamLift were ever
-		// lowered to zero.
-		if peerTotal <= 0 {
+		// This does NOT close cohort dilution — an attacker with enough clean volume
+		// still drags the baseline down — which is why nothing gates on this. See the
+		// contract note above.
+		if peers.mailboxes-1 < MinObserverPeers || peerTotal < MinObserverSamples {
 			continue
 		}
 		peerRate := float64(peerSpam) / float64(peerTotal)

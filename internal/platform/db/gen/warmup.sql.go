@@ -2739,34 +2739,6 @@ LEFT JOIN LATERAL (
       AND o.kind = 'placement'
       AND o.attribution_trusted
       AND o.observed_at >= now() - interval '7 days'
-      -- OBSERVER TRUST, and the first thing in this subsystem that GATES rather than
-      -- reports. An observer whose own spam-reporting is a wild outlier INSIDE its
-      -- provider cohort is not evidence about the senders that mailed it: a
-      -- misconfigured filter, a bulk-junked folder or one compromised account all
-      -- degrade every sender in the pool. The caller reads ListWarmupObserverStats,
-      -- hands it to warmup.DiscountObservers, and binds the ids that come back.
-      --
-      -- NOT (= ANY(COALESCE(...))) rather than <> ALL(...), and the COALESCE is
-      -- load-bearing rather than defensive habit: ` + "`" + `x <> ALL(NULL::uuid[])` + "`" + ` is NULL,
-      -- so a caller that bound a NULL array would make this predicate NULL for every
-      -- row that HAS an observer and silently zero an entire workspace's placement
-      -- evidence — a refresh failure disguised as a clean pool. Against an EMPTY
-      -- array the test is false for every row, so the arm counts exactly what it
-      -- counted before observer trust existed. That is deliberately also the
-      -- fallback a caller whose stats read FAILED must take: stale-but-whole
-      -- evidence beats evidence with an unexplained hole in it.
-      --
-      -- The IS NULL arm keeps rows nobody can be held responsible for, and it is
-      -- worth knowing WHICH those are. Two kinds: placement rows written before the
-      -- observer column was populated, and rows orphaned by 000054's
-      -- ON DELETE SET NULL when a mailbox is deleted. The second is an escape hatch
-      -- — delete the hostile mailbox and its reports become unattributable, so no
-      -- discount can reach them — and it is bounded, not closed: the 7-day window
-      -- above ages them out, so a deleted observer's poison stops counting within a
-      -- week. Dropping NULL-observer rows instead would be worse, silently deleting
-      -- every pre-column observation from the evidence a health state rests on.
-      AND (o.observer_mailbox_id IS NULL
-           OR NOT (o.observer_mailbox_id = ANY(COALESCE($2::uuid[], '{}'::uuid[]))))
 ) place ON true
 LEFT JOIN LATERAL (
     SELECT
@@ -2956,11 +2928,6 @@ ON CONFLICT (workspace_id, mailbox_id) DO UPDATE SET
     newest_evidence_at      = EXCLUDED.newest_evidence_at
 `
 
-type UpsertWarmupSignalSnapshotsForWorkspaceParams struct {
-	WorkspaceID         uuid.UUID   `json:"workspace_id"`
-	DiscountedObservers []uuid.UUID `json:"discounted_observers"`
-}
-
 // Recompute every enabled participant's evidence for ONE workspace in ONE
 // statement. Each population keeps its OWN denominator; unlike populations are
 // never summed (design §4.1). Phase 0 pooled campaign and warmup sends into one
@@ -2974,8 +2941,8 @@ type UpsertWarmupSignalSnapshotsForWorkspaceParams struct {
 // Windows: placement over 7 days (the qualified clean window), delivered/bounce/
 // complaint populations over 30 days, observer token failures over 7 days.
 // $1 pins the workspace on the outer WHERE and on every subquery.
-func (q *Queries) UpsertWarmupSignalSnapshotsForWorkspace(ctx context.Context, arg UpsertWarmupSignalSnapshotsForWorkspaceParams) (int64, error) {
-	result, err := q.db.Exec(ctx, upsertWarmupSignalSnapshotsForWorkspace, arg.WorkspaceID, arg.DiscountedObservers)
+func (q *Queries) UpsertWarmupSignalSnapshotsForWorkspace(ctx context.Context, workspaceID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertWarmupSignalSnapshotsForWorkspace, workspaceID)
 	if err != nil {
 		return 0, err
 	}
