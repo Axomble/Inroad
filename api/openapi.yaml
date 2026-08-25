@@ -4689,24 +4689,26 @@ components:
         discounted_observers:
           type: array
           description: >-
-            Mailboxes whose placement REPORTS have stopped counting as evidence about the
-            senders that mailed them. Placement is sender-attributed but recipient-observed,
-            so one mailbox that reports everything it receives as spam — a misconfigured
-            filter, a bulk-junked folder, one compromised account — degraded every sender in
-            the pool. Empty when every observer is trusted.
-            UNLIKE incidents and the route matrix, this one GATES: these mailboxes' reports are
-            excluded from the materialized evidence the health policy reads, so a mailbox's
-            health_state and lane may be better than the raw numbers beside them suggest. The
-            per-mailbox inbox_rate_7d / spam_rate_7d and the detail route matrix are computed
-            at read time and are NOT filtered — they remain the unedited observations, and this
-            list is how the two are reconciled. It is published for exactly that reason:
-            discarding evidence an operator cannot see is how a reputation engine quietly
-            starts lying. It ships the whole sum rather than a badge, because wrongly excluding
-            a legitimately strict observer makes every sender that mails it look cleaner than
-            it is.
+            Mailboxes that reported far more of the warmup mail they received as spam than
+            their peers on the same receiving provider did. Placement is sender-attributed
+            but recipient-observed, so one mailbox that reports everything it receives as
+            spam — a misconfigured filter, a bulk-junked folder, one compromised account —
+            makes every sender that mails it look worse than it is. Empty when no observer
+            stands out from its peers.
+            NOTHING IS EXCLUDED. Every report here still counts as evidence exactly as it did
+            before, and no threshold, lane, health state or promotion decision reads any of
+            it. An exclusion was built and removed: the peer comparison is gameable, because
+            adding clean volume to a provider's mailboxes drags the peer rate down until an
+            HONEST observer clears the multiple — silencing the mailbox reporting real spam
+            and leaving the sender it reported looking cleaner than it is. Evidence that makes
+            a sender look worse than it is costs sending and is visible; evidence that makes
+            one look better goes unnoticed, which is the direction that matters. See
+            security.md invariant 59 for what must be true before this can act.
+            A client must not render it as a sanction: a legitimately strict provider looks
+            identical from here, which is why the whole sum ships rather than a badge.
             Ordered worst-lift first, then by mailbox id. An observer whose history spans two
-            receiving providers is compared against each of them separately and may appear
-            once per cohort; the exclusion itself is per mailbox.
+            receiving providers is compared against each separately and may appear once per
+            cohort — the same mailbox, two comparisons, not two mailboxes.
           items:
             type: object
             required: [observer_mailbox_id, cohort, spam, total, spam_rate, cohort_spam_rate, lift]

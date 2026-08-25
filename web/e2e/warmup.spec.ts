@@ -349,6 +349,46 @@ const CORRELATED_INCIDENTS = [
   },
 ]
 
+/**
+ * Two published observer-trust verdicts, and nothing acts on either of them
+ * (security.md invariant 59) — this panel is the whole feature, so the browser is
+ * where its two dishonest readings have to be ruled out.
+ *
+ * `mb-7` is deliberately one of the pool's HEALTHY mailboxes: the verdict is about
+ * what it REPORTED as a recipient, not about how it sends, and a rendering that
+ * treats it as a mailbox in trouble contradicts the card sitting below it. Its
+ * arithmetic adds up — 59 of 130 is 45%, its Microsoft peers sit at 12%, and
+ * 45/12 is the 3.8× the multiple rounds to.
+ *
+ * `mb-gone` is not in the pool at all, which is a shape the server really produces:
+ * the window spans seven days, so a mailbox removed from warmup yesterday still has
+ * reports in it. It must be named by its id rather than dropped — a verdict rendered
+ * about nobody is worse than an ugly one. Its cohort is spotless (0% peers), the
+ * case where an exact ratio would be a division by zero.
+ *
+ * Ordered worst-multiple first, as the contract says they arrive.
+ */
+const DISCOUNTED_OBSERVERS = [
+  {
+    observer_mailbox_id: 'mb-gone',
+    cohort: 'other',
+    spam: 30,
+    total: 40,
+    spam_rate: 0.75,
+    cohort_spam_rate: 0,
+    lift: 60,
+  },
+  {
+    observer_mailbox_id: 'mb-7',
+    cohort: 'microsoft',
+    spam: 59,
+    total: 130,
+    spam_rate: 0.45,
+    cohort_spam_rate: 0.12,
+    lift: 3.75,
+  },
+]
+
 const CORRELATED_OVERVIEW = {
   pool_size: CORRELATED_POOL.length,
   // The floor the API serves (warmup.MinIncidentPool). Without it the panel reads
@@ -357,6 +397,7 @@ const CORRELATED_OVERVIEW = {
   incidents_min_pool: 4,
   active: true,
   mailboxes: CORRELATED_POOL,
+  discounted_observers: DISCOUNTED_OBSERVERS,
   incidents: CORRELATED_INCIDENTS,
 }
 
@@ -1066,4 +1107,74 @@ test('a server that does not report correlations shows no panel at all', async (
   await expect(card(page, 'withheld@acme.test')).toBeVisible()
 
   await expect(incidentsPanel(page)).toHaveCount(0)
+})
+
+/* ----------------------------------------------------------- observer trust */
+
+// The axis nothing acts on, which makes this panel the entire feature — and the
+// two ways it lies if a copy rule is dropped. It must not read as a sanction (no
+// mailbox was blocked, discounted or untrusted, and one of the two named here is
+// a perfectly healthy participant), and it must not leave an operator believing
+// their spam evidence was filtered out, because none of it was.
+test('an observer verdict is a suspicion with its arithmetic, and excludes nothing', async ({ page }) => {
+  await serveOverview(page, CORRELATED_OVERVIEW)
+  const panel = page.getByRole('region', { name: 'Spam reporting outliers' })
+  await expect(panel).toBeVisible()
+
+  // Worst multiple first, and the one the pool cannot name is named by its id
+  // rather than dropped — a verdict about nobody is worse than an ugly one.
+  await expect(panel.locator('[data-slot="observer-mailbox"]')).toHaveText(['mb-gone', 'seven@partner.test'])
+  // The cohort in an operator's language. `microsoft` is our contract's word, and
+  // `other` is not a provider at all but a bag of them, which its phrasing says.
+  await expect(panel.locator('[data-slot="observer-comparison"]')).toHaveText([
+    'Compared with other mailboxes whose provider is neither Google nor Microsoft',
+    'Compared with other Microsoft mailboxes',
+  ])
+  await expect(panel).not.toContainText('microsoft')
+  await expect(panel).not.toContainText('unknown')
+
+  // The arithmetic an operator disagrees with the verdict using: this mailbox's
+  // rate over its own count, its peers' rate, and the multiple between them.
+  // Scoped to the figure nodes, because each of the three still reads plausibly
+  // when the labels and explanations around it are swept into the comparison.
+  const microsoft = panel
+    .locator('li')
+    .filter({ has: page.locator('[data-slot="observer-mailbox"]', { hasText: 'seven@partner.test' }) })
+  await expect(microsoft.locator('[data-slot="observer-stat"]')).toHaveText(['59 of 130 (45%)', '12%', '3.8×'])
+  // A spotless cohort is scored against half a case rather than divided by zero,
+  // so its multiple is not an exact ratio of 75% to 0%.
+  const spotless = panel
+    .locator('li')
+    .filter({ has: page.locator('[data-slot="observer-mailbox"]', { hasText: 'mb-gone' }) })
+  await expect(spotless.locator('[data-slot="observer-stat"]')).toHaveText(['30 of 40 (75%)', '0%', '60×'])
+  await expect(spotless).toContainText(/rather than dividing by zero/i)
+  // And it is not boilerplate under every row: the row above was divided by a real
+  // peer rate. Verified against the revert — with the note hung on both rows the
+  // assertion above still passed, so only the pair proves anything.
+  await expect(microsoft).not.toContainText(/rather than dividing by zero/i)
+
+  // Nothing happened to either mailbox, and the panel says so before the rows —
+  // physically above them, since an operator who reads it afterwards has already
+  // concluded their evidence was filtered. Only a laid-out browser can tell the
+  // two apart.
+  const note = panel.locator('[data-slot="observers-nothing-excluded"]')
+  await expect(note).toContainText(/nothing is excluded/i)
+  await expect(note).toContainText(/still counts as evidence/i)
+  await expect(note).toContainText(/no health state, lane or promotion decision reads any of this/i)
+  await expect(note).toContainText(/the peer comparison is gameable/i)
+  const noteBox = await note.boundingBox()
+  const rowBox = await microsoft.boundingBox()
+  if (!noteBox || !rowBox) throw new Error('the note and the rows must both be laid out')
+  expect(noteBox.y + noteBox.height).toBeLessThanOrEqual(rowBox.y)
+
+  // Not a sanction, in any of the words that would state one.
+  await expect(panel).not.toContainText(/untrusted|not trusted|hostile|discounted|blocked|removed|dropped/i)
+  // And the healthy participant it names is still healthy on its own card: the
+  // verdict is about what that mailbox REPORTED as a recipient, not how it sends.
+  // Scoped to the mailbox list rather than through `card`, because that helper
+  // matches any list item carrying the email — including this panel's own row,
+  // which would make the assertion pass on the text it is meant to look past.
+  const sevenCard = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'seven@partner.test' })
+  await expect(sevenCard).toContainText(/healthy/i)
+  await expect(sevenCard).not.toContainText(/reporting more spam/i)
 })
