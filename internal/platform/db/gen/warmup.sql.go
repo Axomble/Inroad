@@ -1173,6 +1173,134 @@ func (q *Queries) ListWarmupEvaluationRows(ctx context.Context, arg ListWarmupEv
 	return items, nil
 }
 
+const listWarmupIncidentParticipants = `-- name: ListWarmupIncidentParticipants :many
+SELECT
+    p.mailbox_id,
+    m.email,
+    -- Both axes, unfolded. WHICH combinations count as degrading is decided ONCE, in
+    -- Go (warmup.IncidentDegraded), because 'watch' means different things on the two
+    -- columns and a SQL copy of that rule is a second opinion nobody would keep in
+    -- step with the first.
+    p.health_state,
+    p.lane,
+    COALESCE(dims.destination_esp, '')::text    AS destination_esp,
+    COALESCE(dims.dkim_domain, '')::text        AS dkim_domain,
+    COALESCE(dims.return_path_domain, '')::text AS return_path_domain
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
+LEFT JOIN LATERAL (
+    -- The newest observation that actually RESOLVED each column, per column
+    -- independently. Picking one row for all three would let a later observation that
+    -- carried only a destination erase a signing domain we know perfectly well.
+    --
+    -- The empty string and 'unknown' are skipped when CHOOSING the row rather than
+    -- surfaced as values: both are the ABSENCE of a classification, and a cohort on one
+    -- would correlate on our own ignorance and fire hardest on the pools with the
+    -- least data (design §8). The fold applies the same exclusion again — it is the
+    -- authority on it — and this filter only decides which row is "latest".
+    SELECT
+        (array_agg(o.destination_esp ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.destination_esp NOT IN ('', 'unknown')))[1]    AS destination_esp,
+        (array_agg(o.dkim_domain ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.dkim_domain NOT IN ('', 'unknown')))[1]        AS dkim_domain,
+        (array_agg(o.return_path_domain ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.return_path_domain NOT IN ('', 'unknown')))[1] AS return_path_domain
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.mailbox_id = p.mailbox_id
+      AND o.kind = 'placement'
+      AND o.attribution_trusted
+      AND o.observed_at >= now() - interval '7 days'
+) dims ON true
+WHERE p.workspace_id = $1 AND p.enabled
+ORDER BY m.email
+`
+
+type ListWarmupIncidentParticipantsRow struct {
+	MailboxID        uuid.UUID `json:"mailbox_id"`
+	Email            string    `json:"email"`
+	HealthState      string    `json:"health_state"`
+	Lane             string    `json:"lane"`
+	DestinationEsp   string    `json:"destination_esp"`
+	DkimDomain       string    `json:"dkim_domain"`
+	ReturnPathDomain string    `json:"return_path_domain"`
+}
+
+// One row per LIVE pool member with everything correlated-incident detection needs:
+// both degradation axes, and the most recent RESOLVED value the mailbox carries on
+// each observed fault dimension (slice D, design §4).
+//
+// Read-time, and deliberately NOT materialized into a warmup_incidents table. An
+// incident has no fact of its own — it is entirely a function of state already
+// stored — so persisting one can only create a version of it that is wrong, which is
+// the "two things that must agree" shape every repeated defect in this subsystem has
+// taken. A table earns its place when slice E has to bound exposure OVER TIME and ask
+// "was this route already in an incident yesterday", which read-time detection cannot
+// answer.
+//
+// The observation population is IDENTICAL to ListWarmupRoutes and the overview
+// rollup — kind='placement', attribution_trusted, inside 7 days, attributed to
+// o.mailbox_id as the SENDER — because an incident must be computed over the same
+// mail the rates beside it describe. Attributing it any other way would correlate the
+// identities of whoever happened to POLL the message.
+//
+// It IS windowed, unlike the identity block on ListWarmupOverviewRows, and the
+// difference is deliberate. That one reports a mailbox's last known identity as a
+// STATE, which stays true while the mailbox sits paused for a fortnight. An incident
+// is a statement about degradation happening NOW, so a mailbox nobody has measured
+// inside the window belongs to no cohort (design §9) — it cannot be evidence for or
+// against a correlation nothing measured.
+//
+// p.enabled, matching every other live-signal read in this file (the evaluator, the
+// snapshot refresh, partner selection): a disabled participant's health_state is
+// frozen history, not something currently going wrong, and it must not be evidence
+// for or against a correlation. Disabling deletes the row, so this only excludes a
+// row an operator disabled by direct write.
+//
+// A participant with NO observations in the window still appears, carrying an EMPTY
+// value on all three observed dimensions (design §9). It is therefore in none of
+// those three cohorts, but it is still part of the pool the concentration is measured
+// against — and it keeps its sender_domain, which the fold derives from the ADDRESS
+// and needs no observation for.
+//
+// ONE lateral, not three correlated subqueries, so the attribution predicate above is
+// written exactly ONCE. Three copies of it would be three things that must agree
+// about which mail counts. The cost is that the aggregate reads the mailbox's whole
+// 7-day window rather than stopping at the first resolved row of each column; that
+// window is one pool member's warmup mail for a week (tens to low hundreds of rows),
+// range-seeked on idx_warmup_observations_subject_time (workspace_id, mailbox_id,
+// kind, observed_at DESC), which is also the index the overview and the snapshot
+// refresh use — so this needs none of its own.
+// Stable for diagnostics only: the fold sorts its own findings strongest-first, so
+// nothing observable depends on the order rows arrive in.
+func (q *Queries) ListWarmupIncidentParticipants(ctx context.Context, workspaceID uuid.UUID) ([]ListWarmupIncidentParticipantsRow, error) {
+	rows, err := q.db.Query(ctx, listWarmupIncidentParticipants, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWarmupIncidentParticipantsRow
+	for rows.Next() {
+		var i ListWarmupIncidentParticipantsRow
+		if err := rows.Scan(
+			&i.MailboxID,
+			&i.Email,
+			&i.HealthState,
+			&i.Lane,
+			&i.DestinationEsp,
+			&i.DkimDomain,
+			&i.ReturnPathDomain,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWarmupOverviewRows = `-- name: ListWarmupOverviewRows :many
 SELECT
     p.mailbox_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,

@@ -282,6 +282,73 @@ func TestPulseInboxCountsReflectUnreadAndInterested(t *testing.T) {
 	}
 }
 
+// addSignedObservation writes one trusted, sender-attributed placement observation
+// carrying a DKIM signing domain — the evidence the correlated-incident read groups on.
+// Inserted directly: the writer lives in coreapi and this file is about what the pulse
+// READ makes of the rows.
+func addSignedObservation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ws, mb uuid.UUID, key, signingDomain string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, placement, tab_capable,
+		                                  dkim_domain, source, attribution_trusted, idempotency_key)
+		 VALUES ($1, $2, 'placement', 'inbox', false, $3, 'warmup_receipt', true, $4)`,
+		ws, mb, signingDomain, key); err != nil {
+		t.Fatalf("observation %s: %v", key, err)
+	}
+}
+
+// The attention row NAMES the shared cause over real rows — the whole behaviour change
+// of the slice, and the half a unit test over a fake store cannot prove: the query, the
+// projection and the fold all have to agree about which mailboxes are degrading and
+// what they share.
+//
+// Three mailboxes sign as mail.acme.test and two of them are throttled; three more are
+// clean. The unattributed row would say "2 throttled", which is the count an operator
+// has to diff three mailboxes by hand to explain.
+func TestPulseAttentionNamesTheSharedCauseOverRealRows(t *testing.T) {
+	ctx, pool, q := setup(t)
+	ws, err := q.CreateWorkspace(ctx, "PulseIncident "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		email := fmt.Sprintf("inside%d@pulse-d.test", i)
+		mb := addMailbox(t, ctx, pool, q, ws.ID, email, "active", "", 50)
+		health := "healthy"
+		if i <= 2 {
+			health = "throttled"
+		}
+		addWarmup(t, ctx, pool, ws.ID, mb.ID, health)
+		addSignedObservation(t, ctx, pool, ws.ID, mb.ID, email, "mail.acme.test")
+	}
+	// The comparison population: without a clean outside there is no concentration to
+	// measure, and the row would fall back to counting states.
+	for i := 1; i <= 3; i++ {
+		email := fmt.Sprintf("outside%d@pulse-d.test", i)
+		mb := addMailbox(t, ctx, pool, q, ws.ID, email, "active", "", 50)
+		addWarmup(t, ctx, pool, ws.ID, mb.ID, "healthy")
+		addSignedObservation(t, ctx, pool, ws.ID, mb.ID, email, fmt.Sprintf("own%d.test", i))
+	}
+
+	p, err := NewService(NewPgStore(q)).Get(ctx, ws.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(p.Attention) != 1 {
+		t.Fatalf("attention = %+v, want exactly one row: attributing a cause must not ADD a row", p.Attention)
+	}
+	got := p.Attention[0]
+	want := Attention{
+		Kind: kindSendersGated, Severity: SeverityWarn, Count: 2,
+		Reason: "warmup health limiting sending: 2 mailboxes degrading through one signing domain (mail.acme.test)",
+		Href:   "/app/mailboxes",
+	}
+	if got != want {
+		t.Errorf("row = %+v, want %+v", got, want)
+	}
+}
+
 // TestPulseEmptyWorkspace proves a workspace with no rows anywhere returns
 // the stable all-zero payload (no NULL-scan errors from the aggregate
 // queries) and an empty, non-nil attention list.

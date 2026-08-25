@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // ErrMailboxNotInWorkspace is returned by UpsertParticipant when the target
@@ -41,6 +42,15 @@ type Store interface {
 	// ListRoutes returns one mailbox's trailing-7-day placement counters split by
 	// the destination each message was delivered to, ordered by destination_esp.
 	ListRoutes(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]RouteRow, error)
+	// ListIncidentParticipants returns the workspace's live pool already projected
+	// onto the correlation fold's input: whether each participant is degraded, and
+	// the most recent RESOLVED value it carries on each observed fault dimension.
+	//
+	// The platform type crosses the seam deliberately rather than being copied into a
+	// third domain struct with the same four fields. It documents itself as "one
+	// participant reduced to the facts correlation needs", which is exactly what this
+	// read produces, and a domain-owned twin would only be a shape to keep in step.
+	ListIncidentParticipants(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.IncidentInput, error)
 	// MailboxInWorkspace reports whether the mailbox belongs to this workspace.
 	// It is the ownership gate for reads whose subject outlives the participant
 	// row, where "is a participant" would be the wrong 404 test.
@@ -163,6 +173,35 @@ func (s *PgStore) ListRoutes(ctx context.Context, workspaceID, mailboxID uuid.UU
 	out := make([]RouteRow, len(rows))
 	for i, r := range rows {
 		out[i] = routeRowFromGen(r)
+	}
+	return out, nil
+}
+
+// ListIncidentParticipants reads the workspace's live pool and projects it onto the
+// correlation fold's input shape.
+//
+// Degraded is folded HERE, by the one platform predicate that owns the question, so
+// no read site ever inlines "state is one of these or lane is one of those". The
+// projection is deliberately the same shape as internal/app/pulse's
+// WarmupIncidentParticipants, which reads the same query for the attention row: the
+// two are sibling app packages and cannot import each other, exactly as the callers of
+// warmup.WorstLanesByDomain already duplicate their four-line fold input. Keep them
+// in step — the SHARED part is the platform fold, not this loop.
+func (s *PgStore) ListIncidentParticipants(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.IncidentInput, error) {
+	rows, err := s.q.ListWarmupIncidentParticipants(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pwarmup.IncidentInput, len(rows))
+	for i, r := range rows {
+		out[i] = pwarmup.IncidentInput{
+			MailboxID:        r.MailboxID.String(),
+			Email:            r.Email,
+			Degraded:         pwarmup.IncidentDegraded(r.HealthState, r.Lane),
+			Route:            r.DestinationEsp,
+			SigningDomain:    r.DkimDomain,
+			ReturnPathDomain: r.ReturnPathDomain,
+		}
 	}
 	return out, nil
 }
