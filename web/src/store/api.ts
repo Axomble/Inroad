@@ -2810,6 +2810,23 @@ export type WarmupOverview = {
   incidents_min_pool: number;
   active: boolean;
   mailboxes: WarmupMailbox[];
+  /** Mailboxes whose placement REPORTS have stopped counting as evidence about the senders that mailed them. Placement is sender-attributed but recipient-observed, so one mailbox that reports everything it receives as spam — a misconfigured filter, a bulk-junked folder, one compromised account — degraded every sender in the pool. Empty when every observer is trusted. UNLIKE incidents and the route matrix, this one GATES: these mailboxes' reports are excluded from the materialized evidence the health policy reads, so a mailbox's health_state and lane may be better than the raw numbers beside them suggest. The per-mailbox inbox_rate_7d / spam_rate_7d and the detail route matrix are computed at read time and are NOT filtered — they remain the unedited observations, and this list is how the two are reconciled. It is published for exactly that reason: discarding evidence an operator cannot see is how a reputation engine quietly starts lying. It ships the whole sum rather than a badge, because wrongly excluding a legitimately strict observer makes every sender that mails it look cleaner than it is. Ordered worst-lift first, then by mailbox id. An observer whose history spans two receiving providers is compared against each of them separately and may appear once per cohort; the exclusion itself is per mailbox. */
+  discounted_observers: {
+    /** the mailbox whose reports were dropped — NOT a mailbox anything is wrong with as a sender */
+    observer_mailbox_id: string;
+    /** The OBSERVER's own receiving provider, which is the population its rate was compared against. Providers junk at materially different rates, so a pooled comparison would flag every Microsoft mailbox in a mostly-Google pool. */
+    cohort: "google" | "microsoft" | "other" | "unknown";
+    /** placements this observer called spam in the trailing 7 days */
+    spam: number;
+    /** every placement this observer reported in the same window — the denominator of spam_rate, and the same population the snapshot counts */
+    total: number;
+    /** spam/total, rounded to two decimals */
+    spam_rate: number;
+    /** The same rate for the observer's cohort EXCLUDING this observer, rounded to two decimals. Excluding it matters most where the cohort is small: a mailbox that dominates its cohort would otherwise raise the very baseline it is measured against and hide itself. */
+    cohort_spam_rate: number;
+    /** How many times the peer rate this observer reports, rounded to two decimals. A cohort with no spam at all is scored with the same continuity correction the incident fold uses (half a case), so this stays finite. */
+    lift: number;
+  }[];
   /** Degradation that is CONCENTRATED in one fault dimension — several mailboxes degrading through one destination route, signing domain, return path, or sender domain. Derived at read time from observations, never persisted. A correlation, not a cause. Empty when no dimension shows concentration. Reported for visibility only: no threshold, lane or promotion decision reads any of it. */
   incidents: {
     dimension:

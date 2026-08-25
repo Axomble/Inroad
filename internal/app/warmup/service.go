@@ -304,12 +304,64 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 		}
 	}
 	return WarmupOverviewDTO{
-		PoolSize:         int(count),
-		Active:           count >= 2,
-		Mailboxes:        mailboxes,
-		Incidents:        s.incidents(ctx, ws),
-		IncidentsMinPool: pwarmup.MinIncidentPool,
+		PoolSize:            int(count),
+		Active:              count >= 2,
+		Mailboxes:           mailboxes,
+		DiscountedObservers: s.discountedObservers(ctx, ws),
+		Incidents:           s.incidents(ctx, ws),
+		IncidentsMinPool:    pwarmup.MinIncidentPool,
 	}, nil
+}
+
+// discountedObservers renders the observers whose placement reports the snapshot
+// refresh is excluding, arithmetic included.
+//
+// This is the operator-visible half of the ONLY inference in this subsystem that
+// gates. The refresh discards these observers' reports, so the rates on the mailbox
+// rows beside this list are computed WITHOUT them; publishing the list is what keeps
+// that from being a silent correction.
+//
+// IT RETURNS NO ERROR, for the same reason incidents does not: a read that cannot
+// compute an inference must not take the pool summary, the health states and the
+// placement rates down with it. The conflation with "every observer is trusted" is
+// the accepted cost — and it is the honest direction here, because a failed read on
+// the WRITE side falls back to exactly that, an empty exclusion list.
+func (s *Service) discountedObservers(ctx context.Context, ws uuid.UUID) []WarmupDiscountedObserverDTO {
+	stats, err := s.store.ListObserverStats(ctx, ws)
+	if err != nil {
+		slog.ErrorContext(ctx, "warmup_observer_trust_read_failed", "workspace_id", ws, "err", err)
+		return []WarmupDiscountedObserverDTO{}
+	}
+	found := pwarmup.DiscountObservers(stats)
+	// make, not a nil slice: `discounted_observers` is always present and `[]` when
+	// nothing was discounted, because an absent key arrives as undefined and sends a
+	// client down a fallback path indistinguishable from "the check did not run".
+	out := make([]WarmupDiscountedObserverDTO, len(found))
+	for i, in := range found {
+		out[i] = discountedObserverDTO(in)
+	}
+	return out
+}
+
+// discountedObserverDTO maps one discounted observer onto the wire shape. The order
+// it arrives in is the detector's (worst lift first, then a total order) and is NOT
+// re-sorted here, exactly as incidentDTO's is.
+func discountedObserverDTO(in pwarmup.DiscountedObserver) WarmupDiscountedObserverDTO {
+	return WarmupDiscountedObserverDTO{
+		ObserverMailboxID: in.ObserverMailboxID,
+		Cohort:            in.Cohort,
+		Spam:              in.Spam,
+		Total:             in.Total,
+		// The two rates are trimmed with roundLift rather than wireRate: they are not
+		// stored REALs being widened for a client to compare against a threshold, they
+		// are ratios of small integer counts computed here, and two decimals is the
+		// precision the counts support. The same call for all three also keeps the row
+		// internally consistent — a lift printed to 2dp beside rates printed to 6
+		// invites a reader to check the division and find it "wrong".
+		SpamRate:       roundLift(in.SpamRate),
+		CohortSpamRate: roundLift(in.CohortSpamRate),
+		Lift:           roundLift(in.Lift),
+	}
 }
 
 // incidents detects correlated degradation across the pool's fault dimensions and

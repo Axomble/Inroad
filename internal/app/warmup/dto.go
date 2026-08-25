@@ -406,12 +406,67 @@ type WarmupIncidentDTO struct {
 	Lift float64 `json:"lift"`
 }
 
+// WarmupDiscountedObserverDTO is one mailbox whose placement reports have STOPPED
+// counting as evidence about the senders that mailed it, with the arithmetic that
+// decided it.
+//
+// UNLIKE every other inference this endpoint publishes, this one GATES: the ids
+// behind these rows are excluded from the placement arm of the snapshot refresh, so
+// the HEALTH STATE of every sender that mailed a discounted observer is decided on
+// evidence these reports are missing from. That is the point — placement is
+// SENDER-attributed but RECIPIENT-observed, and one mailbox junking everything it
+// receives degraded the whole pool — but it means evidence is being DISCARDED, and
+// discarding evidence an operator cannot see is how a reputation engine quietly starts
+// lying. Hence the whole sum ships with the finding rather than a badge.
+//
+// The per-mailbox rates BESIDE this list are deliberately NOT filtered. They are
+// computed at read time from the raw observations (ListWarmupOverviewRows, and the
+// detail route matrix), so a mailbox can show a spam rate its health state does not
+// reflect. Filtering both would make the discount invisible in the numbers; leaving
+// the rates raw and publishing this list is what lets an operator reconcile the two.
+//
+// The failure mode is asymmetric and the thresholds are set for it: wrongly excluding
+// a legitimately strict observer makes every sender that mails it look cleaner than
+// it is, which is worse than leaving the hole open. All three constants in
+// platform/warmup/observer.go must be met before a mailbox appears here.
+type WarmupDiscountedObserverDTO struct {
+	ObserverMailboxID string `json:"observer_mailbox_id"`
+	// Cohort is the OBSERVER's own receiving provider (the destination_esp its
+	// observations were filed under), which is the population its rate was compared
+	// against. Providers junk at materially different rates, so a pooled comparison
+	// would flag every Microsoft mailbox in a mostly-Google pool.
+	Cohort string `json:"cohort"`
+	// Spam and Total are this observer's raw counts inside the 7-day window, over the
+	// same population the snapshot counts — so an operator can re-derive spam_rate and
+	// disagree with it.
+	Spam  int `json:"spam"`
+	Total int `json:"total"`
+	// SpamRate is Spam/Total; CohortSpamRate is the same rate for the observer's
+	// cohort EXCLUDING this observer (otherwise a mailbox that dominates a small
+	// cohort raises the baseline it is measured against and hides itself); Lift is how
+	// many times the peer rate this observer reports. All three are rounded to two
+	// decimals, like an incident lift: these are estimates over counts that are
+	// frequently double digits, and more precision would be false confidence.
+	SpamRate       float64 `json:"spam_rate"`
+	CohortSpamRate float64 `json:"cohort_spam_rate"`
+	Lift           float64 `json:"lift"`
+}
+
 // WarmupOverviewDTO is the WarmupOverview schema: the pool summary plus per
 // mailbox health/placement. active is true when pool_size >= 2.
 type WarmupOverviewDTO struct {
 	PoolSize  int                `json:"pool_size"`
 	Active    bool               `json:"active"`
 	Mailboxes []WarmupMailboxDTO `json:"mailboxes"`
+	// DiscountedObservers is never null — `[]` when every observer is trusted — and
+	// its order is the detector's own (worst lift first, then a total order on the
+	// mailbox id), which the read layer must not re-sort.
+	//
+	// It is on the OVERVIEW rather than on a mailbox row because the subject is the
+	// pool's evidence, not any one participant: the mailbox named here is the one
+	// whose reports were dropped, while the mailboxes AFFECTED are every sender that
+	// mailed it.
+	DiscountedObservers []WarmupDiscountedObserverDTO `json:"discounted_observers"`
 	// Incidents is never null — `[]` when nothing correlated — and its order is the
 	// detector's own (strongest lift first, then a total order on dimension and
 	// value), which the read layer must not re-sort.

@@ -123,7 +123,10 @@ func TestTabbedDenominatorCountsOnlyTabCapableObservations(t *testing.T) {
 	seedPlacementsWithCapability(t, ctx, f, sid, 5, placementTabbed, true)  // Gmail, a tab
 	seedPlacementsWithCapability(t, ctx, f, sid, 20, placementInbox, false) // IMAP: cannot report a tab
 
-	if _, err := f.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, f.ws1); err != nil {
+	// Every observer is trusted here: this fixture is about the tabbed denominator.
+	if _, err := f.q.UpsertWarmupSignalSnapshotsForWorkspace(ctx, gen.UpsertWarmupSignalSnapshotsForWorkspaceParams{
+		WorkspaceID: f.ws1, DiscountedObservers: []uuid.UUID{},
+	}); err != nil {
 		t.Fatalf("refresh snapshots: %v", err)
 	}
 
