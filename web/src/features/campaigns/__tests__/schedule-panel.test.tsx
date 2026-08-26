@@ -355,77 +355,80 @@ describe('SchedulePanel', () => {
     expect(screen.getByRole('button', { name: /save schedule/i })).toBeInTheDocument()
   })
 
-  // --- The schedule board ---
+  // --- The schedule calendar ---
 
-  test('the board is the default view, showing saved windows as cells', async () => {
+  test('the calendar is the default view, showing saved windows as blocks', async () => {
     stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
 
-    // Mon 09:00-17:00 from SCHEDULE: the 9am cell is open, 8am is not.
-    expect(await screen.findByRole('button', { name: /monday 9am, open/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /monday 8am, closed/i })).toBeInTheDocument()
-    // The end is exclusive, so 5pm itself is closed.
-    expect(screen.getByRole('button', { name: /monday 5pm, closed/i })).toBeInTheDocument()
-    // ...and the time inputs are not merely hidden, they are absent.
+    // Mon 09:00-17:00 and Wed 10:00-13:00, from SCHEDULE. The block's own label
+    // is its range, so this asserts what the operator actually reads.
+    expect(await screen.findByText('9am – 5pm')).toBeInTheDocument()
+    expect(screen.getByText('10am – 1pm')).toBeInTheDocument()
+    // The time inputs are absent, not merely hidden.
     expect(screen.queryByLabelText('Mon window 1 start')).not.toBeInTheDocument()
   })
 
-  test('clicking a cell opens it and enables the save', async () => {
+  test('each weekday gets its own column', async () => {
     stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /tuesday 10am, closed/i }))
+    // Monday first, Sunday last — display order, not the API's Sunday-first.
+    expect(await screen.findByRole('group', { name: /monday sending windows/i })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: /sunday sending windows/i })).toBeInTheDocument()
+  })
 
-    expect(await screen.findByRole('button', { name: /tuesday 10am, open/i })).toBeInTheDocument()
+  test('adding a window needs no drag, and enables the save', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /add a window on tuesday/i }))
+
+    // The default is a 9-5 window, so Tuesday now reads the same as Monday.
+    await waitFor(() => expect(screen.getAllByText('9am – 5pm').length).toBeGreaterThan(1))
     expect(screen.getByRole('button', { name: /save schedule/i })).toBeInTheDocument()
   })
 
-  test('a board edit saves as merged minute intervals, not one per cell', async () => {
+  test('a window can be removed', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /remove wednesday 10am – 1pm/i }))
+
+    await waitFor(() => expect(screen.queryByText('10am – 1pm')).not.toBeInTheDocument())
+  })
+
+  test('copy-to-every-day applies one day across the week', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await screen.findByText('9am – 5pm')
+
+    fireEvent.click(screen.getByRole('button', { name: /copy monday's windows to every day/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /save schedule/i }))
+
+    const body = await readPut(fetchMock)
+    // All seven weekdays, each carrying Monday's window.
+    expect(body.days.map((d) => d.weekday).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6])
+  })
+
+  test('an edit saves as minute intervals in the API weekday order', async () => {
     const fetchMock = stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
 
-    // Open three consecutive hours on a closed day. Sequential on purpose:
-    // each click must land before the next cell is queried, since the board
-    // re-renders between them. Promise.all would race the three lookups
-    // against one render.
-    for (const hour of ['9am', '10am', '11am']) {
-      // oxlint-disable-next-line no-await-in-loop -- clicks must be applied in order; see above
-      fireEvent.click(await screen.findByRole('button', { name: new RegExp(`tuesday ${hour}, closed`, 'i') }))
-    }
+    fireEvent.click(await screen.findByRole('button', { name: /add a window on tuesday/i }))
     fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
 
     const body = await readPut(fetchMock)
     const tuesday = body.days.find((d) => d.weekday === 2) as
-      | { weekday: number; intervals: { start_minute: number; end_minute: number }[] }
+      | { intervals: { start_minute: number; end_minute: number }[] }
       | undefined
-    // Three cells become ONE interval — the run-length encoding, end to end.
-    expect(tuesday?.intervals).toEqual([{ start_minute: 540, end_minute: 720 }])
+    expect(tuesday?.intervals).toEqual([{ start_minute: 540, end_minute: 1020 }])
   })
 
-  test('a day header toggles the whole weekday', async () => {
-    stubSchedule()
-    renderWithProviders(<SchedulePanel campaignId="c-1" />)
-    await screen.findByRole('button', { name: /monday 9am, open/i })
-
-    // Monday is partly open, so the first click completes it rather than clearing.
-    fireEvent.click(screen.getByRole('button', { name: 'Mon' }))
-
-    expect(await screen.findByRole('button', { name: /monday 12am, open/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /monday 11pm, open/i })).toBeInTheDocument()
-  })
-
-  test('an entirely closed board is called out, since the API rejects it', async () => {
-    stubSchedule({ schedule: { ...SCHEDULE, days: [] } })
-    renderWithProviders(<SchedulePanel campaignId="c-1" />)
-
-    expect(await screen.findByText(/nothing is open/i)).toBeInTheDocument()
-  })
-
-  // The board cannot represent minute precision, so rounding a saved 09:30
-  // window into cells would silently rewrite the operator's schedule. It is
-  // withheld instead, with the reason stated.
-  test('a minute-precision schedule gets the time inputs and no board', async () => {
-    stubSchedule({
+  // The whole reason this replaced an hour grid: a 09:30 window survives being
+  // loaded into the editor and saved back, rather than being rounded away.
+  test('a minute-precision schedule round-trips through the calendar unchanged', async () => {
+    const fetchMock = stubSchedule({
       schedule: {
         ...SCHEDULE,
         days: [{ weekday: 1, intervals: [{ start_minute: 570, end_minute: 1035 }] }],
@@ -433,21 +436,67 @@ describe('SchedulePanel', () => {
     })
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
 
-    expect(await screen.findByText(/minute precision/i)).toBeInTheDocument()
-    // The exact times are shown directly — no mode switch to find.
-    expect(screen.getByLabelText('Mon window 1 start')).toHaveValue('09:30')
-    expect(screen.queryByRole('button', { name: /monday 9am/i })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^board$/i })).not.toBeInTheDocument()
+    // Shown at its real precision, and the calendar is NOT withheld.
+    expect(await screen.findByText('9:30am – 5:15pm')).toBeInTheDocument()
+
+    // Touch an unrelated day, save, and the precise window is untouched.
+    fireEvent.click(screen.getByRole('button', { name: /add a window on saturday/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /save schedule/i }))
+
+    const body = await readPut(fetchMock)
+    const monday = body.days.find((d) => d.weekday === 1) as
+      | { intervals: { start_minute: number; end_minute: number }[] }
+      | undefined
+    expect(monday?.intervals).toEqual([{ start_minute: 570, end_minute: 1035 }])
   })
 
-  test('switching to exact times keeps a board edit', async () => {
+  test('an entirely closed week is called out, since the API rejects it', async () => {
+    stubSchedule({ schedule: { ...SCHEDULE, days: [] } })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    expect(await screen.findByText(/nothing is open/i)).toBeInTheDocument()
+  })
+
+  test('a full day reads as midnight, not 12pm', async () => {
+    stubSchedule({
+      schedule: { ...SCHEDULE, days: [{ weekday: 1, intervals: [{ start_minute: 0, end_minute: 1440 }] }] },
+    })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    // "12am – 12pm" would read as though sending stopped at noon.
+    expect(await screen.findByText('12am – midnight')).toBeInTheDocument()
+  })
+
+  // The regression this design exists to prevent: DraftWeek holds "HH:MM"
+  // strings and 1440 has no such form (minutesToTime clamps it to "23:59"), so
+  // routing a save through the draft shortens EVERY full day by a minute. The
+  // calendar therefore writes its blocks straight to the wire.
+  test('a full day SAVES as 1440, not 1439', async () => {
+    const fetchMock = stubSchedule({
+      schedule: { ...SCHEDULE, days: [{ weekday: 1, intervals: [{ start_minute: 0, end_minute: 1440 }] }] },
+    })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await screen.findByText('12am – midnight')
+
+    // Edit an unrelated day so the save enables, leaving Monday untouched.
+    fireEvent.click(screen.getByRole('button', { name: /add a window on saturday/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /save schedule/i }))
+
+    const body = await readPut(fetchMock)
+    const monday = body.days.find((d) => d.weekday === 1) as
+      | { intervals: { start_minute: number; end_minute: number }[] }
+      | undefined
+    expect(monday?.intervals).toEqual([{ start_minute: 0, end_minute: 1440 }])
+  })
+
+  test('switching to exact times keeps a calendar edit', async () => {
     stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /tuesday 9am, closed/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /add a window on tuesday/i }))
     fireEvent.click(screen.getByRole('button', { name: /exact times/i }))
 
-    // Both editors read the same draft, so the new Tuesday window is there.
+    // Both editors read the same draft.
     expect(await screen.findByLabelText('Tue window 1 start')).toHaveValue('09:00')
   })
 })
