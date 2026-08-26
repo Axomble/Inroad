@@ -44,6 +44,10 @@ type Service struct {
 	// labels backs the label use cases (see label.go). Optional on the same
 	// terms as snoozes.
 	labels LabelStore
+	// pending/pendingEnq back the deferred-send use cases (see pending.go).
+	// Optional: without them the immediate Reply path is unaffected.
+	pending    PendingReplyStore
+	pendingEnq PendingReplyEnqueuer
 	// clock is the Service's source of "now", injected so time-bounded rules
 	// (the snooze horizon) are testable at a fixed instant rather than
 	// reaching for the process clock. nil means time.Now — see now().
@@ -71,6 +75,19 @@ func WithSnoozeStore(snoozes SnoozeStore) ServiceOption {
 // alongside Store and SnoozeStore.
 func WithLabelStore(labels LabelStore) ServiceOption {
 	return func(s *Service) { s.labels = labels }
+}
+
+// WithPendingReplyStore supplies the deferred-send persistence. PgStore
+// implements it alongside the other three store interfaces.
+func WithPendingReplyStore(pending PendingReplyStore) ServiceOption {
+	return func(s *Service) { s.pending = pending }
+}
+
+// WithPendingReplyEnqueuer supplies the delayed-task publisher for deferred
+// sends. Without it a scheduled row is still created (and a sweeper would pick
+// it up), but nothing is enqueued — which is why cmd/inroad always passes one.
+func WithPendingReplyEnqueuer(enq PendingReplyEnqueuer) ServiceOption {
+	return func(s *Service) { s.pendingEnq = enq }
 }
 
 // WithClock overrides the Service's source of "now". Test-facing; production
@@ -217,6 +234,13 @@ func (s *Service) GetThread(ctx context.Context, workspaceID, id uuid.UUID) (Thr
 		return ThreadDetail{}, err
 	}
 	detail.Labels = labels
+
+	pending, err := s.pendingReplyForThread(ctx, workspaceID, id)
+	if err != nil {
+		return ThreadDetail{}, err
+	}
+	detail.PendingReply = pending
+
 	// Mirrored onto the embedded Thread as well, so a caller holding either the
 	// detail or its Thread sees the same labels rather than having to know which
 	// field the list path populates.

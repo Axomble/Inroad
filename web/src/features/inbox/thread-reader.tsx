@@ -19,6 +19,7 @@ import { SnoozeMenu } from './snooze-menu'
 import { LabelPicker } from './label-picker'
 import { LabelChips } from './label-chip'
 import { ContactContextPanel } from './contact-context-panel'
+import { UndoSendPill } from './undo-send-pill'
 
 /**
  * One thread's messages and its composer — the reader, with no page chrome of
@@ -129,6 +130,9 @@ function ThreadMessages({ threadId, detail }: { threadId: string; detail: InboxT
         // oxlint-disable-next-line no-array-index-key -- fixed, server-sorted list; index+occurred_at is stable, message_id/occurred_at alone are not unique for outbound legs
         <MessageBubble key={`${message.occurred_at}-${index}`} message={message} />
       ))}
+      {/* Above the composer, not below: a queued reply is the most recent thing
+          that happened on this thread, and its countdown is time-critical. */}
+      {detail.pending_reply && <UndoSendPill pending={detail.pending_reply} />}
       <ReplyComposer
         threadId={threadId}
         hasInboundMessage={detail.messages.some((m) => m.direction === 'inbound')}

@@ -35,4 +35,10 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader,
 	if rc, ok := core.(ReplyCore); ok {
 		mux.HandleFunc(queue.TaskInboxReplySend, ReplySendHandler(rc, sender))
 	}
+	// Deferred (undoable) manual replies. A separate assertion from ReplyCore:
+	// the two seams share a Mailer but need different core methods, and a client
+	// that satisfies one need not satisfy the other.
+	if pc, ok := core.(PendingReplyCore); ok {
+		mux.HandleFunc(queue.TaskInboxPendingReplySend, PendingReplySendHandler(pc, sender))
+	}
 }

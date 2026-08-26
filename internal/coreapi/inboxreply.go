@@ -51,3 +51,22 @@ type RecordInboxReplyInput struct {
 	Subject  string
 	BodyText string
 }
+
+// ErrInboxPendingNotClaimable is returned by ClaimPendingInboxReply when the row
+// cannot be claimed. It covers every reason at once — cancelled by the operator,
+// already sent, still waiting for send_after, or held by another worker's live
+// lease — because the worker's response to all of them is identical: stop, and
+// do not retry. Distinguishing them would only invite a caller to treat one as
+// retryable, which is exactly the mistake that double-sends mail.
+var ErrInboxPendingNotClaimable = errors.New("coreapi: pending reply is not claimable")
+
+// PendingInboxReply is a deferred manual reply, resolved for delivery: the
+// stored body plus everything InboxReplyJob carries.
+//
+// The body comes from the ROW, never from the task payload — the operator may
+// have cancelled between scheduling and now, and only the row knows.
+type PendingInboxReply struct {
+	ThreadID string
+	BodyText string
+	Job      InboxReplyJob
+}

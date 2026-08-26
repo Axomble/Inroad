@@ -2,6 +2,7 @@ package inprocess
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -132,4 +133,100 @@ func (c client) ClaimInboxReply(ctx context.Context, workspaceID, taskID string)
 // forever, permanently dropping a reply that never actually went out.
 func (c client) ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error {
 	return c.replyClaims.Delete(ctx, workspaceID, inboxReplyClaimKeyPrefix+taskID)
+}
+
+// --- Deferred (undoable) manual replies ---
+
+// ClaimPendingInboxReply claims a deferred reply for delivery, resolving the
+// body and threading headers in the same step.
+//
+// Unlike ClaimInboxReply, this needs no idempotency-table claim: the
+// inbox_pending_replies ROW is the claim. Its status column carries the
+// 'scheduled' -> 'sending' transition under a WHERE guard, so exactly one
+// worker can move it, and the same row also expresses the state that table
+// cannot — 'cancelled'. That is the whole reason deferred sends have a row at
+// all (see migration 000066).
+//
+// Returns coreapi.ErrInboxPendingNotClaimable when the transition matched no
+// row: cancelled, already sent, not yet due, or held by a live lease. All four
+// mean "stop and do not retry", so they deliberately share one error.
+func (c client) ClaimPendingInboxReply(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxReply, error) {
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return coreapi.PendingInboxReply{}, fmt.Errorf("parse workspace id: %w", err)
+	}
+	id, err := uuid.Parse(pendingID)
+	if err != nil {
+		return coreapi.PendingInboxReply{}, fmt.Errorf("parse pending id: %w", err)
+	}
+
+	// The claim comes FIRST, before reading anything: a read-then-claim
+	// ordering would let two workers both read a claimable row and race.
+	if err := c.inbox.ClaimPendingReply(ctx, ws, id); err != nil {
+		return coreapi.PendingInboxReply{}, err
+	}
+
+	pending, err := c.inbox.GetPendingReply(ctx, ws, id)
+	if err != nil {
+		return coreapi.PendingInboxReply{}, fmt.Errorf("load pending reply: %w", err)
+	}
+	detail, err := c.inbox.GetThread(ctx, ws, pending.ThreadID)
+	if err != nil {
+		return coreapi.PendingInboxReply{}, fmt.Errorf("load thread: %w", err)
+	}
+	job, err := inboxReplyJobFrom(detail)
+	if err != nil {
+		return coreapi.PendingInboxReply{}, err
+	}
+	return coreapi.PendingInboxReply{
+		ThreadID: pending.ThreadID.String(),
+		BodyText: pending.BodyText,
+		Job:      job,
+	}, nil
+}
+
+// MarkPendingInboxReplySent completes a claimed deferred reply. Guarded on
+// 'sending' in SQL, so only the worker that claimed it can complete it.
+func (c client) MarkPendingInboxReplySent(ctx context.Context, workspaceID, pendingID, messageID string) error {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return err
+	}
+	return c.inbox.MarkPendingReplySent(ctx, ws, id, messageID)
+}
+
+// ReleasePendingInboxReply returns a claimed reply to 'scheduled' after a
+// TRANSIENT failure, so asynq's retry can claim it again. Without this the
+// retry would find its own abandoned 'sending' row and have to wait out the
+// full lease before trying — turning a momentary SMTP blip into a five-minute
+// delay.
+func (c client) ReleasePendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return err
+	}
+	return c.inbox.ReleasePendingReply(ctx, ws, id, reason)
+}
+
+// FailPendingInboxReply marks a claimed reply permanently failed. The row
+// survives so the outbox can show what happened rather than the reply simply
+// vanishing.
+func (c client) FailPendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return err
+	}
+	return c.inbox.FailPendingReply(ctx, ws, id, reason)
+}
+
+func parsePendingIDs(workspaceID, pendingID string) (ws, id uuid.UUID, err error) {
+	ws, err = uuid.Parse(workspaceID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("parse workspace id: %w", err)
+	}
+	id, err = uuid.Parse(pendingID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("parse pending id: %w", err)
+	}
+	return ws, id, nil
 }

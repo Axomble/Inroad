@@ -17,6 +17,8 @@ export type {
   InboxOverview,
   InboxSnooze,
   InboxLabel,
+  InboxPendingReply,
+  InboxSettings,
   InboxMailboxCount,
   InboxReplyClassCount,
   SendInboxReplyRequest,
@@ -25,7 +27,7 @@ export type {
 } from '@/store/api'
 
 const inboxApi = api.enhanceEndpoints({
-  addTagTypes: ['InboxThread', 'InboxLabel'],
+  addTagTypes: ['InboxThread', 'InboxLabel', 'InboxOutbox'],
   endpoints: {
     listInboxThreads: {
       providesTags: (result) =>
@@ -109,6 +111,33 @@ const inboxApi = api.enhanceEndpoints({
         { type: 'InboxThread' as const, id: 'LIST' },
       ],
     },
+    // The outbox and the thread both hold a queued reply's state, so scheduling
+    // or cancelling one invalidates both. The thread tag is what makes the
+    // reader's countdown appear and disappear without a manual refetch.
+    listInboxOutbox: {
+      providesTags: [{ type: 'InboxOutbox' as const, id: 'LIST' }],
+    },
+    scheduleInboxReply: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'InboxOutbox' as const, id: 'LIST' },
+        { type: 'InboxThread' as const, id: arg.id },
+      ],
+    },
+    cancelInboxPendingReply: {
+      // No thread tag available here — the arg carries only the pending id, not
+      // the thread's. LIST covers the reader too, since the thread list and the
+      // reader share it.
+      invalidatesTags: [
+        { type: 'InboxOutbox' as const, id: 'LIST' },
+        { type: 'InboxThread' as const, id: 'LIST' },
+      ],
+    },
+    getInboxSettings: {
+      providesTags: [{ type: 'InboxOutbox' as const, id: 'SETTINGS' }],
+    },
+    updateInboxSettings: {
+      invalidatesTags: [{ type: 'InboxOutbox' as const, id: 'SETTINGS' }],
+    },
     // The send is queued (202), not delivered — the outbound message doesn't
     // exist yet at the instant this resolves, so this immediate invalidation
     // is a best-effort refetch, not a guarantee the reply is visible yet. The
@@ -146,4 +175,9 @@ export const {
   useDeleteInboxLabelMutation,
   useAssignInboxThreadLabelMutation,
   useUnassignInboxThreadLabelMutation,
+  useListInboxOutboxQuery,
+  useScheduleInboxReplyMutation,
+  useCancelInboxPendingReplyMutation,
+  useGetInboxSettingsQuery,
+  useUpdateInboxSettingsMutation,
 } = inboxApi

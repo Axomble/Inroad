@@ -56,5 +56,14 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	r.With(write).Delete("/labels/{labelId}", h.deleteLabel)
 	r.With(write).Put("/threads/{id}/labels/{labelId}", h.assignLabel)
 	r.With(write).Delete("/threads/{id}/labels/{labelId}", h.unassignLabel)
+	// Deferred + undoable replies. Scheduling needs inbox:send — it is a send,
+	// merely a later one. CANCELLING needs only inbox:write: stopping mail from
+	// going out is a safety action, and a read-only-ish integration that can
+	// prevent a send but never cause one is the right side of that asymmetry.
+	r.With(send).Post("/threads/{id}/schedule-reply", h.scheduleReply)
+	r.With(read).Get("/outbox", h.listPendingReplies)
+	r.With(write).Delete("/outbox/{pendingId}", h.cancelPendingReply)
+	r.With(read).Get("/settings", h.getInboxSettings)
+	r.With(write).Put("/settings", h.updateInboxSettings)
 	return r
 }

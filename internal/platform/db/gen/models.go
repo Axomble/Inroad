@@ -554,6 +554,22 @@ type InboxMessage struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxPendingReply struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	BodyText    string             `json:"body_text"`
+	Status      string             `json:"status"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	MessageID   string             `json:"message_id"`
+	LastError   string             `json:"last_error"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type InboxThread struct {
 	ID             uuid.UUID          `json:"id"`
 	WorkspaceID    uuid.UUID          `json:"workspace_id"`
@@ -1254,6 +1270,12 @@ type WorkspaceDek struct {
 	WrappedDek  []byte             `json:"wrapped_dek"`
 	KeyProvider string             `json:"key_provider"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkspaceInboxSetting struct {
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	UndoSendSeconds int32              `json:"undo_send_seconds"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 type WorkspaceInvite struct {

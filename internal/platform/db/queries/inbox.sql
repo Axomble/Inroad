@@ -337,3 +337,100 @@ WHERE tl.workspace_id = @workspace_id
     WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
       AND s.snooze_until > now())
 GROUP BY tl.label_id;
+
+-- name: CreateInboxPendingReply :one
+-- Self-enforcing tenancy, the same shape ClaimWarmupSend uses: the thread_id is
+-- taken from a SELECT over inbox_threads pinned to the workspace, so a
+-- cross-tenant thread_id inserts ZERO rows rather than writing a row that
+-- merely fails a later check.
+INSERT INTO inbox_pending_replies (workspace_id, thread_id, body_text, send_after, created_by)
+SELECT t.workspace_id, t.id, @body_text, @send_after, sqlc.narg('created_by')::uuid
+FROM inbox_threads t
+WHERE t.id = @thread_id AND t.workspace_id = @workspace_id
+RETURNING *;
+
+-- name: GetInboxPendingReply :one
+SELECT * FROM inbox_pending_replies WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: ListInboxPendingReplies :many
+-- The outbox: everything still waiting, soonest first. Bounded by the caller.
+SELECT p.*, t.subject AS thread_subject,
+       COALESCE(c.email, '') AS contact_email
+FROM inbox_pending_replies p
+JOIN inbox_threads t ON t.id = p.thread_id AND t.workspace_id = p.workspace_id
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE p.workspace_id = @workspace_id AND p.status IN ('scheduled', 'sending')
+ORDER BY p.send_after, p.id
+LIMIT @page_limit;
+
+-- name: CountInboxPendingReplies :one
+SELECT COUNT(*)::bigint AS total
+FROM inbox_pending_replies
+WHERE workspace_id = @workspace_id AND status IN ('scheduled', 'sending');
+
+-- name: GetPendingReplyForInboxThread :one
+-- The reader's "a reply is in flight" state. At most one row is expected in
+-- practice (the UI does not offer a second Send while one is pending), but the
+-- schema does not forbid two, so this takes the soonest rather than assuming
+-- uniqueness.
+SELECT * FROM inbox_pending_replies
+WHERE thread_id = @thread_id AND workspace_id = @workspace_id
+  AND status IN ('scheduled', 'sending')
+ORDER BY send_after
+LIMIT 1;
+
+-- name: CancelInboxPendingReply :execrows
+-- Undo. Guarded on status='scheduled': a row already claimed by a worker
+-- ('sending') is past the point of no return — the SMTP conversation may
+-- already be open — so cancelling it would report a lie to the operator. The
+-- :execrows result is how the caller learns which happened.
+UPDATE inbox_pending_replies
+SET status = 'cancelled', updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id AND status = 'scheduled';
+
+-- name: ClaimInboxPendingReply :execrows
+-- Claim-before-send, mirroring ClaimWarmupSend. Two rows are claimable: one
+-- still 'scheduled' whose send_after has arrived, and one stuck in 'sending'
+-- past its lease (a worker that crashed mid-send). The send_after guard is what
+-- makes a task that fires early — asynq delivering ahead of schedule, or a
+-- retry of an earlier attempt — wait rather than send.
+UPDATE inbox_pending_replies
+SET status = 'sending', claimed_at = now(), updated_at = now(), last_error = ''
+WHERE id = @id AND workspace_id = @workspace_id
+  AND send_after <= now()
+  AND (status = 'scheduled'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => @lease_seconds::double precision)));
+
+-- name: MarkInboxPendingReplySent :execrows
+-- Guarded on 'sending' so only the claimer can complete it, and :execrows so
+-- the caller runs its side effects (recording the outbound message) exactly
+-- once.
+UPDATE inbox_pending_replies
+SET status = 'sent', message_id = @message_id, sent_at = now(), updated_at = now(), last_error = ''
+WHERE id = @id AND workspace_id = @workspace_id AND status = 'sending';
+
+-- name: ReleaseInboxPendingReply :exec
+-- A retryable failure: back to 'scheduled' for the next attempt. send_after is
+-- deliberately NOT advanced — the reply is already late, and pushing it further
+-- out would compound the delay the failure caused.
+UPDATE inbox_pending_replies
+SET status = 'scheduled', claimed_at = NULL, last_error = @last_error, updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id AND status = 'sending';
+
+-- name: FailInboxPendingReply :exec
+-- Terminal failure, after retries are exhausted or on an error retrying cannot
+-- fix. The row survives so the outbox can show what happened rather than the
+-- reply vanishing.
+UPDATE inbox_pending_replies
+SET status = 'failed', claimed_at = NULL, last_error = @last_error, updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id AND status IN ('scheduled', 'sending');
+
+-- name: GetWorkspaceInboxSettings :one
+SELECT * FROM workspace_inbox_settings WHERE workspace_id = @workspace_id;
+
+-- name: UpsertWorkspaceInboxSettings :one
+INSERT INTO workspace_inbox_settings (workspace_id, undo_send_seconds)
+VALUES (@workspace_id, @undo_send_seconds)
+ON CONFLICT (workspace_id) DO UPDATE
+    SET undo_send_seconds = EXCLUDED.undo_send_seconds, updated_at = now()
+RETURNING *;

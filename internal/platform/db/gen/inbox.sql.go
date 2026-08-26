@@ -51,6 +51,70 @@ func (q *Queries) BumpInboxThreadLastMessageAt(ctx context.Context, arg BumpInbo
 	return err
 }
 
+const cancelInboxPendingReply = `-- name: CancelInboxPendingReply :execrows
+UPDATE inbox_pending_replies
+SET status = 'cancelled', updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND status = 'scheduled'
+`
+
+type CancelInboxPendingReplyParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Undo. Guarded on status='scheduled': a row already claimed by a worker
+// ('sending') is past the point of no return — the SMTP conversation may
+// already be open — so cancelling it would report a lie to the operator. The
+// :execrows result is how the caller learns which happened.
+func (q *Queries) CancelInboxPendingReply(ctx context.Context, arg CancelInboxPendingReplyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, cancelInboxPendingReply, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const claimInboxPendingReply = `-- name: ClaimInboxPendingReply :execrows
+UPDATE inbox_pending_replies
+SET status = 'sending', claimed_at = now(), updated_at = now(), last_error = ''
+WHERE id = $1 AND workspace_id = $2
+  AND send_after <= now()
+  AND (status = 'scheduled'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => $3::double precision)))
+`
+
+type ClaimInboxPendingReplyParams struct {
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	LeaseSeconds float64   `json:"lease_seconds"`
+}
+
+// Claim-before-send, mirroring ClaimWarmupSend. Two rows are claimable: one
+// still 'scheduled' whose send_after has arrived, and one stuck in 'sending'
+// past its lease (a worker that crashed mid-send). The send_after guard is what
+// makes a task that fires early — asynq delivering ahead of schedule, or a
+// retry of an earlier attempt — wait rather than send.
+func (q *Queries) ClaimInboxPendingReply(ctx context.Context, arg ClaimInboxPendingReplyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimInboxPendingReply, arg.ID, arg.WorkspaceID, arg.LeaseSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const countInboxPendingReplies = `-- name: CountInboxPendingReplies :one
+SELECT COUNT(*)::bigint AS total
+FROM inbox_pending_replies
+WHERE workspace_id = $1 AND status IN ('scheduled', 'sending')
+`
+
+func (q *Queries) CountInboxPendingReplies(ctx context.Context, workspaceID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countInboxPendingReplies, workspaceID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
 const countInboxSnoozedThreads = `-- name: CountInboxSnoozedThreads :one
 SELECT COUNT(*)::bigint AS total
 FROM inbox_thread_snoozes
@@ -136,6 +200,53 @@ func (q *Queries) CreateInboxLabel(ctx context.Context, arg CreateInboxLabelPara
 	return i, err
 }
 
+const createInboxPendingReply = `-- name: CreateInboxPendingReply :one
+INSERT INTO inbox_pending_replies (workspace_id, thread_id, body_text, send_after, created_by)
+SELECT t.workspace_id, t.id, $1, $2, $3::uuid
+FROM inbox_threads t
+WHERE t.id = $4 AND t.workspace_id = $5
+RETURNING id, workspace_id, thread_id, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at
+`
+
+type CreateInboxPendingReplyParams struct {
+	BodyText    string             `json:"body_text"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+}
+
+// Self-enforcing tenancy, the same shape ClaimWarmupSend uses: the thread_id is
+// taken from a SELECT over inbox_threads pinned to the workspace, so a
+// cross-tenant thread_id inserts ZERO rows rather than writing a row that
+// merely fails a later check.
+func (q *Queries) CreateInboxPendingReply(ctx context.Context, arg CreateInboxPendingReplyParams) (InboxPendingReply, error) {
+	row := q.db.QueryRow(ctx, createInboxPendingReply,
+		arg.BodyText,
+		arg.SendAfter,
+		arg.CreatedBy,
+		arg.ThreadID,
+		arg.WorkspaceID,
+	)
+	var i InboxPendingReply
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ThreadID,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const deleteInboxLabel = `-- name: DeleteInboxLabel :execrows
 DELETE FROM inbox_labels WHERE id = $1 AND workspace_id = $2
 `
@@ -176,6 +287,26 @@ func (q *Queries) DeleteInboxThreadSnooze(ctx context.Context, arg DeleteInboxTh
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const failInboxPendingReply = `-- name: FailInboxPendingReply :exec
+UPDATE inbox_pending_replies
+SET status = 'failed', claimed_at = NULL, last_error = $1, updated_at = now()
+WHERE id = $2 AND workspace_id = $3 AND status IN ('scheduled', 'sending')
+`
+
+type FailInboxPendingReplyParams struct {
+	LastError   string    `json:"last_error"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Terminal failure, after retries are exhausted or on an error retrying cannot
+// fix. The row survives so the outbox can show what happened rather than the
+// reply vanishing.
+func (q *Queries) FailInboxPendingReply(ctx context.Context, arg FailInboxPendingReplyParams) error {
+	_, err := q.db.Exec(ctx, failInboxPendingReply, arg.LastError, arg.ID, arg.WorkspaceID)
+	return err
 }
 
 const findInboxLabelByName = `-- name: FindInboxLabelByName :one
@@ -293,6 +424,36 @@ func (q *Queries) GetInboxOverviewTotals(ctx context.Context, arg GetInboxOvervi
 	return i, err
 }
 
+const getInboxPendingReply = `-- name: GetInboxPendingReply :one
+SELECT id, workspace_id, thread_id, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at FROM inbox_pending_replies WHERE id = $1 AND workspace_id = $2
+`
+
+type GetInboxPendingReplyParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxPendingReply(ctx context.Context, arg GetInboxPendingReplyParams) (InboxPendingReply, error) {
+	row := q.db.QueryRow(ctx, getInboxPendingReply, arg.ID, arg.WorkspaceID)
+	var i InboxPendingReply
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ThreadID,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getInboxThread = `-- name: GetInboxThread :one
 SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
        COALESCE(c.email, '') AS contact_email,
@@ -376,6 +537,55 @@ func (q *Queries) GetInboxThreadSnooze(ctx context.Context, arg GetInboxThreadSn
 		&i.SnoozedBy,
 		&i.CreatedAt,
 	)
+	return i, err
+}
+
+const getPendingReplyForInboxThread = `-- name: GetPendingReplyForInboxThread :one
+SELECT id, workspace_id, thread_id, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at FROM inbox_pending_replies
+WHERE thread_id = $1 AND workspace_id = $2
+  AND status IN ('scheduled', 'sending')
+ORDER BY send_after
+LIMIT 1
+`
+
+type GetPendingReplyForInboxThreadParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// The reader's "a reply is in flight" state. At most one row is expected in
+// practice (the UI does not offer a second Send while one is pending), but the
+// schema does not forbid two, so this takes the soonest rather than assuming
+// uniqueness.
+func (q *Queries) GetPendingReplyForInboxThread(ctx context.Context, arg GetPendingReplyForInboxThreadParams) (InboxPendingReply, error) {
+	row := q.db.QueryRow(ctx, getPendingReplyForInboxThread, arg.ThreadID, arg.WorkspaceID)
+	var i InboxPendingReply
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ThreadID,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getWorkspaceInboxSettings = `-- name: GetWorkspaceInboxSettings :one
+SELECT workspace_id, undo_send_seconds, updated_at FROM workspace_inbox_settings WHERE workspace_id = $1
+`
+
+func (q *Queries) GetWorkspaceInboxSettings(ctx context.Context, workspaceID uuid.UUID) (WorkspaceInboxSetting, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceInboxSettings, workspaceID)
+	var i WorkspaceInboxSetting
+	err := row.Scan(&i.WorkspaceID, &i.UndoSendSeconds, &i.UpdatedAt)
 	return i, err
 }
 
@@ -582,6 +792,77 @@ func (q *Queries) ListInboxOverviewByReplyClass(ctx context.Context, workspaceID
 	for rows.Next() {
 		var i ListInboxOverviewByReplyClassRow
 		if err := rows.Scan(&i.Key, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInboxPendingReplies = `-- name: ListInboxPendingReplies :many
+SELECT p.id, p.workspace_id, p.thread_id, p.body_text, p.status, p.send_after, p.claimed_at, p.sent_at, p.message_id, p.last_error, p.created_by, p.created_at, p.updated_at, t.subject AS thread_subject,
+       COALESCE(c.email, '') AS contact_email
+FROM inbox_pending_replies p
+JOIN inbox_threads t ON t.id = p.thread_id AND t.workspace_id = p.workspace_id
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE p.workspace_id = $1 AND p.status IN ('scheduled', 'sending')
+ORDER BY p.send_after, p.id
+LIMIT $2
+`
+
+type ListInboxPendingRepliesParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	PageLimit   int32     `json:"page_limit"`
+}
+
+type ListInboxPendingRepliesRow struct {
+	ID            uuid.UUID          `json:"id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	ThreadID      uuid.UUID          `json:"thread_id"`
+	BodyText      string             `json:"body_text"`
+	Status        string             `json:"status"`
+	SendAfter     pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt     pgtype.Timestamptz `json:"claimed_at"`
+	SentAt        pgtype.Timestamptz `json:"sent_at"`
+	MessageID     string             `json:"message_id"`
+	LastError     string             `json:"last_error"`
+	CreatedBy     pgtype.UUID        `json:"created_by"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ThreadSubject string             `json:"thread_subject"`
+	ContactEmail  string             `json:"contact_email"`
+}
+
+// The outbox: everything still waiting, soonest first. Bounded by the caller.
+func (q *Queries) ListInboxPendingReplies(ctx context.Context, arg ListInboxPendingRepliesParams) ([]ListInboxPendingRepliesRow, error) {
+	rows, err := q.db.Query(ctx, listInboxPendingReplies, arg.WorkspaceID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxPendingRepliesRow
+	for rows.Next() {
+		var i ListInboxPendingRepliesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ThreadID,
+			&i.BodyText,
+			&i.Status,
+			&i.SendAfter,
+			&i.ClaimedAt,
+			&i.SentAt,
+			&i.MessageID,
+			&i.LastError,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ThreadSubject,
+			&i.ContactEmail,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -923,6 +1204,49 @@ func (q *Queries) ListSentOutboundStepsForThread(ctx context.Context, arg ListSe
 	return items, nil
 }
 
+const markInboxPendingReplySent = `-- name: MarkInboxPendingReplySent :execrows
+UPDATE inbox_pending_replies
+SET status = 'sent', message_id = $1, sent_at = now(), updated_at = now(), last_error = ''
+WHERE id = $2 AND workspace_id = $3 AND status = 'sending'
+`
+
+type MarkInboxPendingReplySentParams struct {
+	MessageID   string    `json:"message_id"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Guarded on 'sending' so only the claimer can complete it, and :execrows so
+// the caller runs its side effects (recording the outbound message) exactly
+// once.
+func (q *Queries) MarkInboxPendingReplySent(ctx context.Context, arg MarkInboxPendingReplySentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markInboxPendingReplySent, arg.MessageID, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const releaseInboxPendingReply = `-- name: ReleaseInboxPendingReply :exec
+UPDATE inbox_pending_replies
+SET status = 'scheduled', claimed_at = NULL, last_error = $1, updated_at = now()
+WHERE id = $2 AND workspace_id = $3 AND status = 'sending'
+`
+
+type ReleaseInboxPendingReplyParams struct {
+	LastError   string    `json:"last_error"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// A retryable failure: back to 'scheduled' for the next attempt. send_after is
+// deliberately NOT advanced — the reply is already late, and pushing it further
+// out would compound the delay the failure caused.
+func (q *Queries) ReleaseInboxPendingReply(ctx context.Context, arg ReleaseInboxPendingReplyParams) error {
+	_, err := q.db.Exec(ctx, releaseInboxPendingReply, arg.LastError, arg.ID, arg.WorkspaceID)
+	return err
+}
+
 const setInboxThreadUnread = `-- name: SetInboxThreadUnread :execrows
 UPDATE inbox_threads SET unread = $1 WHERE id = $2 AND workspace_id = $3
 `
@@ -1085,5 +1409,25 @@ func (q *Queries) UpsertInboxThreadSnooze(ctx context.Context, arg UpsertInboxTh
 		&i.SnoozedBy,
 		&i.CreatedAt,
 	)
+	return i, err
+}
+
+const upsertWorkspaceInboxSettings = `-- name: UpsertWorkspaceInboxSettings :one
+INSERT INTO workspace_inbox_settings (workspace_id, undo_send_seconds)
+VALUES ($1, $2)
+ON CONFLICT (workspace_id) DO UPDATE
+    SET undo_send_seconds = EXCLUDED.undo_send_seconds, updated_at = now()
+RETURNING workspace_id, undo_send_seconds, updated_at
+`
+
+type UpsertWorkspaceInboxSettingsParams struct {
+	WorkspaceID     uuid.UUID `json:"workspace_id"`
+	UndoSendSeconds int32     `json:"undo_send_seconds"`
+}
+
+func (q *Queries) UpsertWorkspaceInboxSettings(ctx context.Context, arg UpsertWorkspaceInboxSettingsParams) (WorkspaceInboxSetting, error) {
+	row := q.db.QueryRow(ctx, upsertWorkspaceInboxSettings, arg.WorkspaceID, arg.UndoSendSeconds)
+	var i WorkspaceInboxSetting
+	err := row.Scan(&i.WorkspaceID, &i.UndoSendSeconds, &i.UpdatedAt)
 	return i, err
 }

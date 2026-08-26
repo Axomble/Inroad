@@ -3155,6 +3155,140 @@ paths:
         '204': { description: The thread is back in the inbox }
         '401': { description: Unauthorized }
         '404': { description: "The thread does not exist, or is not snoozed" }
+  /inbox/threads/{id}/schedule-reply:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: scheduleInboxReply
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Queue a manual reply for later delivery, returning a handle the operator
+        can undo with.
+
+
+        A SEPARATE operation from sendInboxReply rather than a flag on it,
+        because the contracts genuinely differ: sendInboxReply is
+        fire-and-forget (202, no body), while this must return the queued
+        reply's id — without it there is no handle to cancel, which is the
+        entire point.
+
+
+        Omit `send_at` for the ordinary Send: the reply leaves after the
+        workspace's configured undo window (see getInboxSettings), during which
+        cancelling it is free. Supply `send_at` for a deliberate schedule, up to
+        30 days ahead.
+
+
+        Cancellation does NOT reach into the queue. The delayed job always
+        fires and re-reads the row's status, so an undone reply is one the worker
+        declines to claim. That is why a queued reply is a durable row rather
+        than only a scheduled task.
+
+
+        Scheduling deliberately does NOT mark the thread read, unlike
+        sendInboxReply: an undone reply should leave the thread exactly as the
+        operator found it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleInboxReplyRequest' }
+      responses:
+        '201':
+          description: The queued reply
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingReply' }
+        '400': { description: "Malformed body, or send_at is not an RFC3339 timestamp" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: The recipient is suppressed }
+        '422':
+          description: >-
+            The body is empty or too long, the thread has no message to reply to,
+            or send_at parsed but is out of range (already past, or more than 30
+            days ahead).
+  /inbox/outbox:
+    get:
+      operationId: listInboxOutbox
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Manual replies queued but not yet delivered, soonest first. A reply
+        leaves this list once it is sent, cancelled, or permanently failed.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50, capped at 200 (a larger request is clamped, not rejected).
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: The workspace's queued replies
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingReplyList' }
+        '400': { description: Malformed limit }
+        '401': { description: Unauthorized }
+  /inbox/outbox/{pendingId}:
+    parameters:
+      - name: pendingId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: cancelInboxPendingReply
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Undo a queued reply, so it is never sent.
+
+
+        Requires `inbox:write`, not `inbox:send`: stopping mail from going out is
+        a safety action, and an integration that can prevent a send but never
+        cause one is on the right side of that asymmetry.
+
+
+        Answers 409 — not 404 — once a worker has claimed the reply for
+        delivery. At that point the SMTP conversation may already be open, so
+        reporting success would be a lie; the message says so, because "the mail
+        is already on its way" is something the operator needs told rather than a
+        generic failure.
+      responses:
+        '204': { description: The reply will not be sent }
+        '400': { description: The id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: No such queued reply in this workspace }
+        '409': { description: "Already being delivered, and no longer cancellable" }
+  /inbox/settings:
+    get:
+      operationId: getInboxSettings
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The workspace's inbox settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSettings' }
+        '401': { description: Unauthorized }
+    put:
+      operationId: updateInboxSettings
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InboxSettings' }
+      responses:
+        '200':
+          description: The updated settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSettings' }
+        '400': { description: undo_send_seconds is out of range }
+        '401': { description: Unauthorized }
   /inbox/labels:
     get:
       operationId: listInboxLabels
@@ -5921,6 +6055,71 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    ScheduleInboxReplyRequest:
+      type: object
+      required: [body_text]
+      properties:
+        body_text: { type: string, minLength: 1, maxLength: 100000 }
+        send_at:
+          type: string
+          format: date-time
+          description: >-
+            When to deliver. Omit for the ordinary Send, which leaves after the
+            workspace's undo window. An explicit value must be in the future and
+            within 30 days.
+    InboxPendingReply:
+      type: object
+      required: [id, thread_id, status, send_after, sent_at, body_text, last_error, cancellable, thread_subject, contact_email, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        thread_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [scheduled, sending, sent, cancelled, failed]
+          description: >-
+            `scheduled` is waiting and cancellable. `sending` means a worker has
+            claimed it — past the point of no return. `failed` rows are kept so
+            the outbox can show what happened rather than the reply vanishing.
+        send_after:
+          type: string
+          format: date-time
+          description: When the reply leaves. The client's undo countdown runs against this.
+        sent_at: { type: string, format: date-time, nullable: true }
+        body_text: { type: string }
+        last_error:
+          type: string
+          description: Empty unless a delivery attempt failed. Truncated to 500 characters.
+        cancellable:
+          type: boolean
+          description: >-
+            Whether cancelling would still succeed, mirroring the server's own
+            status rule — so a client need not reimplement it, and never offers
+            an Undo that is guaranteed to fail.
+        thread_subject: { type: string }
+        contact_email:
+          type: string
+          description: Empty for a legacy direct-send match with no linked contact.
+        created_at: { type: string, format: date-time }
+    InboxPendingReplyList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxPendingReply' } }
+    InboxSettings:
+      type: object
+      required: [undo_send_seconds]
+      properties:
+        undo_send_seconds:
+          type: integer
+          minimum: 0
+          maximum: 120
+          description: >-
+            Seconds between pressing Send and the reply actually leaving, during
+            which it can be undone. 0 disables the window (send immediately).
+            Defaults to 10 for a workspace that has never configured one —
+            shorter than Gmail's 30 because a reply answers something already
+            read, and a 30-second wait on every reply is felt as latency rather
+            than safety.
     InboxLabel:
       type: object
       required: [id, name, color, created_at, updated_at]
@@ -6057,6 +6256,14 @@ components:
           required: [messages, snooze]
           properties:
             messages: { type: array, items: { $ref: '#/components/schemas/InboxMessage' } }
+            pending_reply:
+              type: object
+              allOf: [{ $ref: '#/components/schemas/InboxPendingReply' }]
+              nullable: true
+              description: >-
+                The reply queued on this thread and not yet delivered, or null.
+                The reader renders its countdown and Undo control from this
+                alone.
             snooze:
               type: object
               allOf: [{ $ref: '#/components/schemas/InboxSnooze' }]

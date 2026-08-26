@@ -49,6 +49,16 @@ func writeErr(w http.ResponseWriter, err error) {
 	// a property of the workspace, not of the syntax.
 	case errors.Is(err, ErrTooManyLabels):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// Same reasoning as the snooze bounds: a well-formed timestamp that is out
+	// of range is 422, not 400, so a client can tell a malformed request from a
+	// rejected moment on status alone.
+	case errors.Is(err, ErrScheduleInPast), errors.Is(err, ErrScheduleTooFar):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// 409: the reply exists, but the state it is in forbids the action. The
+	// message says WHY, because "the mail is already on its way" is something
+	// the operator needs told rather than a generic failure.
+	case errors.Is(err, ErrPendingNotCancellable):
+		httpx.Error(w, http.StatusConflict, err.Error())
 	// The three draft failures get three DISTINCT statuses, none of which the
 	// draft route can produce for any other reason, so the UI can branch on the
 	// status alone without parsing the body:
@@ -174,6 +184,9 @@ type threadDetailResponse struct {
 	// "Snoozed until …" and an Unsnooze action from this alone, without having
 	// to date-check a possibly-lapsed timestamp itself.
 	Snooze *snoozeResponse `json:"snooze"`
+	// PendingReply is the reply currently queued on this thread, if any — the
+	// reader shows its countdown and Undo from this alone.
+	PendingReply *pendingReplyResponse `json:"pending_reply"`
 }
 
 func toThreadDetailResponse(d ThreadDetail) threadDetailResponse {
@@ -185,6 +198,10 @@ func toThreadDetailResponse(d ThreadDetail) threadDetailResponse {
 	if d.Snooze != nil {
 		snooze := toSnoozeResponse(*d.Snooze)
 		out.Snooze = &snooze
+	}
+	if d.PendingReply != nil {
+		pending := toPendingReplyResponse(*d.PendingReply)
+		out.PendingReply = &pending
 	}
 	return out
 }

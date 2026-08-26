@@ -109,6 +109,9 @@ type ThreadDetail struct {
 	// Labels are the operator-assigned labels on this thread, alphabetical.
 	// Also set by Service.GetThread, from the optional LabelStore.
 	Labels []Label
+	// PendingReply is the reply queued on this thread and not yet delivered,
+	// else nil. Set by Service.GetThread from the optional PendingReplyStore.
+	PendingReply *PendingReply
 }
 
 // ThreadPage is one page of ListThreads, newest first.

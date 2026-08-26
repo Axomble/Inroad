@@ -1546,6 +1546,52 @@ const injectedRtkApi = api.injectEndpoints({
         method: "DELETE",
       }),
     }),
+    scheduleInboxReply: build.mutation<
+      ScheduleInboxReplyApiResponse,
+      ScheduleInboxReplyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/schedule-reply`,
+        method: "POST",
+        body: queryArg.scheduleInboxReplyRequest,
+      }),
+    }),
+    listInboxOutbox: build.query<
+      ListInboxOutboxApiResponse,
+      ListInboxOutboxApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/outbox`,
+        params: {
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    cancelInboxPendingReply: build.mutation<
+      CancelInboxPendingReplyApiResponse,
+      CancelInboxPendingReplyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/outbox/${queryArg.pendingId}`,
+        method: "DELETE",
+      }),
+    }),
+    getInboxSettings: build.query<
+      GetInboxSettingsApiResponse,
+      GetInboxSettingsApiArg
+    >({
+      query: () => ({ url: `/inbox/settings` }),
+    }),
+    updateInboxSettings: build.mutation<
+      UpdateInboxSettingsApiResponse,
+      UpdateInboxSettingsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/settings`,
+        method: "PUT",
+        body: queryArg.inboxSettings,
+      }),
+    }),
     listInboxLabels: build.query<
       ListInboxLabelsApiResponse,
       ListInboxLabelsApiArg
@@ -2550,6 +2596,30 @@ export type SnoozeInboxThreadApiArg = {
 export type UnsnoozeInboxThreadApiResponse = unknown;
 export type UnsnoozeInboxThreadApiArg = {
   id: string;
+};
+export type ScheduleInboxReplyApiResponse =
+  /** status 201 The queued reply */ InboxPendingReply;
+export type ScheduleInboxReplyApiArg = {
+  id: string;
+  scheduleInboxReplyRequest: ScheduleInboxReplyRequest;
+};
+export type ListInboxOutboxApiResponse =
+  /** status 200 The workspace's queued replies */ InboxPendingReplyList;
+export type ListInboxOutboxApiArg = {
+  /** Page size. Defaults to 50, capped at 200 (a larger request is clamped, not rejected). */
+  limit?: number;
+};
+export type CancelInboxPendingReplyApiResponse = unknown;
+export type CancelInboxPendingReplyApiArg = {
+  pendingId: string;
+};
+export type GetInboxSettingsApiResponse =
+  /** status 200 The workspace's inbox settings */ InboxSettings;
+export type GetInboxSettingsApiArg = void;
+export type UpdateInboxSettingsApiResponse =
+  /** status 200 The updated settings */ InboxSettings;
+export type UpdateInboxSettingsApiArg = {
+  inboxSettings: InboxSettings;
 };
 export type ListInboxLabelsApiResponse =
   /** status 200 The workspace's labels */ InboxLabelList;
@@ -4272,6 +4342,24 @@ export type InboxMessage = {
   reply_class: string;
   occurred_at: string;
 };
+export type InboxPendingReply = {
+  id: string;
+  thread_id: string;
+  /** `scheduled` is waiting and cancellable. `sending` means a worker has claimed it — past the point of no return. `failed` rows are kept so the outbox can show what happened rather than the reply vanishing. */
+  status: "scheduled" | "sending" | "sent" | "cancelled" | "failed";
+  /** When the reply leaves. The client's undo countdown runs against this. */
+  send_after: string;
+  sent_at: string | null;
+  body_text: string;
+  /** Empty unless a delivery attempt failed. Truncated to 500 characters. */
+  last_error: string;
+  /** Whether cancelling would still succeed, mirroring the server's own status rule — so a client need not reimplement it, and never offers an Undo that is guaranteed to fail. */
+  cancellable: boolean;
+  thread_subject: string;
+  /** Empty for a legacy direct-send match with no linked contact. */
+  contact_email: string;
+  created_at: string;
+};
 export type InboxSnooze = {
   thread_id: string;
   snooze_until: string;
@@ -4281,6 +4369,8 @@ export type InboxSnooze = {
 };
 export type InboxThreadDetail = InboxThreadSummary & {
   messages: InboxMessage[];
+  /** The reply queued on this thread and not yet delivered, or null. The reader renders its countdown and Undo control from this alone. */
+  pending_reply?: InboxPendingReply | null;
   /** The thread's snooze, or null when it has none — including when a snooze exists but has already lapsed. The server evaluates "still in force" so the client renders "Snoozed until …" and an Unsnooze action from this field alone, without date-checking a possibly-expired timestamp itself. */
   snooze: InboxSnooze | null;
 };
@@ -4297,6 +4387,18 @@ export type SetInboxThreadReadRequest = {
 export type SnoozeInboxThreadRequest = {
   /** When the thread should return to the inbox. Must be in the future and within 90 days. */
   snooze_until: string;
+};
+export type ScheduleInboxReplyRequest = {
+  body_text: string;
+  /** When to deliver. Omit for the ordinary Send, which leaves after the workspace's undo window. An explicit value must be in the future and within 30 days. */
+  send_at?: string;
+};
+export type InboxPendingReplyList = {
+  items: InboxPendingReply[];
+};
+export type InboxSettings = {
+  /** Seconds between pressing Send and the reply actually leaving, during which it can be undone. 0 disables the window (send immediately). Defaults to 10 for a workspace that has never configured one — shorter than Gmail's 30 because a reply answers something already read, and a 30-second wait on every reply is felt as latency rather than safety. */
+  undo_send_seconds: number;
 };
 export type InboxLabelList = {
   labels: InboxLabel[];
@@ -4494,6 +4596,11 @@ export const {
   useSetInboxThreadReadMutation,
   useSnoozeInboxThreadMutation,
   useUnsnoozeInboxThreadMutation,
+  useScheduleInboxReplyMutation,
+  useListInboxOutboxQuery,
+  useCancelInboxPendingReplyMutation,
+  useGetInboxSettingsQuery,
+  useUpdateInboxSettingsMutation,
   useListInboxLabelsQuery,
   useCreateInboxLabelMutation,
   useUpdateInboxLabelMutation,

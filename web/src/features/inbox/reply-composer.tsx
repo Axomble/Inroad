@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Loader2, Sparkles } from 'lucide-react'
+import { Loader2, Sparkles, CalendarClock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -12,14 +12,19 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { Input } from '@/components/ui/input'
 import { api } from '@/store/api'
 import { useAppDispatch } from '@/store/hooks'
-import { useDraftInboxReplyMutation, useSendInboxReplyMutation } from './api'
+import { useDraftInboxReplyMutation, useScheduleInboxReplyMutation } from './api'
 // Cross-feature query-hook imports are allowed for read-only reference data
 // (see features/campaigns/api.ts). Cross-feature UI imports remain forbidden.
 import { useListAiModelsQuery } from '@/features/ai-settings/api'
 import { replyErrorMessage } from './reply-error'
 import { draftReplyError, type DraftReplyError } from './draft-reply-error'
+// The send-later picker reuses the snooze bounds-checker: both answer "is this
+// a usable future instant?" against the same rules, and a second copy of that
+// logic would be a second place for the two to disagree.
+import { parseCustomSnooze, toDateTimeLocalValue } from './snooze-presets'
 
 /** Matches `SendInboxReplyRequest.body_text`'s `maxLength` in api/openapi.yaml. */
 const MAX_BODY_LENGTH = 100_000
@@ -46,9 +51,19 @@ export function ReplyComposer({ threadId, hasInboundMessage }: { threadId: strin
   const [bodyText, setBodyText] = useState('')
   const [sent, setSent] = useState(false)
   const [confirmingOverwrite, setConfirmingOverwrite] = useState(false)
+  /** Inline complaint about a chosen send-later instant, before any request. */
+  const [scheduleError, setScheduleError] = useState<string | null>(null)
+  const [showSchedulePicker, setShowSchedulePicker] = useState(false)
+  /** The send-later field's value. Controlled state, not a DOM read: reading a
+   * ref back at click time is fragile and leaves the value untestable. */
+  const [scheduleAt, setScheduleAt] = useState('')
   /** Bumped by every landed draft: drives the focus/caret effect and the announcement. */
   const [draftToken, setDraftToken] = useState(0)
-  const [sendReply, { isLoading, error }] = useSendInboxReplyMutation()
+  // Scheduling, not the immediate send: the reply goes out after the
+  // workspace's undo window, during which the reader shows a countdown and an
+  // Undo control (see UndoSendPill). A zero window means it leaves at once, so
+  // this path also covers a workspace that opted out of undo entirely.
+  const [scheduleReply, { isLoading, error }] = useScheduleInboxReplyMutation()
   const [draftReply, { isLoading: isDrafting, error: draftError, reset: resetDraftState }] =
     useDraftInboxReplyMutation()
   const modelsQuery = useListAiModelsQuery()
@@ -85,19 +100,35 @@ export function ReplyComposer({ threadId, hasInboundMessage }: { threadId: strin
     !modelsQuery.isLoading && !modelsQuery.isError && !(modelsQuery.data?.models ?? []).some((m) => m.enabled)
   const canDraft = hasInboundMessage && !isDrafting && !isLoading && !noAiModel
 
-  async function onSend() {
+  async function onSend(sendAt?: string) {
     if (!canSend) return
     setSent(false)
-    const result = await sendReply({ id: threadId, sendInboxReplyRequest: { body_text: bodyText } })
+    const result = await scheduleReply({
+      id: threadId,
+      scheduleInboxReplyRequest: { body_text: bodyText, ...(sendAt ? { send_at: sendAt } : {}) },
+    })
     if ('error' in result) return
     setBodyText('')
     setSent(true)
+    setShowSchedulePicker(false)
+    setScheduleAt('')
     setDraftToken(0)
     resetDraftState()
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
     timeoutRef.current = setTimeout(() => {
       dispatch(api.util.invalidateTags([{ type: 'InboxThread', id: threadId }]))
     }, DELAYED_REFETCH_MS)
+  }
+
+  /** Send-later: the operator picks an instant, the reply waits for it. */
+  function onSendAt(value: string) {
+    const result = parseCustomSnooze(value, new Date())
+    if (!result.ok) {
+      setScheduleError(result.reason)
+      return
+    }
+    setScheduleError(null)
+    void onSend(result.at.toISOString())
   }
 
   async function runDraft() {
@@ -178,8 +209,45 @@ export function ReplyComposer({ threadId, hasInboundMessage }: { threadId: strin
       )}
       {sent && !alert && (
         <p role="status" className="text-xs text-ok">
-          Reply sent — it will appear in the thread shortly.
+          Reply queued — you can still undo it from the thread.
         </p>
+      )}
+
+      {showSchedulePicker && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            type="datetime-local"
+            min={toDateTimeLocalValue(new Date())}
+            aria-label="Send this reply at a specific date and time"
+            aria-invalid={scheduleError !== null}
+            className="h-8 w-auto text-[12px]"
+            value={scheduleAt}
+            onChange={(event) => {
+              setScheduleAt(event.target.value)
+              setScheduleError(null)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                onSendAt(scheduleAt)
+              }
+            }}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="xs"
+            disabled={!canSend}
+            onClick={() => onSendAt(scheduleAt)}
+          >
+            Schedule
+          </Button>
+          {scheduleError && (
+            <p role="alert" className="text-[11px] text-danger">
+              {scheduleError}
+            </p>
+          )}
+        </div>
       )}
       {draftToken > 0 && !sent && !alert && (
         <p role="status" className="text-xs text-muted-foreground">
@@ -206,6 +274,20 @@ export function ReplyComposer({ threadId, hasInboundMessage }: { threadId: strin
         >
           {isDrafting ? <Loader2 className="animate-spin" /> : <Sparkles />}
           Draft a reply
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!canSend}
+          aria-expanded={showSchedulePicker}
+          onClick={() => {
+            setShowSchedulePicker((open) => !open)
+            setScheduleError(null)
+          }}
+        >
+          <CalendarClock />
+          Send later
         </Button>
         <Button type="submit" variant="primary" size="sm" disabled={!canSend}>
           {isLoading && <Loader2 className="animate-spin" />}

@@ -25,6 +25,7 @@ let replyResponder: () => Response
 let draftResponder: () => Response | Promise<Response>
 let modelsResponder: () => Response
 let lastRequestBody: unknown
+let lastRequestPath: string
 let sendCalls: number
 let draftCalls: number
 
@@ -33,6 +34,7 @@ beforeEach(() => {
   draftResponder = () => json({ body_text: 'Thursday works — how about 10am?' })
   modelsResponder = () => json({ models: [{ id: 'anthropic/claude', label: 'Claude', enabled: true }] })
   lastRequestBody = undefined
+  lastRequestPath = ''
   sendCalls = 0
   draftCalls = 0
 
@@ -45,6 +47,7 @@ beforeEach(() => {
 
       if (pathname.endsWith('/ai/models')) return modelsResponder()
 
+      lastRequestPath = pathname
       lastRequestBody = isRequest
         ? await input.clone().json().catch(() => undefined)
         : typeof init?.body === 'string'
@@ -82,15 +85,52 @@ test('the send button is disabled with an empty or whitespace-only textarea', ()
   expect(sendButton()).toBeDisabled()
 })
 
-test('sending a reply posts the body, clears the textarea, and shows a success status', async () => {
+// Send now goes through the SCHEDULE endpoint, so the reply waits out the
+// workspace's undo window and stays cancellable. The success copy says "queued"
+// rather than "sent" because that is now the truth — the mail has not left yet.
+test('sending a reply schedules it, clears the textarea, and shows a queued status', async () => {
   renderWithProviders(<ReplyComposer threadId={THREAD_ID} hasInboundMessage />)
 
   fireEvent.change(textarea(), { target: { value: 'Thanks for getting back to me!' } })
   fireEvent.click(sendButton())
 
   await waitFor(() => expect(lastRequestBody).toEqual({ body_text: 'Thanks for getting back to me!' }))
-  expect(await screen.findByRole('status')).toHaveTextContent(/reply sent — it will appear in the thread shortly/i)
+  expect(await screen.findByRole('status')).toHaveTextContent(/reply queued — you can still undo it/i)
   expect(textarea()).toHaveValue('')
+  expect(lastRequestPath).toContain('/schedule-reply')
+})
+
+// Send later attaches an explicit instant. Without send_at the server applies
+// the undo window; with it, the reply waits for the chosen moment.
+test('send later posts the chosen instant as send_at', async () => {
+  renderWithProviders(<ReplyComposer threadId={THREAD_ID} hasInboundMessage />)
+  fireEvent.change(textarea(), { target: { value: 'Next week please' } })
+
+  fireEvent.click(screen.getByRole('button', { name: /send later/i }))
+  const at = new Date(Date.now() + 3 * 86_400_000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const value = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T09:00`
+
+  fireEvent.change(screen.getByLabelText(/specific date and time/i), { target: { value } })
+  fireEvent.click(screen.getByRole('button', { name: /^schedule$/i }))
+
+  await waitFor(() => {
+    const body = lastRequestBody as { body_text: string; send_at?: string }
+    expect(body.body_text).toBe('Next week please')
+    expect(body.send_at).toBeTruthy()
+  })
+})
+
+test('a send-later instant in the past is refused inline, without a request', async () => {
+  renderWithProviders(<ReplyComposer threadId={THREAD_ID} hasInboundMessage />)
+  fireEvent.change(textarea(), { target: { value: 'oops' } })
+
+  fireEvent.click(screen.getByRole('button', { name: /send later/i }))
+  fireEvent.change(screen.getByLabelText(/specific date and time/i), { target: { value: '2020-01-01T09:00' } })
+  fireEvent.click(screen.getByRole('button', { name: /^schedule$/i }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/future/i)
+  expect(sendCalls).toBe(0)
 })
 
 test('a 409 shows the suppressed/no-inbound-message message, not a generic failure', async () => {
