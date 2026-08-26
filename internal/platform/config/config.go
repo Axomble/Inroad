@@ -9,6 +9,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/inroad/inroad/internal/platform/db"
+)
+
+// Pool-sizing defaults. Aliased from db so the numbers have ONE home (the
+// package that owns the pool) while staying nameable in a config error message.
+// db does not import config, so this direction adds no cycle.
+const (
+	DefaultDBMaxConns = db.DefaultPoolMaxConns
+	DefaultDBMinConns = db.DefaultPoolMinConns
 )
 
 type Config struct {
@@ -88,9 +98,27 @@ type Config struct {
 	// because it bounds revocation-propagation latency across replicas.
 	SessionCacheTTL time.Duration
 
+	// DBMaxConns / DBMinConns size the pgx pool this process opens. Defaults
+	// (25 / 4) are exactly the floors db.Connect applied before these existed, so
+	// an upgrade changes no deployment's behaviour. They are per-PROCESS, and the
+	// binding budget is cluster-wide: replicas × DBMaxConns + headroom must stay
+	// under Postgres max_connections (100 by default), which four stock processes
+	// hit exactly. A DSN that pins pool_max_conns/pool_min_conns still wins over
+	// both — see db.PoolSize for the full precedence rule.
+	DBMaxConns int
+	DBMinConns int
+
 	// WorkerConcurrency caps how many asynq tasks the worker processes
 	// simultaneously. Default 10; tune per SMTP throughput.
 	WorkerConcurrency int
+
+	// RunScheduler decides whether THIS worker process runs the asynq periodic
+	// scheduler. Default true so the common single-worker self-host keeps working
+	// with no configuration. asynq elects no leader, so N replicas with this on
+	// register every periodic task N times and every reconcile sweep runs N
+	// times — cost, not corruption (the handlers are idempotent), but it scales
+	// with replica count. Scaling out means setting this false on all but one.
+	RunScheduler bool
 
 	// --- Worker identity + per-IP routing (spec §15) ---
 
@@ -268,6 +296,23 @@ func Load() (*Config, error) {
 	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
 	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
+
+	// Pool sizing is validated here, at the env boundary, so a bad budget fails at
+	// startup with the offending numbers rather than as pool.Acquire blocking
+	// forever on the first request — the failure mode this setting exists to fix.
+	cfg.DBMaxConns = getenvInt("INROAD_DB_MAX_CONNS", DefaultDBMaxConns)
+	cfg.DBMinConns = getenvInt("INROAD_DB_MIN_CONNS", DefaultDBMinConns)
+	if cfg.DBMaxConns <= 0 {
+		return nil, fmt.Errorf("INROAD_DB_MAX_CONNS must be greater than 0, got %d", cfg.DBMaxConns)
+	}
+	if cfg.DBMinConns < 0 {
+		return nil, fmt.Errorf("INROAD_DB_MIN_CONNS must not be negative, got %d", cfg.DBMinConns)
+	}
+	if cfg.DBMaxConns < cfg.DBMinConns {
+		return nil, fmt.Errorf("INROAD_DB_MAX_CONNS (%d) must be at least INROAD_DB_MIN_CONNS (%d)", cfg.DBMaxConns, cfg.DBMinConns)
+	}
+
+	cfg.RunScheduler = getenvBool("INROAD_RUN_SCHEDULER", true)
 
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
 	cfg.WorkerID = getenv("INROAD_WORKER_ID", hostname)

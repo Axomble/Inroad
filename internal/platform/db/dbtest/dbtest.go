@@ -112,6 +112,9 @@ func ScratchDSN(t *testing.T, name string) string {
 // package holds only the connections it is actually using, instead of keeping
 // warm ones for a latency budget no test has.
 //
+// The DSN pin is the TOP of db's precedence rule (pin > INROAD_DB_MAX_CONNS >
+// default), so this holds even on a machine whose environment sizes the pool up.
+//
 // A DSN that already pins the size is returned untouched: someone who set it in
 // INROAD_TEST_DATABASE_URL meant it, and a duplicated key would be ambiguous.
 func withPoolLimits(dsn string) string {
