@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Clock, Plus, X } from 'lucide-react'
+import { Clock, Plus, X, LayoutGrid, ListOrdered } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -25,6 +25,8 @@ import {
   toDraft,
 } from './schedule-draft'
 import type { DraftWeek } from './schedule-draft'
+import { WeekScheduleCalendar } from './week-schedule-calendar'
+import { emptyWeek, fromBlockWeek, toBlockWeek, type BlockWeek } from './schedule-blocks'
 
 /**
  * The campaign's sending plan: when (timezone plus a window per weekday) and how
@@ -45,6 +47,12 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
   const [maxNewLeads, setMaxNewLeads] = useState('')
   const [problem, setProblem] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
+  /**
+   * Which editor is showing. The BOARD is the default because it is the faster
+   * way to say the common thing; the time inputs remain the escape hatch for
+   * minute precision an hour grid cannot express.
+   */
+  const [mode, setMode] = useState<'board' | 'times'>('board')
 
   // Seed the editor from the server once it arrives, and re-seed after a save so
   // the form reflects what was actually persisted. Guarded on `dirty` so a
@@ -53,6 +61,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
     if (!data || dirty) return
     setTimezone(data.timezone)
     setWeek(toDraft(data.days))
+    setBlocks(toBlockWeek(data.days))
     setDailyLimit(dailyLimitToDraft(data.daily_limit))
     setMaxNewLeads(maxNewLeadsToDraft(data.max_new_leads_per_day))
   }, [data, dirty])
@@ -88,8 +97,57 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
     edit(next)
   }
 
+  /** The time inputs show only when the operator asks for them. */
+  const showTimeInputs = mode === 'times'
+
+  /**
+   * The calendar's own state, NOT derived from `week`.
+   *
+   * It cannot be: `DraftWeek` holds "HH:MM" strings, and a day ending at 1440
+   * (exclusive midnight) has no such representation — minutesToTime clamps it
+   * to "23:59" and timeToMinutes rejects hour 24. Round-tripping through the
+   * draft would silently shorten every full day by a minute, on load AND on
+   * every save.
+   *
+   * So each editor owns its own shape and the ACTIVE one is authoritative:
+   * `blocks` while the calendar shows, `week` while the inputs do. Switching
+   * mode converts once, in that direction only (see switchMode), which is the
+   * one place precision can be lost — and only into the editor that genuinely
+   * cannot express it.
+   */
+  const [blocks, setBlocks] = useState<BlockWeek>(emptyWeek)
+
+  function onBlocksChange(next: BlockWeek) {
+    setBlocks(next)
+    setProblem(null)
+    setDirty(true)
+  }
+
+  /**
+   * Moves between editors, converting the live state into the target's shape.
+   *
+   * Calendar → inputs is the lossy direction (a 1440 end becomes 23:59), so it
+   * is only ever done because the operator asked for the inputs. Inputs →
+   * calendar is lossless.
+   */
+  function switchMode(next: 'board' | 'times') {
+    if (next === mode) return
+    if (next === 'times') {
+      setWeek(toDraft(fromBlockWeek(blocks)))
+    } else {
+      const converted = fromDraft(week)
+      // A half-typed time leaves the draft unconvertible; keep the last valid
+      // calendar rather than blanking it to "nothing is open".
+      if ('days' in converted) setBlocks(toBlockWeek(converted.days))
+    }
+    setMode(next)
+  }
+
   async function onSave() {
-    const result = fromDraft(week)
+    // The calendar is authoritative while it is showing, so its blocks go
+    // straight to the wire without passing through the string draft — that
+    // conversion is exactly what would drop a day's final minute.
+    const result = mode === 'board' ? { days: fromBlockWeek(blocks) } : fromDraft(week)
     if ('problem' in result) {
       setProblem(result.problem)
       return
@@ -236,6 +294,41 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
             </div>
           </div>
 
+          {/* The mode switch. Always offered: the calendar is lossless, so
+              neither view can misrepresent what is saved. The time inputs stay
+              because typing an exact boundary is sometimes faster than
+              dragging to it, and because they are keyboard-only. */}
+          <div className="mb-2 flex items-center gap-1">
+              <Button
+                variant={mode === 'board' ? 'secondary' : 'ghost'}
+                size="xs"
+                aria-pressed={mode === 'board'}
+                onClick={() => switchMode('board')}
+              >
+                <LayoutGrid className="size-3" />
+                Board
+              </Button>
+              <Button
+                variant={mode === 'times' ? 'secondary' : 'ghost'}
+                size="xs"
+                aria-pressed={mode === 'times'}
+                onClick={() => switchMode('times')}
+              >
+                <ListOrdered className="size-3" />
+                Exact times
+              </Button>
+          </div>
+
+          {mode === 'board' && (
+            <WeekScheduleCalendar week={blocks} onChange={onBlocksChange} disabled={isSaving} />
+          )}
+
+          {/* Unmounted rather than CSS-hidden when the board is showing. A
+              `hidden` class would leave 7 days of time inputs in the DOM —
+              still focusable by tab order, still found by label queries, and
+              still announced to a screen reader. "Not visible" and "not there"
+              have to agree. */}
+          {showTimeInputs && (
           <ul className="divide-y divide-border rounded-md border border-border">
             {WEEKDAY_SHORT.map((label, weekday) => {
               const intervals = week[weekday] ?? []
@@ -296,6 +389,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
               )
             })}
           </ul>
+        )}
         </div>
 
         {problem && (
