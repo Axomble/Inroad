@@ -5,6 +5,12 @@ description: Deep dive into Inroad control plane, execution plane, coreapi bound
 
 Inroad separates operations into two distinct planes: the **Control Plane** and the **Execution Plane**.
 
+:::note
+This page describes the system's **shape**. For the **rules** that govern how it
+is built — and the reasoning behind each, so a change that must break one can
+weigh what it gives up — see [Architecture Principles](/architecture-principles/).
+:::
+
 ## Planes & Isolation
 
 - **Control Plane (`cmd/inroad`):** Hosts the HTTP REST API server, identity/authentication services, workspace configurations, webhooks, and database management. It directly manages PostgreSQL and Redis.
