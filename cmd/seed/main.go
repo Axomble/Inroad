@@ -9,7 +9,6 @@ import (
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/db"
-	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/notify"
 )
 
@@ -53,7 +52,7 @@ func run() error {
 	// Fixtures come second and deliberately do NOT roll the registration back on
 	// failure: a workspace you can log into is worth more than an all-or-nothing
 	// seed, and a re-run fails at Register anyway since the user already exists.
-	summary, err := seedFixtures(ctx, gen.New(pool), sess.WorkspaceID)
+	summary, err := seedFixtures(ctx, pool, sess.WorkspaceID, sess.UserID)
 	if err != nil {
 		return fmt.Errorf("fixtures: %w", err)
 	}
