@@ -9,7 +9,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/spintax"
 )
 
-// contentVersionShape restates the shape migration 000069's CHECK enforces on the
+// contentVersionShape restates the shape migration 000070's CHECK enforces on the
 // persisted column. It lives here, not beside the derivation, because the constraint
 // is the source of truth and this is an EXPECTATION about it — the production code has
 // no need to re-validate its own output.
@@ -211,7 +211,7 @@ func TestEveryVersionTheLibraryProducesMatchesThePersistedShape(t *testing.T) {
 		for turn := range tmpl.Turns {
 			v := contentVersionOf(tmpl, turn)
 			if !contentVersionShape.MatchString(v) {
-				t.Errorf("thread %d turn %d produced %q, which the 000069 CHECK would reject — the "+
+				t.Errorf("thread %d turn %d produced %q, which the 000070 CHECK would reject — the "+
 					"send would abort instead of recording", i, turn, v)
 			}
 		}
