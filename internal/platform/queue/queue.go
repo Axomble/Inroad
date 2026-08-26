@@ -568,13 +568,22 @@ func (c *Client) Close() error { return c.inner.Close() }
 // list leaves asynq on its built-in {"default":1}. The provided *slog.Logger is
 // adapted to asynq's Logger interface so worker log lines flow through the same
 // structured sink as the rest of the app.
-func NewServer(redisAddr string, logger *slog.Logger, concurrency int, queues []string) *asynq.Server {
+//
+// recorder receives tasks that have exhausted their retries
+// (DeadLetterErrorHandler); nil disables capture, which degrades to asynq's own
+// invisible archive rather than to a failing worker.
+func NewServer(redisAddr string, logger *slog.Logger, concurrency int, queues []string, recorder DeadLetterRecorder) *asynq.Server {
 	if concurrency <= 0 {
 		concurrency = 10
 	}
 	cfg := asynq.Config{
 		Concurrency: concurrency,
 		Logger:      newAsynqLogger(logger),
+		// The dead-letter capture hook. asynq calls this for EVERY failed
+		// attempt; the handler itself filters down to the terminal one, which
+		// is why exhaustion detection lives in one place rather than in each
+		// task handler (see DeadLetterErrorHandler's doc for the full reasoning).
+		ErrorHandler: DeadLetterErrorHandler(recorder, logger),
 	}
 	if qmap := queuePriorities(queues); len(qmap) > 0 {
 		cfg.Queues = qmap

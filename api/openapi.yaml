@@ -3554,6 +3554,107 @@ paths:
         '400': { description: A path id is not a UUID }
         '401': { description: Unauthorized }
         '404': { description: "The label was not applied to this thread" }
+  /dead-letters:
+    get:
+      operationId: listTaskDeadLetters
+      tags: [dead-letters]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Background tasks that exhausted their asynq retries, newest first.
+
+        A task that permanently fails — a send whose provider kept rejecting it,
+        a deferred reply whose mailbox stayed unreachable — is otherwise lost
+        silently. Each row here is that failure, with the original payload, so
+        an operator can see what was dropped and re-run it.
+
+        Requires campaigns:read. Replaying or discarding requires campaigns:SEND
+        (see those operations), because re-running one of these tasks delivers
+        mail.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >-
+            Restrict to one lifecycle state. Omit for all of them.
+          schema: { type: string, enum: [pending, replayed, discarded] }
+        - $ref: '#/components/parameters/PageLimit'
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip. Defaults to 0.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Dead letters
+          content: { application/json: { schema: { $ref: '#/components/schemas/TaskDeadLetterList' } } }
+        '401': { description: Unauthorized }
+        '403': { description: Missing campaigns:read }
+        '422': { description: Unknown status filter }
+  /dead-letters/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getTaskDeadLetter
+      tags: [dead-letters]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The dead letter
+          content: { application/json: { schema: { $ref: '#/components/schemas/TaskDeadLetter' } } }
+        '401': { description: Unauthorized }
+        '403': { description: Missing campaigns:read }
+        '404': { description: No such dead letter in this workspace }
+  /dead-letters/{id}/replay:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: replayTaskDeadLetter
+      tags: [dead-letters]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Re-enqueues the captured payload, exactly once.
+
+        There is no request body: the payload replayed is the one that was
+        captured. Accepting a caller-supplied payload would make this an
+        arbitrary task-injection endpoint.
+
+        Exactly-once is enforced by a status-guarded claim in Postgres, not by
+        the queue: the row flips pending -> replayed in the same statement that
+        authorizes the enqueue, so concurrent or repeated calls re-enqueue at
+        most once and every loser gets 409. A replay that fails to reach the
+        queue returns the row to pending, because nothing was handed over.
+
+        Requires campaigns:send — replaying a send task delivers mail.
+      responses:
+        '200':
+          description: Replayed; the row is now in the replayed state
+          content: { application/json: { schema: { $ref: '#/components/schemas/TaskDeadLetter' } } }
+        '401': { description: Unauthorized }
+        '403': { description: Missing campaigns:send }
+        '404': { description: No such dead letter in this workspace }
+        '409': { description: Already replayed or discarded }
+        '422':
+          description: >-
+            The captured payload cannot be replayed — it is not a JSON object
+            naming this workspace. Permanent for this row; do not retry.
+  /dead-letters/{id}/discard:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: discardTaskDeadLetter
+      tags: [dead-letters]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Files a dead letter as triaged without re-running it. Terminal: a
+        discarded row can never be replayed.
+
+        Requires campaigns:send, the same scope as replay — deciding NOT to
+        deliver a failed send permanently closes the only path by which it could
+        still go out, so it must not be reachable by a weaker credential than
+        sending is.
+      responses:
+        '204': { description: Discarded }
+        '401': { description: Unauthorized }
+        '403': { description: Missing campaigns:send }
+        '404': { description: No such dead letter in this workspace }
+        '409': { description: Already replayed or discarded }
 components:
   securitySchemes:
     bearerAuth:
@@ -6027,6 +6128,50 @@ components:
       required: [labels]
       properties:
         labels: { type: array, items: { $ref: '#/components/schemas/ReplyLabel' } }
+    TaskDeadLetterList:
+      type: object
+      required: [dead_letters]
+      properties:
+        dead_letters: { type: array, items: { $ref: '#/components/schemas/TaskDeadLetter' } }
+    TaskDeadLetter:
+      type: object
+      required: [id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at]
+      properties:
+        id: { type: string, format: uuid }
+        task_type:
+          type: string
+          description: >-
+            The background task's type, e.g. sequence:advance, warmup:tick,
+            inbox:pending_reply_send. An open vocabulary — new task types appear
+            as handlers are added, so do not switch exhaustively on it.
+          example: sequence:advance
+        payload:
+          type: object
+          additionalProperties: true
+          description: >-
+            The original task payload, verbatim — what replay re-enqueues. Its
+            shape varies by task_type; every one carries workspace_id, and the
+            rest are ids naming the work (enrollment_id, mailbox_id, …). Never
+            contains a credential: secrets are resolved by the worker at
+            execution time and never travel in a payload.
+        last_error:
+          type: string
+          description: The final error reported before the task was given up on. May be empty.
+        attempt_count:
+          type: integer
+          description: Attempts made before giving up, including the one that failed last.
+        status:
+          type: string
+          enum: [pending, replayed, discarded]
+          description: >-
+            pending — untriaged and replayable. replayed — re-enqueued; terminal.
+            discarded — filed without re-running; terminal.
+        created_at: { type: string, format: date-time }
+        replayed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When it was replayed; null in every other state.
     ReplyLabelReorderInput:
       type: object
       required: [ids]

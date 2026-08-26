@@ -1,9 +1,12 @@
 package inbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +70,14 @@ type stubCore struct {
 	jobErr error
 
 	sendRefs map[string]coreapi.SendRef
+	// sendRefWorkspace, when non-empty, makes FindSendByMessageID
+	// workspace-scoped the way the real query is (WHERE s.workspace_id = $1):
+	// a lookup from any other workspace resolves to ErrNoMatch. Left empty by
+	// the tests that don't care, so the stub stays tenant-agnostic for them.
+	sendRefWorkspace string
+	// lookupWorkspaces records every workspace id FindSendByMessageID was
+	// called with, so a test can prove the poll pins the tenant it was given.
+	lookupWorkspaces []string
 
 	cursorSet      bool
 	cursorUID      uint32
@@ -134,7 +145,13 @@ func (f *fakeGmailReader) Fetch(_ context.Context, _, sinceHistoryID string, _ i
 	return f.msgs, f.newCursor, nil
 }
 
-func (s *stubCore) FindSendByMessageID(_ context.Context, _, messageID string) (coreapi.SendRef, error) {
+func (s *stubCore) FindSendByMessageID(_ context.Context, workspaceID, messageID string) (coreapi.SendRef, error) {
+	s.lookupWorkspaces = append(s.lookupWorkspaces, workspaceID)
+	// Mirror the real query's workspace pin: a send belonging to another
+	// workspace is not visible, so it reads as no match rather than a hit.
+	if s.sendRefWorkspace != "" && s.sendRefWorkspace != workspaceID {
+		return coreapi.SendRef{}, coreapi.ErrNoMatch
+	}
 	if ref, ok := s.sendRefs[messageID]; ok {
 		return ref, nil
 	}
@@ -602,6 +619,169 @@ func TestPollDSNWinsOverOptOutBody(t *testing.T) {
 	if len(core.replied) != 0 || len(core.unsubscribed) != 0 || len(core.recorded) != 0 {
 		t.Fatalf("the DSN branch must win — classifier never reached; got replied=%v unsub=%v recorded=%v",
 			core.replied, core.unsubscribed, core.recorded)
+	}
+}
+
+// hardBounceDSNWithoutOriginalMessageID is a permanent DSN that returns NO
+// message/rfc822(-headers) part, so there is no original Message-ID to resolve.
+// Some MTAs (and most aggressive spam filters) strip it. The bounce is real but
+// unattributable: it must be a logged no-op, never a suppression of a guessed
+// address and never a poll failure.
+const hardBounceDSNWithoutOriginalMessageID = `From: Mail Delivery System <MAILER-DAEMON@mail.example.com>
+To: sender@example.com
+Subject: Undelivered Mail Returned to Sender
+Content-Type: multipart/report; report-type=delivery-status;
+	boundary="BOUNDARY9"
+MIME-Version: 1.0
+
+--BOUNDARY9
+Content-Type: text/plain; charset=us-ascii
+
+Delivery failed and the original message could not be returned.
+
+--BOUNDARY9
+Content-Type: message/delivery-status
+
+Reporting-MTA: dns; mail.example.com
+Arrival-Date: Mon, 1 Jan 2026 10:00:00 -0500
+
+Final-Recipient: rfc822; nobody@recipient.example.com
+Action: failed
+Status: 5.1.1
+Diagnostic-Code: smtp; 550 5.1.1 User unknown
+
+--BOUNDARY9--
+`
+
+// TestPollHardBounceWithoutOriginalMessageIDIsANoOp proves an unattributable
+// permanent bounce suppresses nothing. Final-Recipient names an address, so the
+// tempting bug is to suppress THAT — but a DSN's recipient is attacker-supplied
+// and unverified, so acting on it would let anyone suppress an address they do
+// not own by mailing a forged report. The poll must still succeed and advance.
+func TestPollHardBounceWithoutOriginalMessageIDIsANoOp(t *testing.T) {
+	core := &stubCore{job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10}}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, hardBounceDSNWithoutOriginalMessageID)},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatalf("an unattributable bounce must never fail the poll: %v", err)
+	}
+	if len(core.bounced) != 0 {
+		t.Fatalf("nothing may be suppressed without a resolved send, got %v", core.bounced)
+	}
+	if len(core.replied) != 0 || len(core.unsubscribed) != 0 {
+		t.Fatalf("a DSN must not fall through to the reply path, got replied=%v unsub=%v",
+			core.replied, core.unsubscribed)
+	}
+	if !core.cursorSet || core.cursorUID != 11 {
+		t.Fatal("cursor must advance past an unattributable bounce")
+	}
+}
+
+// TestPollHardBounceUnknownMessageIDIsANoOp covers the other unresolvable shape:
+// a well-formed DSN whose original Message-ID matches no send this workspace
+// ever made (a bounce for someone else's mail forwarded into the mailbox, or a
+// send already purged). Best-effort: no suppression, no error.
+func TestPollHardBounceUnknownMessageIDIsANoOp(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		// <orig@x> is deliberately absent from sendRefs.
+		sendRefs: map[string]coreapi.SendRef{"<somethingelse@z>": {SendID: "s9"}},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, hardBounceDSN)},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatalf("an unknown Message-ID must never fail the poll: %v", err)
+	}
+	if len(core.bounced) != 0 {
+		t.Fatalf("an unmatched bounce must suppress nothing, got %v", core.bounced)
+	}
+	if !core.cursorSet || core.cursorUID != 11 {
+		t.Fatal("cursor must advance past an unmatched bounce")
+	}
+}
+
+// TestPollHardBounceForAnotherTenantsSendDoesNotCrossTenants is the tenancy
+// guard: the DSN's original Message-ID belongs to a send owned by ws2, but the
+// poll is running for ws1. The lookup is pinned to the POLLED mailbox's
+// workspace — never to anything read out of the message — so it must resolve to
+// nothing and suppress nothing, rather than reaching into another tenant and
+// stopping their enrollment.
+func TestPollHardBounceForAnotherTenantsSendDoesNotCrossTenants(t *testing.T) {
+	core := &stubCore{
+		job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10},
+		// The send exists, but it is ws2's. The poll (pollTask) runs as ws1.
+		sendRefWorkspace: "ws2",
+		sendRefs: map[string]coreapi.SendRef{
+			"<orig@x>": {SendID: "s1", EnrollmentID: "e-ws2", ContactEmail: "nobody@recipient.example.com"},
+		},
+	}
+	reader := &fakeReader{
+		uidValidity: 5, uidNext: 12,
+		msgs: []mail.InboundMessage{inboundMsg(t, 11, hardBounceDSN)},
+	}
+	if err := runPoll(t, core, reader); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.bounced) != 0 {
+		t.Fatalf("a bounce must never resolve into another tenant's send, got %v", core.bounced)
+	}
+	for _, ws := range core.lookupWorkspaces {
+		if ws != "ws1" {
+			t.Fatalf("send lookup must be pinned to the polled workspace ws1, got %q", ws)
+		}
+	}
+	if len(core.lookupWorkspaces) == 0 {
+		t.Fatal("expected the bounce path to attempt a workspace-pinned lookup")
+	}
+}
+
+// TestPollUnresolvableBounceIsLoggedForOperators is the "best-effort, but never
+// silent" requirement. A bounce we cannot attribute is a no-op by design, but a
+// no-op that leaves no trace is indistinguishable from a parser that has quietly
+// stopped working — the operator's only symptom would be a slowly rotting list.
+// Both unresolvable shapes must emit a findable record naming why.
+func TestPollUnresolvableBounceIsLoggedForOperators(t *testing.T) {
+	tests := []struct {
+		name       string
+		fixture    string
+		wantReason string
+	}{
+		{"no original Message-ID", hardBounceDSNWithoutOriginalMessageID, "no_message_id"},
+		{"unknown original Message-ID", hardBounceDSN, "no_matching_send"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			restore := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(restore) })
+
+			core := &stubCore{job: coreapi.InboxPollJob{UIDValidity: 5, LastSeenUID: 10}}
+			reader := &fakeReader{
+				uidValidity: 5, uidNext: 12,
+				msgs: []mail.InboundMessage{inboundMsg(t, 11, tc.fixture)},
+			}
+			if err := runPoll(t, core, reader); err != nil {
+				t.Fatal(err)
+			}
+
+			logged := buf.String()
+			if !strings.Contains(logged, "inbox_poll_bounce_unresolved") {
+				t.Fatalf("an unresolvable bounce must be logged, got: %s", logged)
+			}
+			if !strings.Contains(logged, tc.wantReason) {
+				t.Fatalf("the log must name why it could not resolve (%s), got: %s", tc.wantReason, logged)
+			}
+			// The status code is what tells an operator this was a permanent
+			// failure worth investigating rather than noise.
+			if !strings.Contains(logged, "5.1.1") {
+				t.Fatalf("the log must carry the DSN status code, got: %s", logged)
+			}
+		})
 	}
 }
 
