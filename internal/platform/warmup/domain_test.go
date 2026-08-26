@@ -174,3 +174,33 @@ func TestSharedReputationDomainIsTheOneKeyTheFoldAndTheLookupUse(t *testing.T) {
 		t.Errorf("lanes = %v, want just the one genuinely shared domain", lanes)
 	}
 }
+
+// A DomainLanes with an empty key must not become a verdict on every mailbox the
+// carve-out excludes.
+//
+// The fold never stores "", so this cannot happen today — which is exactly why the
+// guard in For is worth having rather than resting on that. DomainLanes is an
+// exported map type, so a future caller can build one directly, and if it ever
+// carried an "" key then every consumer-provider and malformed-address mailbox would
+// inherit that lane's containment AND, since slice E, its exposure ceiling. The test
+// is written against the hand-built map because a fixture from WorstLanesByDomain
+// could never exercise it.
+func TestForRefusesTheEmptyKeyEvenWhenAMapCarriesOne(t *testing.T) {
+	d := DomainLanes{"": LaneQuarantine, "acme.test": LaneHealthy}
+
+	for _, email := range []string{
+		"someone@gmail.com", // consumer provider: carved out of the fold
+		"broken",            // no @ at all
+		"@nohost.test",      // hmm: an address with no local part still has a host
+		"nolocal@",          // no host
+	} {
+		if got := d.For(email); got == LaneQuarantine {
+			t.Errorf("For(%q) = %q, read from the empty key — the carve-out must not "+
+				"inherit a verdict it never contributed to", email, got)
+		}
+	}
+	// And the real key still resolves, so the guard is not simply refusing everything.
+	if got := d.For("a@acme.test"); got != LaneHealthy {
+		t.Errorf("For on a real domain = %q, want %q", got, LaneHealthy)
+	}
+}

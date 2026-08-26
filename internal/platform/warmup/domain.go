@@ -203,7 +203,19 @@ func (d DomainLanes) For(email string) string {
 	// SharedReputationDomain, so the map cannot be read under a different rule than
 	// it was built with. A consumer-provider mailbox keys on "", which the fold never
 	// stores, so it is never withheld by a verdict it never contributed to.
-	return d.ForDomain(SharedReputationDomain(email))
+	//
+	// The explicit refusal below is not redundant with that. Without it the carve-out
+	// holds only because WorstLanesByDomain — today the sole production constructor —
+	// skips "". DomainLanes is an exported map, so a future caller that builds one
+	// directly and happens to store an "" key would apply that lane's containment AND
+	// its exposure ceiling to every consumer-provider and malformed-address mailbox at
+	// once. The guard costs a comparison and does not depend on what another function
+	// remembers to do.
+	domain := SharedReputationDomain(email)
+	if domain == "" {
+		return ""
+	}
+	return d.ForDomain(domain)
 }
 
 // ForDomain is For for an ALREADY-RESOLVED shared-reputation domain — the key space

@@ -4357,10 +4357,14 @@ components:
         over_budget:
           type: boolean
           description: >-
-            True when share exceeds max_fault_domain_share. Advisory: the rotation
-            routes new contacts away from an over-budget domain when an alternative
-            exists, but never withholds a send — a single-domain pool reports 1.0
-            here and keeps sending.
+            True when share exceeds THIS ROW'S ceiling — not max_fault_domain_share,
+            which is only the ceiling for a domain that is not degrading. A domain at
+            0.25 can be over budget while another at 0.55 is not; re-deriving this
+            against the flat cap reproduces exactly the panel-versus-selector
+            disagreement the ceiling field exists to remove.
+            Advisory: the rotation routes new contacts away from an over-budget domain
+            when an alternative exists, but never withholds a send — a single-domain
+            pool reports 1.0 here and keeps sending.
     CampaignSenderRequest:
       type: object
       required: [mailbox_id]
