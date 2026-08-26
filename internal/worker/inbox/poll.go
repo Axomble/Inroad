@@ -590,6 +590,27 @@ func logJunkScanErr(err error, p queue.InboxPollPayload, provider string) {
 	slog.Warn("inbox_poll_junk_scan_failed", "mailbox_id", p.MailboxID, "provider", provider, "err", err)
 }
 
+// logUnresolvedBounce records a permanent bounce that could not be attributed to
+// a send. This is a no-op by design (see processMessage), but never a silent
+// one: without a trace, a DSN parser that has stopped resolving anything looks
+// exactly like a workspace that simply has no bounces, and the only symptom
+// would be reputation decay weeks later.
+//
+// WARN, not ERROR: a handful of these is normal (forwarded reports, mail sent
+// before this workspace existed). It is the RATE that is diagnostic, so it is
+// logged at a level an operator can alert on without paging on the expected few.
+//
+// reason is a stable token, not a sentence, so it can be grouped. The failed
+// recipient is deliberately NOT logged — it is an unauthenticated,
+// attacker-supplied address off an unverified message, and the repo's rule is
+// ids and reason tokens over message content.
+func logUnresolvedBounce(ctx context.Context, workspaceID, mailboxID string, d DSNResult, reason string) {
+	slog.WarnContext(ctx, "inbox_poll_bounce_unresolved",
+		"workspace_id", workspaceID, "mailbox_id", mailboxID,
+		"reason", reason, "status", d.StatusCode,
+		"original_message_id", d.OriginalMessageID)
+}
+
 // processMessage classifies one fetched message and takes the corresponding
 // action. A DSN is handled first (hard bounce → MarkBounced) and never falls
 // through to the reply path. A non-DSN message that matches a send is
@@ -629,9 +650,24 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 					return true, nil
 				}
 			}
+			// No returned original Message-ID: the bounce is real but
+			// unattributable. Final-Recipient names an address, but a DSN is
+			// unauthenticated and its recipient is attacker-supplied, so
+			// suppressing on it would let anyone kill an address they don't own
+			// with a forged report. Log and skip instead of guessing.
+			if strings.TrimSpace(d.OriginalMessageID) == "" {
+				logUnresolvedBounce(ctx, workspaceID, mailboxID, d, "no_message_id")
+				return false, nil
+			}
 			s, err := core.FindSendByMessageID(ctx, workspaceID, d.OriginalMessageID)
 			if err != nil {
 				if errors.Is(err, coreapi.ErrNoMatch) {
+					// Best-effort by contract: a bounce for mail this workspace
+					// never sent (forwarded DSN, purged send) must not fail the
+					// poll. Logged rather than dropped, so a parser that has
+					// silently stopped resolving anything is visible as a rising
+					// count instead of a slowly rotting recipient list.
+					logUnresolvedBounce(ctx, workspaceID, mailboxID, d, "no_matching_send")
 					return false, nil
 				}
 				return false, err
@@ -641,8 +677,17 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 			}
 			*bounces++
 			return true, nil
-		default: // SoftBounce: log only, no state change.
-			slog.Info("inbox_poll_soft_bounce", "workspace_id", workspaceID, "status", d.StatusCode)
+		default:
+			// SoftBounce (4.x.x): TRANSIENT. Log only — never suppress. A full
+			// mailbox, a greylisting deferral or a temporary DNS failure is
+			// recoverable, and suppression is not: an address killed on a 4.x.x
+			// is a deliverable contact silently removed from every future
+			// campaign, with no operator-visible cause. The sending MTA retries
+			// these on its own; if the failure is really permanent it will
+			// eventually arrive as a 5.x.x and be suppressed then.
+			slog.InfoContext(ctx, "inbox_poll_soft_bounce",
+				"workspace_id", workspaceID, "mailbox_id", mailboxID,
+				"status", d.StatusCode, "original_message_id", d.OriginalMessageID)
 			return true, nil
 		}
 	}
