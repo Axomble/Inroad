@@ -1003,6 +1003,18 @@ type Task struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type TaskDeadLetter struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	TaskType     string             `json:"task_type"`
+	Payload      []byte             `json:"payload"`
+	LastError    string             `json:"last_error"`
+	AttemptCount int32              `json:"attempt_count"`
+	Status       string             `json:"status"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ReplayedAt   pgtype.Timestamptz `json:"replayed_at"`
+}
+
 type TaskTarget struct {
 	ID          uuid.UUID          `json:"id"`
 	TaskID      uuid.UUID          `json:"task_id"`
