@@ -230,3 +230,54 @@ func parsePendingIDs(workspaceID, pendingID string) (ws, id uuid.UUID, err error
 	}
 	return ws, id, nil
 }
+
+// --- Deferred composed emails ---
+
+// ClaimPendingInboxCompose claims a composed email for delivery. Same
+// claim-then-read ordering as ClaimPendingInboxReply: claiming first is what
+// stops two workers both deciding a row is theirs.
+func (c client) ClaimPendingInboxCompose(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxCompose, error) {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return coreapi.PendingInboxCompose{}, err
+	}
+	if err := c.inbox.ClaimPendingCompose(ctx, ws, id); err != nil {
+		return coreapi.PendingInboxCompose{}, err
+	}
+	row, err := c.inbox.GetPendingCompose(ctx, ws, id)
+	if err != nil {
+		return coreapi.PendingInboxCompose{}, fmt.Errorf("load pending compose: %w", err)
+	}
+	return coreapi.PendingInboxCompose{
+		MailboxID: row.MailboxID.String(),
+		ToEmails:  row.ToEmails,
+		CcEmails:  row.CcEmails,
+		BccEmails: row.BccEmails,
+		Subject:   row.Subject,
+		BodyText:  row.BodyText,
+	}, nil
+}
+
+func (c client) MarkPendingInboxComposeSent(ctx context.Context, workspaceID, pendingID, messageID string) error {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return err
+	}
+	return c.inbox.MarkPendingComposeSent(ctx, ws, id, messageID)
+}
+
+func (c client) ReleasePendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return err
+	}
+	return c.inbox.ReleasePendingCompose(ctx, ws, id, reason)
+}
+
+func (c client) FailPendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error {
+	ws, id, err := parsePendingIDs(workspaceID, pendingID)
+	if err != nil {
+		return err
+	}
+	return c.inbox.FailPendingCompose(ctx, ws, id, reason)
+}

@@ -528,6 +528,20 @@ type IdempotencyKey struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxComposeDraft struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	MailboxID   pgtype.UUID        `json:"mailbox_id"`
+	ToEmails    []string           `json:"to_emails"`
+	CcEmails    []string           `json:"cc_emails"`
+	BccEmails   []string           `json:"bcc_emails"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type InboxLabel struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
@@ -552,6 +566,26 @@ type InboxMessage struct {
 	ReplyClass  string             `json:"reply_class"`
 	OccurredAt  pgtype.Timestamptz `json:"occurred_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type InboxPendingCompose struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	ToEmails    []string           `json:"to_emails"`
+	CcEmails    []string           `json:"cc_emails"`
+	BccEmails   []string           `json:"bcc_emails"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	Status      string             `json:"status"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	MessageID   string             `json:"message_id"`
+	LastError   string             `json:"last_error"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type InboxPendingReply struct {

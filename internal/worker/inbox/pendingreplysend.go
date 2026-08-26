@@ -14,6 +14,18 @@ import (
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
+// Stable, client-safe reasons for a failed delivery attempt. These are what
+// last_error stores and what the API returns; the underlying error text stays in
+// the logs. Phrased for an operator reading their outbox, not for a developer
+// reading a stack trace.
+const (
+	reasonTransportUnavailable   = "the sending mailbox could not be reached — check its connection"
+	reasonProviderRejected       = "the mail provider rejected the message"
+	reasonSuppressionCheckFailed = "the recipient's suppression status could not be checked"
+	reasonRecipientSuppressed    = "the recipient has unsubscribed or bounced"
+	reasonNoInboundMessage       = "the thread no longer has a message to reply to"
+)
+
 // PendingReplyCore is the narrow execution-plane seam for deferred manual
 // replies. Consumer-defined here (not a widening of coreapi.Client, which
 // already carries ~40 methods and ~13 test fakes) and satisfied by the
@@ -71,7 +83,7 @@ func PendingReplySendHandler(core PendingReplyCore, sender Mailer) func(context.
 				// now (a deletion). Nothing to reply to, and no retry can
 				// change that — fail the row so the outbox shows why.
 				slog.WarnContext(ctx, "inbox_pending_reply_no_inbound", "pending_id", p.PendingID)
-				failPending(ctx, core, p, "the thread no longer has a message to reply to")
+				failPending(ctx, core, p, reasonNoInboundMessage)
 				return nil
 			}
 			return fmt.Errorf("claim pending reply: %w", err)
@@ -83,17 +95,19 @@ func PendingReplySendHandler(core PendingReplyCore, sender Mailer) func(context.
 		// case. Suppression is permanent, so the row is failed, not released.
 		suppressed, err := core.IsSuppressed(ctx, p.WorkspaceID, pending.Job.ToEmail)
 		if err != nil {
-			return releaseAndReturn(ctx, core, p, fmt.Errorf("check suppression: %w", err))
+			return releaseAndReturn(ctx, core, p, reasonSuppressionCheckFailed,
+				fmt.Errorf("check suppression: %w", err))
 		}
 		if suppressed {
 			slog.InfoContext(ctx, "inbox_pending_reply_recipient_suppressed", "pending_id", p.PendingID)
-			failPending(ctx, core, p, "the recipient has unsubscribed or bounced")
+			failPending(ctx, core, p, reasonRecipientSuppressed)
 			return nil
 		}
 
 		transport, err := core.ResolveSenderTransport(ctx, p.WorkspaceID, pending.Job.MailboxID)
 		if err != nil {
-			return releaseAndReturn(ctx, core, p, fmt.Errorf("resolve sender transport: %w", err))
+			return releaseAndReturn(ctx, core, p, reasonTransportUnavailable,
+				fmt.Errorf("resolve sender transport: %w", err))
 		}
 		defer zeroize(transport.SMTPPassword)
 		defer zeroize(transport.AccessToken)
@@ -119,7 +133,8 @@ func PendingReplySendHandler(core PendingReplyCore, sender Mailer) func(context.
 				References: pending.Job.References,
 			})
 		if err != nil {
-			return releaseAndReturn(ctx, core, p, fmt.Errorf("send pending reply: %w", err))
+			return releaseAndReturn(ctx, core, p, reasonProviderRejected,
+				fmt.Errorf("send pending reply: %w", err))
 		}
 
 		// Past the dial. Everything below is logged, never returned: the mail
@@ -149,8 +164,24 @@ func PendingReplySendHandler(core PendingReplyCore, sender Mailer) func(context.
 // the retry can claim immediately rather than waiting out the lease. A failed
 // release is logged but does not replace the original error — the caller needs
 // to know what actually went wrong.
-func releaseAndReturn(ctx context.Context, core PendingReplyCore, p queue.InboxPendingReplySendPayload, cause error) error {
-	if err := core.ReleasePendingInboxReply(ctx, p.WorkspaceID, p.PendingID, cause.Error()); err != nil {
+//
+// `reason` is a STABLE TOKEN, never cause.Error(). last_error is persisted and
+// served to any inbox:read caller, and a wrapped provider error echoes the SMTP
+// host and port, the provider's raw rejection text, and (on the transport arm)
+// internal keyring error shapes. docs/security.md closes exactly this hole one
+// endpoint over — the draft route returns only its own sentinel precisely
+// because "an upstream string can echo request detail back". The full error goes
+// to the log line, where operators can see it and clients cannot.
+func releaseAndReturn(
+	ctx context.Context,
+	core PendingReplyCore,
+	p queue.InboxPendingReplySendPayload,
+	reason string,
+	cause error,
+) error {
+	slog.WarnContext(ctx, "inbox_pending_reply_attempt_failed",
+		"pending_id", p.PendingID, "reason", reason, "err", cause)
+	if err := core.ReleasePendingInboxReply(ctx, p.WorkspaceID, p.PendingID, reason); err != nil {
 		slog.ErrorContext(ctx, "inbox_pending_reply_release_failed", "pending_id", p.PendingID, "err", err)
 	}
 	return cause

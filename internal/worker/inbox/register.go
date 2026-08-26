@@ -41,4 +41,8 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader,
 	if pc, ok := core.(PendingReplyCore); ok {
 		mux.HandleFunc(queue.TaskInboxPendingReplySend, PendingReplySendHandler(pc, sender))
 	}
+	// Deferred composed (non-reply) emails.
+	if cc, ok := core.(ComposeCore); ok {
+		mux.HandleFunc(queue.TaskInboxPendingComposeSend, PendingComposeSendHandler(cc, sender))
+	}
 }

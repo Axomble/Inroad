@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import { PenLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -24,6 +25,7 @@ import {
 import { ThreadList } from './thread-list'
 import { ScopeRail } from './scope-rail'
 import { ThreadReader, ThreadReaderHeading } from './thread-reader'
+import { ComposeWindow } from './compose-window'
 import {
   parseInboxSearch,
   encodeCursor,
@@ -63,6 +65,10 @@ export function InboxPage() {
   const scope: InboxScope = search.scope ?? 'all'
   const selectedLabel = search.label ?? ''
   const threePane = useMediaQuery(THREE_PANE_QUERY)
+  // One compose window at a time. A multi-window composer is a real feature,
+  // but it needs its own stacking/focus model — and one is what the operator
+  // reaches for from an inbox.
+  const [composing, setComposing] = useState(false)
 
   const { data: mailboxes, error: mailboxesError } = useListMailboxesQuery()
   const mailboxesById = useMemo(() => new Map((mailboxes ?? []).map((m) => [m.id ?? '', m])), [mailboxes])
@@ -259,7 +265,16 @@ export function InboxPage() {
 
   return (
     <Page>
-      <PageTopbar eyebrow="Inbox" subtitle="Read + triage replies across every connected mailbox" />
+      <PageTopbar
+        eyebrow="Inbox"
+        subtitle="Read + triage replies across every connected mailbox"
+        actions={
+          <Button variant="primary" size="sm" onClick={() => setComposing(true)}>
+            <PenLine />
+            Compose
+          </Button>
+        }
+      />
 
       <PageBody className="flex flex-col overflow-hidden lg:flex-row">
         <ScopeRail
@@ -410,6 +425,8 @@ export function InboxPage() {
           </section>
         )}
       </PageBody>
+
+      {composing && <ComposeWindow onClose={() => setComposing(false)} />}
     </Page>
   )
 }

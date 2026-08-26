@@ -3289,6 +3289,156 @@ paths:
               schema: { $ref: '#/components/schemas/InboxSettings' }
         '400': { description: undo_send_seconds is out of range }
         '401': { description: Unauthorized }
+  /inbox/drafts:
+    get:
+      operationId: listInboxComposeDrafts
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The CALLER'S OWN autosaved compose drafts, most recently edited first.
+
+
+        Drafts are per-user, not per-workspace: a colleague must never resume
+        someone else's half-written mail — it may say something they have not
+        decided to say yet, and attributing it to them on send would be worse
+        still. A machine (API-key) principal has no drafts and receives an empty
+        list.
+      responses:
+        '200':
+          description: This user's drafts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxComposeDraftList' }
+        '401': { description: Unauthorized }
+  /inbox/drafts/{draftId}:
+    parameters:
+      - name: draftId
+        in: path
+        required: true
+        description: >-
+          A UUID the CLIENT mints when the composer opens. Autosave is therefore
+          a plain idempotent PUT, and the composer never has to track whether it
+          has saved before.
+        schema: { type: string, format: uuid }
+    put:
+      operationId: saveInboxComposeDraft
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Autosave a half-written email.
+
+
+        Deliberately does NOT validate recipients or the body: a draft is by
+        definition incomplete, and refusing to save "ada@" mid-typing would lose
+        the operator's work at every keystroke. Recipient and body validation
+        happen at SEND time. The subject IS bounded, because an unbounded column
+        is a storage problem rather than a correctness one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveInboxComposeDraftRequest' }
+      responses:
+        '200':
+          description: The saved draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxComposeDraft' }
+        '400': { description: "Malformed body, or a non-UUID id" }
+        '401': { description: Unauthorized }
+        '403': { description: "The caller is a machine principal, which has no drafts" }
+        '404': { description: "That draft belongs to another user" }
+        '422': { description: "The subject is too long, or the workspace draft cap is reached" }
+    delete:
+      operationId: deleteInboxComposeDraft
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+        '400': { description: The id is not a UUID }
+        '401': { description: Unauthorized }
+        '403': { description: "The caller is a machine principal, which has no drafts" }
+        '404': { description: "No such draft of this user's" }
+  /inbox/composes:
+    get:
+      operationId: listInboxComposes
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: Composed emails queued but not yet delivered, soonest first.
+      responses:
+        '200':
+          description: The workspace's queued composed emails
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingComposeList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: sendInboxCompose
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Queue a NEW email — not a reply. Undoable on the same terms as
+        scheduleInboxReply: it leaves after the workspace's undo window, or at an
+        explicit `send_at` up to 30 days out.
+
+
+        DELIVERY SHAPE, worth knowing before you rely on it: each recipient
+        receives their OWN copy, one message per address across To, Cc and Bcc
+        alike. Recipients therefore cannot see each other and cannot reply-all.
+        That is a deliberate consequence of the platform sender carrying a single
+        To and no Cc/Bcc headers — joining addresses into one To would disclose
+        every recipient to all of them and silently turn a Bcc into a visible
+        one, which is the worse failure for an outreach tool.
+
+
+        Every recipient is checked against the workspace's suppression list at
+        queue time AND again at send time. ONE suppressed address rejects the
+        whole message rather than being silently dropped: the operator addressed
+        those people deliberately.
+
+
+        Recipients are capped at 25 in total (not per field) — this path
+        deliberately bypasses the campaign machinery's throttles, warmup limits
+        and suppression accounting, so it is for writing to a person, not a list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendInboxComposeRequest' }
+      responses:
+        '201':
+          description: The queued email
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingCompose' }
+        '400': { description: "Malformed body, a non-UUID mailbox_id, or a bad send_at" }
+        '401': { description: Unauthorized }
+        '404': { description: "No such mailbox in this workspace" }
+        '409': { description: A recipient is suppressed }
+        '422':
+          description: >-
+            No recipients, an unparseable address, more than 25 recipients, an
+            empty or over-long body, an over-long subject, or a send_at out of
+            range.
+  /inbox/composes/{pendingId}:
+    parameters:
+      - name: pendingId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: cancelInboxPendingCompose
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Undo a queued composed email. Answers 409 once a worker has claimed it —
+        see cancelInboxPendingReply for the reasoning.
+      responses:
+        '204': { description: The email will not be sent }
+        '400': { description: The id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: No such queued email in this workspace }
+        '409': { description: "Already being delivered, and no longer cancellable" }
   /inbox/labels:
     get:
       operationId: listInboxLabels
@@ -6055,6 +6205,99 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxComposeDraft:
+      type: object
+      required: [id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The mailbox it will be sent from, or null — a draft is saved from the
+            first keystroke, long before the operator has necessarily chosen one.
+        to_emails: { type: array, items: { type: string } }
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string }
+        body_text: { type: string }
+        updated_at: { type: string, format: date-time }
+    InboxComposeDraftList:
+      type: object
+      required: [drafts]
+      properties:
+        drafts: { type: array, items: { $ref: '#/components/schemas/InboxComposeDraft' } }
+    SaveInboxComposeDraftRequest:
+      type: object
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        to_emails:
+          type: array
+          items: { type: string }
+          description: >-
+            Stored as typed (blanks dropped), NOT normalized: the composer
+            round-trips its own chips, and rewriting them mid-typing would change
+            what the operator is looking at. Normalization happens at send time.
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string, maxLength: 500 }
+        body_text: { type: string }
+    SendInboxComposeRequest:
+      type: object
+      required: [mailbox_id, to_emails, body_text]
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        to_emails:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: >-
+            Addresses, optionally in RFC 5322 form ("Ada <a@x.test>"). Lowercased
+            and de-duplicated within each field before storage.
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string, maxLength: 500 }
+        body_text: { type: string, minLength: 1, maxLength: 100000 }
+        send_at:
+          type: string
+          format: date-time
+          description: Omit to leave after the undo window; otherwise up to 30 days ahead.
+        draft_id:
+          type: string
+          format: uuid
+          description: >-
+            The autosaved draft this send came from. Discarded on success, so the
+            drafts list does not keep a copy of mail already on its way. A failure
+            to discard it does not fail the send.
+    InboxPendingCompose:
+      type: object
+      required: [id, mailbox_id, mailbox_email, to_emails, cc_emails, bcc_emails, subject, body_text, status, send_after, last_error, cancellable, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        mailbox_email: { type: string }
+        to_emails: { type: array, items: { type: string } }
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string }
+        body_text: { type: string }
+        status:
+          type: string
+          enum: [scheduled, sending, sent, cancelled, failed]
+        send_after: { type: string, format: date-time }
+        last_error:
+          type: string
+          description: >-
+            A stable, human-readable reason when a delivery attempt failed —
+            never the provider's own text, which can echo internal detail back.
+        cancellable: { type: boolean }
+        created_at: { type: string, format: date-time }
+    InboxPendingComposeList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxPendingCompose' } }
     ScheduleInboxReplyRequest:
       type: object
       required: [body_text]
@@ -6088,7 +6331,11 @@ components:
         body_text: { type: string }
         last_error:
           type: string
-          description: Empty unless a delivery attempt failed. Truncated to 500 characters.
+          description: >-
+            Empty unless a delivery attempt failed. A stable, human-readable
+            reason — never the mail provider's own error text, which can echo
+            the SMTP host, its raw rejection message, or internal error shapes
+            back to any reader. The detail stays in the server's logs.
         cancellable:
           type: boolean
           description: >-

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,18 @@ const (
 // is mail that will actually leave — a year-out send is far more likely to be a
 // mistake than an intent, and the body would be stale long before it landed.
 const MaxScheduleHorizon = 30 * 24 * time.Hour
+
+// MaxOutstandingPendingSends caps how many replies one workspace may have
+// queued at once.
+//
+// Without it an inbox:send credential can accumulate rows and long-dated asynq
+// tasks up to the 30-day horizon — each carrying a body up to 100KB — and the
+// partial indexes that serve the outbox are precisely the ones that grow. The
+// label taxonomy already guards itself this way (MaxLabelsPerWorkspace); this
+// table is a bigger target and had no ceiling at all.
+//
+// Generous enough that no honest operator meets it: it bounds abuse, not use.
+const MaxOutstandingPendingSends = 500
 
 // PendingReplyLeaseSeconds is how long a claimed send may sit in 'sending'
 // before another worker may reclaim it. Comfortably longer than the queue's own
@@ -166,6 +179,10 @@ func (s *Service) ScheduleReply(
 		return PendingReply{}, err
 	}
 
+	if err := s.checkOutstandingSendCapacity(ctx, workspaceID); err != nil {
+		return PendingReply{}, err
+	}
+
 	sendAfter, err := s.resolveSendAfter(ctx, workspaceID, sendAt)
 	if err != nil {
 		return PendingReply{}, err
@@ -195,6 +212,18 @@ func (s *Service) ScheduleReply(
 	// yet, so this must not pretend the row is safe on its own.
 	if s.pendingEnq != nil {
 		if err := s.pendingEnq.EnqueuePendingInboxReply(saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
+			// The row exists but nothing will ever claim it. Marked failed
+			// before returning, so the outbox tells the truth: leaving it
+			// `scheduled` would show the operator a reply that looks in flight,
+			// counts toward their outbox, and offers an Undo — for mail that is
+			// never going to leave. Wrong in the direction that matters.
+			if claimer, ok := s.pending.(PendingReplyClaimer); ok {
+				if failErr := claimer.FailPendingReply(ctx, workspaceID, saved.ID,
+					"could not be queued for delivery — please send it again"); failErr != nil {
+					slog.ErrorContext(ctx, "inbox_pending_reply_orphan_mark_failed",
+						"pending_id", saved.ID, "err", failErr)
+				}
+			}
 			return PendingReply{}, fmt.Errorf("enqueue pending reply: %w", err)
 		}
 	}
@@ -204,6 +233,21 @@ func (s *Service) ScheduleReply(
 	// changed their mind, and the thread is still theirs to deal with. It moves
 	// to the moment the send actually lands (RecordOutboundReply's caller).
 	return saved, nil
+}
+
+// checkOutstandingSendCapacity refuses a new queued send once the workspace is
+// at MaxOutstandingPendingSends. Counts only what is still waiting, so a busy
+// workspace that actually delivers its mail is never blocked.
+func (s *Service) checkOutstandingSendCapacity(ctx context.Context, workspaceID uuid.UUID) error {
+	outstanding, err := s.pending.CountPendingReplies(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if outstanding >= MaxOutstandingPendingSends {
+		return fmt.Errorf("%w: this workspace already has %d replies queued for delivery",
+			ErrValidation, outstanding)
+	}
+	return nil
 }
 
 // resolveSendAfter turns an optional explicit instant into the moment the send

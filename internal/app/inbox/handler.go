@@ -59,6 +59,14 @@ func writeErr(w http.ResponseWriter, err error) {
 	// the operator needs told rather than a generic failure.
 	case errors.Is(err, ErrPendingNotCancellable):
 		httpx.Error(w, http.StatusConflict, err.Error())
+	// 422 for every compose-content complaint: the JSON parsed and the fields
+	// were well-formed strings, so the request is syntactically fine and
+	// semantically rejected. Each message names the actual problem, because
+	// "one of your recipients is invalid" is only useful if it says which.
+	case errors.Is(err, ErrNoRecipients), errors.Is(err, ErrTooManyRecipients),
+		errors.Is(err, ErrInvalidRecipient), errors.Is(err, ErrSubjectTooLong),
+		errors.Is(err, ErrMailboxRequired):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	// The three draft failures get three DISTINCT statuses, none of which the
 	// draft route can produce for any other reason, so the UI can branch on the
 	// status alone without parsing the body:

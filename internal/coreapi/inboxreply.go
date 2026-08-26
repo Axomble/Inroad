@@ -70,3 +70,15 @@ type PendingInboxReply struct {
 	BodyText string
 	Job      InboxReplyJob
 }
+
+// PendingInboxCompose is a deferred composed email, resolved for delivery. It
+// carries its own recipients and subject rather than deriving them from a
+// thread, which is the whole difference from PendingInboxReply.
+type PendingInboxCompose struct {
+	MailboxID string
+	ToEmails  []string
+	CcEmails  []string
+	BccEmails []string
+	Subject   string
+	BodyText  string
+}

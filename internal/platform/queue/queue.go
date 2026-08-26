@@ -166,6 +166,12 @@ const TaskInboxReplySend = "inbox:reply_send"
 // pending in the queue.
 const TaskInboxPendingReplySend = "inbox:pending_reply_send"
 
+// TaskInboxPendingComposeSend delivers a deferred COMPOSED email — a new
+// message rather than a reply, whose recipients and subject are its own rather
+// than derived from a thread. Same pointer-to-a-row design as
+// TaskInboxPendingReplySend, and cancellable the same way.
+const TaskInboxPendingComposeSend = "inbox:pending_compose_send"
+
 // InboxReplySendPayload is the body of an inbox:reply_send task. WorkspaceID
 // travels alongside ThreadID so the worker can pin workspace_id in its
 // coreapi lookups (defense in depth on the unguessable thread UUID).
@@ -184,6 +190,14 @@ const TaskInboxPendingReplySend = "inbox:pending_reply_send"
 // whether to send it at all, so a payload copy could go stale the moment the
 // operator cancels.
 type InboxPendingReplySendPayload struct {
+	PendingID   string `json:"pending_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// InboxPendingComposeSendPayload names a row in inbox_pending_composes. Carries
+// no content, for the same reason InboxPendingReplySendPayload does not: the row
+// is the single source of truth for what to send and whether to send it.
+type InboxPendingComposeSendPayload struct {
 	PendingID   string `json:"pending_id"`
 	WorkspaceID string `json:"workspace_id"`
 }
@@ -437,6 +451,25 @@ func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAft
 	}
 	return c.enqueue(asynq.NewTask(TaskInboxPendingReplySend, b),
 		asynq.TaskID("inboxpending:"+pendingID),
+		asynq.ProcessAt(sendAfter),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
+		asynq.Retention(taskRetention),
+	)
+}
+
+// EnqueuePendingInboxCompose schedules a composed email for delivery at
+// sendAfter. See EnqueuePendingInboxReply for the ProcessAt/TaskID reasoning —
+// this is the same design over the compose table.
+func (c *Client) EnqueuePendingInboxCompose(pendingID, workspaceID string, sendAfter time.Time) error {
+	b, err := json.Marshal(InboxPendingComposeSendPayload{
+		PendingID: pendingID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueue(asynq.NewTask(TaskInboxPendingComposeSend, b),
+		asynq.TaskID("inboxcompose:"+pendingID),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Timeout(sendTimeout),

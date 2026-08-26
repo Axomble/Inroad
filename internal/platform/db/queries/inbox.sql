@@ -434,3 +434,94 @@ VALUES (@workspace_id, @undo_send_seconds)
 ON CONFLICT (workspace_id) DO UPDATE
     SET undo_send_seconds = EXCLUDED.undo_send_seconds, updated_at = now()
 RETURNING *;
+
+-- name: UpsertInboxComposeDraft :one
+-- Autosave. The draft id comes from the client (a UUID it mints when the
+-- composer opens), so the first save inserts and every later one updates the
+-- same row — no "have I saved yet?" state for the composer to track.
+--
+-- The WHERE on the UPDATE arm pins BOTH workspace and user: a draft is
+-- personal, so even a colleague in the same workspace cannot overwrite it.
+INSERT INTO inbox_compose_drafts (id, workspace_id, user_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text)
+VALUES (@id, @workspace_id, @user_id, sqlc.narg('mailbox_id')::uuid, @to_emails, @cc_emails, @bcc_emails, @subject, @body_text)
+ON CONFLICT (id) DO UPDATE
+    SET mailbox_id = EXCLUDED.mailbox_id,
+        to_emails  = EXCLUDED.to_emails,
+        cc_emails  = EXCLUDED.cc_emails,
+        bcc_emails = EXCLUDED.bcc_emails,
+        subject    = EXCLUDED.subject,
+        body_text  = EXCLUDED.body_text,
+        updated_at = now()
+    WHERE inbox_compose_drafts.workspace_id = @workspace_id
+      AND inbox_compose_drafts.user_id = @user_id
+RETURNING *;
+
+-- name: ListInboxComposeDrafts :many
+-- This user's own drafts only. Most recently edited first — the one they are
+-- most likely to want back.
+SELECT * FROM inbox_compose_drafts
+WHERE workspace_id = @workspace_id AND user_id = @user_id
+ORDER BY updated_at DESC
+LIMIT @page_limit;
+
+-- name: GetInboxComposeDraft :one
+SELECT * FROM inbox_compose_drafts
+WHERE id = @id AND workspace_id = @workspace_id AND user_id = @user_id;
+
+-- name: DeleteInboxComposeDraft :execrows
+DELETE FROM inbox_compose_drafts
+WHERE id = @id AND workspace_id = @workspace_id AND user_id = @user_id;
+
+-- name: CreateInboxPendingCompose :one
+-- Self-enforcing tenancy on the MAILBOX, the same shape
+-- CreateInboxPendingReply uses on the thread: the mailbox_id is taken from a
+-- SELECT pinned to the workspace, so a cross-tenant mailbox inserts zero rows
+-- rather than a row that would send through another workspace's credentials.
+INSERT INTO inbox_pending_composes
+    (workspace_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, send_after, created_by)
+SELECT m.workspace_id, m.id, @to_emails, @cc_emails, @bcc_emails, @subject, @body_text, @send_after,
+       sqlc.narg('created_by')::uuid
+FROM mailboxes m
+WHERE m.id = @mailbox_id AND m.workspace_id = @workspace_id
+RETURNING *;
+
+-- name: GetInboxPendingCompose :one
+SELECT * FROM inbox_pending_composes WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: ListInboxPendingComposes :many
+SELECT c.*, COALESCE(m.email, '') AS mailbox_email
+FROM inbox_pending_composes c
+LEFT JOIN mailboxes m ON m.id = c.mailbox_id AND m.workspace_id = c.workspace_id
+WHERE c.workspace_id = @workspace_id AND c.status IN ('scheduled', 'sending')
+ORDER BY c.send_after, c.id
+LIMIT @page_limit;
+
+-- name: CancelInboxPendingCompose :execrows
+-- Guarded on 'scheduled', exactly as the reply path is: a claimed row may
+-- already have an open SMTP conversation.
+UPDATE inbox_pending_composes
+SET status = 'cancelled', updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id AND status = 'scheduled';
+
+-- name: ClaimInboxPendingCompose :execrows
+UPDATE inbox_pending_composes
+SET status = 'sending', claimed_at = now(), updated_at = now(), last_error = ''
+WHERE id = @id AND workspace_id = @workspace_id
+  AND send_after <= now()
+  AND (status = 'scheduled'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => @lease_seconds::double precision)));
+
+-- name: MarkInboxPendingComposeSent :execrows
+UPDATE inbox_pending_composes
+SET status = 'sent', message_id = @message_id, sent_at = now(), updated_at = now(), last_error = ''
+WHERE id = @id AND workspace_id = @workspace_id AND status = 'sending';
+
+-- name: ReleaseInboxPendingCompose :exec
+UPDATE inbox_pending_composes
+SET status = 'scheduled', claimed_at = NULL, last_error = @last_error, updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id AND status = 'sending';
+
+-- name: FailInboxPendingCompose :exec
+UPDATE inbox_pending_composes
+SET status = 'failed', claimed_at = NULL, last_error = @last_error, updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id AND status IN ('scheduled', 'sending');

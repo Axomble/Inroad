@@ -19,6 +19,8 @@ export type {
   InboxLabel,
   InboxPendingReply,
   InboxSettings,
+  InboxComposeDraft,
+  InboxPendingCompose,
   InboxMailboxCount,
   InboxReplyClassCount,
   SendInboxReplyRequest,
@@ -27,7 +29,7 @@ export type {
 } from '@/store/api'
 
 const inboxApi = api.enhanceEndpoints({
-  addTagTypes: ['InboxThread', 'InboxLabel', 'InboxOutbox'],
+  addTagTypes: ['InboxThread', 'InboxLabel', 'InboxOutbox', 'InboxDraft'],
   endpoints: {
     listInboxThreads: {
       providesTags: (result) =>
@@ -132,6 +134,33 @@ const inboxApi = api.enhanceEndpoints({
         { type: 'InboxThread' as const, id: 'LIST' },
       ],
     },
+    // Drafts are their own tag: autosave fires on a debounce while typing, and
+    // folding it into InboxOutbox would refetch the outbox on every keystroke.
+    listInboxComposeDrafts: {
+      providesTags: [{ type: 'InboxDraft' as const, id: 'LIST' }],
+    },
+    saveInboxComposeDraft: {
+      // Deliberately NO invalidation. Autosave already holds the authoritative
+      // draft in the composer's own state, and invalidating the list on every
+      // debounced keystroke would refetch continuously for a list the operator
+      // is not looking at.
+    },
+    deleteInboxComposeDraft: {
+      invalidatesTags: [{ type: 'InboxDraft' as const, id: 'LIST' }],
+    },
+    listInboxComposes: {
+      providesTags: [{ type: 'InboxOutbox' as const, id: 'LIST' }],
+    },
+    sendInboxCompose: {
+      // Both: the compose leaves the drafts list and joins the outbox.
+      invalidatesTags: [
+        { type: 'InboxOutbox' as const, id: 'LIST' },
+        { type: 'InboxDraft' as const, id: 'LIST' },
+      ],
+    },
+    cancelInboxPendingCompose: {
+      invalidatesTags: [{ type: 'InboxOutbox' as const, id: 'LIST' }],
+    },
     getInboxSettings: {
       providesTags: [{ type: 'InboxOutbox' as const, id: 'SETTINGS' }],
     },
@@ -180,4 +209,10 @@ export const {
   useCancelInboxPendingReplyMutation,
   useGetInboxSettingsQuery,
   useUpdateInboxSettingsMutation,
+  useListInboxComposeDraftsQuery,
+  useSaveInboxComposeDraftMutation,
+  useDeleteInboxComposeDraftMutation,
+  useListInboxComposesQuery,
+  useSendInboxComposeMutation,
+  useCancelInboxPendingComposeMutation,
 } = inboxApi

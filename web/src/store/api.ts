@@ -1592,6 +1592,56 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.inboxSettings,
       }),
     }),
+    listInboxComposeDrafts: build.query<
+      ListInboxComposeDraftsApiResponse,
+      ListInboxComposeDraftsApiArg
+    >({
+      query: () => ({ url: `/inbox/drafts` }),
+    }),
+    saveInboxComposeDraft: build.mutation<
+      SaveInboxComposeDraftApiResponse,
+      SaveInboxComposeDraftApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/drafts/${queryArg.draftId}`,
+        method: "PUT",
+        body: queryArg.saveInboxComposeDraftRequest,
+      }),
+    }),
+    deleteInboxComposeDraft: build.mutation<
+      DeleteInboxComposeDraftApiResponse,
+      DeleteInboxComposeDraftApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/drafts/${queryArg.draftId}`,
+        method: "DELETE",
+      }),
+    }),
+    listInboxComposes: build.query<
+      ListInboxComposesApiResponse,
+      ListInboxComposesApiArg
+    >({
+      query: () => ({ url: `/inbox/composes` }),
+    }),
+    sendInboxCompose: build.mutation<
+      SendInboxComposeApiResponse,
+      SendInboxComposeApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/composes`,
+        method: "POST",
+        body: queryArg.sendInboxComposeRequest,
+      }),
+    }),
+    cancelInboxPendingCompose: build.mutation<
+      CancelInboxPendingComposeApiResponse,
+      CancelInboxPendingComposeApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/composes/${queryArg.pendingId}`,
+        method: "DELETE",
+      }),
+    }),
     listInboxLabels: build.query<
       ListInboxLabelsApiResponse,
       ListInboxLabelsApiArg
@@ -2620,6 +2670,33 @@ export type UpdateInboxSettingsApiResponse =
   /** status 200 The updated settings */ InboxSettings;
 export type UpdateInboxSettingsApiArg = {
   inboxSettings: InboxSettings;
+};
+export type ListInboxComposeDraftsApiResponse =
+  /** status 200 This user's drafts */ InboxComposeDraftList;
+export type ListInboxComposeDraftsApiArg = void;
+export type SaveInboxComposeDraftApiResponse =
+  /** status 200 The saved draft */ InboxComposeDraft;
+export type SaveInboxComposeDraftApiArg = {
+  /** A UUID the CLIENT mints when the composer opens. Autosave is therefore a plain idempotent PUT, and the composer never has to track whether it has saved before. */
+  draftId: string;
+  saveInboxComposeDraftRequest: SaveInboxComposeDraftRequest;
+};
+export type DeleteInboxComposeDraftApiResponse = unknown;
+export type DeleteInboxComposeDraftApiArg = {
+  /** A UUID the CLIENT mints when the composer opens. Autosave is therefore a plain idempotent PUT, and the composer never has to track whether it has saved before. */
+  draftId: string;
+};
+export type ListInboxComposesApiResponse =
+  /** status 200 The workspace's queued composed emails */ InboxPendingComposeList;
+export type ListInboxComposesApiArg = void;
+export type SendInboxComposeApiResponse =
+  /** status 201 The queued email */ InboxPendingCompose;
+export type SendInboxComposeApiArg = {
+  sendInboxComposeRequest: SendInboxComposeRequest;
+};
+export type CancelInboxPendingComposeApiResponse = unknown;
+export type CancelInboxPendingComposeApiArg = {
+  pendingId: string;
 };
 export type ListInboxLabelsApiResponse =
   /** status 200 The workspace's labels */ InboxLabelList;
@@ -4351,7 +4428,7 @@ export type InboxPendingReply = {
   send_after: string;
   sent_at: string | null;
   body_text: string;
-  /** Empty unless a delivery attempt failed. Truncated to 500 characters. */
+  /** Empty unless a delivery attempt failed. A stable, human-readable reason — never the mail provider's own error text, which can echo the SMTP host, its raw rejection message, or internal error shapes back to any reader. The detail stays in the server's logs. */
   last_error: string;
   /** Whether cancelling would still succeed, mirroring the server's own status rule — so a client need not reimplement it, and never offers an Undo that is guaranteed to fail. */
   cancellable: boolean;
@@ -4399,6 +4476,61 @@ export type InboxPendingReplyList = {
 export type InboxSettings = {
   /** Seconds between pressing Send and the reply actually leaving, during which it can be undone. 0 disables the window (send immediately). Defaults to 10 for a workspace that has never configured one — shorter than Gmail's 30 because a reply answers something already read, and a 30-second wait on every reply is felt as latency rather than safety. */
   undo_send_seconds: number;
+};
+export type InboxComposeDraft = {
+  id: string;
+  /** The mailbox it will be sent from, or null — a draft is saved from the first keystroke, long before the operator has necessarily chosen one. */
+  mailbox_id: string | null;
+  to_emails: string[];
+  cc_emails: string[];
+  bcc_emails: string[];
+  subject: string;
+  body_text: string;
+  updated_at: string;
+};
+export type InboxComposeDraftList = {
+  drafts: InboxComposeDraft[];
+};
+export type SaveInboxComposeDraftRequest = {
+  mailbox_id?: string;
+  /** Stored as typed (blanks dropped), NOT normalized: the composer round-trips its own chips, and rewriting them mid-typing would change what the operator is looking at. Normalization happens at send time. */
+  to_emails?: string[];
+  cc_emails?: string[];
+  bcc_emails?: string[];
+  subject?: string;
+  body_text?: string;
+};
+export type InboxPendingCompose = {
+  id: string;
+  mailbox_id: string;
+  mailbox_email: string;
+  to_emails: string[];
+  cc_emails: string[];
+  bcc_emails: string[];
+  subject: string;
+  body_text: string;
+  status: "scheduled" | "sending" | "sent" | "cancelled" | "failed";
+  send_after: string;
+  /** A stable, human-readable reason when a delivery attempt failed — never the provider's own text, which can echo internal detail back. */
+  last_error: string;
+  cancellable: boolean;
+  created_at: string;
+};
+export type InboxPendingComposeList = {
+  items: InboxPendingCompose[];
+};
+export type SendInboxComposeRequest = {
+  mailbox_id: string;
+  /** Addresses, optionally in RFC 5322 form ("Ada <a@x.test>"). Lowercased and de-duplicated within each field before storage. */
+  to_emails: string[];
+  cc_emails?: string[];
+  bcc_emails?: string[];
+  subject?: string;
+  body_text: string;
+  /** Omit to leave after the undo window; otherwise up to 30 days ahead. */
+  send_at?: string;
+  /** The autosaved draft this send came from. Discarded on success, so the drafts list does not keep a copy of mail already on its way. A failure to discard it does not fail the send. */
+  draft_id?: string;
 };
 export type InboxLabelList = {
   labels: InboxLabel[];
@@ -4601,6 +4733,12 @@ export const {
   useCancelInboxPendingReplyMutation,
   useGetInboxSettingsQuery,
   useUpdateInboxSettingsMutation,
+  useListInboxComposeDraftsQuery,
+  useSaveInboxComposeDraftMutation,
+  useDeleteInboxComposeDraftMutation,
+  useListInboxComposesQuery,
+  useSendInboxComposeMutation,
+  useCancelInboxPendingComposeMutation,
   useListInboxLabelsQuery,
   useCreateInboxLabelMutation,
   useUpdateInboxLabelMutation,

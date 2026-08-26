@@ -48,6 +48,10 @@ type Service struct {
 	// Optional: without them the immediate Reply path is unaffected.
 	pending    PendingReplyStore
 	pendingEnq PendingReplyEnqueuer
+	// compose/composeEnq back writing a NEW email (see compose.go). Optional on
+	// the same terms as everything else here.
+	compose    ComposeStore
+	composeEnq ComposeEnqueuer
 	// clock is the Service's source of "now", injected so time-bounded rules
 	// (the snooze horizon) are testable at a fixed instant rather than
 	// reaching for the process clock. nil means time.Now — see now().
@@ -88,6 +92,17 @@ func WithPendingReplyStore(pending PendingReplyStore) ServiceOption {
 // it up), but nothing is enqueued — which is why cmd/inroad always passes one.
 func WithPendingReplyEnqueuer(enq PendingReplyEnqueuer) ServiceOption {
 	return func(s *Service) { s.pendingEnq = enq }
+}
+
+// WithComposeStore supplies the compose persistence (drafts + queued composed
+// emails). PgStore implements it alongside the other stores.
+func WithComposeStore(compose ComposeStore) ServiceOption {
+	return func(s *Service) { s.compose = compose }
+}
+
+// WithComposeEnqueuer supplies the delayed-task publisher for composed emails.
+func WithComposeEnqueuer(enq ComposeEnqueuer) ServiceOption {
+	return func(s *Service) { s.composeEnq = enq }
 }
 
 // WithClock overrides the Service's source of "now". Test-facing; production
