@@ -2810,6 +2810,23 @@ export type WarmupOverview = {
   incidents_min_pool: number;
   active: boolean;
   mailboxes: WarmupMailbox[];
+  /** Mailboxes that reported far more of the warmup mail they received as spam than their peers on the same receiving provider did. Placement is sender-attributed but recipient-observed, so one mailbox that reports everything it receives as spam — a misconfigured filter, a bulk-junked folder, one compromised account — makes every sender that mails it look worse than it is. Empty when no observer stands out from its peers. NOTHING IS EXCLUDED. Every report here still counts as evidence exactly as it did before, and no threshold, lane, health state or promotion decision reads any of it. An exclusion was built and removed: the peer comparison is gameable, because adding clean volume to a provider's mailboxes drags the peer rate down until an HONEST observer clears the multiple — silencing the mailbox reporting real spam and leaving the sender it reported looking cleaner than it is. Evidence that makes a sender look worse than it is costs sending and is visible; evidence that makes one look better goes unnoticed, which is the direction that matters. See security.md invariant 59 for what must be true before this can act. A client must not render it as a sanction: a legitimately strict provider looks identical from here, which is why the whole sum ships rather than a badge. Ordered worst-lift first, then by mailbox id. An observer whose history spans two receiving providers is compared against each separately and may appear once per cohort — the same mailbox, two comparisons, not two mailboxes. */
+  discounted_observers: {
+    /** the mailbox whose reports were dropped — NOT a mailbox anything is wrong with as a sender */
+    observer_mailbox_id: string;
+    /** The OBSERVER's own receiving provider, which is the population its rate was compared against. Providers junk at materially different rates, so a pooled comparison would flag every Microsoft mailbox in a mostly-Google pool. */
+    cohort: "google" | "microsoft" | "other" | "unknown";
+    /** placements this observer called spam in the trailing 7 days */
+    spam: number;
+    /** every placement this observer reported in the same window — the denominator of spam_rate, and the same population the snapshot counts */
+    total: number;
+    /** spam/total, rounded to two decimals */
+    spam_rate: number;
+    /** The same rate for the observer's cohort EXCLUDING this observer, rounded to two decimals. Excluding it matters most where the cohort is small: a mailbox that dominates its cohort would otherwise raise the very baseline it is measured against and hide itself. */
+    cohort_spam_rate: number;
+    /** How many times the peer rate this observer reports, rounded to two decimals. A cohort with no spam at all is scored with the same continuity correction the incident fold uses (half a case), so this stays finite. */
+    lift: number;
+  }[];
   /** Degradation that is CONCENTRATED in one fault dimension — several mailboxes degrading through one destination route, signing domain, return path, or sender domain. Derived at read time from observations, never persisted. A correlation, not a cause. Empty when no dimension shows concentration. Reported for visibility only: no threshold, lane or promotion decision reads any of it. */
   incidents: {
     dimension:

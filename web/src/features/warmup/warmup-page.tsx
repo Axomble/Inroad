@@ -11,6 +11,7 @@ import { useListMailboxesQuery } from '@/features/mailboxes/api'
 import { useGetWarmupOverviewQuery } from './api'
 import { WarmupIncidentsPanel } from './warmup-incidents-panel'
 import { WarmupMailboxCard } from './warmup-mailbox-card'
+import { WarmupObserversPanel } from './warmup-observers-panel'
 
 export function WarmupPage() {
   const { data: overview, isLoading: overviewLoading, isError: overviewError } = useGetWarmupOverviewQuery()
@@ -75,6 +76,16 @@ export function WarmupPage() {
           />
         ) : (
           <>
+            {/*
+              First of the two pool-level panels, because it qualifies the
+              evidence every figure below it rests on — the placement rates on the
+              cards, and the degradation the incidents panel correlates. It also
+              keeps the correlation panel adjacent to the list whose members it
+              names. Nothing is rendered when the overview failed to load:
+              `discounted_observers` is then undefined, and "no mailbox stands
+              out" beside a load error would claim a comparison nobody ran.
+            */}
+            <WarmupObserversPanel observers={overview?.discounted_observers} pool={entries} />
             {/*
               Above the list, because an incident is a statement about SEVERAL
               mailboxes: buried in one card's disclosure it would be four

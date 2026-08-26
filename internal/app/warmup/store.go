@@ -51,6 +51,13 @@ type Store interface {
 	// participant reduced to the facts correlation needs", which is exactly what this
 	// read produces, and a domain-owned twin would only be a shape to keep in step.
 	ListIncidentParticipants(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.IncidentInput, error)
+	// ListObserverStats returns every mailbox's placement REPORTING record over the
+	// trailing 7 days, grouped by (observer, the observer's own receiving provider) —
+	// the input warmup.DiscountObservers judges. The platform type crosses the seam
+	// for the same reason IncidentInput does: it already documents itself as "one
+	// observer reduced to the facts the trust rule needs", and a domain-owned twin
+	// with the same four fields would only be a shape to keep in step.
+	ListObserverStats(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.ObserverStats, error)
 	// MailboxInWorkspace reports whether the mailbox belongs to this workspace.
 	// It is the ownership gate for reads whose subject outlives the participant
 	// row, where "is a participant" would be the wrong 404 test.
@@ -202,6 +209,37 @@ func (s *PgStore) ListIncidentParticipants(ctx context.Context, workspaceID uuid
 			SigningDomain:    r.DkimDomain,
 			ReturnPathDomain: r.ReturnPathDomain,
 		}
+	}
+	return out, nil
+}
+
+// ListObserverStats projects the workspace's observer reporting record onto the
+// trust rule's input shape.
+//
+// The same loop lives in coreapi's snapshot refresh, which reads the same query to
+// bind the exclusion array. That is the duplication this package already accepts for
+// the incident fold: the SHARED part is the platform detector, and an app package and
+// the control<->execution seam cannot import each other's projection.
+func (s *PgStore) ListObserverStats(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.ObserverStats, error) {
+	rows, err := s.q.ListWarmupObserverStats(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pwarmup.ObserverStats, 0, len(rows))
+	for _, r := range rows {
+		// The column is nullable (a deleted observer is SET NULL) even though the
+		// query filters those rows out, so it decodes as pgtype.UUID. An invalid one
+		// is skipped rather than published as the zero uuid, which would name a
+		// mailbox nobody owns in the discounted list.
+		if !r.ObserverMailboxID.Valid {
+			continue
+		}
+		out = append(out, pwarmup.ObserverStats{
+			ObserverMailboxID: uuid.UUID(r.ObserverMailboxID.Bytes).String(),
+			Cohort:            r.DestinationEsp,
+			Spam:              int(r.Spam),
+			Total:             int(r.Total),
+		})
 	}
 	return out, nil
 }

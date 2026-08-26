@@ -140,6 +140,47 @@ test('a correlated incident is reported on the pool, above the mailbox list', as
   expect(list).toHaveTextContent('b@example.com')
 })
 
+/* ------------------------------------------------------- observer trust */
+
+// The overview's own `discounted_observers` has to reach a panel: nothing else in
+// the system reads the field (security.md invariant 59), so an unwired payload is
+// a feature that exists on the wire and nowhere else.
+test('a published observer verdict is reported on the pool, above the mailbox list', async () => {
+  overviewResponder = () =>
+    new Response(
+      JSON.stringify({
+        ...overviewWithIncident(),
+        discounted_observers: [
+          {
+            observer_mailbox_id: 'mb-2',
+            cohort: 'microsoft',
+            spam: 59,
+            total: 130,
+            spam_rate: 0.45,
+            cohort_spam_rate: 0.12,
+            lift: 3.75,
+          },
+        ],
+      }),
+      { status: 200, headers: jsonHeaders },
+    )
+
+  renderWithProviders(<WarmupPage />)
+
+  const panel = await screen.findByRole('region', { name: /spam reporting outliers/i })
+  // Named by its email from the same payload, with the arithmetic beside it.
+  expect(panel.querySelector('[data-slot="observer-mailbox"]')?.textContent).toBe('b@example.com')
+  expect([...panel.querySelectorAll('[data-slot="observer-stat"]')].map((n) => n.textContent)).toEqual([
+    '59 of 130 (45%)',
+    '12%',
+    '3.8×',
+  ])
+
+  // Ahead of the correlation panel, which stays adjacent to the list it names
+  // members of — this one qualifies the evidence both of them rest on.
+  expect(panel.nextElementSibling).toHaveAttribute('data-slot', 'warmup-incidents')
+})
+
 // There is deliberately no test here for "the panel claims nothing when the
 // overview failed to load". On that path `overview` is undefined, so the
 // incidents array and the pool are BOTH absent, and the panel cannot render
