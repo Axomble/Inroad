@@ -32,10 +32,14 @@ export type { CampaignResults, CampaignStepResults, CampaignResultRow } from '@/
 export type { CampaignSchedule, SendWindowDay, SendWindowInterval } from '@/store/api'
 // Sender-pool shapes likewise: the panel's draft state is derived from the
 // contract's types rather than re-declaring the row shape.
+// `FaultDomainShare` rides along on the pool response: how concentrated the
+// campaign's assigned contacts are on any one thing that can fail for several
+// mailboxes at once. Read-only, and read against each row's OWN ceiling.
 export type {
   CampaignSender,
   CampaignSenderPool,
   CampaignSenderPoolRequest,
+  FaultDomainShare,
   RotationMode,
 } from '@/store/api'
 

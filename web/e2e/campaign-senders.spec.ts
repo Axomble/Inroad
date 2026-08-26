@@ -37,9 +37,25 @@ const HEALTH: Record<string, Record<string, unknown>> = {
   'mb-2': { health_state: 'paused', sending: false, cap_today: 0, sent_today: 0 },
 }
 
+/**
+ * The concentration the pool response carries. Deliberately the awkward shape:
+ * `mail.atlas.test` is degrading, so it is held to a 20% ceiling and is over
+ * budget at a quarter of the campaign, while `atlas.test` sits inside a 60%
+ * ceiling at more than half of it. Rendered against one shared limit that table
+ * reads as an arithmetic error, which is the regression this exists to catch.
+ */
+const EXPOSURE = {
+  max_fault_domain_share: 0.6,
+  fault_domain_shares: [
+    { domain: 'mail.atlas.test', assigned: 25, share: 0.25, ceiling: 0.2, over_budget: true },
+    { domain: 'atlas.test', assigned: 55, share: 0.55, ceiling: 0.6, over_budget: false },
+  ],
+}
+
 /** The pool starts with one mailbox, so the spec can add the second one. */
 const initialPool = () => ({
   rotation_mode: 'weighted',
+  ...EXPOSURE,
   senders: [
     {
       mailbox_id: 'mb-1',
@@ -114,6 +130,7 @@ async function mockApi(page: Page): Promise<{ puts: SenderPayload[] }> {
         // panel's post-save state comes from the server rather than local state.
         pool = {
           rotation_mode: sent.rotation_mode,
+          ...EXPOSURE,
           senders: sent.senders.map(poolRow),
         }
         return route.fulfill(json(pool))
@@ -233,6 +250,48 @@ test('a pool row accounts for the volume it has sent and for a warmup-lowered ca
   // The campaign-wide limit is on the same surface, and says what it applies to.
   await expect(page.getByLabel('Daily limit')).toHaveValue('250')
   await expect(page.getByText(/not per mailbox/)).toBeVisible()
+})
+
+/**
+ * Domain concentration, in a real browser, on the shape that reads as broken
+ * arithmetic when the per-domain ceiling is lost: the 25% row is over budget and
+ * the 55% row is not.
+ *
+ * Reached through the accessibility tree — a named region — because that is how
+ * the panel is addressed by an operator using a screen reader and by anything
+ * else that has to find it.
+ */
+test('each fault domain is shown against its own ceiling, and over budget is not a stoppage', async ({ page }) => {
+  await mockApi(page)
+  await signIn(page)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}`)
+
+  const exposure = page.getByRole('region', { name: 'Domain concentration' })
+  await expect(exposure).toBeVisible()
+
+  // Each row carries its OWN ceiling. One shared limit here would make the two
+  // verdicts contradict the two percentages.
+  await expect(exposure.getByText('mail.atlas.test')).toBeVisible()
+  await expect(exposure.locator('[data-slot="exposure-share"]')).toHaveText(['25%', '55%'])
+  await expect(exposure.locator('[data-slot="exposure-ceiling"]')).toHaveText(['20%', '60%'])
+  await expect(exposure.locator('[data-slot="status-pill"]')).toHaveText(['Over budget', 'Within budget'])
+
+  // The smaller share is the over-budget one, and the row says why rather than
+  // leaving the operator to conclude the figures are wrong.
+  await expect(exposure.locator('[data-slot="exposure-tightened"]')).toHaveText([
+    /Held to 20% rather than the campaign's 60%/,
+  ])
+
+  // Over budget withheld nothing: the count is contacts assigned, and the panel
+  // says outright that nothing was paused or slowed.
+  await expect(exposure.locator('[data-slot="exposure-assigned"]').first()).toHaveText('25 contacts assigned')
+  await expect(exposure.getByText(/none of this withholds a send, pauses a mailbox or slows the campaign down/)).toBeVisible()
+
+  // These two rows are 80% of the pool; the rest is on mailboxes that share no
+  // domain, and the panel must not pass itself off as the whole breakdown.
+  await expect(exposure.locator('[data-slot="exposure-uncovered"]')).toContainText(
+    'cover 80% of the contacts assigned',
+  )
 })
 
 test('excluding every mailbox is refused client-side without a request', async ({ page }) => {
