@@ -190,7 +190,20 @@ func run() error {
 	}()
 	defer sch.Shutdown()
 
-	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues)
+	// Dead-letter capture. Wired by type assertion for the same reason as the
+	// cleaner/breaker capabilities in worker.Register: the capability is
+	// consumed through a one-method seam rather than by widening
+	// coreapi.Client (and its many test fakes). A core without it yields a nil
+	// recorder, which disables capture — the pre-existing behaviour where an
+	// exhausted task vanishes into asynq's own archive — rather than failing.
+	var deadLetters queue.DeadLetterRecorder
+	if dl, ok := core.(coreapi.DeadLetterClient); ok {
+		deadLetters = deadLetterRecorder{core: dl}
+	} else {
+		logger.Warn("coreapi has no dead-letter capability; exhausted tasks will not be captured")
+	}
+
+	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues, deadLetters)
 	mux := queue.NewMux()
 	// The DNS resolvers for the two sweeps. The first resolves only domains
 	// derived from connected mailboxes and the second only domains derived from
@@ -206,6 +219,23 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// deadLetterRecorder adapts coreapi.DeadLetterClient to the transport-neutral
+// queue.DeadLetterRecorder seam. It exists because platform/queue must not
+// import coreapi (platform/* never depends on the control⇄execution seam), so
+// the translation between the two one-method interfaces happens here at the
+// composition root — the same shape as replyLabelAdapter in cmd/inroad.
+type deadLetterRecorder struct{ core coreapi.DeadLetterClient }
+
+func (d deadLetterRecorder) RecordDeadLetter(ctx context.Context, in queue.DeadLetter) error {
+	return d.core.RecordDeadLetter(ctx, coreapi.DeadLetterInput{
+		WorkspaceID:  in.WorkspaceID,
+		TaskType:     in.TaskType,
+		Payload:      in.Payload,
+		LastError:    in.LastError,
+		AttemptCount: in.AttemptCount,
+	})
 }
 
 // startHeartbeat registers this worker immediately, then refreshes its `workers`

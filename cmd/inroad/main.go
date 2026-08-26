@@ -34,6 +34,7 @@ import (
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
 	"github.com/inroad/inroad/internal/app/crm"
+	"github.com/inroad/inroad/internal/app/deadletter"
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/idempotency"
@@ -365,6 +366,13 @@ func run() error {
 	// execution plane reads the same table through coreapi, so the operator's
 	// edit and the poller's dispatch cannot drift.
 	replyLabelSvc := replylabel.NewService(replylabel.NewPgStore(pool))
+	// Dead-letter triage: the operator's view of tasks that exhausted their
+	// asynq retries, and the path to re-run one. The worker WRITES this table
+	// through coreapi at the moment of exhaustion; this service is the read and
+	// replay half, and it is the only one holding a queue client — replay is an
+	// operator action on the control plane, never something the execution plane
+	// initiates.
+	deadLetterSvc := deadletter.NewService(deadletter.NewPgStore(queries), enq)
 	// Auto-capture is no longer pinned to reply_class="positive": it fires for
 	// any label carrying captures_deal, read through the narrow
 	// replyLabelAdapter (app/* packages never import each other). Unwired it
@@ -563,6 +571,13 @@ func run() error {
 		// Reply-label taxonomy CRUD + reorder. Gated on the campaign scopes
 		// inside Routes(): a label's role flags are send-automation config.
 		{pattern: "/api/v1/reply-labels", handler: replylabel.NewHandler(replyLabelSvc).Routes()},
+		// Dead-letter triage for tasks that exhausted their asynq retries.
+		// Scope-gated per route inside Routes(): campaigns:read to list, and
+		// campaigns:SEND to replay or discard, because replaying one of these
+		// tasks delivers mail and discarding one permanently prevents it.
+		// In the data plane because an external monitor pulling the pending
+		// list with campaigns:read is exactly the caller this group exists for.
+		{pattern: "/api/v1/dead-letters", handler: deadletter.NewHandler(deadLetterSvc).Routes()},
 		// Unified inbox: GET /threads, GET /threads/{id}, PUT /threads/{id}/read.
 		// Scope-gated per route inside Routes() (inbox:read / inbox:write); a
 		// session principal holds both implicitly.
