@@ -290,6 +290,20 @@ function destinationCopy(esp: string): DestinationCopy {
   return known ?? unrecognisedDestination(raw)
 }
 
+/**
+ * A destination's name on its own, for the one other place in this feature that
+ * has to name one: a correlated incident on the destination dimension carries an
+ * ESP as its shared value.
+ *
+ * Exported rather than duplicated because a provider must not be called
+ * "Microsoft" in the matrix and `microsoft` two panels away — the contract token
+ * reaching a screen is the same defect wherever it happens, and this vocabulary
+ * is the one source of truth for it.
+ */
+export function destinationLabel(esp: string): string {
+  return destinationCopy(esp).label
+}
+
 /* ------------------------------------------------------------- the readings */
 
 function routeReading(route: WarmupRoute): RouteReading {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
@@ -303,10 +304,126 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 		}
 	}
 	return WarmupOverviewDTO{
-		PoolSize:  int(count),
-		Active:    count >= 2,
-		Mailboxes: mailboxes,
+		PoolSize:            int(count),
+		Active:              count >= 2,
+		Mailboxes:           mailboxes,
+		DiscountedObservers: s.discountedObservers(ctx, ws),
+		Incidents:           s.incidents(ctx, ws),
+		IncidentsMinPool:    pwarmup.MinIncidentPool,
 	}, nil
+}
+
+// discountedObservers renders the observers whose placement reports the snapshot
+// refresh is excluding, arithmetic included.
+//
+// This is the operator-visible half of the ONLY inference in this subsystem that
+// gates. The refresh discards these observers' reports, so the rates on the mailbox
+// rows beside this list are computed WITHOUT them; publishing the list is what keeps
+// that from being a silent correction.
+//
+// IT RETURNS NO ERROR, for the same reason incidents does not: a read that cannot
+// compute an inference must not take the pool summary, the health states and the
+// placement rates down with it. The conflation with "every observer is trusted" is
+// the accepted cost — and it is the honest direction here, because a failed read on
+// the WRITE side falls back to exactly that, an empty exclusion list.
+func (s *Service) discountedObservers(ctx context.Context, ws uuid.UUID) []WarmupDiscountedObserverDTO {
+	stats, err := s.store.ListObserverStats(ctx, ws)
+	if err != nil {
+		slog.ErrorContext(ctx, "warmup_observer_trust_read_failed", "workspace_id", ws, "err", err)
+		return []WarmupDiscountedObserverDTO{}
+	}
+	found := pwarmup.DiscountObservers(stats)
+	// make, not a nil slice: `discounted_observers` is always present and `[]` when
+	// nothing was discounted, because an absent key arrives as undefined and sends a
+	// client down a fallback path indistinguishable from "the check did not run".
+	out := make([]WarmupDiscountedObserverDTO, len(found))
+	for i, in := range found {
+		out[i] = discountedObserverDTO(in)
+	}
+	return out
+}
+
+// discountedObserverDTO maps one discounted observer onto the wire shape. The order
+// it arrives in is the detector's (worst lift first, then a total order) and is NOT
+// re-sorted here, exactly as incidentDTO's is.
+func discountedObserverDTO(in pwarmup.DiscountedObserver) WarmupDiscountedObserverDTO {
+	return WarmupDiscountedObserverDTO{
+		ObserverMailboxID: in.ObserverMailboxID,
+		Cohort:            in.Cohort,
+		Spam:              in.Spam,
+		Total:             in.Total,
+		// The two rates are trimmed with roundLift rather than wireRate: they are not
+		// stored REALs being widened for a client to compare against a threshold, they
+		// are ratios of small integer counts computed here, and two decimals is the
+		// precision the counts support. The same call for all three also keeps the row
+		// internally consistent — a lift printed to 2dp beside rates printed to 6
+		// invites a reader to check the division and find it "wrong".
+		SpamRate:       roundLift(in.SpamRate),
+		CohortSpamRate: roundLift(in.CohortSpamRate),
+		Lift:           roundLift(in.Lift),
+	}
+}
+
+// incidents detects correlated degradation across the pool's fault dimensions and
+// renders it, arithmetic included.
+//
+// IT RETURNS NO ERROR, and that is the design (§9, last bullet). The overview is the
+// operator's window into a degrading pool, and it must not go dark because an
+// INFERENCE over data it is already showing could not be computed. A failure is
+// logged and degrades to "no incidents" — which reads as "nothing shared was found",
+// the same as a healthy pool. That conflation is the accepted cost: the alternative
+// is a 500 that hides the mailbox rows, the health states and the placement rates
+// too, all of which are still true.
+func (s *Service) incidents(ctx context.Context, ws uuid.UUID) []WarmupIncidentDTO {
+	participants, err := s.store.ListIncidentParticipants(ctx, ws)
+	if err != nil {
+		slog.ErrorContext(ctx, "warmup_incident_detection_failed", "workspace_id", ws, "err", err)
+		return []WarmupIncidentDTO{}
+	}
+	found := pwarmup.DetectIncidents(participants)
+	// make, not a nil slice: `incidents` is always present and `[]` when nothing
+	// correlated, because an absent key arrives as undefined and sends a client down a
+	// fallback path that looks identical to "detection did not run".
+	out := make([]WarmupIncidentDTO, len(found))
+	for i, in := range found {
+		out[i] = incidentDTO(in)
+	}
+	return out
+}
+
+// incidentDTO maps one detected correlation onto the wire shape. The order it
+// arrives in is the detector's (strongest lift first, then a total order) and is NOT
+// re-sorted here: a second opinion about which finding matters most is exactly the
+// kind of duplicated ranking this subsystem keeps having to remove.
+func incidentDTO(in pwarmup.Incident) WarmupIncidentDTO {
+	// Members are always a list, never null: an incident with no named members cannot
+	// occur (MinIncidentMembers is 2), so a nil here would only ever be a mapping bug
+	// rendered as an empty state.
+	members := in.Members
+	if members == nil {
+		members = []string{}
+	}
+	return WarmupIncidentDTO{
+		Dimension:        in.Dimension,
+		Value:            in.Value,
+		MemberMailboxIDs: members,
+		CohortSize:       in.CohortSize,
+		DegradedInside:   in.DegradedInside,
+		CohortOutside:    in.CohortOutside,
+		DegradedOutside:  in.DegradedOutside,
+		Lift:             roundLift(in.Lift),
+	}
+}
+
+// roundLift trims a lift to two decimals for the wire.
+//
+// Separate from wireRate, which widens a stored float32 REAL and needs six decimals
+// to stay finer than the smallest threshold the policy compares against. A lift
+// crosses no threshold and is an estimate over counts that are frequently single
+// digits: two decimals distinguishes the findings that differ (2.1 from 12) and
+// declines to publish twelve more digits the pool cannot support.
+func roundLift(lift float64) float64 {
+	return math.Round(lift*100) / 100
 }
 
 // ListTransitions returns one mailbox's automated decision history, newest

@@ -9,7 +9,9 @@ import type { WarmupHealth } from '@/lib/warmup-health'
 // live here rather than being injected into the mailboxes page.
 import { useListMailboxesQuery } from '@/features/mailboxes/api'
 import { useGetWarmupOverviewQuery } from './api'
+import { WarmupIncidentsPanel } from './warmup-incidents-panel'
 import { WarmupMailboxCard } from './warmup-mailbox-card'
+import { WarmupObserversPanel } from './warmup-observers-panel'
 
 export function WarmupPage() {
   const { data: overview, isLoading: overviewLoading, isError: overviewError } = useGetWarmupOverviewQuery()
@@ -73,11 +75,36 @@ export function WarmupPage() {
             description="Connect a mailbox first, then enable warmup on it here. Warmup builds sender reputation by exchanging low-volume mail between your own opted-in mailboxes."
           />
         ) : (
-          <ul>
-            {mailboxes.map((m) => (
-              <WarmupMailboxCard key={m.id ?? ''} mailbox={m} entry={entryById.get(m.id ?? '')} />
-            ))}
-          </ul>
+          <>
+            {/*
+              First of the two pool-level panels, because it qualifies the
+              evidence every figure below it rests on — the placement rates on the
+              cards, and the degradation the incidents panel correlates. It also
+              keeps the correlation panel adjacent to the list whose members it
+              names. Nothing is rendered when the overview failed to load:
+              `discounted_observers` is then undefined, and "no mailbox stands
+              out" beside a load error would claim a comparison nobody ran.
+            */}
+            <WarmupObserversPanel observers={overview?.discounted_observers} pool={entries} />
+            {/*
+              Above the list, because an incident is a statement about SEVERAL
+              mailboxes: buried in one card's disclosure it would be four
+              identical panels an operator has to diff by hand, which is the work
+              it exists to remove. Nothing is rendered when the overview failed to
+              load — `incidents` is then undefined, and "no shared cause found"
+              beside a load error would claim a search nobody ran.
+            */}
+            <WarmupIncidentsPanel
+              incidents={overview?.incidents}
+              pool={entries}
+              minPool={overview?.incidents_min_pool}
+            />
+            <ul>
+              {mailboxes.map((m) => (
+                <WarmupMailboxCard key={m.id ?? ''} mailbox={m} entry={entryById.get(m.id ?? '')} />
+              ))}
+            </ul>
+          </>
         )}
       </PageBody>
     </Page>

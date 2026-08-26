@@ -84,6 +84,111 @@ test('does not present fabricated zero stats alongside the overview error', asyn
   expect(screen.getAllByText('—').length).toBeGreaterThan(0)
 })
 
+/* --------------------------------------------------- correlated degradation */
+
+/** An overview whose two degraded participants share one signing domain. */
+function overviewWithIncident() {
+  return {
+    pool_size: 2,
+    active: true,
+    // The floor the API serves. Without it the panel reads as "no search was
+    // reported" and renders nothing, which is the honest response to a payload
+    // that never said what the server was able to look at.
+    incidents_min_pool: 4,
+    mailboxes: [
+      { mailbox_id: 'mb-1', email: 'a@example.com', enabled: true, health_state: 'paused', health_reason: 'spam rate', lane: 'quarantine', lane_reason: '', today_sent: 0, today_target: 0, placement_sample_7d: 40, inbox_rate_7d: 0.4, spam_rate_7d: 0.6 },
+      { mailbox_id: 'mb-2', email: 'b@example.com', enabled: true, health_state: 'paused', health_reason: 'spam rate', lane: 'quarantine', lane_reason: '', today_sent: 0, today_target: 0, placement_sample_7d: 40, inbox_rate_7d: 0.4, spam_rate_7d: 0.6 },
+    ],
+    incidents: [
+      {
+        dimension: 'signing_domain',
+        value: 'mail.acme.test',
+        member_mailbox_ids: ['mb-1', 'mb-2'],
+        cohort_size: 3,
+        degraded_inside: 2,
+        cohort_outside: 8,
+        degraded_outside: 1,
+        lift: 5.3,
+      },
+    ],
+  }
+}
+
+// An incident is a statement about SEVERAL mailboxes, so it cannot live in one
+// mailbox's disclosure: buried there it is four identical panels an operator has
+// to open and diff by hand, which is the work it exists to remove.
+test('a correlated incident is reported on the pool, above the mailbox list', async () => {
+  overviewResponder = () =>
+    new Response(JSON.stringify(overviewWithIncident()), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<WarmupPage />)
+
+  const panel = await screen.findByRole('region', { name: /correlated degradation/i })
+  expect(panel).toHaveTextContent('mail.acme.test')
+  // The arithmetic, not a verdict: both counts and the concentration.
+  expect([...panel.querySelectorAll('[data-slot="incident-stat"]')].map((n) => n.textContent)).toEqual([
+    '2 of 3',
+    '1 of 8',
+    '5.3×',
+  ])
+
+  // Immediately before the mailbox list, not after it and not inside a card: an
+  // operator who reads this after the cards has already diffed them by hand.
+  const list = panel.nextElementSibling
+  expect(list?.tagName).toBe('UL')
+  expect(list).toHaveTextContent('a@example.com')
+  expect(list).toHaveTextContent('b@example.com')
+})
+
+/* ------------------------------------------------------- observer trust */
+
+// The overview's own `discounted_observers` has to reach a panel: nothing else in
+// the system reads the field (security.md invariant 59), so an unwired payload is
+// a feature that exists on the wire and nowhere else.
+test('a published observer verdict is reported on the pool, above the mailbox list', async () => {
+  overviewResponder = () =>
+    new Response(
+      JSON.stringify({
+        ...overviewWithIncident(),
+        discounted_observers: [
+          {
+            observer_mailbox_id: 'mb-2',
+            cohort: 'microsoft',
+            spam: 59,
+            total: 130,
+            spam_rate: 0.45,
+            cohort_spam_rate: 0.12,
+            lift: 3.75,
+          },
+        ],
+      }),
+      { status: 200, headers: jsonHeaders },
+    )
+
+  renderWithProviders(<WarmupPage />)
+
+  const panel = await screen.findByRole('region', { name: /spam reporting outliers/i })
+  // Named by its email from the same payload, with the arithmetic beside it.
+  expect(panel.querySelector('[data-slot="observer-mailbox"]')?.textContent).toBe('b@example.com')
+  expect([...panel.querySelectorAll('[data-slot="observer-stat"]')].map((n) => n.textContent)).toEqual([
+    '59 of 130 (45%)',
+    '12%',
+    '3.8×',
+  ])
+
+  // Ahead of the correlation panel, which stays adjacent to the list it names
+  // members of — this one qualifies the evidence both of them rest on.
+  expect(panel.nextElementSibling).toHaveAttribute('data-slot', 'warmup-incidents')
+})
+
+// There is deliberately no test here for "the panel claims nothing when the
+// overview failed to load". On that path `overview` is undefined, so the
+// incidents array and the pool are BOTH absent, and the panel cannot render
+// whichever of the two a future change breaks — an assertion that cannot
+// distinguish its property from a sibling fact proves nothing. The property that
+// can be isolated is a server that answers with a pool but no incidents, and
+// warmup-incidents-panel.test.tsx tests it there.
+
 test('shows the no-mailboxes empty state when there are none to warm', async () => {
   mailboxesResponder = () => new Response(JSON.stringify([]), { status: 200, headers: jsonHeaders })
 

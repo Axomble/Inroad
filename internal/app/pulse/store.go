@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // Store is the repository interface this domain depends on, defined here (by
@@ -24,6 +25,18 @@ type Store interface {
 	SenderCapacities(ctx context.Context, workspaceID uuid.UUID) ([]gen.ListPulseSenderCapacityRow, error)
 	DmarcAttention(ctx context.Context, workspaceID uuid.UUID) (gen.GetPulseDmarcAttentionRow, error)
 	InboxCounts(ctx context.Context, workspaceID uuid.UUID) (gen.GetInboxPulseCountsRow, error)
+	// WarmupIncidentParticipants is the pool the senders_gated row's cause is inferred
+	// from: each live participant's degradation and the fault-dimension values it
+	// carries.
+	//
+	// It reads the WARMUP domain's query rather than a pulse-owned copy of it. pulse
+	// and warmup are sibling app packages and must not import each other, so the seam
+	// is the shared platform fold (warmup.DetectIncidents) plus the one query — exactly
+	// how this domain already gets its warmup counts, and how the two callers of
+	// warmup.WorstLanesByDomain already share one lane query. A second SQL definition
+	// of "which mail counts as this mailbox's" is how the pulse card and the warmup
+	// page would come to disagree about the same pool.
+	WarmupIncidentParticipants(ctx context.Context, workspaceID uuid.UUID) ([]warmup.IncidentInput, error)
 }
 
 // PgStore implements Store by delegating to the sqlc-generated pulse queries;
@@ -64,4 +77,30 @@ func (s *PgStore) DmarcAttention(ctx context.Context, workspaceID uuid.UUID) (ge
 
 func (s *PgStore) InboxCounts(ctx context.Context, workspaceID uuid.UUID) (gen.GetInboxPulseCountsRow, error) {
 	return s.q.GetInboxPulseCounts(ctx, workspaceID)
+}
+
+// WarmupIncidentParticipants projects the warmup pool onto the correlation fold's
+// input. Degraded is folded by the platform predicate that owns the question, so this
+// package never inlines its own opinion about which states and lanes count.
+//
+// The loop is intentionally the same shape as internal/app/warmup's PgStore method of
+// the same purpose; the two cannot share it (sibling app packages) and the part worth
+// sharing — the fold — is shared.
+func (s *PgStore) WarmupIncidentParticipants(ctx context.Context, workspaceID uuid.UUID) ([]warmup.IncidentInput, error) {
+	rows, err := s.q.ListWarmupIncidentParticipants(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]warmup.IncidentInput, len(rows))
+	for i, r := range rows {
+		out[i] = warmup.IncidentInput{
+			MailboxID:        r.MailboxID.String(),
+			Email:            r.Email,
+			Degraded:         warmup.IncidentDegraded(r.HealthState, r.Lane),
+			Route:            r.DestinationEsp,
+			SigningDomain:    r.DkimDomain,
+			ReturnPathDomain: r.ReturnPathDomain,
+		}
+	}
+	return out, nil
 }

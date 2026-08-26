@@ -284,6 +284,159 @@ GROUP BY o.destination_esp
 -- unresolved bucket last, which is also the order an operator reads them in.
 ORDER BY o.destination_esp;
 
+-- name: ListWarmupObserverStats :many
+-- Per-OBSERVER placement reporting over the trailing 7 days: how much each mailbox
+-- reported, and how much of that it called spam. This is the input to
+-- warmup.DiscountObservers, which decides whose reports stop counting as evidence
+-- about the senders that mailed them.
+--
+-- Placement is SENDER-attributed but RECIPIENT-observed. Invariant 52 binds an
+-- observation to a real send and re-proves the send<->recipient pair in SQL, but
+-- nothing questioned the recipient's OWN verdict — so one mailbox that reports
+-- everything it receives as spam degraded every sender that mailed it. A
+-- misconfigured filter, a bulk-junked folder and one compromised account all produce
+-- exactly that signal.
+--
+-- The predicate is IDENTICAL to the `place` arm of
+-- UpsertWarmupSignalSnapshotsForWorkspace — kind='placement', attribution_trusted,
+-- inside 7 days — deliberately: the population the detector judges MUST be the
+-- population the snapshot counts, or an exclusion removes rows this read never
+-- weighed. `total` is therefore count(*) over that population rather than
+-- inbox+spam. An observation the reader could only call 'other' is still a report the
+-- observer filed, and dropping it from the denominator would push every rate toward
+-- the spam end — the wrong direction for a rule that deletes evidence.
+--
+-- observer_mailbox_id IS NOT NULL drops placements whose observer mailbox has since
+-- been deleted (the 000054 FK is ON DELETE SET NULL). A mailbox that no longer exists
+-- cannot be discounted and has no provider to be compared against, so pooling those
+-- rows would invent one anonymous mega-observer out of unrelated history.
+--
+-- COHORT = (observer, destination_esp): one row per PAIR, not one row per observer
+-- folded onto a dominant esp. destination_esp is derived from the RECIPIENT, so on
+-- THIS read it names the OBSERVER's own receiving provider, which is the only fair
+-- baseline — Microsoft junks materially more than Google, and a pooled comparison
+-- would flag every M365 mailbox in a mostly-Google pool. A mailbox's provider does not
+-- usually change, so the pair is normally just the observer; where historical rows
+-- disagree, splitting compares each row against the baseline of the provider it was
+-- actually observed under and costs only sample size. That cost runs the SAFE way:
+-- smaller groups make MinObserverSamples harder to clear, so the split errs toward
+-- under-exclusion. Choosing a dominant esp instead would need a tie-break rule of its
+-- own, and the whole policy surface of this slice is the three constants in
+-- platform/warmup/observer.go.
+--
+-- Discounting is nonetheless per OBSERVER (the caller binds ids, not pairs), because
+-- the untrustworthy thing is the mailbox, not the provider row its reports were filed
+-- under. An observer that clears all three gates in one cohort therefore stops
+-- counting everywhere, and is reported once per pair so the operator sees which
+-- comparison produced the finding.
+--
+-- Range-seeks idx_warmup_observations_observer_time (workspace_id,
+-- observer_mailbox_id, observed_at DESC) on its workspace prefix — the index
+-- migration 000054 created for this exact axis, which until now had no reader.
+SELECT o.observer_mailbox_id,
+       o.destination_esp,
+       count(*) FILTER (WHERE o.placement = 'spam')::bigint AS spam,
+       count(*)::bigint                                     AS total
+FROM warmup_observations o
+WHERE o.workspace_id = $1
+  AND o.observer_mailbox_id IS NOT NULL
+  AND o.kind = 'placement'
+  AND o.attribution_trusted
+  AND o.observed_at >= now() - interval '7 days'
+GROUP BY o.observer_mailbox_id, o.destination_esp
+-- Stable for diagnostics and tests only: the detector sorts its own findings
+-- worst-first, so nothing observable depends on the order rows arrive in.
+ORDER BY o.observer_mailbox_id, o.destination_esp;
+
+-- name: ListWarmupIncidentParticipants :many
+-- One row per LIVE pool member with everything correlated-incident detection needs:
+-- both degradation axes, and the most recent RESOLVED value the mailbox carries on
+-- each observed fault dimension (slice D, design §4).
+--
+-- Read-time, and deliberately NOT materialized into a warmup_incidents table. An
+-- incident has no fact of its own — it is entirely a function of state already
+-- stored — so persisting one can only create a version of it that is wrong, which is
+-- the "two things that must agree" shape every repeated defect in this subsystem has
+-- taken. A table earns its place when slice E has to bound exposure OVER TIME and ask
+-- "was this route already in an incident yesterday", which read-time detection cannot
+-- answer.
+--
+-- The observation population is IDENTICAL to ListWarmupRoutes and the overview
+-- rollup — kind='placement', attribution_trusted, inside 7 days, attributed to
+-- o.mailbox_id as the SENDER — because an incident must be computed over the same
+-- mail the rates beside it describe. Attributing it any other way would correlate the
+-- identities of whoever happened to POLL the message.
+--
+-- It IS windowed, unlike the identity block on ListWarmupOverviewRows, and the
+-- difference is deliberate. That one reports a mailbox's last known identity as a
+-- STATE, which stays true while the mailbox sits paused for a fortnight. An incident
+-- is a statement about degradation happening NOW, so a mailbox nobody has measured
+-- inside the window belongs to no cohort (design §9) — it cannot be evidence for or
+-- against a correlation nothing measured.
+--
+-- p.enabled, matching every other live-signal read in this file (the evaluator, the
+-- snapshot refresh, partner selection): a disabled participant's health_state is
+-- frozen history, not something currently going wrong, and it must not be evidence
+-- for or against a correlation. Disabling deletes the row, so this only excludes a
+-- row an operator disabled by direct write.
+--
+-- A participant with NO observations in the window still appears, carrying an EMPTY
+-- value on all three observed dimensions (design §9). It is therefore in none of
+-- those three cohorts, but it is still part of the pool the concentration is measured
+-- against — and it keeps its sender_domain, which the fold derives from the ADDRESS
+-- and needs no observation for.
+--
+-- ONE lateral, not three correlated subqueries, so the attribution predicate above is
+-- written exactly ONCE. Three copies of it would be three things that must agree
+-- about which mail counts. The cost is that the aggregate reads the mailbox's whole
+-- 7-day window rather than stopping at the first resolved row of each column; that
+-- window is one pool member's warmup mail for a week (tens to low hundreds of rows),
+-- range-seeked on idx_warmup_observations_subject_time (workspace_id, mailbox_id,
+-- kind, observed_at DESC), which is also the index the overview and the snapshot
+-- refresh use — so this needs none of its own.
+SELECT
+    p.mailbox_id,
+    m.email,
+    -- Both axes, unfolded. WHICH combinations count as degrading is decided ONCE, in
+    -- Go (warmup.IncidentDegraded), because 'watch' means different things on the two
+    -- columns and a SQL copy of that rule is a second opinion nobody would keep in
+    -- step with the first.
+    p.health_state,
+    p.lane,
+    COALESCE(dims.destination_esp, '')::text    AS destination_esp,
+    COALESCE(dims.dkim_domain, '')::text        AS dkim_domain,
+    COALESCE(dims.return_path_domain, '')::text AS return_path_domain
+FROM warmup_participants p
+JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
+LEFT JOIN LATERAL (
+    -- The newest observation that actually RESOLVED each column, per column
+    -- independently. Picking one row for all three would let a later observation that
+    -- carried only a destination erase a signing domain we know perfectly well.
+    --
+    -- The empty string and 'unknown' are skipped when CHOOSING the row rather than
+    -- surfaced as values: both are the ABSENCE of a classification, and a cohort on one
+    -- would correlate on our own ignorance and fire hardest on the pools with the
+    -- least data (design §8). The fold applies the same exclusion again — it is the
+    -- authority on it — and this filter only decides which row is "latest".
+    SELECT
+        (array_agg(o.destination_esp ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.destination_esp NOT IN ('', 'unknown')))[1]    AS destination_esp,
+        (array_agg(o.dkim_domain ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.dkim_domain NOT IN ('', 'unknown')))[1]        AS dkim_domain,
+        (array_agg(o.return_path_domain ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.return_path_domain NOT IN ('', 'unknown')))[1] AS return_path_domain
+    FROM warmup_observations o
+    WHERE o.workspace_id = $1
+      AND o.mailbox_id = p.mailbox_id
+      AND o.kind = 'placement'
+      AND o.attribution_trusted
+      AND o.observed_at >= now() - interval '7 days'
+) dims ON true
+WHERE p.workspace_id = $1 AND p.enabled
+-- Stable for diagnostics only: the fold sorts its own findings strongest-first, so
+-- nothing observable depends on the order rows arrive in.
+ORDER BY m.email;
+
 -- ============================================================================
 -- Send path (spec §4/§6) — the control⇄execution seam's warmup read/claim
 -- surface. Every statement is workspace_id-pinned; every INSERT of a

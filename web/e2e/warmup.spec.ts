@@ -46,6 +46,7 @@ const json = (body: unknown) => ({
  */
 const OVERVIEW = {
   pool_size: 3,
+  incidents_min_pool: 4,
   active: true,
   mailboxes: [
     {
@@ -244,6 +245,185 @@ const ROUTES: Record<string, unknown[]> = {
   ],
 }
 
+/* ------------------------------------------------- correlated degradation */
+
+/**
+ * One participant, reduced to what a correlation reads: whether it is degraded,
+ * and on which axis.
+ *
+ * Both axes are represented in the pool below on purpose. Health and lane are
+ * independent by design and a shared cause surfaces on either — a filtering relay
+ * lands on health, an authentication fault lands on the lane — so a fixture that
+ * degraded only `health_state` would pass against a UI that never looked at the
+ * lane, and the withheld half of every real incident would go uncounted.
+ */
+function poolMember(id: string, email: string, degradation: 'health' | 'lane' | 'none') {
+  return {
+    mailbox_id: id,
+    email,
+    enabled: true,
+    health_state: degradation === 'health' ? 'paused' : 'healthy',
+    health_reason: degradation === 'health' ? 'spam rate above the pause threshold' : '',
+    lane: degradation === 'lane' ? 'quarantine' : 'healthy',
+    lane_reason: degradation === 'lane' ? 'quarantined: hard-bounce rate above the pause threshold' : '',
+    today_sent: 0,
+    today_target: 4,
+    placement_sample_7d: 40,
+    tabbed_rate_7d: null,
+    tab_capable_sample_7d: 0,
+    inbox_rate_7d: 0.9,
+    spam_rate_7d: 0.1,
+    identity: null,
+  }
+}
+
+/**
+ * Eleven participants, five of them degrading: `mb-1`..`mb-4` on the two shared
+ * values below, and `mb-5` degrading on its own with nothing in common with them.
+ *
+ * `mb-5` is the load-bearing member. Without a degraded mailbox OUTSIDE both
+ * cohorts every correlation divides by a clean pool, every lift is enormous, and
+ * a rendering that dropped the outside count entirely would look correct — the
+ * one number an operator needs to disagree with the inference is the one a
+ * fixture without `mb-5` cannot miss.
+ */
+const CORRELATED_POOL = [
+  poolMember('mb-1', 'one@acme.test', 'health'),
+  poolMember('mb-2', 'two@acme.test', 'health'),
+  poolMember('mb-3', 'three@acme.test', 'lane'),
+  poolMember('mb-4', 'four@acme.test', 'lane'),
+  poolMember('mb-5', 'five@acme.test', 'health'),
+  poolMember('mb-6', 'six@acme.test', 'none'),
+  poolMember('mb-7', 'seven@partner.test', 'none'),
+  poolMember('mb-8', 'eight@partner.test', 'none'),
+  poolMember('mb-9', 'nine@partner.test', 'none'),
+  poolMember('mb-10', 'ten@partner.test', 'none'),
+  poolMember('mb-11', 'eleven@partner.test', 'none'),
+]
+
+/**
+ * The same four degraded mailboxes, correlated twice — which is the shape §8's
+ * copy rule is really about, and the one that talks an operator into a cause.
+ *
+ * The signing row is concentrated 4.8×: four of the five mailboxes signing as
+ * `mail.acme.test` are degrading, against one of the other six. The destination
+ * row is the same four mailboxes at 2.3×, because they also happen to send to
+ * Microsoft along with three healthy ones. Both are true. Neither says the DKIM
+ * key or the relay is why, and a UI that badges them alike — or that shows only
+ * the strongest — tells an operator to go and change a DNS record that nothing
+ * here implicates.
+ *
+ * So the fixture pins the two readings a badge would erase: 4.8× and 2.3× have to
+ * reach the screen as different numbers, and the marginal one has to say it may
+ * be chance while the strong one does not.
+ *
+ * Every count is consistent with the pool above, because that is the only shape
+ * the server can produce: a cohort of five whose outside is six, in a pool of
+ * eleven, with the one degraded mailbox outside both cohorts counted in both
+ * outside figures. A fixture whose arithmetic does not add up tests a rendering
+ * that will never happen.
+ */
+const CORRELATED_INCIDENTS = [
+  {
+    dimension: 'signing_domain',
+    value: 'mail.acme.test',
+    member_mailbox_ids: ['mb-1', 'mb-2', 'mb-3', 'mb-4'],
+    cohort_size: 5,
+    degraded_inside: 4,
+    cohort_outside: 6,
+    degraded_outside: 1,
+    lift: 4.8,
+  },
+  {
+    // A contract token, not a provider's name. The route matrix already refuses
+    // to put `microsoft` on a screen; the same provider must not arrive
+    // lower-cased here just because it came through a different field.
+    dimension: 'destination_route',
+    value: 'microsoft',
+    member_mailbox_ids: ['mb-1', 'mb-2', 'mb-3', 'mb-4'],
+    cohort_size: 7,
+    degraded_inside: 4,
+    cohort_outside: 4,
+    degraded_outside: 1,
+    lift: 2.2857,
+  },
+]
+
+/**
+ * Two published observer-trust verdicts, and nothing acts on either of them
+ * (security.md invariant 59) — this panel is the whole feature, so the browser is
+ * where its two dishonest readings have to be ruled out.
+ *
+ * `mb-7` is deliberately one of the pool's HEALTHY mailboxes: the verdict is about
+ * what it REPORTED as a recipient, not about how it sends, and a rendering that
+ * treats it as a mailbox in trouble contradicts the card sitting below it. Its
+ * arithmetic adds up — 59 of 130 is 45%, its Microsoft peers sit at 12%, and
+ * 45/12 is the 3.8× the multiple rounds to.
+ *
+ * `mb-gone` is not in the pool at all, which is a shape the server really produces:
+ * the window spans seven days, so a mailbox removed from warmup yesterday still has
+ * reports in it. It must be named by its id rather than dropped — a verdict rendered
+ * about nobody is worse than an ugly one. Its cohort is spotless (0% peers), the
+ * case where an exact ratio would be a division by zero.
+ *
+ * Ordered worst-multiple first, as the contract says they arrive.
+ */
+const DISCOUNTED_OBSERVERS = [
+  {
+    observer_mailbox_id: 'mb-gone',
+    cohort: 'other',
+    spam: 30,
+    total: 40,
+    spam_rate: 0.75,
+    cohort_spam_rate: 0,
+    lift: 60,
+  },
+  {
+    observer_mailbox_id: 'mb-7',
+    cohort: 'microsoft',
+    spam: 59,
+    total: 130,
+    spam_rate: 0.45,
+    cohort_spam_rate: 0.12,
+    lift: 3.75,
+  },
+]
+
+const CORRELATED_OVERVIEW = {
+  pool_size: CORRELATED_POOL.length,
+  // The floor the API serves (warmup.MinIncidentPool). Without it the panel reads
+  // as "no search was reported" and draws nothing — the honest response to a payload
+  // that never said what the server was able to look across.
+  incidents_min_pool: 4,
+  active: true,
+  mailboxes: CORRELATED_POOL,
+  discounted_observers: DISCOUNTED_OBSERVERS,
+  incidents: CORRELATED_INCIDENTS,
+}
+
+/**
+ * The same degrading pool with nothing shared running through it — the fixture
+ * that separates the two answers `incidents: []` can mean.
+ *
+ * The array is byte-identical to the one a perfectly healthy workspace gets, so
+ * only the pool it arrives with says which sentence is true. Rendered as a tidy
+ * "no incidents" this reads as reassurance on a pool where five mailboxes are
+ * degrading; rendered as an apology it reads as a failure to compute something.
+ * It is neither: five mailboxes are degrading and nothing shared runs through
+ * them, which is information an operator acts on by working through them one at
+ * a time.
+ */
+const UNATTRIBUTED_OVERVIEW = {
+  pool_size: CORRELATED_POOL.length,
+  // The floor the API serves (warmup.MinIncidentPool). Without it the panel reads
+  // as "no search was reported" and draws nothing — the honest response to a payload
+  // that never said what the server was able to look across.
+  incidents_min_pool: 4,
+  active: true,
+  mailboxes: CORRELATED_POOL,
+  incidents: [],
+}
+
 /**
  * The detail payload behind one mailbox's card. `series` is deliberately empty:
  * the sparkline is not what these fixtures are about, and its "not enough history
@@ -305,8 +485,22 @@ const TRANSITIONS = {
 /** Counts how many times the transitions endpoint was actually hit. */
 let transitionRequests = 0
 
+/**
+ * The overview this test is running against. Defaults to the three-mailbox pool
+ * above, which reports no `incidents` field at all — the shape a server predating
+ * correlation sends, and the one the rest of this file exercises.
+ */
+let overview: { mailboxes: { mailbox_id: string; email: string }[] } = OVERVIEW
+
+/** Serve a different pool and reload onto it. */
+async function serveOverview(page: Page, fixture: typeof overview) {
+  overview = fixture
+  await page.reload()
+}
+
 async function mockApi(page: Page) {
   transitionRequests = 0
+  overview = OVERVIEW
   await page.route('**/api/v1/**', async (route: Route) => {
     const path = new URL(route.request().url()).pathname
 
@@ -334,7 +528,7 @@ async function mockApi(page: Page) {
       transitionRequests += 1
       return route.fulfill(json(TRANSITIONS))
     }
-    if (path.endsWith('/warmup/overview')) return route.fulfill(json(OVERVIEW))
+    if (path.endsWith('/warmup/overview')) return route.fulfill(json(overview))
 
     // One mailbox's warmup detail — the series behind its sparkline and the
     // destination-route matrix behind its Routes disclosure. Matched before the
@@ -357,7 +551,7 @@ async function mockApi(page: Page) {
     // the overview alone only feeds the header counts, which is why an empty list
     // here renders "No mailboxes to warm" over a pool of two.
     if (path.endsWith('/mailboxes')) {
-      return route.fulfill(json(OVERVIEW.mailboxes.map((m) => ({
+      return route.fulfill(json(overview.mailboxes.map((m) => ({
         id: m.mailbox_id,
         email: m.email,
         provider: 'smtp',
@@ -780,4 +974,207 @@ test('the matrix says it gates nothing, and gives the calibration reason', async
   await expect(panel).toContainText(/no threshold, lane or promotion decision reads any of it/i)
   await expect(panel).toContainText(/nobody has yet seen what a normal per-route rate looks like/i)
   await expect(panel).toContainText(/it can, on every provider/i)
+})
+
+/* ------------------------------------------------- correlated degradation */
+
+/**
+ * The pool's correlation panel, addressed as the named region it is — the same
+ * handle a screen reader uses, rather than a class or a test id maintained beside
+ * it. Scoping to it is not cosmetic: the page's own stat strip counts at-risk
+ * mailboxes and every card carries a lane reason, so a page-wide assertion about
+ * degradation would pass on somebody else's text.
+ */
+function incidentsPanel(page: Page) {
+  return page.getByRole('region', { name: 'Correlated degradation' })
+}
+
+/**
+ * One correlation's row, found through the VALUE the panel gives it. Matched on
+ * the value node alone, because every row also carries a dimension label, three
+ * figures and a sentence — a row whose value silently became something else still
+ * reads plausibly when all of that is swept into the filter.
+ */
+function incidentRow(page: Page, panel: Locator, value: string) {
+  return panel.locator('li').filter({ has: page.locator('[data-slot="incident-value"]', { hasText: value }) })
+}
+
+/** One row's three figures, in order, without their labels or their sentences. */
+function figuresOf(row: Locator): Locator {
+  return row.locator('[data-slot="incident-stat"]')
+}
+
+// THE case §8 is about, and the one a badge destroys. The same four mailboxes are
+// correlated twice: strongly on their signing domain, marginally on their
+// destination. Both readings are true, they are not the same finding, and an
+// operator who cannot see the difference is being told to go and change a DNS
+// record that nothing here implicates.
+test('two correlations over the same mailboxes read as two strengths, not one badge', async ({ page }) => {
+  await serveOverview(page, CORRELATED_OVERVIEW)
+  const panel = incidentsPanel(page)
+  await expect(panel).toBeVisible()
+
+  await expect(panel.locator('[data-slot="incident-dimension"]')).toHaveText([
+    'signing domain (DKIM)',
+    'destination',
+  ])
+  // The provider is named the way the route matrix names it. `microsoft` is our
+  // contract's word, and it must not reach a screen through a different field
+  // than the one that already forbids it.
+  await expect(panel.locator('[data-slot="incident-value"]')).toHaveText(['mail.acme.test', 'Microsoft'])
+
+  const signing = incidentRow(page, panel, 'mail.acme.test')
+  const destination = incidentRow(page, panel, 'Microsoft')
+
+  // Both sides of both comparisons, over their own populations. The outside count
+  // is what an operator disagrees with the inference with: 4 of 5 degraded is a
+  // finding only while the rest of the pool is 1 of 6.
+  await expect(figuresOf(signing)).toHaveText(['4 of 5', '1 of 6', '4.8×'])
+  await expect(figuresOf(destination)).toHaveText(['4 of 7', '1 of 4', '2.3×'])
+
+  // And the weaker one says it may be chance, where the stronger one does not —
+  // hedging both would train an operator to discount every row, and hedging
+  // neither makes 2.3× look like 4.8×.
+  await expect(destination).toContainText(/read it as a hint/i)
+  await expect(signing).not.toContainText(/read it as a hint/i)
+})
+
+// A correlation names the mailboxes it is about, because "4 mailboxes" leaves the
+// operator to diff the pool by hand — the exact work this exists to remove. And
+// it stays a correlation: nothing on the panel says the shared value is why.
+test('a correlation names its members and claims no cause', async ({ page }) => {
+  await serveOverview(page, CORRELATED_OVERVIEW)
+  const panel = incidentsPanel(page)
+  const signing = incidentRow(page, panel, 'mail.acme.test')
+
+  await expect(signing.locator('[data-slot="incident-members"]')).toHaveText(
+    'one@acme.test, two@acme.test, three@acme.test, four@acme.test',
+  )
+  await expect(signing).toContainText(/signed by the same DKIM d= domain/i)
+
+  await expect(panel).toContainText(/does not say the shared value is why/i)
+  await expect(panel).toContainText(/two dimensions can carry one underlying problem/i)
+  await expect(panel).not.toContainText(/caused by|root cause|is broken|at fault|to blame/i)
+  // Design §7's two reasons, on the screen with the rows.
+  await expect(panel).toContainText(/no threshold, lane or promotion decision reads any of it/i)
+  await expect(panel).toContainText(/steerable by whoever controls a mailbox domain's MX/i)
+})
+
+// An incident is a statement about SEVERAL mailboxes, so the one place it cannot
+// live is on any single card. Physically above the list, not merely earlier in the
+// DOM: an operator who reaches it after the cards has already diffed them by hand,
+// and only a laid-out browser can tell the two apart.
+test('the correlation panel is above the mailbox list, not buried in a card', async ({ page }) => {
+  await serveOverview(page, CORRELATED_OVERVIEW)
+  const panel = incidentsPanel(page)
+  const list = page.locator('[data-slot="page-body"] > ul')
+
+  await expect(list).toBeVisible()
+  await expect(list.locator('[data-slot="warmup-incidents"]')).toHaveCount(0)
+
+  const panelBox = await panel.boundingBox()
+  const listBox = await list.boundingBox()
+  if (!panelBox || !listBox) throw new Error('the panel and the mailbox list must both be laid out')
+  expect(panelBox.y + panelBox.height).toBeLessThanOrEqual(listBox.y)
+})
+
+// The same empty array a perfectly healthy workspace gets, over a pool where five
+// mailboxes are degrading. Rendered as a tidy "no incidents" it reads as
+// reassurance; rendered as an apology it reads as a failure to compute. It is
+// neither — and the count is the check on the whole thing: two of those five are
+// degrading on their LANE, so a reading that watched only health_state would say
+// three and quietly lose the withheld half of the pool.
+test('an empty array over a degrading pool is an answer, not an empty state', async ({ page }) => {
+  await serveOverview(page, UNATTRIBUTED_OVERVIEW)
+  const panel = incidentsPanel(page)
+
+  await expect(panel).toContainText('5 mailboxes are degrading')
+  await expect(panel).toContainText(/no shared cause found/i)
+  await expect(panel).toContainText(/work through them one at a time/i)
+  // It names what was searched, so "no shared cause" is not read as a claim about
+  // every possible cause.
+  await expect(panel).toContainText(/no destination, signing domain, return path or sender domain/i)
+  // And it is not the OTHER empty answer: this pool is not quiet.
+  await expect(panel).not.toContainText(/no degradation in the pool/i)
+  await expect(panel.locator('[data-slot="incident-value"]')).toHaveCount(0)
+})
+
+// A server that reports no incidents field at all has made no inference, so the
+// panel says nothing — the default fixture in this file is exactly that server.
+// "No shared cause found" here would claim a search nobody ran, which is the
+// silent-fallback class the missing `lane` belonged to.
+test('a server that does not report correlations shows no panel at all', async ({ page }) => {
+  await expect(card(page, 'withheld@acme.test')).toBeVisible()
+
+  await expect(incidentsPanel(page)).toHaveCount(0)
+})
+
+/* ----------------------------------------------------------- observer trust */
+
+// The axis nothing acts on, which makes this panel the entire feature — and the
+// two ways it lies if a copy rule is dropped. It must not read as a sanction (no
+// mailbox was blocked, discounted or untrusted, and one of the two named here is
+// a perfectly healthy participant), and it must not leave an operator believing
+// their spam evidence was filtered out, because none of it was.
+test('an observer verdict is a suspicion with its arithmetic, and excludes nothing', async ({ page }) => {
+  await serveOverview(page, CORRELATED_OVERVIEW)
+  const panel = page.getByRole('region', { name: 'Spam reporting outliers' })
+  await expect(panel).toBeVisible()
+
+  // Worst multiple first, and the one the pool cannot name is named by its id
+  // rather than dropped — a verdict about nobody is worse than an ugly one.
+  await expect(panel.locator('[data-slot="observer-mailbox"]')).toHaveText(['mb-gone', 'seven@partner.test'])
+  // The cohort in an operator's language. `microsoft` is our contract's word, and
+  // `other` is not a provider at all but a bag of them, which its phrasing says.
+  await expect(panel.locator('[data-slot="observer-comparison"]')).toHaveText([
+    'Compared with other mailboxes whose provider is neither Google nor Microsoft',
+    'Compared with other Microsoft mailboxes',
+  ])
+  await expect(panel).not.toContainText('microsoft')
+  await expect(panel).not.toContainText('unknown')
+
+  // The arithmetic an operator disagrees with the verdict using: this mailbox's
+  // rate over its own count, its peers' rate, and the multiple between them.
+  // Scoped to the figure nodes, because each of the three still reads plausibly
+  // when the labels and explanations around it are swept into the comparison.
+  const microsoft = panel
+    .locator('li')
+    .filter({ has: page.locator('[data-slot="observer-mailbox"]', { hasText: 'seven@partner.test' }) })
+  await expect(microsoft.locator('[data-slot="observer-stat"]')).toHaveText(['59 of 130 (45%)', '12%', '3.8×'])
+  // A spotless cohort is scored against half a case rather than divided by zero,
+  // so its multiple is not an exact ratio of 75% to 0%.
+  const spotless = panel
+    .locator('li')
+    .filter({ has: page.locator('[data-slot="observer-mailbox"]', { hasText: 'mb-gone' }) })
+  await expect(spotless.locator('[data-slot="observer-stat"]')).toHaveText(['30 of 40 (75%)', '0%', '60×'])
+  await expect(spotless).toContainText(/rather than dividing by zero/i)
+  // And it is not boilerplate under every row: the row above was divided by a real
+  // peer rate. Verified against the revert — with the note hung on both rows the
+  // assertion above still passed, so only the pair proves anything.
+  await expect(microsoft).not.toContainText(/rather than dividing by zero/i)
+
+  // Nothing happened to either mailbox, and the panel says so before the rows —
+  // physically above them, since an operator who reads it afterwards has already
+  // concluded their evidence was filtered. Only a laid-out browser can tell the
+  // two apart.
+  const note = panel.locator('[data-slot="observers-nothing-excluded"]')
+  await expect(note).toContainText(/nothing is excluded/i)
+  await expect(note).toContainText(/still counts as evidence/i)
+  await expect(note).toContainText(/no health state, lane or promotion decision reads any of this/i)
+  await expect(note).toContainText(/the peer comparison is gameable/i)
+  const noteBox = await note.boundingBox()
+  const rowBox = await microsoft.boundingBox()
+  if (!noteBox || !rowBox) throw new Error('the note and the rows must both be laid out')
+  expect(noteBox.y + noteBox.height).toBeLessThanOrEqual(rowBox.y)
+
+  // Not a sanction, in any of the words that would state one.
+  await expect(panel).not.toContainText(/untrusted|not trusted|hostile|discounted|blocked|removed|dropped/i)
+  // And the healthy participant it names is still healthy on its own card: the
+  // verdict is about what that mailbox REPORTED as a recipient, not how it sends.
+  // Scoped to the mailbox list rather than through `card`, because that helper
+  // matches any list item carrying the email — including this panel's own row,
+  // which would make the assertion pass on the text it is meant to look past.
+  const sevenCard = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'seven@partner.test' })
+  await expect(sevenCard).toContainText(/healthy/i)
+  await expect(sevenCard).not.toContainText(/reporting more spam/i)
 })

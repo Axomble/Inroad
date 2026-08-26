@@ -2,7 +2,10 @@ package warmup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +36,20 @@ type fakeStore struct {
 	// getParticipantErr, when non-nil, is returned by GetParticipant to model a
 	// transient read failure (a NON-ErrNoRows error) on the merge-base read.
 	getParticipantErr error
+
+	// incidentParticipants is the workspace's pool already projected onto the fold's
+	// input shape, which is what the real store hands over: whether each mailbox is
+	// degraded, and the dimension values it carries. incidentParticipantsErr models a
+	// read failure, which must degrade to "no incidents" rather than failing the read.
+	incidentParticipants    []pwarmup.IncidentInput
+	incidentParticipantsErr error
+
+	// observerStats is the workspace's per-observer reporting record, already in the
+	// trust rule's input shape. observerStatsErr models a read failure, which must
+	// degrade to "no observer discounted" rather than failing the overview — the same
+	// direction the WRITE side takes when the read breaks.
+	observerStats    []pwarmup.ObserverStats
+	observerStatsErr error
 
 	// transitions is the decision history per mailbox, newest first.
 	// transitionWorkspace, when set, is the only workspace those rows belong to,
@@ -128,6 +145,20 @@ func (s *fakeStore) ListRoutes(_ context.Context, workspaceID, mailboxID uuid.UU
 		return nil, nil
 	}
 	return s.routes[mailboxID], nil
+}
+
+func (s *fakeStore) ListIncidentParticipants(_ context.Context, _ uuid.UUID) ([]pwarmup.IncidentInput, error) {
+	if s.incidentParticipantsErr != nil {
+		return nil, s.incidentParticipantsErr
+	}
+	return s.incidentParticipants, nil
+}
+
+func (s *fakeStore) ListObserverStats(_ context.Context, _ uuid.UUID) ([]pwarmup.ObserverStats, error) {
+	if s.observerStatsErr != nil {
+		return nil, s.observerStatsErr
+	}
+	return s.observerStats, nil
 }
 
 func (s *fakeStore) MailboxInWorkspace(_ context.Context, workspaceID, mailboxID uuid.UUID) (bool, error) {
@@ -847,6 +878,160 @@ func routeParticipant(ws, mb uuid.UUID) Participant {
 	}
 }
 
+// The overview's incident view, which is the whole operator-visible half of the
+// correlated-incident slice: the arithmetic that produced the finding, not a verdict.
+//
+// The fixture is the case the concentration test exists to FIND: four mailboxes sign
+// as bad.test and three of them are degrading (75%), against a pool of twenty where
+// five are (25%) — a lift of 3. The outside is deliberately not clean, so the test
+// cannot pass on a division by an empty denominator.
+func TestOverviewReportsACorrelatedIncidentWithItsArithmetic(t *testing.T) {
+	ws := uuid.New()
+	store := newFakeStore()
+	store.enabledCount = 24
+	store.incidentParticipants = incidentPool()
+
+	svc := withNow(NewService(store), time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC))
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.Incidents) != 1 {
+		t.Fatalf("incidents = %+v, want exactly one (the signing domain)", ov.Incidents)
+	}
+	got := ov.Incidents[0]
+	if got.Dimension != "signing_domain" || got.Value != "bad.test" {
+		t.Errorf("incident names %s=%q, want signing_domain=bad.test", got.Dimension, got.Value)
+	}
+	if got.CohortSize != 4 || got.DegradedInside != 3 || got.CohortOutside != 20 || got.DegradedOutside != 5 {
+		t.Errorf("arithmetic = %+v, want cohort 4 / inside 3 / outside 20 / degraded outside 5", got)
+	}
+	if got.Lift != 3 {
+		t.Errorf("lift = %v, want 3 (75%% inside against 25%% outside)", got.Lift)
+	}
+	if len(got.MemberMailboxIDs) != 3 {
+		t.Errorf("member_mailbox_ids = %v, want the three degraded members", got.MemberMailboxIDs)
+	}
+}
+
+// The wire contract, asserted as JSON because the frontend is built against these
+// exact keys and a Go-side field rename would otherwise pass every other test here.
+func TestOverviewIncidentSerializesTheAgreedContract(t *testing.T) {
+	store := newFakeStore()
+	store.incidentParticipants = incidentPool()
+	svc := withNow(NewService(store), time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.Incidents) != 1 {
+		t.Fatalf("incidents = %+v, want exactly one", ov.Incidents)
+	}
+	body, err := json.Marshal(ov.Incidents[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"dimension":"signing_domain","value":"bad.test",` +
+		`"member_mailbox_ids":["degraded-1","degraded-2","degraded-3"],` +
+		`"cohort_size":4,"degraded_inside":3,"cohort_outside":20,"degraded_outside":5,"lift":3}`
+	if string(body) != want {
+		t.Errorf("contract drift:\n got %s\nwant %s", body, want)
+	}
+}
+
+// incidentPool is the fixture both incident tests read: one genuine signing-domain
+// correlation (3 of 4 degraded) inside a pool of 20 others where 5 are degraded.
+//
+// Every member carries a DISTINCT organizational domain, so the sender_domain
+// dimension cannot form a cohort of its own and the assertions above are about the
+// signing domain alone.
+func incidentPool() []pwarmup.IncidentInput {
+	pool := []pwarmup.IncidentInput{}
+	for i := 1; i <= 3; i++ {
+		pool = append(pool, pwarmup.IncidentInput{
+			MailboxID: fmt.Sprintf("degraded-%d", i), Email: fmt.Sprintf("m%d@inside%d.test", i, i),
+			Degraded: true, SigningDomain: "bad.test",
+		})
+	}
+	pool = append(pool, pwarmup.IncidentInput{
+		MailboxID: "healthy-inside", Email: "ok@inside4.test", SigningDomain: "bad.test",
+	})
+	for i := 1; i <= 20; i++ {
+		pool = append(pool, pwarmup.IncidentInput{
+			MailboxID: fmt.Sprintf("outside-%d", i), Email: fmt.Sprintf("o%d@outside%d.test", i, i),
+			Degraded: i <= 5, SigningDomain: fmt.Sprintf("own%d.test", i),
+		})
+	}
+	return pool
+}
+
+// The two things the DTO mapping decides on its own, tested where they live rather
+// than through a fixture that has to reach them: the members list is never null (a
+// JSON null would break a client typed against string[]), and the lift is trimmed to
+// two decimals so the wire never carries sixteen digits of confidence in an estimate
+// over single-digit counts.
+func TestIncidentDTOKeepsMembersNonNullAndTrimsTheLift(t *testing.T) {
+	empty := incidentDTO(pwarmup.Incident{})
+	if empty.MemberMailboxIDs == nil {
+		t.Error("member_mailbox_ids is nil, and serializes as null: the contract says it is a list")
+	}
+	if len(empty.MemberMailboxIDs) != 0 {
+		t.Errorf("member_mailbox_ids = %v, want empty", empty.MemberMailboxIDs)
+	}
+	if got := incidentDTO(pwarmup.Incident{Lift: 3.2666666666}).Lift; got != 3.27 {
+		t.Errorf("lift = %v, want 3.27", got)
+	}
+}
+
+// No incident is an ANSWER — "nothing shared was found" — so the key is always
+// present and empty. The absent form arrives as undefined and takes a client down a
+// path indistinguishable from "we did not look".
+func TestOverviewIncidentsAreAnEmptyArrayWhenNoneWasFound(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 2
+	svc := withNow(NewService(store), time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	body, err := json.Marshal(ov)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(body), `"incidents":[]`) {
+		t.Errorf("overview JSON = %s, want an empty incidents array", body)
+	}
+}
+
+// Detection must never fail the read (design §9). The overview is the operator's
+// window into a degrading pool: an inference that cannot be computed degrades to "no
+// incidents", while the pool summary and every mailbox row still arrive.
+func TestOverviewSurvivesAFailedIncidentDetection(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.incidentParticipantsErr = errors.New("detection exploded")
+	store.overviewRows = []OverviewRow{{
+		MailboxID: mb, Enabled: true, Email: "a@example.com", HealthState: "healthy",
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt: pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+	}}
+	svc := withNow(NewService(store), time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview must not fail because an inference failed: %v", err)
+	}
+	if ov.Incidents == nil || len(ov.Incidents) != 0 {
+		t.Errorf("incidents = %#v, want an empty slice", ov.Incidents)
+	}
+	if ov.PoolSize != 2 || len(ov.Mailboxes) != 1 {
+		t.Errorf("overview lost its real content: %+v", ov)
+	}
+}
+
 // assertRate compares a nullable wire rate against an exact expectation, within a
 // tolerance that only absorbs float representation.
 func assertRate(t *testing.T, name string, got *float64, want float64) {
@@ -857,5 +1042,203 @@ func assertRate(t *testing.T, name string, got *float64, want float64) {
 	}
 	if diff := *got - want; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("%s = %v, want %v", name, *got, want)
+	}
+}
+
+// The overview publishes the pool floor detection needs, so a client can tell an
+// empty incidents list that means "we looked and found no shared cause" from one
+// that means "this pool is too small for concentration to exist". Both arrive as
+// `[]` and they are different answers.
+//
+// It is served rather than left for the client to derive because it comes from a
+// backend policy constant: a copy on the client would drift the moment that
+// constant is recalibrated, leaving the UI claiming it searched a pool the server
+// never examined.
+func TestOverviewPublishesTheIncidentPoolFloor(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 1
+	store.overviewRows = []OverviewRow{{
+		MailboxID: uuid.New(), Enabled: true, StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		ReplyRate: 0.3, HealthState: "healthy", Email: "a@example.com",
+		StartedAt: pgtype.Timestamptz{Time: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+	}}
+	svc := withNow(NewService(store), time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	if ov.IncidentsMinPool != pwarmup.MinIncidentPool {
+		t.Errorf("IncidentsMinPool = %d, want %d (warmup.MinIncidentPool)",
+			ov.IncidentsMinPool, pwarmup.MinIncidentPool)
+	}
+	// A floor of zero would let a client conclude every pool is large enough,
+	// which is the failure this field exists to prevent — so the zero value is
+	// specifically wrong, not merely unset.
+	if ov.IncidentsMinPool == 0 {
+		t.Error("IncidentsMinPool is 0, which reads as 'every pool is big enough to search'")
+	}
+}
+
+// The observer-trust view, which is the operator-visible half of the ONLY inference
+// in this subsystem that gates. The exclusion removes evidence from every sender that
+// mailed the discounted mailbox, so the whole sum has to ship with the finding: an
+// operator who disagrees needs to see 44 of 50 against a cohort of 12%, not a badge.
+//
+// The fixture is the case the rule exists to catch and nothing weaker: a mailbox
+// junking 88% of what it receives while its Microsoft peers junk 12%. The peers are
+// deliberately NOT clean, so the lift is a real comparison rather than a division by
+// the continuity correction.
+func TestOverviewReportsADiscountedObserverWithItsArithmetic(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 4
+	store.observerStats = hostileObserverPool()
+	svc := withNow(NewService(store), time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.DiscountedObservers) != 1 {
+		t.Fatalf("discounted_observers = %+v, want exactly one (the hostile mailbox)", ov.DiscountedObservers)
+	}
+	// Asserted as JSON because a client is built against these exact keys, and a
+	// Go-side field rename would pass every other assertion here.
+	body, err := json.Marshal(ov.DiscountedObservers[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"observer_mailbox_id":"hostile","cohort":"microsoft","spam":44,"total":50,` +
+		`"spam_rate":0.88,"cohort_spam_rate":0.12,"lift":7.33}`
+	if string(body) != want {
+		t.Errorf("contract drift:\n got %s\nwant %s", body, want)
+	}
+}
+
+// hostileObserverPool is one Microsoft mailbox reporting 88% of its mail as spam
+// beside a peer reporting 12% — a lift of 7.33, comfortably past every gate — and a
+// peer that must NOT be discounted for merely sharing the cohort.
+func hostileObserverPool() []pwarmup.ObserverStats {
+	return []pwarmup.ObserverStats{
+		{ObserverMailboxID: "hostile", Cohort: "microsoft", Spam: 44, Total: 50},
+		// Split across two mailboxes, combining to the same 6/50: a baseline has to be
+		// more than one peer's opinion (MinObserverPeers), and the split leaves the
+		// cohort rate and the lift this test pins exactly where they were.
+		{ObserverMailboxID: "peer-a", Cohort: "microsoft", Spam: 3, Total: 25},
+		{ObserverMailboxID: "peer-b", Cohort: "microsoft", Spam: 3, Total: 25},
+	}
+}
+
+// A STRICT observer is not a hostile one. This mailbox junks 40% of what it receives
+// — well past MinObserverSpamRate, and far more than the pool average — but its
+// Microsoft peers junk 20%, so the lift is 2 and the reports stand. Excluding it would
+// make every sender that mails it look cleaner than it is, which is the worse of the
+// two failure modes, so `[]` here is the whole point of the rule rather than an empty
+// state.
+//
+// Asserted through the JSON because the key must be PRESENT and empty: absent arrives
+// as undefined and takes a client down a path indistinguishable from "the check did
+// not run".
+func TestOverviewDoesNotDiscountAStrictButNormalObserver(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 3
+	store.observerStats = []pwarmup.ObserverStats{
+		{ObserverMailboxID: "strict", Cohort: "microsoft", Spam: 20, Total: 50},
+		{ObserverMailboxID: "peer-a", Cohort: "microsoft", Spam: 20, Total: 100},
+		{ObserverMailboxID: "peer-b", Cohort: "microsoft", Spam: 20, Total: 100},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.DiscountedObservers) != 0 {
+		t.Fatalf("discounted_observers = %+v, want none: 40%% against a cohort of 20%% is a lift of 2, "+
+			"under ObserverSpamLift (%v)", ov.DiscountedObservers, pwarmup.ObserverSpamLift)
+	}
+	body, err := json.Marshal(ov)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(body), `"discounted_observers":[]`) {
+		t.Errorf("overview JSON = %s, want a present, empty discounted_observers array", body)
+	}
+}
+
+// The detector already sorts worst-first and breaks ties on the mailbox id; the read
+// layer must not form a second opinion. The fixture makes the two orders disagree:
+// the WORSE observer sorts LAST by id, so any re-sort here flips them.
+func TestOverviewKeepsTheDetectorsWorstFirstObserverOrder(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 4
+	store.observerStats = []pwarmup.ObserverStats{
+		{ObserverMailboxID: "b-worse", Cohort: "microsoft", Spam: 50, Total: 50},
+		{ObserverMailboxID: "a-bad", Cohort: "microsoft", Spam: 30, Total: 50},
+		{ObserverMailboxID: "c-peer", Cohort: "microsoft", Spam: 4, Total: 400},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.DiscountedObservers) != 2 {
+		t.Fatalf("discounted_observers = %+v, want the two outliers", ov.DiscountedObservers)
+	}
+	if got := []string{ov.DiscountedObservers[0].ObserverMailboxID, ov.DiscountedObservers[1].ObserverMailboxID}; got[0] != "b-worse" || got[1] != "a-bad" {
+		t.Errorf("order = %v, want [b-worse a-bad] — the detector's worst-lift-first order, not the id order", got)
+	}
+	if ov.DiscountedObservers[0].Lift <= ov.DiscountedObservers[1].Lift {
+		t.Errorf("lifts = %v then %v, want strictly descending",
+			ov.DiscountedObservers[0].Lift, ov.DiscountedObservers[1].Lift)
+	}
+}
+
+// The trust read must never fail the overview. It is the operator's window into a
+// degrading pool, and losing the pool summary and every mailbox row because ONE
+// inference could not be computed is worse than reporting no discounted observer —
+// especially since the write side falls back to exactly the same empty list, so the
+// two halves still agree about what happened.
+func TestOverviewSurvivesAFailedObserverTrustRead(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.observerStatsErr = errors.New("observer stats exploded")
+	store.overviewRows = []OverviewRow{{
+		MailboxID: mb, Enabled: true, Email: "a@example.com", HealthState: "healthy",
+		StartVolume: 4, MaxVolume: 40, RampIncrement: 2,
+		StartedAt: pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+	}}
+	svc := withNow(NewService(store), time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("overview must not fail because the trust read failed: %v", err)
+	}
+	if ov.DiscountedObservers == nil || len(ov.DiscountedObservers) != 0 {
+		t.Errorf("discounted_observers = %#v, want an empty slice", ov.DiscountedObservers)
+	}
+	if ov.PoolSize != 2 || len(ov.Mailboxes) != 1 {
+		t.Errorf("overview lost its real content: %+v", ov)
+	}
+}
+
+// The one thing the DTO mapping decides on its own: all THREE floats are trimmed to
+// two decimals, not just the lift. A row that printed a lift to 2dp beside rates to
+// 16 would invite a reader to check 0.8799999999/0.12 and conclude the engine's
+// arithmetic is wrong.
+func TestDiscountedObserverDTOTrimsEveryRate(t *testing.T) {
+	got := discountedObserverDTO(pwarmup.DiscountedObserver{
+		SpamRate: 0.876543, CohortSpamRate: 0.123456, Lift: 7.098765,
+	})
+	if got.SpamRate != 0.88 {
+		t.Errorf("spam_rate = %v, want 0.88", got.SpamRate)
+	}
+	if got.CohortSpamRate != 0.12 {
+		t.Errorf("cohort_spam_rate = %v, want 0.12", got.CohortSpamRate)
+	}
+	if got.Lift != 7.1 {
+		t.Errorf("lift = %v, want 7.1", got.Lift)
 	}
 }

@@ -961,17 +961,25 @@ func withWallClock(t *testing.T, f warmupFixture) warmupFixture {
 // of the send scheduler.
 func seedWarmupSendRow(t *testing.T, ctx context.Context, f warmupFixture, from, to uuid.UUID) uuid.UUID {
 	t.Helper()
+	return seedWarmupSendRowIn(t, ctx, f, f.ws1, from, to)
+}
+
+// seedWarmupSendRowIn is seedWarmupSendRow with the workspace named, for the tenancy
+// tests that have to seed the SECOND workspace's traffic too. Everything the pair
+// writes is pinned to that id, so a row seeded for ws2 can never be read as ws1's.
+func seedWarmupSendRowIn(t *testing.T, ctx context.Context, f warmupFixture, ws, from, to uuid.UUID) uuid.UUID {
+	t.Helper()
 	thread, send := uuid.New(), uuid.New()
 	if _, err := f.raw.Exec(ctx,
 		`INSERT INTO warmup_threads (id, workspace_id, sender_mailbox, partner_mailbox, subject, content_key)
 		 VALUES ($1, $2, $3, $4, 'seeded thread', 'seed')`,
-		thread, f.ws1, from, to); err != nil {
+		thread, ws, from, to); err != nil {
 		t.Fatalf("seed warmup thread: %v", err)
 	}
 	if _, err := f.raw.Exec(ctx,
 		`INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox, status, token, message_id, sent_at)
 		 VALUES ($1, $2, $3, $4, $5, 'sent', 'seeded-token', $6, now())`,
-		send, f.ws1, thread, from, to, "<"+send.String()+"@acme.test>"); err != nil {
+		send, ws, thread, from, to, "<"+send.String()+"@acme.test>"); err != nil {
 		t.Fatalf("seed warmup send: %v", err)
 	}
 	return send

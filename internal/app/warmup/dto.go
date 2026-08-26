@@ -348,12 +348,138 @@ type WarmupIdentityDTO struct {
 	ObservedAt string `json:"observed_at"`
 }
 
+// WarmupIncidentDTO is one detected correlation: several of the pool's degrading
+// mailboxes share one value on one fault dimension, and degrade at a rate the rest
+// of the pool does not.
+//
+// IT IS A CORRELATION, NEVER A CAUSE. "These four share a signing domain" is what
+// the data supports; "your DKIM key is broken" is not, and copy that promotes one to
+// the other is a defect in this feature rather than a wording preference.
+//
+// The whole arithmetic ships with the finding — cohort, both denominators, both
+// numerators, the lift — because an operator who disagrees with an inference needs
+// to see the sum rather than a badge. A lift of 2.1 and a lift of 12 are very
+// different findings and an "incident" pill hides the difference.
+//
+// Reported for visibility only. Nothing gates on an incident, and unlike the tabbed
+// rate and the route matrix this needs TWO reasons (design §7): the three detection
+// constants are uncalibrated guesses, AND three of the four dimensions are
+// influenceable within a workspace. destination_esp is invariant 57's MX controller;
+// signing_domain and return_path_domain are weaker still, read off the message's own
+// DKIM-Signature and Return-Path before the authserv-id trust rule (which gates only
+// the SPF/DKIM/DMARC verdicts), so read/write on one warmup recipient mailbox is
+// enough. The first reason expires when calibration data exists.
+// The second does not, so a later slice that gates on a fault domain has to bind its
+// evidence to something the attacker does not control (the way invariant 52 binds
+// the placement axis) and cannot inherit "slice D proved the correlation is real".
+type WarmupIncidentDTO struct {
+	// Dimension is destination_route | signing_domain | return_path_domain |
+	// sender_domain — WHICH shared thing the degradation concentrates in, which is the
+	// actionable half of the finding.
+	Dimension string `json:"dimension"`
+	// Value is the shared value itself, lower-cased as observed. Never "unknown" or
+	// empty: an unresolved dimension is our own ignorance, and grouping on it would
+	// fire hardest on the pools carrying the least data.
+	Value string `json:"value"`
+	// MemberMailboxIDs are the DEGRADED members only, sorted. The healthy members of
+	// the same cohort are counted in CohortSize but deliberately not named: they are
+	// evidence about the concentration, not mailboxes an operator needs to go and look
+	// at.
+	MemberMailboxIDs []string `json:"member_mailbox_ids"`
+	// CohortSize is every participant carrying Value, degraded or not — the
+	// denominator that makes DegradedInside a rate rather than a count.
+	CohortSize     int `json:"cohort_size"`
+	DegradedInside int `json:"degraded_inside"`
+	// The comparison population: the rest of the pool, INCLUDING participants whose
+	// value on this dimension was never resolved. They are still evidence about
+	// whether degradation is concentrated inside the cohort.
+	//
+	// CohortSize + CohortOutside is therefore every live participant the detection read
+	// saw — the same enabled pool pool_size counts — so a client may render "3 of 7"
+	// without a second request.
+	CohortOutside   int `json:"cohort_outside"`
+	DegradedOutside int `json:"degraded_outside"`
+	// Lift is how many times more degraded the inside is than the outside, rounded to
+	// two decimals. The precision is deliberately coarse: this is an estimate over
+	// counts that are frequently single digits, so sixteen significant figures would
+	// be false confidence in a number the pool cannot support.
+	Lift float64 `json:"lift"`
+}
+
+// WarmupDiscountedObserverDTO is one mailbox whose placement reports have STOPPED
+// counting as evidence about the senders that mailed it, with the arithmetic that
+// decided it.
+//
+// UNLIKE every other inference this endpoint publishes, this one GATES: the ids
+// behind these rows are excluded from the placement arm of the snapshot refresh, so
+// the HEALTH STATE of every sender that mailed a discounted observer is decided on
+// evidence these reports are missing from. That is the point — placement is
+// SENDER-attributed but RECIPIENT-observed, and one mailbox junking everything it
+// receives degraded the whole pool — but it means evidence is being DISCARDED, and
+// discarding evidence an operator cannot see is how a reputation engine quietly starts
+// lying. Hence the whole sum ships with the finding rather than a badge.
+//
+// The per-mailbox rates BESIDE this list are deliberately NOT filtered. They are
+// computed at read time from the raw observations (ListWarmupOverviewRows, and the
+// detail route matrix), so a mailbox can show a spam rate its health state does not
+// reflect. Filtering both would make the discount invisible in the numbers; leaving
+// the rates raw and publishing this list is what lets an operator reconcile the two.
+//
+// The failure mode is asymmetric and the thresholds are set for it: wrongly excluding
+// a legitimately strict observer makes every sender that mails it look cleaner than
+// it is, which is worse than leaving the hole open. All three constants in
+// platform/warmup/observer.go must be met before a mailbox appears here.
+type WarmupDiscountedObserverDTO struct {
+	ObserverMailboxID string `json:"observer_mailbox_id"`
+	// Cohort is the OBSERVER's own receiving provider (the destination_esp its
+	// observations were filed under), which is the population its rate was compared
+	// against. Providers junk at materially different rates, so a pooled comparison
+	// would flag every Microsoft mailbox in a mostly-Google pool.
+	Cohort string `json:"cohort"`
+	// Spam and Total are this observer's raw counts inside the 7-day window, over the
+	// same population the snapshot counts — so an operator can re-derive spam_rate and
+	// disagree with it.
+	Spam  int `json:"spam"`
+	Total int `json:"total"`
+	// SpamRate is Spam/Total; CohortSpamRate is the same rate for the observer's
+	// cohort EXCLUDING this observer (otherwise a mailbox that dominates a small
+	// cohort raises the baseline it is measured against and hides itself); Lift is how
+	// many times the peer rate this observer reports. All three are rounded to two
+	// decimals, like an incident lift: these are estimates over counts that are
+	// frequently double digits, and more precision would be false confidence.
+	SpamRate       float64 `json:"spam_rate"`
+	CohortSpamRate float64 `json:"cohort_spam_rate"`
+	Lift           float64 `json:"lift"`
+}
+
 // WarmupOverviewDTO is the WarmupOverview schema: the pool summary plus per
 // mailbox health/placement. active is true when pool_size >= 2.
 type WarmupOverviewDTO struct {
 	PoolSize  int                `json:"pool_size"`
 	Active    bool               `json:"active"`
 	Mailboxes []WarmupMailboxDTO `json:"mailboxes"`
+	// DiscountedObservers is never null — `[]` when every observer is trusted — and
+	// its order is the detector's own (worst lift first, then a total order on the
+	// mailbox id), which the read layer must not re-sort.
+	//
+	// It is on the OVERVIEW rather than on a mailbox row because the subject is the
+	// pool's evidence, not any one participant: the mailbox named here is the one
+	// whose reports were dropped, while the mailboxes AFFECTED are every sender that
+	// mailed it.
+	DiscountedObservers []WarmupDiscountedObserverDTO `json:"discounted_observers"`
+	// Incidents is never null — `[]` when nothing correlated — and its order is the
+	// detector's own (strongest lift first, then a total order on dimension and
+	// value), which the read layer must not re-sort.
+	//
+	// An empty list is a real answer, not an empty state to apologise for: "no shared
+	// cause found across N degraded mailboxes" is information, and a client should say
+	// so rather than hiding the section.
+	Incidents []WarmupIncidentDTO `json:"incidents"`
+	// IncidentsMinPool is warmup.MinIncidentPool, published so a client can tell an
+	// empty Incidents that means "nothing correlated" from one that means "this pool
+	// is too small for concentration to be measurable at all". Both arrive as `[]`
+	// and they are different answers.
+	IncidentsMinPool int `json:"incidents_min_pool"`
 }
 
 // WarmupDayStatDTO is the WarmupDayStat schema: one UTC day of counters.

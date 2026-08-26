@@ -221,26 +221,3 @@ func seedPlacementsFor(t *testing.T, ctx context.Context, f warmupFixture, sid, 
 		}
 	}
 }
-
-// warmupSendFrom drives one warmup send FROM a chosen mailbox through its claim
-// lifecycle. makeWarmupSend always sends from A; evidence attributed to B needs a
-// send B actually made, because the observation writer reads the sender off the
-// send row rather than trusting a parameter.
-func warmupSendFrom(t *testing.T, ctx context.Context, f warmupFixture, from uuid.UUID) uuid.UUID {
-	t.Helper()
-	job, err := f.core.GetWarmupSendJob(ctx, from.String(), f.ws1.String())
-	if err != nil || job.Skip {
-		t.Fatalf("GetWarmupSendJob(%s): job=%+v err=%v", from, job, err)
-	}
-	if out, err := f.core.ClaimWarmupSend(ctx, job); err != nil || out != coreapi.ClaimWon {
-		t.Fatalf("claim: out=%v err=%v, want Won", out, err)
-	}
-	if err := f.core.MarkWarmupSent(ctx, job, "<"+job.SendID+"@acme.test>"); err != nil {
-		t.Fatalf("MarkWarmupSent: %v", err)
-	}
-	id, err := uuid.Parse(job.SendID)
-	if err != nil {
-		t.Fatalf("parse send id: %v", err)
-	}
-	return id
-}
