@@ -304,6 +304,122 @@ func TestConnectSMTP_DuplicateEmailRejected(t *testing.T) {
 	}
 }
 
+// The subtlety this pins: net/mail.ParseAddress SUCCEEDS on "a@ example.com" and
+// reports the address as "a@example.com". Parsing without using the result would
+// therefore accept the input and still store the raw string, whitespace and all —
+// which is the bug, not a fix for it. A whitespace domain in this column has
+// already caused a live defect: the ESP sweep projected the untrimmed domain, the
+// write-back trimmed it, the two keys disagreed, and a legitimate domain was
+// pinned to the wrong ESP.
+func TestConnectSMTP_StoresTheCanonicalAddressNotTheRawInput(t *testing.T) {
+	cases := []struct {
+		name, raw, want string
+	}{
+		{"whitespace inside the domain is dropped", "a@ example.com", "a@example.com"},
+		{"surrounding whitespace is dropped", "  sender@example.com\t", "sender@example.com"},
+		{"a display name is reduced to the address", "Alex <alex@example.com>", "alex@example.com"},
+		{"an already-canonical address is unchanged", "sender@example.com", "sender@example.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+			in := validConnectInput()
+			in.Email = tc.raw
+			m, err := svc.ConnectSMTP(context.Background(), uuid.New(), in)
+			if err != nil {
+				t.Fatalf("ConnectSMTP() error = %v", err)
+			}
+			store.mu.Lock()
+			persisted := store.lastCreate.Email
+			store.mu.Unlock()
+			if persisted != tc.want {
+				t.Errorf("persisted email = %q, want %q", persisted, tc.want)
+			}
+			if m.Email != tc.want {
+				t.Errorf("returned email = %q, want %q", m.Email, tc.want)
+			}
+		})
+	}
+}
+
+func TestConnectSMTP_RejectsAnUnparseableEmail(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"no at sign", "not-an-email"},
+		{"no domain", "a@"},
+		{"no local part", "@example.com"},
+		{"two addresses", "a@example.com, b@example.com"},
+		{"whitespace inside the local part", `"a b"@example.com`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+			workspaceID := uuid.New()
+			in := validConnectInput()
+			in.Email = tc.raw
+
+			_, err := svc.ConnectSMTP(context.Background(), workspaceID, in)
+			if !errors.Is(err, ErrValidation) {
+				t.Fatalf("ConnectSMTP() error = %v, want ErrValidation", err)
+			}
+			all, err := store.List(context.Background(), workspaceID)
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(all) != 0 {
+				t.Fatalf("len(all) = %d, want 0 (a rejected address must persist nothing)", len(all))
+			}
+		})
+	}
+}
+
+// The usernames default to the mailbox address and are the credentials SMTP AUTH
+// and IMAP LOGIN actually present, so they must be defaulted from the CANONICAL
+// address — defaulting first and canonicalizing after would log in as
+// "a@ example.com" while the row says "a@example.com".
+func TestConnectSMTP_DefaultsUsernamesToTheCanonicalAddress(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+	in := validConnectInput()
+	in.Email = "a@ example.com"
+
+	if _, err := svc.ConnectSMTP(context.Background(), uuid.New(), in); err != nil {
+		t.Fatalf("ConnectSMTP() error = %v", err)
+	}
+
+	store.mu.Lock()
+	got := store.lastCreate
+	store.mu.Unlock()
+	if got.SmtpUsername != "a@example.com" {
+		t.Errorf("smtp_username = %q, want the canonical address", got.SmtpUsername)
+	}
+	if got.ImapUsername != "a@example.com" {
+		t.Errorf("imap_username = %q, want the canonical address", got.ImapUsername)
+	}
+}
+
+// Dedupe must see the canonical form, or two spellings of one address both get in
+// and the workspace sends twice from the same mailbox.
+func TestConnectSMTP_DedupesOnTheCanonicalAddress(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)
+	workspaceID := uuid.New()
+
+	in := validConnectInput()
+	in.Email = "a@example.com"
+	if _, err := svc.ConnectSMTP(context.Background(), workspaceID, in); err != nil {
+		t.Fatalf("first ConnectSMTP() error = %v", err)
+	}
+
+	in.Email = "a@ example.com"
+	if _, err := svc.ConnectSMTP(context.Background(), workspaceID, in); !errors.Is(err, ErrDuplicateMailbox) {
+		t.Fatalf("second ConnectSMTP() error = %v, want ErrDuplicateMailbox", err)
+	}
+}
+
 func TestPauseThenGetShowsPausedStatus(t *testing.T) {
 	store := newFakeStore()
 	svc := NewService(store, &fakeTester{}, newTestKeyring(t), mail.GoogleOAuth{}, nil, mail.MicrosoftOAuth{}, nil)

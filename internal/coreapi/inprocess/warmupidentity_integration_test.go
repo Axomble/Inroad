@@ -300,3 +300,60 @@ func TestIdentityFactsDoNotCrossWorkspaces(t *testing.T) {
 		t.Error("ws1 cannot see its OWN identity facts — the negative assertion above proves nothing")
 	}
 }
+
+// The observed relay IP reaches the observation, and an untrusted hop does not.
+//
+// This is the persistence half of what makes "these three domains fail through one
+// relay" answerable by name. The extractor's own tests cover hop selection; this
+// covers that the value survives the receipt write, and that a header the receiver
+// did not write records nothing rather than the attacker's chosen address.
+func TestReceiptRecordsTheObservedRelayIP(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sid, recipient := makeWarmupSend(t, ctx, f)
+	if _, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sid, RecipientMailbox: recipient,
+		Placement: placementInbox, SourceFolder: "INBOX", MessageID: "<relay@acme.test>",
+		ObservedRelayIP: "209.85.220.41",
+	}); err != nil {
+		t.Fatalf("record receipt: %v", err)
+	}
+
+	var got string
+	if err := f.raw.QueryRow(ctx,
+		`SELECT observed_relay_ip FROM warmup_observations
+		  WHERE workspace_id = $1 AND kind = 'placement' AND observed_relay_ip <> ''`,
+		f.ws1).Scan(&got); err != nil {
+		t.Fatalf("read observed_relay_ip: %v", err)
+	}
+	if got != "209.85.220.41" {
+		t.Errorf("observed_relay_ip = %q, want the address the receiver saw", got)
+	}
+}
+
+// An empty relay IP is the honest value for a message whose Received chain the
+// receiver did not write, and it must not abort the receipt — the identity columns
+// learned that lesson and this one inherits it.
+func TestReceiptWithNoObservableRelayStillRecordsPlacement(t *testing.T) {
+	ctx, f := setupWarmup(t)
+
+	sid, recipient := makeWarmupSend(t, ctx, f)
+	if _, err := f.core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
+		WorkspaceID: f.ws1.String(), WarmupSendID: sid, RecipientMailbox: recipient,
+		Placement: placementSpam, SourceFolder: "Junk", MessageID: "<norelay@acme.test>",
+		ObservedRelayIP: "",
+	}); err != nil {
+		t.Fatalf("a receipt with no observable relay was refused: %v", err)
+	}
+
+	var placement, ip string
+	if err := f.raw.QueryRow(ctx,
+		`SELECT placement, observed_relay_ip FROM warmup_observations
+		  WHERE workspace_id = $1 AND kind = 'placement'`, f.ws1).Scan(&placement, &ip); err != nil {
+		t.Fatalf("read observation: %v", err)
+	}
+	if placement != placementSpam || ip != "" {
+		t.Errorf("got placement=%q ip=%q, want the spam placement recorded with no relay",
+			placement, ip)
+	}
+}

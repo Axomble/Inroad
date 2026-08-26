@@ -284,6 +284,68 @@ GROUP BY o.destination_esp
 -- unresolved bucket last, which is also the order an operator reads them in.
 ORDER BY o.destination_esp;
 
+-- name: ListWarmupContentVersions :many
+-- One WORKSPACE's placement, split by WHICH LIBRARY CONTENT produced it, over the
+-- trailing 7 days. Separates "this thread template lands in spam" from "this mailbox
+-- is degrading" — until now the same signal, with opposite responses.
+--
+-- Grouped per workspace and NOT per mailbox, which is the opposite choice from
+-- ListWarmupRoutes and is the point: the content library is shared across the whole
+-- pool, so a template's record only becomes readable when every sender that drew it
+-- is counted together. Per mailbox, every cell would be a handful of observations.
+--
+-- Computed at read time, like the route matrix and the tabbed rate, and deliberately
+-- NOT materialized: a second lifecycle to keep in step with the observations is the
+-- "two things that must agree" shape every repeated defect in this subsystem has
+-- taken.
+--
+-- The population is IDENTICAL to the overview rollup's and the route matrix's —
+-- kind='placement', attribution_trusted, inside 7 days — and the counter definitions
+-- are kept textually identical to ListWarmupOverviewRows,
+-- UpsertWarmupSignalSnapshotsForWorkspace and ListWarmupRoutes for the same reason:
+-- a version's counters then sum to the workspace's pooled counters, so the split can
+-- never disagree with the total it came from. Note this read is NOT filtered on
+-- mailbox_id, so unlike ListWarmupRoutes it also includes placements whose sender
+-- mailbox has since been deleted — they are still placements this workspace's content
+-- produced.
+--
+-- Each version carries its OWN sample, and the rate is computed over that count and
+-- never over the workspace's pooled total (warmup.FoldContentVersions). That is the
+-- FIFTH application of this rule here — after bounce populations, tab capability,
+-- per-route and per-observer — and it bites hardest on this axis: splitting one
+-- workspace's window by (template, turn) makes small cells the normal case, so most
+-- versions correctly report no rate at all.
+--
+-- content_version = '' is a real bucket and is returned as one: those are the
+-- observations recorded before this slice, or whose send predates it. Folding them
+-- into a template's rate would attribute unknown content to known content; hiding
+-- them would leave an operator unable to see how much of the window is unattributed.
+--
+-- Nothing GATES on the result (see contentversionfold.go for which calibration
+-- problem applies — the sample is small by construction AND the rate is confounded
+-- with whichever mailboxes happened to draw the template).
+--
+-- Seeks idx_warmup_observations_subject_time (workspace_id, mailbox_id, kind,
+-- observed_at DESC) on its workspace_id prefix only, since this grouping spans every
+-- mailbox. That is the same workspace-wide scan the snapshot refresh already does
+-- each tick, over the same rows, so this axis is deliberately given no index of its
+-- own — an index earns its write cost from a query that needs it, and this one does
+-- not.
+SELECT
+    o.content_version,
+    count(*) FILTER (WHERE o.placement IN ('inbox','tabbed'))::bigint AS inbox_7d,
+    count(*) FILTER (WHERE o.placement = 'spam')::bigint             AS spam_7d
+FROM warmup_observations o
+WHERE o.workspace_id = $1
+  AND o.kind = 'placement'
+  AND o.attribution_trusted
+  AND o.observed_at >= now() - interval '7 days'
+GROUP BY o.content_version
+-- Deterministic so the report and the tests are stable. The unattributed bucket ('')
+-- sorts first, ahead of every real version, which is also where an operator wants to
+-- see how much of the window carries no attribution.
+ORDER BY o.content_version;
+
 -- name: ListWarmupObserverStats :many
 -- Per-OBSERVER placement reporting over the trailing 7 days: how much each mailbox
 -- reported, and how much of that it called spam. This is the input to
@@ -709,12 +771,22 @@ WHERE id = $1 AND workspace_id = $2;
 -- lane or policy may be sitting on the row. A NULL issued_lane /
 -- issued_policy_version is a pre-lease row (written before 000057) and passes:
 -- those sends predate the lease and must keep working.
+--
+-- content_version records WHICH library content this send carried — the identifier
+-- warmup.ContentVersion derives from the (template, turn) the thread's content_key
+-- resolves to. It is written HERE, at the claim, rather than after delivery, for the
+-- same reason the token is: the caller already resolved the content to build the
+-- body, and a row that reaches 'sent' without it would be an observation that can
+-- never be attributed. It is re-stamped on a reclaim alongside the lease, so the row
+-- describes the content THIS attempt is sending; a reclaim only happens on a row
+-- that never delivered, so the value cannot drift from what a receipt will see.
 INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
                           is_reply, token, status, claimed_at,
-                          issued_lane, issued_policy_version, lease_expires_at)
+                          issued_lane, issued_policy_version, lease_expires_at,
+                          content_version)
 SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now(),
        sqlc.arg(issued_lane)::text, sqlc.arg(issued_policy_version)::text,
-       sqlc.arg(lease_expires_at)::timestamptz
+       sqlc.arg(lease_expires_at)::timestamptz, sqlc.arg(content_version)::text
 FROM mailboxes m
 JOIN warmup_participants sender
   ON sender.mailbox_id = m.id AND sender.workspace_id = m.workspace_id
@@ -728,7 +800,8 @@ ON CONFLICT (id) DO UPDATE SET
     -- attempt is acting on, not the one a crashed worker acted on.
     issued_lane = sqlc.arg(issued_lane)::text,
     issued_policy_version = sqlc.arg(issued_policy_version)::text,
-    lease_expires_at = sqlc.arg(lease_expires_at)::timestamptz
+    lease_expires_at = sqlc.arg(lease_expires_at)::timestamptz,
+    content_version = sqlc.arg(content_version)::text
     WHERE warmup_sends.workspace_id = $2
       AND (warmup_sends.status = 'queued'
         OR (warmup_sends.status = 'sending'
@@ -890,10 +963,21 @@ RETURNING id, received_at;
 -- An empty value takes the 'unknown' default on the same grounds as the verdicts
 -- above — a caller that predates routes must not hit the 000062 CHECK and abort a
 -- receipt over a column design §7 lets nothing read.
+--
+-- content_version is the ONE column here that comes from neither the caller nor a
+-- default: it is copied off the send row (s.content_version, written at claim time by
+-- ClaimWarmupSend) inside this same statement. Deliberately not a parameter — the
+-- poller that reads the message has no idea which library template produced it, and
+-- adding an argument nobody upstream can compute would invite a wrong value into a
+-- GROUP BY key. Reading it here also means it cannot disagree with the send, and that
+-- it survives the send being deleted: 000054's FK nulls warmup_send_id rather than
+-- refusing the delete, so an aggregation that JOINed for this value would drop
+-- exactly those rows and stop summing to the pooled total.
 INSERT INTO warmup_observations (
     workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
     kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at,
-    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result, destination_esp
+    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result, destination_esp, observed_relay_ip,
+    content_version
 )
 SELECT s.workspace_id, s.from_mailbox, sqlc.arg(recipient_mailbox)::uuid, s.id,
        'placement', sqlc.arg(placement)::text, sqlc.arg(tab_capable)::boolean,
@@ -903,7 +987,9 @@ SELECT s.workspace_id, s.from_mailbox, sqlc.arg(recipient_mailbox)::uuid, s.id,
        COALESCE(NULLIF(sqlc.arg(spf_result)::text, ''), 'unknown'),
        COALESCE(NULLIF(sqlc.arg(dkim_result)::text, ''), 'unknown'),
        COALESCE(NULLIF(sqlc.arg(dmarc_result)::text, ''), 'unknown'),
-       COALESCE(NULLIF(sqlc.arg(destination_esp)::text, ''), 'unknown')
+       COALESCE(NULLIF(sqlc.arg(destination_esp)::text, ''), 'unknown'),
+       sqlc.arg(observed_relay_ip)::text,
+       s.content_version
 FROM warmup_sends s
 WHERE s.id = sqlc.arg(warmup_send_id)
   AND s.workspace_id = sqlc.arg(workspace_id)

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	netmail "net/mail" // aliased: platform/mail below owns the unqualified name here
+	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -69,9 +72,6 @@ type ConnectInput struct {
 }
 
 func (in ConnectInput) validate() error {
-	if in.Email == "" {
-		return fmt.Errorf("%w: email is required", ErrValidation)
-	}
 	if in.SMTPHost == "" {
 		return fmt.Errorf("%w: smtp_host is required", ErrValidation)
 	}
@@ -90,6 +90,34 @@ func (in ConnectInput) validate() error {
 	return nil
 }
 
+// canonicalEmail parses a submitted mailbox address and returns it in the form
+// that must be STORED.
+//
+// Returning the parsed address rather than the caller's string is the whole
+// point. net/mail.ParseAddress SUCCEEDS on "a@ example.com" and reports the
+// address as "a@example.com", so a parse whose result is discarded validates the
+// input and still writes the whitespace to mailboxes.email. That row has already
+// caused a live defect: the ESP sweep projected the untrimmed domain while the
+// write-back trimmed it, the two keys disagreed, and a legitimate domain was
+// pinned to the wrong ESP.
+//
+// The address is also rejected when the canonical form still contains
+// whitespace. ParseAddress unquotes a quoted local part, so `"a b"@example.com`
+// canonicalizes to `a b@example.com` -- a string that no longer parses as an
+// address at all, which would put this column back in the state the trim/no-trim
+// disagreement came from. Unquoted addresses cannot contain whitespace, so
+// nothing usable is refused.
+func canonicalEmail(raw string) (string, error) {
+	addr, err := netmail.ParseAddress(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("%w: email is not a valid address: %w", ErrValidation, err)
+	}
+	if strings.ContainsFunc(addr.Address, unicode.IsSpace) {
+		return "", fmt.Errorf("%w: email contains whitespace", ErrValidation)
+	}
+	return addr.Address, nil
+}
+
 // Default policy applied to every newly connected mailbox (PRD 9.1.3 warm-up ramp).
 const (
 	defaultDailyCap           = int32(50)
@@ -102,6 +130,14 @@ const (
 // against real SMTP/IMAP servers, seals the secret, and persists the
 // mailbox. Nothing is persisted if the connection test fails.
 func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in ConnectInput) (MailboxSafe, error) {
+	// Before anything reads in.Email: the username defaults below, the dedupe
+	// check, and the persisted row must all see the same canonical address.
+	email, err := canonicalEmail(in.Email)
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	in.Email = email
+
 	if in.SMTPUsername == "" {
 		in.SMTPUsername = in.Email
 	}

@@ -73,6 +73,17 @@ func (s *Service) completeOAuth(
 	if email == "" {
 		return MailboxSafe{}, fmt.Errorf("%w: no email in userinfo", ErrValidation)
 	}
+	// Canonicalized through the SAME function the SMTP path uses. This was the one
+	// remaining way into mailboxes.email with a different normalization rule, and the
+	// column already produced a live defect from exactly that: the ESP sweep projected
+	// an untrimmed domain while the write-back trimmed it, and the two keys disagreeing
+	// pinned a real domain to the wrong provider. A provider's userinfo is unlikely to
+	// return a malformed address, but "unlikely" is not the property the dedupe check
+	// and every downstream domain derivation below depend on.
+	email, err = canonicalEmail(email)
+	if err != nil {
+		return MailboxSafe{}, err
+	}
 
 	count, err := s.store.CountByEmail(ctx, workspaceID, email)
 	if err != nil {

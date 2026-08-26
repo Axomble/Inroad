@@ -423,3 +423,45 @@ func TestMicrosoftCallbackAbsentStateNoMailbox(t *testing.T) {
 		t.Fatal("no mailbox should be created without a state")
 	}
 }
+
+// The OAuth path canonicalizes the provider-supplied address through the SAME
+// function the SMTP path uses.
+//
+// It was the last way into mailboxes.email with a different normalization rule, and
+// that column has already produced a live defect from exactly that shape: the ESP
+// sweep projected an untrimmed domain while the write-back trimmed it, and the
+// disagreement pinned a real domain to the wrong provider. A provider's userinfo is
+// unlikely to return a malformed address, but "unlikely" is not the property the
+// dedupe check and every downstream domain derivation depend on.
+//
+// Driven through the exchanger seam rather than by calling canonicalEmail directly —
+// a test that called the helper would pass whether or not the OAuth path invoked it,
+// which is how the first draft of this test proved nothing.
+func TestCompleteGoogleOAuthStoresTheCanonicalEmail(t *testing.T) {
+	store := newFakeStore()
+	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b", RedirectURL: "http://x/cb"}
+	// A display-name form with a space inside the domain: ParseAddress accepts it and
+	// returns the canonical address, so discarding the parse result would store the
+	// raw string and reintroduce the whitespace-domain defect.
+	exch := fakeExchanger{tok: validToken(), email: " Rep <rep@ example.com> "}
+	svc := NewService(store, nil, newTestKeyring(t), oauth, exch, mail.MicrosoftOAuth{}, nil)
+
+	m, err := svc.CompleteGoogleOAuth(context.Background(), "code", uuid.New())
+	if err != nil {
+		t.Fatalf("CompleteGoogleOAuth: %v", err)
+	}
+	if m.Email != "rep@example.com" {
+		t.Errorf("stored email = %q, want the canonical %q", m.Email, "rep@example.com")
+	}
+}
+
+// And a provider address that cannot be canonicalized is refused rather than stored.
+func TestCompleteGoogleOAuthRefusesAnUnparseableProviderEmail(t *testing.T) {
+	oauth := mail.GoogleOAuth{ClientID: "a", ClientSecret: "b", RedirectURL: "http://x/cb"}
+	exch := fakeExchanger{tok: validToken(), email: "not-an-address"}
+	svc := NewService(newFakeStore(), nil, newTestKeyring(t), oauth, exch, mail.MicrosoftOAuth{}, nil)
+
+	if _, err := svc.CompleteGoogleOAuth(context.Background(), "code", uuid.New()); !errors.Is(err, ErrValidation) {
+		t.Errorf("CompleteGoogleOAuth with an unparseable provider email: err = %v, want ErrValidation", err)
+	}
+}

@@ -1109,6 +1109,8 @@ type WarmupObservation struct {
 	DkimResult         string             `json:"dkim_result"`
 	DmarcResult        string             `json:"dmarc_result"`
 	DestinationEsp     string             `json:"destination_esp"`
+	ContentVersion     string             `json:"content_version"`
+	ObservedRelayIp    string             `json:"observed_relay_ip"`
 }
 
 type WarmupParticipant struct {
@@ -1160,6 +1162,7 @@ type WarmupSend struct {
 	LeaseExpiresAt      pgtype.Timestamptz `json:"lease_expires_at"`
 	IssuedConstraints   []byte             `json:"issued_constraints"`
 	PairKey             *string            `json:"pair_key"`
+	ContentVersion      string             `json:"content_version"`
 }
 
 type WarmupSignalSnapshot struct {
