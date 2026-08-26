@@ -19,6 +19,13 @@ type fakeStore struct {
 	// query param through to the Store without needing a real Postgres LIKE
 	// match to prove it.
 	lastListFilter inbox.ListFilter
+	// lastOverviewWindow records the window the most recent GetOverview call
+	// received — see GetOverview's own comment.
+	lastOverviewWindow inbox.OverviewWindow
+	// sentAt stands in for the `sends` table's newest sent_at per thread — the
+	// outbound leg the real schema synthesizes at read time rather than storing
+	// in inbox_messages. See awaitingReply.
+	sentAt map[uuid.UUID]time.Time
 	// setUnreadErr, when non-nil, makes SetUnread fail regardless of the
 	// thread's real state — Reply's tests use this to pin the "enqueue
 	// succeeded, mark-read failed" behavior without needing a way to make a
@@ -27,7 +34,11 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{threads: map[uuid.UUID]inbox.Thread{}, messages: map[uuid.UUID][]inbox.Message{}}
+	return &fakeStore{
+		threads:  map[uuid.UUID]inbox.Thread{},
+		messages: map[uuid.UUID][]inbox.Message{},
+		sentAt:   map[uuid.UUID]time.Time{},
+	}
 }
 
 func (f *fakeStore) UpsertThread(_ context.Context, in inbox.UpsertThreadInput) (inbox.Thread, error) {
@@ -82,6 +93,103 @@ func (f *fakeStore) ListThreads(_ context.Context, ws uuid.UUID, filter inbox.Li
 		}
 	}
 	return inbox.ThreadPage{Items: items}, nil
+}
+
+// GetOverview counts the fake's own threads rather than returning a canned
+// struct, so a test asserting a count is asserting real aggregation behavior
+// (including the workspace filter and the window boundaries) and not just
+// that the value was plumbed through.
+//
+// lastOverviewWindow records the window it was called with, so a handler test
+// can prove ?tz_offset= reached the store without needing a real clock.
+func (f *fakeStore) GetOverview(_ context.Context, ws uuid.UUID, window inbox.OverviewWindow) (inbox.Overview, error) {
+	f.lastOverviewWindow = window
+	var out inbox.Overview
+	perMailbox := map[uuid.UUID]*inbox.MailboxCount{}
+	perClass := map[string]*inbox.ReplyClassCount{}
+
+	for _, t := range f.threads {
+		if t.WorkspaceID != ws {
+			continue
+		}
+		out.Total++
+		if t.Unread {
+			out.Unread++
+		}
+		if !t.LastMessageAt.Before(window.TodayStart) {
+			out.Today++
+		}
+		if !t.LastMessageAt.Before(window.WeekStart) {
+			out.ThisWeek++
+		}
+		if f.awaitingReply(t) {
+			out.AwaitingReply++
+		}
+
+		m, ok := perMailbox[t.MailboxID]
+		if !ok {
+			m = &inbox.MailboxCount{MailboxID: t.MailboxID}
+			perMailbox[t.MailboxID] = m
+		}
+		m.Total++
+		if t.Unread {
+			m.Unread++
+		}
+
+		if t.LastReplyClass == "" {
+			continue // '' is the absence of a class, never a filterable one
+		}
+		c, ok := perClass[t.LastReplyClass]
+		if !ok {
+			c = &inbox.ReplyClassCount{Key: t.LastReplyClass}
+			perClass[t.LastReplyClass] = c
+		}
+		c.Total++
+		if t.Unread {
+			c.Unread++
+		}
+	}
+
+	for _, m := range perMailbox {
+		out.ByMailbox = append(out.ByMailbox, *m)
+	}
+	for _, c := range perClass {
+		out.ByReplyClass = append(out.ByReplyClass, *c)
+	}
+	return out, nil
+}
+
+// awaitingReply mirrors the inbox_thread_awaiting_reply SQL function: the
+// contact spoke last, counting BOTH outbound legs — the manual replies stored
+// in inbox_messages and the campaign sends that live in `sends` and are only
+// synthesized into a thread at read time. Modelling just the stored leg here
+// would make the fake agree with a bug rather than with the read model, so a
+// test could never catch one.
+//
+// sentAt holds the fake's stand-in for the `sends` leg, keyed by thread.
+func (f *fakeStore) awaitingReply(t inbox.Thread) bool {
+	var newestInbound, newestOutbound time.Time
+	for _, m := range f.messages[t.ID] {
+		switch m.Direction {
+		case "inbound":
+			if m.OccurredAt.After(newestInbound) {
+				newestInbound = m.OccurredAt
+			}
+		case "outbound":
+			if m.OccurredAt.After(newestOutbound) {
+				newestOutbound = m.OccurredAt
+			}
+		}
+	}
+	// No inbound message at all: the contact has not spoken, so nothing is
+	// awaiting us — the same answer the SQL's NULL comparison yields.
+	if newestInbound.IsZero() {
+		return false
+	}
+	if sent, ok := f.sentAt[t.ID]; ok && sent.After(newestOutbound) {
+		newestOutbound = sent
+	}
+	return newestInbound.After(newestOutbound)
 }
 
 func (f *fakeStore) GetThread(_ context.Context, ws, id uuid.UUID) (inbox.ThreadDetail, error) {

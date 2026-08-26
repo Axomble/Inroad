@@ -54,6 +54,22 @@ WHERE t.workspace_id = @workspace_id
   AND (sqlc.narg('query')::text IS NULL
        OR t.subject ILIKE '%' || sqlc.narg('query')::text || '%'
        OR c.email ILIKE '%' || sqlc.narg('query')::text || '%')
+  -- The rail's virtual scopes. Each is written so an unscoped caller's
+  -- second operand is never EVALUATED per row (`NOT false` is TRUE, and
+  -- `TRUE OR x` needs no x), which is what keeps the awaiting-reply
+  -- subqueries off the unscoped path. The RESULT SET for a caller passing
+  -- none of these is provably identical to the query before they existed;
+  -- the plan may still mention the sublinks, since Postgres does not define
+  -- OR as short-circuiting — run EXPLAIN, don't take this comment's word.
+  AND (NOT @unread_only::boolean OR t.unread)
+  AND (sqlc.narg('since_last_message_at')::timestamptz IS NULL
+       OR t.last_message_at >= sqlc.narg('since_last_message_at')::timestamptz)
+  -- "Waiting on us" — the same rule the rail's counter uses, shared as one
+  -- function so a count can never disagree with the list it links to. See
+  -- inbox_thread_awaiting_reply's own comment for why this must span both the
+  -- stored and the synthesized outbound legs.
+  AND (NOT @awaiting_reply_only::boolean
+       OR inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))
 ORDER BY t.last_message_at DESC, t.id DESC
 LIMIT @page_limit;
 
@@ -109,3 +125,56 @@ LEFT JOIN mailboxes m ON m.id = s.mailbox_id AND m.workspace_id = s.workspace_id
 WHERE s.workspace_id = @workspace_id AND s.campaign_id = @campaign_id AND s.contact_id = @contact_id
   AND s.sent_at IS NOT NULL
 ORDER BY s.step_order;
+
+-- name: GetInboxOverviewTotals :one
+-- The scope rail's headline counters, computed by Postgres over the whole
+-- workspace rather than sampled client-side from one page of threads.
+--
+-- Every counter is a FILTER aggregate over the SAME single scan, so the rail
+-- costs one query rather than one per scope. All five are cast explicitly:
+-- COUNT(*) is bigint, but a bare COALESCE/FILTER aggregate makes sqlc emit
+-- interface{} while still compiling — the cast is what pins the generated
+-- field to int64.
+--
+-- The window boundaries are computed from a caller-supplied @now rather than
+-- Postgres' own now(): "today" is a question about the VIEWER's day, and the
+-- server has no business assuming its own timezone is theirs. The caller
+-- passes the start of the viewer's today and of their week, already resolved.
+--
+-- awaiting_reply counts threads where the CONTACT spoke last, so the thread
+-- is waiting on us. See the awaiting_reply_only predicate on
+-- ListInboxThreads for why this must consider the sends table and not just
+-- inbox_messages; the two definitions are deliberately identical, so a count
+-- here always matches the list that scope serves.
+SELECT
+    COUNT(*)::bigint AS total,
+    COUNT(*) FILTER (WHERE t.unread)::bigint AS unread,
+    COUNT(*) FILTER (WHERE t.last_message_at >= @today_start::timestamptz)::bigint AS today,
+    COUNT(*) FILTER (WHERE t.last_message_at >= @week_start::timestamptz)::bigint AS this_week,
+    COUNT(*) FILTER (WHERE inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))::bigint AS awaiting_reply
+FROM inbox_threads t
+WHERE t.workspace_id = @workspace_id;
+
+-- name: ListInboxOverviewByMailbox :many
+-- Per-mailbox totals for the rail, one row per mailbox that actually has a
+-- thread. A mailbox with no threads is absent rather than reported as zero:
+-- the rail renders one row per CONNECTED mailbox (which it already fetches
+-- from /mailboxes) and looks its count up here, so an empty mailbox reads as
+-- 0 without this query having to know the mailbox list.
+SELECT mailbox_id,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE unread)::bigint AS unread
+FROM inbox_threads
+WHERE workspace_id = @workspace_id
+GROUP BY mailbox_id;
+
+-- name: ListInboxOverviewByReplyClass :many
+-- Per-reply-class totals, for the rail's label scopes. Threads whose
+-- last_reply_class is '' (never classified) are excluded — '' is the absence
+-- of a class, not a class to offer as a filter.
+SELECT last_reply_class AS key,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE unread)::bigint AS unread
+FROM inbox_threads
+WHERE workspace_id = @workspace_id AND last_reply_class <> ''
+GROUP BY last_reply_class;

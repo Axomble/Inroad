@@ -32,6 +32,63 @@ func (q *Queries) BumpInboxThreadLastMessageAt(ctx context.Context, arg BumpInbo
 	return err
 }
 
+const getInboxOverviewTotals = `-- name: GetInboxOverviewTotals :one
+SELECT
+    COUNT(*)::bigint AS total,
+    COUNT(*) FILTER (WHERE t.unread)::bigint AS unread,
+    COUNT(*) FILTER (WHERE t.last_message_at >= $1::timestamptz)::bigint AS today,
+    COUNT(*) FILTER (WHERE t.last_message_at >= $2::timestamptz)::bigint AS this_week,
+    COUNT(*) FILTER (WHERE inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))::bigint AS awaiting_reply
+FROM inbox_threads t
+WHERE t.workspace_id = $3
+`
+
+type GetInboxOverviewTotalsParams struct {
+	TodayStart  pgtype.Timestamptz `json:"today_start"`
+	WeekStart   pgtype.Timestamptz `json:"week_start"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+}
+
+type GetInboxOverviewTotalsRow struct {
+	Total         int64 `json:"total"`
+	Unread        int64 `json:"unread"`
+	Today         int64 `json:"today"`
+	ThisWeek      int64 `json:"this_week"`
+	AwaitingReply int64 `json:"awaiting_reply"`
+}
+
+// The scope rail's headline counters, computed by Postgres over the whole
+// workspace rather than sampled client-side from one page of threads.
+//
+// Every counter is a FILTER aggregate over the SAME single scan, so the rail
+// costs one query rather than one per scope. All five are cast explicitly:
+// COUNT(*) is bigint, but a bare COALESCE/FILTER aggregate makes sqlc emit
+// interface{} while still compiling — the cast is what pins the generated
+// field to int64.
+//
+// The window boundaries are computed from a caller-supplied @now rather than
+// Postgres' own now(): "today" is a question about the VIEWER's day, and the
+// server has no business assuming its own timezone is theirs. The caller
+// passes the start of the viewer's today and of their week, already resolved.
+//
+// awaiting_reply counts threads where the CONTACT spoke last, so the thread
+// is waiting on us. See the awaiting_reply_only predicate on
+// ListInboxThreads for why this must consider the sends table and not just
+// inbox_messages; the two definitions are deliberately identical, so a count
+// here always matches the list that scope serves.
+func (q *Queries) GetInboxOverviewTotals(ctx context.Context, arg GetInboxOverviewTotalsParams) (GetInboxOverviewTotalsRow, error) {
+	row := q.db.QueryRow(ctx, getInboxOverviewTotals, arg.TodayStart, arg.WeekStart, arg.WorkspaceID)
+	var i GetInboxOverviewTotalsRow
+	err := row.Scan(
+		&i.Total,
+		&i.Unread,
+		&i.Today,
+		&i.ThisWeek,
+		&i.AwaitingReply,
+	)
+	return i, err
+}
+
 const getInboxThread = `-- name: GetInboxThread :one
 SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
        COALESCE(c.email, '') AS contact_email,
@@ -183,6 +240,84 @@ func (q *Queries) ListInboxMessagesByThread(ctx context.Context, arg ListInboxMe
 	return items, nil
 }
 
+const listInboxOverviewByMailbox = `-- name: ListInboxOverviewByMailbox :many
+SELECT mailbox_id,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE unread)::bigint AS unread
+FROM inbox_threads
+WHERE workspace_id = $1
+GROUP BY mailbox_id
+`
+
+type ListInboxOverviewByMailboxRow struct {
+	MailboxID uuid.UUID `json:"mailbox_id"`
+	Total     int64     `json:"total"`
+	Unread    int64     `json:"unread"`
+}
+
+// Per-mailbox totals for the rail, one row per mailbox that actually has a
+// thread. A mailbox with no threads is absent rather than reported as zero:
+// the rail renders one row per CONNECTED mailbox (which it already fetches
+// from /mailboxes) and looks its count up here, so an empty mailbox reads as
+// 0 without this query having to know the mailbox list.
+func (q *Queries) ListInboxOverviewByMailbox(ctx context.Context, workspaceID uuid.UUID) ([]ListInboxOverviewByMailboxRow, error) {
+	rows, err := q.db.Query(ctx, listInboxOverviewByMailbox, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxOverviewByMailboxRow
+	for rows.Next() {
+		var i ListInboxOverviewByMailboxRow
+		if err := rows.Scan(&i.MailboxID, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInboxOverviewByReplyClass = `-- name: ListInboxOverviewByReplyClass :many
+SELECT last_reply_class AS key,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE unread)::bigint AS unread
+FROM inbox_threads
+WHERE workspace_id = $1 AND last_reply_class <> ''
+GROUP BY last_reply_class
+`
+
+type ListInboxOverviewByReplyClassRow struct {
+	Key    string `json:"key"`
+	Total  int64  `json:"total"`
+	Unread int64  `json:"unread"`
+}
+
+// Per-reply-class totals, for the rail's label scopes. Threads whose
+// last_reply_class is ” (never classified) are excluded — ” is the absence
+// of a class, not a class to offer as a filter.
+func (q *Queries) ListInboxOverviewByReplyClass(ctx context.Context, workspaceID uuid.UUID) ([]ListInboxOverviewByReplyClassRow, error) {
+	rows, err := q.db.Query(ctx, listInboxOverviewByReplyClass, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxOverviewByReplyClassRow
+	for rows.Next() {
+		var i ListInboxOverviewByReplyClassRow
+		if err := rows.Scan(&i.Key, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInboxThreads = `-- name: ListInboxThreads :many
 SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
        COALESCE(c.email, '') AS contact_email,
@@ -201,8 +336,24 @@ WHERE t.workspace_id = $1
   AND ($6::text IS NULL
        OR t.subject ILIKE '%' || $6::text || '%'
        OR c.email ILIKE '%' || $6::text || '%')
+  -- The rail's virtual scopes. Each is written so an unscoped caller's
+  -- second operand is never EVALUATED per row (` + "`" + `NOT false` + "`" + ` is TRUE, and
+  -- ` + "`" + `TRUE OR x` + "`" + ` needs no x), which is what keeps the awaiting-reply
+  -- subqueries off the unscoped path. The RESULT SET for a caller passing
+  -- none of these is provably identical to the query before they existed;
+  -- the plan may still mention the sublinks, since Postgres does not define
+  -- OR as short-circuiting — run EXPLAIN, don't take this comment's word.
+  AND (NOT $7::boolean OR t.unread)
+  AND ($8::timestamptz IS NULL
+       OR t.last_message_at >= $8::timestamptz)
+  -- "Waiting on us" — the same rule the rail's counter uses, shared as one
+  -- function so a count can never disagree with the list it links to. See
+  -- inbox_thread_awaiting_reply's own comment for why this must span both the
+  -- stored and the synthesized outbound legs.
+  AND (NOT $9::boolean
+       OR inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))
 ORDER BY t.last_message_at DESC, t.id DESC
-LIMIT $7
+LIMIT $10
 `
 
 type ListInboxThreadsParams struct {
@@ -212,6 +363,9 @@ type ListInboxThreadsParams struct {
 	BeforeLastMessageAt pgtype.Timestamptz `json:"before_last_message_at"`
 	BeforeID            pgtype.UUID        `json:"before_id"`
 	Query               *string            `json:"query"`
+	UnreadOnly          bool               `json:"unread_only"`
+	SinceLastMessageAt  pgtype.Timestamptz `json:"since_last_message_at"`
+	AwaitingReplyOnly   bool               `json:"awaiting_reply_only"`
 	PageLimit           int32              `json:"page_limit"`
 }
 
@@ -259,6 +413,9 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 		arg.BeforeLastMessageAt,
 		arg.BeforeID,
 		arg.Query,
+		arg.UnreadOnly,
+		arg.SinceLastMessageAt,
+		arg.AwaitingReplyOnly,
 		arg.PageLimit,
 	)
 	if err != nil {

@@ -2933,13 +2933,65 @@ paths:
           required: false
           description: Page size. Defaults to 25, capped at 200 (a larger request is clamped, not rejected).
           schema: { type: integer, minimum: 1 }
+        - name: scope
+          in: query
+          required: false
+          description: >-
+            One of the inbox's virtual folders. `unread` restricts to unread
+            threads; `awaiting_reply` to threads whose newest message is inbound
+            (the contact spoke last); `today` and `this_week` to threads whose
+            last_message_at falls in the viewer's current day or ISO week
+            (Monday-based), resolved against tz_offset. Omitted or `all` means
+            the whole inbox. An unrecognised value is a 400, never a silently
+            unscoped page. Combines freely with the keyset cursor: the scope
+            bounds the result set, the cursor names a position within it.
+          schema:
+            type: string
+            enum: [all, unread, today, this_week, awaiting_reply]
+        - name: tz_offset
+          in: query
+          required: false
+          description: >-
+            The viewer's UTC offset in minutes East of UTC, as JavaScript's
+            `-new Date().getTimezoneOffset()` reports it. Only read when scope is
+            `today` or `this_week`, whose boundaries depend on the viewer's own
+            day rather than the server's. Defaults to 0 (UTC) — never the
+            server's local zone, which carries no information about the viewer.
+          schema: { type: integer, minimum: -720, maximum: 840 }
       responses:
         '200':
           description: Threads in the workspace
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InboxThreadPage' }
-        '400': { description: "Malformed filter (bad UUID/timestamp, or a half-set keyset cursor)" }
+        '400': { description: "Malformed filter (bad UUID/timestamp, a half-set keyset cursor, an unknown scope, or an out-of-range tz_offset)" }
+        '401': { description: Unauthorized }
+  /inbox/overview:
+    get:
+      operationId: getInboxOverview
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Thread counts for the inbox's scope rail, counted by the database over
+        the whole workspace — not sampled from a page of threads. Each counter
+        corresponds to a `scope` value accepted by listInboxThreads, so a count
+        and the list it links to always agree.
+      parameters:
+        - name: tz_offset
+          in: query
+          required: false
+          description: >-
+            The viewer's UTC offset in minutes East of UTC (see the identical
+            parameter on listInboxThreads). Determines the `today` and
+            `this_week` boundaries. Defaults to 0 (UTC).
+          schema: { type: integer, minimum: -720, maximum: 840 }
+      responses:
+        '200':
+          description: Scope counts for the workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxOverview' }
+        '400': { description: "tz_offset out of range or not an integer" }
         '401': { description: Unauthorized }
   /inbox/threads/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -5676,6 +5728,54 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxMailboxCount:
+      type: object
+      required: [mailbox_id, total, unread]
+      description: >-
+        One mailbox's thread counts. Only mailboxes that actually hold a thread
+        appear; a connected mailbox with none is absent rather than present with
+        zeroes, so clients should look counts up by id and default to 0.
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        total: { type: integer, format: int64 }
+        unread: { type: integer, format: int64 }
+    InboxReplyClassCount:
+      type: object
+      required: [key, total, unread]
+      description: >-
+        One reply classification's thread counts. `key` is the raw
+        last_reply_class value — resolve it to a display label against the
+        workspace's reply-label taxonomy (listReplyLabels), degrading to the raw
+        key when no label claims it. Threads never classified (an empty key) are
+        excluded entirely.
+      properties:
+        key: { type: string }
+        total: { type: integer, format: int64 }
+        unread: { type: integer, format: int64 }
+    InboxOverview:
+      type: object
+      required: [total, unread, today, this_week, awaiting_reply, by_mailbox, by_reply_class]
+      description: >-
+        Scope counts for the inbox rail. Every counter is over the whole
+        workspace, and each corresponds to a `scope` accepted by
+        listInboxThreads.
+      properties:
+        total: { type: integer, format: int64 }
+        unread: { type: integer, format: int64 }
+        today:
+          type: integer
+          format: int64
+          description: Threads whose last message landed in the viewer's current day (see tz_offset).
+        this_week:
+          type: integer
+          format: int64
+          description: Threads whose last message landed in the viewer's current ISO week, starting Monday.
+        awaiting_reply:
+          type: integer
+          format: int64
+          description: Threads whose newest message is inbound — the contact spoke last, so it is waiting on us.
+        by_mailbox: { type: array, items: { $ref: '#/components/schemas/InboxMailboxCount' } }
+        by_reply_class: { type: array, items: { $ref: '#/components/schemas/InboxReplyClassCount' } }
     InboxMessage:
       type: object
       required: [direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at]

@@ -1,22 +1,24 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ListSearchInput } from '@/components/shared/list-search-input'
 import { SortMenu } from '@/components/shared/sort-menu'
-import { Page, PageTopbar, SectionBar, PageBody, EmptyBlock, ListHeader, ListHeaderCell, HintBar } from '@/components/layout/page'
-import { httpStatus } from '@/lib/rtk-error'
+import { Page, PageTopbar, SectionBar, PageBody, EmptyBlock, HintBar } from '@/components/layout/page'
 import { useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-nav'
+import { useMediaQuery } from '@/hooks/use-media-query'
 import { useListMailboxesQuery } from '@/store/api'
 // Cross-feature query-hook imports are allowed for read-only reference data
 // (see features/campaigns/campaign-form.tsx). Cross-feature UI imports remain
 // forbidden.
 import { useListReplyLabelsQuery } from '@/features/reply-labels/api'
-import { useListInboxThreadsQuery, type InboxThreadSummary } from './api'
+import { useGetInboxOverviewQuery, useListInboxThreadsQuery, type InboxThreadSummary } from './api'
 import { ThreadList } from './thread-list'
+import { ScopeRail } from './scope-rail'
+import { ThreadReader, ThreadReaderHeading } from './thread-reader'
 import {
   parseInboxSearch,
   encodeCursor,
@@ -25,7 +27,11 @@ import {
   popCursor,
   isStaleCursorError,
   inboxErrorMessage,
+  timezoneOffsetMinutes,
+  scopeTimezoneOffset,
+  SCOPE_LABELS,
   type CursorStack,
+  type InboxScope,
 } from './inbox-search'
 
 const ALL_REPLIES_FILTER = { id: '', label: 'All replies' }
@@ -33,12 +39,15 @@ const ALL_REPLIES_FILTER = { id: '', label: 'All replies' }
 const PAGE_SIZE = 25
 
 /**
- * Cap for the rail's own unfiltered fetch — the API's own maximum (200), so
- * the per-mailbox counts reflect as much of the workspace as one request can
- * without a dedicated counts endpoint. Real numbers from a real response, not
- * invented — just not a guaranteed exhaustive total on a very large inbox.
+ * The breakpoint at which the reader becomes a third pane instead of its own
+ * route. Below it there is no room for three columns, so opening a thread
+ * navigates to `/app/inbox/$threadId` as it always has.
+ *
+ * Kept in sync with the `lg:` variants in ScopeRail and the shell below —
+ * Tailwind's `lg` is 64rem, and matchMedia needs the same number in a form it
+ * can parse.
  */
-const RAIL_SAMPLE_SIZE = 200
+const THREE_PANE_QUERY = '(min-width: 64rem)'
 
 export function InboxPage() {
   const search = parseInboxSearch(useSearch({ strict: false }))
@@ -46,10 +55,19 @@ export function InboxPage() {
   const navigate = useNavigate()
   const selectedMailbox = search.mailbox ?? ''
   const replyClass = search.class ?? ''
+  const scope: InboxScope = search.scope ?? 'all'
+  const threePane = useMediaQuery(THREE_PANE_QUERY)
 
   const { data: mailboxes, error: mailboxesError } = useListMailboxesQuery()
   const mailboxesById = useMemo(() => new Map((mailboxes ?? []).map((m) => [m.id ?? '', m])), [mailboxes])
-  const mailboxLabel = (id: string) => mailboxesById.get(id)?.email || id
+  const mailboxLabel = useCallback(
+    (id: string) => mailboxesById.get(id)?.email || id,
+    [mailboxesById],
+  )
+  const mailboxOptions = useMemo(
+    () => (mailboxes ?? []).map((m) => ({ id: m.id ?? '', label: m.email ?? 'Mailbox' })),
+    [mailboxes],
+  )
 
   // The filter's options are the workspace's own reply-label taxonomy (each
   // filter value is the label's raw `key`, the same string stored on
@@ -62,20 +80,13 @@ export function InboxPage() {
     [replyLabelsData],
   )
 
-  // Unfiltered by mailbox/class on purpose: the scope rail's job is "how many
-  // threads live in each mailbox", a question the currently-selected
-  // reply-class filter shouldn't change.
-  const { data: railData } = useListInboxThreadsQuery({ limit: RAIL_SAMPLE_SIZE }, { refetchOnMountOrArgChange: true })
-  // `railData?.items ?? []` would hand `useMemo` a fresh array literal on every
-  // render for as long as `railData` is undefined — memoize the fallback too,
-  // not just the derived Map, so the dependency is actually stable.
-  const allThreads = useMemo(() => railData?.items ?? [], [railData])
-  const totalCount = allThreads.length
-  const countByMailbox = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const t of allThreads) counts.set(t.mailbox_id, (counts.get(t.mailbox_id) ?? 0) + 1)
-    return counts
-  }, [allThreads])
+  // Real counts for the rail, counted by the database over the whole workspace
+  // — this replaces counting one 200-row page client-side, which was honest
+  // about being a sample but wrong on any inbox larger than it.
+  const { data: overview, error: overviewError } = useGetInboxOverviewQuery(
+    { tzOffset: timezoneOffsetMinutes() },
+    { refetchOnMountOrArgChange: true },
+  )
 
   // Keyset pagination can name the next page but not "page N back" (and the
   // response carries no prev_cursor to fall back on either — unlike
@@ -102,6 +113,11 @@ export function InboxPage() {
       mailboxId: selectedMailbox || undefined,
       replyClass: replyClass || undefined,
       q: search.q,
+      // 'all' is the API's own default; sending it explicitly would only make
+      // the cache key noisier for an identical request.
+      scope: scope === 'all' ? undefined : scope,
+      // Only the calendar-dependent scopes read it; see scopeTimezoneOffset.
+      tzOffset: scopeTimezoneOffset(scope),
       beforeLastMessageAt: decodedCursor?.beforeLastMessageAt,
       beforeId: decodedCursor?.beforeId,
       limit: PAGE_SIZE,
@@ -123,19 +139,26 @@ export function InboxPage() {
 
   // Any control except the pager changes what is being listed, which makes
   // the current cursor meaningless — it points into the old result set.
-  const selectMailbox = (id: string) => {
+  const resetPaging = () => {
     setRecoveredFromStaleCursor(false)
     setStack([])
-    patch({ mailbox: id || undefined, cursor: undefined })
+  }
+  // Picking a mailbox clears the virtual scope and vice versa: the rail shows
+  // one selection, so the list must not silently carry the other's filter.
+  const selectMailbox = (id: string) => {
+    resetPaging()
+    patch({ mailbox: id || undefined, scope: undefined, cursor: undefined })
+  }
+  const selectScope = (next: InboxScope) => {
+    resetPaging()
+    patch({ scope: next === 'all' ? undefined : next, mailbox: undefined, cursor: undefined })
   }
   const selectClass = (id: string) => {
-    setRecoveredFromStaleCursor(false)
-    setStack([])
+    resetPaging()
     patch({ class: id || undefined, cursor: undefined })
   }
   const applyQuery = (next: string | undefined) => {
-    setRecoveredFromStaleCursor(false)
-    setStack([])
+    resetPaging()
     patch({ q: next, cursor: undefined })
   }
   // Echoes every keystroke immediately but only commits (writes the URL, hits
@@ -143,7 +166,10 @@ export function InboxPage() {
   // wasteful and would spam the history stack via useUrlPatch's replace.
   const [typedQuery, setTypedQuery] = useDebouncedInput(search.q ?? '', (next) => applyQuery(next.trim() || undefined))
 
-  const items = page?.items ?? []
+  // Memoized so the fallback isn't a fresh array literal on every render while
+  // `page` is undefined — otherwise every derived memo and effect downstream
+  // (the bucket grouping, the selection guard) re-runs each render.
+  const items = useMemo(() => page?.items ?? [], [page])
 
   // The full-vs-partial page is the one honest signal for "is there more":
   // a page that came back short of the limit cannot have another page after
@@ -171,10 +197,26 @@ export function InboxPage() {
     }
   }
 
-  // Opening a thread is navigation, not a mark-read trigger — the reader at
-  // `/app/inbox/$threadId` marks it read on mount (Gmail-style), which keeps
-  // exactly one place responsible for that side effect.
+  // Which thread the reader pane is showing. Component state, not the URL:
+  // it is a selection within this view, and `/app/inbox/$threadId` already
+  // exists as the addressable form of "this one thread" for a link to point at.
+  const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>(undefined)
+
+  // A selection is only meaningful while the selected thread is on screen. A
+  // filter or page change that drops it must clear the reader rather than
+  // leave it showing a thread the list no longer contains.
+  useEffect(() => {
+    if (selectedThreadId && !items.some((t) => t.id === selectedThreadId)) setSelectedThreadId(undefined)
+  }, [items, selectedThreadId])
+
+  // Three panes select in place; below the breakpoint the reader is its own
+  // route, which also keeps the mark-read side effect in exactly one place
+  // (ThreadReader) either way.
   const openThread = (thread: InboxThreadSummary) => {
+    if (threePane) {
+      setSelectedThreadId(thread.id)
+      return
+    }
     void navigate({ to: '/app/inbox/$threadId', params: { threadId: thread.id } })
   }
 
@@ -187,39 +229,37 @@ export function InboxPage() {
   })
 
   const showError = error !== undefined && !staleCursor
-  const hasActiveFilter = Boolean(selectedMailbox || replyClass || search.q)
+  const hasActiveFilter = Boolean(selectedMailbox || replyClass || search.q || search.scope)
   const isEmptyInbox = !isLoading && !showError && items.length === 0 && !hasActiveFilter && !search.cursor
   const isEmptyFiltered = !isLoading && !showError && items.length === 0 && !isEmptyInbox
+
+  const listLabel = selectedMailbox ? mailboxLabel(selectedMailbox) : SCOPE_LABELS[scope]
 
   return (
     <Page>
       <PageTopbar eyebrow="Inbox" subtitle="Read + triage replies across every connected mailbox" />
 
-      <PageBody className="flex flex-col overflow-hidden md:flex-row">
-        <div className="flex max-h-40 w-full shrink-0 flex-col overflow-y-auto border-b border-border md:max-h-none md:w-56 md:border-b-0 md:border-r">
-          <ScopeButton label="All mailboxes" count={totalCount} active={selectedMailbox === ''} onSelect={() => selectMailbox('')} />
-          {mailboxesError ? (
-            <p role="alert" className="p-3 text-[11px] text-danger">
-              Couldn't load mailboxes{httpStatus(mailboxesError) ? ` (${httpStatus(mailboxesError)})` : ''}.
-            </p>
-          ) : (
-            <ul className="grid grid-cols-2 sm:grid-cols-3 md:block">
-              {(mailboxes ?? []).map((m) => (
-                <li key={m.id}>
-                  <ScopeButton
-                    label={m.email ?? 'Mailbox'}
-                    count={countByMailbox.get(m.id ?? '') ?? 0}
-                    active={selectedMailbox === m.id}
-                    onSelect={() => selectMailbox(m.id ?? '')}
-                  />
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+      <PageBody className="flex flex-col overflow-hidden lg:flex-row">
+        <ScopeRail
+          overview={overview}
+          overviewError={overviewError}
+          scope={scope}
+          mailboxes={mailboxOptions}
+          mailboxesError={mailboxesError}
+          selectedMailbox={selectedMailbox}
+          onSelectScope={selectScope}
+          onSelectMailbox={selectMailbox}
+        />
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <SectionBar label={selectedMailbox ? mailboxLabel(selectedMailbox) : 'All mailboxes'}>
+        {/* The list pane. Fixed-width beside the reader so the reader gets the
+            remaining space, full-width when there is no reader. */}
+        <div
+          className={cn(
+            'flex min-w-0 flex-col',
+            threePane && selectedThreadId ? 'w-[22rem] shrink-0 border-r border-border' : 'flex-1',
+          )}
+        >
+          <SectionBar label={listLabel}>
             <ListSearchInput value={typedQuery} onChange={setTypedQuery} placeholder="Search subject or contact email…" />
             <SortMenu options={replyClassFilters} value={replyClass} onChange={selectClass} />
           </SectionBar>
@@ -257,15 +297,15 @@ export function InboxPage() {
             <PageBody>
               <EmptyBlock
                 title="No threads match"
-                description="Nothing matches the selected mailbox, reply-class filter, and search."
+                description="Nothing matches the selected folder, mailbox, reply-class filter, and search."
                 action={
                   <Button
                     variant="secondary"
                     size="sm"
                     onClick={() => {
-                      selectMailbox('')
-                      selectClass('')
-                      applyQuery(undefined)
+                      resetPaging()
+                      patch({ mailbox: undefined, scope: undefined, class: undefined, q: undefined, cursor: undefined })
+                      setTypedQuery('')
                     }}
                   >
                     Clear filters
@@ -275,17 +315,18 @@ export function InboxPage() {
             </PageBody>
           ) : (
             <>
-              <ListHeader>
-                <ListHeaderCell className="min-w-0 flex-1">Thread</ListHeaderCell>
-                <ListHeaderCell className="w-16 text-right">Updated</ListHeaderCell>
-              </ListHeader>
-
               <div
                 ref={nav.containerRef}
                 aria-busy={busy}
                 className={cn('flex-1 overflow-y-auto transition-opacity', busy && 'opacity-50')}
               >
-                <ThreadList threads={items} mailboxLabel={mailboxLabel} nav={nav} onOpen={openThread} />
+                <ThreadList
+                  threads={items}
+                  mailboxLabel={mailboxLabel}
+                  nav={nav}
+                  onOpen={openThread}
+                  selectedThreadId={selectedThreadId}
+                />
               </div>
 
               <div className="flex items-center gap-2 border-t border-border px-4 py-2 sm:px-5">
@@ -307,38 +348,37 @@ export function InboxPage() {
             </>
           )}
         </div>
+
+        {/* The reader pane, only where there is room for it. Below the
+            breakpoint `openThread` navigates instead, so nothing is
+            unreachable — see openThread. */}
+        {threePane && (
+          <section aria-label="Thread" className="hidden min-w-0 flex-1 flex-col overflow-hidden lg:flex">
+            {selectedThreadId ? (
+              <>
+                <div className="border-b border-border px-5 py-2.5">
+                  <ThreadReaderHeading threadId={selectedThreadId} />
+                </div>
+                <div className="flex-1 overflow-y-auto px-5 py-4">
+                  {/* Keyed on the thread id, which is load-bearing rather than
+                      cosmetic: the reader owns a ReplyComposer holding typed
+                      text in local state, and this pane (unlike the standalone
+                      route) stays mounted across thread switches. Without the
+                      key, React would reconcile the same composer and a reply
+                      drafted for one contact would post to whichever thread
+                      was selected when Send was pressed. */}
+                  <ThreadReader key={selectedThreadId} threadId={selectedThreadId} />
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center p-8">
+                <p className="text-[13px] text-faint">Select a thread to read it.</p>
+              </div>
+            )}
+          </section>
+        )}
       </PageBody>
     </Page>
-  )
-}
-
-function ScopeButton({
-  label,
-  count,
-  active,
-  onSelect,
-}: {
-  label: string
-  count: number
-  active: boolean
-  onSelect: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-current={active ? 'true' : undefined}
-      className={cn(
-        'flex w-full items-center gap-2 px-4 py-2 text-left text-[13px] text-muted-foreground transition-colors',
-        'hover:bg-surface-2 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
-        active && 'bg-surface-2 font-medium text-foreground',
-      )}
-    >
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
-        {count}
-      </span>
-    </button>
   )
 }
 

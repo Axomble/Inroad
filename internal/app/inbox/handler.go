@@ -240,7 +240,56 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 		}
 		filter.Limit = int32(limit)
 	}
+	if err := applyScope(&filter, q.Get("scope"), r); err != nil {
+		return ListFilter{}, err
+	}
 	return filter, nil
+}
+
+// Scope names the rail's virtual folders. These are the ONLY accepted values
+// for ?scope= — an unrecognised one is a 400 rather than a silently unscoped
+// page, which would show the operator a list that does not match the scope
+// they clicked.
+const (
+	scopeAll           = "all"
+	scopeUnread        = "unread"
+	scopeToday         = "today"
+	scopeThisWeek      = "this_week"
+	scopeAwaitingReply = "awaiting_reply"
+)
+
+// applyScope translates ?scope= into the ListFilter's scope fields. "" and
+// "all" are both the unscoped inbox (the former because an absent param must
+// not be an error, the latter because the rail names that scope explicitly).
+//
+// today/this_week resolve their boundary through parseOverviewWindow, so the
+// list agrees with the count the rail rendered beside it: computing the two
+// from different clocks would let a thread be counted in "today" but missing
+// from the list it links to.
+func applyScope(filter *ListFilter, scope string, r *http.Request) error {
+	switch scope {
+	case "", scopeAll:
+		return nil
+	case scopeUnread:
+		filter.UnreadOnly = true
+		return nil
+	case scopeAwaitingReply:
+		filter.AwaitingReplyOnly = true
+		return nil
+	case scopeToday, scopeThisWeek:
+		window, err := parseOverviewWindow(r)
+		if err != nil {
+			return err
+		}
+		since := window.TodayStart
+		if scope == scopeThisWeek {
+			since = window.WeekStart
+		}
+		filter.SinceLastMessageAt = &since
+		return nil
+	default:
+		return errors.New("scope must be one of all, unread, today, this_week, awaiting_reply")
+	}
 }
 
 // get handles GET /inbox/threads/{id}.

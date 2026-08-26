@@ -1475,6 +1475,19 @@ const injectedRtkApi = api.injectEndpoints({
           before_last_message_at: queryArg.beforeLastMessageAt,
           before_id: queryArg.beforeId,
           limit: queryArg.limit,
+          scope: queryArg.scope,
+          tz_offset: queryArg.tzOffset,
+        },
+      }),
+    }),
+    getInboxOverview: build.query<
+      GetInboxOverviewApiResponse,
+      GetInboxOverviewApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/overview`,
+        params: {
+          tz_offset: queryArg.tzOffset,
         },
       }),
     }),
@@ -2419,6 +2432,16 @@ export type ListInboxThreadsApiArg = {
   beforeId?: string;
   /** Page size. Defaults to 25, capped at 200 (a larger request is clamped, not rejected). */
   limit?: number;
+  /** One of the inbox's virtual folders. `unread` restricts to unread threads; `awaiting_reply` to threads whose newest message is inbound (the contact spoke last); `today` and `this_week` to threads whose last_message_at falls in the viewer's current day or ISO week (Monday-based), resolved against tz_offset. Omitted or `all` means the whole inbox. An unrecognised value is a 400, never a silently unscoped page. Combines freely with the keyset cursor: the scope bounds the result set, the cursor names a position within it. */
+  scope?: "all" | "unread" | "today" | "this_week" | "awaiting_reply";
+  /** The viewer's UTC offset in minutes East of UTC, as JavaScript's `-new Date().getTimezoneOffset()` reports it. Only read when scope is `today` or `this_week`, whose boundaries depend on the viewer's own day rather than the server's. Defaults to 0 (UTC) — never the server's local zone, which carries no information about the viewer. */
+  tzOffset?: number;
+};
+export type GetInboxOverviewApiResponse =
+  /** status 200 Scope counts for the workspace */ InboxOverview;
+export type GetInboxOverviewApiArg = {
+  /** The viewer's UTC offset in minutes East of UTC (see the identical parameter on listInboxThreads). Determines the `today` and `this_week` boundaries. Defaults to 0 (UTC). */
+  tzOffset?: number;
 };
 export type GetInboxThreadApiResponse =
   /** status 200 Thread with its full message history, oldest first */ InboxThreadDetail;
@@ -4087,6 +4110,28 @@ export type InboxThreadSummary = {
 export type InboxThreadPage = {
   items: InboxThreadSummary[];
 };
+export type InboxMailboxCount = {
+  mailbox_id: string;
+  total: number;
+  unread: number;
+};
+export type InboxReplyClassCount = {
+  key: string;
+  total: number;
+  unread: number;
+};
+export type InboxOverview = {
+  total: number;
+  unread: number;
+  /** Threads whose last message landed in the viewer's current day (see tz_offset). */
+  today: number;
+  /** Threads whose last message landed in the viewer's current ISO week, starting Monday. */
+  this_week: number;
+  /** Threads whose newest message is inbound — the contact spoke last, so it is waiting on us. */
+  awaiting_reply: number;
+  by_mailbox: InboxMailboxCount[];
+  by_reply_class: InboxReplyClassCount[];
+};
 export type InboxMessage = {
   direction: "inbound" | "outbound";
   message_id: string;
@@ -4292,6 +4337,7 @@ export const {
   useUpdateReplyLabelMutation,
   useDeleteReplyLabelMutation,
   useListInboxThreadsQuery,
+  useGetInboxOverviewQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,
   useDraftInboxReplyMutation,

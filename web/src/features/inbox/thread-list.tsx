@@ -1,20 +1,28 @@
+import { useMemo } from 'react'
 import { ReplyClassPill } from '@/components/shared/reply-class-pill'
 import { relativeTime } from '@/lib/relative-time'
 import { cn } from '@/lib/utils'
 import type { ListKeyboardNav } from '@/hooks/use-list-keyboard-nav'
 import type { InboxThreadSummary } from './api'
 import { contactLabel } from './contact-label'
+import { groupByBucket } from './thread-buckets'
 
 /**
- * Dense thread rows: unread dot, contact (primary), subject (secondary),
- * reply-class pill, relative time + mailbox (secondary, beside the
- * timestamp — still worth showing, just not the headline).
+ * Dense thread rows grouped into time buckets ("Today", "Yesterday", …), the
+ * way a mail client presents a list: unread dot, contact (primary), subject
+ * (secondary), reply-class pill, relative time + mailbox.
+ *
+ * `nav`'s indices are over the FLAT list, not per group, so keyboard
+ * navigation runs straight down the visible order regardless of where the
+ * group boundaries fall. Each row therefore carries its own flat index rather
+ * than its position within its bucket.
  */
 export function ThreadList({
   threads,
   mailboxLabel,
   nav,
   onOpen,
+  selectedThreadId,
 }: {
   threads: readonly InboxThreadSummary[]
   /** A mailbox's display label for its id, so a row still says which mailbox
@@ -22,21 +30,49 @@ export function ThreadList({
   mailboxLabel: (mailboxId: string) => string
   nav: ListKeyboardNav
   onOpen: (thread: InboxThreadSummary) => void
+  /** The thread open in the reader pane, highlighted as the current one. */
+  selectedThreadId?: string
 }) {
+  // `now` is captured once per threads-identity rather than per row, so every
+  // row in one render buckets against the same instant — see bucketFor's doc.
+  const groups = useMemo(() => groupByBucket(threads, (t) => t.last_message_at, new Date()), [threads])
+
+  // The flat index each thread occupies, so a row inside a group still knows
+  // its position in the keyboard order.
+  const indexById = useMemo(() => new Map(threads.map((t, i) => [t.id, i])), [threads])
+
   return (
-    <ul>
-      {threads.map((thread, index) => (
-        <ThreadRow
-          key={thread.id}
-          thread={thread}
-          index={index}
-          active={nav.isActive(index)}
-          mailboxLabel={mailboxLabel(thread.mailbox_id)}
-          onHover={nav.onRowHover}
-          onOpen={onOpen}
-        />
+    <div>
+      {groups.map((group) => (
+        <section key={group.bucket}>
+          <h3 className="sticky top-0 z-10 border-b border-border bg-surface/95 px-5 py-1.5 font-mono text-[10px] tracking-wide text-faint uppercase backdrop-blur">
+            {group.label}
+          </h3>
+          <ul>
+            {group.items.map((thread) => {
+              // `indexById` is built from the very array being rendered, so the
+              // lookup cannot miss. -1 rather than 0 for the impossible case:
+              // `nav.isActive(-1)` simply never matches, whereas 0 would make
+              // two rows share an index — both highlighting together, and Enter
+              // opening the wrong one.
+              const index = indexById.get(thread.id) ?? -1
+              return (
+                <ThreadRow
+                  key={thread.id}
+                  thread={thread}
+                  index={index}
+                  active={nav.isActive(index)}
+                  selected={thread.id === selectedThreadId}
+                  mailboxLabel={mailboxLabel(thread.mailbox_id)}
+                  onHover={nav.onRowHover}
+                  onOpen={onOpen}
+                />
+              )
+            })}
+          </ul>
+        </section>
       ))}
-    </ul>
+    </div>
   )
 }
 
@@ -44,6 +80,7 @@ function ThreadRow({
   thread,
   index,
   active,
+  selected,
   mailboxLabel,
   onHover,
   onOpen,
@@ -51,6 +88,7 @@ function ThreadRow({
   thread: InboxThreadSummary
   index: number
   active: boolean
+  selected: boolean
   mailboxLabel: string
   onHover: (index: number) => void
   onOpen: (thread: InboxThreadSummary) => void
@@ -58,11 +96,16 @@ function ThreadRow({
   return (
     <li
       data-row-index={index}
+      aria-current={selected ? 'true' : undefined}
       className={cn(
         'flex cursor-pointer items-center gap-3 border-b border-border px-5 py-3 transition-colors',
-        // The keyboard cursor and hover share one highlight, so "current"
-        // always means the same thing however you got there.
-        active ? 'bg-surface-2/60' : 'hover:bg-surface-2/40',
+        // Three states, deliberately distinct: the thread OPEN in the reader
+        // keeps a persistent left marker, while the keyboard/hover cursor is
+        // a transient background. Conflating them would leave the operator
+        // unable to tell which thread they are reading from which they are
+        // pointing at.
+        selected && 'border-l-2 border-l-primary bg-surface-2/70 pl-[18px]',
+        !selected && (active ? 'bg-surface-2/60' : 'hover:bg-surface-2/40'),
       )}
       onMouseEnter={() => onHover(index)}
       onClick={() => onOpen(thread)}

@@ -119,7 +119,22 @@ type ListFilter struct {
 	// thread's subject or its contact's email. "" means no search filter —
 	// this domain's usual convention for "absent" text, not a pointer.
 	Query string
-	Limit int32
+	// UnreadOnly restricts the page to unread threads. A bool rather than a
+	// *bool because there is no third state to express: the rail either asks
+	// for the unread scope or it doesn't, and "explicitly only READ threads"
+	// is not a scope this product offers.
+	UnreadOnly bool
+	// SinceLastMessageAt restricts the page to threads whose last_message_at
+	// is at or after it — how the "today" and "this week" scopes are
+	// expressed. nil for no lower bound. Deliberately separate from the
+	// BeforeLastMessageAt keyset cursor: this one bounds the SCOPE, that one
+	// names a position within it, and a page deep into "today" needs both at
+	// once.
+	SinceLastMessageAt *time.Time
+	// AwaitingReplyOnly restricts the page to threads whose newest message is
+	// inbound — the contact spoke last, so the thread is waiting on us.
+	AwaitingReplyOnly bool
+	Limit             int32
 }
 
 // UpsertThreadInput carries the fields UpsertThread writes on first insert, and
@@ -177,6 +192,8 @@ type Store interface {
 	// RecordOutboundReply's doc for why this never flips unread or
 	// last_reply_class the way RecordReply's inbound path does.
 	RecordOutboundReply(ctx context.Context, threadID, workspaceID uuid.UUID, msgIn InsertMessageInput) error
+	// GetOverview returns the workspace's scope counts — see overview.go.
+	GetOverview(ctx context.Context, workspaceID uuid.UUID, window OverviewWindow) (Overview, error)
 }
 
 // DefaultThreadPageLimit is the page size ListThreads uses when the caller
@@ -338,6 +355,9 @@ func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 		BeforeLastMessageAt: pgTimestamptz(filter.BeforeLastMessageAt),
 		BeforeID:            pgUUID(filter.BeforeID),
 		Query:               likeQuery(filter.Query),
+		UnreadOnly:          filter.UnreadOnly,
+		SinceLastMessageAt:  pgTimestamptz(filter.SinceLastMessageAt),
+		AwaitingReplyOnly:   filter.AwaitingReplyOnly,
 		PageLimit:           NormalizeLimit(filter.Limit),
 	})
 	if err != nil {
@@ -661,6 +681,13 @@ func pgTimestamptz(t *time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
+// pgTimestamptzValue converts a required (non-pointer) domain time to the
+// pgtype the generated params use — pgTimestamptz's counterpart for the
+// overview window's boundaries, which are never absent.
+func pgTimestamptzValue(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
 // likeQuery escapes filter.Query (a plain string, "" meaning "no search")

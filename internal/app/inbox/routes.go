@@ -33,6 +33,7 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	read := auth.RequireScope(auth.ScopeInboxRead)
 	write := auth.RequireScope(auth.ScopeInboxWrite)
 	send := auth.RequireScope(auth.ScopeInboxSend)
+	r.With(read).Get("/overview", h.overview)
 	r.With(read).Get("/threads", h.list)
 	r.With(read).Get("/threads/{id}", h.get)
 	r.With(send).Post("/threads/{id}/reply", h.reply)

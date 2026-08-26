@@ -14,8 +14,12 @@ export type {
   InboxMessage,
   InboxReplyLabelRef,
   InboxDraftReply,
+  InboxOverview,
+  InboxMailboxCount,
+  InboxReplyClassCount,
   SendInboxReplyRequest,
   SetInboxThreadReadRequest,
+  ListInboxThreadsApiArg,
 } from '@/store/api'
 
 const inboxApi = api.enhanceEndpoints({
@@ -32,6 +36,14 @@ const inboxApi = api.enhanceEndpoints({
     },
     getInboxThread: {
       providesTags: (_result, _error, arg) => [{ type: 'InboxThread', id: arg.id }],
+    },
+    // The overview's counts describe the same rows the list serves, so they go
+    // stale on exactly the same events. Tagging it with LIST means marking a
+    // thread read (or sending a reply) refreshes the rail's counters through
+    // the invalidations those mutations already declare — no separate tag to
+    // keep in step.
+    getInboxOverview: {
+      providesTags: [{ type: 'InboxThread', id: 'LIST' }],
     },
     // Invalidates the LIST tag too: an unread thread marked read must
     // disappear from an "unread" filter (none exists yet, but the same tag
@@ -66,6 +78,7 @@ const inboxApi = api.enhanceEndpoints({
 // the textarea — cost with no correctness gain.
 export const {
   useListInboxThreadsQuery,
+  useGetInboxOverviewQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,
   useDraftInboxReplyMutation,
