@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Clock, Plus, X } from 'lucide-react'
+import { Clock, Plus, X, LayoutGrid, ListOrdered } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -25,6 +25,8 @@ import {
   toDraft,
 } from './schedule-draft'
 import type { DraftWeek } from './schedule-draft'
+import { WeekScheduleGrid } from './week-schedule-grid'
+import { cellsToIntervals, intervalsToCells, isHourAligned, type CellGrid } from './schedule-cells'
 
 /**
  * The campaign's sending plan: when (timezone plus a window per weekday) and how
@@ -45,6 +47,12 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
   const [maxNewLeads, setMaxNewLeads] = useState('')
   const [problem, setProblem] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
+  /**
+   * Which editor is showing. The BOARD is the default because it is the faster
+   * way to say the common thing; the time inputs remain the escape hatch for
+   * minute precision an hour grid cannot express.
+   */
+  const [mode, setMode] = useState<'board' | 'times'>('board')
 
   // Seed the editor from the server once it arrives, and re-seed after a save so
   // the form reflects what was actually persisted. Guarded on `dirty` so a
@@ -86,6 +94,36 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
         : intervals,
     )
     edit(next)
+  }
+
+  /**
+   * Whether the saved schedule can be shown on an hour board at all.
+   *
+   * Read from the SERVER's days, not the draft: the question is about what is
+   * already persisted. A campaign with a 09:30 window cannot be represented in
+   * cells, and rounding it to render the board would silently rewrite a
+   * schedule the operator chose — so the board is withheld and the time inputs
+   * take over, with the reason stated.
+   */
+  const gridRepresentable = isHourAligned(data?.days)
+  /** The time inputs show unless the board is available AND selected. */
+  const showTimeInputs = !gridRepresentable || mode === 'times'
+
+  // The board's own state is DERIVED from `week` rather than held separately,
+  // so the two editors cannot drift: whichever one is showing, `week` is the
+  // single source of truth that onSave reads.
+  const grid = useMemo<CellGrid>(() => {
+    const converted = fromDraft(week)
+    // A half-typed time in the inputs makes the draft unconvertible. The board
+    // shows the last valid shape rather than blanking — it is a view of the
+    // same schedule, and an empty board would read as "nothing is open".
+    return 'days' in converted ? intervalsToCells(converted.days) : intervalsToCells(data?.days)
+  }, [week, data])
+
+  function onGridChange(next: CellGrid) {
+    setWeek(toDraft(cellsToIntervals(next)))
+    setProblem(null)
+    setDirty(true)
   }
 
   async function onSave() {
@@ -236,6 +274,48 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
             </div>
           </div>
 
+          {/* The mode switch. Only offered when the board CAN represent what is
+              saved — otherwise the choice would be between an accurate editor
+              and one that silently rewrites the schedule, which is not a
+              choice to give someone. */}
+          {gridRepresentable ? (
+            <div className="mb-2 flex items-center gap-1">
+              <Button
+                variant={mode === 'board' ? 'secondary' : 'ghost'}
+                size="xs"
+                aria-pressed={mode === 'board'}
+                onClick={() => setMode('board')}
+              >
+                <LayoutGrid className="size-3" />
+                Board
+              </Button>
+              <Button
+                variant={mode === 'times' ? 'secondary' : 'ghost'}
+                size="xs"
+                aria-pressed={mode === 'times'}
+                onClick={() => setMode('times')}
+              >
+                <ListOrdered className="size-3" />
+                Exact times
+              </Button>
+            </div>
+          ) : (
+            <p role="status" className="mb-2 text-[11px] text-muted-foreground">
+              This schedule uses minute precision, so the board can't show it without
+              rounding — edit the exact times below instead.
+            </p>
+          )}
+
+          {gridRepresentable && mode === 'board' && (
+            <WeekScheduleGrid grid={grid} onChange={onGridChange} disabled={isSaving} />
+          )}
+
+          {/* Unmounted rather than CSS-hidden when the board is showing. A
+              `hidden` class would leave 7 days of time inputs in the DOM —
+              still focusable by tab order, still found by label queries, and
+              still announced to a screen reader. "Not visible" and "not there"
+              have to agree. */}
+          {showTimeInputs && (
           <ul className="divide-y divide-border rounded-md border border-border">
             {WEEKDAY_SHORT.map((label, weekday) => {
               const intervals = week[weekday] ?? []
@@ -296,6 +376,7 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
               )
             })}
           </ul>
+        )}
         </div>
 
         {problem && (

@@ -40,6 +40,19 @@ function stubSchedule({
   return fetchMock
 }
 
+/**
+ * Switches to the "Exact times" editor and waits for it.
+ *
+ * The board is now the default view, and the time inputs are UNMOUNTED while it
+ * shows — not merely hidden — so a test that wants them must ask for them, the
+ * same way an operator does. Every test below that reads or edits a time input
+ * goes through here.
+ */
+async function showTimeInputs() {
+  fireEvent.click(await screen.findByRole('button', { name: /exact times/i }))
+  await screen.findByLabelText('Mon window 1 start')
+}
+
 /** The body of the first PUT, once one has been made. */
 async function readPut(fetchMock: ReturnType<typeof stubSchedule>) {
   await waitFor(() => {
@@ -58,6 +71,7 @@ describe('SchedulePanel', () => {
   test('renders the saved windows, timezone, and the send-time preview', async () => {
     stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Timezone')).toHaveValue('America/New_York'))
     expect(screen.getByLabelText('Mon window 1 start')).toHaveValue('09:00')
@@ -82,6 +96,7 @@ describe('SchedulePanel', () => {
   test('the save action only appears once something is edited', async () => {
     stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: /save schedule/i })).not.toBeInTheDocument()
@@ -93,6 +108,7 @@ describe('SchedulePanel', () => {
   test('sends the edited schedule as a full replace', async () => {
     const fetchMock = stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Mon window 1 start'), { target: { value: '10:30' } })
@@ -112,6 +128,7 @@ describe('SchedulePanel', () => {
   test('adding a window to a closed day makes it sendable', async () => {
     const fetchMock = stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /add a fri window/i }))
@@ -130,6 +147,7 @@ describe('SchedulePanel', () => {
   test('removing the last window blocks the save with an explanation', async () => {
     const fetchMock = stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /remove mon window 1/i }))
@@ -144,6 +162,7 @@ describe('SchedulePanel', () => {
   test('an invalid range is caught client-side before any request', async () => {
     const fetchMock = stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Mon window 1 end'), { target: { value: '08:00' } })
@@ -156,6 +175,7 @@ describe('SchedulePanel', () => {
   test("a rejected save surfaces the server's reason and keeps the edits", async () => {
     stubSchedule({ putStatus: 422 })
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Mon window 1 start'), { target: { value: '10:30' } })
@@ -180,6 +200,7 @@ describe('SchedulePanel', () => {
   test('no campaign limit shows as an empty field, not as a zero', async () => {
     stubSchedule({ schedule: { ...SCHEDULE, daily_limit: null } })
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     expect(screen.getByLabelText('Daily limit')).toHaveValue(null)
@@ -189,6 +210,7 @@ describe('SchedulePanel', () => {
     const { daily_limit: _omitted, ...withoutLimit } = SCHEDULE
     stubSchedule({ schedule: withoutLimit })
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     expect(screen.getByLabelText('Daily limit')).toHaveValue(null)
@@ -245,6 +267,7 @@ describe('SchedulePanel', () => {
   test('the preview is withheld while edits are unsaved', async () => {
     stubSchedule()
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByText(/Mon 09:14:37/)).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Mon window 1 start'), { target: { value: '10:30' } })
@@ -266,6 +289,7 @@ describe('SchedulePanel', () => {
   test('no new-leads limit shows as an empty field, not as a zero', async () => {
     stubSchedule({ schedule: { ...SCHEDULE, max_new_leads_per_day: null } })
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     expect(screen.getByLabelText('New leads per day')).toHaveValue(null)
@@ -275,6 +299,7 @@ describe('SchedulePanel', () => {
     const { max_new_leads_per_day: _omitted, ...withoutLimit } = SCHEDULE
     stubSchedule({ schedule: withoutLimit })
     renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await showTimeInputs()
 
     await waitFor(() => expect(screen.getByLabelText('Mon window 1 start')).toBeInTheDocument())
     expect(screen.getByLabelText('New leads per day')).toHaveValue(null)
@@ -328,5 +353,101 @@ describe('SchedulePanel', () => {
 
     fireEvent.change(screen.getByLabelText('New leads per day'), { target: { value: '5' } })
     expect(screen.getByRole('button', { name: /save schedule/i })).toBeInTheDocument()
+  })
+
+  // --- The schedule board ---
+
+  test('the board is the default view, showing saved windows as cells', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    // Mon 09:00-17:00 from SCHEDULE: the 9am cell is open, 8am is not.
+    expect(await screen.findByRole('button', { name: /monday 9am, open/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /monday 8am, closed/i })).toBeInTheDocument()
+    // The end is exclusive, so 5pm itself is closed.
+    expect(screen.getByRole('button', { name: /monday 5pm, closed/i })).toBeInTheDocument()
+    // ...and the time inputs are not merely hidden, they are absent.
+    expect(screen.queryByLabelText('Mon window 1 start')).not.toBeInTheDocument()
+  })
+
+  test('clicking a cell opens it and enables the save', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /tuesday 10am, closed/i }))
+
+    expect(await screen.findByRole('button', { name: /tuesday 10am, open/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /save schedule/i })).toBeInTheDocument()
+  })
+
+  test('a board edit saves as merged minute intervals, not one per cell', async () => {
+    const fetchMock = stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    // Open three consecutive hours on a closed day. Sequential on purpose:
+    // each click must land before the next cell is queried, since the board
+    // re-renders between them. Promise.all would race the three lookups
+    // against one render.
+    for (const hour of ['9am', '10am', '11am']) {
+      // oxlint-disable-next-line no-await-in-loop -- clicks must be applied in order; see above
+      fireEvent.click(await screen.findByRole('button', { name: new RegExp(`tuesday ${hour}, closed`, 'i') }))
+    }
+    fireEvent.click(screen.getByRole('button', { name: /save schedule/i }))
+
+    const body = await readPut(fetchMock)
+    const tuesday = body.days.find((d) => d.weekday === 2) as
+      | { weekday: number; intervals: { start_minute: number; end_minute: number }[] }
+      | undefined
+    // Three cells become ONE interval — the run-length encoding, end to end.
+    expect(tuesday?.intervals).toEqual([{ start_minute: 540, end_minute: 720 }])
+  })
+
+  test('a day header toggles the whole weekday', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+    await screen.findByRole('button', { name: /monday 9am, open/i })
+
+    // Monday is partly open, so the first click completes it rather than clearing.
+    fireEvent.click(screen.getByRole('button', { name: 'Mon' }))
+
+    expect(await screen.findByRole('button', { name: /monday 12am, open/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /monday 11pm, open/i })).toBeInTheDocument()
+  })
+
+  test('an entirely closed board is called out, since the API rejects it', async () => {
+    stubSchedule({ schedule: { ...SCHEDULE, days: [] } })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    expect(await screen.findByText(/nothing is open/i)).toBeInTheDocument()
+  })
+
+  // The board cannot represent minute precision, so rounding a saved 09:30
+  // window into cells would silently rewrite the operator's schedule. It is
+  // withheld instead, with the reason stated.
+  test('a minute-precision schedule gets the time inputs and no board', async () => {
+    stubSchedule({
+      schedule: {
+        ...SCHEDULE,
+        days: [{ weekday: 1, intervals: [{ start_minute: 570, end_minute: 1035 }] }],
+      },
+    })
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    expect(await screen.findByText(/minute precision/i)).toBeInTheDocument()
+    // The exact times are shown directly — no mode switch to find.
+    expect(screen.getByLabelText('Mon window 1 start')).toHaveValue('09:30')
+    expect(screen.queryByRole('button', { name: /monday 9am/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^board$/i })).not.toBeInTheDocument()
+  })
+
+  test('switching to exact times keeps a board edit', async () => {
+    stubSchedule()
+    renderWithProviders(<SchedulePanel campaignId="c-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /tuesday 9am, closed/i }))
+    fireEvent.click(screen.getByRole('button', { name: /exact times/i }))
+
+    // Both editors read the same draft, so the new Tuesday window is there.
+    expect(await screen.findByLabelText('Tue window 1 start')).toHaveValue('09:00')
   })
 })
