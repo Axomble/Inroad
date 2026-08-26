@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -41,22 +42,31 @@ var (
 )
 
 // seedFixtures fills a freshly registered workspace with mailboxes, lists,
-// contacts, and a running campaign. Every insert is additive and the caller runs
-// it once, right after Register, so there is nothing to make idempotent.
-func seedFixtures(ctx context.Context, q *gen.Queries, ws uuid.UUID) (string, error) {
+// contacts, a campaign, and a populated inbox. Every insert is additive and the
+// caller runs it once, right after Register, so there is nothing to make
+// idempotent.
+//
+// Takes the pool (not just the query layer) because the inbox seed must place
+// threads at specific moments in the past — see seedInbox.
+func seedFixtures(ctx context.Context, pool *pgxpool.Pool, ws, user uuid.UUID) (string, error) {
+	q := gen.New(pool)
 	mailboxes, err := seedMailboxes(ctx, q, ws)
 	if err != nil {
 		return "", fmt.Errorf("mailboxes: %w", err)
 	}
-	list, err := seedContactsAndList(ctx, q, ws)
+	list, contacts, err := seedContactsAndList(ctx, q, ws)
 	if err != nil {
 		return "", fmt.Errorf("contacts: %w", err)
 	}
 	if err := seedCampaign(ctx, q, ws, mailboxes[0], list); err != nil {
 		return "", fmt.Errorf("campaign: %w", err)
 	}
-	return fmt.Sprintf("%d mailboxes, %d contacts, 1 list, 1 campaign",
-		len(mailboxes), seedContacts), nil
+	threads, err := seedInbox(ctx, q, pool, ws, user, mailboxes, contacts)
+	if err != nil {
+		return "", fmt.Errorf("inbox: %w", err)
+	}
+	return fmt.Sprintf("%d mailboxes, %d contacts, 1 list, 1 campaign, %d inbox threads",
+		len(mailboxes), seedContacts, threads), nil
 }
 
 // seedMailboxes creates one mailbox per provider so the mailbox screen shows all
@@ -105,33 +115,51 @@ func seedMailboxes(ctx context.Context, q *gen.Queries, ws uuid.UUID) ([]uuid.UU
 // seedContactsAndList creates the target list and enough contacts that the
 // contacts screen behaves like a real one: more than a page, with varied names,
 // domains and companies so search returns different rows for different queries.
-func seedContactsAndList(ctx context.Context, q *gen.Queries, ws uuid.UUID) (uuid.UUID, error) {
+// The created contacts are returned so the inbox seed can link threads to them.
+func seedContactsAndList(ctx context.Context, q *gen.Queries, ws uuid.UUID) (uuid.UUID, []seededContact, error) {
 	list, err := q.CreateList(ctx, gen.CreateListParams{WorkspaceID: ws, Name: "Q3 — Seed-stage SaaS founders"})
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, nil, err
 	}
 	// A second, empty list so the list switcher has something to switch to and the
 	// empty-state copy is reachable without deleting anything.
 	if _, err := q.CreateList(ctx, gen.CreateListParams{WorkspaceID: ws, Name: "Conference follow-up — SaaStr"}); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, nil, err
 	}
 
+	contacts := make([]seededContact, 0, seedContacts)
 	for i := range seedContacts {
+		sc := seededContact{
+			Email:   fmt.Sprintf("%s.%s%d@%s.example.com", firsts[i%len(firsts)], lasts[i%len(lasts)], i, domains[i%len(domains)]),
+			First:   firsts[i%len(firsts)],
+			Last:    lasts[i%len(lasts)],
+			Company: companies[i%len(companies)],
+		}
 		c, err := q.UpsertContact(ctx, gen.UpsertContactParams{
 			WorkspaceID: ws,
-			Email:       fmt.Sprintf("%s.%s%d@%s.example.com", firsts[i%len(firsts)], lasts[i%len(lasts)], i, domains[i%len(domains)]),
-			FirstName:   firsts[i%len(firsts)],
-			LastName:    lasts[i%len(lasts)],
-			Company:     companies[i%len(companies)],
+			Email:       sc.Email,
+			FirstName:   sc.First,
+			LastName:    sc.Last,
+			Company:     sc.Company,
 		})
 		if err != nil {
-			return uuid.Nil, err
+			return uuid.Nil, nil, err
 		}
 		if err := q.AddListMember(ctx, gen.AddListMemberParams{ListID: list.ID, ContactID: c.ID}); err != nil {
-			return uuid.Nil, err
+			return uuid.Nil, nil, err
 		}
+		sc.ID = c.ID
+		contacts = append(contacts, sc)
 	}
-	return list.ID, nil
+	return list.ID, contacts, nil
+}
+
+// seededContact is what the inbox seed needs to know about a contact — the
+// UpsertContact query returns only (id, inserted), so the identity fields are
+// carried from the same values the insert was built from.
+type seededContact struct {
+	ID                          uuid.UUID
+	Email, First, Last, Company string
 }
 
 // seedCampaign creates a three-step sequence in draft. Draft rather than running

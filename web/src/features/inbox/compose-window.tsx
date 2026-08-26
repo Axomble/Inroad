@@ -1,9 +1,14 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { X, Minus, Loader2, CalendarClock, Trash2 } from 'lucide-react'
+import { X, Minus, Loader2, CalendarClock, Trash2, ChevronDown, Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { SortMenu } from '@/components/shared/sort-menu'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { httpStatus, serverDetail } from '@/lib/rtk-error'
 import { cn } from '@/lib/utils'
 import { useListMailboxesQuery } from '@/store/api'
@@ -188,7 +193,35 @@ export function ComposeWindow({
       <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-3">
         <div className="flex items-center gap-2">
           <span className="w-10 shrink-0 font-mono text-[10px] tracking-wide text-faint uppercase">From</span>
-          <SortMenu options={mailboxOptions} value={mailboxId} onChange={setMailboxId} />
+          {/* Its own picker rather than the shared SortMenu: choosing a sending
+              mailbox is not an ordering, and a trigger reading "Sort" here
+              taught the wrong model of what the menu does. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-label={`Send from ${mailboxOptions.find((m) => m.id === mailboxId)?.label ?? 'a mailbox'}`}
+                className="max-w-full font-normal"
+              >
+                <span className="min-w-0 truncate">
+                  {mailboxOptions.find((m) => m.id === mailboxId)?.label ?? 'Choose a mailbox'}
+                </span>
+                <ChevronDown className="size-3.5 shrink-0" aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              {mailboxOptions.map((option) => (
+                <DropdownMenuItem key={option.id} onSelect={() => setMailboxId(option.id)}>
+                  <Check
+                    className={option.id === mailboxId ? 'size-4 opacity-100' : 'size-4 opacity-0'}
+                    aria-hidden="true"
+                  />
+                  {option.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <RecipientInput id="compose-to" label="To" values={to} onChange={setTo} placeholder="name@company.com" />

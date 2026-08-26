@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
-import { PenLine } from 'lucide-react'
+import { MailOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ListSearchInput } from '@/components/shared/list-search-input'
-import { SortMenu } from '@/components/shared/sort-menu'
 import { Page, PageTopbar, SectionBar, PageBody, EmptyBlock, HintBar } from '@/components/layout/page'
 import { useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
@@ -20,12 +19,16 @@ import {
   useGetInboxOverviewQuery,
   useListInboxLabelsQuery,
   useListInboxThreadsQuery,
+  useSetInboxThreadReadMutation,
   type InboxThreadSummary,
 } from './api'
 import { ThreadList } from './thread-list'
-import { ScopeRail } from './scope-rail'
+import { FolderPane } from './folder-pane'
+import { CommandBar } from './command-bar'
+import { ReplyFilterMenu } from './reply-filter-menu'
 import { ThreadReader, ThreadReaderHeading } from './thread-reader'
 import { ComposeWindow } from './compose-window'
+import { groupByBucket, type ThreadBucket } from './thread-buckets'
 import {
   parseInboxSearch,
   encodeCursor,
@@ -50,7 +53,7 @@ const PAGE_SIZE = 25
  * route. Below it there is no room for three columns, so opening a thread
  * navigates to `/app/inbox/$threadId` as it always has.
  *
- * Kept in sync with the `lg:` variants in ScopeRail and the shell below —
+ * Kept in sync with the `lg:` variants in FolderPane and the shell below —
  * Tailwind's `lg` is 64rem, and matchMedia needs the same number in a form it
  * can parse.
  */
@@ -92,15 +95,15 @@ export function InboxPage() {
     [replyLabelsData],
   )
 
-  // The rail's label section. Fetched unconditionally (unlike the picker's own
-  // skip-until-open query, which RTK Query dedupes with this one): the rail is
-  // always visible, so its labels are always needed.
+  // The folder pane's category section. Fetched unconditionally (unlike the
+  // picker's own skip-until-open query, which RTK Query dedupes with this
+  // one): the pane is always visible, so its labels are always needed.
   const { data: labelData } = useListInboxLabelsQuery()
   const labels = useMemo(() => labelData?.labels ?? [], [labelData])
 
-  // Real counts for the rail, counted by the database over the whole workspace
-  // — this replaces counting one 200-row page client-side, which was honest
-  // about being a sample but wrong on any inbox larger than it.
+  // Real counts for the folder pane, counted by the database over the whole
+  // workspace — this replaces counting one 200-row page client-side, which was
+  // honest about being a sample but wrong on any inbox larger than it.
   const { data: overview, error: overviewError } = useGetInboxOverviewQuery(
     { tzOffset: timezoneOffsetMinutes() },
     { refetchOnMountOrArgChange: true },
@@ -162,9 +165,9 @@ export function InboxPage() {
     setRecoveredFromStaleCursor(false)
     setStack([])
   }
-  // The rail shows ONE selection, so choosing any of the three clears the other
-  // two: a mailbox, a virtual scope, and a label are alternative ways to say
-  // "show me this pile", not filters to intersect.
+  // The folder pane shows ONE selection, so choosing any of the three clears
+  // the other two: a mailbox, a virtual folder, and a category are alternative
+  // ways to say "show me this pile", not filters to intersect.
   const selectMailbox = (id: string) => {
     resetPaging()
     patch({ mailbox: id || undefined, scope: undefined, label: undefined, cursor: undefined })
@@ -194,6 +197,29 @@ export function InboxPage() {
   // `page` is undefined — otherwise every derived memo and effect downstream
   // (the bucket grouping, the selection guard) re-runs each render.
   const items = useMemo(() => page?.items ?? [], [page])
+
+  // The time groups and their collapse state live HERE, not in ThreadList: the
+  // keyboard cursor below must skip the rows a collapsed group hides, and only
+  // the owner of the nav can know the visible order. Collapse is view state
+  // for this visit — deliberately not persisted, and deliberately keyed by
+  // bucket so it survives paging within the same view.
+  const groups = useMemo(() => groupByBucket(items, (t) => t.last_message_at, new Date()), [items])
+  const [collapsedBuckets, setCollapsedBuckets] = useState<ReadonlySet<ThreadBucket>>(new Set())
+  const toggleGroup = (bucket: ThreadBucket) => {
+    setCollapsedBuckets((prev) => {
+      const next = new Set(prev)
+      if (next.has(bucket)) next.delete(bucket)
+      else next.add(bucket)
+      return next
+    })
+  }
+
+  // The flat keyboard order: the expanded groups' rows, in display order.
+  const visibleThreads = useMemo(
+    () => groups.flatMap((g) => (collapsedBuckets.has(g.bucket) ? [] : g.items)),
+    [groups, collapsedBuckets],
+  )
+  const visibleIndexById = useMemo(() => new Map(visibleThreads.map((t, i) => [t.id, i])), [visibleThreads])
 
   // The full-vs-partial page is the one honest signal for "is there more":
   // a page that came back short of the limit cannot have another page after
@@ -232,6 +258,10 @@ export function InboxPage() {
   useEffect(() => {
     if (selectedThreadId && !items.some((t) => t.id === selectedThreadId)) setSelectedThreadId(undefined)
   }, [items, selectedThreadId])
+  const selectedThread = useMemo(
+    () => items.find((t) => t.id === selectedThreadId),
+    [items, selectedThreadId],
+  )
 
   // Three panes select in place; below the breakpoint the reader is its own
   // route, which also keeps the mark-read side effect in exactly one place
@@ -245,12 +275,35 @@ export function InboxPage() {
   }
 
   const nav = useListKeyboardNav({
-    count: items.length,
+    count: visibleThreads.length,
     onOpen: (index) => {
-      const thread = items[index]
+      const thread = visibleThreads[index]
       if (thread) openThread(thread)
     },
   })
+
+  // The command bar's verbs. Both are honest per-thread mutations — the API
+  // has no bulk endpoint, so "Mark all as read" is the loaded page's unread
+  // threads, one call each, and a partial failure is reported rather than
+  // silently leaving some rows unread.
+  const [setRead] = useSetInboxThreadReadMutation()
+  const toggleRead = (thread: InboxThreadSummary) => {
+    void setRead({ id: thread.id, setInboxThreadReadRequest: { unread: !thread.unread } })
+  }
+  const unreadOnPage = useMemo(() => items.filter((t) => t.unread).length, [items])
+  const [markingAll, setMarkingAll] = useState(false)
+  const [markAllFailures, setMarkAllFailures] = useState(0)
+  const markAllRead = async () => {
+    const unreadThreads = items.filter((t) => t.unread)
+    if (unreadThreads.length === 0 || markingAll) return
+    setMarkingAll(true)
+    setMarkAllFailures(0)
+    const results = await Promise.allSettled(
+      unreadThreads.map((t) => setRead({ id: t.id, setInboxThreadReadRequest: { unread: false } }).unwrap()),
+    )
+    setMarkAllFailures(results.filter((r) => r.status === 'rejected').length)
+    setMarkingAll(false)
+  }
 
   const showError = error !== undefined && !staleCursor
   const hasActiveFilter = Boolean(selectedMailbox || replyClass || search.q || search.scope || selectedLabel)
@@ -260,24 +313,32 @@ export function InboxPage() {
   const listLabel = selectedMailbox
     ? mailboxLabel(selectedMailbox)
     : selectedLabel
-      ? (labels.find((l) => l.id === selectedLabel)?.name ?? 'Label')
+      ? (labels.find((l) => l.id === selectedLabel)?.name ?? 'Category')
       : SCOPE_LABELS[scope]
 
   return (
     <Page>
-      <PageTopbar
-        eyebrow="Inbox"
-        subtitle="Read + triage replies across every connected mailbox"
-        actions={
-          <Button variant="primary" size="sm" onClick={() => setComposing(true)}>
-            <PenLine />
-            Compose
-          </Button>
-        }
+      <PageTopbar eyebrow="Inbox" subtitle="Read + triage replies across every connected mailbox" />
+
+      <CommandBar
+        onCompose={() => setComposing(true)}
+        selected={threePane ? selectedThread : undefined}
+        onToggleRead={toggleRead}
+        unreadOnPage={unreadOnPage}
+        markAllBusy={markingAll}
+        onMarkAllRead={() => void markAllRead()}
       />
 
+      {markAllFailures > 0 && (
+        <p role="alert" className="border-b border-border px-4 py-1.5 text-xs text-danger">
+          {markAllFailures === 1
+            ? "1 thread couldn't be marked as read — it stays unread."
+            : `${markAllFailures} threads couldn't be marked as read — they stay unread.`}
+        </p>
+      )}
+
       <PageBody className="flex flex-col overflow-hidden lg:flex-row">
-        <ScopeRail
+        <FolderPane
           overview={overview}
           overviewError={overviewError}
           scope={scope}
@@ -291,17 +352,14 @@ export function InboxPage() {
           onSelectLabel={selectLabel}
         />
 
-        {/* The list pane. Fixed-width beside the reader so the reader gets the
-            remaining space, full-width when there is no reader. */}
-        <div
-          className={cn(
-            'flex min-w-0 flex-col',
-            threePane && selectedThreadId ? 'w-[22rem] shrink-0 border-r border-border' : 'flex-1',
-          )}
-        >
+        {/* The message list. A fixed column beside the reader (which is always
+            present at three-pane width, showing its prompt when nothing is
+            selected — the way a mail client keeps its reading pane on screen),
+            full-width when the viewport only has room for the list. */}
+        <div className={cn('flex min-w-0 flex-col', threePane ? 'w-[24rem] shrink-0 border-r border-border' : 'flex-1')}>
           <SectionBar label={listLabel}>
             <ListSearchInput value={typedQuery} onChange={setTypedQuery} placeholder="Search subject or contact email…" />
-            <SortMenu options={replyClassFilters} value={replyClass} onChange={selectClass} />
+            <ReplyFilterMenu options={replyClassFilters} value={replyClass} onChange={selectClass} />
           </SectionBar>
 
           {recoveredFromStaleCursor && (
@@ -368,10 +426,14 @@ export function InboxPage() {
                 className={cn('flex-1 overflow-y-auto transition-opacity', busy && 'opacity-50')}
               >
                 <ThreadList
-                  threads={items}
+                  groups={groups}
+                  collapsed={collapsedBuckets}
+                  onToggleGroup={toggleGroup}
+                  visibleIndexById={visibleIndexById}
                   mailboxLabel={mailboxLabel}
                   nav={nav}
                   onOpen={openThread}
+                  onToggleRead={toggleRead}
                   selectedThreadId={selectedThreadId}
                 />
               </div>
@@ -418,9 +480,7 @@ export function InboxPage() {
                 </div>
               </>
             ) : (
-              <div className="flex flex-1 items-center justify-center p-8">
-                <p className="text-[13px] text-faint">Select a thread to read it.</p>
-              </div>
+              <ReaderPrompt />
             )}
           </section>
         )}
@@ -431,16 +491,35 @@ export function InboxPage() {
   )
 }
 
+/**
+ * The reading pane before anything is selected — a mail client keeps the pane
+ * on screen and says what it's for, rather than collapsing the column.
+ */
+function ReaderPrompt() {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
+      <span className="flex size-20 items-center justify-center rounded-full bg-surface-2">
+        <MailOpen className="size-8 text-faint" strokeWidth={1.5} aria-hidden="true" />
+      </span>
+      <div className="text-center">
+        <p className="text-sm font-medium text-foreground">Select an item to read</p>
+        <p className="mt-0.5 text-[12.5px] text-muted-foreground">Nothing is selected</p>
+      </div>
+    </div>
+  )
+}
+
 function LoadingRows() {
   return (
     <ul>
-      {[0, 1, 2].map((i) => (
-        <li key={i} className="flex items-center gap-4 border-b border-border px-5 py-3.5">
-          <div className="flex-1 space-y-2">
-            <Skeleton className="h-3.5 w-48" />
-            <Skeleton className="h-2.5 w-64" />
+      {[0, 1, 2, 3, 4].map((i) => (
+        <li key={i} className="flex items-start gap-2.5 border-b border-border py-2.5 pr-3 pl-4">
+          <Skeleton className="size-8 shrink-0 rounded-full" />
+          <div className="flex-1 space-y-2 pt-0.5">
+            <Skeleton className="h-3.5 w-40" />
+            <Skeleton className="h-2.5 w-56" />
           </div>
-          <Skeleton className="h-4 w-16" />
+          <Skeleton className="h-3 w-12" />
         </li>
       ))}
     </ul>

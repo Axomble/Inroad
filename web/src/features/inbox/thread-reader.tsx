@@ -13,6 +13,7 @@ import {
   type InboxThreadDetail,
 } from './api'
 import { contactLabel } from './contact-label'
+import { SenderAvatar } from './sender-avatar'
 import { MessageBody } from './message-body'
 import { ReplyComposer } from './reply-composer'
 import { SnoozeMenu } from './snooze-menu'
@@ -128,7 +129,7 @@ function ThreadMessages({ threadId, detail }: { threadId: string; detail: InboxT
         // `messages` is a fixed, server-sorted list that this component never
         // reorders or filters client-side.
         // oxlint-disable-next-line no-array-index-key -- fixed, server-sorted list; index+occurred_at is stable, message_id/occurred_at alone are not unique for outbound legs
-        <MessageBubble key={`${message.occurred_at}-${index}`} message={message} />
+        <MessageCard key={`${message.occurred_at}-${index}`} message={message} />
       ))}
       {/* Above the composer, not below: a queued reply is the most recent thing
           that happened on this thread, and its countdown is time-critical. */}
@@ -142,9 +143,11 @@ function ThreadMessages({ threadId, detail }: { threadId: string; detail: InboxT
 }
 
 /**
- * The reader's own heading — who the thread is with, its subject, and its
- * reply class. Exported so the pane can render it inline while the standalone
- * page feeds the same facts into a PageTopbar.
+ * The reader's own heading — the subject as the pane's title (the way a mail
+ * client titles its reading pane), who the thread is with beneath it, and the
+ * thread verbs (categorize, snooze) on the right. Exported so the pane can
+ * render it inline while the standalone page feeds the same facts into a
+ * PageTopbar.
  */
 export function ThreadReaderHeading({ threadId }: { threadId: string }) {
   const { data } = useGetInboxThreadQuery({ id: threadId })
@@ -152,8 +155,10 @@ export function ThreadReaderHeading({ threadId }: { threadId: string }) {
   return (
     <div className="flex min-w-0 items-start justify-between gap-3">
       <div className="min-w-0">
-        <h2 className="truncate text-sm font-semibold text-foreground">{contactLabel(data)}</h2>
-        <p className="truncate text-[12px] text-muted-foreground">{data.subject || '(no subject)'}</p>
+        <h2 className="truncate text-[15px] font-semibold tracking-[-0.01em] text-foreground">
+          {data.subject || '(no subject)'}
+        </h2>
+        <p className="truncate text-[12px] text-muted-foreground">{contactLabel(data)}</p>
       </div>
       <div className="flex shrink-0 items-start gap-2">
         <LabelChips labels={data.labels} max={2} />
@@ -165,23 +170,29 @@ export function ThreadReaderHeading({ threadId }: { threadId: string }) {
   )
 }
 
-/** A single message in the thread, its own bubble — sender/time header + the sanitized body. */
-function MessageBubble({ message }: { message: InboxMessage }) {
+/**
+ * A single message, laid out the way a desktop mail client lays one out: a
+ * flat full-width card — avatar, sender, the "To:" line, timestamp on the
+ * right — rather than a chat bubble. Direction is carried by the header's
+ * facts ("You" as the sender, the To: line), not by pushing the card around.
+ */
+function MessageCard({ message }: { message: InboxMessage }) {
   const outbound = message.direction === 'outbound'
-  // "You" for outbound is a text label, not a color: an inbound bubble's
+  // "You" for outbound is a text label, not a color: an inbound card's
   // sender name/email carries the same weight of information the other way.
   const sender = outbound ? 'You' : message.from_name || message.from_email || 'Unknown sender'
 
   return (
-    <article
-      className={cn(
-        'max-w-[85%] rounded-xl border border-border p-4',
-        outbound ? 'ml-auto bg-primary/5' : 'bg-surface-2/40',
-      )}
-    >
-      <header className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-        <span className="text-sm font-semibold text-foreground">{sender}</span>
-        <time className="font-mono text-[11px] text-muted-foreground" dateTime={message.occurred_at}>
+    <article className={cn('rounded-lg border border-border p-4', outbound ? 'bg-surface-2/40' : 'bg-surface')}>
+      <header className="mb-3 flex items-start gap-3">
+        <SenderAvatar label={outbound ? message.from_email || 'You' : sender} />
+        <div className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-semibold text-foreground">{sender}</span>
+          {message.to_email && (
+            <span className="block truncate text-[11.5px] text-muted-foreground">To: {message.to_email}</span>
+          )}
+        </div>
+        <time className="shrink-0 font-mono text-[11px] text-muted-foreground" dateTime={message.occurred_at}>
           {relativeTime(message.occurred_at)}
         </time>
       </header>

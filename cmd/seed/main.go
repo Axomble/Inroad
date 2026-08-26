@@ -99,7 +99,7 @@ func run() error {
 	// Fixtures come second and deliberately do NOT roll the registration back on
 	// failure: a workspace you can log into is worth more than an all-or-nothing
 	// seed, and a re-run fails at Register anyway since the user already exists.
-	summary, err := seed(ctx, pool, sess.WorkspaceID, opts)
+	summary, err := seed(ctx, pool, sess.WorkspaceID, sess.UserID, opts)
 	if err != nil {
 		return fmt.Errorf("fixtures: %w", err)
 	}
@@ -127,13 +127,15 @@ func workspaceName(o options) string {
 	return "Demo Workspace"
 }
 
-// seed dispatches to the static fixture or the simulation harness.
-func seed(ctx context.Context, pool *pgxpool.Pool, ws uuid.UUID, o options) (string, error) {
-	q := gen.New(pool)
+// seed dispatches to the static fixture or the simulation harness. The user id
+// is only the static fixture's concern (its seeded snoozes record who snoozed);
+// the harness generates its own actors.
+func seed(ctx context.Context, pool *pgxpool.Pool, ws, user uuid.UUID, o options) (string, error) {
 	if !o.sandboxMode {
-		return seedFixtures(ctx, q, ws)
+		return seedFixtures(ctx, pool, ws, user)
 	}
 
+	q := gen.New(pool)
 	store := sandbox.NewPgStore(pool)
 	simOpts := sandbox.Options{Window: time.Duration(o.windowDays) * 24 * time.Hour}
 	if o.deliver {

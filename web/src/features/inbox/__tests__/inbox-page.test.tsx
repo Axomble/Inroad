@@ -94,6 +94,8 @@ let mailboxes: Mailbox[]
 let threads: Thread[]
 let threadRequests: URL[]
 let overviewRequests: URL[]
+/** Every PUT /inbox/threads/:id/read the page issued, in order. */
+let readRequests: { id: string; unread: boolean }[]
 /** Lets a test force the overview to fail, to assert the rail degrades. */
 let overviewStatus: number
 
@@ -164,6 +166,7 @@ beforeEach(() => {
   router.lastNavigation = null
   threadRequests = []
   overviewRequests = []
+  readRequests = []
   overviewStatus = 200
   mailboxes = [
     { id: 'mb-1', email: 'sales@acme.test' },
@@ -224,6 +227,20 @@ beforeEach(() => {
           })),
           by_reply_class: [],
         })
+      }
+
+      // Mark read/unread — the mutation behind the command bar's toggle, the
+      // rows' hover quick action, and "Mark all as read". Mutates the fixture
+      // so the invalidation-driven refetch shows the new state.
+      const readMatch = /\/inbox\/threads\/([^/]+)\/read$/.exec(url.pathname)
+      if (readMatch && method === 'PUT') {
+        const raw = isRequest ? await input.text() : String(init?.body ?? '{}')
+        const body = JSON.parse(raw) as { unread: boolean }
+        const thread = threads.find((t) => t.id === readMatch[1])
+        if (!thread) return json({ error: 'not found' }, 404)
+        thread.unread = body.unread
+        readRequests.push({ id: thread.id, unread: body.unread })
+        return json({ ok: true })
       }
 
       // One thread's detail, for the three-pane reader. Its message history is
@@ -324,7 +341,7 @@ test('the reply-class filter re-fetches with the reply_class query param', async
   await screen.findByText('Jamie Lin')
 
   // Radix's DropdownMenu opens on keydown (Enter), not a bare click.
-  fireEvent.keyDown(screen.getByRole('button', { name: /^sort by all replies$/i }), { key: 'Enter' })
+  fireEvent.keyDown(screen.getByRole('button', { name: /^filter by reply class: all replies$/i }), { key: 'Enter' })
   fireEvent.click(await screen.findByRole('menuitem', { name: /^positive$/i }))
 
   await waitFor(() => expect(router.search.class).toBe('positive'))
@@ -416,7 +433,7 @@ test('the reply-class filter options are the workspace reply labels, not a hardc
   renderWithProviders(<InboxPage />)
   await screen.findByText('Jamie Lin')
 
-  fireEvent.keyDown(screen.getByRole('button', { name: /^sort by all replies$/i }), { key: 'Enter' })
+  fireEvent.keyDown(screen.getByRole('button', { name: /^filter by reply class: all replies$/i }), { key: 'Enter' })
 
   expect(await screen.findByRole('menuitem', { name: /^positive$/i })).toBeInTheDocument()
   expect(screen.getByRole('menuitem', { name: /^negative$/i })).toBeInTheDocument()
@@ -444,7 +461,7 @@ test('while reply labels are still loading, the filter degrades to just "All rep
   renderWithProviders(<InboxPage />)
   await screen.findByText('Jamie Lin')
 
-  fireEvent.keyDown(screen.getByRole('button', { name: /^sort by all replies$/i }), { key: 'Enter' })
+  fireEvent.keyDown(screen.getByRole('button', { name: /^filter by reply class: all replies$/i }), { key: 'Enter' })
   expect(await screen.findByRole('menuitem', { name: 'All replies' })).toBeInTheDocument()
   expect(screen.queryByRole('menuitem', { name: /^positive$/i })).not.toBeInTheDocument()
 })
@@ -607,12 +624,12 @@ test('on a wide viewport a row click opens the thread in the reader pane instead
   await screen.findByText('Re: intro')
 
   // Before any selection the pane prompts rather than showing a blank column.
-  expect(screen.getByText('Select a thread to read it.')).toBeInTheDocument()
+  expect(screen.getByText('Select an item to read')).toBeInTheDocument()
 
   fireEvent.click(screen.getByText('Re: intro'))
 
   // The reader fetches the thread; navigation must NOT have happened.
-  await waitFor(() => expect(screen.queryByText('Select a thread to read it.')).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.queryByText('Select an item to read')).not.toBeInTheDocument())
   expect(router.lastNavigation).toBeNull()
 })
 
@@ -637,12 +654,12 @@ test('a filter change that drops the selected thread clears the reader rather th
 
   // t-1 lives in mb-1.
   fireEvent.click(screen.getByText('Re: intro'))
-  await waitFor(() => expect(screen.queryByText('Select a thread to read it.')).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.queryByText('Select an item to read')).not.toBeInTheDocument())
 
   // Switching to mb-2 removes it from the list entirely.
   fireEvent.click(screen.getByRole('button', { name: /support@acme\.test/ }))
 
-  await waitFor(() => expect(screen.getByText('Select a thread to read it.')).toBeInTheDocument())
+  await waitFor(() => expect(screen.getByText('Select an item to read')).toBeInTheDocument())
 })
 
 test('switching threads in the reader pane discards the previous thread typed reply', async () => {
@@ -679,4 +696,57 @@ test('tz_offset is sent only for the calendar-dependent scopes', async () => {
     expect(url.searchParams.get('scope')).toBe('awaiting_reply')
     expect(url.searchParams.get('tz_offset')).toBeNull()
   })
+})
+
+// ---------------------------------------------------------------------------
+// Command bar + row quick actions (mark read/unread), and collapsible groups
+// ---------------------------------------------------------------------------
+
+test('Mark all as read issues one read call per unread thread on the page and the unread cue leaves', async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Jamie Lin')
+
+  // Only t-1 is unread in the fixture, so exactly one call must go out.
+  fireEvent.click(screen.getByRole('button', { name: 'Mark all as read' }))
+
+  await waitFor(() => expect(readRequests).toEqual([{ id: 't-1', unread: false }]))
+  // The mutation invalidates the list; the refetch shows the row read.
+  await waitFor(() => expect(screen.queryByText('Unread:', { exact: false })).not.toBeInTheDocument())
+  // Nothing left to mark: the button disables rather than firing no-op calls.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark all as read' })).toBeDisabled())
+})
+
+test("a row's quick action toggles that one thread read without opening it", async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Jamie Lin')
+
+  fireEvent.click(screen.getByRole('button', { name: 'Mark Jamie Lin as read' }))
+
+  await waitFor(() => expect(readRequests).toEqual([{ id: 't-1', unread: false }]))
+  // The quick action must not count as opening the row.
+  expect(router.lastNavigation).toBeNull()
+  // After the refetch the same button now offers the reverse verb.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Mark Jamie Lin as unread' })).toBeInTheDocument())
+})
+
+test('collapsing a time group hides its rows and the keyboard cursor skips them', async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Jamie Lin')
+
+  // The fixture's fixed 2026-08-06 timestamps all land in one (old) bucket, so
+  // its header is the message list's single group toggle. The folder pane's
+  // section headers are also aria-expanded buttons — scope to the group by its
+  // bucket label, which no pane section shares.
+  const groupToggle = screen.getByRole('button', { name: /Older|Earlier this/ })
+  fireEvent.click(groupToggle)
+
+  expect(screen.queryByText('Jamie Lin')).not.toBeInTheDocument()
+  // With every row hidden, j/Enter must not open a hidden thread.
+  fireEvent.keyDown(document, { key: 'j' })
+  fireEvent.keyDown(document, { key: 'Enter' })
+  expect(router.lastNavigation).toBeNull()
+
+  // Expanding brings the rows straight back — no refetch needed.
+  fireEvent.click(groupToggle)
+  expect(await screen.findByText('Jamie Lin')).toBeInTheDocument()
 })
