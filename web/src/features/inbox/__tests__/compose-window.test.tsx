@@ -103,7 +103,11 @@ function composeCalls(): Call[] {
 
 /** Fills the minimum a send needs. */
 async function fillValid() {
-  await waitFor(() => expect(screen.getByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument())
+  // Same generous timeout as the standalone mailbox test: this waits on a real
+  // round trip, and the default is tight under a parallel suite.
+  await waitFor(() => expect(screen.getByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument(), {
+    timeout: 5000,
+  })
   fireEvent.change(toField(), { target: { value: 'ada@prospect.test,' } })
   fireEvent.change(bodyField(), { target: { value: 'Hello there' } })
 }
@@ -111,7 +115,13 @@ async function fillValid() {
 test('a single connected mailbox is chosen automatically', async () => {
   renderWithProviders(<ComposeWindow onClose={onClose} />)
   // No decision to make, so the operator is not asked to make one.
-  expect(await screen.findByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument()
+  //
+  // The generous timeout is for the suite, not the feature: this waits on a
+  // real /mailboxes round trip through RTK Query, and findByRole's 1s default
+  // is tight when every other test file is running in parallel.
+  expect(
+    await screen.findByRole('button', { name: /sales@acme\.test/ }, { timeout: 5000 }),
+  ).toBeInTheDocument()
 })
 
 test('typing a comma commits a recipient chip', async () => {
@@ -131,7 +141,9 @@ test('a chip can be removed', async () => {
 
 test('send is blocked until there is a recipient and a body', async () => {
   renderWithProviders(<ComposeWindow onClose={onClose} />)
-  await waitFor(() => expect(screen.getByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument())
+  await waitFor(() => expect(screen.getByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument(), {
+    timeout: 5000,
+  })
 
   expect(sendButton()).toBeDisabled()
   fireEvent.change(toField(), { target: { value: 'ada@prospect.test,' } })
@@ -200,7 +212,9 @@ test('a suppressed recipient is explained rather than shown as a status', async 
 // being accepted and failing server-side.
 test('an invalid address blocks sending and is called out', async () => {
   renderWithProviders(<ComposeWindow onClose={onClose} />)
-  await waitFor(() => expect(screen.getByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument())
+  await waitFor(() => expect(screen.getByRole('button', { name: /sales@acme\.test/ })).toBeInTheDocument(), {
+    timeout: 5000,
+  })
   fireEvent.change(toField(), { target: { value: 'not-an-email,' } })
   fireEvent.change(bodyField(), { target: { value: 'Hello' } })
 
