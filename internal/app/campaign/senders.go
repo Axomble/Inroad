@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/platform/rotation"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // Sentinel errors for sender-pool validation, mapped to 422 by the handler.
@@ -75,10 +76,20 @@ type Sender struct {
 	SentToday  int
 }
 
-// SenderPool is a campaign's whole pool plus the mode that selects from it.
+// SenderPool is a campaign's whole pool, the mode that selects from it, and how
+// concentrated its sending has become.
+//
+// FaultDomainShares is the CURRENT USAGE half of the exposure budget the rotation
+// enforces (internal/platform/rotation/exposure.go): how much of the campaign rests
+// on each thing that can fail for all of its mailboxes at once. MaxFaultDomainShare
+// is the limit those shares are read against, carried on the wire so a client does
+// not hard-code a constant that can move. A budget with no visible usage is a number
+// nobody can act on, which is why the pair travels together.
 type SenderPool struct {
-	RotationMode string
-	Senders      []Sender
+	RotationMode        string
+	Senders             []Sender
+	FaultDomainShares   []rotation.FaultDomainShare
+	MaxFaultDomainShare float64
 }
 
 // SenderInput is one requested pool member on a full replace. Weight/Enabled are
@@ -105,7 +116,57 @@ func (s *Service) GetSenders(ctx context.Context, ws, campaignID uuid.UUID) (Sen
 	if err != nil {
 		return SenderPool{}, err
 	}
-	return SenderPool{RotationMode: normalizeRotationMode(c.RotationMode), Senders: senders}, nil
+	return SenderPool{
+		RotationMode:        normalizeRotationMode(c.RotationMode),
+		Senders:             senders,
+		FaultDomainShares:   faultDomainShares(senders),
+		MaxFaultDomainShare: rotation.MaxFaultDomainShare,
+	}, nil
+}
+
+// faultDomainShares folds the pool into its concentration: each fault domain's slice
+// of the campaign's assigned contacts, worst first.
+//
+// Measured over the WHOLE pool, disabled and inactive members included, because the
+// risk lives in the mail already sent rather than in today's roster — a domain that
+// carries 68% of a campaign's threads carries that exposure whether or not its
+// mailbox is enabled this morning. The selector narrows over today's ELIGIBLE
+// subset instead, which is the right denominator for "who takes the next contact"
+// and the wrong one for "what would a blocklisting cost me".
+//
+// warmup.SharedReputationDomain is the same key the rotation groups candidates by
+// (see inprocess.faultDomains), so the panel cannot report a concentration the
+// selector does not act on, nor miss one it does.
+func faultDomainShares(senders []Sender) []rotation.FaultDomainShare {
+	candidates := make([]rotation.Candidate, len(senders))
+	domains := make(map[string]string, len(senders))
+	// The ceiling each domain is judged against, which is NOT always the flat cap:
+	// a degrading domain is narrowed at a lower share. Reporting against the flat cap
+	// showed a domain the selector was actively routing away from as comfortably
+	// within budget — the panel and the selector disagreeing about the same pool,
+	// which is the shape of the availableToday bug this package already carries a
+	// warning about.
+	ceilings := make(map[string]float64, len(senders))
+	for i, s := range senders {
+		id := s.MailboxID.String()
+		candidates[i] = rotation.Candidate{MailboxID: id, AssignedCount: s.AssignedCount}
+		domain := warmup.SharedReputationDomain(s.Email)
+		domains[id] = domain
+		if domain == "" {
+			continue
+		}
+		// The WORST lane on the domain, which is what DomainLane already carries and
+		// what WorstLanesByDomain folded — so this reads the same verdict the send
+		// path's ceiling reads rather than re-deriving one.
+		if s.DomainLane != nil {
+			ceilings[domain] = warmup.ExposureCeiling(*s.DomainLane)
+		}
+	}
+	return rotation.FaultDomainSharesFor(
+		candidates,
+		func(c rotation.Candidate) string { return domains[c.MailboxID] },
+		func(domain string) float64 { return ceilings[domain] },
+	)
 }
 
 // loadSenderPool returns the campaign's sender pool, falling back to the

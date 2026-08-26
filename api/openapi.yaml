@@ -4823,10 +4823,69 @@ components:
           description: "Read-only count of sends from this mailbox today (UTC day)." 
     CampaignSenderPool:
       type: object
-      required: [rotation_mode, senders]
+      required: [rotation_mode, senders, max_fault_domain_share, fault_domain_shares]
       properties:
         rotation_mode: { $ref: '#/components/schemas/RotationMode' }
         senders: { type: array, items: { $ref: '#/components/schemas/CampaignSender' } }
+        max_fault_domain_share:
+          type: number
+          format: double
+          description: >-
+            Read-only. The most of a campaign's assigned volume that should rest on
+            one fault domain while an alternative exists — the limit
+            fault_domain_shares is measured against. Carried on the wire so a client
+            never hard-codes it.
+        fault_domain_shares:
+          type: array
+          description: >-
+            Read-only. How concentrated this campaign's sending is, worst first:
+            one entry per thing that can fail for several of its mailboxes at once.
+            Empty when nothing in the pool can be grouped. Measured over the WHOLE
+            pool including disabled members, because the risk lives in the mail
+            already sent rather than in today's roster.
+          items: { $ref: '#/components/schemas/FaultDomainShare' }
+    FaultDomainShare:
+      type: object
+      description: >-
+        One fault domain's slice of a campaign's assigned contacts. The domain is
+        the organizational domain the mailboxes share standing under; consumer
+        providers (gmail.com and the like) are deliberately absent, because two
+        strangers there do not share a fate.
+      required: [domain, assigned, share, ceiling, over_budget]
+      properties:
+        domain: { type: string }
+        assigned:
+          type: integer
+          format: int64
+          description: "Contacts assigned to mailboxes on this domain."
+        share:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: "Fraction of the campaign's assigned contacts, not a percentage."
+        ceiling:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: >-
+            The share this domain was judged against — max_fault_domain_share, or a
+            LOWER one because the domain is degrading. Published because otherwise a
+            reader cannot tell why a domain at 25% is over budget while another at 55%
+            is not, and would reasonably conclude the figure was wrong. Compare each
+            share against its own ceiling, never against max_fault_domain_share alone.
+        over_budget:
+          type: boolean
+          description: >-
+            True when share exceeds THIS ROW'S ceiling — not max_fault_domain_share,
+            which is only the ceiling for a domain that is not degrading. A domain at
+            0.25 can be over budget while another at 0.55 is not; re-deriving this
+            against the flat cap reproduces exactly the panel-versus-selector
+            disagreement the ceiling field exists to remove.
+            Advisory: the rotation routes new contacts away from an over-budget domain
+            when an alternative exists, but never withholds a send — a single-domain
+            pool reports 1.0 here and keeps sending.
     CampaignSenderRequest:
       type: object
       required: [mailbox_id]

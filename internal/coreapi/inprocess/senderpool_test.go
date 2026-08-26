@@ -213,7 +213,7 @@ func TestPartitionByESPFallsBackToTheFullPool(t *testing.T) {
 }
 
 // A cache miss must cost nothing. With one eligible member there is nothing to
-// choose between, so espMatched must return before it reaches the database —
+// choose between, so narrowCandidates must return before it reaches the database —
 // which a zero-value client proves by panicking on a nil *gen.Queries if it does
 // not.
 func TestESPMatchSkipsTheLookupWhenThereIsNothingToChoose(t *testing.T) {
@@ -221,7 +221,7 @@ func TestESPMatchSkipsTheLookupWhenThereIsNothingToChoose(t *testing.T) {
 	rows := []gen.ListCampaignSenderCandidatesRow{g}
 	eligible := eligibleCandidates(rows, noDomainLanes)
 
-	got := client{}.espMatched(t.Context(), uuid.New(), "someone@acme.test", rows, eligible)
+	got := client{}.narrowCandidates(t.Context(), uuid.New(), "someone@acme.test", rows, eligible, noDomainLanes)
 	if len(got) != 1 || got[0].MailboxID != g.MailboxID.String() {
 		t.Errorf("subset = %+v, want the single eligible member unchanged", got)
 	}

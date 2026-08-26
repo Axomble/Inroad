@@ -15,10 +15,33 @@ import (
 )
 
 // senderPoolResponse is the wire shape of a campaign's sender pool: the rotation
-// mode plus one row per pool member.
+// mode, one row per pool member, and the pool's concentration across the things
+// that can fail for several members at once.
+//
+// max_fault_domain_share is the LIMIT and fault_domain_shares is the CURRENT USAGE.
+// The pair travels together because neither is actionable alone: a share with no
+// limit beside it is a number, and a limit with no usage is a setting.
 type senderPoolResponse struct {
-	RotationMode string           `json:"rotation_mode"`
-	Senders      []senderResponse `json:"senders"`
+	RotationMode        string                     `json:"rotation_mode"`
+	Senders             []senderResponse           `json:"senders"`
+	MaxFaultDomainShare float64                    `json:"max_fault_domain_share"`
+	FaultDomainShares   []faultDomainShareResponse `json:"fault_domain_shares"`
+}
+
+// faultDomainShareResponse is one fault domain's slice of the campaign's assigned
+// contacts. share is a fraction in [0,1], not a percentage, and over_budget is
+// already computed server-side so the panel does not re-derive the comparison and
+// drift from the selector's.
+type faultDomainShareResponse struct {
+	Domain   string  `json:"domain"`
+	Assigned int64   `json:"assigned"`
+	Share    float64 `json:"share"`
+	// Ceiling is what this domain's share was judged against — the pool-wide limit,
+	// or a lower one because the domain is degrading. Without it a reader cannot tell
+	// why a domain at 25% is over budget while another at 55% is not, and would
+	// reasonably assume the first figure was wrong.
+	Ceiling    float64 `json:"ceiling"`
+	OverBudget bool    `json:"over_budget"`
 }
 
 // senderResponse is one pool member. email/provider/status, the rotation state
@@ -94,7 +117,17 @@ func newSenderPoolResponse(p SenderPool) senderPoolResponse {
 			CapToday: s.CapToday, SentToday: s.SentToday,
 		})
 	}
-	return senderPoolResponse{RotationMode: p.RotationMode, Senders: senders}
+	shares := make([]faultDomainShareResponse, 0, len(p.FaultDomainShares))
+	for _, s := range p.FaultDomainShares {
+		shares = append(shares, faultDomainShareResponse{
+			Domain: s.Domain, Assigned: s.Assigned, Share: s.Share,
+			Ceiling: s.Ceiling, OverBudget: s.OverBudget,
+		})
+	}
+	return senderPoolResponse{
+		RotationMode: p.RotationMode, Senders: senders,
+		MaxFaultDomainShare: p.MaxFaultDomainShare, FaultDomainShares: shares,
+	}
 }
 
 // getSenders handles GET /campaigns/{id}/senders.

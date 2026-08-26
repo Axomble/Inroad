@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
 import { useListMailboxesQuery } from '@/features/mailboxes/api'
 import { useGetCampaignSendersQuery, useUpdateCampaignSendersMutation } from './api'
 import type { RotationMode } from './api'
+import { FaultDomainExposure } from './fault-domain-exposure'
 import {
   ROTATION_MODES,
   capacityLabel,
@@ -155,6 +156,11 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
             </ul>
           </div>
         )}
+
+        {/* Directly under the pool it measures: the only action it ever asks
+            for is a change to the ticks above it. Reads the server's pool, never
+            the draft — an unsaved tick has not moved a single contact. */}
+        <FaultDomainExposure pool={data} />
 
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <GitBranch className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />

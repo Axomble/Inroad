@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { SendersPanel } from '../senders-panel'
@@ -287,6 +287,36 @@ describe('SendersPanel', () => {
     expect(screen.queryAllByRole('textbox')).toHaveLength(0)
     expect(screen.getAllByRole('spinbutton')).toHaveLength(2)
     expect(screen.getAllByRole('checkbox')).toHaveLength(4)
+  })
+
+  test("the pool's domain concentration is surfaced under the rows it is measured over", async () => {
+    stubSenders({
+      pool: {
+        ...POOL,
+        max_fault_domain_share: 0.6,
+        fault_domain_shares: [
+          { domain: 'acme.test', assigned: 68, share: 0.68, ceiling: 0.6, over_budget: true },
+          { domain: 'other.test', assigned: 32, share: 0.32, ceiling: 0.35, over_budget: false },
+        ],
+      },
+    })
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    // Reached the way a browser reaches it: a named region, not a class.
+    const region = await screen.findByRole('region', { name: /domain concentration/i })
+    expect(within(region).getByText('acme.test')).toBeInTheDocument()
+    expect(within(region).getByText('Over budget')).toBeInTheDocument()
+    expect(within(region).getByText('Within budget')).toBeInTheDocument()
+  })
+
+  test('a pool the server reports no concentration for renders no concentration region', async () => {
+    stubSenders()
+    renderWithProviders(<SendersPanel campaignId="c-1" />)
+
+    // The fixture predates the exposure fields; an absent measurement must read
+    // as silence rather than as a campaign with nothing concentrated.
+    await waitFor(() => expect(screen.getByLabelText('Rotation mode')).toBeInTheDocument())
+    expect(screen.queryByRole('region', { name: /domain concentration/i })).not.toBeInTheDocument()
   })
 
   test("a rejected save surfaces the server's reason and keeps the edits", async () => {

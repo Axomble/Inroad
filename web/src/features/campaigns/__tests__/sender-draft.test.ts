@@ -11,8 +11,13 @@ import {
 } from '../sender-draft'
 import type { DraftSender } from '../sender-draft'
 
+// The exposure fields the server always emits alongside the pool. Spread in, so a
+// fixture stays about the sender rows it is actually testing.
+const EXPOSURE = { max_fault_domain_share: 0.6, fault_domain_shares: [] }
+
 const POOL = {
   rotation_mode: 'round_robin' as const,
+  ...EXPOSURE,
   senders: [
     {
       mailbox_id: 'mb-2',
@@ -63,6 +68,7 @@ describe('toDraft', () => {
   test('keeps an inactive mailbox that is already in the pool', () => {
     const pool = {
       rotation_mode: 'weighted' as const,
+      ...EXPOSURE,
       senders: [{ ...POOL.senders[0]!, mailbox_id: 'mb-3', email: 'c@example.com', status: 'paused' }],
     }
     const rows = toDraft(pool, MAILBOXES)
@@ -80,12 +86,13 @@ describe('toDraft', () => {
 
   test('is empty when the workspace has no offerable mailboxes', () => {
     expect(toDraft(undefined, [])).toEqual([])
-    expect(toDraft({ rotation_mode: 'weighted', senders: [] }, [MAILBOXES[2]!])).toEqual([])
+    expect(toDraft({ rotation_mode: 'weighted', senders: [], ...EXPOSURE }, [MAILBOXES[2]!])).toEqual([])
   })
 
   test('reads the health and capacity fields the server reported', () => {
     const pool = {
       rotation_mode: 'weighted' as const,
+      ...EXPOSURE,
       senders: [
         { ...POOL.senders[0]!, health_state: 'throttled' as const, sending: true, cap_today: 25, sent_today: 4 },
       ],
@@ -111,6 +118,7 @@ describe('toDraft', () => {
   test('reads a null health state as not warming up rather than healthy', () => {
     const pool = {
       rotation_mode: 'weighted' as const,
+      ...EXPOSURE,
       senders: [{ ...POOL.senders[0]!, health_state: null, cap_today: 50, sent_today: 0 }],
     }
     expect(toDraft(pool, MAILBOXES).find((r) => r.mailbox_id === 'mb-2')?.healthState).toBeNull()
@@ -119,6 +127,7 @@ describe('toDraft', () => {
   test('reads a zero cap as a real zero, not as unknown', () => {
     const pool = {
       rotation_mode: 'weighted' as const,
+      ...EXPOSURE,
       senders: [{ ...POOL.senders[0]!, sending: false, cap_today: 0, sent_today: 0 }],
     }
     const member = toDraft(pool, MAILBOXES).find((r) => r.mailbox_id === 'mb-2')

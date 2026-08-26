@@ -981,6 +981,34 @@ write history that never happened.
     floor is untouchable, and one that junks a single victim rather than everything
     sits near the pool average at any volume.
 
+60. **A warmup lane now reaches campaign selection by a SECOND path, and that path
+    cannot withhold a send.** Invariant 54 says a lane's effect on campaign leads runs
+    through `warmup.NewLeadsWithheld`, and that only `quarantine` and `blocked`
+    withhold. Both are still true and are no longer the whole picture: since exposure
+    budgets, `watch` and `recovery` also change WHICH mailbox a new lead is assigned
+    to, through `exposureCeilings` → `rotation.WithinExposureBudgetFor`, which does not
+    go through `NewLeadsWithheld` at all. A reviewer auditing "what can a lane do to a
+    campaign" from invariant 54 alone would miss it.
+    Two properties bound it, and both are load-bearing rather than incidental.
+    **It never empties the candidate set:** if every candidate is over budget — the
+    ordinary single-domain workspace — the whole set is returned unchanged, so the
+    budget can shift volume but never reduce it. A concentration limit able to
+    withhold mail would be a worse failure than the concentration it prevents.
+    **A ceiling of 0 means "no opinion", never "may not send":** containment stays
+    `LaneMaySend`'s decision, because a second implementation of "may this send" is the
+    shape every repeated defect here has taken. `pending_auth` gets 0 deliberately, so
+    the DNS advisory invariant 39 forbids from stopping a campaign does not narrow one
+    either.
+    It reads a LANE, not a rate, grouped by the sender's organizational domain from
+    `mailboxes.email` — our own record, and immutable after insert. Nothing
+    route-derived or message-derived reaches it, which is why it is outside what
+    invariants 57, 58 and 59 constrain. Keep it that way.
+    **Known asymmetry:** consumer-provider mailboxes are never grouped
+    (`SharesDomainReputation`), so the budget can push volume ONTO them but never off.
+    Those are the same mailboxes the domain half of the containment gate never covers.
+    Each mailbox's own lane still applies before the budget, so containment is not
+    weakened — but new leads drift toward the least domain-contained class of mailbox.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

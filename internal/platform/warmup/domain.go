@@ -85,6 +85,28 @@ func SharesDomainReputation(email string) bool {
 	return domain != "" && !consumerMailDomains[domain]
 }
 
+// SharedReputationDomain is the KEY this file's grouping is done under: the
+// organizational domain when its mailboxes genuinely share standing, and "" when
+// they do not — a consumer provider, or an address with no domain to group on.
+//
+// The whole of "which mailboxes share a fault", as one value. It exists because
+// three separate places need it and the alternative is three expressions of one
+// rule: the fold below builds the map with it, For reads the map with it, and a
+// caller that GROUPS senders by shared fault (rotation's exposure budget) needs the
+// same key to look a group's verdict up by. Deriving it at a call site instead —
+// SharesDomainReputation guarding an OrganizationalDomain call — reproduces the
+// pair, and a copy that drifts is the "two things that must agree" defect this file
+// already exists to prevent.
+//
+// "" is deliberately not a group. It is never a key of DomainLanes, so it reads
+// back as "no verdict" rather than as a bucket holding every ungroupable mailbox.
+func SharedReputationDomain(email string) string {
+	if !SharesDomainReputation(email) {
+		return ""
+	}
+	return OrganizationalDomain(email)
+}
+
 // OrganizationalDomain returns the registrable domain (eTLD+1) of an email
 // address, lower-cased: the unit the gate groups mailboxes by. Empty when the
 // address carries no domain at all.
@@ -160,11 +182,12 @@ func WorstLanesByDomain(participants []MailboxLane) DomainLanes {
 	out := make(DomainLanes, len(participants))
 	for _, p := range participants {
 		// A consumer-provider mailbox contributes nothing to a domain verdict: its
-		// neighbours are strangers, not this workspace's other senders.
-		if !SharesDomainReputation(p.Email) {
+		// neighbours are strangers, not this workspace's other senders. An address
+		// with no domain contributes nothing either — both are "" here.
+		domain := SharedReputationDomain(p.Email)
+		if domain == "" {
 			continue
 		}
-		domain := OrganizationalDomain(p.Email)
 		if current, ok := out[domain]; !ok || laneSeverity(p.Lane) > laneSeverity(current) {
 			out[domain] = p.Lane
 		}
@@ -176,14 +199,34 @@ func WorstLanesByDomain(participants []MailboxLane) DomainLanes {
 // no participant is warming up there — which every lane predicate already reads
 // as "not gated".
 func (d DomainLanes) For(email string) string {
-	// Symmetric with the fold: a consumer-provider mailbox is never withheld by a
-	// domain verdict, because it never contributed to one. Checked on BOTH sides so
-	// the map cannot be read with a different rule than it was built with — the
-	// "two things that must agree" shape this subsystem keeps producing.
-	if !SharesDomainReputation(email) {
+	// Symmetric with the fold BY CONSTRUCTION, not by inspection: both sides call
+	// SharedReputationDomain, so the map cannot be read under a different rule than
+	// it was built with. A consumer-provider mailbox keys on "", which the fold never
+	// stores, so it is never withheld by a verdict it never contributed to.
+	//
+	// The explicit refusal below is not redundant with that. Without it the carve-out
+	// holds only because WorstLanesByDomain — today the sole production constructor —
+	// skips "". DomainLanes is an exported map, so a future caller that builds one
+	// directly and happens to store an "" key would apply that lane's containment AND
+	// its exposure ceiling to every consumer-provider and malformed-address mailbox at
+	// once. The guard costs a comparison and does not depend on what another function
+	// remembers to do.
+	domain := SharedReputationDomain(email)
+	if domain == "" {
 		return ""
 	}
-	return d[OrganizationalDomain(email)]
+	return d.ForDomain(domain)
+}
+
+// ForDomain is For for an ALREADY-RESOLVED shared-reputation domain — the key space
+// SharedReputationDomain produces and WorstLanesByDomain stores under.
+//
+// For a caller that has already grouped senders by that key (rotation's exposure
+// budget groups candidates by fault domain, then needs each group's lane) this is
+// the way to read a verdict without going back to an address and folding it a second
+// time. "" is never a stored key, so an ungroupable sender reads back as no verdict.
+func (d DomainLanes) ForDomain(domain string) string {
+	return d[domain]
 }
 
 // laneSeverity orders lanes by how contained they are, so "worst on the domain"

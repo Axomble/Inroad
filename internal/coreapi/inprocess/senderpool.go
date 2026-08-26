@@ -79,11 +79,12 @@ func threadLostItsMailbox(currentStep int32, pinned pgtype.UUID) bool {
 // A pool whose every member is disabled, inactive, health-paused or capped defers
 // instead (exhaustedPoolSender), and pins nothing.
 //
-// ESP matching narrows step 2's candidate set only. It CANNOT apply at step 1,
-// which keeps the thread's mailbox: a follow-up carries In-Reply-To/References
-// from the previous message, so a live thread is never re-routed no matter what
-// the recipient's ESP turns out to be. Matching is therefore a property of the
-// initial assignment and of nothing else.
+// ESP matching and the exposure budget narrow step 2's candidate set only. Neither
+// CAN apply at step 1, which keeps the thread's mailbox: a follow-up carries
+// In-Reply-To/References from the previous message, so a live thread is never
+// re-routed no matter what the recipient's ESP turns out to be, nor how much of the
+// campaign's volume its fault domain has come to carry. Both are therefore
+// properties of the initial assignment and of nothing else.
 func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b gen.GetStepEnrollmentBundleRow) (resolvedSender, error) {
 	if b.EnrollmentMailboxID.Valid {
 		return c.withTodaysCapacity(ctx, ws, bundleSender(b))
@@ -109,7 +110,8 @@ func (c client) resolveSender(ctx context.Context, ws, enrollmentID uuid.UUID, b
 		if len(eligible) == 0 {
 			return c.exhaustedPoolSender(b, rows, domainLanes)
 		}
-		winner, serr := rotation.Select(b.RotationMode, c.espMatched(ctx, ws, b.ToEmail, rows, eligible))
+		winner, serr := rotation.Select(b.RotationMode,
+			c.narrowCandidates(ctx, ws, b.ToEmail, rows, eligible, domainLanes))
 		if serr != nil {
 			return resolvedSender{}, serr
 		}
@@ -223,13 +225,9 @@ func eligibleCandidates(rows []gen.ListCampaignSenderCandidatesRow, domainLanes 
 	return out
 }
 
-// espMatched narrows the eligible set to the mailboxes that send through the
-// same provider as the recipient's domain, so a Google contact is assigned a
-// Google mailbox and a Microsoft contact a Microsoft one. It is a NARROWING, not
-// a re-ranking: rotation.Select is then called on the subset unchanged, so every
-// rotation mode behaves identically to before within it. Adding an ESP factor to
-// rotation.Candidate instead would have been silently inert under round_robin
-// and least_recently_used, whose comparisons never consult the score.
+// narrowCandidates applies both candidate narrowings to the eligible set before
+// rotation ranks it. It reads the recipient's ESP from the cache; the ordering and
+// the arithmetic live in the pure `narrowed` below.
 //
 // The recipient's ESP is read from the cache ONLY. resolveSender already runs
 // three or four queries inside the send job, and a DNS lookup here would put a
@@ -239,14 +237,97 @@ func eligibleCandidates(rows []gen.ListCampaignSenderCandidatesRow, domainLanes 
 // worker/recipientesp.
 //
 // Skipped outright when the pool has one eligible member — there is nothing to
-// choose between, so the lookup would be a query spent to reach the same answer.
-func (c client) espMatched(ctx context.Context, ws uuid.UUID, toEmail string,
+// choose between, so the lookup would be a query spent to reach the same answer,
+// and neither narrowing can change a one-element set either.
+func (c client) narrowCandidates(ctx context.Context, ws uuid.UUID, toEmail string,
 	rows []gen.ListCampaignSenderCandidatesRow, eligible []rotation.Candidate,
+	domainLanes warmup.DomainLanes,
 ) []rotation.Candidate {
 	if len(eligible) < 2 {
 		return eligible
 	}
-	return partitionByESP(rows, eligible, c.recipientESP(ctx, ws, toEmail))
+	return narrowed(rows, eligible, c.recipientESP(ctx, ws, toEmail), domainLanes)
+}
+
+// narrowed is the pure half of candidate narrowing: ESP matching FIRST, then the
+// exposure budget within whatever it left.
+//
+// THE ORDER IS A DECISION, not an implementation detail, because the two can
+// disagree — the only mailbox matching the recipient's provider may be the one
+// sitting on the over-exposed fault domain. ESP matching wins for three reasons:
+//
+//  1. What each is worth. Matching improves the deliverability of THIS message and
+//     does so now; the budget hedges a portfolio risk that may never materialise.
+//     Trading a certain gain for an uncertain one is the wrong side of that trade,
+//     and the budget's own doc comment says as much — being wrong about it should
+//     only ever pick a different healthy mailbox.
+//  2. What each needs to see. partitionByESP has to answer "does the pool contain
+//     ANY mailbox on the recipient's provider", and it falls back to the full set
+//     when the answer is no. Narrowing first would make it ask that of a set already
+//     pruned for an unrelated reason, so a pool that does match would silently read
+//     as unmatched. The budget has no such dependency: it is guaranteed non-empty
+//     and composes safely onto any subset.
+//  3. What it costs the budget. Nothing structural — it still narrows within the
+//     matched cohort, measured over that cohort, which is where a pool's
+//     concentration usually sits (a workspace's Google mailboxes spread over three
+//     domains). It simply cannot force a cross-provider send to relieve one.
+//
+// Neither step can empty the set, so the composition cannot reduce sending.
+func narrowed(rows []gen.ListCampaignSenderCandidatesRow, eligible []rotation.Candidate,
+	recipient esp.ESP, domainLanes warmup.DomainLanes,
+) []rotation.Candidate {
+	return withinExposureBudget(rows, partitionByESP(rows, eligible, recipient), domainLanes)
+}
+
+// withinExposureBudget keeps the candidates whose FAULT DOMAIN is not already
+// carrying more of the campaign than it should — the concentration limit, wired to
+// this pool's rows.
+//
+// It reads no evidence about how mail performed. The shares come from
+// campaign_senders.assigned_count (the campaign's own history) and the grouping from
+// mailboxes.email; the only lane it consults is the evaluator's own conclusion, which
+// is not route-derived and not carried by any message. Nothing here is influenceable
+// the way security.md invariants 57–59 describe.
+//
+// A quarantined or blocked domain never reaches this function with anything to
+// narrow: availableToday already removed its mailboxes. Containment stays
+// LaneMaySend's decision and this stays a ceiling, so the two cannot become two
+// implementations of "may this send".
+func withinExposureBudget(rows []gen.ListCampaignSenderCandidatesRow, eligible []rotation.Candidate,
+	domainLanes warmup.DomainLanes,
+) []rotation.Candidate {
+	return rotation.WithinExposureBudgetFor(eligible, faultDomains(rows), exposureCeilings(domainLanes))
+}
+
+// faultDomains resolves each pool member to the thing that can fail for all of it at
+// once: the shared-reputation domain of its address.
+//
+// Built from the pool rows the caller already has, keyed by mailbox id, because
+// rotation.Candidate carries no address and platform/rotation must not learn what a
+// mailbox domain is. A candidate absent from the map resolves to "" (unknown), which
+// the budget never groups — the right answer for a row that is not in this pool.
+//
+// warmup.SharedReputationDomain, not OrganizationalDomain, so the key space here is
+// the SAME one warmup.DomainLanes is built and read under. That is what lets
+// exposureCeilings look a group's lane up by the key it grouped on; deriving the two
+// separately would be the "two things that must agree" defect that file exists to
+// prevent. It also carries the consumer-provider carve-out for free: two strangers on
+// gmail.com key on "" and are never throttled as though they shared a fate.
+func faultDomains(rows []gen.ListCampaignSenderCandidatesRow) rotation.FaultDomainOf {
+	byMailbox := make(map[string]string, len(rows))
+	for _, r := range rows {
+		byMailbox[r.MailboxID.String()] = warmup.SharedReputationDomain(r.Email)
+	}
+	return func(c rotation.Candidate) string { return byMailbox[c.MailboxID] }
+}
+
+// exposureCeilings is each fault domain's share ceiling: tighter for a domain the
+// evaluator has put on watch or in recovery, and zero — "no opinion", which
+// rotation reads as the flat cap — for every other lane.
+func exposureCeilings(domainLanes warmup.DomainLanes) func(domain string) float64 {
+	return func(domain string) float64 {
+		return warmup.ExposureCeiling(domainLanes.ForDomain(domain))
+	}
 }
 
 // recipientESP reads one domain's cached classification. Every failure — a
@@ -275,9 +356,16 @@ func (c client) recipientESP(ctx context.Context, ws uuid.UUID, toEmail string) 
 }
 
 // partitionByESP keeps the eligible candidates whose mailbox sends through want,
-// or returns the whole set when that would select nothing. Pure, and order
-// preserving — the input is ordered by mailbox_id, which is rotation's tie-break,
-// so the subset stays deterministic.
+// so a Google contact is assigned a Google mailbox and a Microsoft contact a
+// Microsoft one — or returns the whole set when that would select nothing. Pure,
+// and order preserving: the input is ordered by mailbox_id, which is rotation's
+// tie-break, so the subset stays deterministic.
+//
+// A NARROWING, not a re-ranking. rotation.Select is called on the subset unchanged,
+// so every rotation mode behaves identically to before within it. Adding an ESP
+// factor to rotation.Candidate instead would have been silently inert under
+// round_robin and least_recently_used, whose comparisons never consult the score —
+// the same reason the exposure budget narrows rather than scores.
 //
 // Falling back on an empty subset is the rule that makes this safe to enable
 // unconditionally: a matched pool that is exhausted for today must not defer a
