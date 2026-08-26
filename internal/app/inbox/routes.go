@@ -47,5 +47,14 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	// sends nothing, exactly like marking a thread read.
 	r.With(write).Put("/threads/{id}/snooze", h.snooze)
 	r.With(write).Delete("/threads/{id}/snooze", h.unsnooze)
+	// Operator-assigned labels. Reading the taxonomy is inbox:read; creating,
+	// editing and applying are inbox:write — filing is triage, and none of it
+	// sends mail or spends AI budget.
+	r.With(read).Get("/labels", h.listLabels)
+	r.With(write).Post("/labels", h.createLabel)
+	r.With(write).Put("/labels/{labelId}", h.updateLabel)
+	r.With(write).Delete("/labels/{labelId}", h.deleteLabel)
+	r.With(write).Put("/threads/{id}/labels/{labelId}", h.assignLabel)
+	r.With(write).Delete("/threads/{id}/labels/{labelId}", h.unassignLabel)
 	return r
 }

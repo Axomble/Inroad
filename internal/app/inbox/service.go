@@ -41,6 +41,9 @@ type Service struct {
 	// NewService(store) call site compiling. The snooze methods are the only
 	// ones that touch it, and they are unreachable without a route mounted.
 	snoozes SnoozeStore
+	// labels backs the label use cases (see label.go). Optional on the same
+	// terms as snoozes.
+	labels LabelStore
 	// clock is the Service's source of "now", injected so time-bounded rules
 	// (the snooze horizon) are testable at a fixed instant rather than
 	// reaching for the process clock. nil means time.Now — see now().
@@ -62,6 +65,12 @@ func NewService(store Store, opts ...ServiceOption) *Service {
 // implements both interfaces).
 func WithSnoozeStore(snoozes SnoozeStore) ServiceOption {
 	return func(s *Service) { s.snoozes = snoozes }
+}
+
+// WithLabelStore supplies the label persistence. PgStore implements it
+// alongside Store and SnoozeStore.
+func WithLabelStore(labels LabelStore) ServiceOption {
+	return func(s *Service) { s.labels = labels }
 }
 
 // WithClock overrides the Service's source of "now". Test-facing; production
@@ -144,7 +153,39 @@ func (s *Service) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 	if filter.SnoozeHidden && filter.SnoozedOnly {
 		return ThreadPage{}, fmt.Errorf("%w: snooze_hidden and snoozed_only are mutually exclusive", ErrValidation)
 	}
-	return s.store.ListThreads(ctx, workspaceID, filter)
+	page, err := s.store.ListThreads(ctx, workspaceID, filter)
+	if err != nil {
+		return ThreadPage{}, err
+	}
+	if err := s.attachLabels(ctx, workspaceID, page.Items); err != nil {
+		return ThreadPage{}, err
+	}
+	return page, nil
+}
+
+// attachLabels fills in every listed thread's labels with ONE query for the
+// whole page. A query per row would be a textbook N+1 on the inbox's hottest
+// read; a JOIN in ListInboxThreads would instead multiply the page's rows by
+// each thread's label count and break the keyset's LIMIT.
+//
+// No-op when no label store is configured, so a Service built without one
+// lists threads exactly as it did before labels existed.
+func (s *Service) attachLabels(ctx context.Context, workspaceID uuid.UUID, threads []Thread) error {
+	if s.labels == nil || len(threads) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(threads))
+	for i, t := range threads {
+		ids[i] = t.ID
+	}
+	byThread, err := s.labels.LabelsForThreads(ctx, workspaceID, ids)
+	if err != nil {
+		return err
+	}
+	for i := range threads {
+		threads[i].Labels = byThread[threads[i].ID]
+	}
+	return nil
 }
 
 // GetThread returns one thread with its full message history, scoped to
@@ -170,6 +211,16 @@ func (s *Service) GetThread(ctx context.Context, workspaceID, id uuid.UUID) (Thr
 		return ThreadDetail{}, err
 	}
 	detail.Snooze = snooze
+
+	labels, err := s.labelsForThread(ctx, workspaceID, id)
+	if err != nil {
+		return ThreadDetail{}, err
+	}
+	detail.Labels = labels
+	// Mirrored onto the embedded Thread as well, so a caller holding either the
+	// detail or its Thread sees the same labels rather than having to know which
+	// field the list path populates.
+	detail.Thread.Labels = labels
 	return detail, nil
 }
 

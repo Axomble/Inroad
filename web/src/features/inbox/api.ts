@@ -16,6 +16,7 @@ export type {
   InboxDraftReply,
   InboxOverview,
   InboxSnooze,
+  InboxLabel,
   InboxMailboxCount,
   InboxReplyClassCount,
   SendInboxReplyRequest,
@@ -24,7 +25,7 @@ export type {
 } from '@/store/api'
 
 const inboxApi = api.enhanceEndpoints({
-  addTagTypes: ['InboxThread'],
+  addTagTypes: ['InboxThread', 'InboxLabel'],
   endpoints: {
     listInboxThreads: {
       providesTags: (result) =>
@@ -71,6 +72,43 @@ const inboxApi = api.enhanceEndpoints({
         { type: 'InboxThread', id: 'LIST' },
       ],
     },
+    // Labels: the taxonomy itself and the per-thread assignments live under
+    // different tags. Creating or renaming a label changes the PICKER
+    // (InboxLabel), while applying one to a thread changes that THREAD and the
+    // rail counts (InboxThread). Conflating them would refetch every thread
+    // whenever someone recoloured a label.
+    listInboxLabels: {
+      providesTags: [{ type: 'InboxLabel' as const, id: 'LIST' }],
+    },
+    createInboxLabel: {
+      invalidatesTags: [{ type: 'InboxLabel' as const, id: 'LIST' }],
+    },
+    updateInboxLabel: {
+      // Also invalidates threads: a renamed or recoloured label is embedded in
+      // every thread carrying it, so the chips would otherwise show stale copy.
+      invalidatesTags: [
+        { type: 'InboxLabel' as const, id: 'LIST' },
+        { type: 'InboxThread' as const, id: 'LIST' },
+      ],
+    },
+    deleteInboxLabel: {
+      invalidatesTags: [
+        { type: 'InboxLabel' as const, id: 'LIST' },
+        { type: 'InboxThread' as const, id: 'LIST' },
+      ],
+    },
+    assignInboxThreadLabel: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'InboxThread' as const, id: arg.id },
+        { type: 'InboxThread' as const, id: 'LIST' },
+      ],
+    },
+    unassignInboxThreadLabel: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'InboxThread' as const, id: arg.id },
+        { type: 'InboxThread' as const, id: 'LIST' },
+      ],
+    },
     // The send is queued (202), not delivered — the outbound message doesn't
     // exist yet at the instant this resolves, so this immediate invalidation
     // is a best-effort refetch, not a guarantee the reply is visible yet. The
@@ -102,4 +140,10 @@ export const {
   useSetInboxThreadReadMutation,
   useSnoozeInboxThreadMutation,
   useUnsnoozeInboxThreadMutation,
+  useListInboxLabelsQuery,
+  useCreateInboxLabelMutation,
+  useUpdateInboxLabelMutation,
+  useDeleteInboxLabelMutation,
+  useAssignInboxThreadLabelMutation,
+  useUnassignInboxThreadLabelMutation,
 } = inboxApi

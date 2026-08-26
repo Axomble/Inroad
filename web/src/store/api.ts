@@ -1477,6 +1477,7 @@ const injectedRtkApi = api.injectEndpoints({
           limit: queryArg.limit,
           scope: queryArg.scope,
           tz_offset: queryArg.tzOffset,
+          label: queryArg.label,
         },
       }),
     }),
@@ -1542,6 +1543,59 @@ const injectedRtkApi = api.injectEndpoints({
     >({
       query: (queryArg) => ({
         url: `/inbox/threads/${queryArg.id}/snooze`,
+        method: "DELETE",
+      }),
+    }),
+    listInboxLabels: build.query<
+      ListInboxLabelsApiResponse,
+      ListInboxLabelsApiArg
+    >({
+      query: () => ({ url: `/inbox/labels` }),
+    }),
+    createInboxLabel: build.mutation<
+      CreateInboxLabelApiResponse,
+      CreateInboxLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/labels`,
+        method: "POST",
+        body: queryArg.upsertInboxLabelRequest,
+      }),
+    }),
+    updateInboxLabel: build.mutation<
+      UpdateInboxLabelApiResponse,
+      UpdateInboxLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/labels/${queryArg.labelId}`,
+        method: "PUT",
+        body: queryArg.upsertInboxLabelRequest,
+      }),
+    }),
+    deleteInboxLabel: build.mutation<
+      DeleteInboxLabelApiResponse,
+      DeleteInboxLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/labels/${queryArg.labelId}`,
+        method: "DELETE",
+      }),
+    }),
+    assignInboxThreadLabel: build.mutation<
+      AssignInboxThreadLabelApiResponse,
+      AssignInboxThreadLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/labels/${queryArg.labelId}`,
+        method: "PUT",
+      }),
+    }),
+    unassignInboxThreadLabel: build.mutation<
+      UnassignInboxThreadLabelApiResponse,
+      UnassignInboxThreadLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/labels/${queryArg.labelId}`,
         method: "DELETE",
       }),
     }),
@@ -2458,6 +2512,8 @@ export type ListInboxThreadsApiArg = {
     "all" | "unread" | "today" | "this_week" | "awaiting_reply" | "snoozed";
   /** The viewer's UTC offset in minutes East of UTC, as JavaScript's `-new Date().getTimezoneOffset()` reports it. Only read when scope is `today` or `this_week`, whose boundaries depend on the viewer's own day rather than the server's. Defaults to 0 (UTC) — never the server's local zone, which carries no information about the viewer. */
   tzOffset?: number;
+  /** Restrict to threads carrying one operator-assigned label (see listInboxLabels). Distinct from `reply_class`, which filters on the classifier's own verdict. */
+  label?: string;
 };
 export type GetInboxOverviewApiResponse =
   /** status 200 Scope counts for the workspace */ InboxOverview;
@@ -2494,6 +2550,34 @@ export type SnoozeInboxThreadApiArg = {
 export type UnsnoozeInboxThreadApiResponse = unknown;
 export type UnsnoozeInboxThreadApiArg = {
   id: string;
+};
+export type ListInboxLabelsApiResponse =
+  /** status 200 The workspace's labels */ InboxLabelList;
+export type ListInboxLabelsApiArg = void;
+export type CreateInboxLabelApiResponse =
+  /** status 200 The created or resolved label */ InboxLabel;
+export type CreateInboxLabelApiArg = {
+  upsertInboxLabelRequest: UpsertInboxLabelRequest;
+};
+export type UpdateInboxLabelApiResponse =
+  /** status 200 The updated label */ InboxLabel;
+export type UpdateInboxLabelApiArg = {
+  labelId: string;
+  upsertInboxLabelRequest: UpsertInboxLabelRequest;
+};
+export type DeleteInboxLabelApiResponse = unknown;
+export type DeleteInboxLabelApiArg = {
+  labelId: string;
+};
+export type AssignInboxThreadLabelApiResponse = unknown;
+export type AssignInboxThreadLabelApiArg = {
+  id: string;
+  labelId: string;
+};
+export type UnassignInboxThreadLabelApiResponse = unknown;
+export type UnassignInboxThreadLabelApiArg = {
+  id: string;
+  labelId: string;
 };
 export type Membership = {
   workspace_id: string;
@@ -4115,6 +4199,14 @@ export type ReplyLabelReorderInput = {
   /** every label in the workspace, exactly once, in the new order */
   ids: string[];
 };
+export type InboxLabel = {
+  id: string;
+  name: string;
+  /** A lowercase hex colour, `#rrggbb`. */
+  color: string;
+  created_at: string;
+  updated_at: string;
+};
 export type InboxReplyLabelRef = {
   key: string;
   label: string;
@@ -4134,6 +4226,8 @@ export type InboxThreadSummary = {
   contact_last_name: string;
   subject: string;
   last_reply_class: string;
+  /** The operator-assigned labels on this thread, alphabetical. Always present (`[]` when none), so a client can map over it unconditionally. Distinct from `reply_label`, which is the classifier's verdict and cannot be assigned by hand. */
+  labels?: InboxLabel[];
   /** The workspace reply label resolved from last_reply_class for display, or null when the key no longer matches a label (readers degrade to the raw last_reply_class key). */
   reply_label: InboxReplyLabelRef | null;
   unread: boolean;
@@ -4203,6 +4297,15 @@ export type SetInboxThreadReadRequest = {
 export type SnoozeInboxThreadRequest = {
   /** When the thread should return to the inbox. Must be in the future and within 90 days. */
   snooze_until: string;
+};
+export type InboxLabelList = {
+  labels: InboxLabel[];
+};
+export type UpsertInboxLabelRequest = {
+  /** Normalized before storage (trimmed, internal whitespace collapsed). Unique per workspace, case-insensitively. */
+  name: string;
+  /** A hex colour, `#rrggbb` (case-insensitive on input, stored lowercase). Omitted on create means the server's default. */
+  color?: string;
 };
 export const {
   useAuthRegisterMutation,
@@ -4391,4 +4494,10 @@ export const {
   useSetInboxThreadReadMutation,
   useSnoozeInboxThreadMutation,
   useUnsnoozeInboxThreadMutation,
+  useListInboxLabelsQuery,
+  useCreateInboxLabelMutation,
+  useUpdateInboxLabelMutation,
+  useDeleteInboxLabelMutation,
+  useAssignInboxThreadLabelMutation,
+  useUnassignInboxThreadLabelMutation,
 } = injectedRtkApi;

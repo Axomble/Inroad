@@ -10,6 +10,7 @@ import { useGetInboxThreadQuery } from './api'
 import { contactLabel } from './contact-label'
 import { ThreadReader } from './thread-reader'
 import { SnoozeMenu } from './snooze-menu'
+import { LabelPicker } from './label-picker'
 
 const routeApi = getRouteApi('/app/inbox/$threadId')
 
@@ -49,6 +50,7 @@ export function ThreadDetailPage() {
           data ? (
             <div className="flex items-start gap-2">
               <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} />
+              <LabelPicker threadId={threadId} applied={data.labels} />
               <SnoozeMenu threadId={threadId} snooze={data.snooze} />
             </div>
           ) : undefined

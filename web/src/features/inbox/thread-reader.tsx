@@ -11,6 +11,8 @@ import { contactLabel } from './contact-label'
 import { MessageBody } from './message-body'
 import { ReplyComposer } from './reply-composer'
 import { SnoozeMenu } from './snooze-menu'
+import { LabelPicker } from './label-picker'
+import { LabelChips } from './label-chip'
 
 /**
  * One thread's messages and its composer — the reader, with no page chrome of
@@ -105,7 +107,9 @@ export function ThreadReaderHeading({ threadId }: { threadId: string }) {
         <p className="truncate text-[12px] text-muted-foreground">{data.subject || '(no subject)'}</p>
       </div>
       <div className="flex shrink-0 items-start gap-2">
+        <LabelChips labels={data.labels} max={2} />
         <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} />
+        <LabelPicker threadId={threadId} applied={data.labels} />
         <SnoozeMenu threadId={threadId} snooze={data.snooze} />
       </div>
     </div>

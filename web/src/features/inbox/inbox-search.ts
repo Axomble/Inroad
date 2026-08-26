@@ -22,6 +22,8 @@ export interface InboxSearch {
   q?: string
   cursor?: string
   scope?: InboxScope
+  /** An operator-assigned label's id — the rail's label scope. */
+  label?: string
 }
 
 /**
@@ -70,6 +72,7 @@ export function parseInboxSearch(search: Record<string, unknown>): InboxSearch {
     q: text(search.q),
     cursor: text(search.cursor),
     scope: scope(search.scope),
+    label: text(search.label),
   }
 }
 

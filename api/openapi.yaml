@@ -2965,6 +2965,14 @@ paths:
             day rather than the server's. Defaults to 0 (UTC) — never the
             server's local zone, which carries no information about the viewer.
           schema: { type: integer, minimum: -720, maximum: 840 }
+        - name: label
+          in: query
+          required: false
+          description: >-
+            Restrict to threads carrying one operator-assigned label (see
+            listInboxLabels). Distinct from `reply_class`, which filters on the
+            classifier's own verdict.
+          schema: { type: string, format: uuid }
       responses:
         '200':
           description: Threads in the workspace
@@ -3147,6 +3155,121 @@ paths:
         '204': { description: The thread is back in the inbox }
         '401': { description: Unauthorized }
         '404': { description: "The thread does not exist, or is not snoozed" }
+  /inbox/labels:
+    get:
+      operationId: listInboxLabels
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace's operator-assigned thread labels, sorted
+        case-insensitively by name.
+
+
+        Distinct from listReplyLabels: that is the CLASSIFIER's taxonomy, written
+        onto a thread's `last_reply_class` by the model and not assignable by
+        hand. These are the operator's own filing system — created and applied
+        only by people, and many-per-thread rather than one.
+      responses:
+        '200':
+          description: The workspace's labels
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxLabelList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createInboxLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Search-or-create, which is what a label picker needs: a name that
+        already exists (compared case-insensitively) resolves to the EXISTING
+        label with 200 rather than 409, because a member typing a name they have
+        used before means "file it under that", not "fail". The existing label
+        keeps its own colour — resolving is not editing.
+
+
+        Names are normalized before storage: surrounding whitespace trimmed and
+        internal runs collapsed, so " Big   Deals " and "Big Deals" cannot become
+        two labels that look identical in the picker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertInboxLabelRequest' }
+      responses:
+        '200':
+          description: The created or resolved label
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxLabel' }
+        '400': { description: "Malformed body, empty name, over the length cap, or a colour that is not #rrggbb" }
+        '401': { description: Unauthorized }
+        '422': { description: The workspace already holds the maximum number of labels }
+  /inbox/labels/{labelId}:
+    parameters:
+      - name: labelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: updateInboxLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertInboxLabelRequest' }
+      responses:
+        '200':
+          description: The updated label
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxLabel' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Another label in this workspace already has that name }
+    delete:
+      operationId: deleteInboxLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Deletes the label and unfiles every thread it was on. The threads
+        themselves are untouched — that is what deleting a label means.
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+  /inbox/threads/{id}/labels/{labelId}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - name: labelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: assignInboxThreadLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Applies a label to a thread. Idempotent: applying an already-applied
+        label is a 204, not a conflict — the join's composite primary key makes
+        that true in the database rather than by a check in the handler.
+      responses:
+        '204': { description: Applied }
+        '400': { description: A path id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: "The thread or the label does not exist in this workspace" }
+    delete:
+      operationId: unassignInboxThreadLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Removed }
+        '400': { description: A path id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: "The label was not applied to this thread" }
 components:
   securitySchemes:
     bearerAuth:
@@ -5753,6 +5876,14 @@ components:
         contact_last_name: { type: string, description: "The linked contact's last name, or \"\" when contact_id is null." }
         subject: { type: string }
         last_reply_class: { type: string }
+        labels:
+          type: array
+          description: >-
+            The operator-assigned labels on this thread, alphabetical. Always
+            present (`[]` when none), so a client can map over it
+            unconditionally. Distinct from `reply_label`, which is the
+            classifier's verdict and cannot be assigned by hand.
+          items: { $ref: '#/components/schemas/InboxLabel' }
         reply_label:
           type: object
           allOf: [{ $ref: '#/components/schemas/InboxReplyLabelRef' }]
@@ -5790,6 +5921,36 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxLabel:
+      type: object
+      required: [id, name, color, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        color:
+          type: string
+          description: A lowercase hex colour, `#rrggbb`.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    InboxLabelList:
+      type: object
+      required: [labels]
+      properties:
+        labels: { type: array, items: { $ref: '#/components/schemas/InboxLabel' } }
+    UpsertInboxLabelRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: >-
+            Normalized before storage (trimmed, internal whitespace collapsed).
+            Unique per workspace, case-insensitively.
+        color:
+          type: string
+          description: >-
+            A hex colour, `#rrggbb` (case-insensitive on input, stored
+            lowercase). Omitted on create means the server's default.
     SnoozeInboxThreadRequest:
       type: object
       required: [snooze_until]

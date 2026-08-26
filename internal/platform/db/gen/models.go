@@ -528,6 +528,15 @@ type IdempotencyKey struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxLabel struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	Color       string             `json:"color"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type InboxMessage struct {
 	ID          uuid.UUID          `json:"id"`
 	ThreadID    uuid.UUID          `json:"thread_id"`
@@ -557,6 +566,13 @@ type InboxThread struct {
 	Unread         bool               `json:"unread"`
 	LastMessageAt  pgtype.Timestamptz `json:"last_message_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type InboxThreadLabel struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	LabelID     uuid.UUID          `json:"label_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type InboxThreadSnooze struct {

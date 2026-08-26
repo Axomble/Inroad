@@ -40,6 +40,15 @@ func writeErr(w http.ResponseWriter, err error) {
 	// actual bound, so the UI can surface it without hardcoding 90 days.
 	case errors.Is(err, ErrSnoozeInPast), errors.Is(err, ErrSnoozeTooFar):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// A name collision is a genuine conflict on a resource that already exists.
+	// The label picker's own path (EnsureLabel) resolves it to the existing
+	// label instead, so a caller only ever sees this from a strict create.
+	case errors.Is(err, ErrLabelNameTaken):
+		httpx.Error(w, http.StatusConflict, err.Error())
+	// 422, like the snooze bounds: the request was well-formed and the limit is
+	// a property of the workspace, not of the syntax.
+	case errors.Is(err, ErrTooManyLabels):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	// The three draft failures get three DISTINCT statuses, none of which the
 	// draft route can produce for any other reason, so the UI can branch on the
 	// status alone without parsing the body:
@@ -125,6 +134,7 @@ type threadSummaryResponse struct {
 	Subject          string                 `json:"subject"`
 	LastReplyClass   string                 `json:"last_reply_class"`
 	ReplyLabel       *replyLabelRefResponse `json:"reply_label"`
+	Labels           []labelResponse        `json:"labels"`
 	Unread           bool                   `json:"unread"`
 	LastMessageAt    string                 `json:"last_message_at"`
 }
@@ -141,6 +151,7 @@ func toThreadSummaryResponse(t Thread) threadSummaryResponse {
 		Subject:          t.Subject,
 		LastReplyClass:   t.LastReplyClass,
 		ReplyLabel:       toReplyLabelRefResponse(t.ReplyLabel),
+		Labels:           toLabelResponses(t.Labels),
 		Unread:           t.Unread,
 		LastMessageAt:    t.LastMessageAt.UTC().Format(time.RFC3339),
 	}
@@ -225,6 +236,13 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 	}
 	if raw := q.Get("reply_class"); raw != "" {
 		filter.ReplyClass = &raw
+	}
+	if raw := q.Get("label"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			return ListFilter{}, errors.New("label must be a UUID")
+		}
+		filter.LabelID = &id
 	}
 	filter.Query = q.Get("q")
 	beforeAt := q.Get("before_last_message_at")

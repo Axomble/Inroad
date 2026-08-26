@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { Inbox, MailOpen, CalendarDays, CalendarRange, Reply, BellOff, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { httpStatus } from '@/lib/rtk-error'
-import type { InboxOverview } from './api'
+import type { InboxOverview, InboxLabel } from './api'
 import { INBOX_SCOPES, SCOPE_LABELS, type InboxScope } from './inbox-search'
 
 /**
@@ -63,8 +63,11 @@ export function ScopeRail({
   mailboxes,
   mailboxesError,
   selectedMailbox,
+  labels,
+  selectedLabel,
   onSelectScope,
   onSelectMailbox,
+  onSelectLabel,
 }: {
   overview: InboxOverview | undefined
   overviewError: unknown
@@ -72,8 +75,11 @@ export function ScopeRail({
   mailboxes: readonly MailboxOption[]
   mailboxesError: unknown
   selectedMailbox: string
+  labels: readonly InboxLabel[]
+  selectedLabel: string
   onSelectScope: (scope: InboxScope) => void
   onSelectMailbox: (mailboxId: string) => void
+  onSelectLabel: (labelId: string) => void
 }) {
   // Per-mailbox counts are looked up by id: the API omits mailboxes holding no
   // threads, so an absent entry legitimately means zero (see InboxMailboxCount).
@@ -101,7 +107,7 @@ export function ScopeRail({
               icon={SCOPE_ICONS[s]}
               label={SCOPE_LABELS[s]}
               count={countForScope(s, overview)}
-              active={scope === s && selectedMailbox === ''}
+              active={scope === s && selectedMailbox === '' && selectedLabel === ''}
               onSelect={() => onSelectScope(s)}
             />
           </li>
@@ -138,6 +144,28 @@ export function ScopeRail({
           </>
         )
       )}
+
+      {labels.length > 0 && (
+        <>
+          <p className="px-4 pt-3 pb-1 font-mono text-[10px] tracking-wide text-faint uppercase">Labels</p>
+          <ul className="grid grid-cols-2 sm:grid-cols-3 lg:block">
+            {labels.map((label) => (
+              <li key={label.id}>
+                <RailRow
+                  label={label.name}
+                  dotColor={label.color}
+                  // No count: the overview's breakdown is per reply-class, not
+                  // per operator label. Showing a number we do not have would
+                  // mean inventing one.
+                  count={undefined}
+                  active={selectedLabel === label.id}
+                  onSelect={() => onSelectLabel(label.id)}
+                />
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </nav>
   )
 }
@@ -147,6 +175,7 @@ function RailRow({
   label,
   count,
   unread = 0,
+  dotColor,
   active,
   onSelect,
 }: {
@@ -154,6 +183,8 @@ function RailRow({
   label: string
   count: number | undefined
   unread?: number
+  /** A label's own colour, shown as a dot in place of an icon. */
+  dotColor?: string
   active: boolean
   onSelect: () => void
 }) {
@@ -169,6 +200,9 @@ function RailRow({
       )}
     >
       {Icon && <Icon className="size-3.5 shrink-0" aria-hidden="true" />}
+      {dotColor && (
+        <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: dotColor }} aria-hidden="true" />
+      )}
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {/* Unread is the number an operator scans for, so it leads and carries
           the emphasis; the total follows in the muted chip. A row with no

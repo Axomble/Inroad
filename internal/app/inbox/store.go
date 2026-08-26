@@ -53,6 +53,10 @@ type Thread struct {
 	ContactEmail     string
 	ContactFirstName string
 	ContactLastName  string
+	// Labels are the operator-assigned labels on this thread. Populated by the
+	// Service for a listed PAGE (one query for the whole page, not per row) and
+	// for a single thread; nil when no label store is configured.
+	Labels []Label
 	// ReplyLabel is the workspace's reply-label row resolved from
 	// LastReplyClass (a LEFT JOIN on (workspace_id, key)), for display. nil
 	// when no label in the workspace claims the key — a deleted custom
@@ -102,6 +106,9 @@ type ThreadDetail struct {
 	// rows), so a lapsed snooze arrives as nil rather than as a stale row the
 	// reader would have to date-check itself.
 	Snooze *Snooze
+	// Labels are the operator-assigned labels on this thread, alphabetical.
+	// Also set by Service.GetThread, from the optional LabelStore.
+	Labels []Label
 }
 
 // ThreadPage is one page of ListThreads, newest first.
@@ -146,7 +153,10 @@ type ListFilter struct {
 	// a contradiction the store rejects rather than silently resolving.
 	SnoozeHidden bool
 	SnoozedOnly  bool
-	Limit        int32
+	// LabelID restricts the page to threads carrying one operator-assigned
+	// label. Optional; nil means no label filter.
+	LabelID *uuid.UUID
+	Limit   int32
 }
 
 // UpsertThreadInput carries the fields UpsertThread writes on first insert, and
@@ -372,6 +382,7 @@ func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 		AwaitingReplyOnly:   filter.AwaitingReplyOnly,
 		SnoozeHidden:        filter.SnoozeHidden,
 		SnoozedOnly:         filter.SnoozedOnly,
+		LabelID:             pgUUID(filter.LabelID),
 		PageLimit:           NormalizeLimit(filter.Limit),
 	})
 	if err != nil {

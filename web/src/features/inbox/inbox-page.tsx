@@ -15,7 +15,12 @@ import { useListMailboxesQuery } from '@/store/api'
 // (see features/campaigns/campaign-form.tsx). Cross-feature UI imports remain
 // forbidden.
 import { useListReplyLabelsQuery } from '@/features/reply-labels/api'
-import { useGetInboxOverviewQuery, useListInboxThreadsQuery, type InboxThreadSummary } from './api'
+import {
+  useGetInboxOverviewQuery,
+  useListInboxLabelsQuery,
+  useListInboxThreadsQuery,
+  type InboxThreadSummary,
+} from './api'
 import { ThreadList } from './thread-list'
 import { ScopeRail } from './scope-rail'
 import { ThreadReader, ThreadReaderHeading } from './thread-reader'
@@ -56,6 +61,7 @@ export function InboxPage() {
   const selectedMailbox = search.mailbox ?? ''
   const replyClass = search.class ?? ''
   const scope: InboxScope = search.scope ?? 'all'
+  const selectedLabel = search.label ?? ''
   const threePane = useMediaQuery(THREE_PANE_QUERY)
 
   const { data: mailboxes, error: mailboxesError } = useListMailboxesQuery()
@@ -79,6 +85,12 @@ export function InboxPage() {
     () => [ALL_REPLIES_FILTER, ...(replyLabelsData?.labels.map((l) => ({ id: l.key, label: l.label })) ?? [])],
     [replyLabelsData],
   )
+
+  // The rail's label section. Fetched unconditionally (unlike the picker's own
+  // skip-until-open query, which RTK Query dedupes with this one): the rail is
+  // always visible, so its labels are always needed.
+  const { data: labelData } = useListInboxLabelsQuery()
+  const labels = useMemo(() => labelData?.labels ?? [], [labelData])
 
   // Real counts for the rail, counted by the database over the whole workspace
   // — this replaces counting one 200-row page client-side, which was honest
@@ -116,6 +128,7 @@ export function InboxPage() {
       // 'all' is the API's own default; sending it explicitly would only make
       // the cache key noisier for an identical request.
       scope: scope === 'all' ? undefined : scope,
+      label: selectedLabel || undefined,
       // Only the calendar-dependent scopes read it; see scopeTimezoneOffset.
       tzOffset: scopeTimezoneOffset(scope),
       beforeLastMessageAt: decodedCursor?.beforeLastMessageAt,
@@ -143,15 +156,20 @@ export function InboxPage() {
     setRecoveredFromStaleCursor(false)
     setStack([])
   }
-  // Picking a mailbox clears the virtual scope and vice versa: the rail shows
-  // one selection, so the list must not silently carry the other's filter.
+  // The rail shows ONE selection, so choosing any of the three clears the other
+  // two: a mailbox, a virtual scope, and a label are alternative ways to say
+  // "show me this pile", not filters to intersect.
   const selectMailbox = (id: string) => {
     resetPaging()
-    patch({ mailbox: id || undefined, scope: undefined, cursor: undefined })
+    patch({ mailbox: id || undefined, scope: undefined, label: undefined, cursor: undefined })
   }
   const selectScope = (next: InboxScope) => {
     resetPaging()
-    patch({ scope: next === 'all' ? undefined : next, mailbox: undefined, cursor: undefined })
+    patch({ scope: next === 'all' ? undefined : next, mailbox: undefined, label: undefined, cursor: undefined })
+  }
+  const selectLabel = (id: string) => {
+    resetPaging()
+    patch({ label: id || undefined, mailbox: undefined, scope: undefined, cursor: undefined })
   }
   const selectClass = (id: string) => {
     resetPaging()
@@ -229,11 +247,15 @@ export function InboxPage() {
   })
 
   const showError = error !== undefined && !staleCursor
-  const hasActiveFilter = Boolean(selectedMailbox || replyClass || search.q || search.scope)
+  const hasActiveFilter = Boolean(selectedMailbox || replyClass || search.q || search.scope || selectedLabel)
   const isEmptyInbox = !isLoading && !showError && items.length === 0 && !hasActiveFilter && !search.cursor
   const isEmptyFiltered = !isLoading && !showError && items.length === 0 && !isEmptyInbox
 
-  const listLabel = selectedMailbox ? mailboxLabel(selectedMailbox) : SCOPE_LABELS[scope]
+  const listLabel = selectedMailbox
+    ? mailboxLabel(selectedMailbox)
+    : selectedLabel
+      ? (labels.find((l) => l.id === selectedLabel)?.name ?? 'Label')
+      : SCOPE_LABELS[scope]
 
   return (
     <Page>
@@ -247,8 +269,11 @@ export function InboxPage() {
           mailboxes={mailboxOptions}
           mailboxesError={mailboxesError}
           selectedMailbox={selectedMailbox}
+          labels={labels}
+          selectedLabel={selectedLabel}
           onSelectScope={selectScope}
           onSelectMailbox={selectMailbox}
+          onSelectLabel={selectLabel}
         />
 
         {/* The list pane. Fixed-width beside the reader so the reader gets the
@@ -304,7 +329,14 @@ export function InboxPage() {
                     size="sm"
                     onClick={() => {
                       resetPaging()
-                      patch({ mailbox: undefined, scope: undefined, class: undefined, q: undefined, cursor: undefined })
+                      patch({
+                        mailbox: undefined,
+                        scope: undefined,
+                        label: undefined,
+                        class: undefined,
+                        q: undefined,
+                        cursor: undefined,
+                      })
                       setTypedQuery('')
                     }}
                   >

@@ -6,6 +6,7 @@ import type { ListKeyboardNav } from '@/hooks/use-list-keyboard-nav'
 import type { InboxThreadSummary } from './api'
 import { contactLabel } from './contact-label'
 import { groupByBucket } from './thread-buckets'
+import { LabelChips } from './label-chip'
 
 /**
  * Dense thread rows grouped into time buckets ("Today", "Yesterday", …), the
@@ -127,7 +128,10 @@ function ThreadRow({
           {thread.unread && <span className="sr-only">Unread: </span>}
           {contactLabel(thread)}
         </div>
-        <div className="truncate text-[12px] text-muted-foreground">{thread.subject || '(no subject)'}</div>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-[12px] text-muted-foreground">{thread.subject || '(no subject)'}</span>
+          <LabelChips labels={thread.labels} max={2} className="shrink-0" />
+        </div>
       </div>
       <ReplyClassPill replyClass={thread.last_reply_class} replyLabel={thread.reply_label} className="shrink-0" />
       <div className="flex w-28 shrink-0 flex-col items-end gap-0.5">

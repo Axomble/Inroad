@@ -12,6 +12,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const assignInboxThreadLabel = `-- name: AssignInboxThreadLabel :exec
+INSERT INTO inbox_thread_labels (thread_id, label_id, workspace_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (thread_id, label_id) DO NOTHING
+`
+
+type AssignInboxThreadLabelParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	LabelID     uuid.UUID `json:"label_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Idempotent by construction: the composite PK means re-applying an
+// already-applied label is a no-op, not an error the caller must distinguish.
+func (q *Queries) AssignInboxThreadLabel(ctx context.Context, arg AssignInboxThreadLabelParams) error {
+	_, err := q.db.Exec(ctx, assignInboxThreadLabel, arg.ThreadID, arg.LabelID, arg.WorkspaceID)
+	return err
+}
+
 const bumpInboxThreadLastMessageAt = `-- name: BumpInboxThreadLastMessageAt :exec
 UPDATE inbox_threads SET last_message_at = now() WHERE id = $1 AND workspace_id = $2
 `
@@ -48,6 +67,96 @@ func (q *Queries) CountInboxSnoozedThreads(ctx context.Context, workspaceID uuid
 	return total, err
 }
 
+const countInboxThreadsByLabel = `-- name: CountInboxThreadsByLabel :many
+SELECT tl.label_id, COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_thread_labels tl
+JOIN inbox_threads t ON t.id = tl.thread_id AND t.workspace_id = tl.workspace_id
+WHERE tl.workspace_id = $1
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY tl.label_id
+`
+
+type CountInboxThreadsByLabelRow struct {
+	LabelID uuid.UUID `json:"label_id"`
+	Total   int64     `json:"total"`
+	Unread  int64     `json:"unread"`
+}
+
+// The rail's per-label counters. Snoozed threads are excluded for the same
+// reason every other counter excludes them: they are absent from the list the
+// counter labels. A label with no (visible) threads is absent rather than
+// reported as zero — the picker renders every label and looks its count up.
+func (q *Queries) CountInboxThreadsByLabel(ctx context.Context, workspaceID uuid.UUID) ([]CountInboxThreadsByLabelRow, error) {
+	rows, err := q.db.Query(ctx, countInboxThreadsByLabel, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountInboxThreadsByLabelRow
+	for rows.Next() {
+		var i CountInboxThreadsByLabelRow
+		if err := rows.Scan(&i.LabelID, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const createInboxLabel = `-- name: CreateInboxLabel :one
+INSERT INTO inbox_labels (workspace_id, name, color)
+VALUES ($1, $2, $3)
+RETURNING id, workspace_id, name, color, created_at, updated_at
+`
+
+type CreateInboxLabelParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+	Color       string    `json:"color"`
+}
+
+func (q *Queries) CreateInboxLabel(ctx context.Context, arg CreateInboxLabelParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, createInboxLabel, arg.WorkspaceID, arg.Name, arg.Color)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteInboxLabel = `-- name: DeleteInboxLabel :execrows
+DELETE FROM inbox_labels WHERE id = $1 AND workspace_id = $2
+`
+
+type DeleteInboxLabelParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// The join rows go with it via ON DELETE CASCADE: deleting a label unfiles
+// every thread it was on, which is what "delete this label" means. :execrows
+// so an unknown or cross-workspace id becomes ErrNotFound rather than silent
+// success.
+func (q *Queries) DeleteInboxLabel(ctx context.Context, arg DeleteInboxLabelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteInboxLabel, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteInboxThreadSnooze = `-- name: DeleteInboxThreadSnooze :execrows
 DELETE FROM inbox_thread_snoozes
 WHERE thread_id = $1 AND workspace_id = $2
@@ -67,6 +176,56 @@ func (q *Queries) DeleteInboxThreadSnooze(ctx context.Context, arg DeleteInboxTh
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const findInboxLabelByName = `-- name: FindInboxLabelByName :one
+SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels
+WHERE workspace_id = $1 AND lower(name) = lower($2)
+`
+
+type FindInboxLabelByNameParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+}
+
+// Backs the picker's search-or-create: a member typing an existing name must
+// get that label rather than a unique-violation. Matched case-insensitively,
+// against the same lower(name) expression the unique index uses.
+func (q *Queries) FindInboxLabelByName(ctx context.Context, arg FindInboxLabelByNameParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, findInboxLabelByName, arg.WorkspaceID, arg.Name)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getInboxLabel = `-- name: GetInboxLabel :one
+SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels WHERE id = $1 AND workspace_id = $2
+`
+
+type GetInboxLabelParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxLabel(ctx context.Context, arg GetInboxLabelParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, getInboxLabel, arg.ID, arg.WorkspaceID)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getInboxOverviewTotals = `-- name: GetInboxOverviewTotals :one
@@ -264,6 +423,41 @@ func (q *Queries) InsertInboxMessage(ctx context.Context, arg InsertInboxMessage
 	return err
 }
 
+const listInboxLabels = `-- name: ListInboxLabels :many
+SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels
+WHERE workspace_id = $1
+ORDER BY lower(name)
+`
+
+// Alphabetical, case-insensitively: the picker is scanned by eye, so "Zebra"
+// must not sort before "apple" the way a raw byte ordering would put it.
+func (q *Queries) ListInboxLabels(ctx context.Context, workspaceID uuid.UUID) ([]InboxLabel, error) {
+	rows, err := q.db.Query(ctx, listInboxLabels, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxLabel
+	for rows.Next() {
+		var i InboxLabel
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Color,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInboxMessagesByThread = `-- name: ListInboxMessagesByThread :many
 SELECT id, thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at, created_at FROM inbox_messages WHERE thread_id = $1 AND workspace_id = $2 ORDER BY occurred_at
 `
@@ -450,8 +644,16 @@ WHERE t.workspace_id = $1
         SELECT 1 FROM inbox_thread_snoozes s
         WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
           AND s.snooze_until > now()))
+  -- The operator's own label filter. EXISTS rather than a JOIN so a thread
+  -- carrying the label twice could never duplicate the row (the composite PK
+  -- already prevents that, but a JOIN would make the query's correctness
+  -- depend on that constraint rather than on its own shape).
+  AND ($12::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM inbox_thread_labels tl
+        WHERE tl.thread_id = t.id AND tl.workspace_id = t.workspace_id
+          AND tl.label_id = $12::uuid))
 ORDER BY t.last_message_at DESC, t.id DESC
-LIMIT $12
+LIMIT $13
 `
 
 type ListInboxThreadsParams struct {
@@ -466,6 +668,7 @@ type ListInboxThreadsParams struct {
 	AwaitingReplyOnly   bool               `json:"awaiting_reply_only"`
 	SnoozeHidden        bool               `json:"snooze_hidden"`
 	SnoozedOnly         bool               `json:"snoozed_only"`
+	LabelID             pgtype.UUID        `json:"label_id"`
 	PageLimit           int32              `json:"page_limit"`
 }
 
@@ -518,6 +721,7 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 		arg.AwaitingReplyOnly,
 		arg.SnoozeHidden,
 		arg.SnoozedOnly,
+		arg.LabelID,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -544,6 +748,98 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 			&i.ContactLastName,
 			&i.ReplyLabelLabel,
 			&i.ReplyLabelColor,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLabelsForInboxThread = `-- name: ListLabelsForInboxThread :many
+SELECT l.id, l.workspace_id, l.name, l.color, l.created_at, l.updated_at FROM inbox_labels l
+JOIN inbox_thread_labels tl ON tl.label_id = l.id AND tl.workspace_id = l.workspace_id
+WHERE tl.thread_id = $1 AND tl.workspace_id = $2
+ORDER BY lower(l.name)
+`
+
+type ListLabelsForInboxThreadParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) ListLabelsForInboxThread(ctx context.Context, arg ListLabelsForInboxThreadParams) ([]InboxLabel, error) {
+	rows, err := q.db.Query(ctx, listLabelsForInboxThread, arg.ThreadID, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxLabel
+	for rows.Next() {
+		var i InboxLabel
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Color,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLabelsForInboxThreads = `-- name: ListLabelsForInboxThreads :many
+SELECT tl.thread_id, l.id, l.workspace_id, l.name, l.color, l.created_at, l.updated_at FROM inbox_labels l
+JOIN inbox_thread_labels tl ON tl.label_id = l.id AND tl.workspace_id = l.workspace_id
+WHERE tl.workspace_id = $1 AND tl.thread_id = ANY($2::uuid[])
+ORDER BY tl.thread_id, lower(l.name)
+`
+
+type ListLabelsForInboxThreadsParams struct {
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	ThreadIds   []uuid.UUID `json:"thread_ids"`
+}
+
+type ListLabelsForInboxThreadsRow struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	Color       string             `json:"color"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+// The list view's labels, for a whole page of threads in ONE query rather than
+// one per row. Returns (thread_id, label) pairs for the Go layer to group;
+// an array_agg of composite rows would land in sqlc as interface{}.
+func (q *Queries) ListLabelsForInboxThreads(ctx context.Context, arg ListLabelsForInboxThreadsParams) ([]ListLabelsForInboxThreadsRow, error) {
+	rows, err := q.db.Query(ctx, listLabelsForInboxThreads, arg.WorkspaceID, arg.ThreadIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLabelsForInboxThreadsRow
+	for rows.Next() {
+		var i ListLabelsForInboxThreadsRow
+		if err := rows.Scan(
+			&i.ThreadID,
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Color,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -646,6 +942,58 @@ func (q *Queries) SetInboxThreadUnread(ctx context.Context, arg SetInboxThreadUn
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const unassignInboxThreadLabel = `-- name: UnassignInboxThreadLabel :execrows
+DELETE FROM inbox_thread_labels
+WHERE thread_id = $1 AND label_id = $2 AND workspace_id = $3
+`
+
+type UnassignInboxThreadLabelParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	LabelID     uuid.UUID `json:"label_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) UnassignInboxThreadLabel(ctx context.Context, arg UnassignInboxThreadLabelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, unassignInboxThreadLabel, arg.ThreadID, arg.LabelID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateInboxLabel = `-- name: UpdateInboxLabel :one
+UPDATE inbox_labels
+SET name = $1, color = $2, updated_at = now()
+WHERE id = $3 AND workspace_id = $4
+RETURNING id, workspace_id, name, color, created_at, updated_at
+`
+
+type UpdateInboxLabelParams struct {
+	Name        string    `json:"name"`
+	Color       string    `json:"color"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) UpdateInboxLabel(ctx context.Context, arg UpdateInboxLabelParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, updateInboxLabel,
+		arg.Name,
+		arg.Color,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const upsertInboxThread = `-- name: UpsertInboxThread :one

@@ -88,6 +88,14 @@ WHERE t.workspace_id = @workspace_id
         SELECT 1 FROM inbox_thread_snoozes s
         WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
           AND s.snooze_until > now()))
+  -- The operator's own label filter. EXISTS rather than a JOIN so a thread
+  -- carrying the label twice could never duplicate the row (the composite PK
+  -- already prevents that, but a JOIN would make the query's correctness
+  -- depend on that constraint rather than on its own shape).
+  AND (sqlc.narg('label_id')::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM inbox_thread_labels tl
+        WHERE tl.thread_id = t.id AND tl.workspace_id = t.workspace_id
+          AND tl.label_id = sqlc.narg('label_id')::uuid))
 ORDER BY t.last_message_at DESC, t.id DESC
 LIMIT @page_limit;
 
@@ -252,3 +260,80 @@ WHERE thread_id = @thread_id AND workspace_id = @workspace_id;
 SELECT COUNT(*)::bigint AS total
 FROM inbox_thread_snoozes
 WHERE workspace_id = @workspace_id AND snooze_until > now();
+
+-- name: CreateInboxLabel :one
+INSERT INTO inbox_labels (workspace_id, name, color)
+VALUES (@workspace_id, @name, @color)
+RETURNING *;
+
+-- name: ListInboxLabels :many
+-- Alphabetical, case-insensitively: the picker is scanned by eye, so "Zebra"
+-- must not sort before "apple" the way a raw byte ordering would put it.
+SELECT * FROM inbox_labels
+WHERE workspace_id = @workspace_id
+ORDER BY lower(name);
+
+-- name: GetInboxLabel :one
+SELECT * FROM inbox_labels WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: FindInboxLabelByName :one
+-- Backs the picker's search-or-create: a member typing an existing name must
+-- get that label rather than a unique-violation. Matched case-insensitively,
+-- against the same lower(name) expression the unique index uses.
+SELECT * FROM inbox_labels
+WHERE workspace_id = @workspace_id AND lower(name) = lower(@name);
+
+-- name: UpdateInboxLabel :one
+UPDATE inbox_labels
+SET name = @name, color = @color, updated_at = now()
+WHERE id = @id AND workspace_id = @workspace_id
+RETURNING *;
+
+-- name: DeleteInboxLabel :execrows
+-- The join rows go with it via ON DELETE CASCADE: deleting a label unfiles
+-- every thread it was on, which is what "delete this label" means. :execrows
+-- so an unknown or cross-workspace id becomes ErrNotFound rather than silent
+-- success.
+DELETE FROM inbox_labels WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: AssignInboxThreadLabel :exec
+-- Idempotent by construction: the composite PK means re-applying an
+-- already-applied label is a no-op, not an error the caller must distinguish.
+INSERT INTO inbox_thread_labels (thread_id, label_id, workspace_id)
+VALUES (@thread_id, @label_id, @workspace_id)
+ON CONFLICT (thread_id, label_id) DO NOTHING;
+
+-- name: UnassignInboxThreadLabel :execrows
+DELETE FROM inbox_thread_labels
+WHERE thread_id = @thread_id AND label_id = @label_id AND workspace_id = @workspace_id;
+
+-- name: ListLabelsForInboxThread :many
+SELECT l.* FROM inbox_labels l
+JOIN inbox_thread_labels tl ON tl.label_id = l.id AND tl.workspace_id = l.workspace_id
+WHERE tl.thread_id = @thread_id AND tl.workspace_id = @workspace_id
+ORDER BY lower(l.name);
+
+-- name: ListLabelsForInboxThreads :many
+-- The list view's labels, for a whole page of threads in ONE query rather than
+-- one per row. Returns (thread_id, label) pairs for the Go layer to group;
+-- an array_agg of composite rows would land in sqlc as interface{}.
+SELECT tl.thread_id, l.* FROM inbox_labels l
+JOIN inbox_thread_labels tl ON tl.label_id = l.id AND tl.workspace_id = l.workspace_id
+WHERE tl.workspace_id = @workspace_id AND tl.thread_id = ANY(@thread_ids::uuid[])
+ORDER BY tl.thread_id, lower(l.name);
+
+-- name: CountInboxThreadsByLabel :many
+-- The rail's per-label counters. Snoozed threads are excluded for the same
+-- reason every other counter excludes them: they are absent from the list the
+-- counter labels. A label with no (visible) threads is absent rather than
+-- reported as zero — the picker renders every label and looks its count up.
+SELECT tl.label_id, COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_thread_labels tl
+JOIN inbox_threads t ON t.id = tl.thread_id AND t.workspace_id = tl.workspace_id
+WHERE tl.workspace_id = @workspace_id
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY tl.label_id;
