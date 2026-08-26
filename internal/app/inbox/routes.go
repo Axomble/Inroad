@@ -43,5 +43,9 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	}
 	r.With(draft...).Post("/threads/{id}/draft-reply", h.draftReply)
 	r.With(write).Put("/threads/{id}/read", h.setRead)
+	// Snoozing is inbox:write, not inbox:send: it changes triage state and
+	// sends nothing, exactly like marking a thread read.
+	r.With(write).Put("/threads/{id}/snooze", h.snooze)
+	r.With(write).Delete("/threads/{id}/snooze", h.unsnooze)
 	return r
 }

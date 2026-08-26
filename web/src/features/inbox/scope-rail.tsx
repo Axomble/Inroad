@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Inbox, MailOpen, CalendarDays, CalendarRange, Reply, AlertCircle } from 'lucide-react'
+import { Inbox, MailOpen, CalendarDays, CalendarRange, Reply, BellOff, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { httpStatus } from '@/lib/rtk-error'
 import type { InboxOverview } from './api'
@@ -16,6 +16,7 @@ const SCOPE_ICONS: Record<InboxScope, typeof Inbox> = {
   today: CalendarDays,
   this_week: CalendarRange,
   awaiting_reply: Reply,
+  snoozed: BellOff,
 }
 
 /**
@@ -36,6 +37,8 @@ function countForScope(scope: InboxScope, overview: InboxOverview | undefined): 
       return overview.this_week
     case 'awaiting_reply':
       return overview.awaiting_reply
+    case 'snoozed':
+      return overview.snoozed
   }
 }
 

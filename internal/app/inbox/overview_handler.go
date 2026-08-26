@@ -33,6 +33,7 @@ type overviewResponse struct {
 	Today         int64                     `json:"today"`
 	ThisWeek      int64                     `json:"this_week"`
 	AwaitingReply int64                     `json:"awaiting_reply"`
+	Snoozed       int64                     `json:"snoozed"`
 	ByMailbox     []mailboxCountResponse    `json:"by_mailbox"`
 	ByReplyClass  []replyClassCountResponse `json:"by_reply_class"`
 }
@@ -61,6 +62,7 @@ func toOverviewResponse(o Overview) overviewResponse {
 		Today:         o.Today,
 		ThisWeek:      o.ThisWeek,
 		AwaitingReply: o.AwaitingReply,
+		Snoozed:       o.Snoozed,
 		ByMailbox:     byMailbox,
 		ByReplyClass:  byClass,
 	}

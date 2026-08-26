@@ -97,6 +97,11 @@ type Message struct {
 type ThreadDetail struct {
 	Thread   Thread
 	Messages []Message
+	// Snooze is the thread's snooze if one is still in force, else nil. Set by
+	// Service.GetThread (not by the Store, which reads only thread/message
+	// rows), so a lapsed snooze arrives as nil rather than as a stale row the
+	// reader would have to date-check itself.
+	Snooze *Snooze
 }
 
 // ThreadPage is one page of ListThreads, newest first.
@@ -134,7 +139,14 @@ type ListFilter struct {
 	// AwaitingReplyOnly restricts the page to threads whose newest message is
 	// inbound — the contact spoke last, so the thread is waiting on us.
 	AwaitingReplyOnly bool
-	Limit             int32
+	// SnoozeHidden excludes threads still snoozed; SnoozedOnly keeps only
+	// those. Three states, not one bool, because "neither" is a real and
+	// distinct case: a search should find a snoozed thread (hiding it would
+	// look like data loss), while every rail scope hides them. Setting both is
+	// a contradiction the store rejects rather than silently resolving.
+	SnoozeHidden bool
+	SnoozedOnly  bool
+	Limit        int32
 }
 
 // UpsertThreadInput carries the fields UpsertThread writes on first insert, and
@@ -358,6 +370,8 @@ func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 		UnreadOnly:          filter.UnreadOnly,
 		SinceLastMessageAt:  pgTimestamptz(filter.SinceLastMessageAt),
 		AwaitingReplyOnly:   filter.AwaitingReplyOnly,
+		SnoozeHidden:        filter.SnoozeHidden,
+		SnoozedOnly:         filter.SnoozedOnly,
 		PageLimit:           NormalizeLimit(filter.Limit),
 	})
 	if err != nil {

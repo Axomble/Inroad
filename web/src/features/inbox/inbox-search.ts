@@ -39,6 +39,7 @@ export const INBOX_SCOPES = [
   'today',
   'this_week',
   'awaiting_reply',
+  'snoozed',
 ] as const satisfies readonly NonNullable<ListInboxThreadsApiArg['scope']>[]
 
 export type InboxScope = (typeof INBOX_SCOPES)[number]
@@ -55,6 +56,7 @@ export const SCOPE_LABELS: Record<NonNullable<ListInboxThreadsApiArg['scope']>, 
   today: 'Today',
   this_week: 'This week',
   awaiting_reply: 'Awaiting reply',
+  snoozed: 'Snoozed',
 }
 
 /**

@@ -32,6 +32,43 @@ func (q *Queries) BumpInboxThreadLastMessageAt(ctx context.Context, arg BumpInbo
 	return err
 }
 
+const countInboxSnoozedThreads = `-- name: CountInboxSnoozedThreads :one
+SELECT COUNT(*)::bigint AS total
+FROM inbox_thread_snoozes
+WHERE workspace_id = $1 AND snooze_until > now()
+`
+
+// The rail's `snoozed` counter: only snoozes still in force. An expired row is
+// not "a snoozed thread" — it is a thread that has already come back, and it
+// is counted by whichever ordinary scope it now falls into.
+func (q *Queries) CountInboxSnoozedThreads(ctx context.Context, workspaceID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countInboxSnoozedThreads, workspaceID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
+const deleteInboxThreadSnooze = `-- name: DeleteInboxThreadSnooze :execrows
+DELETE FROM inbox_thread_snoozes
+WHERE thread_id = $1 AND workspace_id = $2
+`
+
+type DeleteInboxThreadSnoozeParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Un-snooze. :execrows so the store can tell "there was a snooze and it is
+// gone" from "there was nothing to remove" and report ErrNotFound for the
+// latter, rather than silently succeeding.
+func (q *Queries) DeleteInboxThreadSnooze(ctx context.Context, arg DeleteInboxThreadSnoozeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteInboxThreadSnooze, arg.ThreadID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getInboxOverviewTotals = `-- name: GetInboxOverviewTotals :one
 SELECT
     COUNT(*)::bigint AS total,
@@ -41,6 +78,14 @@ SELECT
     COUNT(*) FILTER (WHERE inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))::bigint AS awaiting_reply
 FROM inbox_threads t
 WHERE t.workspace_id = $3
+  -- Snoozed threads are excluded from every counter here, because they are
+  -- excluded from every list those counters label. The ` + "`" + `snoozed` + "`" + ` scope has its
+  -- own counter (CountInboxSnoozedThreads) rather than a FILTER on this scan:
+  -- it is the one count that wants the rows this WHERE removes.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
 `
 
 type GetInboxOverviewTotalsParams struct {
@@ -152,6 +197,29 @@ func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) 
 	return i, err
 }
 
+const getInboxThreadSnooze = `-- name: GetInboxThreadSnooze :one
+SELECT thread_id, workspace_id, snooze_until, snoozed_by, created_at FROM inbox_thread_snoozes
+WHERE thread_id = $1 AND workspace_id = $2
+`
+
+type GetInboxThreadSnoozeParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxThreadSnooze(ctx context.Context, arg GetInboxThreadSnoozeParams) (InboxThreadSnooze, error) {
+	row := q.db.QueryRow(ctx, getInboxThreadSnooze, arg.ThreadID, arg.WorkspaceID)
+	var i InboxThreadSnooze
+	err := row.Scan(
+		&i.ThreadID,
+		&i.WorkspaceID,
+		&i.SnoozeUntil,
+		&i.SnoozedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertInboxMessage = `-- name: InsertInboxMessage :exec
 INSERT INTO inbox_messages (thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -241,12 +309,18 @@ func (q *Queries) ListInboxMessagesByThread(ctx context.Context, arg ListInboxMe
 }
 
 const listInboxOverviewByMailbox = `-- name: ListInboxOverviewByMailbox :many
-SELECT mailbox_id,
+SELECT t.mailbox_id,
        COUNT(*)::bigint AS total,
-       COUNT(*) FILTER (WHERE unread)::bigint AS unread
-FROM inbox_threads
-WHERE workspace_id = $1
-GROUP BY mailbox_id
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_threads t
+WHERE t.workspace_id = $1
+  -- Same snooze exclusion as GetInboxOverviewTotals, for the same reason: a
+  -- mailbox's count must match the list clicking that mailbox produces.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY t.mailbox_id
 `
 
 type ListInboxOverviewByMailboxRow struct {
@@ -281,12 +355,18 @@ func (q *Queries) ListInboxOverviewByMailbox(ctx context.Context, workspaceID uu
 }
 
 const listInboxOverviewByReplyClass = `-- name: ListInboxOverviewByReplyClass :many
-SELECT last_reply_class AS key,
+SELECT t.last_reply_class AS key,
        COUNT(*)::bigint AS total,
-       COUNT(*) FILTER (WHERE unread)::bigint AS unread
-FROM inbox_threads
-WHERE workspace_id = $1 AND last_reply_class <> ''
-GROUP BY last_reply_class
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_threads t
+WHERE t.workspace_id = $1 AND t.last_reply_class <> ''
+  -- Same snooze exclusion as GetInboxOverviewTotals: a label's count must
+  -- match the list clicking that label produces.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY t.last_reply_class
 `
 
 type ListInboxOverviewByReplyClassRow struct {
@@ -352,8 +432,26 @@ WHERE t.workspace_id = $1
   -- stored and the synthesized outbound legs.
   AND (NOT $9::boolean
        OR inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))
+  -- Snooze partitions the inbox in two, so it is a THREE-state filter rather
+  -- than another boolean: every ordinary scope hides threads still snoozed
+  -- (snooze_hidden), the ` + "`" + `snoozed` + "`" + ` scope shows only those (snoozed_only), and
+  -- neither is set when a caller genuinely wants both (search, which should
+  -- find a snoozed thread — hiding it would look like data loss).
+  --
+  -- "Still snoozed" is snooze_until > now(), evaluated here at read time: an
+  -- expired snooze needs no sweeper to bring its thread back, it simply stops
+  -- matching. Both arms use the same EXISTS shape so the partial index on
+  -- (workspace_id, snooze_until) serves either direction.
+  AND (NOT $10::boolean OR NOT EXISTS (
+        SELECT 1 FROM inbox_thread_snoozes s
+        WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+          AND s.snooze_until > now()))
+  AND (NOT $11::boolean OR EXISTS (
+        SELECT 1 FROM inbox_thread_snoozes s
+        WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+          AND s.snooze_until > now()))
 ORDER BY t.last_message_at DESC, t.id DESC
-LIMIT $10
+LIMIT $12
 `
 
 type ListInboxThreadsParams struct {
@@ -366,6 +464,8 @@ type ListInboxThreadsParams struct {
 	UnreadOnly          bool               `json:"unread_only"`
 	SinceLastMessageAt  pgtype.Timestamptz `json:"since_last_message_at"`
 	AwaitingReplyOnly   bool               `json:"awaiting_reply_only"`
+	SnoozeHidden        bool               `json:"snooze_hidden"`
+	SnoozedOnly         bool               `json:"snoozed_only"`
 	PageLimit           int32              `json:"page_limit"`
 }
 
@@ -416,6 +516,8 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 		arg.UnreadOnly,
 		arg.SinceLastMessageAt,
 		arg.AwaitingReplyOnly,
+		arg.SnoozeHidden,
+		arg.SnoozedOnly,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -590,6 +692,49 @@ func (q *Queries) UpsertInboxThread(ctx context.Context, arg UpsertInboxThreadPa
 		&i.LastReplyClass,
 		&i.Unread,
 		&i.LastMessageAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const upsertInboxThreadSnooze = `-- name: UpsertInboxThreadSnooze :one
+INSERT INTO inbox_thread_snoozes (thread_id, workspace_id, snooze_until, snoozed_by)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (thread_id) DO UPDATE
+    SET snooze_until = EXCLUDED.snooze_until,
+        snoozed_by   = EXCLUDED.snoozed_by
+    -- Belt and braces: the WHERE on the UPDATE arm means a row belonging to
+    -- another workspace cannot be overwritten even if a caller somehow reached
+    -- this with a foreign thread_id (the service checks the thread first, so
+    -- this should be unreachable).
+    WHERE inbox_thread_snoozes.workspace_id = $2
+RETURNING thread_id, workspace_id, snooze_until, snoozed_by, created_at
+`
+
+type UpsertInboxThreadSnoozeParams struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	SnoozeUntil pgtype.Timestamptz `json:"snooze_until"`
+	SnoozedBy   pgtype.UUID        `json:"snoozed_by"`
+}
+
+// Snooze a thread, or re-snooze one already snoozed (a second call replaces
+// the moment rather than failing — re-snoozing is a normal operator action,
+// not an error). thread_id is the PK, so the conflict target is the whole
+// identity of a snooze.
+func (q *Queries) UpsertInboxThreadSnooze(ctx context.Context, arg UpsertInboxThreadSnoozeParams) (InboxThreadSnooze, error) {
+	row := q.db.QueryRow(ctx, upsertInboxThreadSnooze,
+		arg.ThreadID,
+		arg.WorkspaceID,
+		arg.SnoozeUntil,
+		arg.SnoozedBy,
+	)
+	var i InboxThreadSnooze
+	err := row.Scan(
+		&i.ThreadID,
+		&i.WorkspaceID,
+		&i.SnoozeUntil,
+		&i.SnoozedBy,
 		&i.CreatedAt,
 	)
 	return i, err

@@ -1526,6 +1526,25 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.setInboxThreadReadRequest,
       }),
     }),
+    snoozeInboxThread: build.mutation<
+      SnoozeInboxThreadApiResponse,
+      SnoozeInboxThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/snooze`,
+        method: "PUT",
+        body: queryArg.snoozeInboxThreadRequest,
+      }),
+    }),
+    unsnoozeInboxThread: build.mutation<
+      UnsnoozeInboxThreadApiResponse,
+      UnsnoozeInboxThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/snooze`,
+        method: "DELETE",
+      }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -2432,8 +2451,11 @@ export type ListInboxThreadsApiArg = {
   beforeId?: string;
   /** Page size. Defaults to 25, capped at 200 (a larger request is clamped, not rejected). */
   limit?: number;
-  /** One of the inbox's virtual folders. `unread` restricts to unread threads; `awaiting_reply` to threads whose newest message is inbound (the contact spoke last); `today` and `this_week` to threads whose last_message_at falls in the viewer's current day or ISO week (Monday-based), resolved against tz_offset. Omitted or `all` means the whole inbox. An unrecognised value is a 400, never a silently unscoped page. Combines freely with the keyset cursor: the scope bounds the result set, the cursor names a position within it. */
-  scope?: "all" | "unread" | "today" | "this_week" | "awaiting_reply";
+  /** One of the inbox's virtual folders. `unread` restricts to unread threads; `awaiting_reply` to threads whose newest message is inbound (the contact spoke last); `today` and `this_week` to threads whose last_message_at falls in the viewer's current day or ISO week (Monday-based), resolved against tz_offset; `snoozed` to threads whose snooze is still in force. Omitted or `all` means the whole inbox. An unrecognised value is a 400, never a silently unscoped page. Combines freely with the keyset cursor: the scope bounds the result set, the cursor names a position within it.
+    
+    Snoozed threads are EXCLUDED from every scope except `snoozed` — that is what snoozing means. The one exception is a search (`q`), which searches snoozed threads too: answering "no results" for a thread the operator snoozed last week would read as data loss. */
+  scope?:
+    "all" | "unread" | "today" | "this_week" | "awaiting_reply" | "snoozed";
   /** The viewer's UTC offset in minutes East of UTC, as JavaScript's `-new Date().getTimezoneOffset()` reports it. Only read when scope is `today` or `this_week`, whose boundaries depend on the viewer's own day rather than the server's. Defaults to 0 (UTC) — never the server's local zone, which carries no information about the viewer. */
   tzOffset?: number;
 };
@@ -2462,6 +2484,16 @@ export type SetInboxThreadReadApiResponse = unknown;
 export type SetInboxThreadReadApiArg = {
   id: string;
   setInboxThreadReadRequest: SetInboxThreadReadRequest;
+};
+export type SnoozeInboxThreadApiResponse =
+  /** status 200 The stored snooze */ InboxSnooze;
+export type SnoozeInboxThreadApiArg = {
+  id: string;
+  snoozeInboxThreadRequest: SnoozeInboxThreadRequest;
+};
+export type UnsnoozeInboxThreadApiResponse = unknown;
+export type UnsnoozeInboxThreadApiArg = {
+  id: string;
 };
 export type Membership = {
   workspace_id: string;
@@ -4129,6 +4161,8 @@ export type InboxOverview = {
   this_week: number;
   /** Threads whose newest message is inbound — the contact spoke last, so it is waiting on us. */
   awaiting_reply: number;
+  /** Threads whose snooze is still in force. Unlike every other counter here, this one counts rows the others deliberately exclude: a snoozed thread is absent from `total`, `unread`, `today`, `this_week`, `awaiting_reply` and both breakdowns, because it is absent from the lists those counters label. A lapsed snooze counts here not at all — its thread has already returned to whichever ordinary scope it belongs to. */
+  snoozed: number;
   by_mailbox: InboxMailboxCount[];
   by_reply_class: InboxReplyClassCount[];
 };
@@ -4144,8 +4178,17 @@ export type InboxMessage = {
   reply_class: string;
   occurred_at: string;
 };
+export type InboxSnooze = {
+  thread_id: string;
+  snooze_until: string;
+  /** The member who snoozed it, for display. Null when the snooze was set by an API key (no human behind it) or when that member has since been removed from the workspace — a departure must not drag their teammates' snoozes back into the inbox. */
+  snoozed_by: string | null;
+  created_at: string;
+};
 export type InboxThreadDetail = InboxThreadSummary & {
   messages: InboxMessage[];
+  /** The thread's snooze, or null when it has none — including when a snooze exists but has already lapsed. The server evaluates "still in force" so the client renders "Snoozed until …" and an Unsnooze action from this field alone, without date-checking a possibly-expired timestamp itself. */
+  snooze: InboxSnooze | null;
 };
 export type SendInboxReplyRequest = {
   body_text: string;
@@ -4156,6 +4199,10 @@ export type InboxDraftReply = {
 };
 export type SetInboxThreadReadRequest = {
   unread: boolean;
+};
+export type SnoozeInboxThreadRequest = {
+  /** When the thread should return to the inbox. Must be in the future and within 90 days. */
+  snooze_until: string;
 };
 export const {
   useAuthRegisterMutation,
@@ -4342,4 +4389,6 @@ export const {
   useSendInboxReplyMutation,
   useDraftInboxReplyMutation,
   useSetInboxThreadReadMutation,
+  useSnoozeInboxThreadMutation,
+  useUnsnoozeInboxThreadMutation,
 } = injectedRtkApi;

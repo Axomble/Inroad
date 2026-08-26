@@ -70,6 +70,24 @@ WHERE t.workspace_id = @workspace_id
   -- stored and the synthesized outbound legs.
   AND (NOT @awaiting_reply_only::boolean
        OR inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))
+  -- Snooze partitions the inbox in two, so it is a THREE-state filter rather
+  -- than another boolean: every ordinary scope hides threads still snoozed
+  -- (snooze_hidden), the `snoozed` scope shows only those (snoozed_only), and
+  -- neither is set when a caller genuinely wants both (search, which should
+  -- find a snoozed thread — hiding it would look like data loss).
+  --
+  -- "Still snoozed" is snooze_until > now(), evaluated here at read time: an
+  -- expired snooze needs no sweeper to bring its thread back, it simply stops
+  -- matching. Both arms use the same EXISTS shape so the partial index on
+  -- (workspace_id, snooze_until) serves either direction.
+  AND (NOT @snooze_hidden::boolean OR NOT EXISTS (
+        SELECT 1 FROM inbox_thread_snoozes s
+        WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+          AND s.snooze_until > now()))
+  AND (NOT @snoozed_only::boolean OR EXISTS (
+        SELECT 1 FROM inbox_thread_snoozes s
+        WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+          AND s.snooze_until > now()))
 ORDER BY t.last_message_at DESC, t.id DESC
 LIMIT @page_limit;
 
@@ -153,7 +171,15 @@ SELECT
     COUNT(*) FILTER (WHERE t.last_message_at >= @week_start::timestamptz)::bigint AS this_week,
     COUNT(*) FILTER (WHERE inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))::bigint AS awaiting_reply
 FROM inbox_threads t
-WHERE t.workspace_id = @workspace_id;
+WHERE t.workspace_id = @workspace_id
+  -- Snoozed threads are excluded from every counter here, because they are
+  -- excluded from every list those counters label. The `snoozed` scope has its
+  -- own counter (CountInboxSnoozedThreads) rather than a FILTER on this scan:
+  -- it is the one count that wants the rows this WHERE removes.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now());
 
 -- name: ListInboxOverviewByMailbox :many
 -- Per-mailbox totals for the rail, one row per mailbox that actually has a
@@ -161,20 +187,68 @@ WHERE t.workspace_id = @workspace_id;
 -- the rail renders one row per CONNECTED mailbox (which it already fetches
 -- from /mailboxes) and looks its count up here, so an empty mailbox reads as
 -- 0 without this query having to know the mailbox list.
-SELECT mailbox_id,
+SELECT t.mailbox_id,
        COUNT(*)::bigint AS total,
-       COUNT(*) FILTER (WHERE unread)::bigint AS unread
-FROM inbox_threads
-WHERE workspace_id = @workspace_id
-GROUP BY mailbox_id;
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_threads t
+WHERE t.workspace_id = @workspace_id
+  -- Same snooze exclusion as GetInboxOverviewTotals, for the same reason: a
+  -- mailbox's count must match the list clicking that mailbox produces.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY t.mailbox_id;
 
 -- name: ListInboxOverviewByReplyClass :many
 -- Per-reply-class totals, for the rail's label scopes. Threads whose
 -- last_reply_class is '' (never classified) are excluded — '' is the absence
 -- of a class, not a class to offer as a filter.
-SELECT last_reply_class AS key,
+SELECT t.last_reply_class AS key,
        COUNT(*)::bigint AS total,
-       COUNT(*) FILTER (WHERE unread)::bigint AS unread
-FROM inbox_threads
-WHERE workspace_id = @workspace_id AND last_reply_class <> ''
-GROUP BY last_reply_class;
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_threads t
+WHERE t.workspace_id = @workspace_id AND t.last_reply_class <> ''
+  -- Same snooze exclusion as GetInboxOverviewTotals: a label's count must
+  -- match the list clicking that label produces.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY t.last_reply_class;
+
+-- name: UpsertInboxThreadSnooze :one
+-- Snooze a thread, or re-snooze one already snoozed (a second call replaces
+-- the moment rather than failing — re-snoozing is a normal operator action,
+-- not an error). thread_id is the PK, so the conflict target is the whole
+-- identity of a snooze.
+INSERT INTO inbox_thread_snoozes (thread_id, workspace_id, snooze_until, snoozed_by)
+VALUES (@thread_id, @workspace_id, @snooze_until, sqlc.narg('snoozed_by'))
+ON CONFLICT (thread_id) DO UPDATE
+    SET snooze_until = EXCLUDED.snooze_until,
+        snoozed_by   = EXCLUDED.snoozed_by
+    -- Belt and braces: the WHERE on the UPDATE arm means a row belonging to
+    -- another workspace cannot be overwritten even if a caller somehow reached
+    -- this with a foreign thread_id (the service checks the thread first, so
+    -- this should be unreachable).
+    WHERE inbox_thread_snoozes.workspace_id = @workspace_id
+RETURNING *;
+
+-- name: DeleteInboxThreadSnooze :execrows
+-- Un-snooze. :execrows so the store can tell "there was a snooze and it is
+-- gone" from "there was nothing to remove" and report ErrNotFound for the
+-- latter, rather than silently succeeding.
+DELETE FROM inbox_thread_snoozes
+WHERE thread_id = @thread_id AND workspace_id = @workspace_id;
+
+-- name: GetInboxThreadSnooze :one
+SELECT * FROM inbox_thread_snoozes
+WHERE thread_id = @thread_id AND workspace_id = @workspace_id;
+
+-- name: CountInboxSnoozedThreads :one
+-- The rail's `snoozed` counter: only snoozes still in force. An expired row is
+-- not "a snoozed thread" — it is a thread that has already come back, and it
+-- is counted by whichever ordinary scope it now falls into.
+SELECT COUNT(*)::bigint AS total
+FROM inbox_thread_snoozes
+WHERE workspace_id = @workspace_id AND snooze_until > now();

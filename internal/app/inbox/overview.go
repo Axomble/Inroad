@@ -22,8 +22,15 @@ type Overview struct {
 	Today         int64
 	ThisWeek      int64
 	AwaitingReply int64
-	ByMailbox     []MailboxCount
-	ByReplyClass  []ReplyClassCount
+	// Snoozed counts threads whose snooze is STILL IN FORCE. It is the one
+	// counter here not drawn from the same scan as the others: every field
+	// above deliberately excludes snoozed threads (because every list they
+	// label excludes them), so this is counted separately over the rows they
+	// leave out. An expired snooze counts nowhere here — its thread has
+	// already returned to whichever ordinary scope it belongs to.
+	Snoozed      int64
+	ByMailbox    []MailboxCount
+	ByReplyClass []ReplyClassCount
 }
 
 // MailboxCount is one mailbox's thread counts. Mailboxes with no threads at
@@ -87,6 +94,10 @@ func (s *PgStore) GetOverview(ctx context.Context, workspaceID uuid.UUID, window
 	if err != nil {
 		return Overview{}, err
 	}
+	snoozed, err := s.q.CountInboxSnoozedThreads(ctx, workspaceID)
+	if err != nil {
+		return Overview{}, err
+	}
 
 	byMailbox := make([]MailboxCount, len(mailboxRows))
 	for i, r := range mailboxRows {
@@ -103,6 +114,7 @@ func (s *PgStore) GetOverview(ctx context.Context, workspaceID uuid.UUID, window
 		Today:         totals.Today,
 		ThisWeek:      totals.ThisWeek,
 		AwaitingReply: totals.AwaitingReply,
+		Snoozed:       snoozed,
 		ByMailbox:     byMailbox,
 		ByReplyClass:  byClass,
 	}, nil

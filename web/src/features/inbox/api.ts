@@ -15,6 +15,7 @@ export type {
   InboxReplyLabelRef,
   InboxDraftReply,
   InboxOverview,
+  InboxSnooze,
   InboxMailboxCount,
   InboxReplyClassCount,
   SendInboxReplyRequest,
@@ -54,6 +55,22 @@ const inboxApi = api.enhanceEndpoints({
         { type: 'InboxThread', id: 'LIST' },
       ],
     },
+    // Snoozing moves a thread between scopes and changes every rail counter
+    // that excludes snoozed threads, so it invalidates the LIST as well as the
+    // thread itself — the same pair setInboxThreadRead invalidates, for the
+    // same reason.
+    snoozeInboxThread: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'InboxThread', id: arg.id },
+        { type: 'InboxThread', id: 'LIST' },
+      ],
+    },
+    unsnoozeInboxThread: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'InboxThread', id: arg.id },
+        { type: 'InboxThread', id: 'LIST' },
+      ],
+    },
     // The send is queued (202), not delivered — the outbound message doesn't
     // exist yet at the instant this resolves, so this immediate invalidation
     // is a best-effort refetch, not a guarantee the reply is visible yet. The
@@ -83,4 +100,6 @@ export const {
   useSendInboxReplyMutation,
   useDraftInboxReplyMutation,
   useSetInboxThreadReadMutation,
+  useSnoozeInboxThreadMutation,
+  useUnsnoozeInboxThreadMutation,
 } = inboxApi

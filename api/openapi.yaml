@@ -2941,13 +2941,20 @@ paths:
             threads; `awaiting_reply` to threads whose newest message is inbound
             (the contact spoke last); `today` and `this_week` to threads whose
             last_message_at falls in the viewer's current day or ISO week
-            (Monday-based), resolved against tz_offset. Omitted or `all` means
-            the whole inbox. An unrecognised value is a 400, never a silently
-            unscoped page. Combines freely with the keyset cursor: the scope
-            bounds the result set, the cursor names a position within it.
+            (Monday-based), resolved against tz_offset; `snoozed` to threads
+            whose snooze is still in force. Omitted or `all` means the whole
+            inbox. An unrecognised value is a 400, never a silently unscoped
+            page. Combines freely with the keyset cursor: the scope bounds the
+            result set, the cursor names a position within it.
+
+
+            Snoozed threads are EXCLUDED from every scope except `snoozed` —
+            that is what snoozing means. The one exception is a search (`q`),
+            which searches snoozed threads too: answering "no results" for a
+            thread the operator snoozed last week would read as data loss.
           schema:
             type: string
-            enum: [all, unread, today, this_week, awaiting_reply]
+            enum: [all, unread, today, this_week, awaiting_reply, snoozed]
         - name: tz_offset
           in: query
           required: false
@@ -3085,6 +3092,61 @@ paths:
         '400': { description: Validation error }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /inbox/threads/{id}/snooze:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: snoozeInboxThread
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Hide a thread from the inbox until a chosen moment, then let it return.
+        Snoozed threads leave every scope except `snoozed` (a search still finds
+        them).
+
+
+        PUT, not POST, because it is idempotent in the way that matters: the
+        same request twice leaves the same single snooze, and re-snoozing an
+        already-snoozed thread replaces the moment rather than stacking a second
+        one. The response echoes the stored snooze so a client renders the
+        instant the server accepted rather than assuming its own round-tripped.
+
+
+        `snooze_until` is an absolute RFC3339 instant, not a duration or a
+        preset name: presets like "tomorrow morning" depend on the viewer's
+        timezone and working hours, so the client resolves its own preset and
+        the server's job is to bound and store the result. It must be in the
+        future and no more than 90 days ahead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SnoozeInboxThreadRequest' }
+      responses:
+        '200':
+          description: The stored snooze
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSnooze' }
+        '400': { description: "Malformed body, or snooze_until is not an RFC3339 timestamp" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '422':
+          description: >-
+            snooze_until parsed but is out of bounds — already past, or further
+            than 90 days ahead. Distinct from 400 so a client can tell a
+            malformed request from a rejected moment on status alone.
+    delete:
+      operationId: unsnoozeInboxThread
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Return a snoozed thread to the inbox immediately. 404 when the thread
+        has no snooze — which also covers an unknown or foreign thread id, since
+        neither can have one.
+      responses:
+        '204': { description: The thread is back in the inbox }
+        '401': { description: Unauthorized }
+        '404': { description: "The thread does not exist, or is not snoozed" }
 components:
   securitySchemes:
     bearerAuth:
@@ -5728,6 +5790,32 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    SnoozeInboxThreadRequest:
+      type: object
+      required: [snooze_until]
+      properties:
+        snooze_until:
+          type: string
+          format: date-time
+          description: >-
+            When the thread should return to the inbox. Must be in the future
+            and within 90 days.
+    InboxSnooze:
+      type: object
+      required: [thread_id, snooze_until, snoozed_by, created_at]
+      properties:
+        thread_id: { type: string, format: uuid }
+        snooze_until: { type: string, format: date-time }
+        snoozed_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The member who snoozed it, for display. Null when the snooze was set
+            by an API key (no human behind it) or when that member has since
+            been removed from the workspace — a departure must not drag their
+            teammates' snoozes back into the inbox.
+        created_at: { type: string, format: date-time }
     InboxMailboxCount:
       type: object
       required: [mailbox_id, total, unread]
@@ -5754,7 +5842,7 @@ components:
         unread: { type: integer, format: int64 }
     InboxOverview:
       type: object
-      required: [total, unread, today, this_week, awaiting_reply, by_mailbox, by_reply_class]
+      required: [total, unread, today, this_week, awaiting_reply, snoozed, by_mailbox, by_reply_class]
       description: >-
         Scope counts for the inbox rail. Every counter is over the whole
         workspace, and each corresponds to a `scope` accepted by
@@ -5774,6 +5862,17 @@ components:
           type: integer
           format: int64
           description: Threads whose newest message is inbound — the contact spoke last, so it is waiting on us.
+        snoozed:
+          type: integer
+          format: int64
+          description: >-
+            Threads whose snooze is still in force. Unlike every other counter
+            here, this one counts rows the others deliberately exclude: a
+            snoozed thread is absent from `total`, `unread`, `today`,
+            `this_week`, `awaiting_reply` and both breakdowns, because it is
+            absent from the lists those counters label. A lapsed snooze counts
+            here not at all — its thread has already returned to whichever
+            ordinary scope it belongs to.
         by_mailbox: { type: array, items: { $ref: '#/components/schemas/InboxMailboxCount' } }
         by_reply_class: { type: array, items: { $ref: '#/components/schemas/InboxReplyClassCount' } }
     InboxMessage:
@@ -5794,9 +5893,19 @@ components:
       allOf:
         - $ref: '#/components/schemas/InboxThreadSummary'
         - type: object
-          required: [messages]
+          required: [messages, snooze]
           properties:
             messages: { type: array, items: { $ref: '#/components/schemas/InboxMessage' } }
+            snooze:
+              type: object
+              allOf: [{ $ref: '#/components/schemas/InboxSnooze' }]
+              nullable: true
+              description: >-
+                The thread's snooze, or null when it has none — including when a
+                snooze exists but has already lapsed. The server evaluates
+                "still in force" so the client renders "Snoozed until …" and an
+                Unsnooze action from this field alone, without date-checking a
+                possibly-expired timestamp itself.
     SetInboxThreadReadRequest:
       type: object
       required: [unread]

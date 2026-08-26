@@ -9,6 +9,7 @@ import { httpStatus } from '@/lib/rtk-error'
 import { useGetInboxThreadQuery } from './api'
 import { contactLabel } from './contact-label'
 import { ThreadReader } from './thread-reader'
+import { SnoozeMenu } from './snooze-menu'
 
 const routeApi = getRouteApi('/app/inbox/$threadId')
 
@@ -44,7 +45,14 @@ export function ThreadDetailPage() {
         }
         title={isLoading ? <Skeleton className="h-5 w-48" /> : data && contactLabel(data)}
         subtitle={data ? data.subject || '(no subject)' : undefined}
-        actions={data ? <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} /> : undefined}
+        actions={
+          data ? (
+            <div className="flex items-start gap-2">
+              <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} />
+              <SnoozeMenu threadId={threadId} snooze={data.snooze} />
+            </div>
+          ) : undefined
+        }
       />
 
       <PageBody className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">

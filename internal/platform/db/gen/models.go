@@ -559,6 +559,14 @@ type InboxThread struct {
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxThreadSnooze struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	SnoozeUntil pgtype.Timestamptz `json:"snooze_until"`
+	SnoozedBy   pgtype.UUID        `json:"snoozed_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type List struct {
 	ID          uuid.UUID          `json:"id"`
 	WorkspaceID uuid.UUID          `json:"workspace_id"`

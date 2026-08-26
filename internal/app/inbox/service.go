@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -35,6 +36,15 @@ type Service struct {
 	suppression SuppressionChecker
 	replyEnq    ReplyEnqueuer
 	drafter     ReplyDrafter
+	// snoozes backs Snooze/Unsnooze/GetSnooze (see snooze.go). Optional like
+	// the rest: nil when a caller never snoozes, which keeps every existing
+	// NewService(store) call site compiling. The snooze methods are the only
+	// ones that touch it, and they are unreachable without a route mounted.
+	snoozes SnoozeStore
+	// clock is the Service's source of "now", injected so time-bounded rules
+	// (the snooze horizon) are testable at a fixed instant rather than
+	// reaching for the process clock. nil means time.Now — see now().
+	clock func() time.Time
 }
 
 // NewService builds a Service over store, applying any ServiceOptions (see
@@ -45,6 +55,28 @@ func NewService(store Store, opts ...ServiceOption) *Service {
 		opt(s)
 	}
 	return s
+}
+
+// WithSnoozeStore supplies the snooze persistence. Without it, the snooze use
+// cases have nowhere to write; cmd/inroad always passes one (PgStore
+// implements both interfaces).
+func WithSnoozeStore(snoozes SnoozeStore) ServiceOption {
+	return func(s *Service) { s.snoozes = snoozes }
+}
+
+// WithClock overrides the Service's source of "now". Test-facing; production
+// leaves it unset and gets time.Now.
+func WithClock(clock func() time.Time) ServiceOption {
+	return func(s *Service) { s.clock = clock }
+}
+
+// now reads the injected clock, defaulting to time.Now so an option-free
+// Service behaves exactly as it did before the clock existed.
+func (s *Service) now() time.Time {
+	if s.clock == nil {
+		return time.Now()
+	}
+	return s.clock()
 }
 
 // RecordReply carries one matched (or legacy) reply: the thread it belongs to
@@ -106,6 +138,12 @@ func (s *Service) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 	if (filter.BeforeLastMessageAt == nil) != (filter.BeforeID == nil) {
 		return ThreadPage{}, fmt.Errorf("%w: %s", ErrValidation, errHalfSetCursor)
 	}
+	// "Hide the snoozed" and "show only the snoozed" together can only ever
+	// match nothing. Rejected rather than served as an empty page, which would
+	// present a caller's bug as a legitimately empty inbox.
+	if filter.SnoozeHidden && filter.SnoozedOnly {
+		return ThreadPage{}, fmt.Errorf("%w: snooze_hidden and snoozed_only are mutually exclusive", ErrValidation)
+	}
 	return s.store.ListThreads(ctx, workspaceID, filter)
 }
 
@@ -114,7 +152,25 @@ func (s *Service) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 // another workspace — the two are indistinguishable by design (Invariant:
 // never leak a foreign row's existence).
 func (s *Service) GetThread(ctx context.Context, workspaceID, id uuid.UUID) (ThreadDetail, error) {
-	return s.store.GetThread(ctx, workspaceID, id)
+	detail, err := s.store.GetThread(ctx, workspaceID, id)
+	if err != nil {
+		return ThreadDetail{}, err
+	}
+	// Resolved here rather than joined in the store's query because whether a
+	// snooze is still IN FORCE depends on the Service's clock — see
+	// activeSnoozeFor.
+	//
+	// A failure here IS propagated rather than degraded to nil: reporting "not
+	// snoozed" when we could not determine it would show the operator a Snooze
+	// button for a thread that is already snoozed, and the resulting re-snooze
+	// would silently overwrite the moment a colleague chose. A 500 they can
+	// retry is better than a confident wrong answer.
+	snooze, err := s.activeSnoozeFor(ctx, workspaceID, id)
+	if err != nil {
+		return ThreadDetail{}, err
+	}
+	detail.Snooze = snooze
+	return detail, nil
 }
 
 // SetUnread flips a thread's read state, scoped to workspaceID.

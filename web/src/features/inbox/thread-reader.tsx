@@ -10,6 +10,7 @@ import { useGetInboxThreadQuery, useSetInboxThreadReadMutation, type InboxMessag
 import { contactLabel } from './contact-label'
 import { MessageBody } from './message-body'
 import { ReplyComposer } from './reply-composer'
+import { SnoozeMenu } from './snooze-menu'
 
 /**
  * One thread's messages and its composer — the reader, with no page chrome of
@@ -103,7 +104,10 @@ export function ThreadReaderHeading({ threadId }: { threadId: string }) {
         <h2 className="truncate text-sm font-semibold text-foreground">{contactLabel(data)}</h2>
         <p className="truncate text-[12px] text-muted-foreground">{data.subject || '(no subject)'}</p>
       </div>
-      <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} className="shrink-0" />
+      <div className="flex shrink-0 items-start gap-2">
+        <ReplyClassPill replyClass={data.last_reply_class} replyLabel={data.reply_label} />
+        <SnoozeMenu threadId={threadId} snooze={data.snooze} />
+      </div>
     </div>
   )
 }

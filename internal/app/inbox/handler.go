@@ -33,6 +33,13 @@ func writeErr(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrReplyBodyInvalid):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// 422, not 400: the body parsed and snooze_until was a well-formed
+	// timestamp, so the request is syntactically fine and semantically
+	// rejected. This lets a client tell "I sent malformed JSON" from "my chosen
+	// moment was out of bounds" on the status alone. The message names the
+	// actual bound, so the UI can surface it without hardcoding 90 days.
+	case errors.Is(err, ErrSnoozeInPast), errors.Is(err, ErrSnoozeTooFar):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	// The three draft failures get three DISTINCT statuses, none of which the
 	// draft route can produce for any other reason, so the UI can branch on the
 	// status alone without parsing the body:
@@ -152,6 +159,10 @@ func uuidString(id *uuid.UUID) *string {
 type threadDetailResponse struct {
 	threadSummaryResponse
 	Messages []messageResponse `json:"messages"`
+	// Snooze is null unless a snooze is still in force — the reader shows
+	// "Snoozed until …" and an Unsnooze action from this alone, without having
+	// to date-check a possibly-lapsed timestamp itself.
+	Snooze *snoozeResponse `json:"snooze"`
 }
 
 func toThreadDetailResponse(d ThreadDetail) threadDetailResponse {
@@ -159,7 +170,12 @@ func toThreadDetailResponse(d ThreadDetail) threadDetailResponse {
 	for _, m := range d.Messages {
 		messages = append(messages, toMessageResponse(m))
 	}
-	return threadDetailResponse{threadSummaryResponse: toThreadSummaryResponse(d.Thread), Messages: messages}
+	out := threadDetailResponse{threadSummaryResponse: toThreadSummaryResponse(d.Thread), Messages: messages}
+	if d.Snooze != nil {
+		snooze := toSnoozeResponse(*d.Snooze)
+		out.Snooze = &snooze
+	}
+	return out
 }
 
 // threadPageResponse is GET /inbox/threads. There is no separate cursor
@@ -256,6 +272,7 @@ const (
 	scopeToday         = "today"
 	scopeThisWeek      = "this_week"
 	scopeAwaitingReply = "awaiting_reply"
+	scopeSnoozed       = "snoozed"
 )
 
 // applyScope translates ?scope= into the ListFilter's scope fields. "" and
@@ -267,6 +284,13 @@ const (
 // from different clocks would let a thread be counted in "today" but missing
 // from the list it links to.
 func applyScope(filter *ListFilter, scope string, r *http.Request) error {
+	// Snoozed threads are hidden from every scope but `snoozed` itself — that
+	// is what snoozing means. The one exception is a SEARCH: a query is the
+	// operator asking for a specific thread by name, and answering "no results"
+	// because they snoozed it last week reads as data loss. Set before the
+	// switch so the `snoozed` case can override it.
+	filter.SnoozeHidden = filter.Query == ""
+
 	switch scope {
 	case "", scopeAll:
 		return nil
@@ -275,6 +299,13 @@ func applyScope(filter *ListFilter, scope string, r *http.Request) error {
 		return nil
 	case scopeAwaitingReply:
 		filter.AwaitingReplyOnly = true
+		return nil
+	case scopeSnoozed:
+		// Mutually exclusive with SnoozeHidden (Service.ListThreads rejects
+		// both), so clear it rather than leaving a contradiction for the
+		// validator to catch.
+		filter.SnoozeHidden = false
+		filter.SnoozedOnly = true
 		return nil
 	case scopeToday, scopeThisWeek:
 		window, err := parseOverviewWindow(r)
@@ -288,7 +319,7 @@ func applyScope(filter *ListFilter, scope string, r *http.Request) error {
 		filter.SinceLastMessageAt = &since
 		return nil
 	default:
-		return errors.New("scope must be one of all, unread, today, this_week, awaiting_reply")
+		return errors.New("scope must be one of all, unread, today, this_week, awaiting_reply, snoozed")
 	}
 }
 
