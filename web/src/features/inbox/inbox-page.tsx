@@ -391,7 +391,7 @@ export function InboxPage() {
                 <div className="border-b border-border px-5 py-2.5">
                   <ThreadReaderHeading threadId={selectedThreadId} />
                 </div>
-                <div className="flex-1 overflow-y-auto px-5 py-4">
+                <div className="flex min-h-0 flex-1 overflow-hidden px-5 py-4">
                   {/* Keyed on the thread id, which is load-bearing rather than
                       cosmetic: the reader owns a ReplyComposer holding typed
                       text in local state, and this pane (unlike the standalone
@@ -399,7 +399,7 @@ export function InboxPage() {
                       key, React would reconcile the same composer and a reply
                       drafted for one contact would post to whichever thread
                       was selected when Send was pressed. */}
-                  <ThreadReader key={selectedThreadId} threadId={selectedThreadId} />
+                  <ThreadReader key={selectedThreadId} threadId={selectedThreadId} withContextPanel />
                 </div>
               </>
             ) : (

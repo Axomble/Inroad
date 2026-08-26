@@ -57,8 +57,16 @@ export function ThreadDetailPage() {
         }
       />
 
-      <PageBody className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
-        <ThreadReader threadId={threadId} />
+      {/* The context rail is shown here too, but only from `xl` — its own
+          breakpoint. This route is the layout narrow viewports get, and below
+          `xl` the rail stacks below the messages rather than beside them (see
+          ContactContextPanel's own responsive classes), which is the right
+          fallback: the context is still reachable, just not alongside.
+
+          max-w-3xl is dropped when the rail is present, since a centred column
+          plus a right rail reads as lopsided. */}
+      <PageBody className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 xl:max-w-6xl">
+        <ThreadReader threadId={threadId} withContextPanel />
       </PageBody>
     </Page>
   )

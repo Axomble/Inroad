@@ -6,13 +6,19 @@ import { EmptyBlock } from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
 import { relativeTime } from '@/lib/relative-time'
 import { cn } from '@/lib/utils'
-import { useGetInboxThreadQuery, useSetInboxThreadReadMutation, type InboxMessage } from './api'
+import {
+  useGetInboxThreadQuery,
+  useSetInboxThreadReadMutation,
+  type InboxMessage,
+  type InboxThreadDetail,
+} from './api'
 import { contactLabel } from './contact-label'
 import { MessageBody } from './message-body'
 import { ReplyComposer } from './reply-composer'
 import { SnoozeMenu } from './snooze-menu'
 import { LabelPicker } from './label-picker'
 import { LabelChips } from './label-chip'
+import { ContactContextPanel } from './contact-context-panel'
 
 /**
  * One thread's messages and its composer — the reader, with no page chrome of
@@ -28,7 +34,20 @@ import { LabelChips } from './label-chip'
  * need genuinely different chrome: the standalone page needs a back button and
  * a PageTopbar, the pane needs neither.
  */
-export function ThreadReader({ threadId, className }: { threadId: string; className?: string }) {
+export function ThreadReader({
+  threadId,
+  className,
+  withContextPanel = false,
+}: {
+  threadId: string
+  className?: string
+  /**
+   * Renders the contact-context rail beside the messages. Opt-in rather than
+   * always-on: the standalone `/app/inbox/$threadId` page is the layout used on
+   * narrow viewports, where a second column has nowhere to go.
+   */
+  withContextPanel?: boolean
+}) {
   const { data, isLoading, error, refetch } = useGetInboxThreadQuery({ id: threadId })
   const [setRead] = useSetInboxThreadReadMutation()
 
@@ -74,9 +93,32 @@ export function ThreadReader({ threadId, className }: { threadId: string; classN
 
   if (!data) return null
 
+  if (withContextPanel) {
+    return (
+      <div className={cn('flex min-h-0 flex-col xl:flex-row', className)}>
+        <div className="min-w-0 flex-1 space-y-4 overflow-y-auto">
+          <ThreadMessages threadId={threadId} detail={data} />
+        </div>
+        <ContactContextPanel contactId={data.contact_id} />
+      </div>
+    )
+  }
+
   return (
     <div className={cn('space-y-4', className)}>
-      {data.messages.map((message, index) => (
+      <ThreadMessages threadId={threadId} detail={data} />
+    </div>
+  )
+}
+
+/**
+ * The messages themselves plus the composer — the part that is identical
+ * whether or not the context rail is shown.
+ */
+function ThreadMessages({ threadId, detail }: { threadId: string; detail: InboxThreadDetail }) {
+  return (
+    <>
+      {detail.messages.map((message, index) => (
         // `message_id` is blank for most outbound sends (no provider
         // Message-ID recorded, or none generated yet) — never a safe key on its
         // own, since two outbound messages in the same thread can legitimately
@@ -87,8 +129,11 @@ export function ThreadReader({ threadId, className }: { threadId: string; classN
         // oxlint-disable-next-line no-array-index-key -- fixed, server-sorted list; index+occurred_at is stable, message_id/occurred_at alone are not unique for outbound legs
         <MessageBubble key={`${message.occurred_at}-${index}`} message={message} />
       ))}
-      <ReplyComposer threadId={threadId} hasInboundMessage={data.messages.some((m) => m.direction === 'inbound')} />
-    </div>
+      <ReplyComposer
+        threadId={threadId}
+        hasInboundMessage={detail.messages.some((m) => m.direction === 'inbound')}
+      />
+    </>
   )
 }
 
