@@ -97,8 +97,8 @@ func WithReplyEnqueuer(e ReplyEnqueuer) ServiceOption {
 // queries/send.sql's CountSentToday) so campaign scheduling still sees true
 // volume. Suppression, by contrast, is never bypassed.
 func (s *Service) Reply(ctx context.Context, ws, threadID uuid.UUID, bodyText string) error {
-	if len(bodyText) < minReplyBodyLen || len(bodyText) > maxReplyBodyLen {
-		return ErrReplyBodyInvalid
+	if err := validateReplyBody(bodyText); err != nil {
+		return err
 	}
 	detail, err := s.store.GetThread(ctx, ws, threadID)
 	if err != nil {
@@ -175,4 +175,15 @@ func (s *Service) RecordOutboundReply(ctx context.Context, ws, threadID uuid.UUI
 		return fmt.Errorf("%w: message direction must be outbound", ErrValidation)
 	}
 	return s.store.RecordOutboundReply(ctx, threadID, ws, msg)
+}
+
+// validateReplyBody bounds a manual reply's body. Shared by the immediate
+// (Reply) and deferred (ScheduleReply) paths so the two can never disagree
+// about what a valid reply is — a body accepted for scheduling must be one the
+// send path would also have accepted.
+func validateReplyBody(bodyText string) error {
+	if len(bodyText) < minReplyBodyLen || len(bodyText) > maxReplyBodyLen {
+		return ErrReplyBodyInvalid
+	}
+	return nil
 }

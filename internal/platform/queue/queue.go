@@ -158,6 +158,20 @@ type TestSendPayload struct {
 // (POST /inbox/threads/{id}/reply). One task per reply.
 const TaskInboxReplySend = "inbox:reply_send"
 
+// TaskInboxPendingReplySend delivers a DEFERRED manual reply — one whose row in
+// inbox_pending_replies carries the body and the authoritative send_after.
+// Distinct from TaskInboxReplySend, which carries the body in its own payload
+// and has no row to cancel: this task is only a POINTER to a row, so the
+// operator can undo the send by updating that row while the task is still
+// pending in the queue.
+const TaskInboxPendingReplySend = "inbox:pending_reply_send"
+
+// TaskInboxPendingComposeSend delivers a deferred COMPOSED email — a new
+// message rather than a reply, whose recipients and subject are its own rather
+// than derived from a thread. Same pointer-to-a-row design as
+// TaskInboxPendingReplySend, and cancellable the same way.
+const TaskInboxPendingComposeSend = "inbox:pending_compose_send"
+
 // InboxReplySendPayload is the body of an inbox:reply_send task. WorkspaceID
 // travels alongside ThreadID so the worker can pin workspace_id in its
 // coreapi lookups (defense in depth on the unguessable thread UUID).
@@ -171,6 +185,23 @@ const TaskInboxReplySend = "inbox:reply_send"
 // asynq.GetTaskID (which would work identically in production but is opaque
 // to construct in a unit test that builds a task directly) — this way the
 // SAME value is trivially assertable in tests.
+// InboxPendingReplySendPayload names a row in inbox_pending_replies. It
+// carries NO body: the row is the single source of truth for what to send and
+// whether to send it at all, so a payload copy could go stale the moment the
+// operator cancels.
+type InboxPendingReplySendPayload struct {
+	PendingID   string `json:"pending_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// InboxPendingComposeSendPayload names a row in inbox_pending_composes. Carries
+// no content, for the same reason InboxPendingReplySendPayload does not: the row
+// is the single source of truth for what to send and whether to send it.
+type InboxPendingComposeSendPayload struct {
+	PendingID   string `json:"pending_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
 type InboxReplySendPayload struct {
 	ThreadID    string `json:"thread_id"`
 	BodyText    string `json:"body_text"`
@@ -394,6 +425,56 @@ func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID 
 // correspondence, kept out of a Redis-visible identifier).
 func inboxReplySendTaskID(threadID string, now time.Time) string {
 	return fmt.Sprintf("inboxreply:%s:%d", threadID, now.Unix())
+}
+
+// EnqueuePendingInboxReply schedules a deferred manual reply for delivery at
+// sendAfter.
+//
+// asynq.ProcessAt, not ProcessIn: the moment is already absolute (the row's
+// send_after), and converting it to a duration here would introduce a skew
+// between what the row says and when the task fires.
+//
+// The task id is the pending-reply id, which makes the enqueue idempotent for
+// free — a retried schedule of the SAME row dedups rather than producing two
+// deliveries. asynq's TaskID conflict is swallowed as success by c.enqueue.
+//
+// Note this task cannot be cancelled through the queue (asynq's Inspector is
+// not used in this codebase). Cancellation is a DB status flip that the handler
+// re-reads on pickup; the task still fires and no-ops. See
+// migrations/000066_inbox_pending_reply.up.sql for why.
+func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error {
+	b, err := json.Marshal(InboxPendingReplySendPayload{
+		PendingID: pendingID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueue(asynq.NewTask(TaskInboxPendingReplySend, b),
+		asynq.TaskID("inboxpending:"+pendingID),
+		asynq.ProcessAt(sendAfter),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
+		asynq.Retention(taskRetention),
+	)
+}
+
+// EnqueuePendingInboxCompose schedules a composed email for delivery at
+// sendAfter. See EnqueuePendingInboxReply for the ProcessAt/TaskID reasoning —
+// this is the same design over the compose table.
+func (c *Client) EnqueuePendingInboxCompose(pendingID, workspaceID string, sendAfter time.Time) error {
+	b, err := json.Marshal(InboxPendingComposeSendPayload{
+		PendingID: pendingID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueue(asynq.NewTask(TaskInboxPendingComposeSend, b),
+		asynq.TaskID("inboxcompose:"+pendingID),
+		asynq.ProcessAt(sendAfter),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
+		asynq.Retention(taskRetention),
+	)
 }
 
 // EnqueueInboxReplySend enqueues an inbox:reply_send task for immediate

@@ -1475,6 +1475,20 @@ const injectedRtkApi = api.injectEndpoints({
           before_last_message_at: queryArg.beforeLastMessageAt,
           before_id: queryArg.beforeId,
           limit: queryArg.limit,
+          scope: queryArg.scope,
+          tz_offset: queryArg.tzOffset,
+          label: queryArg.label,
+        },
+      }),
+    }),
+    getInboxOverview: build.query<
+      GetInboxOverviewApiResponse,
+      GetInboxOverviewApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/overview`,
+        params: {
+          tz_offset: queryArg.tzOffset,
         },
       }),
     }),
@@ -1511,6 +1525,174 @@ const injectedRtkApi = api.injectEndpoints({
         url: `/inbox/threads/${queryArg.id}/read`,
         method: "PUT",
         body: queryArg.setInboxThreadReadRequest,
+      }),
+    }),
+    snoozeInboxThread: build.mutation<
+      SnoozeInboxThreadApiResponse,
+      SnoozeInboxThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/snooze`,
+        method: "PUT",
+        body: queryArg.snoozeInboxThreadRequest,
+      }),
+    }),
+    unsnoozeInboxThread: build.mutation<
+      UnsnoozeInboxThreadApiResponse,
+      UnsnoozeInboxThreadApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/snooze`,
+        method: "DELETE",
+      }),
+    }),
+    scheduleInboxReply: build.mutation<
+      ScheduleInboxReplyApiResponse,
+      ScheduleInboxReplyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/schedule-reply`,
+        method: "POST",
+        body: queryArg.scheduleInboxReplyRequest,
+      }),
+    }),
+    listInboxOutbox: build.query<
+      ListInboxOutboxApiResponse,
+      ListInboxOutboxApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/outbox`,
+        params: {
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    cancelInboxPendingReply: build.mutation<
+      CancelInboxPendingReplyApiResponse,
+      CancelInboxPendingReplyApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/outbox/${queryArg.pendingId}`,
+        method: "DELETE",
+      }),
+    }),
+    getInboxSettings: build.query<
+      GetInboxSettingsApiResponse,
+      GetInboxSettingsApiArg
+    >({
+      query: () => ({ url: `/inbox/settings` }),
+    }),
+    updateInboxSettings: build.mutation<
+      UpdateInboxSettingsApiResponse,
+      UpdateInboxSettingsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/settings`,
+        method: "PUT",
+        body: queryArg.inboxSettings,
+      }),
+    }),
+    listInboxComposeDrafts: build.query<
+      ListInboxComposeDraftsApiResponse,
+      ListInboxComposeDraftsApiArg
+    >({
+      query: () => ({ url: `/inbox/drafts` }),
+    }),
+    saveInboxComposeDraft: build.mutation<
+      SaveInboxComposeDraftApiResponse,
+      SaveInboxComposeDraftApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/drafts/${queryArg.draftId}`,
+        method: "PUT",
+        body: queryArg.saveInboxComposeDraftRequest,
+      }),
+    }),
+    deleteInboxComposeDraft: build.mutation<
+      DeleteInboxComposeDraftApiResponse,
+      DeleteInboxComposeDraftApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/drafts/${queryArg.draftId}`,
+        method: "DELETE",
+      }),
+    }),
+    listInboxComposes: build.query<
+      ListInboxComposesApiResponse,
+      ListInboxComposesApiArg
+    >({
+      query: () => ({ url: `/inbox/composes` }),
+    }),
+    sendInboxCompose: build.mutation<
+      SendInboxComposeApiResponse,
+      SendInboxComposeApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/composes`,
+        method: "POST",
+        body: queryArg.sendInboxComposeRequest,
+      }),
+    }),
+    cancelInboxPendingCompose: build.mutation<
+      CancelInboxPendingComposeApiResponse,
+      CancelInboxPendingComposeApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/composes/${queryArg.pendingId}`,
+        method: "DELETE",
+      }),
+    }),
+    listInboxLabels: build.query<
+      ListInboxLabelsApiResponse,
+      ListInboxLabelsApiArg
+    >({
+      query: () => ({ url: `/inbox/labels` }),
+    }),
+    createInboxLabel: build.mutation<
+      CreateInboxLabelApiResponse,
+      CreateInboxLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/labels`,
+        method: "POST",
+        body: queryArg.upsertInboxLabelRequest,
+      }),
+    }),
+    updateInboxLabel: build.mutation<
+      UpdateInboxLabelApiResponse,
+      UpdateInboxLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/labels/${queryArg.labelId}`,
+        method: "PUT",
+        body: queryArg.upsertInboxLabelRequest,
+      }),
+    }),
+    deleteInboxLabel: build.mutation<
+      DeleteInboxLabelApiResponse,
+      DeleteInboxLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/labels/${queryArg.labelId}`,
+        method: "DELETE",
+      }),
+    }),
+    assignInboxThreadLabel: build.mutation<
+      AssignInboxThreadLabelApiResponse,
+      AssignInboxThreadLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/labels/${queryArg.labelId}`,
+        method: "PUT",
+      }),
+    }),
+    unassignInboxThreadLabel: build.mutation<
+      UnassignInboxThreadLabelApiResponse,
+      UnassignInboxThreadLabelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/threads/${queryArg.id}/labels/${queryArg.labelId}`,
+        method: "DELETE",
       }),
     }),
   }),
@@ -2419,6 +2601,21 @@ export type ListInboxThreadsApiArg = {
   beforeId?: string;
   /** Page size. Defaults to 25, capped at 200 (a larger request is clamped, not rejected). */
   limit?: number;
+  /** One of the inbox's virtual folders. `unread` restricts to unread threads; `awaiting_reply` to threads whose newest message is inbound (the contact spoke last); `today` and `this_week` to threads whose last_message_at falls in the viewer's current day or ISO week (Monday-based), resolved against tz_offset; `snoozed` to threads whose snooze is still in force. Omitted or `all` means the whole inbox. An unrecognised value is a 400, never a silently unscoped page. Combines freely with the keyset cursor: the scope bounds the result set, the cursor names a position within it.
+    
+    Snoozed threads are EXCLUDED from every scope except `snoozed` — that is what snoozing means. The one exception is a search (`q`), which searches snoozed threads too: answering "no results" for a thread the operator snoozed last week would read as data loss. */
+  scope?:
+    "all" | "unread" | "today" | "this_week" | "awaiting_reply" | "snoozed";
+  /** The viewer's UTC offset in minutes East of UTC, as JavaScript's `-new Date().getTimezoneOffset()` reports it. Only read when scope is `today` or `this_week`, whose boundaries depend on the viewer's own day rather than the server's. Defaults to 0 (UTC) — never the server's local zone, which carries no information about the viewer. */
+  tzOffset?: number;
+  /** Restrict to threads carrying one operator-assigned label (see listInboxLabels). Distinct from `reply_class`, which filters on the classifier's own verdict. */
+  label?: string;
+};
+export type GetInboxOverviewApiResponse =
+  /** status 200 Scope counts for the workspace */ InboxOverview;
+export type GetInboxOverviewApiArg = {
+  /** The viewer's UTC offset in minutes East of UTC (see the identical parameter on listInboxThreads). Determines the `today` and `this_week` boundaries. Defaults to 0 (UTC). */
+  tzOffset?: number;
 };
 export type GetInboxThreadApiResponse =
   /** status 200 Thread with its full message history, oldest first */ InboxThreadDetail;
@@ -2439,6 +2636,95 @@ export type SetInboxThreadReadApiResponse = unknown;
 export type SetInboxThreadReadApiArg = {
   id: string;
   setInboxThreadReadRequest: SetInboxThreadReadRequest;
+};
+export type SnoozeInboxThreadApiResponse =
+  /** status 200 The stored snooze */ InboxSnooze;
+export type SnoozeInboxThreadApiArg = {
+  id: string;
+  snoozeInboxThreadRequest: SnoozeInboxThreadRequest;
+};
+export type UnsnoozeInboxThreadApiResponse = unknown;
+export type UnsnoozeInboxThreadApiArg = {
+  id: string;
+};
+export type ScheduleInboxReplyApiResponse =
+  /** status 201 The queued reply */ InboxPendingReply;
+export type ScheduleInboxReplyApiArg = {
+  id: string;
+  scheduleInboxReplyRequest: ScheduleInboxReplyRequest;
+};
+export type ListInboxOutboxApiResponse =
+  /** status 200 The workspace's queued replies */ InboxPendingReplyList;
+export type ListInboxOutboxApiArg = {
+  /** Page size. Defaults to 50, capped at 200 (a larger request is clamped, not rejected). */
+  limit?: number;
+};
+export type CancelInboxPendingReplyApiResponse = unknown;
+export type CancelInboxPendingReplyApiArg = {
+  pendingId: string;
+};
+export type GetInboxSettingsApiResponse =
+  /** status 200 The workspace's inbox settings */ InboxSettings;
+export type GetInboxSettingsApiArg = void;
+export type UpdateInboxSettingsApiResponse =
+  /** status 200 The updated settings */ InboxSettings;
+export type UpdateInboxSettingsApiArg = {
+  inboxSettings: InboxSettings;
+};
+export type ListInboxComposeDraftsApiResponse =
+  /** status 200 This user's drafts */ InboxComposeDraftList;
+export type ListInboxComposeDraftsApiArg = void;
+export type SaveInboxComposeDraftApiResponse =
+  /** status 200 The saved draft */ InboxComposeDraft;
+export type SaveInboxComposeDraftApiArg = {
+  /** A UUID the CLIENT mints when the composer opens. Autosave is therefore a plain idempotent PUT, and the composer never has to track whether it has saved before. */
+  draftId: string;
+  saveInboxComposeDraftRequest: SaveInboxComposeDraftRequest;
+};
+export type DeleteInboxComposeDraftApiResponse = unknown;
+export type DeleteInboxComposeDraftApiArg = {
+  /** A UUID the CLIENT mints when the composer opens. Autosave is therefore a plain idempotent PUT, and the composer never has to track whether it has saved before. */
+  draftId: string;
+};
+export type ListInboxComposesApiResponse =
+  /** status 200 The workspace's queued composed emails */ InboxPendingComposeList;
+export type ListInboxComposesApiArg = void;
+export type SendInboxComposeApiResponse =
+  /** status 201 The queued email */ InboxPendingCompose;
+export type SendInboxComposeApiArg = {
+  sendInboxComposeRequest: SendInboxComposeRequest;
+};
+export type CancelInboxPendingComposeApiResponse = unknown;
+export type CancelInboxPendingComposeApiArg = {
+  pendingId: string;
+};
+export type ListInboxLabelsApiResponse =
+  /** status 200 The workspace's labels */ InboxLabelList;
+export type ListInboxLabelsApiArg = void;
+export type CreateInboxLabelApiResponse =
+  /** status 200 The created or resolved label */ InboxLabel;
+export type CreateInboxLabelApiArg = {
+  upsertInboxLabelRequest: UpsertInboxLabelRequest;
+};
+export type UpdateInboxLabelApiResponse =
+  /** status 200 The updated label */ InboxLabel;
+export type UpdateInboxLabelApiArg = {
+  labelId: string;
+  upsertInboxLabelRequest: UpsertInboxLabelRequest;
+};
+export type DeleteInboxLabelApiResponse = unknown;
+export type DeleteInboxLabelApiArg = {
+  labelId: string;
+};
+export type AssignInboxThreadLabelApiResponse = unknown;
+export type AssignInboxThreadLabelApiArg = {
+  id: string;
+  labelId: string;
+};
+export type UnassignInboxThreadLabelApiResponse = unknown;
+export type UnassignInboxThreadLabelApiArg = {
+  id: string;
+  labelId: string;
 };
 export type Membership = {
   workspace_id: string;
@@ -4099,6 +4385,14 @@ export type ReplyLabelReorderInput = {
   /** every label in the workspace, exactly once, in the new order */
   ids: string[];
 };
+export type InboxLabel = {
+  id: string;
+  name: string;
+  /** A lowercase hex colour, `#rrggbb`. */
+  color: string;
+  created_at: string;
+  updated_at: string;
+};
 export type InboxReplyLabelRef = {
   key: string;
   label: string;
@@ -4118,6 +4412,8 @@ export type InboxThreadSummary = {
   contact_last_name: string;
   subject: string;
   last_reply_class: string;
+  /** The operator-assigned labels on this thread, alphabetical. Always present (`[]` when none), so a client can map over it unconditionally. Distinct from `reply_label`, which is the classifier's verdict and cannot be assigned by hand. */
+  labels?: InboxLabel[];
   /** The workspace reply label resolved from last_reply_class for display, or null when the key no longer matches a label (readers degrade to the raw last_reply_class key). */
   reply_label: InboxReplyLabelRef | null;
   unread: boolean;
@@ -4125,6 +4421,30 @@ export type InboxThreadSummary = {
 };
 export type InboxThreadPage = {
   items: InboxThreadSummary[];
+};
+export type InboxMailboxCount = {
+  mailbox_id: string;
+  total: number;
+  unread: number;
+};
+export type InboxReplyClassCount = {
+  key: string;
+  total: number;
+  unread: number;
+};
+export type InboxOverview = {
+  total: number;
+  unread: number;
+  /** Threads whose last message landed in the viewer's current day (see tz_offset). */
+  today: number;
+  /** Threads whose last message landed in the viewer's current ISO week, starting Monday. */
+  this_week: number;
+  /** Threads whose newest message is inbound — the contact spoke last, so it is waiting on us. */
+  awaiting_reply: number;
+  /** Threads whose snooze is still in force. Unlike every other counter here, this one counts rows the others deliberately exclude: a snoozed thread is absent from `total`, `unread`, `today`, `this_week`, `awaiting_reply` and both breakdowns, because it is absent from the lists those counters label. A lapsed snooze counts here not at all — its thread has already returned to whichever ordinary scope it belongs to. */
+  snoozed: number;
+  by_mailbox: InboxMailboxCount[];
+  by_reply_class: InboxReplyClassCount[];
 };
 export type InboxMessage = {
   direction: "inbound" | "outbound";
@@ -4138,8 +4458,37 @@ export type InboxMessage = {
   reply_class: string;
   occurred_at: string;
 };
+export type InboxPendingReply = {
+  id: string;
+  thread_id: string;
+  /** `scheduled` is waiting and cancellable. `sending` means a worker has claimed it — past the point of no return. `failed` rows are kept so the outbox can show what happened rather than the reply vanishing. */
+  status: "scheduled" | "sending" | "sent" | "cancelled" | "failed";
+  /** When the reply leaves. The client's undo countdown runs against this. */
+  send_after: string;
+  sent_at: string | null;
+  body_text: string;
+  /** Empty unless a delivery attempt failed. A stable, human-readable reason — never the mail provider's own error text, which can echo the SMTP host, its raw rejection message, or internal error shapes back to any reader. The detail stays in the server's logs. */
+  last_error: string;
+  /** Whether cancelling would still succeed, mirroring the server's own status rule — so a client need not reimplement it, and never offers an Undo that is guaranteed to fail. */
+  cancellable: boolean;
+  thread_subject: string;
+  /** Empty for a legacy direct-send match with no linked contact. */
+  contact_email: string;
+  created_at: string;
+};
+export type InboxSnooze = {
+  thread_id: string;
+  snooze_until: string;
+  /** The member who snoozed it, for display. Null when the snooze was set by an API key (no human behind it) or when that member has since been removed from the workspace — a departure must not drag their teammates' snoozes back into the inbox. */
+  snoozed_by: string | null;
+  created_at: string;
+};
 export type InboxThreadDetail = InboxThreadSummary & {
   messages: InboxMessage[];
+  /** The reply queued on this thread and not yet delivered, or null. The reader renders its countdown and Undo control from this alone. */
+  pending_reply?: InboxPendingReply | null;
+  /** The thread's snooze, or null when it has none — including when a snooze exists but has already lapsed. The server evaluates "still in force" so the client renders "Snoozed until …" and an Unsnooze action from this field alone, without date-checking a possibly-expired timestamp itself. */
+  snooze: InboxSnooze | null;
 };
 export type SendInboxReplyRequest = {
   body_text: string;
@@ -4150,6 +4499,86 @@ export type InboxDraftReply = {
 };
 export type SetInboxThreadReadRequest = {
   unread: boolean;
+};
+export type SnoozeInboxThreadRequest = {
+  /** When the thread should return to the inbox. Must be in the future and within 90 days. */
+  snooze_until: string;
+};
+export type ScheduleInboxReplyRequest = {
+  body_text: string;
+  /** When to deliver. Omit for the ordinary Send, which leaves after the workspace's undo window. An explicit value must be in the future and within 30 days. */
+  send_at?: string;
+};
+export type InboxPendingReplyList = {
+  items: InboxPendingReply[];
+};
+export type InboxSettings = {
+  /** Seconds between pressing Send and the reply actually leaving, during which it can be undone. 0 disables the window (send immediately). Defaults to 10 for a workspace that has never configured one — shorter than Gmail's 30 because a reply answers something already read, and a 30-second wait on every reply is felt as latency rather than safety. */
+  undo_send_seconds: number;
+};
+export type InboxComposeDraft = {
+  id: string;
+  /** The mailbox it will be sent from, or null — a draft is saved from the first keystroke, long before the operator has necessarily chosen one. */
+  mailbox_id: string | null;
+  to_emails: string[];
+  cc_emails: string[];
+  bcc_emails: string[];
+  subject: string;
+  body_text: string;
+  updated_at: string;
+};
+export type InboxComposeDraftList = {
+  drafts: InboxComposeDraft[];
+};
+export type SaveInboxComposeDraftRequest = {
+  mailbox_id?: string;
+  /** Stored as typed (blanks dropped), NOT normalized: the composer round-trips its own chips, and rewriting them mid-typing would change what the operator is looking at. Normalization happens at send time. */
+  to_emails?: string[];
+  cc_emails?: string[];
+  bcc_emails?: string[];
+  subject?: string;
+  body_text?: string;
+};
+export type InboxPendingCompose = {
+  id: string;
+  mailbox_id: string;
+  mailbox_email: string;
+  to_emails: string[];
+  cc_emails: string[];
+  bcc_emails: string[];
+  subject: string;
+  body_text: string;
+  status: "scheduled" | "sending" | "sent" | "cancelled" | "failed";
+  send_after: string;
+  /** A stable, human-readable reason when a delivery attempt failed — never the provider's own text, which can echo internal detail back. */
+  last_error: string;
+  cancellable: boolean;
+  created_at: string;
+};
+export type InboxPendingComposeList = {
+  items: InboxPendingCompose[];
+};
+export type SendInboxComposeRequest = {
+  mailbox_id: string;
+  /** Addresses, optionally in RFC 5322 form ("Ada <a@x.test>"). Lowercased and de-duplicated within each field before storage. */
+  to_emails: string[];
+  cc_emails?: string[];
+  bcc_emails?: string[];
+  subject?: string;
+  body_text: string;
+  /** Omit to leave after the undo window; otherwise up to 30 days ahead. */
+  send_at?: string;
+  /** The autosaved draft this send came from. Discarded on success, so the drafts list does not keep a copy of mail already on its way. A failure to discard it does not fail the send. */
+  draft_id?: string;
+};
+export type InboxLabelList = {
+  labels: InboxLabel[];
+};
+export type UpsertInboxLabelRequest = {
+  /** Normalized before storage (trimmed, internal whitespace collapsed). Unique per workspace, case-insensitively. */
+  name: string;
+  /** A hex colour, `#rrggbb` (case-insensitive on input, stored lowercase). Omitted on create means the server's default. */
+  color?: string;
 };
 export const {
   useAuthRegisterMutation,
@@ -4331,8 +4760,28 @@ export const {
   useUpdateReplyLabelMutation,
   useDeleteReplyLabelMutation,
   useListInboxThreadsQuery,
+  useGetInboxOverviewQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,
   useDraftInboxReplyMutation,
   useSetInboxThreadReadMutation,
+  useSnoozeInboxThreadMutation,
+  useUnsnoozeInboxThreadMutation,
+  useScheduleInboxReplyMutation,
+  useListInboxOutboxQuery,
+  useCancelInboxPendingReplyMutation,
+  useGetInboxSettingsQuery,
+  useUpdateInboxSettingsMutation,
+  useListInboxComposeDraftsQuery,
+  useSaveInboxComposeDraftMutation,
+  useDeleteInboxComposeDraftMutation,
+  useListInboxComposesQuery,
+  useSendInboxComposeMutation,
+  useCancelInboxPendingComposeMutation,
+  useListInboxLabelsQuery,
+  useCreateInboxLabelMutation,
+  useUpdateInboxLabelMutation,
+  useDeleteInboxLabelMutation,
+  useAssignInboxThreadLabelMutation,
+  useUnassignInboxThreadLabelMutation,
 } = injectedRtkApi;

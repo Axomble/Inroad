@@ -2933,13 +2933,80 @@ paths:
           required: false
           description: Page size. Defaults to 25, capped at 200 (a larger request is clamped, not rejected).
           schema: { type: integer, minimum: 1 }
+        - name: scope
+          in: query
+          required: false
+          description: >-
+            One of the inbox's virtual folders. `unread` restricts to unread
+            threads; `awaiting_reply` to threads whose newest message is inbound
+            (the contact spoke last); `today` and `this_week` to threads whose
+            last_message_at falls in the viewer's current day or ISO week
+            (Monday-based), resolved against tz_offset; `snoozed` to threads
+            whose snooze is still in force. Omitted or `all` means the whole
+            inbox. An unrecognised value is a 400, never a silently unscoped
+            page. Combines freely with the keyset cursor: the scope bounds the
+            result set, the cursor names a position within it.
+
+
+            Snoozed threads are EXCLUDED from every scope except `snoozed` —
+            that is what snoozing means. The one exception is a search (`q`),
+            which searches snoozed threads too: answering "no results" for a
+            thread the operator snoozed last week would read as data loss.
+          schema:
+            type: string
+            enum: [all, unread, today, this_week, awaiting_reply, snoozed]
+        - name: tz_offset
+          in: query
+          required: false
+          description: >-
+            The viewer's UTC offset in minutes East of UTC, as JavaScript's
+            `-new Date().getTimezoneOffset()` reports it. Only read when scope is
+            `today` or `this_week`, whose boundaries depend on the viewer's own
+            day rather than the server's. Defaults to 0 (UTC) — never the
+            server's local zone, which carries no information about the viewer.
+          schema: { type: integer, minimum: -720, maximum: 840 }
+        - name: label
+          in: query
+          required: false
+          description: >-
+            Restrict to threads carrying one operator-assigned label (see
+            listInboxLabels). Distinct from `reply_class`, which filters on the
+            classifier's own verdict.
+          schema: { type: string, format: uuid }
       responses:
         '200':
           description: Threads in the workspace
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InboxThreadPage' }
-        '400': { description: "Malformed filter (bad UUID/timestamp, or a half-set keyset cursor)" }
+        '400': { description: "Malformed filter (bad UUID/timestamp, a half-set keyset cursor, an unknown scope, or an out-of-range tz_offset)" }
+        '401': { description: Unauthorized }
+  /inbox/overview:
+    get:
+      operationId: getInboxOverview
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Thread counts for the inbox's scope rail, counted by the database over
+        the whole workspace — not sampled from a page of threads. Each counter
+        corresponds to a `scope` value accepted by listInboxThreads, so a count
+        and the list it links to always agree.
+      parameters:
+        - name: tz_offset
+          in: query
+          required: false
+          description: >-
+            The viewer's UTC offset in minutes East of UTC (see the identical
+            parameter on listInboxThreads). Determines the `today` and
+            `this_week` boundaries. Defaults to 0 (UTC).
+          schema: { type: integer, minimum: -720, maximum: 840 }
+      responses:
+        '200':
+          description: Scope counts for the workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxOverview' }
+        '400': { description: "tz_offset out of range or not an integer" }
         '401': { description: Unauthorized }
   /inbox/threads/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -3033,6 +3100,460 @@ paths:
         '400': { description: Validation error }
         '401': { description: Unauthorized }
         '404': { description: Not found }
+  /inbox/threads/{id}/snooze:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    put:
+      operationId: snoozeInboxThread
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Hide a thread from the inbox until a chosen moment, then let it return.
+        Snoozed threads leave every scope except `snoozed` (a search still finds
+        them).
+
+
+        PUT, not POST, because it is idempotent in the way that matters: the
+        same request twice leaves the same single snooze, and re-snoozing an
+        already-snoozed thread replaces the moment rather than stacking a second
+        one. The response echoes the stored snooze so a client renders the
+        instant the server accepted rather than assuming its own round-tripped.
+
+
+        `snooze_until` is an absolute RFC3339 instant, not a duration or a
+        preset name: presets like "tomorrow morning" depend on the viewer's
+        timezone and working hours, so the client resolves its own preset and
+        the server's job is to bound and store the result. It must be in the
+        future and no more than 90 days ahead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SnoozeInboxThreadRequest' }
+      responses:
+        '200':
+          description: The stored snooze
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSnooze' }
+        '400': { description: "Malformed body, or snooze_until is not an RFC3339 timestamp" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '422':
+          description: >-
+            snooze_until parsed but is out of bounds — already past, or further
+            than 90 days ahead. Distinct from 400 so a client can tell a
+            malformed request from a rejected moment on status alone.
+    delete:
+      operationId: unsnoozeInboxThread
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Return a snoozed thread to the inbox immediately. 404 when the thread
+        has no snooze — which also covers an unknown or foreign thread id, since
+        neither can have one.
+      responses:
+        '204': { description: The thread is back in the inbox }
+        '401': { description: Unauthorized }
+        '404': { description: "The thread does not exist, or is not snoozed" }
+  /inbox/threads/{id}/schedule-reply:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: scheduleInboxReply
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Queue a manual reply for later delivery, returning a handle the operator
+        can undo with.
+
+
+        A SEPARATE operation from sendInboxReply rather than a flag on it,
+        because the contracts genuinely differ: sendInboxReply is
+        fire-and-forget (202, no body), while this must return the queued
+        reply's id — without it there is no handle to cancel, which is the
+        entire point.
+
+
+        Omit `send_at` for the ordinary Send: the reply leaves after the
+        workspace's configured undo window (see getInboxSettings), during which
+        cancelling it is free. Supply `send_at` for a deliberate schedule, up to
+        30 days ahead.
+
+
+        Cancellation does NOT reach into the queue. The delayed job always
+        fires and re-reads the row's status, so an undone reply is one the worker
+        declines to claim. That is why a queued reply is a durable row rather
+        than only a scheduled task.
+
+
+        Scheduling deliberately does NOT mark the thread read, unlike
+        sendInboxReply: an undone reply should leave the thread exactly as the
+        operator found it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduleInboxReplyRequest' }
+      responses:
+        '201':
+          description: The queued reply
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingReply' }
+        '400': { description: "Malformed body, or send_at is not an RFC3339 timestamp" }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: The recipient is suppressed }
+        '422':
+          description: >-
+            The body is empty or too long, the thread has no message to reply to,
+            or send_at parsed but is out of range (already past, or more than 30
+            days ahead).
+  /inbox/outbox:
+    get:
+      operationId: listInboxOutbox
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Manual replies queued but not yet delivered, soonest first. A reply
+        leaves this list once it is sent, cancelled, or permanently failed.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50, capped at 200 (a larger request is clamped, not rejected).
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: The workspace's queued replies
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingReplyList' }
+        '400': { description: Malformed limit }
+        '401': { description: Unauthorized }
+  /inbox/outbox/{pendingId}:
+    parameters:
+      - name: pendingId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: cancelInboxPendingReply
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Undo a queued reply, so it is never sent.
+
+
+        Requires `inbox:write`, not `inbox:send`: stopping mail from going out is
+        a safety action, and an integration that can prevent a send but never
+        cause one is on the right side of that asymmetry.
+
+
+        Answers 409 — not 404 — once a worker has claimed the reply for
+        delivery. At that point the SMTP conversation may already be open, so
+        reporting success would be a lie; the message says so, because "the mail
+        is already on its way" is something the operator needs told rather than a
+        generic failure.
+      responses:
+        '204': { description: The reply will not be sent }
+        '400': { description: The id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: No such queued reply in this workspace }
+        '409': { description: "Already being delivered, and no longer cancellable" }
+  /inbox/settings:
+    get:
+      operationId: getInboxSettings
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The workspace's inbox settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSettings' }
+        '401': { description: Unauthorized }
+    put:
+      operationId: updateInboxSettings
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InboxSettings' }
+      responses:
+        '200':
+          description: The updated settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSettings' }
+        '400': { description: undo_send_seconds is out of range }
+        '401': { description: Unauthorized }
+  /inbox/drafts:
+    get:
+      operationId: listInboxComposeDrafts
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The CALLER'S OWN autosaved compose drafts, most recently edited first.
+
+
+        Drafts are per-user, not per-workspace: a colleague must never resume
+        someone else's half-written mail — it may say something they have not
+        decided to say yet, and attributing it to them on send would be worse
+        still. A machine (API-key) principal has no drafts and receives an empty
+        list.
+      responses:
+        '200':
+          description: This user's drafts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxComposeDraftList' }
+        '401': { description: Unauthorized }
+  /inbox/drafts/{draftId}:
+    parameters:
+      - name: draftId
+        in: path
+        required: true
+        description: >-
+          A UUID the CLIENT mints when the composer opens. Autosave is therefore
+          a plain idempotent PUT, and the composer never has to track whether it
+          has saved before.
+        schema: { type: string, format: uuid }
+    put:
+      operationId: saveInboxComposeDraft
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Autosave a half-written email.
+
+
+        Deliberately does NOT validate recipients or the body: a draft is by
+        definition incomplete, and refusing to save "ada@" mid-typing would lose
+        the operator's work at every keystroke. Recipient and body validation
+        happen at SEND time. The subject IS bounded, because an unbounded column
+        is a storage problem rather than a correctness one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveInboxComposeDraftRequest' }
+      responses:
+        '200':
+          description: The saved draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxComposeDraft' }
+        '400': { description: "Malformed body, or a non-UUID id" }
+        '401': { description: Unauthorized }
+        '403': { description: "The caller is a machine principal, which has no drafts" }
+        '404': { description: "That draft belongs to another user" }
+        '422': { description: "The subject is too long, or the workspace draft cap is reached" }
+    delete:
+      operationId: deleteInboxComposeDraft
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Deleted }
+        '400': { description: The id is not a UUID }
+        '401': { description: Unauthorized }
+        '403': { description: "The caller is a machine principal, which has no drafts" }
+        '404': { description: "No such draft of this user's" }
+  /inbox/composes:
+    get:
+      operationId: listInboxComposes
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: Composed emails queued but not yet delivered, soonest first.
+      responses:
+        '200':
+          description: The workspace's queued composed emails
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingComposeList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: sendInboxCompose
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Queue a NEW email — not a reply. Undoable on the same terms as
+        scheduleInboxReply: it leaves after the workspace's undo window, or at an
+        explicit `send_at` up to 30 days out.
+
+
+        DELIVERY SHAPE, worth knowing before you rely on it: each recipient
+        receives their OWN copy, one message per address across To, Cc and Bcc
+        alike. Recipients therefore cannot see each other and cannot reply-all.
+        That is a deliberate consequence of the platform sender carrying a single
+        To and no Cc/Bcc headers — joining addresses into one To would disclose
+        every recipient to all of them and silently turn a Bcc into a visible
+        one, which is the worse failure for an outreach tool.
+
+
+        Every recipient is checked against the workspace's suppression list at
+        queue time AND again at send time. ONE suppressed address rejects the
+        whole message rather than being silently dropped: the operator addressed
+        those people deliberately.
+
+
+        Recipients are capped at 25 in total (not per field) — this path
+        deliberately bypasses the campaign machinery's throttles, warmup limits
+        and suppression accounting, so it is for writing to a person, not a list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendInboxComposeRequest' }
+      responses:
+        '201':
+          description: The queued email
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxPendingCompose' }
+        '400': { description: "Malformed body, a non-UUID mailbox_id, or a bad send_at" }
+        '401': { description: Unauthorized }
+        '404': { description: "No such mailbox in this workspace" }
+        '409': { description: A recipient is suppressed }
+        '422':
+          description: >-
+            No recipients, an unparseable address, more than 25 recipients, an
+            empty or over-long body, an over-long subject, or a send_at out of
+            range.
+  /inbox/composes/{pendingId}:
+    parameters:
+      - name: pendingId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: cancelInboxPendingCompose
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Undo a queued composed email. Answers 409 once a worker has claimed it —
+        see cancelInboxPendingReply for the reasoning.
+      responses:
+        '204': { description: The email will not be sent }
+        '400': { description: The id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: No such queued email in this workspace }
+        '409': { description: "Already being delivered, and no longer cancellable" }
+  /inbox/labels:
+    get:
+      operationId: listInboxLabels
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace's operator-assigned thread labels, sorted
+        case-insensitively by name.
+
+
+        Distinct from listReplyLabels: that is the CLASSIFIER's taxonomy, written
+        onto a thread's `last_reply_class` by the model and not assignable by
+        hand. These are the operator's own filing system — created and applied
+        only by people, and many-per-thread rather than one.
+      responses:
+        '200':
+          description: The workspace's labels
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxLabelList' }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createInboxLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Search-or-create, which is what a label picker needs: a name that
+        already exists (compared case-insensitively) resolves to the EXISTING
+        label with 200 rather than 409, because a member typing a name they have
+        used before means "file it under that", not "fail". The existing label
+        keeps its own colour — resolving is not editing.
+
+
+        Names are normalized before storage: surrounding whitespace trimmed and
+        internal runs collapsed, so " Big   Deals " and "Big Deals" cannot become
+        two labels that look identical in the picker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertInboxLabelRequest' }
+      responses:
+        '200':
+          description: The created or resolved label
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxLabel' }
+        '400': { description: "Malformed body, empty name, over the length cap, or a colour that is not #rrggbb" }
+        '401': { description: Unauthorized }
+        '422': { description: The workspace already holds the maximum number of labels }
+  /inbox/labels/{labelId}:
+    parameters:
+      - name: labelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: updateInboxLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertInboxLabelRequest' }
+      responses:
+        '200':
+          description: The updated label
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxLabel' }
+        '400': { description: Validation error }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+        '409': { description: Another label in this workspace already has that name }
+    delete:
+      operationId: deleteInboxLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Deletes the label and unfiles every thread it was on. The threads
+        themselves are untouched — that is what deleting a label means.
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: Not found }
+  /inbox/threads/{id}/labels/{labelId}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - name: labelId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: assignInboxThreadLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Applies a label to a thread. Idempotent: applying an already-applied
+        label is a 204, not a conflict — the join's composite primary key makes
+        that true in the database rather than by a check in the handler.
+      responses:
+        '204': { description: Applied }
+        '400': { description: A path id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: "The thread or the label does not exist in this workspace" }
+    delete:
+      operationId: unassignInboxThreadLabel
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Removed }
+        '400': { description: A path id is not a UUID }
+        '401': { description: Unauthorized }
+        '404': { description: "The label was not applied to this thread" }
 components:
   securitySchemes:
     bearerAuth:
@@ -5721,6 +6242,14 @@ components:
         contact_last_name: { type: string, description: "The linked contact's last name, or \"\" when contact_id is null." }
         subject: { type: string }
         last_reply_class: { type: string }
+        labels:
+          type: array
+          description: >-
+            The operator-assigned labels on this thread, alphabetical. Always
+            present (`[]` when none), so a client can map over it
+            unconditionally. Distinct from `reply_label`, which is the
+            classifier's verdict and cannot be assigned by hand.
+          items: { $ref: '#/components/schemas/InboxLabel' }
         reply_label:
           type: object
           allOf: [{ $ref: '#/components/schemas/InboxReplyLabelRef' }]
@@ -5758,6 +6287,283 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxComposeDraft:
+      type: object
+      required: [id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The mailbox it will be sent from, or null — a draft is saved from the
+            first keystroke, long before the operator has necessarily chosen one.
+        to_emails: { type: array, items: { type: string } }
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string }
+        body_text: { type: string }
+        updated_at: { type: string, format: date-time }
+    InboxComposeDraftList:
+      type: object
+      required: [drafts]
+      properties:
+        drafts: { type: array, items: { $ref: '#/components/schemas/InboxComposeDraft' } }
+    SaveInboxComposeDraftRequest:
+      type: object
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        to_emails:
+          type: array
+          items: { type: string }
+          description: >-
+            Stored as typed (blanks dropped), NOT normalized: the composer
+            round-trips its own chips, and rewriting them mid-typing would change
+            what the operator is looking at. Normalization happens at send time.
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string, maxLength: 500 }
+        body_text: { type: string }
+    SendInboxComposeRequest:
+      type: object
+      required: [mailbox_id, to_emails, body_text]
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        to_emails:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: >-
+            Addresses, optionally in RFC 5322 form ("Ada <a@x.test>"). Lowercased
+            and de-duplicated within each field before storage.
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string, maxLength: 500 }
+        body_text: { type: string, minLength: 1, maxLength: 100000 }
+        send_at:
+          type: string
+          format: date-time
+          description: Omit to leave after the undo window; otherwise up to 30 days ahead.
+        draft_id:
+          type: string
+          format: uuid
+          description: >-
+            The autosaved draft this send came from. Discarded on success, so the
+            drafts list does not keep a copy of mail already on its way. A failure
+            to discard it does not fail the send.
+    InboxPendingCompose:
+      type: object
+      required: [id, mailbox_id, mailbox_email, to_emails, cc_emails, bcc_emails, subject, body_text, status, send_after, last_error, cancellable, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        mailbox_email: { type: string }
+        to_emails: { type: array, items: { type: string } }
+        cc_emails: { type: array, items: { type: string } }
+        bcc_emails: { type: array, items: { type: string } }
+        subject: { type: string }
+        body_text: { type: string }
+        status:
+          type: string
+          enum: [scheduled, sending, sent, cancelled, failed]
+        send_after: { type: string, format: date-time }
+        last_error:
+          type: string
+          description: >-
+            A stable, human-readable reason when a delivery attempt failed —
+            never the provider's own text, which can echo internal detail back.
+        cancellable: { type: boolean }
+        created_at: { type: string, format: date-time }
+    InboxPendingComposeList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxPendingCompose' } }
+    ScheduleInboxReplyRequest:
+      type: object
+      required: [body_text]
+      properties:
+        body_text: { type: string, minLength: 1, maxLength: 100000 }
+        send_at:
+          type: string
+          format: date-time
+          description: >-
+            When to deliver. Omit for the ordinary Send, which leaves after the
+            workspace's undo window. An explicit value must be in the future and
+            within 30 days.
+    InboxPendingReply:
+      type: object
+      required: [id, thread_id, status, send_after, sent_at, body_text, last_error, cancellable, thread_subject, contact_email, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        thread_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [scheduled, sending, sent, cancelled, failed]
+          description: >-
+            `scheduled` is waiting and cancellable. `sending` means a worker has
+            claimed it — past the point of no return. `failed` rows are kept so
+            the outbox can show what happened rather than the reply vanishing.
+        send_after:
+          type: string
+          format: date-time
+          description: When the reply leaves. The client's undo countdown runs against this.
+        sent_at: { type: string, format: date-time, nullable: true }
+        body_text: { type: string }
+        last_error:
+          type: string
+          description: >-
+            Empty unless a delivery attempt failed. A stable, human-readable
+            reason — never the mail provider's own error text, which can echo
+            the SMTP host, its raw rejection message, or internal error shapes
+            back to any reader. The detail stays in the server's logs.
+        cancellable:
+          type: boolean
+          description: >-
+            Whether cancelling would still succeed, mirroring the server's own
+            status rule — so a client need not reimplement it, and never offers
+            an Undo that is guaranteed to fail.
+        thread_subject: { type: string }
+        contact_email:
+          type: string
+          description: Empty for a legacy direct-send match with no linked contact.
+        created_at: { type: string, format: date-time }
+    InboxPendingReplyList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxPendingReply' } }
+    InboxSettings:
+      type: object
+      required: [undo_send_seconds]
+      properties:
+        undo_send_seconds:
+          type: integer
+          minimum: 0
+          maximum: 120
+          description: >-
+            Seconds between pressing Send and the reply actually leaving, during
+            which it can be undone. 0 disables the window (send immediately).
+            Defaults to 10 for a workspace that has never configured one —
+            shorter than Gmail's 30 because a reply answers something already
+            read, and a 30-second wait on every reply is felt as latency rather
+            than safety.
+    InboxLabel:
+      type: object
+      required: [id, name, color, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        color:
+          type: string
+          description: A lowercase hex colour, `#rrggbb`.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    InboxLabelList:
+      type: object
+      required: [labels]
+      properties:
+        labels: { type: array, items: { $ref: '#/components/schemas/InboxLabel' } }
+    UpsertInboxLabelRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: >-
+            Normalized before storage (trimmed, internal whitespace collapsed).
+            Unique per workspace, case-insensitively.
+        color:
+          type: string
+          description: >-
+            A hex colour, `#rrggbb` (case-insensitive on input, stored
+            lowercase). Omitted on create means the server's default.
+    SnoozeInboxThreadRequest:
+      type: object
+      required: [snooze_until]
+      properties:
+        snooze_until:
+          type: string
+          format: date-time
+          description: >-
+            When the thread should return to the inbox. Must be in the future
+            and within 90 days.
+    InboxSnooze:
+      type: object
+      required: [thread_id, snooze_until, snoozed_by, created_at]
+      properties:
+        thread_id: { type: string, format: uuid }
+        snooze_until: { type: string, format: date-time }
+        snoozed_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The member who snoozed it, for display. Null when the snooze was set
+            by an API key (no human behind it) or when that member has since
+            been removed from the workspace — a departure must not drag their
+            teammates' snoozes back into the inbox.
+        created_at: { type: string, format: date-time }
+    InboxMailboxCount:
+      type: object
+      required: [mailbox_id, total, unread]
+      description: >-
+        One mailbox's thread counts. Only mailboxes that actually hold a thread
+        appear; a connected mailbox with none is absent rather than present with
+        zeroes, so clients should look counts up by id and default to 0.
+      properties:
+        mailbox_id: { type: string, format: uuid }
+        total: { type: integer, format: int64 }
+        unread: { type: integer, format: int64 }
+    InboxReplyClassCount:
+      type: object
+      required: [key, total, unread]
+      description: >-
+        One reply classification's thread counts. `key` is the raw
+        last_reply_class value — resolve it to a display label against the
+        workspace's reply-label taxonomy (listReplyLabels), degrading to the raw
+        key when no label claims it. Threads never classified (an empty key) are
+        excluded entirely.
+      properties:
+        key: { type: string }
+        total: { type: integer, format: int64 }
+        unread: { type: integer, format: int64 }
+    InboxOverview:
+      type: object
+      required: [total, unread, today, this_week, awaiting_reply, snoozed, by_mailbox, by_reply_class]
+      description: >-
+        Scope counts for the inbox rail. Every counter is over the whole
+        workspace, and each corresponds to a `scope` accepted by
+        listInboxThreads.
+      properties:
+        total: { type: integer, format: int64 }
+        unread: { type: integer, format: int64 }
+        today:
+          type: integer
+          format: int64
+          description: Threads whose last message landed in the viewer's current day (see tz_offset).
+        this_week:
+          type: integer
+          format: int64
+          description: Threads whose last message landed in the viewer's current ISO week, starting Monday.
+        awaiting_reply:
+          type: integer
+          format: int64
+          description: Threads whose newest message is inbound — the contact spoke last, so it is waiting on us.
+        snoozed:
+          type: integer
+          format: int64
+          description: >-
+            Threads whose snooze is still in force. Unlike every other counter
+            here, this one counts rows the others deliberately exclude: a
+            snoozed thread is absent from `total`, `unread`, `today`,
+            `this_week`, `awaiting_reply` and both breakdowns, because it is
+            absent from the lists those counters label. A lapsed snooze counts
+            here not at all — its thread has already returned to whichever
+            ordinary scope it belongs to.
+        by_mailbox: { type: array, items: { $ref: '#/components/schemas/InboxMailboxCount' } }
+        by_reply_class: { type: array, items: { $ref: '#/components/schemas/InboxReplyClassCount' } }
     InboxMessage:
       type: object
       required: [direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at]
@@ -5776,9 +6582,27 @@ components:
       allOf:
         - $ref: '#/components/schemas/InboxThreadSummary'
         - type: object
-          required: [messages]
+          required: [messages, snooze]
           properties:
             messages: { type: array, items: { $ref: '#/components/schemas/InboxMessage' } }
+            pending_reply:
+              type: object
+              allOf: [{ $ref: '#/components/schemas/InboxPendingReply' }]
+              nullable: true
+              description: >-
+                The reply queued on this thread and not yet delivered, or null.
+                The reader renders its countdown and Undo control from this
+                alone.
+            snooze:
+              type: object
+              allOf: [{ $ref: '#/components/schemas/InboxSnooze' }]
+              nullable: true
+              description: >-
+                The thread's snooze, or null when it has none — including when a
+                snooze exists but has already lapsed. The server evaluates
+                "still in force" so the client renders "Snoozed until …" and an
+                Unsnooze action from this field alone, without date-checking a
+                possibly-expired timestamp itself.
     SetInboxThreadReadRequest:
       type: object
       required: [unread]

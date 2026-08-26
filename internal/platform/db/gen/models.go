@@ -528,6 +528,29 @@ type IdempotencyKey struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxComposeDraft struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	UserID      uuid.UUID          `json:"user_id"`
+	MailboxID   pgtype.UUID        `json:"mailbox_id"`
+	ToEmails    []string           `json:"to_emails"`
+	CcEmails    []string           `json:"cc_emails"`
+	BccEmails   []string           `json:"bcc_emails"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type InboxLabel struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	Color       string             `json:"color"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type InboxMessage struct {
 	ID          uuid.UUID          `json:"id"`
 	ThreadID    uuid.UUID          `json:"thread_id"`
@@ -545,6 +568,42 @@ type InboxMessage struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type InboxPendingCompose struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	ToEmails    []string           `json:"to_emails"`
+	CcEmails    []string           `json:"cc_emails"`
+	BccEmails   []string           `json:"bcc_emails"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	Status      string             `json:"status"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	MessageID   string             `json:"message_id"`
+	LastError   string             `json:"last_error"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type InboxPendingReply struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	BodyText    string             `json:"body_text"`
+	Status      string             `json:"status"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
+	MessageID   string             `json:"message_id"`
+	LastError   string             `json:"last_error"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type InboxThread struct {
 	ID             uuid.UUID          `json:"id"`
 	WorkspaceID    uuid.UUID          `json:"workspace_id"`
@@ -557,6 +616,21 @@ type InboxThread struct {
 	Unread         bool               `json:"unread"`
 	LastMessageAt  pgtype.Timestamptz `json:"last_message_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type InboxThreadLabel struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	LabelID     uuid.UUID          `json:"label_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type InboxThreadSnooze struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	SnoozeUntil pgtype.Timestamptz `json:"snooze_until"`
+	SnoozedBy   pgtype.UUID        `json:"snoozed_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type List struct {
@@ -1230,6 +1304,12 @@ type WorkspaceDek struct {
 	WrappedDek  []byte             `json:"wrapped_dek"`
 	KeyProvider string             `json:"key_provider"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkspaceInboxSetting struct {
+	WorkspaceID     uuid.UUID          `json:"workspace_id"`
+	UndoSendSeconds int32              `json:"undo_send_seconds"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 type WorkspaceInvite struct {

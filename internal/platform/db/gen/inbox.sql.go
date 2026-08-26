@@ -12,6 +12,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const assignInboxThreadLabel = `-- name: AssignInboxThreadLabel :exec
+INSERT INTO inbox_thread_labels (thread_id, label_id, workspace_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (thread_id, label_id) DO NOTHING
+`
+
+type AssignInboxThreadLabelParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	LabelID     uuid.UUID `json:"label_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Idempotent by construction: the composite PK means re-applying an
+// already-applied label is a no-op, not an error the caller must distinguish.
+func (q *Queries) AssignInboxThreadLabel(ctx context.Context, arg AssignInboxThreadLabelParams) error {
+	_, err := q.db.Exec(ctx, assignInboxThreadLabel, arg.ThreadID, arg.LabelID, arg.WorkspaceID)
+	return err
+}
+
 const bumpInboxThreadLastMessageAt = `-- name: BumpInboxThreadLastMessageAt :exec
 UPDATE inbox_threads SET last_message_at = now() WHERE id = $1 AND workspace_id = $2
 `
@@ -30,6 +49,614 @@ type BumpInboxThreadLastMessageAtParams struct {
 func (q *Queries) BumpInboxThreadLastMessageAt(ctx context.Context, arg BumpInboxThreadLastMessageAtParams) error {
 	_, err := q.db.Exec(ctx, bumpInboxThreadLastMessageAt, arg.ID, arg.WorkspaceID)
 	return err
+}
+
+const cancelInboxPendingCompose = `-- name: CancelInboxPendingCompose :execrows
+UPDATE inbox_pending_composes
+SET status = 'cancelled', updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND status = 'scheduled'
+`
+
+type CancelInboxPendingComposeParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Guarded on 'scheduled', exactly as the reply path is: a claimed row may
+// already have an open SMTP conversation.
+func (q *Queries) CancelInboxPendingCompose(ctx context.Context, arg CancelInboxPendingComposeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, cancelInboxPendingCompose, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const cancelInboxPendingReply = `-- name: CancelInboxPendingReply :execrows
+UPDATE inbox_pending_replies
+SET status = 'cancelled', updated_at = now()
+WHERE id = $1 AND workspace_id = $2 AND status = 'scheduled'
+`
+
+type CancelInboxPendingReplyParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Undo. Guarded on status='scheduled': a row already claimed by a worker
+// ('sending') is past the point of no return — the SMTP conversation may
+// already be open — so cancelling it would report a lie to the operator. The
+// :execrows result is how the caller learns which happened.
+func (q *Queries) CancelInboxPendingReply(ctx context.Context, arg CancelInboxPendingReplyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, cancelInboxPendingReply, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const claimInboxPendingCompose = `-- name: ClaimInboxPendingCompose :execrows
+UPDATE inbox_pending_composes
+SET status = 'sending', claimed_at = now(), updated_at = now(), last_error = ''
+WHERE id = $1 AND workspace_id = $2
+  AND send_after <= now()
+  AND (status = 'scheduled'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => $3::double precision)))
+`
+
+type ClaimInboxPendingComposeParams struct {
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	LeaseSeconds float64   `json:"lease_seconds"`
+}
+
+func (q *Queries) ClaimInboxPendingCompose(ctx context.Context, arg ClaimInboxPendingComposeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimInboxPendingCompose, arg.ID, arg.WorkspaceID, arg.LeaseSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const claimInboxPendingReply = `-- name: ClaimInboxPendingReply :execrows
+UPDATE inbox_pending_replies
+SET status = 'sending', claimed_at = now(), updated_at = now(), last_error = ''
+WHERE id = $1 AND workspace_id = $2
+  AND send_after <= now()
+  AND (status = 'scheduled'
+       OR (status = 'sending' AND claimed_at < now() - make_interval(secs => $3::double precision)))
+`
+
+type ClaimInboxPendingReplyParams struct {
+	ID           uuid.UUID `json:"id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	LeaseSeconds float64   `json:"lease_seconds"`
+}
+
+// Claim-before-send, mirroring ClaimWarmupSend. Two rows are claimable: one
+// still 'scheduled' whose send_after has arrived, and one stuck in 'sending'
+// past its lease (a worker that crashed mid-send). The send_after guard is what
+// makes a task that fires early — asynq delivering ahead of schedule, or a
+// retry of an earlier attempt — wait rather than send.
+func (q *Queries) ClaimInboxPendingReply(ctx context.Context, arg ClaimInboxPendingReplyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimInboxPendingReply, arg.ID, arg.WorkspaceID, arg.LeaseSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const countInboxPendingReplies = `-- name: CountInboxPendingReplies :one
+SELECT COUNT(*)::bigint AS total
+FROM inbox_pending_replies
+WHERE workspace_id = $1 AND status IN ('scheduled', 'sending')
+`
+
+func (q *Queries) CountInboxPendingReplies(ctx context.Context, workspaceID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countInboxPendingReplies, workspaceID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
+const countInboxSnoozedThreads = `-- name: CountInboxSnoozedThreads :one
+SELECT COUNT(*)::bigint AS total
+FROM inbox_thread_snoozes
+WHERE workspace_id = $1 AND snooze_until > now()
+`
+
+// The rail's `snoozed` counter: only snoozes still in force. An expired row is
+// not "a snoozed thread" — it is a thread that has already come back, and it
+// is counted by whichever ordinary scope it now falls into.
+func (q *Queries) CountInboxSnoozedThreads(ctx context.Context, workspaceID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countInboxSnoozedThreads, workspaceID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
+const countInboxThreadsByLabel = `-- name: CountInboxThreadsByLabel :many
+SELECT tl.label_id, COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_thread_labels tl
+JOIN inbox_threads t ON t.id = tl.thread_id AND t.workspace_id = tl.workspace_id
+WHERE tl.workspace_id = $1
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY tl.label_id
+`
+
+type CountInboxThreadsByLabelRow struct {
+	LabelID uuid.UUID `json:"label_id"`
+	Total   int64     `json:"total"`
+	Unread  int64     `json:"unread"`
+}
+
+// The rail's per-label counters. Snoozed threads are excluded for the same
+// reason every other counter excludes them: they are absent from the list the
+// counter labels. A label with no (visible) threads is absent rather than
+// reported as zero — the picker renders every label and looks its count up.
+func (q *Queries) CountInboxThreadsByLabel(ctx context.Context, workspaceID uuid.UUID) ([]CountInboxThreadsByLabelRow, error) {
+	rows, err := q.db.Query(ctx, countInboxThreadsByLabel, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountInboxThreadsByLabelRow
+	for rows.Next() {
+		var i CountInboxThreadsByLabelRow
+		if err := rows.Scan(&i.LabelID, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const createInboxLabel = `-- name: CreateInboxLabel :one
+INSERT INTO inbox_labels (workspace_id, name, color)
+VALUES ($1, $2, $3)
+RETURNING id, workspace_id, name, color, created_at, updated_at
+`
+
+type CreateInboxLabelParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+	Color       string    `json:"color"`
+}
+
+func (q *Queries) CreateInboxLabel(ctx context.Context, arg CreateInboxLabelParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, createInboxLabel, arg.WorkspaceID, arg.Name, arg.Color)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createInboxPendingCompose = `-- name: CreateInboxPendingCompose :one
+INSERT INTO inbox_pending_composes
+    (workspace_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, send_after, created_by)
+SELECT m.workspace_id, m.id, $1, $2, $3, $4, $5, $6,
+       $7::uuid
+FROM mailboxes m
+WHERE m.id = $8 AND m.workspace_id = $9
+RETURNING id, workspace_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at
+`
+
+type CreateInboxPendingComposeParams struct {
+	ToEmails    []string           `json:"to_emails"`
+	CcEmails    []string           `json:"cc_emails"`
+	BccEmails   []string           `json:"bcc_emails"`
+	Subject     string             `json:"subject"`
+	BodyText    string             `json:"body_text"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+}
+
+// Self-enforcing tenancy on the MAILBOX, the same shape
+// CreateInboxPendingReply uses on the thread: the mailbox_id is taken from a
+// SELECT pinned to the workspace, so a cross-tenant mailbox inserts zero rows
+// rather than a row that would send through another workspace's credentials.
+func (q *Queries) CreateInboxPendingCompose(ctx context.Context, arg CreateInboxPendingComposeParams) (InboxPendingCompose, error) {
+	row := q.db.QueryRow(ctx, createInboxPendingCompose,
+		arg.ToEmails,
+		arg.CcEmails,
+		arg.BccEmails,
+		arg.Subject,
+		arg.BodyText,
+		arg.SendAfter,
+		arg.CreatedBy,
+		arg.MailboxID,
+		arg.WorkspaceID,
+	)
+	var i InboxPendingCompose
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.MailboxID,
+		&i.ToEmails,
+		&i.CcEmails,
+		&i.BccEmails,
+		&i.Subject,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createInboxPendingReply = `-- name: CreateInboxPendingReply :one
+INSERT INTO inbox_pending_replies (workspace_id, thread_id, body_text, send_after, created_by)
+SELECT t.workspace_id, t.id, $1, $2, $3::uuid
+FROM inbox_threads t
+WHERE t.id = $4 AND t.workspace_id = $5
+RETURNING id, workspace_id, thread_id, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at
+`
+
+type CreateInboxPendingReplyParams struct {
+	BodyText    string             `json:"body_text"`
+	SendAfter   pgtype.Timestamptz `json:"send_after"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+}
+
+// Self-enforcing tenancy, the same shape ClaimWarmupSend uses: the thread_id is
+// taken from a SELECT over inbox_threads pinned to the workspace, so a
+// cross-tenant thread_id inserts ZERO rows rather than writing a row that
+// merely fails a later check.
+func (q *Queries) CreateInboxPendingReply(ctx context.Context, arg CreateInboxPendingReplyParams) (InboxPendingReply, error) {
+	row := q.db.QueryRow(ctx, createInboxPendingReply,
+		arg.BodyText,
+		arg.SendAfter,
+		arg.CreatedBy,
+		arg.ThreadID,
+		arg.WorkspaceID,
+	)
+	var i InboxPendingReply
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ThreadID,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteInboxComposeDraft = `-- name: DeleteInboxComposeDraft :execrows
+DELETE FROM inbox_compose_drafts
+WHERE id = $1 AND workspace_id = $2 AND user_id = $3
+`
+
+type DeleteInboxComposeDraftParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	UserID      uuid.UUID `json:"user_id"`
+}
+
+func (q *Queries) DeleteInboxComposeDraft(ctx context.Context, arg DeleteInboxComposeDraftParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteInboxComposeDraft, arg.ID, arg.WorkspaceID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteInboxLabel = `-- name: DeleteInboxLabel :execrows
+DELETE FROM inbox_labels WHERE id = $1 AND workspace_id = $2
+`
+
+type DeleteInboxLabelParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// The join rows go with it via ON DELETE CASCADE: deleting a label unfiles
+// every thread it was on, which is what "delete this label" means. :execrows
+// so an unknown or cross-workspace id becomes ErrNotFound rather than silent
+// success.
+func (q *Queries) DeleteInboxLabel(ctx context.Context, arg DeleteInboxLabelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteInboxLabel, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteInboxThreadSnooze = `-- name: DeleteInboxThreadSnooze :execrows
+DELETE FROM inbox_thread_snoozes
+WHERE thread_id = $1 AND workspace_id = $2
+`
+
+type DeleteInboxThreadSnoozeParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Un-snooze. :execrows so the store can tell "there was a snooze and it is
+// gone" from "there was nothing to remove" and report ErrNotFound for the
+// latter, rather than silently succeeding.
+func (q *Queries) DeleteInboxThreadSnooze(ctx context.Context, arg DeleteInboxThreadSnoozeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteInboxThreadSnooze, arg.ThreadID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const failInboxPendingCompose = `-- name: FailInboxPendingCompose :exec
+UPDATE inbox_pending_composes
+SET status = 'failed', claimed_at = NULL, last_error = $1, updated_at = now()
+WHERE id = $2 AND workspace_id = $3 AND status IN ('scheduled', 'sending')
+`
+
+type FailInboxPendingComposeParams struct {
+	LastError   string    `json:"last_error"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) FailInboxPendingCompose(ctx context.Context, arg FailInboxPendingComposeParams) error {
+	_, err := q.db.Exec(ctx, failInboxPendingCompose, arg.LastError, arg.ID, arg.WorkspaceID)
+	return err
+}
+
+const failInboxPendingReply = `-- name: FailInboxPendingReply :exec
+UPDATE inbox_pending_replies
+SET status = 'failed', claimed_at = NULL, last_error = $1, updated_at = now()
+WHERE id = $2 AND workspace_id = $3 AND status IN ('scheduled', 'sending')
+`
+
+type FailInboxPendingReplyParams struct {
+	LastError   string    `json:"last_error"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Terminal failure, after retries are exhausted or on an error retrying cannot
+// fix. The row survives so the outbox can show what happened rather than the
+// reply vanishing.
+func (q *Queries) FailInboxPendingReply(ctx context.Context, arg FailInboxPendingReplyParams) error {
+	_, err := q.db.Exec(ctx, failInboxPendingReply, arg.LastError, arg.ID, arg.WorkspaceID)
+	return err
+}
+
+const findInboxLabelByName = `-- name: FindInboxLabelByName :one
+SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels
+WHERE workspace_id = $1 AND lower(name) = lower($2)
+`
+
+type FindInboxLabelByNameParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Name        string    `json:"name"`
+}
+
+// Backs the picker's search-or-create: a member typing an existing name must
+// get that label rather than a unique-violation. Matched case-insensitively,
+// against the same lower(name) expression the unique index uses.
+func (q *Queries) FindInboxLabelByName(ctx context.Context, arg FindInboxLabelByNameParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, findInboxLabelByName, arg.WorkspaceID, arg.Name)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getInboxComposeDraft = `-- name: GetInboxComposeDraft :one
+SELECT id, workspace_id, user_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, created_at, updated_at FROM inbox_compose_drafts
+WHERE id = $1 AND workspace_id = $2 AND user_id = $3
+`
+
+type GetInboxComposeDraftParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	UserID      uuid.UUID `json:"user_id"`
+}
+
+func (q *Queries) GetInboxComposeDraft(ctx context.Context, arg GetInboxComposeDraftParams) (InboxComposeDraft, error) {
+	row := q.db.QueryRow(ctx, getInboxComposeDraft, arg.ID, arg.WorkspaceID, arg.UserID)
+	var i InboxComposeDraft
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.MailboxID,
+		&i.ToEmails,
+		&i.CcEmails,
+		&i.BccEmails,
+		&i.Subject,
+		&i.BodyText,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getInboxLabel = `-- name: GetInboxLabel :one
+SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels WHERE id = $1 AND workspace_id = $2
+`
+
+type GetInboxLabelParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxLabel(ctx context.Context, arg GetInboxLabelParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, getInboxLabel, arg.ID, arg.WorkspaceID)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getInboxOverviewTotals = `-- name: GetInboxOverviewTotals :one
+SELECT
+    COUNT(*)::bigint AS total,
+    COUNT(*) FILTER (WHERE t.unread)::bigint AS unread,
+    COUNT(*) FILTER (WHERE t.last_message_at >= $1::timestamptz)::bigint AS today,
+    COUNT(*) FILTER (WHERE t.last_message_at >= $2::timestamptz)::bigint AS this_week,
+    COUNT(*) FILTER (WHERE inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))::bigint AS awaiting_reply
+FROM inbox_threads t
+WHERE t.workspace_id = $3
+  -- Snoozed threads are excluded from every counter here, because they are
+  -- excluded from every list those counters label. The ` + "`" + `snoozed` + "`" + ` scope has its
+  -- own counter (CountInboxSnoozedThreads) rather than a FILTER on this scan:
+  -- it is the one count that wants the rows this WHERE removes.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+`
+
+type GetInboxOverviewTotalsParams struct {
+	TodayStart  pgtype.Timestamptz `json:"today_start"`
+	WeekStart   pgtype.Timestamptz `json:"week_start"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+}
+
+type GetInboxOverviewTotalsRow struct {
+	Total         int64 `json:"total"`
+	Unread        int64 `json:"unread"`
+	Today         int64 `json:"today"`
+	ThisWeek      int64 `json:"this_week"`
+	AwaitingReply int64 `json:"awaiting_reply"`
+}
+
+// The scope rail's headline counters, computed by Postgres over the whole
+// workspace rather than sampled client-side from one page of threads.
+//
+// Every counter is a FILTER aggregate over the SAME single scan, so the rail
+// costs one query rather than one per scope. All five are cast explicitly:
+// COUNT(*) is bigint, but a bare COALESCE/FILTER aggregate makes sqlc emit
+// interface{} while still compiling — the cast is what pins the generated
+// field to int64.
+//
+// The window boundaries are computed from a caller-supplied @now rather than
+// Postgres' own now(): "today" is a question about the VIEWER's day, and the
+// server has no business assuming its own timezone is theirs. The caller
+// passes the start of the viewer's today and of their week, already resolved.
+//
+// awaiting_reply counts threads where the CONTACT spoke last, so the thread
+// is waiting on us. See the awaiting_reply_only predicate on
+// ListInboxThreads for why this must consider the sends table and not just
+// inbox_messages; the two definitions are deliberately identical, so a count
+// here always matches the list that scope serves.
+func (q *Queries) GetInboxOverviewTotals(ctx context.Context, arg GetInboxOverviewTotalsParams) (GetInboxOverviewTotalsRow, error) {
+	row := q.db.QueryRow(ctx, getInboxOverviewTotals, arg.TodayStart, arg.WeekStart, arg.WorkspaceID)
+	var i GetInboxOverviewTotalsRow
+	err := row.Scan(
+		&i.Total,
+		&i.Unread,
+		&i.Today,
+		&i.ThisWeek,
+		&i.AwaitingReply,
+	)
+	return i, err
+}
+
+const getInboxPendingCompose = `-- name: GetInboxPendingCompose :one
+SELECT id, workspace_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at FROM inbox_pending_composes WHERE id = $1 AND workspace_id = $2
+`
+
+type GetInboxPendingComposeParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxPendingCompose(ctx context.Context, arg GetInboxPendingComposeParams) (InboxPendingCompose, error) {
+	row := q.db.QueryRow(ctx, getInboxPendingCompose, arg.ID, arg.WorkspaceID)
+	var i InboxPendingCompose
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.MailboxID,
+		&i.ToEmails,
+		&i.CcEmails,
+		&i.BccEmails,
+		&i.Subject,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getInboxPendingReply = `-- name: GetInboxPendingReply :one
+SELECT id, workspace_id, thread_id, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at FROM inbox_pending_replies WHERE id = $1 AND workspace_id = $2
+`
+
+type GetInboxPendingReplyParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxPendingReply(ctx context.Context, arg GetInboxPendingReplyParams) (InboxPendingReply, error) {
+	row := q.db.QueryRow(ctx, getInboxPendingReply, arg.ID, arg.WorkspaceID)
+	var i InboxPendingReply
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ThreadID,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getInboxThread = `-- name: GetInboxThread :one
@@ -95,6 +722,78 @@ func (q *Queries) GetInboxThread(ctx context.Context, arg GetInboxThreadParams) 
 	return i, err
 }
 
+const getInboxThreadSnooze = `-- name: GetInboxThreadSnooze :one
+SELECT thread_id, workspace_id, snooze_until, snoozed_by, created_at FROM inbox_thread_snoozes
+WHERE thread_id = $1 AND workspace_id = $2
+`
+
+type GetInboxThreadSnoozeParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) GetInboxThreadSnooze(ctx context.Context, arg GetInboxThreadSnoozeParams) (InboxThreadSnooze, error) {
+	row := q.db.QueryRow(ctx, getInboxThreadSnooze, arg.ThreadID, arg.WorkspaceID)
+	var i InboxThreadSnooze
+	err := row.Scan(
+		&i.ThreadID,
+		&i.WorkspaceID,
+		&i.SnoozeUntil,
+		&i.SnoozedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getPendingReplyForInboxThread = `-- name: GetPendingReplyForInboxThread :one
+SELECT id, workspace_id, thread_id, body_text, status, send_after, claimed_at, sent_at, message_id, last_error, created_by, created_at, updated_at FROM inbox_pending_replies
+WHERE thread_id = $1 AND workspace_id = $2
+  AND status IN ('scheduled', 'sending')
+ORDER BY send_after
+LIMIT 1
+`
+
+type GetPendingReplyForInboxThreadParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// The reader's "a reply is in flight" state. At most one row is expected in
+// practice (the UI does not offer a second Send while one is pending), but the
+// schema does not forbid two, so this takes the soonest rather than assuming
+// uniqueness.
+func (q *Queries) GetPendingReplyForInboxThread(ctx context.Context, arg GetPendingReplyForInboxThreadParams) (InboxPendingReply, error) {
+	row := q.db.QueryRow(ctx, getPendingReplyForInboxThread, arg.ThreadID, arg.WorkspaceID)
+	var i InboxPendingReply
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ThreadID,
+		&i.BodyText,
+		&i.Status,
+		&i.SendAfter,
+		&i.ClaimedAt,
+		&i.SentAt,
+		&i.MessageID,
+		&i.LastError,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getWorkspaceInboxSettings = `-- name: GetWorkspaceInboxSettings :one
+SELECT workspace_id, undo_send_seconds, updated_at FROM workspace_inbox_settings WHERE workspace_id = $1
+`
+
+func (q *Queries) GetWorkspaceInboxSettings(ctx context.Context, workspaceID uuid.UUID) (WorkspaceInboxSetting, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceInboxSettings, workspaceID)
+	var i WorkspaceInboxSetting
+	err := row.Scan(&i.WorkspaceID, &i.UndoSendSeconds, &i.UpdatedAt)
+	return i, err
+}
+
 const insertInboxMessage = `-- name: InsertInboxMessage :exec
 INSERT INTO inbox_messages (thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -137,6 +836,88 @@ func (q *Queries) InsertInboxMessage(ctx context.Context, arg InsertInboxMessage
 		arg.OccurredAt,
 	)
 	return err
+}
+
+const listInboxComposeDrafts = `-- name: ListInboxComposeDrafts :many
+SELECT id, workspace_id, user_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, created_at, updated_at FROM inbox_compose_drafts
+WHERE workspace_id = $1 AND user_id = $2
+ORDER BY updated_at DESC
+LIMIT $3
+`
+
+type ListInboxComposeDraftsParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	UserID      uuid.UUID `json:"user_id"`
+	PageLimit   int32     `json:"page_limit"`
+}
+
+// This user's own drafts only. Most recently edited first — the one they are
+// most likely to want back.
+func (q *Queries) ListInboxComposeDrafts(ctx context.Context, arg ListInboxComposeDraftsParams) ([]InboxComposeDraft, error) {
+	rows, err := q.db.Query(ctx, listInboxComposeDrafts, arg.WorkspaceID, arg.UserID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxComposeDraft
+	for rows.Next() {
+		var i InboxComposeDraft
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.UserID,
+			&i.MailboxID,
+			&i.ToEmails,
+			&i.CcEmails,
+			&i.BccEmails,
+			&i.Subject,
+			&i.BodyText,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInboxLabels = `-- name: ListInboxLabels :many
+SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels
+WHERE workspace_id = $1
+ORDER BY lower(name)
+`
+
+// Alphabetical, case-insensitively: the picker is scanned by eye, so "Zebra"
+// must not sort before "apple" the way a raw byte ordering would put it.
+func (q *Queries) ListInboxLabels(ctx context.Context, workspaceID uuid.UUID) ([]InboxLabel, error) {
+	rows, err := q.db.Query(ctx, listInboxLabels, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxLabel
+	for rows.Next() {
+		var i InboxLabel
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Color,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listInboxMessagesByThread = `-- name: ListInboxMessagesByThread :many
@@ -183,6 +964,241 @@ func (q *Queries) ListInboxMessagesByThread(ctx context.Context, arg ListInboxMe
 	return items, nil
 }
 
+const listInboxOverviewByMailbox = `-- name: ListInboxOverviewByMailbox :many
+SELECT t.mailbox_id,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_threads t
+WHERE t.workspace_id = $1
+  -- Same snooze exclusion as GetInboxOverviewTotals, for the same reason: a
+  -- mailbox's count must match the list clicking that mailbox produces.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY t.mailbox_id
+`
+
+type ListInboxOverviewByMailboxRow struct {
+	MailboxID uuid.UUID `json:"mailbox_id"`
+	Total     int64     `json:"total"`
+	Unread    int64     `json:"unread"`
+}
+
+// Per-mailbox totals for the rail, one row per mailbox that actually has a
+// thread. A mailbox with no threads is absent rather than reported as zero:
+// the rail renders one row per CONNECTED mailbox (which it already fetches
+// from /mailboxes) and looks its count up here, so an empty mailbox reads as
+// 0 without this query having to know the mailbox list.
+func (q *Queries) ListInboxOverviewByMailbox(ctx context.Context, workspaceID uuid.UUID) ([]ListInboxOverviewByMailboxRow, error) {
+	rows, err := q.db.Query(ctx, listInboxOverviewByMailbox, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxOverviewByMailboxRow
+	for rows.Next() {
+		var i ListInboxOverviewByMailboxRow
+		if err := rows.Scan(&i.MailboxID, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInboxOverviewByReplyClass = `-- name: ListInboxOverviewByReplyClass :many
+SELECT t.last_reply_class AS key,
+       COUNT(*)::bigint AS total,
+       COUNT(*) FILTER (WHERE t.unread)::bigint AS unread
+FROM inbox_threads t
+WHERE t.workspace_id = $1 AND t.last_reply_class <> ''
+  -- Same snooze exclusion as GetInboxOverviewTotals: a label's count must
+  -- match the list clicking that label produces.
+  AND NOT EXISTS (
+    SELECT 1 FROM inbox_thread_snoozes s
+    WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+      AND s.snooze_until > now())
+GROUP BY t.last_reply_class
+`
+
+type ListInboxOverviewByReplyClassRow struct {
+	Key    string `json:"key"`
+	Total  int64  `json:"total"`
+	Unread int64  `json:"unread"`
+}
+
+// Per-reply-class totals, for the rail's label scopes. Threads whose
+// last_reply_class is ” (never classified) are excluded — ” is the absence
+// of a class, not a class to offer as a filter.
+func (q *Queries) ListInboxOverviewByReplyClass(ctx context.Context, workspaceID uuid.UUID) ([]ListInboxOverviewByReplyClassRow, error) {
+	rows, err := q.db.Query(ctx, listInboxOverviewByReplyClass, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxOverviewByReplyClassRow
+	for rows.Next() {
+		var i ListInboxOverviewByReplyClassRow
+		if err := rows.Scan(&i.Key, &i.Total, &i.Unread); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInboxPendingComposes = `-- name: ListInboxPendingComposes :many
+SELECT c.id, c.workspace_id, c.mailbox_id, c.to_emails, c.cc_emails, c.bcc_emails, c.subject, c.body_text, c.status, c.send_after, c.claimed_at, c.sent_at, c.message_id, c.last_error, c.created_by, c.created_at, c.updated_at, COALESCE(m.email, '') AS mailbox_email
+FROM inbox_pending_composes c
+LEFT JOIN mailboxes m ON m.id = c.mailbox_id AND m.workspace_id = c.workspace_id
+WHERE c.workspace_id = $1 AND c.status IN ('scheduled', 'sending')
+ORDER BY c.send_after, c.id
+LIMIT $2
+`
+
+type ListInboxPendingComposesParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	PageLimit   int32     `json:"page_limit"`
+}
+
+type ListInboxPendingComposesRow struct {
+	ID           uuid.UUID          `json:"id"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+	MailboxID    uuid.UUID          `json:"mailbox_id"`
+	ToEmails     []string           `json:"to_emails"`
+	CcEmails     []string           `json:"cc_emails"`
+	BccEmails    []string           `json:"bcc_emails"`
+	Subject      string             `json:"subject"`
+	BodyText     string             `json:"body_text"`
+	Status       string             `json:"status"`
+	SendAfter    pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt    pgtype.Timestamptz `json:"claimed_at"`
+	SentAt       pgtype.Timestamptz `json:"sent_at"`
+	MessageID    string             `json:"message_id"`
+	LastError    string             `json:"last_error"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	MailboxEmail string             `json:"mailbox_email"`
+}
+
+func (q *Queries) ListInboxPendingComposes(ctx context.Context, arg ListInboxPendingComposesParams) ([]ListInboxPendingComposesRow, error) {
+	rows, err := q.db.Query(ctx, listInboxPendingComposes, arg.WorkspaceID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxPendingComposesRow
+	for rows.Next() {
+		var i ListInboxPendingComposesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.MailboxID,
+			&i.ToEmails,
+			&i.CcEmails,
+			&i.BccEmails,
+			&i.Subject,
+			&i.BodyText,
+			&i.Status,
+			&i.SendAfter,
+			&i.ClaimedAt,
+			&i.SentAt,
+			&i.MessageID,
+			&i.LastError,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.MailboxEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInboxPendingReplies = `-- name: ListInboxPendingReplies :many
+SELECT p.id, p.workspace_id, p.thread_id, p.body_text, p.status, p.send_after, p.claimed_at, p.sent_at, p.message_id, p.last_error, p.created_by, p.created_at, p.updated_at, t.subject AS thread_subject,
+       COALESCE(c.email, '') AS contact_email
+FROM inbox_pending_replies p
+JOIN inbox_threads t ON t.id = p.thread_id AND t.workspace_id = p.workspace_id
+LEFT JOIN contacts c ON c.id = t.contact_id AND c.workspace_id = t.workspace_id
+WHERE p.workspace_id = $1 AND p.status IN ('scheduled', 'sending')
+ORDER BY p.send_after, p.id
+LIMIT $2
+`
+
+type ListInboxPendingRepliesParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	PageLimit   int32     `json:"page_limit"`
+}
+
+type ListInboxPendingRepliesRow struct {
+	ID            uuid.UUID          `json:"id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	ThreadID      uuid.UUID          `json:"thread_id"`
+	BodyText      string             `json:"body_text"`
+	Status        string             `json:"status"`
+	SendAfter     pgtype.Timestamptz `json:"send_after"`
+	ClaimedAt     pgtype.Timestamptz `json:"claimed_at"`
+	SentAt        pgtype.Timestamptz `json:"sent_at"`
+	MessageID     string             `json:"message_id"`
+	LastError     string             `json:"last_error"`
+	CreatedBy     pgtype.UUID        `json:"created_by"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ThreadSubject string             `json:"thread_subject"`
+	ContactEmail  string             `json:"contact_email"`
+}
+
+// The outbox: everything still waiting, soonest first. Bounded by the caller.
+func (q *Queries) ListInboxPendingReplies(ctx context.Context, arg ListInboxPendingRepliesParams) ([]ListInboxPendingRepliesRow, error) {
+	rows, err := q.db.Query(ctx, listInboxPendingReplies, arg.WorkspaceID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInboxPendingRepliesRow
+	for rows.Next() {
+		var i ListInboxPendingRepliesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ThreadID,
+			&i.BodyText,
+			&i.Status,
+			&i.SendAfter,
+			&i.ClaimedAt,
+			&i.SentAt,
+			&i.MessageID,
+			&i.LastError,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ThreadSubject,
+			&i.ContactEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInboxThreads = `-- name: ListInboxThreads :many
 SELECT t.id, t.workspace_id, t.mailbox_id, t.campaign_id, t.contact_id, t.root_message_id, t.subject, t.last_reply_class, t.unread, t.last_message_at, t.created_at,
        COALESCE(c.email, '') AS contact_email,
@@ -201,8 +1217,50 @@ WHERE t.workspace_id = $1
   AND ($6::text IS NULL
        OR t.subject ILIKE '%' || $6::text || '%'
        OR c.email ILIKE '%' || $6::text || '%')
+  -- The rail's virtual scopes. Each is written so an unscoped caller's
+  -- second operand is never EVALUATED per row (` + "`" + `NOT false` + "`" + ` is TRUE, and
+  -- ` + "`" + `TRUE OR x` + "`" + ` needs no x), which is what keeps the awaiting-reply
+  -- subqueries off the unscoped path. The RESULT SET for a caller passing
+  -- none of these is provably identical to the query before they existed;
+  -- the plan may still mention the sublinks, since Postgres does not define
+  -- OR as short-circuiting — run EXPLAIN, don't take this comment's word.
+  AND (NOT $7::boolean OR t.unread)
+  AND ($8::timestamptz IS NULL
+       OR t.last_message_at >= $8::timestamptz)
+  -- "Waiting on us" — the same rule the rail's counter uses, shared as one
+  -- function so a count can never disagree with the list it links to. See
+  -- inbox_thread_awaiting_reply's own comment for why this must span both the
+  -- stored and the synthesized outbound legs.
+  AND (NOT $9::boolean
+       OR inbox_thread_awaiting_reply(t.id, t.workspace_id, t.campaign_id, t.contact_id))
+  -- Snooze partitions the inbox in two, so it is a THREE-state filter rather
+  -- than another boolean: every ordinary scope hides threads still snoozed
+  -- (snooze_hidden), the ` + "`" + `snoozed` + "`" + ` scope shows only those (snoozed_only), and
+  -- neither is set when a caller genuinely wants both (search, which should
+  -- find a snoozed thread — hiding it would look like data loss).
+  --
+  -- "Still snoozed" is snooze_until > now(), evaluated here at read time: an
+  -- expired snooze needs no sweeper to bring its thread back, it simply stops
+  -- matching. Both arms use the same EXISTS shape so the partial index on
+  -- (workspace_id, snooze_until) serves either direction.
+  AND (NOT $10::boolean OR NOT EXISTS (
+        SELECT 1 FROM inbox_thread_snoozes s
+        WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+          AND s.snooze_until > now()))
+  AND (NOT $11::boolean OR EXISTS (
+        SELECT 1 FROM inbox_thread_snoozes s
+        WHERE s.thread_id = t.id AND s.workspace_id = t.workspace_id
+          AND s.snooze_until > now()))
+  -- The operator's own label filter. EXISTS rather than a JOIN so a thread
+  -- carrying the label twice could never duplicate the row (the composite PK
+  -- already prevents that, but a JOIN would make the query's correctness
+  -- depend on that constraint rather than on its own shape).
+  AND ($12::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM inbox_thread_labels tl
+        WHERE tl.thread_id = t.id AND tl.workspace_id = t.workspace_id
+          AND tl.label_id = $12::uuid))
 ORDER BY t.last_message_at DESC, t.id DESC
-LIMIT $7
+LIMIT $13
 `
 
 type ListInboxThreadsParams struct {
@@ -212,6 +1270,12 @@ type ListInboxThreadsParams struct {
 	BeforeLastMessageAt pgtype.Timestamptz `json:"before_last_message_at"`
 	BeforeID            pgtype.UUID        `json:"before_id"`
 	Query               *string            `json:"query"`
+	UnreadOnly          bool               `json:"unread_only"`
+	SinceLastMessageAt  pgtype.Timestamptz `json:"since_last_message_at"`
+	AwaitingReplyOnly   bool               `json:"awaiting_reply_only"`
+	SnoozeHidden        bool               `json:"snooze_hidden"`
+	SnoozedOnly         bool               `json:"snoozed_only"`
+	LabelID             pgtype.UUID        `json:"label_id"`
 	PageLimit           int32              `json:"page_limit"`
 }
 
@@ -259,6 +1323,12 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 		arg.BeforeLastMessageAt,
 		arg.BeforeID,
 		arg.Query,
+		arg.UnreadOnly,
+		arg.SinceLastMessageAt,
+		arg.AwaitingReplyOnly,
+		arg.SnoozeHidden,
+		arg.SnoozedOnly,
+		arg.LabelID,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -285,6 +1355,98 @@ func (q *Queries) ListInboxThreads(ctx context.Context, arg ListInboxThreadsPara
 			&i.ContactLastName,
 			&i.ReplyLabelLabel,
 			&i.ReplyLabelColor,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLabelsForInboxThread = `-- name: ListLabelsForInboxThread :many
+SELECT l.id, l.workspace_id, l.name, l.color, l.created_at, l.updated_at FROM inbox_labels l
+JOIN inbox_thread_labels tl ON tl.label_id = l.id AND tl.workspace_id = l.workspace_id
+WHERE tl.thread_id = $1 AND tl.workspace_id = $2
+ORDER BY lower(l.name)
+`
+
+type ListLabelsForInboxThreadParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) ListLabelsForInboxThread(ctx context.Context, arg ListLabelsForInboxThreadParams) ([]InboxLabel, error) {
+	rows, err := q.db.Query(ctx, listLabelsForInboxThread, arg.ThreadID, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InboxLabel
+	for rows.Next() {
+		var i InboxLabel
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Color,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLabelsForInboxThreads = `-- name: ListLabelsForInboxThreads :many
+SELECT tl.thread_id, l.id, l.workspace_id, l.name, l.color, l.created_at, l.updated_at FROM inbox_labels l
+JOIN inbox_thread_labels tl ON tl.label_id = l.id AND tl.workspace_id = l.workspace_id
+WHERE tl.workspace_id = $1 AND tl.thread_id = ANY($2::uuid[])
+ORDER BY tl.thread_id, lower(l.name)
+`
+
+type ListLabelsForInboxThreadsParams struct {
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	ThreadIds   []uuid.UUID `json:"thread_ids"`
+}
+
+type ListLabelsForInboxThreadsRow struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Name        string             `json:"name"`
+	Color       string             `json:"color"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+// The list view's labels, for a whole page of threads in ONE query rather than
+// one per row. Returns (thread_id, label) pairs for the Go layer to group;
+// an array_agg of composite rows would land in sqlc as interface{}.
+func (q *Queries) ListLabelsForInboxThreads(ctx context.Context, arg ListLabelsForInboxThreadsParams) ([]ListLabelsForInboxThreadsRow, error) {
+	rows, err := q.db.Query(ctx, listLabelsForInboxThreads, arg.WorkspaceID, arg.ThreadIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLabelsForInboxThreadsRow
+	for rows.Next() {
+		var i ListLabelsForInboxThreadsRow
+		if err := rows.Scan(
+			&i.ThreadID,
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Color,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -368,6 +1530,86 @@ func (q *Queries) ListSentOutboundStepsForThread(ctx context.Context, arg ListSe
 	return items, nil
 }
 
+const markInboxPendingComposeSent = `-- name: MarkInboxPendingComposeSent :execrows
+UPDATE inbox_pending_composes
+SET status = 'sent', message_id = $1, sent_at = now(), updated_at = now(), last_error = ''
+WHERE id = $2 AND workspace_id = $3 AND status = 'sending'
+`
+
+type MarkInboxPendingComposeSentParams struct {
+	MessageID   string    `json:"message_id"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) MarkInboxPendingComposeSent(ctx context.Context, arg MarkInboxPendingComposeSentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markInboxPendingComposeSent, arg.MessageID, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markInboxPendingReplySent = `-- name: MarkInboxPendingReplySent :execrows
+UPDATE inbox_pending_replies
+SET status = 'sent', message_id = $1, sent_at = now(), updated_at = now(), last_error = ''
+WHERE id = $2 AND workspace_id = $3 AND status = 'sending'
+`
+
+type MarkInboxPendingReplySentParams struct {
+	MessageID   string    `json:"message_id"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Guarded on 'sending' so only the claimer can complete it, and :execrows so
+// the caller runs its side effects (recording the outbound message) exactly
+// once.
+func (q *Queries) MarkInboxPendingReplySent(ctx context.Context, arg MarkInboxPendingReplySentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markInboxPendingReplySent, arg.MessageID, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const releaseInboxPendingCompose = `-- name: ReleaseInboxPendingCompose :exec
+UPDATE inbox_pending_composes
+SET status = 'scheduled', claimed_at = NULL, last_error = $1, updated_at = now()
+WHERE id = $2 AND workspace_id = $3 AND status = 'sending'
+`
+
+type ReleaseInboxPendingComposeParams struct {
+	LastError   string    `json:"last_error"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) ReleaseInboxPendingCompose(ctx context.Context, arg ReleaseInboxPendingComposeParams) error {
+	_, err := q.db.Exec(ctx, releaseInboxPendingCompose, arg.LastError, arg.ID, arg.WorkspaceID)
+	return err
+}
+
+const releaseInboxPendingReply = `-- name: ReleaseInboxPendingReply :exec
+UPDATE inbox_pending_replies
+SET status = 'scheduled', claimed_at = NULL, last_error = $1, updated_at = now()
+WHERE id = $2 AND workspace_id = $3 AND status = 'sending'
+`
+
+type ReleaseInboxPendingReplyParams struct {
+	LastError   string    `json:"last_error"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// A retryable failure: back to 'scheduled' for the next attempt. send_after is
+// deliberately NOT advanced — the reply is already late, and pushing it further
+// out would compound the delay the failure caused.
+func (q *Queries) ReleaseInboxPendingReply(ctx context.Context, arg ReleaseInboxPendingReplyParams) error {
+	_, err := q.db.Exec(ctx, releaseInboxPendingReply, arg.LastError, arg.ID, arg.WorkspaceID)
+	return err
+}
+
 const setInboxThreadUnread = `-- name: SetInboxThreadUnread :execrows
 UPDATE inbox_threads SET unread = $1 WHERE id = $2 AND workspace_id = $3
 `
@@ -387,6 +1629,121 @@ func (q *Queries) SetInboxThreadUnread(ctx context.Context, arg SetInboxThreadUn
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const unassignInboxThreadLabel = `-- name: UnassignInboxThreadLabel :execrows
+DELETE FROM inbox_thread_labels
+WHERE thread_id = $1 AND label_id = $2 AND workspace_id = $3
+`
+
+type UnassignInboxThreadLabelParams struct {
+	ThreadID    uuid.UUID `json:"thread_id"`
+	LabelID     uuid.UUID `json:"label_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) UnassignInboxThreadLabel(ctx context.Context, arg UnassignInboxThreadLabelParams) (int64, error) {
+	result, err := q.db.Exec(ctx, unassignInboxThreadLabel, arg.ThreadID, arg.LabelID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateInboxLabel = `-- name: UpdateInboxLabel :one
+UPDATE inbox_labels
+SET name = $1, color = $2, updated_at = now()
+WHERE id = $3 AND workspace_id = $4
+RETURNING id, workspace_id, name, color, created_at, updated_at
+`
+
+type UpdateInboxLabelParams struct {
+	Name        string    `json:"name"`
+	Color       string    `json:"color"`
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) UpdateInboxLabel(ctx context.Context, arg UpdateInboxLabelParams) (InboxLabel, error) {
+	row := q.db.QueryRow(ctx, updateInboxLabel,
+		arg.Name,
+		arg.Color,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i InboxLabel
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Color,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertInboxComposeDraft = `-- name: UpsertInboxComposeDraft :one
+INSERT INTO inbox_compose_drafts (id, workspace_id, user_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text)
+VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9)
+ON CONFLICT (id) DO UPDATE
+    SET mailbox_id = EXCLUDED.mailbox_id,
+        to_emails  = EXCLUDED.to_emails,
+        cc_emails  = EXCLUDED.cc_emails,
+        bcc_emails = EXCLUDED.bcc_emails,
+        subject    = EXCLUDED.subject,
+        body_text  = EXCLUDED.body_text,
+        updated_at = now()
+    WHERE inbox_compose_drafts.workspace_id = $2
+      AND inbox_compose_drafts.user_id = $3
+RETURNING id, workspace_id, user_id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, created_at, updated_at
+`
+
+type UpsertInboxComposeDraftParams struct {
+	ID          uuid.UUID   `json:"id"`
+	WorkspaceID uuid.UUID   `json:"workspace_id"`
+	UserID      uuid.UUID   `json:"user_id"`
+	MailboxID   pgtype.UUID `json:"mailbox_id"`
+	ToEmails    []string    `json:"to_emails"`
+	CcEmails    []string    `json:"cc_emails"`
+	BccEmails   []string    `json:"bcc_emails"`
+	Subject     string      `json:"subject"`
+	BodyText    string      `json:"body_text"`
+}
+
+// Autosave. The draft id comes from the client (a UUID it mints when the
+// composer opens), so the first save inserts and every later one updates the
+// same row — no "have I saved yet?" state for the composer to track.
+//
+// The WHERE on the UPDATE arm pins BOTH workspace and user: a draft is
+// personal, so even a colleague in the same workspace cannot overwrite it.
+func (q *Queries) UpsertInboxComposeDraft(ctx context.Context, arg UpsertInboxComposeDraftParams) (InboxComposeDraft, error) {
+	row := q.db.QueryRow(ctx, upsertInboxComposeDraft,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.UserID,
+		arg.MailboxID,
+		arg.ToEmails,
+		arg.CcEmails,
+		arg.BccEmails,
+		arg.Subject,
+		arg.BodyText,
+	)
+	var i InboxComposeDraft
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.MailboxID,
+		&i.ToEmails,
+		&i.CcEmails,
+		&i.BccEmails,
+		&i.Subject,
+		&i.BodyText,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const upsertInboxThread = `-- name: UpsertInboxThread :one
@@ -435,5 +1792,68 @@ func (q *Queries) UpsertInboxThread(ctx context.Context, arg UpsertInboxThreadPa
 		&i.LastMessageAt,
 		&i.CreatedAt,
 	)
+	return i, err
+}
+
+const upsertInboxThreadSnooze = `-- name: UpsertInboxThreadSnooze :one
+INSERT INTO inbox_thread_snoozes (thread_id, workspace_id, snooze_until, snoozed_by)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (thread_id) DO UPDATE
+    SET snooze_until = EXCLUDED.snooze_until,
+        snoozed_by   = EXCLUDED.snoozed_by
+    -- Belt and braces: the WHERE on the UPDATE arm means a row belonging to
+    -- another workspace cannot be overwritten even if a caller somehow reached
+    -- this with a foreign thread_id (the service checks the thread first, so
+    -- this should be unreachable).
+    WHERE inbox_thread_snoozes.workspace_id = $2
+RETURNING thread_id, workspace_id, snooze_until, snoozed_by, created_at
+`
+
+type UpsertInboxThreadSnoozeParams struct {
+	ThreadID    uuid.UUID          `json:"thread_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	SnoozeUntil pgtype.Timestamptz `json:"snooze_until"`
+	SnoozedBy   pgtype.UUID        `json:"snoozed_by"`
+}
+
+// Snooze a thread, or re-snooze one already snoozed (a second call replaces
+// the moment rather than failing — re-snoozing is a normal operator action,
+// not an error). thread_id is the PK, so the conflict target is the whole
+// identity of a snooze.
+func (q *Queries) UpsertInboxThreadSnooze(ctx context.Context, arg UpsertInboxThreadSnoozeParams) (InboxThreadSnooze, error) {
+	row := q.db.QueryRow(ctx, upsertInboxThreadSnooze,
+		arg.ThreadID,
+		arg.WorkspaceID,
+		arg.SnoozeUntil,
+		arg.SnoozedBy,
+	)
+	var i InboxThreadSnooze
+	err := row.Scan(
+		&i.ThreadID,
+		&i.WorkspaceID,
+		&i.SnoozeUntil,
+		&i.SnoozedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const upsertWorkspaceInboxSettings = `-- name: UpsertWorkspaceInboxSettings :one
+INSERT INTO workspace_inbox_settings (workspace_id, undo_send_seconds)
+VALUES ($1, $2)
+ON CONFLICT (workspace_id) DO UPDATE
+    SET undo_send_seconds = EXCLUDED.undo_send_seconds, updated_at = now()
+RETURNING workspace_id, undo_send_seconds, updated_at
+`
+
+type UpsertWorkspaceInboxSettingsParams struct {
+	WorkspaceID     uuid.UUID `json:"workspace_id"`
+	UndoSendSeconds int32     `json:"undo_send_seconds"`
+}
+
+func (q *Queries) UpsertWorkspaceInboxSettings(ctx context.Context, arg UpsertWorkspaceInboxSettingsParams) (WorkspaceInboxSetting, error) {
+	row := q.db.QueryRow(ctx, upsertWorkspaceInboxSettings, arg.WorkspaceID, arg.UndoSendSeconds)
+	var i WorkspaceInboxSetting
+	err := row.Scan(&i.WorkspaceID, &i.UndoSendSeconds, &i.UpdatedAt)
 	return i, err
 }

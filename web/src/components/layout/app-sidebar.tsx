@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Building2, ChartNoAxesColumn, CircleCheckBig, CircleDollarSign, Inbox, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
+import { Building2, ChartNoAxesColumn, CircleCheckBig, CircleDollarSign, Inbox, SendHorizontal, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { config } from '@/lib/config'
 import { Button } from '@/components/ui/button'
@@ -44,6 +44,10 @@ const NAV: NavGroup[] = [
       { label: 'Overview', to: '/app', icon: LayoutDashboard },
       { label: 'Approvals', to: '/app/approvals', icon: CircleCheckBig },
       { label: 'Inbox', to: '/app/inbox', icon: Inbox },
+      // Beside the Inbox rather than under Sending: the outbox is where a
+      // reply you just wrote waits, so it belongs with the surface you wrote it
+      // from, not with campaign configuration.
+      { label: 'Outbox', to: '/app/outbox', icon: SendHorizontal },
     ],
   },
   {

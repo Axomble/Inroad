@@ -7,6 +7,7 @@
 // `total` (see rangeLabel's absence below — there is nothing to render one
 // from), so pagination goes on the one fact a page size proves.
 import { httpStatus } from '@/lib/rtk-error'
+import type { ListInboxThreadsApiArg } from '@/store/api'
 
 /**
  * The inbox view, as held in the URL: which mailbox it's scoped to (omitted =
@@ -20,6 +21,44 @@ export interface InboxSearch {
   class?: string
   q?: string
   cursor?: string
+  scope?: InboxScope
+  /** An operator-assigned label's id — the rail's label scope. */
+  label?: string
+}
+
+/**
+ * The rail's virtual folders, in render order — a local tuple rather than the
+ * generated union because the order and the labels are ours, not the API's.
+ *
+ * `satisfies` pins every entry to a scope the generated client accepts, so a
+ * scope removed from openapi.yaml fails `tsc` here rather than 400-ing at
+ * runtime. The reverse direction (a scope the API gained but the rail omits)
+ * is covered by SCOPE_LABELS' exhaustive Record below.
+ */
+export const INBOX_SCOPES = [
+  'all',
+  'unread',
+  'today',
+  'this_week',
+  'awaiting_reply',
+  'snoozed',
+] as const satisfies readonly NonNullable<ListInboxThreadsApiArg['scope']>[]
+
+export type InboxScope = (typeof INBOX_SCOPES)[number]
+
+/**
+ * The rail's label per scope. A `Record` over the generated union rather than
+ * over the local one: adding a scope to openapi.yaml then fails `tsc` here
+ * until it is labelled, so the rail can never silently omit a folder the API
+ * has started serving.
+ */
+export const SCOPE_LABELS: Record<NonNullable<ListInboxThreadsApiArg['scope']>, string> = {
+  all: 'All mail',
+  unread: 'Unread',
+  today: 'Today',
+  this_week: 'This week',
+  awaiting_reply: 'Awaiting reply',
+  snoozed: 'Snoozed',
 }
 
 /**
@@ -32,11 +71,47 @@ export function parseInboxSearch(search: Record<string, unknown>): InboxSearch {
     class: text(search.class),
     q: text(search.q),
     cursor: text(search.cursor),
+    scope: scope(search.scope),
+    label: text(search.label),
   }
 }
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * An unrecognised scope is dropped rather than forwarded: the API answers 400
+ * for one, and a hand-edited URL should degrade to the whole inbox instead of
+ * dead-ending the page on an error the user can't act on.
+ */
+function scope(value: unknown): InboxScope | undefined {
+  return INBOX_SCOPES.find((s) => s === value)
+}
+
+/**
+ * The viewer's UTC offset in minutes East of UTC, which is what the API's
+ * `tz_offset` takes. `getTimezoneOffset()` reports the opposite sign (minutes
+ * to ADD to local time to reach UTC), hence the negation.
+ *
+ * Read at call time rather than module load so a long-lived tab that crosses a
+ * DST boundary sends the offset in force now, not the one at page load.
+ */
+export function timezoneOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset()
+}
+
+/**
+ * The scopes whose boundaries depend on the viewer's calendar, and so the only
+ * list requests that need `tz_offset`. Sending it on the others would be pure
+ * RTK Query cache-key noise, and would make a DST transition invalidate cached
+ * pages the offset cannot affect.
+ */
+const TIMEZONE_DEPENDENT_SCOPES: readonly InboxScope[] = ['today', 'this_week']
+
+/** The `tz_offset` to send for a scope, or `undefined` when it is irrelevant. */
+export function scopeTimezoneOffset(forScope: InboxScope): number | undefined {
+  return TIMEZONE_DEPENDENT_SCOPES.includes(forScope) ? timezoneOffsetMinutes() : undefined
 }
 
 /**

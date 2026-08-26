@@ -53,6 +53,10 @@ type Thread struct {
 	ContactEmail     string
 	ContactFirstName string
 	ContactLastName  string
+	// Labels are the operator-assigned labels on this thread. Populated by the
+	// Service for a listed PAGE (one query for the whole page, not per row) and
+	// for a single thread; nil when no label store is configured.
+	Labels []Label
 	// ReplyLabel is the workspace's reply-label row resolved from
 	// LastReplyClass (a LEFT JOIN on (workspace_id, key)), for display. nil
 	// when no label in the workspace claims the key — a deleted custom
@@ -97,6 +101,17 @@ type Message struct {
 type ThreadDetail struct {
 	Thread   Thread
 	Messages []Message
+	// Snooze is the thread's snooze if one is still in force, else nil. Set by
+	// Service.GetThread (not by the Store, which reads only thread/message
+	// rows), so a lapsed snooze arrives as nil rather than as a stale row the
+	// reader would have to date-check itself.
+	Snooze *Snooze
+	// Labels are the operator-assigned labels on this thread, alphabetical.
+	// Also set by Service.GetThread, from the optional LabelStore.
+	Labels []Label
+	// PendingReply is the reply queued on this thread and not yet delivered,
+	// else nil. Set by Service.GetThread from the optional PendingReplyStore.
+	PendingReply *PendingReply
 }
 
 // ThreadPage is one page of ListThreads, newest first.
@@ -119,7 +134,32 @@ type ListFilter struct {
 	// thread's subject or its contact's email. "" means no search filter —
 	// this domain's usual convention for "absent" text, not a pointer.
 	Query string
-	Limit int32
+	// UnreadOnly restricts the page to unread threads. A bool rather than a
+	// *bool because there is no third state to express: the rail either asks
+	// for the unread scope or it doesn't, and "explicitly only READ threads"
+	// is not a scope this product offers.
+	UnreadOnly bool
+	// SinceLastMessageAt restricts the page to threads whose last_message_at
+	// is at or after it — how the "today" and "this week" scopes are
+	// expressed. nil for no lower bound. Deliberately separate from the
+	// BeforeLastMessageAt keyset cursor: this one bounds the SCOPE, that one
+	// names a position within it, and a page deep into "today" needs both at
+	// once.
+	SinceLastMessageAt *time.Time
+	// AwaitingReplyOnly restricts the page to threads whose newest message is
+	// inbound — the contact spoke last, so the thread is waiting on us.
+	AwaitingReplyOnly bool
+	// SnoozeHidden excludes threads still snoozed; SnoozedOnly keeps only
+	// those. Three states, not one bool, because "neither" is a real and
+	// distinct case: a search should find a snoozed thread (hiding it would
+	// look like data loss), while every rail scope hides them. Setting both is
+	// a contradiction the store rejects rather than silently resolving.
+	SnoozeHidden bool
+	SnoozedOnly  bool
+	// LabelID restricts the page to threads carrying one operator-assigned
+	// label. Optional; nil means no label filter.
+	LabelID *uuid.UUID
+	Limit   int32
 }
 
 // UpsertThreadInput carries the fields UpsertThread writes on first insert, and
@@ -177,6 +217,8 @@ type Store interface {
 	// RecordOutboundReply's doc for why this never flips unread or
 	// last_reply_class the way RecordReply's inbound path does.
 	RecordOutboundReply(ctx context.Context, threadID, workspaceID uuid.UUID, msgIn InsertMessageInput) error
+	// GetOverview returns the workspace's scope counts — see overview.go.
+	GetOverview(ctx context.Context, workspaceID uuid.UUID, window OverviewWindow) (Overview, error)
 }
 
 // DefaultThreadPageLimit is the page size ListThreads uses when the caller
@@ -338,6 +380,12 @@ func (s *PgStore) ListThreads(ctx context.Context, workspaceID uuid.UUID, filter
 		BeforeLastMessageAt: pgTimestamptz(filter.BeforeLastMessageAt),
 		BeforeID:            pgUUID(filter.BeforeID),
 		Query:               likeQuery(filter.Query),
+		UnreadOnly:          filter.UnreadOnly,
+		SinceLastMessageAt:  pgTimestamptz(filter.SinceLastMessageAt),
+		AwaitingReplyOnly:   filter.AwaitingReplyOnly,
+		SnoozeHidden:        filter.SnoozeHidden,
+		SnoozedOnly:         filter.SnoozedOnly,
+		LabelID:             pgUUID(filter.LabelID),
 		PageLimit:           NormalizeLimit(filter.Limit),
 	})
 	if err != nil {
@@ -661,6 +709,13 @@ func pgTimestamptz(t *time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
+// pgTimestamptzValue converts a required (non-pointer) domain time to the
+// pgtype the generated params use — pgTimestamptz's counterpart for the
+// overview window's boundaries, which are never absent.
+func pgTimestamptzValue(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
 // likeQuery escapes filter.Query (a plain string, "" meaning "no search")

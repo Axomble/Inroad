@@ -453,7 +453,13 @@ func run() error {
 	// Built here, after the agent runtime, because the draft path reuses THAT
 	// runtime's model resolver rather than constructing a second one — one
 	// workspace AI configuration, one credential-unsealing path.
-	inboxHandler := inbox.NewHandler(inbox.NewService(inbox.NewPgStore(pool),
+	// One PgStore, handed in five times: it implements inbox.Store (threads and
+	// messages), inbox.SnoozeStore, inbox.LabelStore (triage state),
+	// inbox.PendingReplyStore (deferred replies) and inbox.ComposeStore (drafts
+	// + composed emails). The interfaces are separate so a caller needing only
+	// one need not satisfy the others, not because the persistence is.
+	inboxStore := inbox.NewPgStore(pool)
+	inboxHandler := inbox.NewHandler(inbox.NewService(inboxStore,
 		// A manual reply must never go to an address the workspace has
 		// explicitly unsubscribed or bounced — the SAME suppression table a
 		// real send checks. internal/worker/inbox re-checks independently
@@ -462,6 +468,12 @@ func run() error {
 		inbox.WithSuppressionChecker(suppStore),
 		inbox.WithReplyEnqueuer(enq),
 		inbox.WithReplyDrafter(replyDrafterAdapter{runtime: runtime}),
+		inbox.WithSnoozeStore(inboxStore),
+		inbox.WithLabelStore(inboxStore),
+		inbox.WithPendingReplyStore(inboxStore),
+		inbox.WithPendingReplyEnqueuer(enq),
+		inbox.WithComposeStore(inboxStore),
+		inbox.WithComposeEnqueuer(enq),
 	))
 	// Per-IP and per-WORKSPACE cap on reply drafting. Unlike the pre-auth
 	// throttles above, the account key comes from the authenticated principal

@@ -43,11 +43,16 @@ const router = vi.hoisted(() => {
 })
 
 vi.mock('@tanstack/react-router', async () => {
-  const { useSyncExternalStore } = await import('react')
+  const { useSyncExternalStore, createElement } = await import('react')
   return {
     useSearch: () => useSyncExternalStore(router.subscribe, () => router.search),
     // Stable across renders, as TanStack's own `useNavigate` is.
     useNavigate: () => router.navigate,
+    // The reader's ReplyComposer links to Settings → AI when no model is
+    // configured. A plain anchor is enough: no test here asserts on it, but
+    // omitting the export makes the whole reader throw on render.
+    Link: ({ to, children, ...rest }: { to: string; children?: unknown }) =>
+      createElement('a', { href: to, ...rest }, children as never),
   }
 })
 
@@ -88,6 +93,9 @@ const PAGE_SIZE = 25
 let mailboxes: Mailbox[]
 let threads: Thread[]
 let threadRequests: URL[]
+let overviewRequests: URL[]
+/** Lets a test force the overview to fail, to assert the rail degrades. */
+let overviewStatus: number
 
 /** The reply-class filter's options now come from GET /reply-labels, not a
  * hardcoded list — the fixture mirrors the built-in taxonomy so filter tests
@@ -155,6 +163,8 @@ beforeEach(() => {
   router.search = {}
   router.lastNavigation = null
   threadRequests = []
+  overviewRequests = []
+  overviewStatus = 200
   mailboxes = [
     { id: 'mb-1', email: 'sales@acme.test' },
     { id: 'mb-2', email: 'support@acme.test' },
@@ -195,6 +205,51 @@ beforeEach(() => {
 
       if (url.pathname.endsWith('/mailboxes')) return json(mailboxes)
       if (url.pathname.endsWith('/reply-labels')) return json(REPLY_LABELS)
+
+      if (url.pathname.endsWith('/inbox/overview')) {
+        overviewRequests.push(url)
+        if (overviewStatus !== 200) return json({ error: 'nope' }, overviewStatus)
+        // Derived from the same `threads` fixture the list serves, so a count
+        // asserted in a test can never contradict the rows beside it.
+        return json({
+          total: threads.length,
+          unread: threads.filter((t) => t.unread).length,
+          today: threads.length,
+          this_week: threads.length,
+          awaiting_reply: threads.filter((t) => t.unread).length,
+          by_mailbox: mailboxes.map((m) => ({
+            mailbox_id: m.id,
+            total: threads.filter((t) => t.mailbox_id === m.id).length,
+            unread: threads.filter((t) => t.mailbox_id === m.id && t.unread).length,
+          })),
+          by_reply_class: [],
+        })
+      }
+
+      // One thread's detail, for the three-pane reader. Its message history is
+      // synthesized from the summary so the reader has something to render.
+      const detailMatch = /\/inbox\/threads\/([^/]+)$/.exec(url.pathname)
+      if (detailMatch && method === 'GET') {
+        const thread = threads.find((t) => t.id === detailMatch[1])
+        if (!thread) return json({ error: 'not found' }, 404)
+        return json({
+          ...thread,
+          messages: [
+            {
+              direction: 'inbound',
+              message_id: `m-${thread.id}`,
+              from_email: thread.contact_email || 'someone@prospect.test',
+              from_name: thread.contact_first_name,
+              to_email: 'sales@acme.test',
+              subject: thread.subject,
+              body_text: `Body of ${thread.subject}`,
+              body_html: '',
+              reply_class: thread.last_reply_class,
+              occurred_at: thread.last_message_at,
+            },
+          ],
+        })
+      }
 
       if (url.pathname.endsWith('/inbox/threads') && method === 'GET') {
         threadRequests.push(url)
@@ -411,4 +466,217 @@ test('Previous pops back to the exact prior page', async () => {
   expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled()
   // Page 1 was a full page, so Next is live again.
   expect(screen.getByRole('button', { name: 'Next page' })).toBeEnabled()
+})
+
+// ---------------------------------------------------------------------------
+// Scope rail + real counts (the overview endpoint)
+// ---------------------------------------------------------------------------
+
+test('the rail renders real per-mailbox counts from the overview, not a client-side sample', async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  await waitFor(() => expect(overviewRequests.length).toBeGreaterThan(0))
+  // One thread per mailbox in the fixture, and mb-1's is the unread one.
+  const salesRow = screen.getByRole('button', { name: /sales@acme\.test/ })
+  expect(salesRow).toHaveTextContent('1')
+  expect(salesRow).toHaveTextContent('unread')
+})
+
+test('the overview is asked for the viewer own timezone offset, so "today" is their day', async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  await waitFor(() => expect(overviewRequests.length).toBeGreaterThan(0))
+  const request = overviewRequests[overviewRequests.length - 1]
+  if (!request) throw new Error('no overview request')
+  expect(request.searchParams.get('tz_offset')).toBe(String(-new Date().getTimezoneOffset()))
+})
+
+test('a failed overview degrades to a rail without counts rather than breaking the page', async () => {
+  overviewStatus = 500
+  renderWithProviders(<InboxPage />)
+
+  // The list still renders — the counts are supplementary, not load-bearing.
+  await screen.findByText('Re: intro')
+  expect(await screen.findByText(/Counts unavailable/)).toBeInTheDocument()
+})
+
+test('clicking a virtual scope re-fetches with that scope and drops any mailbox filter', async () => {
+  router.search = { mailbox: 'mb-1' }
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  fireEvent.click(screen.getByRole('button', { name: /Awaiting reply/ }))
+
+  await waitFor(() => {
+    const url = lastThreadRequest()
+    expect(url.searchParams.get('scope')).toBe('awaiting_reply')
+    // The rail shows one selection: picking a folder must clear the mailbox,
+    // not silently intersect the two.
+    expect(url.searchParams.get('mailbox_id')).toBeNull()
+  })
+})
+
+test('the All mail scope sends no scope param, since it is the API default', async () => {
+  router.search = { scope: 'unread' }
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  fireEvent.click(screen.getByRole('button', { name: /All mail/ }))
+
+  await waitFor(() => expect(lastThreadRequest().searchParams.get('scope')).toBeNull())
+})
+
+test('picking a mailbox clears the virtual scope', async () => {
+  router.search = { scope: 'unread' }
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  fireEvent.click(screen.getByRole('button', { name: /support@acme\.test/ }))
+
+  await waitFor(() => {
+    const url = lastThreadRequest()
+    expect(url.searchParams.get('mailbox_id')).toBe('mb-2')
+    expect(url.searchParams.get('scope')).toBeNull()
+  })
+})
+
+test('an unrecognised scope in the URL degrades to the whole inbox instead of a 400', async () => {
+  router.search = { scope: 'not-a-scope' }
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  expect(lastThreadRequest().searchParams.get('scope')).toBeNull()
+})
+
+test('threads are grouped under time-bucket headings', async () => {
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  // The fixture's timestamps are a fixed 2026-08-06, which is in the past
+  // relative to any real run, so they land in the oldest bucket. The assertion
+  // is that a heading exists at all — which bucket is bucketFor's own test.
+  const headings = await screen.findAllByRole('heading', { level: 3 })
+  expect(headings.length).toBeGreaterThan(0)
+})
+
+test('a scope change resets paging, so page 2 of one folder is not carried into another', async () => {
+  threads = Array.from({ length: PAGE_SIZE }, (_, i) => makeThread(i))
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Subject 0')
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+  await waitFor(() => expect(lastThreadRequest().searchParams.get('before_id')).not.toBeNull())
+
+  fireEvent.click(screen.getByRole('button', { name: /Unread/ }))
+  await waitFor(() => {
+    const url = lastThreadRequest()
+    expect(url.searchParams.get('scope')).toBe('unread')
+    expect(url.searchParams.get('before_id')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Three-pane layout. jsdom has no matchMedia, so the tests above all exercise
+// the NARROW path (a row click navigates to the thread's own route). These
+// stub it to assert the wide path selects in place instead.
+// ---------------------------------------------------------------------------
+
+/** Stubs matchMedia so every query reports `matches`, putting the page in its
+ * three-pane layout. Returns a working (if inert) MediaQueryList. */
+function stubWideViewport() {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })),
+  )
+}
+
+test('on a wide viewport a row click opens the thread in the reader pane instead of navigating away', async () => {
+  stubWideViewport()
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  // Before any selection the pane prompts rather than showing a blank column.
+  expect(screen.getByText('Select a thread to read it.')).toBeInTheDocument()
+
+  fireEvent.click(screen.getByText('Re: intro'))
+
+  // The reader fetches the thread; navigation must NOT have happened.
+  await waitFor(() => expect(screen.queryByText('Select a thread to read it.')).not.toBeInTheDocument())
+  expect(router.lastNavigation).toBeNull()
+})
+
+test('the row open in the reader is marked as current, so it is distinguishable from the hover cursor', async () => {
+  stubWideViewport()
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  fireEvent.click(screen.getByText('Re: intro'))
+
+  await waitFor(() => {
+    const current = document.querySelectorAll('li[aria-current="true"]')
+    expect(current).toHaveLength(1)
+    expect(current[0]).toHaveTextContent('Re: intro')
+  })
+})
+
+test('a filter change that drops the selected thread clears the reader rather than showing a stale one', async () => {
+  stubWideViewport()
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  // t-1 lives in mb-1.
+  fireEvent.click(screen.getByText('Re: intro'))
+  await waitFor(() => expect(screen.queryByText('Select a thread to read it.')).not.toBeInTheDocument())
+
+  // Switching to mb-2 removes it from the list entirely.
+  fireEvent.click(screen.getByRole('button', { name: /support@acme\.test/ }))
+
+  await waitFor(() => expect(screen.getByText('Select a thread to read it.')).toBeInTheDocument())
+})
+
+test('switching threads in the reader pane discards the previous thread typed reply', async () => {
+  stubWideViewport()
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+
+  // Draft a reply to thread A but never send it.
+  fireEvent.click(screen.getByText('Re: intro'))
+  const composer = await screen.findByPlaceholderText('Write a reply…')
+  fireEvent.change(composer, { target: { value: 'Private note meant only for Jamie' } })
+  expect(screen.getByPlaceholderText('Write a reply…')).toHaveValue('Private note meant only for Jamie')
+
+  // Move to thread B. The composer must come up empty: carrying the text over
+  // would let Send deliver Jamie's reply to a different contact.
+  fireEvent.click(screen.getByText('Re: follow up'))
+
+  await waitFor(() => expect(screen.getByPlaceholderText('Write a reply…')).toHaveValue(''))
+})
+
+test('tz_offset is sent only for the calendar-dependent scopes', async () => {
+  router.search = { scope: 'today' }
+  renderWithProviders(<InboxPage />)
+  await screen.findByText('Re: intro')
+  await waitFor(() =>
+    expect(lastThreadRequest().searchParams.get('tz_offset')).toBe(String(-new Date().getTimezoneOffset())),
+  )
+
+  // awaiting_reply has no calendar boundary, so the offset would only be
+  // cache-key noise.
+  fireEvent.click(screen.getByRole('button', { name: /Awaiting reply/ }))
+  await waitFor(() => {
+    const url = lastThreadRequest()
+    expect(url.searchParams.get('scope')).toBe('awaiting_reply')
+    expect(url.searchParams.get('tz_offset')).toBeNull()
+  })
 })

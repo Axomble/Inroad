@@ -33,6 +33,40 @@ func writeErr(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrReplyBodyInvalid):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// 422, not 400: the body parsed and snooze_until was a well-formed
+	// timestamp, so the request is syntactically fine and semantically
+	// rejected. This lets a client tell "I sent malformed JSON" from "my chosen
+	// moment was out of bounds" on the status alone. The message names the
+	// actual bound, so the UI can surface it without hardcoding 90 days.
+	case errors.Is(err, ErrSnoozeInPast), errors.Is(err, ErrSnoozeTooFar):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// A name collision is a genuine conflict on a resource that already exists.
+	// The label picker's own path (EnsureLabel) resolves it to the existing
+	// label instead, so a caller only ever sees this from a strict create.
+	case errors.Is(err, ErrLabelNameTaken):
+		httpx.Error(w, http.StatusConflict, err.Error())
+	// 422, like the snooze bounds: the request was well-formed and the limit is
+	// a property of the workspace, not of the syntax.
+	case errors.Is(err, ErrTooManyLabels):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// Same reasoning as the snooze bounds: a well-formed timestamp that is out
+	// of range is 422, not 400, so a client can tell a malformed request from a
+	// rejected moment on status alone.
+	case errors.Is(err, ErrScheduleInPast), errors.Is(err, ErrScheduleTooFar):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+	// 409: the reply exists, but the state it is in forbids the action. The
+	// message says WHY, because "the mail is already on its way" is something
+	// the operator needs told rather than a generic failure.
+	case errors.Is(err, ErrPendingNotCancellable):
+		httpx.Error(w, http.StatusConflict, err.Error())
+	// 422 for every compose-content complaint: the JSON parsed and the fields
+	// were well-formed strings, so the request is syntactically fine and
+	// semantically rejected. Each message names the actual problem, because
+	// "one of your recipients is invalid" is only useful if it says which.
+	case errors.Is(err, ErrNoRecipients), errors.Is(err, ErrTooManyRecipients),
+		errors.Is(err, ErrInvalidRecipient), errors.Is(err, ErrSubjectTooLong),
+		errors.Is(err, ErrMailboxRequired):
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	// The three draft failures get three DISTINCT statuses, none of which the
 	// draft route can produce for any other reason, so the UI can branch on the
 	// status alone without parsing the body:
@@ -118,6 +152,7 @@ type threadSummaryResponse struct {
 	Subject          string                 `json:"subject"`
 	LastReplyClass   string                 `json:"last_reply_class"`
 	ReplyLabel       *replyLabelRefResponse `json:"reply_label"`
+	Labels           []labelResponse        `json:"labels"`
 	Unread           bool                   `json:"unread"`
 	LastMessageAt    string                 `json:"last_message_at"`
 }
@@ -134,6 +169,7 @@ func toThreadSummaryResponse(t Thread) threadSummaryResponse {
 		Subject:          t.Subject,
 		LastReplyClass:   t.LastReplyClass,
 		ReplyLabel:       toReplyLabelRefResponse(t.ReplyLabel),
+		Labels:           toLabelResponses(t.Labels),
 		Unread:           t.Unread,
 		LastMessageAt:    t.LastMessageAt.UTC().Format(time.RFC3339),
 	}
@@ -152,6 +188,13 @@ func uuidString(id *uuid.UUID) *string {
 type threadDetailResponse struct {
 	threadSummaryResponse
 	Messages []messageResponse `json:"messages"`
+	// Snooze is null unless a snooze is still in force — the reader shows
+	// "Snoozed until …" and an Unsnooze action from this alone, without having
+	// to date-check a possibly-lapsed timestamp itself.
+	Snooze *snoozeResponse `json:"snooze"`
+	// PendingReply is the reply currently queued on this thread, if any — the
+	// reader shows its countdown and Undo from this alone.
+	PendingReply *pendingReplyResponse `json:"pending_reply"`
 }
 
 func toThreadDetailResponse(d ThreadDetail) threadDetailResponse {
@@ -159,7 +202,16 @@ func toThreadDetailResponse(d ThreadDetail) threadDetailResponse {
 	for _, m := range d.Messages {
 		messages = append(messages, toMessageResponse(m))
 	}
-	return threadDetailResponse{threadSummaryResponse: toThreadSummaryResponse(d.Thread), Messages: messages}
+	out := threadDetailResponse{threadSummaryResponse: toThreadSummaryResponse(d.Thread), Messages: messages}
+	if d.Snooze != nil {
+		snooze := toSnoozeResponse(*d.Snooze)
+		out.Snooze = &snooze
+	}
+	if d.PendingReply != nil {
+		pending := toPendingReplyResponse(*d.PendingReply)
+		out.PendingReply = &pending
+	}
+	return out
 }
 
 // threadPageResponse is GET /inbox/threads. There is no separate cursor
@@ -210,6 +262,13 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 	if raw := q.Get("reply_class"); raw != "" {
 		filter.ReplyClass = &raw
 	}
+	if raw := q.Get("label"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			return ListFilter{}, errors.New("label must be a UUID")
+		}
+		filter.LabelID = &id
+	}
 	filter.Query = q.Get("q")
 	beforeAt := q.Get("before_last_message_at")
 	beforeID := q.Get("before_id")
@@ -240,7 +299,71 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 		}
 		filter.Limit = int32(limit)
 	}
+	if err := applyScope(&filter, q.Get("scope"), r); err != nil {
+		return ListFilter{}, err
+	}
 	return filter, nil
+}
+
+// Scope names the rail's virtual folders. These are the ONLY accepted values
+// for ?scope= — an unrecognised one is a 400 rather than a silently unscoped
+// page, which would show the operator a list that does not match the scope
+// they clicked.
+const (
+	scopeAll           = "all"
+	scopeUnread        = "unread"
+	scopeToday         = "today"
+	scopeThisWeek      = "this_week"
+	scopeAwaitingReply = "awaiting_reply"
+	scopeSnoozed       = "snoozed"
+)
+
+// applyScope translates ?scope= into the ListFilter's scope fields. "" and
+// "all" are both the unscoped inbox (the former because an absent param must
+// not be an error, the latter because the rail names that scope explicitly).
+//
+// today/this_week resolve their boundary through parseOverviewWindow, so the
+// list agrees with the count the rail rendered beside it: computing the two
+// from different clocks would let a thread be counted in "today" but missing
+// from the list it links to.
+func applyScope(filter *ListFilter, scope string, r *http.Request) error {
+	// Snoozed threads are hidden from every scope but `snoozed` itself — that
+	// is what snoozing means. The one exception is a SEARCH: a query is the
+	// operator asking for a specific thread by name, and answering "no results"
+	// because they snoozed it last week reads as data loss. Set before the
+	// switch so the `snoozed` case can override it.
+	filter.SnoozeHidden = filter.Query == ""
+
+	switch scope {
+	case "", scopeAll:
+		return nil
+	case scopeUnread:
+		filter.UnreadOnly = true
+		return nil
+	case scopeAwaitingReply:
+		filter.AwaitingReplyOnly = true
+		return nil
+	case scopeSnoozed:
+		// Mutually exclusive with SnoozeHidden (Service.ListThreads rejects
+		// both), so clear it rather than leaving a contradiction for the
+		// validator to catch.
+		filter.SnoozeHidden = false
+		filter.SnoozedOnly = true
+		return nil
+	case scopeToday, scopeThisWeek:
+		window, err := parseOverviewWindow(r)
+		if err != nil {
+			return err
+		}
+		since := window.TodayStart
+		if scope == scopeThisWeek {
+			since = window.WeekStart
+		}
+		filter.SinceLastMessageAt = &since
+		return nil
+	default:
+		return errors.New("scope must be one of all, unread, today, this_week, awaiting_reply, snoozed")
+	}
 }
 
 // get handles GET /inbox/threads/{id}.

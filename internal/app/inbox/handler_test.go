@@ -23,8 +23,17 @@ var testWS = uuid.New()
 
 func bearer(t *testing.T, ws uuid.UUID) string {
 	t.Helper()
+	return bearerAs(t, ws, uuid.New())
+}
+
+// bearerAs issues a token for a SPECIFIC user. Most tests do not care who the
+// caller is and use bearer(), which mints a fresh id each call — but anything
+// per-user (compose drafts) needs two requests to arrive as the SAME person, and
+// a random id per call would make an operator's own draft invisible to them.
+func bearerAs(t *testing.T, ws, userID uuid.UUID) string {
+	t.Helper()
 	tok, err := auth.IssueToken(testSecret, auth.Claims{
-		UserID: uuid.New().String(), WorkspaceID: ws.String(), Role: "owner", SessionID: uuid.New().String(),
+		UserID: userID.String(), WorkspaceID: ws.String(), Role: "owner", SessionID: uuid.New().String(),
 	}, time.Hour)
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
