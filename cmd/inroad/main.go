@@ -128,7 +128,7 @@ func run() error {
 		metricsWG.Wait()
 	}()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	pool, err := db.ConnectSized(ctx, cfg.DatabaseURL, db.PoolSize{Max: cfg.DBMaxConns, Min: cfg.DBMinConns})
 	if err != nil {
 		logger.Error("db connect failed", "err", err)
 		return err

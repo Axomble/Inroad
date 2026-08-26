@@ -90,7 +90,7 @@ func run() error {
 		metricsWG.Wait()
 	}()
 
-	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
+	pool, err := db.ConnectSized(context.Background(), cfg.DatabaseURL, db.PoolSize{Max: cfg.DBMaxConns, Min: cfg.DBMinConns})
 	if err != nil {
 		logger.Error("db connect failed", "err", err)
 		return err
@@ -154,41 +154,15 @@ func run() error {
 	defer cancelHeartbeat()
 	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, logger)
 
-	// Start the periodic scheduler alongside the worker. It enqueues the
-	// reconcile sweeps (enrollments, inbox, warmup, …) so work whose live
-	// task was lost (launch committed DB rows but Redis enqueue failed)
-	// gets retried without operator action.
-	sch := queue.NewScheduler(cfg.RedisAddr, logger)
-	if err := queue.RegisterSweepEnrollments(sch); err != nil {
-		logger.Error("scheduler register (enrollments) failed", "err", err)
+	// Start the periodic scheduler alongside the worker, if this replica is the
+	// one that schedules. It enqueues the reconcile sweeps (enrollments, inbox,
+	// warmup, …) so work whose live task was lost (launch committed DB rows but
+	// Redis enqueue failed) gets retried without operator action.
+	stopScheduler, err := startScheduler(cfg, logger)
+	if err != nil {
 		return err
 	}
-	if err := queue.RegisterInboxSweep(sch); err != nil {
-		logger.Error("scheduler register (inbox sweep) failed", "err", err)
-		return err
-	}
-	if err := queue.RegisterWarmupSweep(sch); err != nil {
-		logger.Error("scheduler register (warmup sweep) failed", "err", err)
-		return err
-	}
-	if err := queue.RegisterMaintenanceCleanup(sch); err != nil {
-		logger.Error("scheduler register (maintenance cleanup) failed", "err", err)
-		return err
-	}
-	if err := queue.RegisterDomainAuthSweep(sch); err != nil {
-		logger.Error("scheduler register (domain auth sweep) failed", "err", err)
-		return err
-	}
-	if err := queue.RegisterRecipientESPSweep(sch); err != nil {
-		logger.Error("scheduler register (recipient esp sweep) failed", "err", err)
-		return err
-	}
-	go func() {
-		if err := sch.Run(); err != nil {
-			logger.Error("scheduler exited", "err", err)
-		}
-	}()
-	defer sch.Shutdown()
+	defer stopScheduler()
 
 	// Dead-letter capture. Wired by type assertion for the same reason as the
 	// cleaner/breaker capabilities in worker.Register: the capability is

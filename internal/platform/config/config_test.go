@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -350,6 +351,101 @@ func TestGoogleSignInCredentialsFallBackToMailboxClient(t *testing.T) {
 			}
 			if want := cfg.PublicURL + "/api/v1/auth/oauth/google/callback"; cfg.GoogleSignInRedirectURL != want {
 				t.Errorf("GoogleSignInRedirectURL = %q, want %q", cfg.GoogleSignInRedirectURL, want)
+			}
+		})
+	}
+}
+
+// setRequiredSecrets sets the two env vars Load refuses to run without, so a
+// focused test can assert on one setting without restating them.
+func setRequiredSecrets(t *testing.T) {
+	t.Helper()
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+}
+
+// The defaults must equal the pool floors that were hardcoded before these env
+// vars existed, so upgrading changes no running deployment's connection budget.
+func TestDBPoolDefaultsMatchThePreviousFloors(t *testing.T) {
+	setRequiredSecrets(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.DBMaxConns != 25 {
+		t.Errorf("DBMaxConns = %d, want 25 (the previous hardcoded floor)", cfg.DBMaxConns)
+	}
+	if cfg.DBMinConns != 4 {
+		t.Errorf("DBMinConns = %d, want 4 (the previous hardcoded floor)", cfg.DBMinConns)
+	}
+}
+
+func TestDBPoolOverrides(t *testing.T) {
+	setRequiredSecrets(t)
+	t.Setenv("INROAD_DB_MAX_CONNS", "8")
+	t.Setenv("INROAD_DB_MIN_CONNS", "2")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.DBMaxConns != 8 || cfg.DBMinConns != 2 {
+		t.Fatalf("pool sizing = (%d, %d), want (8, 2)", cfg.DBMaxConns, cfg.DBMinConns)
+	}
+}
+
+// An unusable connection budget must fail at startup with the offending numbers,
+// not as a pool.Acquire that blocks forever on the first request.
+func TestDBPoolValidationFailsLoud(t *testing.T) {
+	for _, tc := range []struct {
+		name, maxConns, minConns string
+		wantText                 string
+	}{
+		{"max below min", "2", "10", "INROAD_DB_MAX_CONNS"},
+		{"zero max", "0", "0", "greater than 0"},
+		{"negative max", "-1", "0", "greater than 0"},
+		{"negative min", "10", "-1", "must not be negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredSecrets(t)
+			t.Setenv("INROAD_DB_MAX_CONNS", tc.maxConns)
+			t.Setenv("INROAD_DB_MIN_CONNS", tc.minConns)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with max=%s min=%s = nil error, want a rejection", tc.maxConns, tc.minConns)
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("Load() error = %q, want it to mention %q", err, tc.wantText)
+			}
+		})
+	}
+}
+
+// The scheduler defaults ON so a single-worker self-host keeps working with no
+// configuration; scaling out is what requires turning it off on the extras.
+func TestRunSchedulerDefaultsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		want        bool
+	}{
+		{"unset", "", true},
+		{"true", "true", true},
+		{"one", "1", true},
+		{"false", "false", false},
+		{"zero", "0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequiredSecrets(t)
+			t.Setenv("INROAD_RUN_SCHEDULER", tc.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.RunScheduler != tc.want {
+				t.Fatalf("RunScheduler with %q = %v, want %v", tc.value, cfg.RunScheduler, tc.want)
 			}
 		})
 	}
