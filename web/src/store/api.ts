@@ -3643,9 +3643,24 @@ export type CampaignSender = {
   /** Read-only count of sends from this mailbox today (UTC day). */
   sent_today?: number;
 };
+export type FaultDomainShare = {
+  domain: string;
+  /** Contacts assigned to mailboxes on this domain. */
+  assigned: number;
+  /** Fraction of the campaign's assigned contacts, not a percentage. */
+  share: number;
+  /** The share this domain was judged against — max_fault_domain_share, or a LOWER one because the domain is degrading. Published because otherwise a reader cannot tell why a domain at 25% is over budget while another at 55% is not, and would reasonably conclude the figure was wrong. Compare each share against its own ceiling, never against max_fault_domain_share alone. */
+  ceiling: number;
+  /** True when share exceeds max_fault_domain_share. Advisory: the rotation routes new contacts away from an over-budget domain when an alternative exists, but never withholds a send — a single-domain pool reports 1.0 here and keeps sending. */
+  over_budget: boolean;
+};
 export type CampaignSenderPool = {
   rotation_mode: RotationMode;
   senders: CampaignSender[];
+  /** Read-only. The most of a campaign's assigned volume that should rest on one fault domain while an alternative exists — the limit fault_domain_shares is measured against. Carried on the wire so a client never hard-codes it. */
+  max_fault_domain_share: number;
+  /** Read-only. How concentrated this campaign's sending is, worst first: one entry per thing that can fail for several of its mailboxes at once. Empty when nothing in the pool can be grouped. Measured over the WHOLE pool including disabled members, because the risk lives in the mail already sent rather than in today's roster. */
+  fault_domain_shares: FaultDomainShare[];
 };
 export type CampaignSenderRequest = {
   mailbox_id: string;

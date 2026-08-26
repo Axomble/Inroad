@@ -137,3 +137,40 @@ func TestAConsumerMailboxIsNeitherCountedNorWithheld(t *testing.T) {
 		t.Errorf("acme.com domain lane = %q, want quarantine — a real shared domain must still gate", got)
 	}
 }
+
+// The KEY half of the gate, on its own — and the proof that there is only one of it.
+//
+// A caller that GROUPS senders by shared fault (the rotation exposure budget) needs
+// the key, then needs that group's verdict. Deriving the key at the call site and
+// indexing the map would be a second expression of the rule the fold applies, and
+// the two would agree only by inspection. This asserts they are the same value for
+// every address shape the fold treats differently.
+func TestSharedReputationDomainIsTheOneKeyTheFoldAndTheLookupUse(t *testing.T) {
+	participants := []MailboxLane{
+		{Email: "ops@mail.acme.co.uk", Lane: LaneWatch},
+		{Email: "alice@gmail.com", Lane: LaneQuarantine},
+		{Email: "nodomain", Lane: LaneBlocked},
+	}
+	lanes := WorstLanesByDomain(participants)
+
+	for _, p := range participants {
+		key := SharedReputationDomain(p.Email)
+		if got, want := lanes.ForDomain(key), lanes.For(p.Email); got != want {
+			t.Errorf("%s: ForDomain(%q) = %q but For(email) = %q — one key, or the two will drift",
+				p.Email, key, got, want)
+		}
+	}
+	if got := SharedReputationDomain("ops@mail.acme.co.uk"); got != "acme.co.uk" {
+		t.Errorf("shared domain = %q, want acme.co.uk — the eTLD+1 the fold groups on", got)
+	}
+	// Both addresses the fold SKIPS resolve to no key at all. "" must never become a
+	// bucket that lumps a consumer mailbox together with an ungroupable one.
+	for _, email := range []string{"alice@gmail.com", "nodomain"} {
+		if got := SharedReputationDomain(email); got != "" {
+			t.Errorf("%s: shared domain = %q, want none", email, got)
+		}
+	}
+	if len(lanes) != 1 {
+		t.Errorf("lanes = %v, want just the one genuinely shared domain", lanes)
+	}
+}
