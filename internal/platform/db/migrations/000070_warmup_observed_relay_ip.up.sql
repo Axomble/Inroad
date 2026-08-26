@@ -1,0 +1,21 @@
+-- The relay address a warmup message was observed arriving from.
+--
+-- This is what makes "these three domains fail through one relay" answerable by
+-- NAME rather than by inference. Slice D can group degradation by signing domain
+-- and destination route; until now it could not group by the machine the mail
+-- actually came from.
+--
+-- TEXT and no CHECK, deliberately. An IP is not a closed vocabulary the way
+-- destination_esp or the auth verdicts are, so the shape is enforced in Go
+-- (warmup.ObservedRelayIP), which rejects private, loopback, link-local and CGNAT
+-- ranges — an attacker can name those freely and they identify nothing — and
+-- normalises so one relay is one value. A CHECK here would be a second, weaker
+-- implementation of that.
+--
+-- '' means "nothing trustworthy was observed", which is the honest reading for a
+-- message whose Received chain the receiver did not write, and for every row that
+-- predates this column. NOTHING GATES ON IT: the relay identity is derived from
+-- headers a sender partly controls, and letting that reach pool eligibility is the
+-- escalation path security.md invariants 57-60 exist to describe.
+ALTER TABLE warmup_observations
+    ADD COLUMN IF NOT EXISTS observed_relay_ip TEXT NOT NULL DEFAULT '';

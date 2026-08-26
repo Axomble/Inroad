@@ -1009,6 +1009,30 @@ write history that never happened.
     Each mailbox's own lane still applies before the budget, so containment is not
     weakened — but new leads drift toward the least domain-contained class of mailbox.
 
+61. **The observed relay IP and the content version are recorded and gate nothing.**
+    `warmup_observations.observed_relay_ip` is the address the RECEIVER saw its peer
+    connect from, taken from the topmost `Received` hop the receiving infrastructure
+    wrote. `content_version` fingerprints the library template a send carried, copied
+    onto the observation inside `RecordWarmupPlacementObservation`'s own
+    `INSERT…SELECT` so it cannot disagree with the send.
+    **Neither gates anything**, and the reasons differ. The relay IP is derived from a
+    `Received` chain a sender partly controls, so only hops attributable to the
+    receiver are trusted at all, and letting an attacker-influenceable relay identity
+    reach pool eligibility is the escalation path invariants 57–60 describe. The
+    content version is a calibration problem twice over: the sample per version is
+    small by construction, because a shared library spreads thin across a pool, and a
+    template's apparent spam rate is confounded with whichever mailboxes happened to
+    draw it.
+    Private, loopback, link-local and CGNAT ranges are refused as relay identities —
+    an attacker can name those freely and they identify nothing. `''` means "nothing
+    trustworthy was observed", which is also every pre-column row, and is never to be
+    read as a relay.
+    **ASN resolution is deliberately absent.** It needs a MaxMind-class dataset: a new
+    dependency, a licence question, and a refresh story for a self-hostable product.
+    The IP alone is what could be recorded without taking that on, and naming a relay
+    by ASN is the more useful grouping — so this is deferred for a supply-chain reason,
+    not an effort one.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

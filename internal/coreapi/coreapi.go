@@ -732,6 +732,13 @@ type WarmupSendJob struct {
 	IssuedLane          string
 	IssuedPolicyVersion string
 	LeaseExpiresAt      time.Time
+	// ContentVersion identifies WHICH library content this send carries — the
+	// (thread template, turn) warmup.ContentVersion derives from the thread's
+	// content_key. ClaimWarmupSend persists it, and the placement observation copies
+	// it off the send row, so a spam spike can be attributed to a template rather
+	// than only to a mailbox. Empty when the content could not be resolved to a
+	// library turn; it gates nothing either way (see warmup/contentversionfold.go).
+	ContentVersion string
 	// ToEmail / FromEmail / FromName address the message envelope.
 	ToEmail   string
 	FromEmail string
@@ -827,6 +834,11 @@ type WarmupReceiptInput struct {
 	SPFResult        string
 	DKIMResult       string
 	DMARCResult      string
+	// ObservedRelayIP is the address the RECEIVER saw its peer connect from, taken
+	// from the topmost Received hop the receiving infrastructure wrote. "" when
+	// nothing trustworthy was observed — a sender partly controls that chain, so a
+	// hop we cannot attribute to the receiver is not a relay identity. Gates nothing.
+	ObservedRelayIP string
 }
 
 // WarmupEngagePlan is what a recipient should do about a newly received warmup

@@ -160,6 +160,11 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		body       string
 		inReplyTo  string
 		references string
+		// contentVersion identifies the library content this send carries. It is
+		// derived from the SAME (content key, turn) pair that resolved the body just
+		// below, in both branches, so it can never name content the send did not
+		// transmit.
+		contentVersion string
 	)
 
 	// New-thread recipient defaults to the recency-spread partner; the reply branch
@@ -196,6 +201,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 				// TODO(warmup): enrich References with the full ancestor chain once
 				// per-message ids are persisted (a schema change, out of scope here).
 				references = rp.RootMessageID
+				contentVersion = warmup.ContentVersion(rp.ContentKey, int(rp.Turn))
 			}
 		case errors.Is(rerr, pgx.ErrNoRows):
 			// no repliable partner for this sender — fall through to a new thread
@@ -223,6 +229,7 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		}
 		subject = content.Subject
 		body = opener
+		contentVersion = warmup.ContentVersion(newThreadContentKey, 0)
 	}
 
 	sendID := deriveWarmupSendID(mbID, dayKey, sendIndex)
@@ -284,10 +291,13 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		IssuedLane:          b.Lane,
 		IssuedPolicyVersion: warmup.PolicyVersion,
 		LeaseExpiresAt:      b.LeaseExpiresAt.Time,
-		ToEmail:             toEmail,
-		FromEmail:           b.FromEmail,
-		FromName:            b.FromName,
-		Subject:             subject,
+		// Which library content this send carries, so its placement can be attributed
+		// to a template and not only to a mailbox.
+		ContentVersion: contentVersion,
+		ToEmail:        toEmail,
+		FromEmail:      b.FromEmail,
+		FromName:       b.FromName,
+		Subject:        subject,
 		// Warmup mail is intentionally plaintext for v1 (the library content is
 		// text-only), so BodyHTML is deliberately left empty here — not a TODO.
 		BodyText:       body,
@@ -337,6 +347,7 @@ func (c client) ClaimWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) 
 		ID: sendID, WorkspaceID: ws, ThreadID: threadID, FromMailbox: from, ToMailbox: to,
 		IsReply: job.IsReply, Token: job.Token, LeaseSeconds: claimLeaseSeconds,
 		IssuedLane: job.IssuedLane, IssuedPolicyVersion: job.IssuedPolicyVersion,
+		ContentVersion: job.ContentVersion,
 		LeaseExpiresAt: pgtype.Timestamptz{Time: job.LeaseExpiresAt, Valid: !job.LeaseExpiresAt.IsZero()},
 	}); err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {

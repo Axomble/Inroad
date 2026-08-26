@@ -148,10 +148,11 @@ func (q *Queries) ApplyWarmupParticipantTransition(ctx context.Context, arg Appl
 const claimWarmupSend = `-- name: ClaimWarmupSend :one
 INSERT INTO warmup_sends (id, workspace_id, thread_id, from_mailbox, to_mailbox,
                           is_reply, token, status, claimed_at,
-                          issued_lane, issued_policy_version, lease_expires_at)
+                          issued_lane, issued_policy_version, lease_expires_at,
+                          content_version)
 SELECT $1, $2, $3, $4, $5, $6, $7, 'sending', now(),
        $8::text, $9::text,
-       $10::timestamptz
+       $10::timestamptz, $11::text
 FROM mailboxes m
 JOIN warmup_participants sender
   ON sender.mailbox_id = m.id AND sender.workspace_id = m.workspace_id
@@ -165,11 +166,12 @@ ON CONFLICT (id) DO UPDATE SET
     -- attempt is acting on, not the one a crashed worker acted on.
     issued_lane = $8::text,
     issued_policy_version = $9::text,
-    lease_expires_at = $10::timestamptz
+    lease_expires_at = $10::timestamptz,
+    content_version = $11::text
     WHERE warmup_sends.workspace_id = $2
       AND (warmup_sends.status = 'queued'
         OR (warmup_sends.status = 'sending'
-            AND warmup_sends.claimed_at < now() - make_interval(secs => $11::int)))
+            AND warmup_sends.claimed_at < now() - make_interval(secs => $12::int)))
       AND (warmup_sends.issued_lane IS NULL
            OR warmup_sends.issued_lane = $8::text)
       AND (warmup_sends.issued_policy_version IS NULL
@@ -188,6 +190,7 @@ type ClaimWarmupSendParams struct {
 	IssuedLane          string             `json:"issued_lane"`
 	IssuedPolicyVersion string             `json:"issued_policy_version"`
 	LeaseExpiresAt      pgtype.Timestamptz `json:"lease_expires_at"`
+	ContentVersion      string             `json:"content_version"`
 	LeaseSeconds        int32              `json:"lease_seconds"`
 }
 
@@ -241,6 +244,15 @@ type ClaimWarmupSendParams struct {
 // lane or policy may be sitting on the row. A NULL issued_lane /
 // issued_policy_version is a pre-lease row (written before 000057) and passes:
 // those sends predate the lease and must keep working.
+//
+// content_version records WHICH library content this send carried — the identifier
+// warmup.ContentVersion derives from the (template, turn) the thread's content_key
+// resolves to. It is written HERE, at the claim, rather than after delivery, for the
+// same reason the token is: the caller already resolved the content to build the
+// body, and a row that reaches 'sent' without it would be an observation that can
+// never be attributed. It is re-stamped on a reclaim alongside the lease, so the row
+// describes the content THIS attempt is sending; a reclaim only happens on a row
+// that never delivered, so the value cannot drift from what a receipt will see.
 func (q *Queries) ClaimWarmupSend(ctx context.Context, arg ClaimWarmupSendParams) (uuid.UUID, error) {
 	row := q.db.QueryRow(ctx, claimWarmupSend,
 		arg.ID,
@@ -253,6 +265,7 @@ func (q *Queries) ClaimWarmupSend(ctx context.Context, arg ClaimWarmupSendParams
 		arg.IssuedLane,
 		arg.IssuedPolicyVersion,
 		arg.LeaseExpiresAt,
+		arg.ContentVersion,
 		arg.LeaseSeconds,
 	)
 	var id uuid.UUID
@@ -985,6 +998,95 @@ func (q *Queries) ListDueWarmupMailboxes(ctx context.Context) ([]ListDueWarmupMa
 	for rows.Next() {
 		var i ListDueWarmupMailboxesRow
 		if err := rows.Scan(&i.MailboxID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWarmupContentVersions = `-- name: ListWarmupContentVersions :many
+SELECT
+    o.content_version,
+    count(*) FILTER (WHERE o.placement IN ('inbox','tabbed'))::bigint AS inbox_7d,
+    count(*) FILTER (WHERE o.placement = 'spam')::bigint             AS spam_7d
+FROM warmup_observations o
+WHERE o.workspace_id = $1
+  AND o.kind = 'placement'
+  AND o.attribution_trusted
+  AND o.observed_at >= now() - interval '7 days'
+GROUP BY o.content_version
+ORDER BY o.content_version
+`
+
+type ListWarmupContentVersionsRow struct {
+	ContentVersion string `json:"content_version"`
+	Inbox7d        int64  `json:"inbox_7d"`
+	Spam7d         int64  `json:"spam_7d"`
+}
+
+// One WORKSPACE's placement, split by WHICH LIBRARY CONTENT produced it, over the
+// trailing 7 days. Separates "this thread template lands in spam" from "this mailbox
+// is degrading" — until now the same signal, with opposite responses.
+//
+// Grouped per workspace and NOT per mailbox, which is the opposite choice from
+// ListWarmupRoutes and is the point: the content library is shared across the whole
+// pool, so a template's record only becomes readable when every sender that drew it
+// is counted together. Per mailbox, every cell would be a handful of observations.
+//
+// Computed at read time, like the route matrix and the tabbed rate, and deliberately
+// NOT materialized: a second lifecycle to keep in step with the observations is the
+// "two things that must agree" shape every repeated defect in this subsystem has
+// taken.
+//
+// The population is IDENTICAL to the overview rollup's and the route matrix's —
+// kind='placement', attribution_trusted, inside 7 days — and the counter definitions
+// are kept textually identical to ListWarmupOverviewRows,
+// UpsertWarmupSignalSnapshotsForWorkspace and ListWarmupRoutes for the same reason:
+// a version's counters then sum to the workspace's pooled counters, so the split can
+// never disagree with the total it came from. Note this read is NOT filtered on
+// mailbox_id, so unlike ListWarmupRoutes it also includes placements whose sender
+// mailbox has since been deleted — they are still placements this workspace's content
+// produced.
+//
+// Each version carries its OWN sample, and the rate is computed over that count and
+// never over the workspace's pooled total (warmup.FoldContentVersions). That is the
+// FIFTH application of this rule here — after bounce populations, tab capability,
+// per-route and per-observer — and it bites hardest on this axis: splitting one
+// workspace's window by (template, turn) makes small cells the normal case, so most
+// versions correctly report no rate at all.
+//
+// content_version = ” is a real bucket and is returned as one: those are the
+// observations recorded before this slice, or whose send predates it. Folding them
+// into a template's rate would attribute unknown content to known content; hiding
+// them would leave an operator unable to see how much of the window is unattributed.
+//
+// Nothing GATES on the result (see contentversionfold.go for which calibration
+// problem applies — the sample is small by construction AND the rate is confounded
+// with whichever mailboxes happened to draw the template).
+//
+// Seeks idx_warmup_observations_subject_time (workspace_id, mailbox_id, kind,
+// observed_at DESC) on its workspace_id prefix only, since this grouping spans every
+// mailbox. That is the same workspace-wide scan the snapshot refresh already does
+// each tick, over the same rows, so this axis is deliberately given no index of its
+// own — an index earns its write cost from a query that needs it, and this one does
+// not.
+// Deterministic so the report and the tests are stable. The unattributed bucket (”)
+// sorts first, ahead of every real version, which is also where an operator wants to
+// see how much of the window carries no attribution.
+func (q *Queries) ListWarmupContentVersions(ctx context.Context, workspaceID uuid.UUID) ([]ListWarmupContentVersionsRow, error) {
+	rows, err := q.db.Query(ctx, listWarmupContentVersions, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWarmupContentVersionsRow
+	for rows.Next() {
+		var i ListWarmupContentVersionsRow
+		if err := rows.Scan(&i.ContentVersion, &i.Inbox7d, &i.Spam7d); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -2018,7 +2120,8 @@ const recordWarmupPlacementObservation = `-- name: RecordWarmupPlacementObservat
 INSERT INTO warmup_observations (
     workspace_id, mailbox_id, observer_mailbox_id, warmup_send_id,
     kind, placement, tab_capable, source, attribution_trusted, idempotency_key, observed_at,
-    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result, destination_esp
+    dkim_domain, return_path_domain, spf_result, dkim_result, dmarc_result, destination_esp, observed_relay_ip,
+    content_version
 )
 SELECT s.workspace_id, s.from_mailbox, $1::uuid, s.id,
        'placement', $2::text, $3::boolean,
@@ -2028,10 +2131,12 @@ SELECT s.workspace_id, s.from_mailbox, $1::uuid, s.id,
        COALESCE(NULLIF($8::text, ''), 'unknown'),
        COALESCE(NULLIF($9::text, ''), 'unknown'),
        COALESCE(NULLIF($10::text, ''), 'unknown'),
-       COALESCE(NULLIF($11::text, ''), 'unknown')
+       COALESCE(NULLIF($11::text, ''), 'unknown'),
+       $12::text,
+       s.content_version
 FROM warmup_sends s
-WHERE s.id = $12
-  AND s.workspace_id = $13
+WHERE s.id = $13
+  AND s.workspace_id = $14
   AND s.to_mailbox = $1
 ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
 `
@@ -2048,6 +2153,7 @@ type RecordWarmupPlacementObservationParams struct {
 	DkimResult       string             `json:"dkim_result"`
 	DmarcResult      string             `json:"dmarc_result"`
 	DestinationEsp   string             `json:"destination_esp"`
+	ObservedRelayIp  string             `json:"observed_relay_ip"`
 	WarmupSendID     uuid.UUID          `json:"warmup_send_id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
 }
@@ -2094,6 +2200,16 @@ type RecordWarmupPlacementObservationParams struct {
 // An empty value takes the 'unknown' default on the same grounds as the verdicts
 // above — a caller that predates routes must not hit the 000062 CHECK and abort a
 // receipt over a column design §7 lets nothing read.
+//
+// content_version is the ONE column here that comes from neither the caller nor a
+// default: it is copied off the send row (s.content_version, written at claim time by
+// ClaimWarmupSend) inside this same statement. Deliberately not a parameter — the
+// poller that reads the message has no idea which library template produced it, and
+// adding an argument nobody upstream can compute would invite a wrong value into a
+// GROUP BY key. Reading it here also means it cannot disagree with the send, and that
+// it survives the send being deleted: 000054's FK nulls warmup_send_id rather than
+// refusing the delete, so an aggregation that JOINed for this value would drop
+// exactly those rows and stop summing to the pooled total.
 func (q *Queries) RecordWarmupPlacementObservation(ctx context.Context, arg RecordWarmupPlacementObservationParams) error {
 	_, err := q.db.Exec(ctx, recordWarmupPlacementObservation,
 		arg.RecipientMailbox,
@@ -2107,6 +2223,7 @@ func (q *Queries) RecordWarmupPlacementObservation(ctx context.Context, arg Reco
 		arg.DkimResult,
 		arg.DmarcResult,
 		arg.DestinationEsp,
+		arg.ObservedRelayIp,
 		arg.WarmupSendID,
 		arg.WorkspaceID,
 	)

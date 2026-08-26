@@ -508,6 +508,10 @@ func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p q
 		SPFResult:        identity.SPFResult,
 		DKIMResult:       identity.DKIMResult,
 		DMARCResult:      identity.DMARCResult,
+		// The relay this message was observed arriving from, read from the same header
+		// and the same Receiver the identity was, so "who received this" is decided
+		// once. Empty when no hop could be attributed to the receiver.
+		ObservedRelayIP: warmup.ObservedRelayIP(msg.Header, hook.receiver),
 	})
 	if err != nil {
 		return err

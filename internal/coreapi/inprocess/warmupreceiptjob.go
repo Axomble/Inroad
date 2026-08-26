@@ -414,6 +414,10 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 		// recipient that migrates providers, or a domain whose MX changes, must not
 		// rewrite which route historical observations were measured on (design §5).
 		DestinationEsp: destination,
+		// Bounded like the identity domains, and for the same reason: an unbounded
+		// header-derived string in an append-only table is the growth-by-external-
+		// input shape the token-failure evidence already had to be bucketed to avoid.
+		ObservedRelayIp: domainOrEmpty(in.ObservedRelayIP),
 	}); err != nil {
 		return coreapi.WarmupEngagePlan{}, err
 	}
@@ -636,14 +640,18 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 		IssuedLane:          rb.Lane,
 		IssuedPolicyVersion: warmup.PolicyVersion,
 		LeaseExpiresAt:      rb.LeaseExpiresAt.Time,
-		ToEmail:             th.SenderEmail,
-		FromEmail:           th.RecipientEmail,
-		FromName:            th.RecipientName,
-		Subject:             "Re: " + content.Subject,
-		BodyText:            body,
-		InReplyTo:           th.RootMessageID,
-		References:          th.RootMessageID,
-		Token:               token,
+		// Derived from the SAME (content key, turn) that produced `body` above, so an
+		// engagement reply's placement is attributed to the turn it actually sent —
+		// which is a different body from the opener, and lands differently.
+		ContentVersion: warmup.ContentVersion(th.ContentKey, int(th.Turn)),
+		ToEmail:        th.SenderEmail,
+		FromEmail:      th.RecipientEmail,
+		FromName:       th.RecipientName,
+		Subject:        "Re: " + content.Subject,
+		BodyText:       body,
+		InReplyTo:      th.RootMessageID,
+		References:     th.RootMessageID,
+		Token:          token,
 	}, true, nil
 }
 
