@@ -161,6 +161,58 @@ func TestLoadRejectsWeakTrackingSecret(t *testing.T) {
 	}
 }
 
+// TestLoadWSTicketSecretFallsBackToJWTSecret proves that with
+// INROAD_WS_TICKET_SECRET unset, WSTicketSecret inherits JWTSecret rather than
+// being left empty — an empty HMAC key would sign every connect ticket with
+// nothing, and the channel key comes from the ticket.
+func TestLoadWSTicketSecretFallsBackToJWTSecret(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	os.Unsetenv("INROAD_WS_TICKET_SECRET")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if string(cfg.WSTicketSecret) != string(cfg.JWTSecret) {
+		t.Fatalf("WSTicketSecret = %q, want it to fall back to JWTSecret %q", cfg.WSTicketSecret, cfg.JWTSecret)
+	}
+}
+
+// TestLoadWSTicketSecretExplicitOverridesJWTSecret proves an explicitly-set
+// (and sufficiently long) INROAD_WS_TICKET_SECRET is used as-is, so an operator
+// can rotate socket credentials without invalidating live sessions.
+func TestLoadWSTicketSecretExplicitOverridesJWTSecret(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	t.Setenv("INROAD_WS_TICKET_SECRET", "fedcba9876543210fedcba9876543210")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if string(cfg.WSTicketSecret) != "fedcba9876543210fedcba9876543210" {
+		t.Fatalf("WSTicketSecret = %q, want the explicit value", cfg.WSTicketSecret)
+	}
+	// The point of a dedicated secret: rotating it must not touch the others.
+	if string(cfg.WSTicketSecret) == string(cfg.JWTSecret) {
+		t.Fatal("WSTicketSecret equals JWTSecret despite an explicit override")
+	}
+}
+
+// TestLoadRejectsWeakWSTicketSecret proves an explicitly-set but too-short
+// INROAD_WS_TICKET_SECRET fails closed. A guessable ticket secret is worse than
+// a guessable tracking secret: forging a ticket forges a workspace.
+func TestLoadRejectsWeakWSTicketSecret(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	t.Setenv("INROAD_WS_TICKET_SECRET", "tooshort")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for a too-short WS ticket secret, got nil")
+	}
+}
+
 func TestLoadTokenDefaults(t *testing.T) {
 	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
 	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))

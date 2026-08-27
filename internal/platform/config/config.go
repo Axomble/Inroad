@@ -54,6 +54,16 @@ type Config struct {
 	// tracking links; falls back to JWTSecret when unset, matching TrackingSecret.
 	WarmupSecret []byte
 
+	// WSTicketSecret signs the realtime WebSocket connect ticket
+	// (internal/platform/wsticket), which a browser spends on the Upgrade request
+	// because it cannot set an Authorization header there. Dedicated so rotating
+	// it doesn't invalidate sessions, tracking links or warmup receipts; falls
+	// back to JWTSecret when unset, matching TrackingSecret.
+	//
+	// The ticket payload carries a domain prefix, so sharing JWTSecret with the
+	// other codecs cannot let one of their tokens authenticate a socket.
+	WSTicketSecret []byte
+
 	// MailAllowPrivateHosts permits mailbox SMTP/IMAP hosts on RFC1918/ULA
 	// private ranges. Default true for self-hosted operators reaching internal
 	// mail servers; set false for multi-tenant Cloud. Loopback, link-local
@@ -259,6 +269,20 @@ func Load() (*Config, error) {
 		cfg.WarmupSecret = []byte(warmupSecret)
 	} else {
 		cfg.WarmupSecret = cfg.JWTSecret
+	}
+
+	if wsTicketSecret := os.Getenv("INROAD_WS_TICKET_SECRET"); wsTicketSecret != "" {
+		// Same floor as INROAD_JWT_SECRET: an explicitly-set weak secret fails
+		// closed rather than signing connect tickets with a guessable key — and a
+		// forgeable ticket is a forgeable workspace, since the channel key comes
+		// from the ticket. The fallback below inherits JWTSecret, which already met
+		// this bar.
+		if len(wsTicketSecret) < 16 {
+			return nil, fmt.Errorf("INROAD_WS_TICKET_SECRET must be at least 16 bytes")
+		}
+		cfg.WSTicketSecret = []byte(wsTicketSecret)
+	} else {
+		cfg.WSTicketSecret = cfg.JWTSecret
 	}
 
 	rawKey, err := base64.StdEncoding.DecodeString(os.Getenv("INROAD_MASTER_KEY"))
