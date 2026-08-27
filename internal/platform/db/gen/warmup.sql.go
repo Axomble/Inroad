@@ -1521,6 +1521,29 @@ SELECT
     -- every mailbox fell back to the "probation" badge — a wrong lane shown
     -- confidently for every participant that was not actually in probation.
     p.lane, p.lane_reason,
+    -- The sentinel FLAG, and the count of this mailbox's placement observations that a
+    -- sentinel filed. The count is what warmup.ConfidenceOf reads, and it is a count
+    -- rather than a boolean because "how much of this rests on a controlled reference"
+    -- is the operator's question, not "is any of it".
+    --
+    -- Correlated on observer_mailbox_id, so it asks whether the OBSERVER is a sentinel
+    -- now. An observer designated after it filed a report still counts: the report is
+    -- no less independent of the sender's lane for having been filed a week earlier,
+    -- and the alternative — recording sentinel-ness per observation — would freeze a
+    -- flag the operator is expected to rotate.
+    p.is_sentinel,
+    (
+        SELECT count(*)
+        FROM warmup_observations o
+        JOIN warmup_participants op
+          ON op.mailbox_id = o.observer_mailbox_id AND op.workspace_id = o.workspace_id
+        WHERE o.workspace_id = $1
+          AND o.mailbox_id = p.mailbox_id
+          AND o.kind = 'placement'
+          AND o.attribution_trusted
+          AND o.observed_at >= now() - interval '7 days'
+          AND op.is_sentinel
+    )::bigint AS sentinel_observations_7d,
     m.email,
     COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
@@ -1640,6 +1663,8 @@ type ListWarmupOverviewRowsRow struct {
 	HealthReason             string             `json:"health_reason"`
 	Lane                     string             `json:"lane"`
 	LaneReason               string             `json:"lane_reason"`
+	IsSentinel               bool               `json:"is_sentinel"`
+	SentinelObservations7d   int64              `json:"sentinel_observations_7d"`
 	Email                    string             `json:"email"`
 	Inbox7d                  int64              `json:"inbox_7d"`
 	Spam7d                   int64              `json:"spam_7d"`
@@ -1682,6 +1707,8 @@ func (q *Queries) ListWarmupOverviewRows(ctx context.Context, workspaceID uuid.U
 			&i.HealthReason,
 			&i.Lane,
 			&i.LaneReason,
+			&i.IsSentinel,
+			&i.SentinelObservations7d,
 			&i.Email,
 			&i.Inbox7d,
 			&i.Spam7d,

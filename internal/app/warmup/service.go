@@ -279,19 +279,30 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 	}
 	now := s.now()
 	mailboxes := make([]WarmupMailboxDTO, len(rows))
+	// Counted over the rows the overview actually returns, which are the ENABLED
+	// participants — the same population SentinelPoolOversized's share is taken of, so
+	// the numerator and denominator cannot disagree.
+	sentinels := 0
 	for i, r := range rows {
+		if r.IsSentinel {
+			sentinels++
+		}
 		placementSample := r.Inbox7d + r.Spam7d
 		mailboxes[i] = WarmupMailboxDTO{
-			MailboxID:         r.MailboxID.String(),
-			Email:             r.Email,
-			Enabled:           r.Enabled,
-			HealthState:       r.HealthState,
-			HealthReason:      r.HealthReason,
-			Lane:              r.Lane,
-			LaneReason:        r.LaneReason,
-			TodaySent:         r.TodaySent,
-			TodayTarget:       targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
-			PlacementSample7d: placementSample,
+			MailboxID:    r.MailboxID.String(),
+			Email:        r.Email,
+			Enabled:      r.Enabled,
+			HealthState:  r.HealthState,
+			HealthReason: r.HealthReason,
+			Lane:         r.Lane,
+			LaneReason:   r.LaneReason,
+			TodaySent:    r.TodaySent,
+			TodayTarget:  targetFor(r.HealthState, r.StartVolume, r.MaxVolume, r.RampIncrement, r.StartedAt, now),
+			IsSentinel:   r.IsSentinel,
+			// The LABEL the contract promises, from the policy that owns the rule
+			// rather than a second comparison spelled out here.
+			EvidenceConfidence: string(pwarmup.ConfidenceOf(int(r.SentinelObservations7d))),
+			PlacementSample7d:  placementSample,
 			// The tabbed rate is measured over its OWN denominator: only the
 			// observations whose reader could have named a tab. Pooling the rest would
 			// dilute it toward zero, so a pool of IMAP mailboxes — most of a self-hosted
@@ -304,12 +315,14 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 		}
 	}
 	return WarmupOverviewDTO{
-		PoolSize:            int(count),
-		Active:              count >= 2,
-		Mailboxes:           mailboxes,
-		DiscountedObservers: s.discountedObservers(ctx, ws),
-		Incidents:           s.incidents(ctx, ws),
-		IncidentsMinPool:    pwarmup.MinIncidentPool,
+		PoolSize:              int(count),
+		Active:                count >= 2,
+		SentinelCount:         sentinels,
+		SentinelPoolOversized: pwarmup.SentinelPoolOversized(sentinels, len(mailboxes)),
+		Mailboxes:             mailboxes,
+		DiscountedObservers:   s.discountedObservers(ctx, ws),
+		Incidents:             s.incidents(ctx, ws),
+		IncidentsMinPool:      pwarmup.MinIncidentPool,
 	}, nil
 }
 

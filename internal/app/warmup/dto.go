@@ -162,6 +162,11 @@ type OverviewRow struct {
 	// undetectable on an entire provider class.
 	Tabbed7d     int64
 	TabCapable7d int64
+	// IsSentinel and SentinelObservations7d are the two sentinel facts: whether this
+	// mailbox IS a controlled reference, and how many of its placement observations a
+	// sentinel filed. The second is what warmup.ConfidenceOf reads.
+	IsSentinel             bool
+	SentinelObservations7d int64
 	// The LATEST identity this mailbox's warmup mail was observed sending under and
 	// the verdicts its receivers reached on it (design §4). Attributed to the SENDER
 	// exactly as the placement counters above are, because it IS the same
@@ -187,22 +192,24 @@ type OverviewRow struct {
 
 func overviewRowFromGen(r gen.ListWarmupOverviewRowsRow) OverviewRow {
 	return OverviewRow{
-		MailboxID:     r.MailboxID,
-		Enabled:       r.Enabled,
-		StartVolume:   r.StartVolume,
-		MaxVolume:     r.MaxVolume,
-		RampIncrement: r.RampIncrement,
-		ReplyRate:     r.ReplyRate,
-		StartedAt:     r.StartedAt,
-		HealthState:   r.HealthState,
-		HealthReason:  r.HealthReason,
-		Lane:          r.Lane,
-		LaneReason:    r.LaneReason,
-		Email:         r.Email,
-		Inbox7d:       r.Inbox7d,
-		Spam7d:        r.Spam7d,
-		Tabbed7d:      r.Tabbed7d,
-		TabCapable7d:  r.TabCapable7d,
+		MailboxID:              r.MailboxID,
+		IsSentinel:             r.IsSentinel,
+		SentinelObservations7d: r.SentinelObservations7d,
+		Enabled:                r.Enabled,
+		StartVolume:            r.StartVolume,
+		MaxVolume:              r.MaxVolume,
+		RampIncrement:          r.RampIncrement,
+		ReplyRate:              r.ReplyRate,
+		StartedAt:              r.StartedAt,
+		HealthState:            r.HealthState,
+		HealthReason:           r.HealthReason,
+		Lane:                   r.Lane,
+		LaneReason:             r.LaneReason,
+		Email:                  r.Email,
+		Inbox7d:                r.Inbox7d,
+		Spam7d:                 r.Spam7d,
+		Tabbed7d:               r.Tabbed7d,
+		TabCapable7d:           r.TabCapable7d,
 
 		IdentityDKIMDomain:       r.IdentityDkimDomain,
 		IdentityReturnPathDomain: r.IdentityReturnPathDomain,
@@ -346,7 +353,21 @@ type WarmupMailboxDTO struct {
 	//
 	// Reported for visibility only, like the tabbed rate above: no threshold, lane or
 	// promotion decision reads any of it (design §7).
-	Identity *WarmupIdentityDTO `json:"identity"`
+	Identity *WarmupIdentityDTO `json:"identity"` // IsSentinel marks a controlled measurement reference: a mailbox the operator is
+	// willing to expose to any lane so degrading members have something dependable to
+	// be measured against. A third, ORTHOGONAL fact beside health_state and lane, never
+	// a value of either.
+	IsSentinel bool `json:"is_sentinel"`
+	// EvidenceConfidence is WHO produced the placement evidence behind this row's
+	// rates: peer_only when every observation came from the mailbox's own lane-mates,
+	// sentinel_corroborated when at least one came from a sentinel.
+	//
+	// A LABEL, never a penalty. Nothing is discounted and no threshold moves — peer-only
+	// evidence is what a healthy pool mostly produces. What it is not is INDEPENDENT:
+	// when a watch mailbox is measured only by its own lane-mates, a shared cause moves
+	// both sides of the comparison at once, and the reading looks stable while nothing
+	// about it is.
+	EvidenceConfidence string `json:"evidence_confidence"`
 }
 
 // WarmupIdentityDTO is the WarmupMailbox.identity schema: the latest observed
@@ -494,6 +515,15 @@ type WarmupOverviewDTO struct {
 	// whose reports were dropped, while the mailboxes AFFECTED are every sender that
 	// mailed it.
 	DiscountedObservers []WarmupDiscountedObserverDTO `json:"discounted_observers"`
+	// SentinelCount is how many enabled participants are designated sentinels, and
+	// SentinelPoolOversized whether that has passed the advisory share.
+	//
+	// Advisory means advisory: exceeded, it is reported and nothing is refused.
+	// Refusing to pair would stop warmup rather than tell the operator something, and
+	// a pool of one sentinel and nothing else is oversized AND useless — which is worth
+	// saying plainly rather than enforcing.
+	SentinelCount         int  `json:"sentinel_count"`
+	SentinelPoolOversized bool `json:"sentinel_pool_oversized"`
 	// Incidents is never null — `[]` when nothing correlated — and its order is the
 	// detector's own (strongest lift first, then a total order on dimension and
 	// value), which the read layer must not re-sort.
