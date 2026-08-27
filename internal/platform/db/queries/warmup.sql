@@ -551,7 +551,17 @@ WHERE p.workspace_id = $1
   AND p.enabled
   AND p.health_state <> 'paused'
   AND (p.paused_until IS NULL OR p.paused_until <= now())
-  AND p.lane = sender.lane
+  -- Same lane, OR either side is a SENTINEL: a mailbox the operator controls and is
+  -- willing to expose to any lane, so a degrading member has something dependable to be
+  -- measured against instead of only other degrading members. Mirrors
+  -- warmup.Pairable, which is the Go statement of this rule.
+  --
+  -- p.lane's OWN sendability is now checked explicitly. It used to be implied by
+  -- p.lane = sender.lane, and widening that without adding it would let a sentinel pair
+  -- into quarantine — making the breaker negotiable, which is the one thing a sentinel
+  -- must never do.
+  AND (p.lane = sender.lane OR p.is_sentinel OR sender.is_sentinel)
+  AND p.lane NOT IN ('pending_auth','quarantine','blocked')
   AND sender.lane NOT IN ('pending_auth','quarantine','blocked');
 
 -- ----------------------------------------------------------------------------
@@ -613,7 +623,17 @@ WITH candidates AS (
       AND p.enabled
       AND p.health_state <> 'paused'
       AND (p.paused_until IS NULL OR p.paused_until <= now())
-      AND p.lane = sender.lane
+      -- Same lane, OR either side is a SENTINEL: a mailbox the operator controls and is
+      -- willing to expose to any lane, so a degrading member has something dependable to be
+      -- measured against instead of only other degrading members. Mirrors
+      -- warmup.Pairable, which is the Go statement of this rule.
+      --
+      -- p.lane's OWN sendability is now checked explicitly. It used to be implied by
+      -- p.lane = sender.lane, and widening that without adding it would let a sentinel pair
+      -- into quarantine — making the breaker negotiable, which is the one thing a sentinel
+      -- must never do.
+      AND (p.lane = sender.lane OR p.is_sentinel OR sender.is_sentinel)
+      AND p.lane NOT IN ('pending_auth','quarantine','blocked')
       AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 )
 SELECT mailbox_id, email, display_name
@@ -670,7 +690,17 @@ WHERE p.workspace_id = $1
   AND p.enabled
   AND p.health_state <> 'paused'
   AND (p.paused_until IS NULL OR p.paused_until <= now())
-  AND p.lane = sender.lane
+  -- Same lane, OR either side is a SENTINEL: a mailbox the operator controls and is
+  -- willing to expose to any lane, so a degrading member has something dependable to be
+  -- measured against instead of only other degrading members. Mirrors
+  -- warmup.Pairable, which is the Go statement of this rule.
+  --
+  -- p.lane's OWN sendability is now checked explicitly. It used to be implied by
+  -- p.lane = sender.lane, and widening that without adding it would let a sentinel pair
+  -- into quarantine — making the breaker negotiable, which is the one thing a sentinel
+  -- must never do.
+  AND (p.lane = sender.lane OR p.is_sentinel OR sender.is_sentinel)
+  AND p.lane NOT IN ('pending_auth','quarantine','blocked')
   AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
   AND t.turn >= 1
   AND t.turn < sqlc.arg(max_turn)::int

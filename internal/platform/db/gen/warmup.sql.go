@@ -283,7 +283,17 @@ WHERE p.workspace_id = $1
   AND p.enabled
   AND p.health_state <> 'paused'
   AND (p.paused_until IS NULL OR p.paused_until <= now())
-  AND p.lane = sender.lane
+  -- Same lane, OR either side is a SENTINEL: a mailbox the operator controls and is
+  -- willing to expose to any lane, so a degrading member has something dependable to be
+  -- measured against instead of only other degrading members. Mirrors
+  -- warmup.Pairable, which is the Go statement of this rule.
+  --
+  -- p.lane's OWN sendability is now checked explicitly. It used to be implied by
+  -- p.lane = sender.lane, and widening that without adding it would let a sentinel pair
+  -- into quarantine — making the breaker negotiable, which is the one thing a sentinel
+  -- must never do.
+  AND (p.lane = sender.lane OR p.is_sentinel OR sender.is_sentinel)
+  AND p.lane NOT IN ('pending_auth','quarantine','blocked')
   AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 `
 
@@ -562,7 +572,7 @@ func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngage
 }
 
 const getWarmupParticipant = `-- name: GetWarmupParticipant :one
-SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason FROM warmup_participants
+SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason, is_sentinel FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2
 `
 
@@ -590,6 +600,7 @@ func (q *Queries) GetWarmupParticipant(ctx context.Context, arg GetWarmupPartici
 		&i.UpdatedAt,
 		&i.Lane,
 		&i.LaneReason,
+		&i.IsSentinel,
 	)
 	return i, err
 }
@@ -2426,7 +2437,17 @@ WITH candidates AS (
       AND p.enabled
       AND p.health_state <> 'paused'
       AND (p.paused_until IS NULL OR p.paused_until <= now())
-      AND p.lane = sender.lane
+      -- Same lane, OR either side is a SENTINEL: a mailbox the operator controls and is
+      -- willing to expose to any lane, so a degrading member has something dependable to be
+      -- measured against instead of only other degrading members. Mirrors
+      -- warmup.Pairable, which is the Go statement of this rule.
+      --
+      -- p.lane's OWN sendability is now checked explicitly. It used to be implied by
+      -- p.lane = sender.lane, and widening that without adding it would let a sentinel pair
+      -- into quarantine — making the breaker negotiable, which is the one thing a sentinel
+      -- must never do.
+      AND (p.lane = sender.lane OR p.is_sentinel OR sender.is_sentinel)
+      AND p.lane NOT IN ('pending_auth','quarantine','blocked')
       AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 )
 SELECT mailbox_id, email, display_name
@@ -2519,7 +2540,17 @@ WHERE p.workspace_id = $1
   AND p.enabled
   AND p.health_state <> 'paused'
   AND (p.paused_until IS NULL OR p.paused_until <= now())
-  AND p.lane = sender.lane
+  -- Same lane, OR either side is a SENTINEL: a mailbox the operator controls and is
+  -- willing to expose to any lane, so a degrading member has something dependable to be
+  -- measured against instead of only other degrading members. Mirrors
+  -- warmup.Pairable, which is the Go statement of this rule.
+  --
+  -- p.lane's OWN sendability is now checked explicitly. It used to be implied by
+  -- p.lane = sender.lane, and widening that without adding it would let a sentinel pair
+  -- into quarantine — making the breaker negotiable, which is the one thing a sentinel
+  -- must never do.
+  AND (p.lane = sender.lane OR p.is_sentinel OR sender.is_sentinel)
+  AND p.lane NOT IN ('pending_auth','quarantine','blocked')
   AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
   AND t.turn >= 1
   AND t.turn < $3::int
@@ -2691,7 +2722,7 @@ ON CONFLICT (mailbox_id) DO UPDATE SET
     reply_rate     = EXCLUDED.reply_rate,
     updated_at     = now()
 WHERE warmup_participants.workspace_id = $2
-RETURNING mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason
+RETURNING mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason, is_sentinel
 `
 
 type UpsertWarmupParticipantParams struct {
@@ -2748,6 +2779,7 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 		&i.UpdatedAt,
 		&i.Lane,
 		&i.LaneReason,
+		&i.IsSentinel,
 	)
 	return i, err
 }

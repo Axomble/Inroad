@@ -515,6 +515,7 @@ func (s *Service) participantDTO(p Participant, todaySent int32) WarmupParticipa
 		StartedAt:     rfc3339(p.StartedAt),
 		TodaySent:     todaySent,
 		TodayTarget:   targetFor(p.HealthState, p.StartVolume, p.MaxVolume, p.RampIncrement, p.StartedAt, s.now()),
+		IsSentinel:    p.IsSentinel,
 	}
 }
 

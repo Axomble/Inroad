@@ -7,12 +7,14 @@ import type {
   WarmupParticipant,
   WarmupSettings,
   GetMailboxWarmupApiArg,
+  SetWarmupSentinelApiArg,
 } from '@/store/api'
 import {
   useGetWarmupOverviewQuery,
   useGetMailboxWarmupQuery,
   useEnableMailboxWarmupMutation,
   useDisableMailboxWarmupMutation,
+  useSetWarmupSentinelMutation,
 } from '../api'
 
 // A light contract guard: the warmup endpoints the UI binds to must stay wired
@@ -58,4 +60,28 @@ test('the generated warmup types keep the fields the UI depends on', () => {
   expectTypeOf<WarmupMailbox>().toMatchObjectType<{ lane_reason: string }>()
   expectTypeOf<GetMailboxWarmupApiArg>().toMatchObjectType<{ id: string }>()
   expectTypeOf<WarmupSettings>().toMatchObjectType<{ start_volume?: number }>()
+})
+
+test('the sentinel endpoint is wired, and its fields keep the shapes the copy reads', () => {
+  expect(api.endpoints.setWarmupSentinel).toBeDefined()
+  expect(useSetWarmupSentinelMutation).toBeTypeOf('function')
+  // A required body: designating and undesignating are different requests, so the
+  // flag must not be optional — an omitted key would have to invent a default.
+  expectTypeOf<SetWarmupSentinelApiArg>().toMatchObjectType<{
+    mailboxId: string
+    warmupSentinelRequest: { is_sentinel: boolean }
+  }>()
+
+  // Optional on the read side, and that is load-bearing rather than laziness:
+  // `undefined` is a build that does not report sentinels, which the copy renders
+  // as silence, while `false` is a mailbox that is not one. Widening these to
+  // required would erase the distinction the whole panel is built on.
+  expectTypeOf<WarmupMailbox['is_sentinel']>().toEqualTypeOf<boolean | undefined>()
+  expectTypeOf<WarmupOverview['sentinel_count']>().toEqualTypeOf<number | undefined>()
+  expectTypeOf<WarmupOverview['sentinel_pool_oversized']>().toEqualTypeOf<boolean | undefined>()
+  // The vocabulary must stay whole: a dropped member would fall into the
+  // "unrecognised" branch at runtime and be named as a raw token on screen.
+  expectTypeOf<WarmupMailbox['evidence_confidence']>().toEqualTypeOf<
+    'peer_only' | 'sentinel_corroborated' | undefined
+  >()
 })

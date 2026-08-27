@@ -1033,6 +1033,41 @@ write history that never happened.
     by ASN is the more useful grouping — so this is deferred for a supply-chain reason,
     not an effort one.
 
+62. **A shared warmup pool removes the premise every preceding invariant rests on.**
+    Invariants 52 and 56–61 all bound their residual risk the same way: the attacker
+    is a customer, acting inside their own tenant, damaging only their own reads, with
+    something to lose. A cross-workspace pool (design §9, Phase 3) removes all three
+    at once and adds a motive that did not exist — degrading a competitor.
+    **Nothing here is weakened, and nothing is pre-approved.** What follows is what
+    would have to become true.
+    **The coordinator issues instructions, never evidence.** No output of a
+    coordinator — no peer's advertisement, no reported outcome, no lease term — may be
+    an input to a lane, health-state or promotion decision. That is the single rule
+    that keeps invariants 57–61 intact under a shared pool: they say route-, incident-,
+    observer- and content-derived signals gate nothing, and a peer-supplied signal is
+    strictly less trustworthy than our own. It is also what protects invariant 60's
+    clean path into campaign selection.
+    **A participant's mail address is never published.** It may appear only in a single
+    assignment, to the one peer about to send to it, for the life of one lease. An
+    advertisement carrying addresses is a harvestable directory of every mailbox in the
+    pool. `internal/platform/coordinator` makes this structural: the outbound payload
+    has no address field.
+    **"Give me a partner from another workspace" must be inexpressible, not merely
+    refused.** A `PairRequest` names exactly one workspace — the caller's own — and the
+    local implementation additionally rejects any candidate whose workspace differs.
+    **What a coordinator must refuse while sentinel capacity is zero:** every
+    cross-tenant assignment, consent on both sides included. Phase 3's own gate is
+    "expand only when sentinel capacity and incident operations can protect the
+    promised isolation"; with no sentinels, the only way to diagnose a degrading peer
+    is to expose real customer mailboxes to it. Sentinels exist as a mechanism
+    (`warmup.Pairable`, `warmup_participants.is_sentinel`) but a pool has capacity only
+    once an operator designates one.
+    **No threshold is asserted for peer-only versus sentinel-corroborated evidence.**
+    `warmup.SentinelPoolShare` is an advisory upper cap, not a floor, and nobody has
+    measured what a sentinel observation is worth relative to a peer one in this
+    system. Until that exists the answer is binary refusal, not a discount — every
+    slice here that guessed a threshold and acted on it had to be walked back.
+
 ## Deferred (documented, not yet built)
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.

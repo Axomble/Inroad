@@ -501,3 +501,62 @@ test('a 404 disable explains the mailbox is no longer a participant', async () =
   const alert = await screen.findByRole('alert')
   expect(alert).toHaveTextContent(/no longer a warmup participant/i)
 })
+
+/* ------------------------------------------------------------- sentinels */
+
+/** The evidence label alone — the row also carries three rates and a tab note. */
+function evidenceText(): string {
+  return document.querySelector('[data-slot="evidence-confidence"]')?.textContent ?? ''
+}
+
+// Absent is not peer-only. A build that does not report the label has said
+// nothing about who produced this mailbox's evidence, and inventing "peer-only"
+// would state the shape of a pool the server never described.
+test('no evidence label at all on a build that does not report one', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
+
+  expect(document.querySelector('[data-slot="evidence-confidence"]')).toBeNull()
+})
+
+// Peer-only is what a healthy pool mostly produces. On the row it is a label
+// beside the rates it qualifies — never a warning, and never a discount.
+test('peer-only evidence is labelled on the row and says it gates nothing', () => {
+  renderWithProviders(
+    <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, evidence_confidence: 'peer_only' }} />,
+  )
+
+  expect(evidenceText()).toMatch(/peer-only/i)
+  expect(evidenceText()).toMatch(/gates nothing/i)
+  expect(evidenceText()).not.toMatch(/\bwarning\b|insufficient|\bweak\b/i)
+})
+
+// The arithmetic travels with the label, as it does for every other inference on
+// this screen: "corroborated" without a count is a badge.
+test('a corroborated row says how many of its observations came from a sentinel', () => {
+  renderWithProviders(
+    <WarmupMailboxCard
+      mailbox={mailbox}
+      entry={{ ...entry, evidence_confidence: 'sentinel_corroborated', sentinel_observations_7d: 12 }}
+    />,
+  )
+
+  expect(evidenceText()).toMatch(/sentinel-corroborated/i)
+  expect(evidenceText()).toMatch(/12/)
+})
+
+/** The designation mark alone: the control beside it also contains "sentinel". */
+function sentinelMark(): string | null {
+  return document.querySelector('[data-slot="sentinel-mark"]')?.textContent ?? null
+}
+
+test('a designated mailbox is marked on its own row', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, is_sentinel: true }} />)
+
+  expect(sentinelMark()).toMatch(/sentinel/i)
+})
+
+test('an ordinary mailbox carries no designation mark', () => {
+  renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, is_sentinel: false }} />)
+
+  expect(sentinelMark()).toBeNull()
+})

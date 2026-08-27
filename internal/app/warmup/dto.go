@@ -25,6 +25,22 @@ type Participant struct {
 	PausedUntil   pgtype.Timestamptz
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
+	// IsSentinel is the measurement-reference marker: a mailbox the operator
+	// controls end to end and is willing to expose to every lane, so a degrading
+	// mailbox has something dependable to be measured against.
+	//
+	// A FLAG, NOT A LANE, and deliberately a separate field rather than a lane
+	// value: a sentinel keeps its own health state and its own lane and may itself
+	// degrade, be contained and recover, which a lane-valued "sentinel" would make
+	// unrepresentable at exactly the moment it matters.
+	//
+	// The upsert's ON CONFLICT arm never writes it, so a ramp-settings update keeps
+	// the designation. A DISABLE deletes the row, so a re-enabled mailbox comes back
+	// undesignated — unlike the lane, which is carried forward from the transition
+	// trail. That asymmetry is deliberate and runs the safe way: a mailbox that
+	// silently returned as a sentinel would start receiving mail from degrading
+	// senders on the strength of a decision its operator made before it left.
+	IsSentinel bool
 }
 
 func participantFromGen(p gen.WarmupParticipant) Participant {
@@ -42,6 +58,7 @@ func participantFromGen(p gen.WarmupParticipant) Participant {
 		PausedUntil:   p.PausedUntil,
 		CreatedAt:     p.CreatedAt,
 		UpdatedAt:     p.UpdatedAt,
+		IsSentinel:    p.IsSentinel,
 	}
 }
 
@@ -270,6 +287,16 @@ type WarmupParticipantDTO struct {
 	StartedAt     string  `json:"started_at"`
 	TodaySent     int32   `json:"today_sent"`
 	TodayTarget   int32   `json:"today_target"`
+	// IsSentinel is a third, ORTHOGONAL fact beside the two axes above, never a
+	// value of either: this mailbox is exposed to every lane on purpose so degrading
+	// mailboxes have a dependable reference to be measured against, and it keeps its
+	// own health state and lane while doing it.
+	//
+	// Always emitted, false included. A client has to be able to tell "not a
+	// sentinel" from "this build does not report designation" — the second is a
+	// statement about the server and the first is one about the mailbox — and an
+	// omitted-when-false field collapses them.
+	IsSentinel bool `json:"is_sentinel"`
 }
 
 // WarmupMailboxDTO is the WarmupMailbox schema: a participant enriched with the
