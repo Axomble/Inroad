@@ -126,6 +126,29 @@ SELECT
     -- every mailbox fell back to the "probation" badge — a wrong lane shown
     -- confidently for every participant that was not actually in probation.
     p.lane, p.lane_reason,
+    -- The sentinel FLAG, and the count of this mailbox's placement observations that a
+    -- sentinel filed. The count is what warmup.ConfidenceOf reads, and it is a count
+    -- rather than a boolean because "how much of this rests on a controlled reference"
+    -- is the operator's question, not "is any of it".
+    --
+    -- Correlated on observer_mailbox_id, so it asks whether the OBSERVER is a sentinel
+    -- now. An observer designated after it filed a report still counts: the report is
+    -- no less independent of the sender's lane for having been filed a week earlier,
+    -- and the alternative — recording sentinel-ness per observation — would freeze a
+    -- flag the operator is expected to rotate.
+    p.is_sentinel,
+    (
+        SELECT count(*)
+        FROM warmup_observations o
+        JOIN warmup_participants op
+          ON op.mailbox_id = o.observer_mailbox_id AND op.workspace_id = o.workspace_id
+        WHERE o.workspace_id = $1
+          AND o.mailbox_id = p.mailbox_id
+          AND o.kind = 'placement'
+          AND o.attribution_trusted
+          AND o.observed_at >= now() - interval '7 days'
+          AND op.is_sentinel
+    )::bigint AS sentinel_observations_7d,
     m.email,
     COALESCE(wk.inbox, 0)::bigint AS inbox_7d,
     COALESCE(wk.spam, 0)::bigint  AS spam_7d,
@@ -511,7 +534,7 @@ ORDER BY m.email;
 -- config, health and lane, and its decrypted-at-caller transport columns.
 -- workspace-pinned (belt-and-braces on the unguessable mailbox UUID); a foreign
 -- pair yields no row.
-SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
+SELECT p.workspace_id, p.enabled, p.is_sentinel, p.start_volume, p.max_volume, p.ramp_increment,
        p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
        -- The lease expiry is minted HERE, from the database clock, because
        -- ClaimWarmupSend compares it against the database clock. Computing it in
@@ -596,7 +619,12 @@ WHERE p.workspace_id = $1
 -- pair budget (see the note above), so it also orders the spread by what the pair
 -- has actually exchanged rather than by what this sender happened to send.
 WITH candidates AS (
-    SELECT p.mailbox_id, m.email, m.display_name,
+    -- workspace_id, lane and is_sentinel come from the CANDIDATE'S OWN ROW, never copied
+-- from the request. The coordinator seam compares the candidate's workspace against
+-- the requester's to refuse a cross-tenant partner, and a value copied from the
+-- request would make that comparison test a value against itself — a tenancy check
+-- that can never fail is worse than none, because it reads as one.
+SELECT p.mailbox_id, m.email, m.display_name, p.workspace_id, p.lane, p.is_sentinel,
            COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
            COALESCE(pair.sent_today, 0)::bigint AS sent_today
     FROM warmup_participants p
@@ -636,7 +664,7 @@ WITH candidates AS (
       AND p.lane NOT IN ('pending_auth','quarantine','blocked')
       AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 )
-SELECT mailbox_id, email, display_name
+SELECT mailbox_id, email, display_name, workspace_id, lane, is_sentinel
 FROM candidates c
 WHERE c.sent_today < sqlc.arg(max_pair_sends)::int
   AND (

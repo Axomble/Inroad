@@ -3,9 +3,15 @@ package warmup
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // TestParticipantDTOReportsSentinelDesignation proves the read surface carries
@@ -110,5 +116,227 @@ func TestUpdatingRampSettingsKeepsTheDesignation(t *testing.T) {
 	}
 	if !got.IsSentinel {
 		t.Fatalf("a ramp update cleared the sentinel designation: %+v", got)
+	}
+}
+
+// The server actually EMITS the sentinel fields the contract declares.
+//
+// This is the test that was missing, and its absence is why the feature shipped dead.
+// `evidence_confidence` and `sentinel_count` were declared in openapi.yaml, generated
+// into the client, and read by the UI — while nothing in Go ever set them. Both are
+// optional, so the UI's undefined branch rendered permanently, and that branch has
+// careful copy about "a build that does not report sentinels". Which was true of every
+// build. It looked handled.
+//
+// Asserted through the JSON rather than the struct, because a Go field that is never
+// populated and a JSON key that is never sent are the same defect from a client's side,
+// and only one of them is visible in a field-by-field comparison.
+func TestOverviewEmitsTheSentinelFieldsTheContractDeclares(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.overviewRows = []OverviewRow{
+		{
+			MailboxID: uuid.New(), Enabled: true, Email: "sentinel@acme.test",
+			HealthState: "healthy", Lane: "healthy",
+			StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+			StartedAt:  pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+			IsSentinel: true,
+			// Its own evidence came from a sentinel observer.
+			SentinelObservations7d: 12, Inbox7d: 30, Spam7d: 1,
+		},
+		{
+			MailboxID: uuid.New(), Enabled: true, Email: "peer@acme.test",
+			HealthState: "healthy", Lane: "healthy",
+			StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+			StartedAt:  pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+			IsSentinel: false,
+			// Measured only by its own lane-mates.
+			SentinelObservations7d: 0, Inbox7d: 28, Spam7d: 2,
+		},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	body, err := json.Marshal(ov)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(body)
+
+	for _, want := range []string{
+		`"sentinel_count":1`,
+		`"sentinel_pool_oversized":false`, // one of two is exactly the share, not over it
+		`"evidence_confidence":"sentinel_corroborated"`,
+		`"evidence_confidence":"peer_only"`,
+		`"is_sentinel":true`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("overview JSON is missing %s\ngot: %s", want, got)
+		}
+	}
+}
+
+// And the confidence label comes from the policy, not a comparison spelled out in the
+// service — so the two cannot drift about what "corroborated" means.
+func TestEvidenceConfidenceTracksThePolicy(t *testing.T) {
+	for _, n := range []int64{0, 1, 5} {
+		store := newFakeStore()
+		store.enabledCount = 1
+		store.overviewRows = []OverviewRow{{
+			MailboxID: uuid.New(), Enabled: true, Email: "a@acme.test",
+			HealthState: "healthy", Lane: "healthy",
+			StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+			StartedAt:              pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+			SentinelObservations7d: n,
+		}}
+		svc := withNow(NewService(store), time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC))
+
+		ov, err := svc.GetOverview(context.Background(), uuid.New())
+		if err != nil {
+			t.Fatalf("GetOverview: %v", err)
+		}
+		want := string(pwarmup.ConfidenceOf(int(n)))
+		if got := ov.Mailboxes[0].EvidenceConfidence; got != want {
+			t.Errorf("with %d sentinel observations: confidence = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// The advisory cap fires, and only when actually exceeded.
+//
+// Split from the emission test because that fixture sits at EXACTLY the share — one
+// sentinel of two — where the honest answer is false. A revert hardcoding false
+// therefore passed it, which is a test agreeing with a bug.
+//
+// Advisory throughout: exceeded, it is reported and nothing is refused. Refusing to
+// pair would stop warmup rather than tell the operator that measurement has started
+// to become the network.
+func TestSentinelPoolOversizedIsReportedNotEnforced(t *testing.T) {
+	row := func(sentinel bool) OverviewRow {
+		return OverviewRow{
+			MailboxID: uuid.New(), Enabled: true, Email: "m@acme.test",
+			HealthState: "healthy", Lane: "healthy",
+			StartVolume: 4, MaxVolume: 40, RampIncrement: 2, ReplyRate: 0.3,
+			StartedAt:  pgtype.Timestamptz{Time: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Valid: true},
+			IsSentinel: sentinel,
+		}
+	}
+	tests := []struct {
+		name      string
+		rows      []OverviewRow
+		wantCount int
+		wantOver  bool
+	}{
+		// Two of three is 67%, past the advisory half.
+		{"two sentinels of three", []OverviewRow{row(true), row(true), row(false)}, 2, true},
+		// One of two is exactly half, which is not past it.
+		{"one of two is at the share, not over", []OverviewRow{row(true), row(false)}, 1, false},
+		// A pool of nothing but a sentinel is oversized AND measures nothing.
+		{"a lone sentinel", []OverviewRow{row(true)}, 1, true},
+		{"no sentinels", []OverviewRow{row(false), row(false)}, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			store.enabledCount = int64(len(tc.rows))
+			store.overviewRows = tc.rows
+			svc := withNow(NewService(store), time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC))
+
+			ov, err := svc.GetOverview(context.Background(), uuid.New())
+			if err != nil {
+				t.Fatalf("GetOverview: %v", err)
+			}
+			if ov.SentinelCount != tc.wantCount {
+				t.Errorf("sentinel_count = %d, want %d", ov.SentinelCount, tc.wantCount)
+			}
+			if ov.SentinelPoolOversized != tc.wantOver {
+				t.Errorf("sentinel_pool_oversized = %v, want %v", ov.SentinelPoolOversized, tc.wantOver)
+			}
+			// Nothing is withheld either way: every mailbox is still returned.
+			if len(ov.Mailboxes) != len(tc.rows) {
+				t.Errorf("returned %d mailboxes of %d — the cap must report, never refuse",
+					len(ov.Mailboxes), len(tc.rows))
+			}
+		})
+	}
+}
+
+// The content-version rollup is EMITTED, with its own denominators and null rates.
+//
+// Asserted through the JSON for the same reason the sentinel fields are: a Go field
+// that is never populated and a JSON key that is never sent are the same defect from a
+// client's side, and this rollup spent a release built, tested and callerless.
+func TestOverviewEmitsContentVersionsWithTheirOwnDenominators(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.contentVersionStats = []pwarmup.ContentVersionStat{
+		// Enough to carry a rate.
+		{Version: "sl1:aaaaaaaaaaaaaaaa", Inbox: 60, Spam: 40},
+		// Below the floor: reported, but with no rate to read.
+		{Version: "sl1:bbbbbbbbbbbbbbbb", Inbox: 2, Spam: 1},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	if len(ov.ContentVersions) != 2 {
+		t.Fatalf("content_versions = %+v, want both templates", ov.ContentVersions)
+	}
+
+	body, err := json.Marshal(ov)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(body)
+	if !strings.Contains(got, `"content_versions":[`) {
+		t.Errorf("content_versions key is absent from the payload:\n%s", got)
+	}
+
+	byVersion := map[string]WarmupContentVersionDTO{}
+	for _, cv := range ov.ContentVersions {
+		byVersion[cv.Version] = cv
+	}
+	big := byVersion["sl1:aaaaaaaaaaaaaaaa"]
+	if big.PlacementSample != 100 {
+		t.Errorf("placement_sample = %d, want 100 — this version's OWN denominator", big.PlacementSample)
+	}
+	if big.SpamRate == nil || *big.SpamRate != 0.4 {
+		t.Errorf("spam_rate = %v, want 0.4", big.SpamRate)
+	}
+
+	// The floor case: counts reported, rates withheld. Reporting 33% off three
+	// observations would be a confident number about a template nobody has sent.
+	small := byVersion["sl1:bbbbbbbbbbbbbbbb"]
+	if small.PlacementSample != 3 {
+		t.Errorf("placement_sample = %d, want 3", small.PlacementSample)
+	}
+	if small.SpamRate != nil || small.InboxRate != nil {
+		t.Errorf("rates = %v/%v below the sample floor, want null", small.InboxRate, small.SpamRate)
+	}
+}
+
+// A failed rollup must not take the overview down with it — the operator's window into
+// a degrading pool cannot go dark because one advisory panel could not be computed.
+func TestOverviewSurvivesAFailedContentVersionRead(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 1
+	store.contentVersionErr = errors.New("content versions exploded")
+	svc := withNow(NewService(store), time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("a failed content-version read failed the whole overview: %v", err)
+	}
+	if ov.ContentVersions == nil {
+		t.Error("content_versions is nil after a failed read; it marshals to null, and " +
+			"the contract says []")
+	}
+	if len(ov.ContentVersions) != 0 {
+		t.Errorf("content_versions = %+v after a failed read, want empty", ov.ContentVersions)
 	}
 }

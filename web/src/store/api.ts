@@ -3183,6 +3183,18 @@ export type WarmupOverview = {
   /** The smallest pool in which correlated-incident detection can find anything: enough participants to form a cohort AND at least one outside it to compare against. Served so the UI can tell "we looked and found no shared cause" from "this pool is too small to look", which are different answers and must not render alike. It is here rather than hardcoded client-side because it is derived from a backend policy constant, and a client copy would drift the moment that constant is recalibrated — leaving the UI claiming it searched a pool the server never examined. */
   incidents_min_pool: number;
   active: boolean;
+  /** This pool's placement split by WHICH library template produced it, over the trailing 7 days. Separates "this thread template lands in spam" from "this mailbox is degrading" — until now the same signal with opposite responses. Per WORKSPACE, not per mailbox: the library is shared across the pool, so a per-mailbox split would quarter an already-thin sample and report nothing about most templates. Always present, [] when nothing was observed. Reported for visibility only — nothing gates on it. The sample per version is small by construction, and a template's apparent spam rate is confounded with whichever mailboxes happened to draw it: two calibration problems, not one. */
+  content_versions: {
+    /** Stable fingerprint of the library template and turn. */
+    version: string;
+    inbox: number;
+    spam: number;
+    /** inbox + spam for THIS version alone — its own denominator. */
+    placement_sample: number;
+    /** Null, never zero, when placement_sample is below the floor. A template nobody has sent much of has not earned a rate, and rendering a null as 0% would report a clean result on evidence that does not exist. */
+    inbox_rate: number | null;
+    spam_rate: number | null;
+  }[];
   /** Enabled participants designated as sentinels. ZERO IS THE ORDINARY CASE — most self-hosted installations never designate one, warmup works exactly as it does without them, and a client must not render it as a misconfiguration to be corrected. Absent on a build that does not report sentinels, which is a different fact from zero. */
   sentinel_count?: number;
   /** Whether sentinels have grown past sentinel_pool_share of the enabled pool. ADVISORY, NEVER ENFORCED: exceeded, it is reported and nothing is refused. Refusing to pair would stop warmup rather than tell the operator something, and the cap exists to keep the references from becoming the network they are supposed to measure — not to gate sending. Served rather than recomputed client-side for the reason incidents_min_pool is: it is a backend policy verdict, and a client copy of the rule would drift the moment the share is recalibrated. Note a pool of one sentinel and nothing else is oversized by this measure AND is measuring nothing, which is worth saying plainly rather than hiding. */
