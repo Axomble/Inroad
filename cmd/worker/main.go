@@ -97,6 +97,15 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// pgx pool saturation, read on scrape. This is how an operator watches the
+	// connection budget (INROAD_DB_MAX_CONNS) being approached BEFORE
+	// pool.Acquire starts blocking — the worker is the replica that exhausts it
+	// first, since concurrency is per-process.
+	if err := mtx.RegisterPool(pool); err != nil {
+		logger.Error("register pool metrics failed", "err", err)
+		return err
+	}
+
 	// Build the per-workspace Keyring at the worker's composition root. The
 	// DEKStore is the sqlc-backed adapter over the pool; the worker engine
 	// packages never see it — they reach data only through coreapi, which holds
@@ -120,7 +129,11 @@ func run() error {
 		RedirectURL:  cfg.MSRedirectURL,
 		Tenant:       cfg.MSTenant,
 	}
-	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary())
+	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(),
+		// The claim-before-send outcome counter (won/reclaimed/lost/…) is
+		// emitted from inside the claim, which is the only place every outcome
+		// is already distinguished.
+		inprocess.WithMetrics(mtx))
 
 	// Resolve the optional worker egress IP once. When set, outbound SMTP/IMAP
 	// dials bind their SOURCE address to it (spec §15) so a mailbox's mail
@@ -146,6 +159,21 @@ func run() error {
 	engager := mail.NewMultiEngager(imapEngager, mail.NewGmailEngager())
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
+
+	// Queue backlog per queue, read on scrape. Wired on the worker (not the
+	// API) because the worker is what consumes the queues, so the depth and the
+	// consumer's own saturation are scraped from one target. The inspector is
+	// read-only — nothing here mutates a task.
+	inspector := queue.NewInspector(cfg.RedisAddr)
+	defer func() {
+		if err := inspector.Close(); err != nil {
+			logger.Error("queue inspector close failed", "err", err)
+		}
+	}()
+	if err := mtx.RegisterQueue(inspector, logger); err != nil {
+		logger.Error("register queue metrics failed", "err", err)
+		return err
+	}
 
 	// Heartbeat this worker into the global registry so the control-plane
 	// assigner can route mailboxes to it. The ticker is bound to hbCtx, cancelled

@@ -27,7 +27,9 @@ import (
 // looks records up through — injected at the composition root so tests never
 // touch real DNS, and mxResolver is the same seam for the recipient-domain ESP
 // sweep's MX lookups. mtx records inroad_sends_total at the campaign and warmup
-// send handlers' finalize points; a nil mtx (metrics disabled) no-ops.
+// send handlers' finalize points, and inroad_sweep_seconds /
+// inroad_sweep_rows_total at the enrollment, inbox and warmup sweeps; a nil
+// mtx (metrics disabled) no-ops.
 func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, resolver dnsauth.Resolver, mxResolver esp.Resolver, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte, mtx *metrics.Metrics) {
 	if cleaner, ok := core.(maintenance.Cleaner); ok {
 		mux.HandleFunc(queue.TaskMaintenanceCleanup, maintenance.CleanupHandler(cleaner))
@@ -55,7 +57,7 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	// Warmup: send one warmup email per tick (lazy chain) + fan-out/health sweep +
 	// recipient-side engagement (rescue/mark-read/reply) of received warmup mail.
 	mux.HandleFunc(queue.TaskWarmupTick, warmup.SendHandler(core, sndr, enq, mtx))
-	mux.HandleFunc(queue.TaskWarmupSweep, warmup.SweepHandler(core, enq))
+	mux.HandleFunc(queue.TaskWarmupSweep, warmup.SweepHandler(core, enq, mtx))
 	mux.HandleFunc(queue.TaskWarmupEngage, warmup.EngageHandler(core, engager, sndr))
 	// Test-send preview (POST /campaigns/{id}/test-send): registered by type
 	// assertion for the same reason as the cleaner/breaker above -- the
@@ -68,8 +70,8 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	}
 	// Multi-step sequencing: advance one step per task (lazy chain) + reconcile.
 	mux.HandleFunc(queue.TaskSequenceAdvance, sequence.AdvanceHandler(core, sndr, enq, publicURL, trackingSecret, mtx))
-	mux.HandleFunc(queue.TaskSweepEnrollments, sequence.SweepHandler(core, enq))
+	mux.HandleFunc(queue.TaskSweepEnrollments, sequence.SweepHandler(core, enq, mtx))
 	// Reply & bounce detection: poll one mailbox's INBOX per task + reconcile.
 	// warmupSecret lets the poller verify + isolate warmup mail (spec §7/§9.4).
-	inbox.Register(mux, core, reader, sndr, enq, warmupSecret)
+	inbox.Register(mux, core, reader, sndr, enq, warmupSecret, mtx)
 }

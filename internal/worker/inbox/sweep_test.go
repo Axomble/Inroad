@@ -28,7 +28,7 @@ func (f *fakeEnqueuer) EnqueueInboxPoll(mailboxID, _ string) error {
 func TestSweepEnqueuesOnePollPerActiveMailbox(t *testing.T) {
 	core := &stubCore{mailboxes: []coreapi.MailboxRef{{ID: "m1", WorkspaceID: "w1"}, {ID: "m2", WorkspaceID: "w1"}}}
 	enq := &fakeEnqueuer{}
-	h := SweepHandler(core, enq)
+	h := SweepHandler(core, enq, nil)
 	if err := h(context.Background(), asynq.NewTask("inbox:sweep", nil)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestSweepEnqueuesOnePollPerActiveMailbox(t *testing.T) {
 func TestSweepTolerantOfPartialEnqueueFailure(t *testing.T) {
 	core := &stubCore{mailboxes: []coreapi.MailboxRef{{ID: "m1", WorkspaceID: "w1"}, {ID: "m2", WorkspaceID: "w1"}}}
 	enq := &fakeEnqueuer{fail: map[string]bool{"m1": true}}
-	h := SweepHandler(core, enq)
+	h := SweepHandler(core, enq, nil)
 	if err := h(context.Background(), asynq.NewTask("inbox:sweep", nil)); err != nil {
 		t.Fatalf("expected sweep to swallow enqueue failure, got: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestSweepPropagatesCoreError(t *testing.T) {
 	want := errors.New("db down")
 	core := &stubCore{listErr: want}
 	enq := &fakeEnqueuer{}
-	h := SweepHandler(core, enq)
+	h := SweepHandler(core, enq, nil)
 	if err := h(context.Background(), asynq.NewTask("inbox:sweep", nil)); !errors.Is(err, want) {
 		t.Fatalf("expected core error to propagate, got %v", err)
 	}

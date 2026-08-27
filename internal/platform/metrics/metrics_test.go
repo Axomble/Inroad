@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -113,13 +114,135 @@ func TestSendFinalizedIncrementsWithLabels(t *testing.T) {
 	}
 }
 
+// TestSendClaimedSeparatesWonFromReclaimed is the point of the claim counter:
+// a reclaimed lease (a worker died mid-send) must land on its OWN series, not
+// be folded into "won", or the single best send-path health signal is invisible.
+func TestSendClaimedSeparatesWonFromReclaimed(t *testing.T) {
+	m := metrics.New()
+	m.SendClaimed("step", metrics.ClaimOutcomeWon)
+	m.SendClaimed("step", metrics.ClaimOutcomeWon)
+	m.SendClaimed("step", metrics.ClaimOutcomeReclaimed)
+	m.SendClaimed("step", metrics.ClaimOutcomeLost)
+
+	families := metricstest.Scrape(t, m)
+	for outcome, want := range map[string]float64{
+		metrics.ClaimOutcomeWon:         2,
+		metrics.ClaimOutcomeReclaimed:   1,
+		metrics.ClaimOutcomeLost:        1,
+		metrics.ClaimOutcomeAlreadySent: 0,
+		metrics.ClaimOutcomeDeferred:    0,
+	} {
+		got := metricstest.CounterValue(families, "inroad_send_claims_total", map[string]string{
+			"kind": "step", "outcome": outcome,
+		})
+		if got != want {
+			t.Errorf("claims{outcome=%q} = %v, want %v", outcome, got, want)
+		}
+	}
+}
+
+// TestSweepCompletedRecordsDurationAndRows: one call must move BOTH the
+// duration histogram and the rows counter, since rows-per-sweep (the growth
+// curve of the unbounded scans) is only derivable from the pair.
+func TestSweepCompletedRecordsDurationAndRows(t *testing.T) {
+	m := metrics.New()
+	m.SweepCompleted("inbox", 40, 250*time.Millisecond)
+	m.SweepCompleted("inbox", 60, 750*time.Millisecond)
+	m.SweepCompleted("warmup", 5, time.Second)
+
+	families := metricstest.Scrape(t, m)
+	if got := metricstest.HistogramSampleCount(families, "inroad_sweep_seconds", map[string]string{"kind": "inbox"}); got != 2 {
+		t.Errorf("inbox sweep observations = %d, want 2", got)
+	}
+	if got := metricstest.CounterValue(families, "inroad_sweep_rows_total", map[string]string{"kind": "inbox"}); got != 100 {
+		t.Errorf("inbox rows = %v, want 100 (40+60)", got)
+	}
+	if got := metricstest.CounterValue(families, "inroad_sweep_rows_total", map[string]string{"kind": "warmup"}); got != 5 {
+		t.Errorf("warmup rows = %v, want 5", got)
+	}
+}
+
+// TestSweepCompletedWithZeroRowsStillTimesTheSweep: an empty sweep is still a
+// sweep, and its cost is exactly what an operator wants to see when the scan
+// gets expensive without returning anything.
+func TestSweepCompletedWithZeroRowsStillTimesTheSweep(t *testing.T) {
+	m := metrics.New()
+	m.SweepCompleted("enrollments", 0, 5*time.Second)
+
+	families := metricstest.Scrape(t, m)
+	if got := metricstest.HistogramSampleCount(families, "inroad_sweep_seconds", map[string]string{"kind": "enrollments"}); got != 1 {
+		t.Fatalf("observations = %d, want 1 (an empty sweep is still timed)", got)
+	}
+	if got := metricstest.CounterValue(families, "inroad_sweep_rows_total", map[string]string{"kind": "enrollments"}); got != 0 {
+		t.Fatalf("rows = %v, want 0", got)
+	}
+}
+
+// TestSweepCompletedIgnoresNegativeRows: a Prometheus counter can only go up,
+// so a negative count from an upstream arithmetic slip must be dropped rather
+// than permanently corrupting the series.
+func TestSweepCompletedIgnoresNegativeRows(t *testing.T) {
+	m := metrics.New()
+	m.SweepCompleted("inbox", 10, time.Second)
+	m.SweepCompleted("inbox", -5, time.Second)
+
+	families := metricstest.Scrape(t, m)
+	if got := metricstest.CounterValue(families, "inroad_sweep_rows_total", map[string]string{"kind": "inbox"}); got != 10 {
+		t.Fatalf("rows = %v, want 10 (the negative count must be ignored, never subtracted)", got)
+	}
+}
+
+// TestNewRegistersRuntimeAndProcessCollectors pins the free-and-standard
+// collectors being present on every process's registry without any wiring.
+func TestNewRegistersRuntimeAndProcessCollectors(t *testing.T) {
+	families := metricstest.Scrape(t, metrics.New())
+	// go_goroutines comes from the Go collector; process_start_time_seconds
+	// from the process collector. Both are stable, documented series names.
+	for _, name := range []string{"go_goroutines", "go_memstats_alloc_bytes", "process_start_time_seconds"} {
+		if _, ok := families[name]; !ok {
+			t.Errorf("missing %q — the runtime/process collectors are not registered", name)
+		}
+	}
+}
+
+// TestNoTenantLabelsAnywhere is the repo-wide cardinality guard: NO series this
+// registry exposes may carry a per-tenant dimension. Unbounded label
+// cardinality kills the metrics backend, and per-workspace behaviour belongs in
+// logs and the DB instead.
+func TestNoTenantLabelsAnywhere(t *testing.T) {
+	m := metrics.New()
+	m.SendFinalized("campaign", "sent")
+	m.SendClaimed("step", metrics.ClaimOutcomeWon)
+	m.SweepCompleted("inbox", 1, time.Second)
+
+	banned := map[string]bool{
+		"workspace_id": true, "workspace": true, "tenant_id": true, "tenant": true,
+		"campaign_id": true, "campaign": true, "mailbox_id": true, "mailbox": true,
+		"contact_id": true, "contact": true, "enrollment_id": true, "send_id": true,
+	}
+	for name, fam := range metricstest.Scrape(t, m) {
+		for _, sample := range fam.GetMetric() {
+			for _, lp := range sample.GetLabel() {
+				if banned[lp.GetName()] {
+					t.Errorf("%s carries banned high-cardinality label %q", name, lp.GetName())
+				}
+			}
+		}
+	}
+}
+
 // TestNilMetricsNoOps proves every method on a nil *Metrics is a safe no-op —
 // the worker's finalize points and the HTTP middleware chain must not need
 // their own "metrics == nil" guard.
 func TestNilMetricsNoOps(t *testing.T) {
 	var m *metrics.Metrics
 
-	m.SendFinalized("campaign", "sent") // must not panic
+	// Every recording method, on a nil receiver. The claim path in particular
+	// runs with a nil *Metrics in every unit test and integration test that
+	// builds an inprocess client without WithMetrics.
+	m.SendFinalized("campaign", "sent")
+	m.SendClaimed("step", metrics.ClaimOutcomeWon)
+	m.SweepCompleted("inbox", 12, 3*time.Second)
 
 	r := chi.NewRouter()
 	r.Use(m.HTTPMiddleware())

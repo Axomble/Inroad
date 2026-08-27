@@ -57,7 +57,17 @@ DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
     WHERE sends.status = 'sending'
       AND sends.workspace_id = $2
       AND sends.claimed_at < now() - make_interval(secs => sqlc.arg(lease_seconds)::int)
-RETURNING id;
+-- `freshly_inserted` distinguishes the two ways a claim is won, for
+-- observability only (inroad_send_claims_total: a rising RECLAIM rate means
+-- workers are dying mid-send, which a single "won" counter would hide). Both
+-- branches stamp claimed_at with the SAME statement's now(), and created_at
+-- defaults to now() on insert and is never touched by the DO UPDATE — so
+-- equality means "this row was created by this very statement" (a fresh win)
+-- and inequality means an earlier row's stale lease was taken over. now() is
+-- the transaction timestamp, constant within a statement, so this is exact
+-- rather than a timing heuristic. Nothing on the send path branches on it; the
+-- claim's meaning is unchanged.
+RETURNING id, (created_at = claimed_at) AS freshly_inserted;
 
 -- name: LatestSentForContact :one
 -- The most recent successfully-sent step for a (campaign, contact), used to

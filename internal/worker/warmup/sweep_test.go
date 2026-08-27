@@ -43,7 +43,7 @@ func TestSweepFansOutPerMailboxWithAssignedDestAndEvaluatesHealth(t *testing.T) 
 	}}
 	enq := &fakeEnq{}
 
-	if err := SweepHandler(core, enq)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
+	if err := SweepHandler(core, enq, nil)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 
@@ -76,7 +76,7 @@ func TestSweepStillEvaluatesHealthWhenAssignFails(t *testing.T) {
 	}
 	enq := &fakeEnq{}
 
-	if err := SweepHandler(core, enq)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
+	if err := SweepHandler(core, enq, nil)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
 		t.Fatalf("a per-mailbox routing failure must not fail the sweep, got %v", err)
 	}
 	if len(enq.calls) != 0 {
@@ -96,7 +96,7 @@ func TestSweepStillEvaluatesHealthWhenEnqueueFails(t *testing.T) {
 	// mb-1's tick enqueue fails; mb-2 must still be processed.
 	enq := &fakeEnq{failOn: "mb-1", err: context.DeadlineExceeded}
 
-	if err := SweepHandler(core, enq)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
+	if err := SweepHandler(core, enq, nil)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
 		t.Fatalf("a per-mailbox enqueue failure must not fail the sweep, got %v", err)
 	}
 	// Both mailboxes are attempted; the failure on mb-1 doesn't short-circuit mb-2.
@@ -120,7 +120,7 @@ func TestSweepEmptyPoolStillEvaluatesHealth(t *testing.T) {
 	core := &sweepCore{}
 	enq := &fakeEnq{}
 
-	if err := SweepHandler(core, enq)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
+	if err := SweepHandler(core, enq, nil)(context.Background(), asynq.NewTask(queue.TaskWarmupSweep, nil)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if len(enq.calls) != 0 {

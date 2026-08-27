@@ -37,7 +37,7 @@ func TestSweepReenqueuesDueEnrollments(t *testing.T) {
 		{EnrollmentID: "e1", WorkspaceID: "w"}, {EnrollmentID: "e2", WorkspaceID: "w"},
 	}}
 	enq := &countEnq{}
-	if err := SweepHandler(core, enq)(context.Background(), sweepTask()); err != nil {
+	if err := SweepHandler(core, enq, nil)(context.Background(), sweepTask()); err != nil {
 		t.Fatal(err)
 	}
 	if len(enq.ids) != 2 {
@@ -47,7 +47,7 @@ func TestSweepReenqueuesDueEnrollments(t *testing.T) {
 
 func TestSweepNoDueIsNoOp(t *testing.T) {
 	enq := &countEnq{}
-	if err := SweepHandler(&sweepCore{}, enq)(context.Background(), sweepTask()); err != nil {
+	if err := SweepHandler(&sweepCore{}, enq, nil)(context.Background(), sweepTask()); err != nil {
 		t.Fatal(err)
 	}
 	if len(enq.ids) != 0 {

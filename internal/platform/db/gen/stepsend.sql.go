@@ -22,7 +22,7 @@ DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
     WHERE sends.status = 'sending'
       AND sends.workspace_id = $2
       AND sends.claimed_at < now() - make_interval(secs => $10::int)
-RETURNING id
+RETURNING id, (created_at = claimed_at) AS freshly_inserted
 `
 
 type ClaimStepSendParams struct {
@@ -36,6 +36,11 @@ type ClaimStepSendParams struct {
 	ReferencesHeader string      `json:"references_header"`
 	VariantID        pgtype.UUID `json:"variant_id"`
 	LeaseSeconds     int32       `json:"lease_seconds"`
+}
+
+type ClaimStepSendRow struct {
+	ID              uuid.UUID `json:"id"`
+	FreshlyInserted bool      `json:"freshly_inserted"`
 }
 
 // Claim one step-send for delivery (claim-before-send). The sends row is the
@@ -54,7 +59,17 @@ type ClaimStepSendParams struct {
 // reclaim recomputes the same variant, but the weights could have been edited
 // between the two attempts. Re-stamping it keeps the row describing what is
 // actually about to be sent rather than what a previous attempt intended.
-func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (uuid.UUID, error) {
+// `freshly_inserted` distinguishes the two ways a claim is won, for
+// observability only (inroad_send_claims_total: a rising RECLAIM rate means
+// workers are dying mid-send, which a single "won" counter would hide). Both
+// branches stamp claimed_at with the SAME statement's now(), and created_at
+// defaults to now() on insert and is never touched by the DO UPDATE — so
+// equality means "this row was created by this very statement" (a fresh win)
+// and inequality means an earlier row's stale lease was taken over. now() is
+// the transaction timestamp, constant within a statement, so this is exact
+// rather than a timing heuristic. Nothing on the send path branches on it; the
+// claim's meaning is unchanged.
+func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (ClaimStepSendRow, error) {
 	row := q.db.QueryRow(ctx, claimStepSend,
 		arg.ID,
 		arg.WorkspaceID,
@@ -67,9 +82,9 @@ func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (u
 		arg.VariantID,
 		arg.LeaseSeconds,
 	)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i ClaimStepSendRow
+	err := row.Scan(&i.ID, &i.FreshlyInserted)
+	return i, err
 }
 
 const getStepEnrollmentBundle = `-- name: GetStepEnrollmentBundle :one
