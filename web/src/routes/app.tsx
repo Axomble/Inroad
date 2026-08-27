@@ -6,6 +6,8 @@ import { WorkspaceSwitcher } from '@/features/auth/workspace-switcher'
 import { useAuthGuard } from '@/features/auth/use-auth-guard'
 import { UnverifiedBanner } from '@/features/auth/unverified-banner'
 import { WorkspaceOnboardingOverlay } from '@/features/auth/workspace-onboarding-overlay'
+import { RealtimeProvider } from '@/features/realtime/realtime-provider'
+import { ConnectionIndicator } from '@/features/realtime/connection-indicator'
 
 /**
  * Authenticated app layout. Guards every /app/* route: no in-memory session ->
@@ -43,30 +45,42 @@ function AppLayout() {
   // of staring at a broken-looking app shell.
   useAuthGuard()
   return (
-    <div className="flex h-dvh flex-col">
-      {/* Sits alongside the unverified banner rather than inside a page: an
-          un-named workspace blocks every /app route, not one of them. Renders
-          nothing (and costs nothing) once the workspace has been named. */}
-      <WorkspaceOnboardingOverlay />
-      <UnverifiedBanner />
-      {/* AppShell fills whatever height remains below the banner (h-full,
-          not h-dvh — this wrapper owns the viewport height so the banner
-          can take its own space above the shell without either overflowing
-          or fighting AppShell's internal flex layout). */}
-      <div className="min-h-0 flex-1">
-        <AppShell
-          leftSlot={
-            // Workspace identity sits beside the product mark, separated by a
-            // hairline; utilities (docs, assistant, theme, account) keep right.
-            <div className="hidden items-center border-l border-chrome-border pl-3 sm:flex">
-              <WorkspaceSwitcher />
-            </div>
-          }
-          rightSlot={<AuthHeader />}
-        >
-          <Outlet />
-        </AppShell>
+    // The workspace socket opens here, not in main.tsx or __root.tsx: this is
+    // the first point an access token is guaranteed, and useAuthGuard above is
+    // also the disconnect trigger.
+    <RealtimeProvider>
+      <div className="flex h-dvh flex-col">
+        {/* Sits alongside the unverified banner rather than inside a page: an
+            un-named workspace blocks every /app route, not one of them. Renders
+            nothing (and costs nothing) once the workspace has been named. */}
+        <WorkspaceOnboardingOverlay />
+        <UnverifiedBanner />
+        {/* AppShell fills whatever height remains below the banner (h-full,
+            not h-dvh — this wrapper owns the viewport height so the banner
+            can take its own space above the shell without either overflowing
+            or fighting AppShell's internal flex layout). */}
+        <div className="min-h-0 flex-1">
+          <AppShell
+            leftSlot={
+              // Workspace identity sits beside the product mark, separated by a
+              // hairline; utilities (docs, assistant, theme, account) keep right.
+              <div className="hidden items-center border-l border-chrome-border pl-3 sm:flex">
+                <WorkspaceSwitcher />
+              </div>
+            }
+            rightSlot={
+              <div className="flex items-center gap-3">
+                {/* Renders nothing while the socket is healthy; a dead socket
+                    otherwise looks identical to a quiet workspace. */}
+                <ConnectionIndicator />
+                <AuthHeader />
+              </div>
+            }
+          >
+            <Outlet />
+          </AppShell>
+        </div>
       </div>
-    </div>
+    </RealtimeProvider>
   )
 }
