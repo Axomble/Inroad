@@ -187,9 +187,20 @@ type CampaignDetail struct {
 //     contact's enrollment, exactly one per contact for the campaign's
 //     lifetime -- active + completed + stopped).
 //
-// OpensIndicative is proxy-filtered (CountHumanOpens excludes known
-// prefetch UAs and near-instant fetches) but remains an approximation --
-// clicks are the reliable signal.
+// OpensIndicative and Clicks both count only HUMAN-classified events: each
+// tracking hit is judged once at write time by platform/botfilter (known proxy
+// and scanner UAs, the sub-2s prefetch window, a click with no preceding open,
+// datacenter ranges, per-subnet bursts) and the queries filter on that stored
+// verdict. Clicks are filtered too now -- a link scanner that follows every URL
+// in a message used to count as a click while the open side excluded proxies,
+// which could report more clicks than opens.
+//
+// It remains an APPROXIMATION, and deliberately errs toward counting a doubtful
+// hit as human: over-filtering silently deletes a real person's engagement,
+// while under-filtering only inflates a number an operator can question. The
+// machine events are not discarded -- CountTrackingEventsByKindAndVerdict can
+// report "N opens, M of them machine" -- so the excluded volume stays visible
+// rather than vanishing.
 type Metrics struct {
 	Sent            int64
 	OpensIndicative int64

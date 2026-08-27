@@ -71,7 +71,11 @@ SELECT (
      AND im.occurred_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day')
 )::bigint;
 -- name: GetCampaignIDForSend :one
-SELECT campaign_id, workspace_id FROM sends WHERE id = $1;
+-- sent_at is selected for the tracking classifier's prefetch-window rule (an
+-- open within seconds of the send is a machine fetch, not a read). It is NULL
+-- for a send that has not gone out, which the classifier reads as "unknown send
+-- time" and treats as no signal rather than guessing.
+SELECT campaign_id, workspace_id, sent_at FROM sends WHERE id = $1;
 -- name: GetSendByMessageID :one
 -- Match an inbound reply/bounce back to the send that caused it, workspace-scoped.
 -- sends has no enrollment_id of its own, so this left-joins sequence_enrollments

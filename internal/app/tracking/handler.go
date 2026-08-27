@@ -3,6 +3,7 @@ package tracking
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -24,10 +25,32 @@ var pixelGIF = []byte{
 }
 
 // Handler serves the public, stateless open/click tracking endpoints.
-type Handler struct{ svc *Service }
+type Handler struct {
+	svc *Service
+	ip  httpx.ClientIPResolver
+	now func() time.Time
+}
 
-// NewHandler builds a Handler around svc.
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+// NewHandler builds a Handler around svc, resolving the client IP through the
+// shared trusted-proxy-aware resolver (X-Forwarded-For is honored ONLY from a
+// configured proxy; from a direct peer it is a forgeable header and ignored).
+//
+// The IP is a classification input, never an access-control one, so an
+// unresolvable address is simply no signal.
+func NewHandler(svc *Service, ip httpx.ClientIPResolver) *Handler {
+	return &Handler{svc: svc, ip: ip, now: time.Now}
+}
+
+// hit assembles the request facts the service classifies on. Everything here
+// except the token is attacker-controlled and is used only as a signal.
+func (h *Handler) hit(r *http.Request, token string) Hit {
+	return Hit{
+		Token:     token,
+		UserAgent: r.UserAgent(),
+		IP:        h.ip.ClientIP(r),
+		At:        h.now(),
+	}
+}
 
 // openGIF always returns the 1x1 pixel with Cache-Control: no-store,
 // whether or not the token is valid or the send exists -- see
@@ -37,7 +60,7 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 // worse, invite probing to see which tokens fail).
 func (h *Handler) openGIF(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSuffix(chi.URLParam(r, "token"), ".gif")
-	h.svc.RecordOpen(r.Context(), token, r.UserAgent())
+	h.svc.RecordOpen(r.Context(), h.hit(r, token))
 
 	w.Header().Set("Content-Type", "image/gif")
 	w.Header().Set("Cache-Control", "no-store")
@@ -52,7 +75,7 @@ func (h *Handler) openGIF(w http.ResponseWriter, r *http.Request) {
 // image, and a 404 gives no more of an oracle than any other dead link.
 func (h *Handler) clickRedirect(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
-	dest, ok := h.svc.RecordClick(r.Context(), token, r.UserAgent())
+	dest, ok := h.svc.RecordClick(r.Context(), h.hit(r, token))
 	if !ok {
 		httpx.Error(w, http.StatusNotFound, "not found")
 		return

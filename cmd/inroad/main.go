@@ -499,7 +499,14 @@ func run() error {
 		},
 	}.Middleware("inbox-draft-reply")
 
-	trackHandler := tracking.NewHandler(tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool)))
+	// The tracking handler shares the trusted-proxy IP resolver so a hit's
+	// source address feeds bot/prefetch classification. X-Forwarded-For is
+	// honored only from a configured proxy; the address is a classification
+	// signal, never an access-control decision.
+	trackHandler := tracking.NewHandler(
+		tracking.NewService(cfg.TrackingSecret, tracking.NewPgStore(pool), logger),
+		ipResolver,
+	)
 
 	// Deny-by-default routing. Two groups:
 	//   public    - reachable without an access token. Either genuinely open

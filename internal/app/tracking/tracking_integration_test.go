@@ -7,16 +7,21 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/app/campaign"
+	"github.com/inroad/inroad/internal/platform/botfilter"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/track"
 )
 
@@ -102,12 +107,28 @@ func seedSend(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *gen.Quer
 }
 
 // mountHandler wires a real Handler (PgStore backed) mounted at "/t", the
-// same prefix cmd/inroad mounts it at in production.
+// same prefix cmd/inroad mounts it at in production. No trusted proxies, so
+// the client IP is the httptest RemoteAddr and X-Forwarded-For is ignored --
+// the production default.
 func mountHandler(pool *pgxpool.Pool) http.Handler {
-	h := NewHandler(NewService(itSecret, NewPgStore(pool)))
+	h := NewHandler(NewService(itSecret, NewPgStore(pool), nil), httpx.NewClientIPResolver(nil))
 	r := chi.NewRouter()
 	r.Mount("/t", h.Routes())
 	return r
+}
+
+// verdictOf reads back the stored classification for sendID's single event.
+func verdictOf(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sendID uuid.UUID) (bool, string) {
+	t.Helper()
+	var isMachine bool
+	var reason string
+	err := pool.QueryRow(ctx,
+		`SELECT is_machine, machine_reason FROM tracking_events WHERE send_id = $1`, sendID).
+		Scan(&isMachine, &reason)
+	if err != nil {
+		t.Fatalf("scan verdict: %v", err)
+	}
+	return isMachine, reason
 }
 
 // countEvents returns how many tracking_events rows exist for sendID,
@@ -249,11 +270,14 @@ func TestClickRedirect_ProtocolRelativeURL_404NoRedirectNoEvent(t *testing.T) {
 	}
 }
 
-// TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens proves the
-// prefetch filter lives in the read path (CountHumanOpens), not the write
-// path: a GoogleImageProxy hit is still recorded as a real event (so raw
-// event data is never lossy), but the metrics query that computes
-// OpensIndicative must not count it.
+// TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens is the
+// end-to-end proof of this feature's central claim: the machine event is
+// STORED, with its verdict, and excluded from the headline rate by a FILTER on
+// that stored column -- never dropped.
+//
+// The judgement now happens at WRITE time (platform/botfilter) rather than
+// being re-derived by each reader, so this asserts both halves: the row exists
+// carrying is_machine/machine_reason, and CountHumanOpens does not count it.
 func TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens(t *testing.T) {
 	ctx := context.Background()
 	pool, q, closeFn := connect(t)
@@ -271,7 +295,12 @@ func TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens(t *testing
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	if n := countEvents(t, ctx, pool, fx.sendID); n != 1 {
-		t.Fatalf("recorded %d events for a GoogleImageProxy open, want 1 (write path must not filter)", n)
+		t.Fatalf("recorded %d events for a GoogleImageProxy open, want 1 (a machine event is STORED, never dropped)", n)
+	}
+	isMachine, reason := verdictOf(t, ctx, pool, fx.sendID)
+	if !isMachine || reason != string(botfilter.ReasonProxyUserAgent) {
+		t.Fatalf("stored verdict = machine:%v reason:%q, want machine:true reason:%q",
+			isMachine, reason, botfilter.ReasonProxyUserAgent)
 	}
 
 	n, err := q.CountHumanOpens(ctx, gen.CountHumanOpensParams{CampaignID: fx.campaignID, WorkspaceID: fx.ws})
@@ -280,6 +309,141 @@ func TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens(t *testing
 	}
 	if n != 0 {
 		t.Fatalf("CountHumanOpens = %d, want 0 (GoogleImageProxy must be excluded)", n)
+	}
+
+	// The transparency counterpart: reporting can still SEE the machine open,
+	// which is the whole point of storing rather than discarding it.
+	rows, err := q.CountTrackingEventsByKindAndVerdict(ctx, gen.CountTrackingEventsByKindAndVerdictParams{
+		CampaignID: fx.campaignID, WorkspaceID: fx.ws,
+	})
+	if err != nil {
+		t.Fatalf("CountTrackingEventsByKindAndVerdict: %v", err)
+	}
+	var machineOpens int64
+	for _, row := range rows {
+		if row.Kind == gen.TrackingEventKindOpen && row.IsMachine {
+			machineOpens = row.N
+		}
+	}
+	if machineOpens != 1 {
+		t.Fatalf("machine opens = %d, want 1 — reporting must be able to say 'N opens, M of them machine'", machineOpens)
+	}
+}
+
+// A sub-second open from an ordinary browser UA is the Apple MPP shape: the UA
+// list cannot see it (MPP forwards the original client's UA), so the timing
+// rule is what catches it. Seeded against a send that went out just now rather
+// than the backdated hour every other fixture uses.
+func TestOpenPixel_PrefetchWindow_ClassifiedMachineAgainstARealSend(t *testing.T) {
+	ctx := context.Background()
+	pool, q, closeFn := connect(t)
+	defer closeFn()
+	fx := seedSend(t, ctx, pool, q)
+	// Undo seedSend's backdating: the send just went out, so the open that
+	// follows immediately is inside the prefetch window.
+	if _, err := pool.Exec(ctx, `UPDATE sends SET sent_at = now() WHERE id = $1`, fx.sendID); err != nil {
+		t.Fatalf("reset sent_at: %v", err)
+	}
+	r := mountHandler(pool)
+
+	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
+	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148")
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	if n := countEvents(t, ctx, pool, fx.sendID); n != 1 {
+		t.Fatalf("recorded %d events, want 1", n)
+	}
+	isMachine, reason := verdictOf(t, ctx, pool, fx.sendID)
+	if !isMachine || reason != string(botfilter.ReasonPrefetchWindow) {
+		t.Fatalf("stored verdict = machine:%v reason:%q, want machine:true reason:%q",
+			isMachine, reason, botfilter.ReasonPrefetchWindow)
+	}
+	n, err := q.CountHumanOpens(ctx, gen.CountHumanOpensParams{CampaignID: fx.campaignID, WorkspaceID: fx.ws})
+	if err != nil {
+		t.Fatalf("CountHumanOpens: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("CountHumanOpens = %d, want 0", n)
+	}
+}
+
+// The client IP is persisted so the burst rule has something to count, and the
+// subnet-containment query must actually match it through the ::cidr cast --
+// the shape sqlc's parser accepts but only Postgres can confirm.
+func TestOpenPixel_StoresClientIPAndCountsItBySubnet(t *testing.T) {
+	ctx := context.Background()
+	pool, q, closeFn := connect(t)
+	defer closeFn()
+	fx := seedSend(t, ctx, pool, q)
+	r := mountHandler(pool)
+
+	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
+	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
+	req.RemoteAddr = "203.0.113.9:41234"
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	var stored netip.Addr
+	if err := pool.QueryRow(ctx, `SELECT client_ip FROM tracking_events WHERE send_id = $1`, fx.sendID).Scan(&stored); err != nil {
+		t.Fatalf("scan client_ip: %v", err)
+	}
+	if stored.String() != "203.0.113.9" {
+		t.Fatalf("stored client_ip = %v, want 203.0.113.9", stored)
+	}
+
+	n, err := q.CountRecentSendOpensFromSubnet(ctx, gen.CountRecentSendOpensFromSubnetParams{
+		SendID:    fx.sendID,
+		CreatedAt: pgtype.Timestamptz{Time: time.Now().Add(-botfilter.BurstWindow), Valid: true},
+		Subnet:    "203.0.113.0/24",
+	})
+	if err != nil {
+		t.Fatalf("CountRecentSendOpensFromSubnet: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("subnet count = %d, want 1 — the ::cidr containment must match the stored address", n)
+	}
+
+	// A different /24 must not match, or the rule would group unrelated readers.
+	other, err := q.CountRecentSendOpensFromSubnet(ctx, gen.CountRecentSendOpensFromSubnetParams{
+		SendID:    fx.sendID,
+		CreatedAt: pgtype.Timestamptz{Time: time.Now().Add(-botfilter.BurstWindow), Valid: true},
+		Subnet:    "198.51.100.0/24",
+	})
+	if err != nil {
+		t.Fatalf("CountRecentSendOpensFromSubnet (other): %v", err)
+	}
+	if other != 0 {
+		t.Fatalf("foreign subnet count = %d, want 0", other)
+	}
+}
+
+// The CHECK constraint makes a contradictory pair unrepresentable, so no future
+// writer can store "machine with no reason" or "human that names one".
+func TestVerdictAndReasonCannotDisagree(t *testing.T) {
+	ctx := context.Background()
+	pool, q, closeFn := connect(t)
+	defer closeFn()
+	fx := seedSend(t, ctx, pool, q)
+
+	cases := []struct {
+		name      string
+		isMachine bool
+		reason    string
+	}{
+		{"machine with no reason", true, ""},
+		{"human that names a reason", false, "proxy_user_agent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pool.Exec(ctx,
+				`INSERT INTO tracking_events (workspace_id, campaign_id, send_id, kind, is_machine, machine_reason)
+				 VALUES ($1,$2,$3,'open',$4,$5)`,
+				fx.ws, fx.campaignID, fx.sendID, tc.isMachine, tc.reason)
+			if err == nil {
+				t.Fatal("insert succeeded, want a CHECK violation")
+			}
+		})
 	}
 }
 
@@ -296,6 +460,10 @@ func TestCampaignMetrics_FromSeededEvents(t *testing.T) {
 	fx := seedSend(t, ctx, pool, q)
 	r := mountHandler(pool)
 
+	// Open first, then click: the send is backdated an hour (seedSend), so the
+	// open is outside the prefetch window and classifies human, and the click
+	// that follows it is vouched for by that open. This is the ordinary human
+	// sequence, and both must survive classification into the metrics below.
 	openTok := track.MakeOpenToken(itSecret, fx.sendID.String())
 	reqO := httptest.NewRequest(http.MethodGet, "/t/o/"+openTok+".gif", http.NoBody)
 	reqO.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
@@ -303,6 +471,7 @@ func TestCampaignMetrics_FromSeededEvents(t *testing.T) {
 
 	clickTok := track.MakeClickToken(itSecret, fx.sendID.String(), "https://example.test/landing")
 	reqC := httptest.NewRequest(http.MethodGet, "/t/c/"+clickTok, http.NoBody)
+	reqC.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	r.ServeHTTP(httptest.NewRecorder(), reqC)
 
 	campSvc := campaign.NewService(campaign.NewPgStore(pool), nil)
