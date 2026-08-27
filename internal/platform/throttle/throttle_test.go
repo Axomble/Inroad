@@ -46,10 +46,10 @@ func cfg(l Limiter, ipLimit, acctLimit int) Config {
 func req(email string) *http.Request {
 	var r *http.Request
 	if email == "" {
-		r = httptest.NewRequest(http.MethodPost, "/login", http.NoBody)
+		r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", http.NoBody)
 	} else {
 		buf, _ := json.Marshal(map[string]string{"email": email})
-		r = httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(buf))
+		r = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", bytes.NewReader(buf))
 	}
 	return r
 }
@@ -188,10 +188,10 @@ func runThroughPeek(t *testing.T, r *http.Request) (*httptest.ResponseRecorder, 
 // the body intact.
 func TestBodyPeek_MalformedJSON(t *testing.T) {
 	const raw = `{"email": "broken`
-	if got := peekEmail(httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw))); got != "" {
+	if got := peekEmail(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", strings.NewReader(raw))); got != "" {
 		t.Fatalf("peekEmail on malformed JSON: got %q, want \"\" (IP-only fallback)", got)
 	}
-	rec, seen := runThroughPeek(t, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw)))
+	rec, seen := runThroughPeek(t, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", strings.NewReader(raw)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("malformed body: got %d, want 200 (peek never fails the request)", rec.Code)
 	}
@@ -203,10 +203,10 @@ func TestBodyPeek_MalformedJSON(t *testing.T) {
 // TestBodyPeek_EmptyBody asserts a missing/empty body degrades peekEmail to "" and
 // passes through to the handler (which sees an empty body) without erroring.
 func TestBodyPeek_EmptyBody(t *testing.T) {
-	if got := peekEmail(httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(""))); got != "" {
+	if got := peekEmail(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", strings.NewReader(""))); got != "" {
 		t.Fatalf("peekEmail on empty body: got %q, want \"\"", got)
 	}
-	rec, seen := runThroughPeek(t, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("")))
+	rec, seen := runThroughPeek(t, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", strings.NewReader("")))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("empty body: got %d, want 200", rec.Code)
 	}
@@ -227,10 +227,10 @@ func TestBodyPeek_OversizedBody(t *testing.T) {
 	if len(raw) <= maxBodyPeek {
 		t.Fatalf("test body %d bytes is not over the %d cap", len(raw), maxBodyPeek)
 	}
-	if got := peekEmail(httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw))); got != "" {
+	if got := peekEmail(httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", strings.NewReader(raw))); got != "" {
 		t.Fatalf("peekEmail on oversized body: got %q, want \"\" (IP-only, no partial parse)", got)
 	}
-	rec, seen := runThroughPeek(t, httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(raw)))
+	rec, seen := runThroughPeek(t, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", strings.NewReader(raw)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("oversized body: got %d, want 200 (peek never fails the request)", rec.Code)
 	}

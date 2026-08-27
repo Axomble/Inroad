@@ -28,7 +28,7 @@ func newAuthedRequest(t *testing.T, secret []byte, ws uuid.UUID, method, id, bod
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	req := httptest.NewRequest(method, "/lists/"+id, strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), method, "/lists/"+id, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", id)

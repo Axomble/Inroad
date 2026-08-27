@@ -115,7 +115,7 @@ func TestMiddlewarePassAndReject(t *testing.T) {
 
 	// Pass: no-op verifier forwards to next.
 	rec := httptest.NewRecorder()
-	Middleware(NewNoop(), resolver)(next).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/login", http.NoBody))
+	Middleware(NewNoop(), resolver)(next).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", http.NoBody))
 	if rec.Code != http.StatusTeapot {
 		t.Fatalf("noop middleware: got %d, want 418 (forwarded)", rec.Code)
 	}
@@ -125,7 +125,7 @@ func TestMiddlewarePassAndReject(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"success":true}`), nil
 	}))
 	rec = httptest.NewRecorder()
-	Middleware(v, resolver)(next).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/login", http.NoBody))
+	Middleware(v, resolver)(next).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", http.NoBody))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("reject middleware: got %d, want 403", rec.Code)
 	}

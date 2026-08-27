@@ -60,7 +60,7 @@ func newTestVerifier(store verifierStore, limiter RateLimiter) *Verifier {
 }
 
 func bearerReq(token string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.RemoteAddr = "198.51.100.10:5555"
 	return r
@@ -74,13 +74,13 @@ func allowLimiter() *fakeLimiter { return &fakeLimiter{allow: true} }
 func TestVerifyDefersNonAPIKey(t *testing.T) {
 	v := newTestVerifier(newFakeStore(), allowLimiter())
 
-	jwt := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	jwt := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	jwt.Header.Set("Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.body.sig")
 	if _, ok, err := v.Verify(context.Background(), jwt); ok || err != nil {
 		t.Fatalf("jwt: got (ok=%v, err=%v), want defer (false, nil)", ok, err)
 	}
 
-	none := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	none := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	if _, ok, err := v.Verify(context.Background(), none); ok || err != nil {
 		t.Fatalf("no cred: got (ok=%v, err=%v), want defer", ok, err)
 	}
@@ -90,7 +90,7 @@ func TestVerifyDefersNonAPIKey(t *testing.T) {
 // OWNS but cannot parse is a hard 401 (ErrUnauthorized), not a defer.
 func TestVerifyMalformedTokenRejected(t *testing.T) {
 	v := newTestVerifier(newFakeStore(), allowLimiter())
-	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	r.Header.Set("Authorization", "Bearer inrd_garbled")
 	_, ok, err := v.Verify(context.Background(), r)
 	if ok || !errors.Is(err, auth.ErrUnauthorized) {
@@ -257,7 +257,7 @@ func TestVerifyXAPIKeyHeader(t *testing.T) {
 	tok := seedKey(t, store, nil)
 	v := newTestVerifier(store, allowLimiter())
 
-	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	r.Header.Set("X-API-Key", tok)
 	r.RemoteAddr = "198.51.100.10:5555"
 	if _, ok, err := v.Verify(context.Background(), r); !ok || err != nil {

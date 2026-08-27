@@ -86,7 +86,7 @@ func TestMCPRequiresBearerToken(t *testing.T) {
 	h := New(fakeRegistry{}, func(context.Context, *http.Request) (agenttool.Principal, []string, time.Time, string, bool, error) {
 		return agenttool.Principal{WorkspaceID: workspaceID, UserID: userID}, []string{"contacts:read"}, time.Now().Add(time.Hour), "client", true, nil
 	}, "https://inroad.test/v1/mcp", "https://inroad.test/oauth2")
-	req := httptest.NewRequest(http.MethodPost, "/v1/mcp", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/mcp", http.NoBody)
 	res := httptest.NewRecorder()
 	h.StreamableHTTP().ServeHTTP(res, req)
 	if res.Code != http.StatusUnauthorized {
@@ -99,7 +99,7 @@ func TestMCPMetadataIsPublic(t *testing.T) {
 		return agenttool.Principal{}, nil, time.Time{}, "", false, nil
 	}, "https://inroad.test/v1/mcp", "https://inroad.test/oauth2")
 	res := httptest.NewRecorder()
-	h.Metadata().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", http.NoBody))
+	h.Metadata().ServeHTTP(res, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/.well-known/oauth-protected-resource", http.NoBody))
 	if res.Code != http.StatusOK {
 		t.Fatalf("metadata status = %d, want 200", res.Code)
 	}

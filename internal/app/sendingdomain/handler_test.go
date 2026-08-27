@@ -1,6 +1,7 @@
 package sendingdomain
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ var testSecret = []byte("0123456789abcdef0123456789abcdef")
 // {domain} path parameter is parsed by chi exactly as in production.
 func serve(t *testing.T, h *Handler, method, target string, authed bool) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(method, target, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), method, target, http.NoBody)
 	if authed {
 		tok, err := auth.IssueToken(testSecret, auth.Claims{
 			UserID: uuid.NewString(), WorkspaceID: testWS.String(), Role: "owner", SessionID: uuid.NewString(),

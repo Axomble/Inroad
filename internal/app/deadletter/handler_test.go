@@ -45,7 +45,7 @@ func bearer(t *testing.T, ws uuid.UUID) string {
 // request drives one call through the mounted router as the workspace ws.
 func request(t *testing.T, h *Handler, method, path string, ws uuid.UUID) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(method, "/dead-letters"+path, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), method, "/dead-letters"+path, http.NoBody)
 	r.Header.Set("Authorization", bearer(t, ws))
 	w := httptest.NewRecorder()
 	authedRouter(h).ServeHTTP(w, r)

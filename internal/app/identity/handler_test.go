@@ -29,7 +29,7 @@ func doRequest(h http.HandlerFunc, method, path string, body any) *httptest.Resp
 	} else {
 		reader = bytes.NewReader(nil)
 	}
-	req := httptest.NewRequest(method, path, reader)
+	req := httptest.NewRequestWithContext(context.Background(), method, path, reader)
 	req.RemoteAddr = "203.0.113.10:54321" // exercises the host:port -> bare-IP strip
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -152,7 +152,7 @@ func TestRegisterDuplicateEmailReturns409(t *testing.T) {
 
 func TestRefreshFailureClearsCookiesAndReturns401(t *testing.T) {
 	h := newTestHandler(newFakeStore())
-	req := httptest.NewRequest(http.MethodPost, "/refresh", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/refresh", http.NoBody)
 	req.RemoteAddr = "203.0.113.10:54321"
 	req.AddCookie(&http.Cookie{Name: refreshCookieName, Value: "not-a-real-token"})
 	w := httptest.NewRecorder()
@@ -192,7 +192,7 @@ func TestMeIncludesEmailVerified(t *testing.T) {
 	}
 
 	callMe := func() map[string]any {
-		req := httptest.NewRequest(http.MethodGet, "/me", http.NoBody)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/me", http.NoBody)
 		req.Header.Set("Authorization", "Bearer "+access)
 		w := httptest.NewRecorder()
 		auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.me)).ServeHTTP(w, req)
@@ -245,7 +245,7 @@ func TestListSessionsEmptyReturnsEmptyArray(t *testing.T) {
 		t.Fatalf("IssueToken: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/sessions", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/sessions", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.listSessions)).ServeHTTP(w, req)
@@ -288,7 +288,7 @@ func TestSwitchWorkspaceUsesSessionIDFromJWTNotBody(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]string{"workspace_id": otherWS.String()})
-	req := httptest.NewRequest(http.MethodPost, "/switch-workspace", bytes.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/switch-workspace", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 

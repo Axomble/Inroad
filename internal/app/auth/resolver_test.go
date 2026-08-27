@@ -44,7 +44,7 @@ func TestRequireAuthFirstOkWins(t *testing.T) {
 		stubVerifier{principal: want, ok: true},
 		stubVerifier{called: &secondCalled},
 	)
-	code, got := serve(t, mw, httptest.NewRequest("GET", "/x", http.NoBody))
+	code, got := serve(t, mw, httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if code != http.StatusOK {
 		t.Fatalf("first-ok should reach next, got %d", code)
 	}
@@ -62,7 +62,7 @@ func TestRequireAuthDefersDownChain(t *testing.T) {
 		stubVerifier{ok: false},                 // defer
 		stubVerifier{principal: want, ok: true}, // wins
 	)
-	code, got := serve(t, mw, httptest.NewRequest("GET", "/x", http.NoBody))
+	code, got := serve(t, mw, httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if code != http.StatusOK || got.UserID != "u2" {
 		t.Fatalf("expected defer then second wins, got code=%d principal=%+v", code, got)
 	}
@@ -70,7 +70,7 @@ func TestRequireAuthDefersDownChain(t *testing.T) {
 
 func TestRequireAuthAllDeferIs401(t *testing.T) {
 	mw := RequireAuth(stubVerifier{ok: false}, stubVerifier{ok: false})
-	code, _ := serve(t, mw, httptest.NewRequest("GET", "/x", http.NoBody))
+	code, _ := serve(t, mw, httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if code != http.StatusUnauthorized {
 		t.Fatalf("all-defer should be 401, got %d", code)
 	}
@@ -82,7 +82,7 @@ func TestRequireAuthHardFailUnauthorizedIs401(t *testing.T) {
 		stubVerifier{err: ErrUnauthorized},
 		stubVerifier{called: &secondCalled, ok: true},
 	)
-	code, _ := serve(t, mw, httptest.NewRequest("GET", "/x", http.NoBody))
+	code, _ := serve(t, mw, httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if code != http.StatusUnauthorized {
 		t.Fatalf("hard ErrUnauthorized should be 401, got %d", code)
 	}
@@ -93,7 +93,7 @@ func TestRequireAuthHardFailUnauthorizedIs401(t *testing.T) {
 
 func TestRequireAuthHardFailInternalIs500(t *testing.T) {
 	mw := RequireAuth(stubVerifier{err: errors.New("db down")})
-	code, _ := serve(t, mw, httptest.NewRequest("GET", "/x", http.NoBody))
+	code, _ := serve(t, mw, httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if code != http.StatusInternalServerError {
 		t.Fatalf("non-Unauthorized error should be 500, got %d", code)
 	}
@@ -110,7 +110,7 @@ func TestRequireAuthPanicsWithoutVerifiers(t *testing.T) {
 
 func TestRequireScopeSessionHoldsAll(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	r := httptest.NewRequest("GET", "/x", http.NoBody).WithContext(
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody).WithContext(
 		context.WithValue(context.Background(), ctxKey{}, Principal{Kind: KindSession}))
 	w := httptest.NewRecorder()
 	RequireScope(ScopeMailboxesWrite)(next).ServeHTTP(w, r)
@@ -123,7 +123,7 @@ func TestRequireScopeMachineGrantedSubset(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	p := Principal{Kind: KindAPIKey, Scopes: []string{ScopeMailboxesRead}}
 
-	r := httptest.NewRequest("GET", "/x", http.NoBody).WithContext(
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody).WithContext(
 		context.WithValue(context.Background(), ctxKey{}, p))
 	w := httptest.NewRecorder()
 	RequireScope(ScopeMailboxesRead)(next).ServeHTTP(w, r)
@@ -131,7 +131,7 @@ func TestRequireScopeMachineGrantedSubset(t *testing.T) {
 		t.Fatalf("granted scope should pass, got %d", w.Code)
 	}
 
-	r2 := httptest.NewRequest("GET", "/x", http.NoBody).WithContext(
+	r2 := httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody).WithContext(
 		context.WithValue(context.Background(), ctxKey{}, p))
 	w2 := httptest.NewRecorder()
 	RequireScope(ScopeMailboxesWrite)(next).ServeHTTP(w2, r2)
@@ -143,7 +143,7 @@ func TestRequireScopeMachineGrantedSubset(t *testing.T) {
 func TestRequireScopeRejectsMissingPrincipal(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	w := httptest.NewRecorder()
-	RequireScope(ScopeMailboxesRead)(next).ServeHTTP(w, httptest.NewRequest("GET", "/x", http.NoBody))
+	RequireScope(ScopeMailboxesRead)(next).ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("missing principal should be 401, got %d", w.Code)
 	}
@@ -151,14 +151,14 @@ func TestRequireScopeRejectsMissingPrincipal(t *testing.T) {
 
 func TestJWTVerifierDefersWithoutBearer(t *testing.T) {
 	_, ok, err := NewJWTVerifier([]byte("0123456789abcdef")).Verify(context.Background(),
-		httptest.NewRequest("GET", "/x", http.NoBody))
+		httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody))
 	if ok || err != nil {
 		t.Fatalf("no bearer should defer (false,nil), got ok=%v err=%v", ok, err)
 	}
 }
 
 func TestJWTVerifierRejectsBadToken(t *testing.T) {
-	r := httptest.NewRequest("GET", "/x", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody)
 	r.Header.Set("Authorization", "Bearer not-a-jwt")
 	_, ok, err := NewJWTVerifier([]byte("0123456789abcdef")).Verify(context.Background(), r)
 	if ok || !errors.Is(err, ErrUnauthorized) {
@@ -172,7 +172,7 @@ func TestJWTVerifierMapsClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	r := httptest.NewRequest("GET", "/x", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), "GET", "/x", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	p, ok, err := NewJWTVerifier(secret).Verify(context.Background(), r)
 	if !ok || err != nil {

@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -34,27 +35,34 @@ const defaultIMAPTimeout = 30 * time.Second
 // sending any mail. TLS is enforced by default (security Invariant 6): port 465
 // uses implicit TLS, every other port requires STARTTLS — cleartext auth is
 // permitted ONLY when cfg.AllowPlaintext is explicitly set.
-func (t *NetTester) TestSMTP(cfg SMTPConfig) error {
+func (t *NetTester) TestSMTP(ctx context.Context, cfg SMTPConfig) error {
 	addr, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, t.AllowPrivate)
 	if err != nil {
 		return err
 	}
 
-	var c *smtp.Client
+	// DialContext rather than a bare timeout: this runs on an HTTP request, and a
+	// caller who has disconnected should not leave us holding a half-open dial to a
+	// stranger's server for the full t.Timeout. The timeout stays as the ceiling for
+	// a caller who is still waiting.
+	dialer := &net.Dialer{Timeout: t.Timeout}
+	var conn net.Conn
+	var derr error
 	if cfg.Port == 465 {
-		conn, derr := tls.DialWithDialer(&net.Dialer{Timeout: t.Timeout}, "tcp", addr, &tls.Config{ServerName: cfg.Host})
-		if derr != nil {
-			return fmt.Errorf("smtp dial: %w", derr)
-		}
-		c, err = smtp.NewClient(conn, cfg.Host)
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: cfg.Host}}
+		conn, derr = tlsDialer.DialContext(ctx, "tcp", addr)
 	} else {
-		conn, derr := net.DialTimeout("tcp", addr, t.Timeout)
-		if derr != nil {
-			return fmt.Errorf("smtp dial: %w", derr)
-		}
-		c, err = smtp.NewClient(conn, cfg.Host)
+		conn, derr = dialer.DialContext(ctx, "tcp", addr)
 	}
+	if derr != nil {
+		return fmt.Errorf("smtp dial: %w", derr)
+	}
+
+	c, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
+		// NewClient reads the server greeting, so it can fail on a connection that
+		// opened fine. Closing here rather than leaking the socket until GC.
+		_ = conn.Close()
 		return fmt.Errorf("smtp client: %w", err)
 	}
 	defer c.Close()

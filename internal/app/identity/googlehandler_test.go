@@ -26,7 +26,7 @@ func newGoogleTestHandler(store *fakeStore, g *fakeGoogle) *Handler {
 // Location header.
 func callbackLocation(t *testing.T, h *Handler, query string) (int, string) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/callback?"+query, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/callback?"+query, http.NoBody)
 	w := httptest.NewRecorder()
 	h.googleSignInCallback(w, req)
 	return w.Code, w.Header().Get("Location")
@@ -41,7 +41,7 @@ func TestGoogleCallbackSetsCookiesAndRedirects(t *testing.T) {
 	h := newGoogleTestHandler(store, g)
 
 	state := startAndState(t, h.svc, "")
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/callback?code=abc&state="+state, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/callback?code=abc&state="+state, http.NoBody)
 	w := httptest.NewRecorder()
 	h.googleSignInCallback(w, req)
 
@@ -141,7 +141,7 @@ func TestGoogleCallbackRedirectsOnFailure(t *testing.T) {
 // the button rather than offering a broken redirect.
 func TestStartGoogleSignInDisabledReturns501(t *testing.T) {
 	h := newGoogleTestHandler(newFakeStore(), &fakeGoogle{enabled: false})
-	req := httptest.NewRequest(http.MethodPost, "/oauth/google/start", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/google/start", http.NoBody)
 	w := httptest.NewRecorder()
 	h.startGoogleSignInJSON(w, req)
 	if w.Code != http.StatusNotImplemented {
@@ -152,7 +152,7 @@ func TestStartGoogleSignInDisabledReturns501(t *testing.T) {
 // An absent body is a legitimate plain sign-in (no invite), so it must not 400.
 func TestStartGoogleSignInAcceptsEmptyBody(t *testing.T) {
 	h := newGoogleTestHandler(newFakeStore(), &fakeGoogle{enabled: true, identity: verifiedIdentity()})
-	req := httptest.NewRequest(http.MethodPost, "/oauth/google/start", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth/google/start", http.NoBody)
 	w := httptest.NewRecorder()
 	h.startGoogleSignInJSON(w, req)
 	if w.Code != http.StatusOK {
@@ -201,7 +201,7 @@ func TestGetStartRedirectsToProvider(t *testing.T) {
 	g := &fakeGoogle{enabled: true, identity: verifiedIdentity()}
 	h := newGoogleTestHandler(newFakeStore(), g)
 
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/start", http.NoBody)
 	w := httptest.NewRecorder()
 	h.startGoogleSignIn(w, req)
 
@@ -219,7 +219,7 @@ func TestGetStartRedirectsToProvider(t *testing.T) {
 func TestGetStartRedirectsToLoginWhenDisabled(t *testing.T) {
 	h := newGoogleTestHandler(newFakeStore(), &fakeGoogle{enabled: false})
 
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/start", http.NoBody)
 	w := httptest.NewRecorder()
 	h.startGoogleSignIn(w, req)
 
@@ -238,7 +238,7 @@ func TestReturnToSurvivesTheRoundTrip(t *testing.T) {
 	store := newFakeStore()
 	h := newGoogleTestHandler(store, &fakeGoogle{enabled: true, identity: verifiedIdentity()})
 
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?return_to=%2Finbox%3Ftab%3Dunread", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/start?return_to=%2Finbox%3Ftab%3Dunread", http.NoBody)
 	w := httptest.NewRecorder()
 	h.startGoogleSignIn(w, req)
 	state := stateFromLocation(t, w.Header().Get("Location"))
@@ -270,7 +270,7 @@ func TestUnsafeReturnToIsDropped(t *testing.T) {
 	store := newFakeStore()
 	h := newGoogleTestHandler(store, &fakeGoogle{enabled: true, identity: verifiedIdentity()})
 
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start?return_to=https%3A%2F%2Fevil.example%2Fsteal", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/start?return_to=https%3A%2F%2Fevil.example%2Fsteal", http.NoBody)
 	w := httptest.NewRecorder()
 	h.startGoogleSignIn(w, req)
 	state := stateFromLocation(t, w.Header().Get("Location"))
@@ -334,7 +334,7 @@ func TestGoogleStartThrottleCoversBothStartRoutesButNotTheCallback(t *testing.T)
 		{"callback is NOT throttled", http.MethodGet, "/oauth/google/callback?code=x&state=y", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
+			req := httptest.NewRequestWithContext(context.Background(), tc.method, tc.path, http.NoBody)
 			router.ServeHTTP(httptest.NewRecorder(), req)
 			if hits != tc.wantHits {
 				t.Fatalf("throttle hits = %d, want %d", hits, tc.wantHits)
@@ -349,7 +349,7 @@ func TestGoogleStartRoutesWorkWithoutAThrottle(t *testing.T) {
 	h := newGoogleTestHandler(newFakeStore(), &fakeGoogle{enabled: true, identity: verifiedIdentity()})
 	router := h.Routes(RouteDeps{})
 
-	req := httptest.NewRequest(http.MethodGet, "/oauth/google/start", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth/google/start", http.NoBody)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {

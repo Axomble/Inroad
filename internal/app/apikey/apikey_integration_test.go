@@ -55,7 +55,7 @@ func setup(t *testing.T) (*PgStore, *Service, *Verifier, func() (uuid.UUID, uuid
 }
 
 func bearer(token, remoteAddr string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+token)
 	if remoteAddr != "" {
 		r.RemoteAddr = remoteAddr

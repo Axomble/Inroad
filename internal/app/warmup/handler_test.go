@@ -1,6 +1,7 @@
 package warmup
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -44,9 +45,9 @@ func do(t *testing.T, h http.Handler, method, target, authz, body string) *httpt
 	t.Helper()
 	var r *http.Request
 	if body == "" {
-		r = httptest.NewRequest(method, target, http.NoBody)
+		r = httptest.NewRequestWithContext(context.Background(), method, target, http.NoBody)
 	} else {
-		r = httptest.NewRequest(method, target, strings.NewReader(body))
+		r = httptest.NewRequestWithContext(context.Background(), method, target, strings.NewReader(body))
 	}
 	if authz != "" {
 		r.Header.Set("Authorization", authz)

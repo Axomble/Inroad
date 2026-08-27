@@ -1,6 +1,7 @@
 package oauthprovider
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 func TestAuthorizationServerMetadata(t *testing.T) {
 	h := AuthorizationServerMetadata("https://inroad.test/")
 	res := httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/oauth2/.well-known/oauth-authorization-server", http.NoBody))
+	h.ServeHTTP(res, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth2/.well-known/oauth-authorization-server", http.NoBody))
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", res.Code)
 	}
@@ -28,7 +29,7 @@ func TestAuthorizationServerMetadata(t *testing.T) {
 
 func TestAuthorizationServerMetadataRejectsNonGet(t *testing.T) {
 	res := httptest.NewRecorder()
-	AuthorizationServerMetadata("https://inroad.test").ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/", http.NoBody))
+	AuthorizationServerMetadata("https://inroad.test").ServeHTTP(res, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/", http.NoBody))
 	if res.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", res.Code)
 	}

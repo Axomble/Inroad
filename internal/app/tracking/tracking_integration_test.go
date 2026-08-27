@@ -155,7 +155,7 @@ func TestOpenPixel_RecordsEvent(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -191,7 +191,7 @@ func TestClickRedirect_RecordsEventAndRedirects(t *testing.T) {
 
 	dest := "https://example.test/landing?utm_source=inroad"
 	tok := track.MakeClickToken(itSecret, fx.sendID.String(), dest)
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+tok, http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -228,7 +228,7 @@ func TestClickRedirect_DataURL_404NoRedirectNoEvent(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeClickToken(itSecret, fx.sendID.String(), "data:text/html,pwned")
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -255,7 +255,7 @@ func TestClickRedirect_ProtocolRelativeURL_404NoRedirectNoEvent(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeClickToken(itSecret, fx.sendID.String(), "//evil.com/x")
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -286,7 +286,7 @@ func TestOpenPixel_GoogleImageProxy_RecordedButExcludedFromHumanOpens(t *testing
 	r := mountHandler(pool)
 
 	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; GoogleImageProxy)")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -347,7 +347,7 @@ func TestOpenPixel_PrefetchWindow_ClassifiedMachineAgainstARealSend(t *testing.T
 	r := mountHandler(pool)
 
 	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148")
 	r.ServeHTTP(httptest.NewRecorder(), req)
 
@@ -379,7 +379,7 @@ func TestOpenPixel_StoresClientIPAndCountsItBySubnet(t *testing.T) {
 	r := mountHandler(pool)
 
 	tok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	req.RemoteAddr = "203.0.113.9:41234"
 	r.ServeHTTP(httptest.NewRecorder(), req)
@@ -465,12 +465,12 @@ func TestCampaignMetrics_FromSeededEvents(t *testing.T) {
 	// that follows it is vouched for by that open. This is the ordinary human
 	// sequence, and both must survive classification into the metrics below.
 	openTok := track.MakeOpenToken(itSecret, fx.sendID.String())
-	reqO := httptest.NewRequest(http.MethodGet, "/t/o/"+openTok+".gif", http.NoBody)
+	reqO := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+openTok+".gif", http.NoBody)
 	reqO.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	r.ServeHTTP(httptest.NewRecorder(), reqO)
 
 	clickTok := track.MakeClickToken(itSecret, fx.sendID.String(), "https://example.test/landing")
-	reqC := httptest.NewRequest(http.MethodGet, "/t/c/"+clickTok, http.NoBody)
+	reqC := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+clickTok, http.NoBody)
 	reqC.Header.Set("User-Agent", "Mozilla/5.0 (real client)")
 	r.ServeHTTP(httptest.NewRecorder(), reqC)
 

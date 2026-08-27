@@ -43,7 +43,7 @@ func post(t *testing.T, h *Handler, path string, body any) *http.Response {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(buf))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader(buf))
 	rec := httptest.NewRecorder()
 	h.Routes(nil, nil).ServeHTTP(rec, req)
 	return rec.Result()

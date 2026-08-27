@@ -88,7 +88,7 @@ func newTestHandlerAt(t *testing.T, now time.Time) (http.Handler, *fakeStore, uu
 // get issues a tracking request with a chosen User-Agent and source address.
 func get(t *testing.T, r http.Handler, path, ua, remoteAddr string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, http.NoBody)
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
@@ -104,7 +104,7 @@ func TestOpenGIF_ValidToken_RecordsEventAndServesPixel(t *testing.T) {
 	r, store, sendID := newTestHandler(t)
 	tok := track.MakeOpenToken(testSecret, sendID.String())
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", testUA)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -136,7 +136,7 @@ func TestOpenGIF_ValidToken_RecordsEventAndServesPixel(t *testing.T) {
 func TestOpenGIF_InvalidToken_ServesPixelButRecordsNothing(t *testing.T) {
 	r, store, _ := newTestHandler(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/not-a-real-token.gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/not-a-real-token.gif", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -155,7 +155,7 @@ func TestOpenGIF_UnknownSend_ServesPixelButRecordsNothing(t *testing.T) {
 	r, store, _ := newTestHandler(t)
 	tok := track.MakeOpenToken(testSecret, uuid.New().String()) // validly signed, no such send
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -214,7 +214,7 @@ func TestClickRedirect_TamperedToken_404NoRedirectNoEvent(t *testing.T) {
 	sig[len(sig)/2] ^= 0xFF
 	tampered := tok[:dot+1] + base64.RawURLEncoding.EncodeToString(sig)
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tampered, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+tampered, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -237,7 +237,7 @@ func TestClickRedirect_UnsafeScheme_404NoRedirectNoEvent(t *testing.T) {
 	r, store, sendID := newTestHandler(t)
 	tok := track.MakeClickToken(testSecret, sendID.String(), "javascript:alert(1)")
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -256,7 +256,7 @@ func TestClickRedirect_UnknownSend_404NoRedirectNoEvent(t *testing.T) {
 	r, store, _ := newTestHandler(t)
 	tok := track.MakeClickToken(testSecret, uuid.New().String(), "https://example.test/landing")
 
-	req := httptest.NewRequest(http.MethodGet, "/t/c/"+tok, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/c/"+tok, http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -428,7 +428,7 @@ func TestOpenGIF_ForgedForwardedForIsIgnored(t *testing.T) {
 	r, store, sendID := newTestHandler(t)
 	tok := track.MakeOpenToken(testSecret, sendID.String())
 
-	req := httptest.NewRequest(http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/t/o/"+tok+".gif", http.NoBody)
 	req.Header.Set("User-Agent", testUA)
 	req.Header.Set("X-Forwarded-For", "8.8.8.8") // a datacenter range, if believed
 	req.RemoteAddr = "203.0.113.9:41234"

@@ -48,7 +48,7 @@ func scopedRouter(h *Handler, ws uuid.UUID, scopes []string) http.Handler {
 // scopes, through the real mounted router.
 func apiKeyRequest(t *testing.T, h *Handler, method, path string, ws uuid.UUID, scopes []string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(method, "/dead-letters"+path, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), method, "/dead-letters"+path, http.NoBody)
 	w := httptest.NewRecorder()
 	scopedRouter(h, ws, scopes).ServeHTTP(w, r)
 	return w
@@ -65,7 +65,7 @@ func TestUnauthenticatedIsRejected(t *testing.T) {
 		{http.MethodPost, "/" + id + "/replay"},
 		{http.MethodPost, "/" + id + "/discard"},
 	} {
-		r := httptest.NewRequest(tc.method, "/dead-letters"+tc.path, http.NoBody)
+		r := httptest.NewRequestWithContext(context.Background(), tc.method, "/dead-letters"+tc.path, http.NoBody)
 		w := httptest.NewRecorder()
 		authedRouter(h).ServeHTTP(w, r)
 		if w.Code != http.StatusUnauthorized {

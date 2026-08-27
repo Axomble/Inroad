@@ -46,13 +46,13 @@ func TestIntegrationThrottleOverCapRealRedis(t *testing.T) {
 
 	for i := 1; i <= limit; i++ {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/login", http.NoBody))
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", http.NoBody))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("request %d: got %d, want 200", i, rec.Code)
 		}
 	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/login", http.NoBody))
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/login", http.NoBody))
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("over cap: got %d, want 429", rec.Code)
 	}

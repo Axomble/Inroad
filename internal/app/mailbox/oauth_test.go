@@ -143,14 +143,14 @@ func newCallbackHarness(t *testing.T, email string) (*fakeStore, http.Handler) {
 }
 
 func getCallback(router http.Handler, rawQuery string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/google/callback?"+rawQuery, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/google/callback?"+rawQuery, http.NoBody)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
 }
 
 func getMicrosoftCallback(router http.Handler, rawQuery string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/microsoft/callback?"+rawQuery, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/microsoft/callback?"+rawQuery, http.NoBody)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec

@@ -239,9 +239,9 @@ func sessionRouter(t *testing.T, h *Handler) (http.Handler, string) {
 
 func do(t *testing.T, h http.Handler, method, target, authz, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(method, target, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), method, target, http.NoBody)
 	if body != "" {
-		r = httptest.NewRequest(method, target, strings.NewReader(body))
+		r = httptest.NewRequestWithContext(context.Background(), method, target, strings.NewReader(body))
 	}
 	if authz != "" {
 		r.Header.Set("Authorization", authz)

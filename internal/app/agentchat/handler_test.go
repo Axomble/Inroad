@@ -1,6 +1,7 @@
 package agentchat
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,7 +11,7 @@ import (
 
 func TestThreadRouteMatchesWithoutTrailingSlash(t *testing.T) {
 	handler := NewHandler(nil).Routes()
-	request := httptest.NewRequest(http.MethodGet, "/threads/"+uuid.NewString(), http.NoBody)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/threads/"+uuid.NewString(), http.NoBody)
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
@@ -21,7 +22,7 @@ func TestThreadRouteMatchesWithoutTrailingSlash(t *testing.T) {
 }
 
 func TestStreamOffsetPrefersLastEventID(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/?after_seq=4", http.NoBody)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?after_seq=4", http.NoBody)
 	request.Header.Set("Last-Event-ID", "9")
 	got, err := streamOffset(request)
 	if err != nil || got != 9 {
@@ -30,7 +31,7 @@ func TestStreamOffsetPrefersLastEventID(t *testing.T) {
 }
 
 func TestStreamOffsetRejectsNegativeValues(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/?after_seq=-1", http.NoBody)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?after_seq=-1", http.NoBody)
 	if _, err := streamOffset(request); err == nil {
 		t.Fatal("expected invalid offset error")
 	}
