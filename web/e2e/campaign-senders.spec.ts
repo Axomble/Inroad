@@ -204,7 +204,7 @@ async function signIn(page: Page) {
 test('adding a mailbox to the pool sends the whole pool and the panel reflects what was saved', async ({ page }) => {
   const { puts } = await mockApi(page)
   await signIn(page)
-  await page.goto(`/app/campaigns/${CAMPAIGN_ID}`)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/schedule`)
 
   // The saved pool renders, including its rotation state.
   await expect(page.getByLabel('Rotation mode')).toHaveValue('weighted')
@@ -240,7 +240,7 @@ test('adding a mailbox to the pool sends the whole pool and the panel reflects w
 test('a pool row accounts for the volume it has sent and for a warmup-lowered cap', async ({ page }) => {
   await mockApi(page)
   await signIn(page)
-  await page.goto(`/app/campaigns/${CAMPAIGN_ID}`)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/schedule`)
 
   await expect(page.getByText('12 / 52 sent today')).toBeVisible()
   await expect(page.getByText(/Cap lowered by warmup health/)).toBeVisible()
@@ -264,7 +264,7 @@ test('a pool row accounts for the volume it has sent and for a warmup-lowered ca
 test('each fault domain is shown against its own ceiling, and over budget is not a stoppage', async ({ page }) => {
   await mockApi(page)
   await signIn(page)
-  await page.goto(`/app/campaigns/${CAMPAIGN_ID}`)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/schedule`)
 
   const exposure = page.getByRole('region', { name: 'Domain concentration' })
   await expect(exposure).toBeVisible()
@@ -297,7 +297,7 @@ test('each fault domain is shown against its own ceiling, and over budget is not
 test('excluding every mailbox is refused client-side without a request', async ({ page }) => {
   const { puts } = await mockApi(page)
   await signIn(page)
-  await page.goto(`/app/campaigns/${CAMPAIGN_ID}`)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/schedule`)
 
   await page.getByLabel('Include founder@atlas.test in the pool').uncheck()
   await page.getByRole('button', { name: 'Save senders' }).click()

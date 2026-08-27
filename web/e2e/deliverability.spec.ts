@@ -199,7 +199,7 @@ test('an automatically paused campaign explains itself on a phone-sized viewport
   await page.setViewportSize({ width: 390, height: 844 })
   await mockApi(page)
   await signIn(page)
-  await page.goto(`/app/campaigns/${CAMPAIGN_ID}`)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/preferences`)
 
   const card = page.getByRole('region', { name: 'Deliverability guardrails' })
   await expect(card.getByText('Paused by the guardrail')).toBeVisible()
