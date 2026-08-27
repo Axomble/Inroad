@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"testing"
+	"time"
 )
 
 // Migration filenames are a correctness surface, not a naming convention.
@@ -21,7 +22,32 @@ import (
 // cheapest guard: it needs no database, it runs in `go test ./...` like everything
 // else, and it reads exactly the bytes that ship (migrate.go's migrationsFS), not a
 // directory listing that could drift from the embed pattern.
-var migrationName = regexp.MustCompile(`^(\d{6})_([a-z0-9_]+)\.(up|down)\.sql$`)
+// Two eras, deliberately, and the boundary is frozen.
+//
+// SEQUENTIAL (6 digits) is every migration up to legacyVersionCeiling. Those are
+// applied in deployed databases and recorded by version in schema_migrations, so
+// renaming one would strand every installation that already ran it. They stay.
+//
+// TIMESTAMP (14 digits, YYYYMMDDHHMMSS) is every migration from here on, and the
+// reason is that sequential numbering plus parallel branches is a collision machine.
+// Each branch picks max+1 when it is CREATED; merge order decides who was actually
+// right. Both PRs are individually valid and the collision exists only in the union,
+// which is why a guard running on a branch cannot see it — it has no way to know what
+// another open PR is about to claim.
+//
+// That is not hypothetical here. It has taken main down five times: the 000057
+// outage this file was written for, and four more in one week (000069 twice, then
+// 000071 twice — the second of those was a renumbering FIX that collided in turn).
+// golang-migrate refuses to initialise at all when two files claim a version, so each
+// one stops every migration, every database-backed test, and every fresh deploy.
+//
+// Timestamps make merge order irrelevant: two branches created a second apart already
+// hold different versions, and no coordination is required between them.
+var migrationName = regexp.MustCompile(`^(\d{6}|\d{14})_([a-z0-9_]+)\.(up|down)\.sql$`)
+
+// legacyVersionCeiling is the last sequential migration. Nothing at or below it may
+// be renamed; nothing new may be added below it.
+const legacyVersionCeiling = "000071"
 
 type migrationFile struct {
 	version   string
@@ -99,26 +125,65 @@ func TestEveryMigrationHasBothDirections(t *testing.T) {
 	}
 }
 
-// Versions should advance without gaps. A gap is not fatal to golang-migrate, but it
-// almost always means a migration was deleted after being applied somewhere, which
-// leaves that installation on a version this build no longer contains.
-func TestMigrationVersionsAreContiguous(t *testing.T) {
-	versions := map[string]bool{}
+// The sequential era must stay contiguous, and nothing new may join it.
+//
+// A gap inside the legacy block almost always means a migration was deleted after
+// being applied somewhere, which strands that installation on a version this build no
+// longer contains. That check is worth keeping for the block where it still applies.
+//
+// It deliberately does NOT extend to timestamps: gaps there are the normal state of
+// affairs, since two developers working in the same week produce versions minutes or
+// days apart. Losing gap-detection for new migrations is the price of collision
+// immunity, and it is the right trade — a deleted-after-applied migration is rare and
+// recoverable, while a version collision takes main down for everyone and has done so
+// five times.
+func TestTheSequentialEraIsContiguousAndClosed(t *testing.T) {
+	legacy := map[string]bool{}
 	for _, f := range readMigrationFiles(t) {
-		versions[f.version] = true
+		if len(f.version) != 6 {
+			continue
+		}
+		if f.version > legacyVersionCeiling {
+			t.Errorf("%s_%s is a NEW sequential migration above the frozen ceiling %s — "+
+				"sequential numbering is what collides; use a YYYYMMDDHHMMSS version",
+				f.version, f.name, legacyVersionCeiling)
+		}
+		legacy[f.version] = true
 	}
-	ordered := make([]string, 0, len(versions))
-	for v := range versions {
+
+	ordered := make([]string, 0, len(legacy))
+	for v := range legacy {
 		ordered = append(ordered, v)
 	}
 	sort.Strings(ordered)
-
 	for i := 1; i < len(ordered); i++ {
 		prev, cur := ordered[i-1], ordered[i]
 		if next := increment(prev); next != cur {
-			t.Errorf("version %s follows %s — expected %s; a gap usually means a migration "+
-				"was deleted after being applied, stranding installations on a version this "+
-				"build no longer has", cur, prev, next)
+			t.Errorf("version %s follows %s — expected %s; a gap in the sequential era "+
+				"usually means a migration was deleted after being applied, stranding "+
+				"installations on a version this build no longer has", cur, prev, next)
+		}
+	}
+}
+
+// A timestamp version must be a real instant, and must sort above every sequential
+// one so the two eras compose into a single increasing order.
+//
+// The plausibility check is not pedantry: a fat-fingered 20261301... would sort fine
+// and parse fine, and would then be a permanent lie about when the migration was
+// written — which is the only thing a timestamp version carries that a counter does
+// not.
+func TestTimestampVersionsAreRealInstantsAboveTheLegacyCeiling(t *testing.T) {
+	for _, f := range readMigrationFiles(t) {
+		if len(f.version) != 14 {
+			continue
+		}
+		if f.version <= legacyVersionCeiling {
+			t.Errorf("%s_%s sorts at or below the sequential ceiling %s, so migrate would run "+
+				"it before migrations written years earlier", f.version, f.name, legacyVersionCeiling)
+		}
+		if _, err := time.Parse("20060102150405", f.version); err != nil {
+			t.Errorf("%s_%s is not a YYYYMMDDHHMMSS instant: %v", f.version, f.name, err)
 		}
 	}
 }

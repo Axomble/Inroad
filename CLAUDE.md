@@ -35,6 +35,18 @@ Self-hostable cold email sequencing + mailbox warmup platform (open-core alterna
   - **Fetches, but belongs to no one domain → a neutral feature.** `features/records/` holds what every *record type* shares: notes, tasks, the activity feed, `useOpenTasks`, the actor badge, `recordErrorMessage`, and the notes/tasks/activity cache tags. The API models these polymorphically (`note_targets`/`task_targets` carry a nullable contact/company/deal id), so one implementation serves contacts, companies and deals. `contacts`, `crm` and any future record-owning domain may import it; it imports none of them.
   - **Genuinely one domain's concept → leave it there** and restructure the caller. A deal row lives in `features/crm/` because a deal is a CRM record type (stages, pipelines, the `/app/deals` route); the contact page renders its own row over the contacts API's own shape rather than dragging "deal" into a neutral module. A little duplication beats a shared module that knows about everything.
   - Error copy stays per-feature (`crmErrorMessage`, `recordErrorMessage`, `agentErrorMessage`), because the scope a 403 names differs by domain. A domain-specific mapper should handle only the statuses where naming its domain helps, and delegate the rest.
+- **Migrations are TIMESTAMPED, not sequential.** New files are
+  `YYYYMMDDHHMMSS_snake_name.{up,down}.sql` — e.g. `20260827143000_add_thing.up.sql`.
+  Get the version with `date -u +%Y%m%d%H%M%S`.
+  Sequential numbering (`000001`–`000071`) is frozen: those are recorded by version in
+  deployed `schema_migrations`, so renaming one strands every installation that ran it.
+  Never add a new `NNNNNN_` file — a test refuses it.
+  The reason is not style. Every branch picked `max+1` at branch time and merge order
+  decided who was right, so two valid PRs collided in the union and golang-migrate then
+  refused to initialise AT ALL — taking down every migration, every database-backed
+  test and every fresh deploy. That happened five times, twice in one day, and once to
+  a renumbering fix that collided in turn. A guard running on a branch cannot see what
+  another open PR is about to claim; a timestamp does not need to.
 - **Secrets:** never commit; `.env` is gitignored, `.env.example` holds placeholders.
 - **Commits:** conventional (`feat:`, `chore:`, `test:`, `docs:`).
 - **Branches:** prefix by type — `feature/…`, `fix/…`, `chore/…`. Never commit feature work directly to `main`; branch, then merge.
