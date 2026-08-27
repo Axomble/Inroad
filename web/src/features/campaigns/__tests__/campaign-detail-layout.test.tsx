@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { Provider } from 'react-redux'
 import { routeTree } from '@/routeTree.gen'
 import { makeTestStore } from '@/test/render-with-providers'
+import type { RouterContext } from '@/routes/__root'
 
 /**
  * The campaign detail route's two structural promises, which are the ticket's
@@ -108,7 +109,11 @@ async function renderAt(path: string) {
   })
   const router = createRouter({
     routeTree,
-    context: { store },
+    // The context type is the PRODUCTION store, whose state carries
+    // redux-persist's `_persist`; the test store deliberately omits persistence.
+    // Only `beforeLoad`'s `getState().auth` and `dispatch` are actually read, so
+    // the cast is narrowed to this one seam rather than widening the store type.
+    context: { store: store as unknown as RouterContext['store'] },
     history: createMemoryHistory({ initialEntries: [path] }),
   })
   const utils = render(
