@@ -193,11 +193,20 @@ func (s *PgStore) RecordInboundReply(ctx context.Context, in ReplyRecord) error 
 	// The message's workspace comes from the caller's trusted input and its
 	// thread from the row just upserted in THIS transaction — never from a
 	// value that travelled alongside.
+	//
+	// mailbox_id is DERIVED from the thread rather than taken from in.MailboxID,
+	// matching queries/inbox.sql's InsertInboxMessage exactly. It is the column
+	// CountSentToday's daily-cap half seeks, and it is NOT NULL, so a seeder that
+	// omitted it would fail loudly — but a seeder that passed its own copy could
+	// disagree with the thread and quietly make seeded data a worse oracle than
+	// production. Deriving keeps the sandbox's rows indistinguishable from the
+	// product's, which is the whole point of seeding against it.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO inbox_messages (thread_id, workspace_id, direction, message_id,
+		INSERT INTO inbox_messages (thread_id, workspace_id, mailbox_id, direction, message_id,
 		                            from_email, from_name, to_email, subject,
 		                            body_text, body_html, reply_class, occurred_at, created_at)
-		VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+		SELECT $1, $2, (SELECT t.mailbox_id FROM inbox_threads t WHERE t.id = $1 AND t.workspace_id = $2),
+		       'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $11
 		ON CONFLICT (workspace_id, message_id) WHERE message_id <> '' DO NOTHING`,
 		threadID, in.WorkspaceID, in.MessageID, in.FromEmail, in.FromName,
 		in.ToEmail, in.Subject, in.BodyText, in.BodyHTML, in.ReplyClass, in.OccurredAt,

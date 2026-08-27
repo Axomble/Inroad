@@ -795,8 +795,10 @@ func (q *Queries) GetWorkspaceInboxSettings(ctx context.Context, workspaceID uui
 }
 
 const insertInboxMessage = `-- name: InsertInboxMessage :exec
-INSERT INTO inbox_messages (thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+INSERT INTO inbox_messages (thread_id, workspace_id, mailbox_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
+SELECT $1, $2,
+       (SELECT t.mailbox_id FROM inbox_threads t WHERE t.id = $1 AND t.workspace_id = $2),
+       $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 ON CONFLICT (workspace_id, message_id) WHERE message_id <> '' DO NOTHING
 `
 
@@ -820,6 +822,23 @@ type InsertInboxMessageParams struct {
 // CREATE UNIQUE INDEX ... WHERE ... is an index, not a named constraint (a
 // table constraint cannot carry a WHERE clause), so ON CONSTRAINT cannot
 // target it — Postgres rejects that with "constraint ... does not exist".
+//
+// mailbox_id is DERIVED here, from the thread, rather than accepted as a
+// parameter. It is denormalized onto this table so CountSentToday's daily-cap
+// half can range-seek (mailbox_id, occurred_at) instead of walking every thread
+// the mailbox ever had — see the migration and queries/send.sql. Deriving it in
+// the statement is what makes that safe: a denormalized column some writer
+// forgets is WORSE than no column, because the count silently under-reports and
+// the daily cap silently over-sends. A writer cannot forget a value it does not
+// supply, and RecordOutboundReply's call site (internal/coreapi/inprocess/
+// inboxreply.go) has only a thread id in hand anyway, so a parameter would have
+// meant plumbing the mailbox across the coreapi seam for no gain.
+//
+// The SELECT is pinned on BOTH id and workspace_id, so a thread id from another
+// tenant yields no row and the INSERT fails on the NOT NULL rather than
+// silently attributing a message to a foreign mailbox. That is belt-and-braces:
+// both call sites already set workspace_id from the thread they just read or
+// upserted in the same transaction.
 func (q *Queries) InsertInboxMessage(ctx context.Context, arg InsertInboxMessageParams) error {
 	_, err := q.db.Exec(ctx, insertInboxMessage,
 		arg.ThreadID,
@@ -921,7 +940,7 @@ func (q *Queries) ListInboxLabels(ctx context.Context, workspaceID uuid.UUID) ([
 }
 
 const listInboxMessagesByThread = `-- name: ListInboxMessagesByThread :many
-SELECT id, thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at, created_at FROM inbox_messages WHERE thread_id = $1 AND workspace_id = $2 ORDER BY occurred_at
+SELECT id, thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at, created_at, mailbox_id FROM inbox_messages WHERE thread_id = $1 AND workspace_id = $2 ORDER BY occurred_at
 `
 
 type ListInboxMessagesByThreadParams struct {
@@ -953,6 +972,7 @@ func (q *Queries) ListInboxMessagesByThread(ctx context.Context, arg ListInboxMe
 			&i.ReplyClass,
 			&i.OccurredAt,
 			&i.CreatedAt,
+			&i.MailboxID,
 		); err != nil {
 			return nil, err
 		}

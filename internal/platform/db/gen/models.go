@@ -566,6 +566,7 @@ type InboxMessage struct {
 	ReplyClass  string             `json:"reply_class"`
 	OccurredAt  pgtype.Timestamptz `json:"occurred_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	MailboxID   uuid.UUID          `json:"mailbox_id"`
 }
 
 type InboxPendingCompose struct {

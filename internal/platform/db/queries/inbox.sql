@@ -15,8 +15,27 @@ RETURNING *;
 -- CREATE UNIQUE INDEX ... WHERE ... is an index, not a named constraint (a
 -- table constraint cannot carry a WHERE clause), so ON CONSTRAINT cannot
 -- target it — Postgres rejects that with "constraint ... does not exist".
-INSERT INTO inbox_messages (thread_id, workspace_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
-VALUES (@thread_id, @workspace_id, @direction, @message_id, @from_email, @from_name, @to_email, @subject, @body_text, @body_html, @reply_class, @occurred_at)
+--
+-- mailbox_id is DERIVED here, from the thread, rather than accepted as a
+-- parameter. It is denormalized onto this table so CountSentToday's daily-cap
+-- half can range-seek (mailbox_id, occurred_at) instead of walking every thread
+-- the mailbox ever had — see the migration and queries/send.sql. Deriving it in
+-- the statement is what makes that safe: a denormalized column some writer
+-- forgets is WORSE than no column, because the count silently under-reports and
+-- the daily cap silently over-sends. A writer cannot forget a value it does not
+-- supply, and RecordOutboundReply's call site (internal/coreapi/inprocess/
+-- inboxreply.go) has only a thread id in hand anyway, so a parameter would have
+-- meant plumbing the mailbox across the coreapi seam for no gain.
+--
+-- The SELECT is pinned on BOTH id and workspace_id, so a thread id from another
+-- tenant yields no row and the INSERT fails on the NOT NULL rather than
+-- silently attributing a message to a foreign mailbox. That is belt-and-braces:
+-- both call sites already set workspace_id from the thread they just read or
+-- upserted in the same transaction.
+INSERT INTO inbox_messages (thread_id, workspace_id, mailbox_id, direction, message_id, from_email, from_name, to_email, subject, body_text, body_html, reply_class, occurred_at)
+SELECT @thread_id, @workspace_id,
+       (SELECT t.mailbox_id FROM inbox_threads t WHERE t.id = @thread_id AND t.workspace_id = @workspace_id),
+       @direction, @message_id, @from_email, @from_name, @to_email, @subject, @body_text, @body_html, @reply_class, @occurred_at
 ON CONFLICT (workspace_id, message_id) WHERE message_id <> '' DO NOTHING;
 
 -- name: ListInboxThreads :many
