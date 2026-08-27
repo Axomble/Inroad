@@ -67,7 +67,7 @@ func TestRegisterRateLimitedReturns429(t *testing.T) {
 
 	body := `{"client_name":"Acme","redirect_uris":["` + testRedirectURI + `"],"scope":"contacts:read"}`
 	send := func() int {
-		r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/register", strings.NewReader(body))
 		w := httptest.NewRecorder()
 		srv.ServeHTTP(w, r)
 		return w.Code
@@ -94,7 +94,7 @@ func TestRegisterRequiresAdmin(t *testing.T) {
 	}
 	srv := h.Routes(fakeVerifier{p: member}, nil)
 	body := `{"client_name":"Acme","redirect_uris":["` + testRedirectURI + `"],"scope":"contacts:read"}`
-	r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/register", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
@@ -118,7 +118,7 @@ func TestAuthorizeHandlerUnknownClientNoOpenRedirect(t *testing.T) {
 		"code_challenge":        {testChallenge},
 		"code_challenge_method": {"S256"},
 	}
-	r := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?"+q.Encode(), http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth2/authorize?"+q.Encode(), http.NoBody)
 	w := httptest.NewRecorder()
 	h.authorize(w, r)
 
@@ -146,7 +146,7 @@ func TestAuthorizeHandlerUnauthenticatedRedirectsToLogin(t *testing.T) {
 		"code_challenge":        {testChallenge},
 		"code_challenge_method": {"S256"},
 	}
-	r := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?"+q.Encode(), http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth2/authorize?"+q.Encode(), http.NoBody)
 	w := httptest.NewRecorder()
 	h.authorize(w, r)
 
@@ -171,7 +171,7 @@ func TestAuthorizeHandlerAuthenticatedRedirectsToConsent(t *testing.T) {
 		"code_challenge":        {testChallenge},
 		"code_challenge_method": {"S256"},
 	}
-	r := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?"+q.Encode(), http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/oauth2/authorize?"+q.Encode(), http.NoBody)
 	w := httptest.NewRecorder()
 	h.authorize(w, r)
 

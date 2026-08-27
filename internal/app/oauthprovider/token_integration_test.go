@@ -92,7 +92,7 @@ func TestTokenRoundTripAndReuseDetection(t *testing.T) {
 
 	// The oauthVerifier authenticates the access token and mints a scoped principal.
 	v := NewVerifier(store)
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	p, ok, err := v.Verify(ctx, r)
 	if err != nil || !ok {
@@ -138,7 +138,7 @@ func TestTokenRoundTripAndReuseDetection(t *testing.T) {
 	// ACCESS token minted in that family (rot.AccessToken), so the oauthVerifier rejects it
 	// on the very next request — WITHOUT any explicit RFC 7009 revoke. Without this, a
 	// compromised chain's access token would stay valid for its full ~1h TTL after reuse.
-	rReuse := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	rReuse := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	rReuse.Header.Set("Authorization", "Bearer "+rot.AccessToken)
 	if _, ok, _ := v.Verify(ctx, rReuse); ok {
 		t.Fatal("family-access-revoke: an access token in a reuse-revoked family must be rejected")
@@ -149,7 +149,7 @@ func TestTokenRoundTripAndReuseDetection(t *testing.T) {
 	if err := svc.Revoke(ctx, rot.AccessToken, ClientCredentials{ID: cid}); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	r2 := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	r2.Header.Set("Authorization", "Bearer "+rot.AccessToken)
 	if _, ok, _ := v.Verify(ctx, r2); ok {
 		t.Fatal("revoked access token must be rejected")
@@ -199,7 +199,7 @@ func TestRevokeForeignTokensNoOpDB(t *testing.T) {
 		t.Fatalf("foreign access revoke should be a silent no-op: %v", err)
 	}
 	v := NewVerifier(store)
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	if _, ok, err := v.Verify(ctx, r); !ok || err != nil {
 		t.Fatalf("victim access token must stay live after a foreign revoke: ok=%v err=%v", ok, err)

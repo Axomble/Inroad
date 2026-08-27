@@ -1,6 +1,7 @@
 package contact
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,7 @@ func serveSearch(t *testing.T, h *Handler, query string) *httptest.ResponseRecor
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	r := httptest.NewRequest(http.MethodGet, "/?"+query, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?"+query, http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+tok)
 
 	w := httptest.NewRecorder()
@@ -42,7 +43,7 @@ func TestListContactsRequiresAuth(t *testing.T) {
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(testSecret))(
 		http.HandlerFunc(newHandler(store, true).listContacts),
-	).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	).ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)

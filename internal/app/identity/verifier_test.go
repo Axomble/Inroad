@@ -44,7 +44,7 @@ func bearerRequest(t *testing.T, c auth.Claims) *http.Request {
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	r := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/x", http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	return r
 }
@@ -151,7 +151,7 @@ func TestSessionVerifierPropagatesStoreError(t *testing.T) {
 func TestSessionVerifierDefersWithoutBearer(t *testing.T) {
 	store := &fakeAuthStore{states: map[uuid.UUID]SessionAuthState{}}
 	v := NewSessionVerifier(verifierSecret, store, 0)
-	_, ok, err := v.Verify(context.Background(), httptest.NewRequest(http.MethodGet, "/x", http.NoBody))
+	_, ok, err := v.Verify(context.Background(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/x", http.NoBody))
 	if ok || err != nil {
 		t.Fatalf("no bearer should defer (false,nil), got ok=%v err=%v", ok, err)
 	}

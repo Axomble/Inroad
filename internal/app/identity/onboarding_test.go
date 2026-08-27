@@ -182,7 +182,7 @@ func TestOnboardingRouteRejectsNonAdminAndForeignWorkspace(t *testing.T) {
 			t.Fatalf("IssueToken: %v", err)
 		}
 		body, _ := json.Marshal(map[string]string{"name": "Renamed By Force"})
-		req := httptest.NewRequest(http.MethodPost, "/"+pathWS+"/onboarding/complete", bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/"+pathWS+"/onboarding/complete", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+access)
 		w := httptest.NewRecorder()
 		auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(h.WorkspaceRoutes()).ServeHTTP(w, req)

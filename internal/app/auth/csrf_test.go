@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -8,7 +9,7 @@ import (
 
 func TestRequireCSRFMatch(t *testing.T) {
 	h := RequireCSRF(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
-	r := httptest.NewRequest("POST", "/auth/refresh", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), "POST", "/auth/refresh", http.NoBody)
 	r.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: "tok123"})
 	r.Header.Set("X-CSRF-Token", "tok123")
 	w := httptest.NewRecorder()
@@ -20,7 +21,7 @@ func TestRequireCSRFMatch(t *testing.T) {
 
 func TestRequireCSRFMismatch(t *testing.T) {
 	h := RequireCSRF(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
-	r := httptest.NewRequest("POST", "/auth/refresh", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), "POST", "/auth/refresh", http.NoBody)
 	r.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: "tok123"})
 	r.Header.Set("X-CSRF-Token", "different")
 	w := httptest.NewRecorder()

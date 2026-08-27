@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,7 +39,7 @@ func TestSPA(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tc.target, http.NoBody)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, tc.target, http.NoBody)
 			req.Header.Set("Accept", tc.accept)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)

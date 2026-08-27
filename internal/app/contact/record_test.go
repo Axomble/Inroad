@@ -297,7 +297,7 @@ func serveRecord(t *testing.T, h *Handler, path string) *httptest.ResponseRecord
 	router.Get("/{id}", h.getContact)
 	router.Get("/{id}/engagement", h.getContactEngagement)
 
-	r := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, http.NoBody)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(testSecret))(router).ServeHTTP(w, r)
@@ -345,7 +345,7 @@ func TestRecordRequiresAuth(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(testSecret))(router).
-		ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/"+uuid.NewString(), http.NoBody))
+		ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/"+uuid.NewString(), http.NoBody))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
@@ -687,7 +687,7 @@ func serveLink(t *testing.T, h *Handler, path, body string) *httptest.ResponseRe
 	router := chi.NewRouter()
 	router.Put("/{id}/company", h.putContactCompany)
 
-	r := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPut, path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(testSecret))(router).ServeHTTP(w, r)

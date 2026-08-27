@@ -62,7 +62,7 @@ func TestRoutesAdminGate(t *testing.T) {
 				} else {
 					reader = bytes.NewReader(nil)
 				}
-				req := httptest.NewRequest(v.method, v.target, reader)
+				req := httptest.NewRequestWithContext(context.Background(), v.method, v.target, reader)
 				w := httptest.NewRecorder()
 				srv.ServeHTTP(w, req)
 

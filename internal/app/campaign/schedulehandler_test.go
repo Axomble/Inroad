@@ -31,7 +31,7 @@ func newScheduleRequest(t *testing.T, secret []byte, ws, campaignID uuid.UUID, m
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req := httptest.NewRequest(method, "/campaigns/"+campaignID.String()+"/schedule", reader)
+	req := httptest.NewRequestWithContext(context.Background(), method, "/campaigns/"+campaignID.String()+"/schedule", reader)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", campaignID.String())

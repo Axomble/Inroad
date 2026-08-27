@@ -1,6 +1,7 @@
 package deliverability
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ var testSecret = []byte("0123456789abcdef0123456789abcdef")
 // routes are registered as a sub-router under /campaigns, mirroring cmd/inroad.
 func serve(t *testing.T, h *Handler, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	r := httptest.NewRequest(method, target, strings.NewReader(body))
+	r := httptest.NewRequestWithContext(context.Background(), method, target, strings.NewReader(body))
 	tok, err := auth.IssueToken(testSecret, auth.Claims{
 		UserID: uuid.NewString(), WorkspaceID: testWS.String(), Role: "owner", SessionID: uuid.NewString(),
 	}, time.Hour)
@@ -359,7 +360,7 @@ func TestIngestAcceptsANullSendID(t *testing.T) {
 // field to send, and an unauthenticated ingest is rejected outright.
 func TestIngestRequiresAuthentication(t *testing.T) {
 	store := &fakeStore{ingestNew: true}
-	r := httptest.NewRequest(http.MethodPost, "/deliverability/events",
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/deliverability/events",
 		strings.NewReader(`{"kind":"complaint","email":"a@b.test","provider_event_id":"1"}`))
 	root := chi.NewRouter()
 	root.Mount("/deliverability", handlerWith(store).Routes())

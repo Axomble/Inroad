@@ -16,7 +16,7 @@ import (
 // verify runs the verifier against a request carrying the given Authorization header.
 func verify(t *testing.T, v *Verifier, authHeader string) (auth.Principal, bool, error) {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/contacts", http.NoBody)
 	if authHeader != "" {
 		r.Header.Set("Authorization", authHeader)
 	}

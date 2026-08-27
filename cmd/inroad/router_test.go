@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -49,7 +50,7 @@ func bearerFor(t *testing.T) string {
 
 func do(t *testing.T, r http.Handler, method, path, authHeader string, headers map[string]string, cookies ...*http.Cookie) int {
 	t.Helper()
-	req := httptest.NewRequest(method, path, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), method, path, http.NoBody)
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
@@ -211,7 +212,7 @@ func TestSkipIdempotencyGuardMatchesOnlyDraftReply(t *testing.T) {
 	}
 	for path, want := range tests {
 		t.Run(path, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, path, http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, http.NoBody)
 			if got := skipIdempotencyGuard(r); got != want {
 				t.Fatalf("skipIdempotencyGuard(%q) = %v, want %v", path, got, want)
 			}
@@ -254,7 +255,7 @@ func TestSkipIdempotencyGuardSeesTheFullMountedPath(t *testing.T) {
 			})
 
 			target := "/api/v1/inbox/threads/" + uuid.NewString() + tc.request
-			root.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, target, http.NoBody))
+			root.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodPost, target, http.NoBody))
 
 			if !reachedHandler {
 				t.Fatalf("request to %q never reached the handler; the test's own routing is wrong", target)

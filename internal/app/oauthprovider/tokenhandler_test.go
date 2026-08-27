@@ -18,7 +18,7 @@ import (
 
 // postForm builds a form-urlencoded POST request to path with the given values.
 func postForm(path string, form url.Values) *http.Request {
-	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
 }
@@ -38,7 +38,7 @@ func decodeTokenErr(t *testing.T, body io.Reader) tokenErrorBody {
 func TestTokenHandlerMalformedFormIsInvalidRequest(t *testing.T) {
 	h, _ := newTestHandler(fakeOwner{})
 	// An invalid percent-escape makes r.ParseForm fail.
-	r := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader("%zz"))
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/oauth2/token", strings.NewReader("%zz"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
 	h.token(w, r)

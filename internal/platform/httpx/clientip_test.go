@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -112,7 +113,7 @@ func TestClientIP(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+			r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 			r.RemoteAddr = tc.remoteAddr
 			if tc.xff != "" {
 				r.Header.Set("X-Forwarded-For", tc.xff)
@@ -129,7 +130,7 @@ func TestClientIP(t *testing.T) {
 // no usable header yields the zero Addr (so an allowlist caller fails closed)
 // rather than panicking.
 func TestClientIPEmptyRemoteAddr(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	r.RemoteAddr = ""
 	if got := NewClientIPResolver(nil).ClientIP(r); got.IsValid() {
 		t.Fatalf("ClientIP = %q, want zero Addr", got.String())

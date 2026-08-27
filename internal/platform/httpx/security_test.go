@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,7 @@ func TestSecurityHeaders(t *testing.T) {
 	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/mailboxes", http.NoBody)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -37,7 +38,7 @@ func TestLimitRequestBody(t *testing.T) {
 			return
 		}
 	}))
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/campaigns", strings.NewReader(strings.Repeat("x", maxJSONBody+1)))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/campaigns", strings.NewReader(strings.Repeat("x", maxJSONBody+1)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

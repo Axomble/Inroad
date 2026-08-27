@@ -30,7 +30,7 @@ func newAuthedRequest(t *testing.T, secret []byte, ws, campaignID uuid.UUID, met
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	req := httptest.NewRequest(method, "/campaigns/"+campaignID.String()+"/tracking", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), method, "/campaigns/"+campaignID.String()+"/tracking", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
 
 	rctx := chi.NewRouteContext()
@@ -55,7 +55,7 @@ func newAuthedEnrollmentsRequest(t *testing.T, secret []byte, ws, campaignID uui
 	if rawQuery != "" {
 		url += "?" + rawQuery
 	}
-	req := httptest.NewRequest(http.MethodGet, url, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", campaignID.String())

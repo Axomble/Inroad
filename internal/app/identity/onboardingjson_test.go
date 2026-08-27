@@ -89,7 +89,7 @@ func meResponseBody(t *testing.T, h *Handler, reg Session) []byte {
 	if err != nil {
 		t.Fatalf("IssueToken: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/me", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/me", http.NoBody)
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.me)).ServeHTTP(w, req)
@@ -177,7 +177,7 @@ func TestSwitchWorkspaceResponseAlwaysCarriesOnboardingKey(t *testing.T) {
 		t.Fatalf("IssueToken: %v", err)
 	}
 	payload, _ := json.Marshal(map[string]string{"workspace_id": otherWS.String()})
-	req := httptest.NewRequest(http.MethodPost, "/switch-workspace", bytes.NewReader(payload))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/switch-workspace", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(h.jwtSecret))(http.HandlerFunc(h.switchWorkspace)).ServeHTTP(w, req)

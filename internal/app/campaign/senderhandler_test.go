@@ -32,7 +32,7 @@ func newSendersRequest(t *testing.T, secret []byte, ws, campaignID uuid.UUID, me
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
-	req := httptest.NewRequest(method, "/campaigns/"+campaignID.String()+"/senders", reader)
+	req := httptest.NewRequestWithContext(context.Background(), method, "/campaigns/"+campaignID.String()+"/senders", reader)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", campaignID.String())

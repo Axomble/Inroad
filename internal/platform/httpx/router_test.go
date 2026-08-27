@@ -15,7 +15,7 @@ import (
 
 func TestHealthz(t *testing.T) {
 	r := NewRouter(slog.New(slog.NewJSONHandler(io.Discard, nil)), metrics.New())
-	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
