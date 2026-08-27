@@ -49,8 +49,7 @@ SELECT (
      AND s.sent_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day')
   +
   (SELECT count(*) FROM inbox_messages im
-   JOIN inbox_threads t ON t.id = im.thread_id
-   WHERE t.mailbox_id = $1::uuid AND im.direction = 'outbound'
+   WHERE im.mailbox_id = $1::uuid AND im.direction = 'outbound'
      AND im.occurred_at >= date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc'
      AND im.occurred_at <  (date_trunc('day', now() AT TIME ZONE 'utc') AT TIME ZONE 'utc') + interval '1 day')
 )::bigint
@@ -67,9 +66,9 @@ SELECT (
 // "a manual reply is never blocked by the cap, but it counts toward it")
 // must see it too. Manual replies are stored as direction='outbound'
 // inbox_messages rows (see internal/app/inbox.Service.Reply /
-// RecordOutboundReply); found here via inbox_threads.mailbox_id, using the
-// plain mailbox_id index migration 000049 added (this call has no
-// workspace_id to use the existing composite one — see below).
+// RecordOutboundReply); found here via inbox_messages.mailbox_id, which is
+// denormalized onto the message row precisely so this gate can seek it (see
+// below).
 //
 // The half-open range is explicitly UTC (date_trunc on now() AT TIME ZONE
 // 'utc'), so it counts the UTC day unconditionally. This matches the old
@@ -82,16 +81,33 @@ SELECT (
 // advance/send. Workspace-pinned (this query is not, being keyed on an
 // unguessable mailbox id).
 //
-// PERFORMANCE NOTE: the inbox_messages half is NOT as tight as the sends
-// half — idx_inbox_threads_mailbox (migration 000049) narrows by mailbox_id
-// but not by date, so the join's outer side is every thread the mailbox has
-// EVER had, not just today's, before idx_inbox_messages_thread narrows each
-// to today's occurred_at range. Fine at manual-reply volumes (an operator
-// hand-sending replies, not a bulk campaign), but if that ever changes, the
-// escape hatch is denormalizing mailbox_id onto inbox_messages directly (a
-// migration + backfill + a partial index on (mailbox_id, occurred_at) WHERE
-// direction='outbound'), which would make this half scale with reply volume
-// instead of total thread history.
+// BOTH halves are now sargable, and both must stay. The inbox_messages half is
+// NOT redundant with the sends half and must never be "simplified" away: the
+// outbound leg of a thread is SYNTHESIZED at read time — a campaign send lives
+// in `sends` and is not an inbox_messages row, while a manual reply is an
+// inbox_messages row and is not a `sends` row (see this query's header for why
+// it cannot be one). Each table holds a disjoint half of the mailbox's real
+// outbound volume, so counting either alone under-reports, and an under-report
+// here does not fail a test — it silently over-sends past the daily cap and
+// costs sender reputation.
+//
+// The inbox_messages half previously joined inbox_threads to reach mailbox_id,
+// and idx_inbox_threads_mailbox (migration 000049) narrows by mailbox_id but has
+// NO date component — so the join's outer side was every thread the mailbox had
+// EVER had, before idx_inbox_messages_thread narrowed each to today. That
+// degrades linearly with mailbox age, on the send path, for exactly the
+// long-lived mailboxes that matter most. No index could fix it in place: the
+// date lives on inbox_messages and the mailbox lived on inbox_threads, and no
+// single index spans two tables.
+//
+// The join is now gone. inbox_messages carries its own mailbox_id (derived from
+// the thread at INSERT — see queries/inbox.sql), so this half range-seeks
+// idx_inbox_messages_mailbox_outbound (mailbox_id, occurred_at) WHERE
+// direction='outbound' and scales with today's REPLY VOLUME instead of total
+// thread history — the same shape the sends half already had via
+// idx_sends_mailbox_sent. The counted SET is unchanged: mailbox_id on the
+// message equals its thread's mailbox_id by construction and by NOT NULL, so
+// dropping the join removes work, not rows.
 func (q *Queries) CountSentToday(ctx context.Context, mailboxID uuid.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countSentToday, mailboxID)
 	var column_1 int64
