@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,13 +38,13 @@ func NewNetInboxReader(allowPrivate bool) *NetInboxReader {
 // read-only, returning the open client (caller must Logout) and its mailbox
 // status. Shared by Fetch and CurrentState so both go through one vetted
 // dial path.
-func (r *NetInboxReader) selectInboxReadOnly(cfg IMAPConfig) (*client.Client, *imap.MailboxStatus, error) {
+func (r *NetInboxReader) selectInboxReadOnly(ctx context.Context, cfg IMAPConfig) (*client.Client, *imap.MailboxStatus, error) {
 	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	c, err := dialIMAP(addr, cfg, r.Timeout, r.LocalAddr)
+	c, err := dialIMAP(ctx, addr, cfg, r.Timeout, r.LocalAddr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -65,8 +66,8 @@ func (r *NetInboxReader) selectInboxReadOnly(cfg IMAPConfig) (*client.Client, *i
 // read-only SELECT that fetches no message bodies. Used by the poll handler
 // to detect a UIDVALIDITY reset and to establish a first-poll baseline
 // without crawling the mailbox's pre-existing history.
-func (r *NetInboxReader) CurrentState(cfg IMAPConfig) (uidValidity, uidNext uint32, err error) {
-	c, mbox, err := r.selectInboxReadOnly(cfg)
+func (r *NetInboxReader) CurrentState(ctx context.Context, cfg IMAPConfig) (uidValidity, uidNext uint32, err error) {
+	c, mbox, err := r.selectInboxReadOnly(ctx, cfg)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -80,12 +81,12 @@ func (r *NetInboxReader) CurrentState(cfg IMAPConfig) (uidValidity, uidNext uint
 // uidRangeSeqSet), not just the returned slice, so a first poll (sinceUID==0)
 // or a compromised/misbehaving server can never make Fetch pull an unbounded
 // number of messages over the wire.
-func (r *NetInboxReader) Fetch(cfg IMAPConfig, sinceUID uint32, maxN int) ([]InboundMessage, uint32, error) {
+func (r *NetInboxReader) Fetch(ctx context.Context, cfg IMAPConfig, sinceUID uint32, maxN int) ([]InboundMessage, uint32, error) {
 	if maxN <= 0 {
 		return nil, 0, fmt.Errorf("mail: Fetch requires maxN > 0, got %d", maxN)
 	}
 
-	c, mbox, err := r.selectInboxReadOnly(cfg)
+	c, mbox, err := r.selectInboxReadOnly(ctx, cfg)
 	if err != nil {
 		return nil, 0, err
 	}

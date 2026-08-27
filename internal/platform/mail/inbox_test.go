@@ -12,7 +12,7 @@ import (
 
 func TestInboxReaderRejectsPrivateWhenDisallowed(t *testing.T) {
 	reader := &NetInboxReader{Timeout: time.Second} // AllowPrivate false
-	_, _, err := reader.Fetch(IMAPConfig{Host: "10.0.0.5", Port: 993}, 0, 50)
+	_, _, err := reader.Fetch(t.Context(), IMAPConfig{Host: "10.0.0.5", Port: 993}, 0, 50)
 	if !errors.Is(err, ErrHostNotPermitted) {
 		t.Fatalf("expected ErrHostNotPermitted for private IP, got %v", err)
 	}
@@ -20,10 +20,10 @@ func TestInboxReaderRejectsPrivateWhenDisallowed(t *testing.T) {
 
 func TestInboxReaderRejectsNonPositiveMaxN(t *testing.T) {
 	reader := &NetInboxReader{Timeout: time.Second}
-	if _, _, err := reader.Fetch(IMAPConfig{Host: "mail.example.com", Port: 993}, 0, 0); err == nil {
+	if _, _, err := reader.Fetch(t.Context(), IMAPConfig{Host: "mail.example.com", Port: 993}, 0, 0); err == nil {
 		t.Fatal("expected error for maxN == 0, got nil")
 	}
-	if _, _, err := reader.Fetch(IMAPConfig{Host: "mail.example.com", Port: 993}, 0, -1); err == nil {
+	if _, _, err := reader.Fetch(t.Context(), IMAPConfig{Host: "mail.example.com", Port: 993}, 0, -1); err == nil {
 		t.Fatal("expected error for maxN < 0, got nil")
 	}
 }

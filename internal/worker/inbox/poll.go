@@ -59,7 +59,7 @@ type WarmupEngageEnqueuer interface {
 // mail.InboxReader (interface segregation) so the core poll path never depends on
 // junk support.
 type imapJunkScanner interface {
-	FetchJunk(cfg mail.IMAPConfig, maxN int) (msgs []mail.InboundMessage, folder string, err error)
+	FetchJunk(ctx context.Context, cfg mail.IMAPConfig, maxN int) (msgs []mail.InboundMessage, folder string, err error)
 }
 
 // gmailSpamScanner is the OPTIONAL SPAM-label capability of a GmailFetcher.
@@ -255,7 +255,7 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 
 		cfg := mail.IMAPConfig{Host: job.Host, Port: job.Port, Username: job.Username, Password: string(job.Password)}
 
-		uidValidity, uidNext, err := reader.CurrentState(cfg)
+		uidValidity, uidNext, err := reader.CurrentState(ctx, cfg)
 		if err != nil {
 			return err
 		}
@@ -276,7 +276,7 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 			return core.SetInboxCursor(ctx, p.MailboxID, p.WorkspaceID, base, uidValidity)
 		}
 
-		msgs, _, err := reader.Fetch(cfg, job.LastSeenUID, fetchBatchSize)
+		msgs, _, err := reader.Fetch(ctx, cfg, job.LastSeenUID, fetchBatchSize)
 		if err != nil {
 			return err
 		}
@@ -530,7 +530,7 @@ func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p q
 // back the INBOX cursor. Non-warmup junk mail is deliberately ignored (never
 // classified): the junk scan exists only to observe warmup placement.
 func scanIMAPJunk(ctx context.Context, core coreapi.Client, hook warmupHook, js imapJunkScanner, cfg mail.IMAPConfig, p queue.InboxPollPayload, tabCapable bool) {
-	msgs, folder, err := js.FetchJunk(cfg, junkScanBatch)
+	msgs, folder, err := js.FetchJunk(ctx, cfg, junkScanBatch)
 	if err != nil {
 		logJunkScanErr(err, p, "imap")
 		return

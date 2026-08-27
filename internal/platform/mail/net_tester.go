@@ -87,7 +87,7 @@ func (t *NetTester) TestSMTP(ctx context.Context, cfg SMTPConfig) error {
 
 // TestIMAP dials the IMAP server, negotiates TLS, and logs in, then logs out.
 // Port 143 upgrades via STARTTLS; other ports use implicit TLS.
-func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
+func (t *NetTester) TestIMAP(ctx context.Context, cfg IMAPConfig) error {
 	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, t.AllowPrivate)
 	if err != nil {
 		return err
@@ -95,7 +95,7 @@ func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
 
 	// The connect-test is a control-plane dial (cmd/inroad), not a worker egress
 	// dial, so it binds no source address.
-	c, err := dialIMAP(addr, cfg, t.Timeout, nil)
+	c, err := dialIMAP(ctx, addr, cfg, t.Timeout, nil)
 	if err != nil {
 		return err
 	}
@@ -114,16 +114,28 @@ func (t *NetTester) TestIMAP(cfg IMAPConfig) error {
 // still checks against the hostname the caller asked for. Shared by TestIMAP
 // and NetInboxReader.Fetch so both go through one SSRF-guarded dial path.
 //
+// ctx cancels the DIAL and the greeting read. It does not cancel later commands:
+// go-imap's Client has no context-aware API, so once connected, Client.Timeout is
+// what bounds SELECT/FETCH/LOGIN. That is the honest division — connecting is the
+// part that hangs on an unreachable or black-holed host, and it is the part a
+// worker shutdown or an abandoned HTTP request needs back.
+//
+// Dialed by hand rather than through client.DialWithDialer / DialWithDialerTLS,
+// which take a *net.Dialer and no context: they cannot be cancelled at all. This
+// is the same dial they perform (net or tls, then client.New reads the greeting),
+// with DialContext in place of Dial.
+//
 // timeout bounds both the initial dial+greeting (via a net.Dialer deadline)
 // and every subsequent IMAP command — STARTTLS, LOGIN, SELECT, FETCH, ... —
 // via go-imap's per-command deadline (Client.Timeout), so a hung server can
 // never block the caller indefinitely. A timeout <= 0 falls back to
-// defaultIMAPTimeout.
+// defaultIMAPTimeout. Client.Timeout is set BEFORE STARTTLS, which the old
+// DialWithDialer path could not do: the upgrade handshake itself was unbounded.
 //
 // localAddr optionally binds the SOURCE address of the dial (the worker egress
 // IP, spec §15); nil uses the OS default route. addr is the already-vetted
 // DESTINATION, so a source bind never affects the SSRF vet (spec §17.7).
-func dialIMAP(addr string, cfg IMAPConfig, timeout time.Duration, localAddr *net.TCPAddr) (*client.Client, error) {
+func dialIMAP(ctx context.Context, addr string, cfg IMAPConfig, timeout time.Duration, localAddr *net.TCPAddr) (*client.Client, error) {
 	if timeout <= 0 {
 		timeout = defaultIMAPTimeout
 	}
@@ -132,18 +144,34 @@ func dialIMAP(addr string, cfg IMAPConfig, timeout time.Duration, localAddr *net
 		dialer.LocalAddr = localAddr
 	}
 
-	var c *client.Client
+	var conn net.Conn
 	var err error
 	if cfg.Port == 143 {
-		if c, err = client.DialWithDialer(dialer, addr); err == nil {
-			err = c.StartTLS(&tls.Config{ServerName: cfg.Host})
-		}
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	} else {
-		c, err = client.DialWithDialerTLS(dialer, addr, &tls.Config{ServerName: cfg.Host})
+		// ServerName stays cfg.Host even though addr is the resolved IP, so
+		// certificate validation still checks the hostname the caller asked for.
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: cfg.Host}}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("imap dial: %w", err)
 	}
+
+	c, err := client.New(conn)
+	if err != nil {
+		// New reads the server greeting, so it can fail on a connection that opened
+		// fine. Closing here rather than leaking the socket.
+		_ = conn.Close()
+		return nil, fmt.Errorf("imap dial: %w", err)
+	}
 	c.Timeout = timeout
+
+	if cfg.Port == 143 {
+		if err := c.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
+			_ = c.Logout()
+			return nil, fmt.Errorf("imap dial: %w", err)
+		}
+	}
 	return c, nil
 }

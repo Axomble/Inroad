@@ -165,7 +165,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 	}); err != nil {
 		return MailboxSafe{}, fmt.Errorf("%w: smtp: %w", ErrConnectionTestFailed, err)
 	}
-	if err := s.tester.TestIMAP(mail.IMAPConfig{
+	if err := s.tester.TestIMAP(ctx, mail.IMAPConfig{
 		Host:     in.IMAPHost,
 		Port:     in.IMAPPort,
 		Username: in.IMAPUsername,

@@ -65,12 +65,12 @@ func imapCfg(t EngageTarget) IMAPConfig {
 // encodes a mailbox name as a quoted-string/literal, so an attacker-influenceable
 // SourceFolder can never break out into a raw command. The client is always logged
 // out. Shared by MarkRead and Rescue so both go through one vetted dial path.
-func (e *NetEngager) withFolder(cfg IMAPConfig, folder string, fn func(c *client.Client) error) error {
+func (e *NetEngager) withFolder(ctx context.Context, cfg IMAPConfig, folder string, fn func(c *client.Client) error) error {
 	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, e.AllowPrivate)
 	if err != nil {
 		return err
 	}
-	c, err := dialIMAP(addr, cfg, e.Timeout, e.LocalAddr)
+	c, err := dialIMAP(ctx, addr, cfg, e.Timeout, e.LocalAddr)
 	if err != nil {
 		return err
 	}
@@ -119,8 +119,8 @@ func markReadFolder(t EngageTarget) string {
 // quoted/literal SELECT argument (see withFolder), so an attacker-influenceable folder
 // can never break out. A message not found in that folder yields no search hit and is a
 // clean no-op.
-func (e *NetEngager) MarkRead(_ context.Context, t EngageTarget) error {
-	return e.withFolder(imapCfg(t), markReadFolder(t), func(c *client.Client) error {
+func (e *NetEngager) MarkRead(ctx context.Context, t EngageTarget) error {
+	return e.withFolder(ctx, imapCfg(t), markReadFolder(t), func(c *client.Client) error {
 		set, ok, err := findUIDs(c, t.MessageID)
 		if err != nil || !ok {
 			return err
@@ -137,11 +137,11 @@ func (e *NetEngager) MarkRead(_ context.Context, t EngageTarget) error {
 // using UidMove — which go-imap performs as an RFC 6851 MOVE, falling back to
 // COPY + STORE \Deleted + EXPUNGE on servers without the MOVE extension. A message
 // already in the inbox (SourceFolder empty or INBOX) needs no rescue.
-func (e *NetEngager) Rescue(_ context.Context, t EngageTarget) error {
+func (e *NetEngager) Rescue(ctx context.Context, t EngageTarget) error {
 	if t.SourceFolder == "" || strings.EqualFold(t.SourceFolder, inboxFolder) {
 		return nil // already in the inbox — nothing to rescue
 	}
-	return e.withFolder(imapCfg(t), t.SourceFolder, func(c *client.Client) error {
+	return e.withFolder(ctx, imapCfg(t), t.SourceFolder, func(c *client.Client) error {
 		set, ok, err := findUIDs(c, t.MessageID)
 		if err != nil || !ok {
 			return err

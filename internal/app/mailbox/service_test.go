@@ -135,7 +135,7 @@ type fakeTester struct {
 }
 
 func (t *fakeTester) TestSMTP(_ context.Context, cfg mail.SMTPConfig) error { return t.smtpErr }
-func (t *fakeTester) TestIMAP(cfg mail.IMAPConfig) error                    { return t.imapErr }
+func (t *fakeTester) TestIMAP(_ context.Context, cfg mail.IMAPConfig) error { return t.imapErr }
 
 // inMemDEKStore is a minimal in-memory crypto.DEKStore for unit tests: it
 // returns ErrDEKNotFound on a miss and fails a Put for an already-present

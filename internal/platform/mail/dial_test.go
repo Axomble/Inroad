@@ -70,10 +70,10 @@ func TestInboxSourceBindDoesNotBypassSSRF(t *testing.T) {
 	r := NewNetInboxReader(false)
 	r.LocalAddr = egress
 
-	if _, _, err := r.CurrentState(IMAPConfig{Host: "127.0.0.1", Port: 993}); !errors.Is(err, ErrHostNotPermitted) {
+	if _, _, err := r.CurrentState(t.Context(), IMAPConfig{Host: "127.0.0.1", Port: 993}); !errors.Is(err, ErrHostNotPermitted) {
 		t.Fatalf("loopback IMAP destination must stay blocked with a source bind set, got err=%v", err)
 	}
-	if _, _, err := r.CurrentState(IMAPConfig{Host: "169.254.169.254", Port: 993}); !errors.Is(err, ErrHostNotPermitted) {
+	if _, _, err := r.CurrentState(t.Context(), IMAPConfig{Host: "169.254.169.254", Port: 993}); !errors.Is(err, ErrHostNotPermitted) {
 		t.Fatalf("metadata IMAP destination must stay blocked with a source bind set, got err=%v", err)
 	}
 }
