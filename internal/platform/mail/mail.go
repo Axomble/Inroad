@@ -36,16 +36,16 @@ type IMAPConfig struct {
 // ConnectionTester verifies mailbox credentials against real servers before we
 // persist them (PRD 9.1.3). Domains depend on this interface, not the concrete
 // dialer, so they can be unit-tested with a fake.
-// Only TestSMTP takes a context, and the asymmetry is deliberate rather than an
-// oversight. The SMTP dial is ours (net.Dialer), so a caller that goes away can
-// cancel it. The IMAP dial goes through go-imap's client.DialWithDialer, which
-// accepts no context, so honouring one would mean dialing by hand at all four
-// IMAP call sites — including the worker egress paths that bind a source address.
-// A ctx parameter TestIMAP could not act on would claim cancellation it does not
-// have, which is worse than a signature that admits the gap.
+//
+// Both methods cancel their DIAL when ctx is done, which is the part that hangs on
+// an unreachable or black-holed host and the part an abandoned HTTP request needs
+// back. Neither cancels post-connect commands: go-imap's Client has no
+// context-aware API, so a per-command deadline bounds those instead (see dialIMAP).
+// The ctx here is therefore a real guarantee about connecting, not a claim to
+// cancel a LOGIN already in flight.
 type ConnectionTester interface {
 	TestSMTP(ctx context.Context, cfg SMTPConfig) error
-	TestIMAP(cfg IMAPConfig) error
+	TestIMAP(ctx context.Context, cfg IMAPConfig) error
 }
 
 // InboundMessage is a single message fetched from a mailbox's INBOX, parsed
@@ -79,10 +79,10 @@ type InboxReader interface {
 	// the returned slice), plus the mailbox's current UIDVALIDITY. Reusing
 	// IMAPConfig keeps mailbox credential wiring identical to
 	// ConnectionTester.TestIMAP.
-	Fetch(cfg IMAPConfig, sinceUID uint32, maxN int) (msgs []InboundMessage, uidValidity uint32, err error)
+	Fetch(ctx context.Context, cfg IMAPConfig, sinceUID uint32, maxN int) (msgs []InboundMessage, uidValidity uint32, err error)
 	// CurrentState reports INBOX's current UIDVALIDITY and UIDNEXT via a
 	// read-only SELECT, without fetching any message bodies. The poll handler
 	// uses it to detect a UIDVALIDITY reset and to establish a first-poll
 	// baseline (see Fetch's callers) without pulling any mail over the wire.
-	CurrentState(cfg IMAPConfig) (uidValidity, uidNext uint32, err error)
+	CurrentState(ctx context.Context, cfg IMAPConfig) (uidValidity, uidNext uint32, err error)
 }

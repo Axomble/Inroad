@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -82,7 +83,7 @@ func pickJunkFolder(infos []*imap.MailboxInfo) (string, bool) {
 // Stateless by design: there is no junk cursor — the warmup receipt write is
 // idempotent (UNIQUE on (send, recipient)), so re-scanning the same messages
 // every poll never double-records.
-func (r *NetInboxReader) FetchJunk(cfg IMAPConfig, maxN int) ([]InboundMessage, string, error) {
+func (r *NetInboxReader) FetchJunk(ctx context.Context, cfg IMAPConfig, maxN int) ([]InboundMessage, string, error) {
 	if maxN <= 0 {
 		return nil, "", fmt.Errorf("mail: FetchJunk requires maxN > 0, got %d", maxN)
 	}
@@ -91,7 +92,7 @@ func (r *NetInboxReader) FetchJunk(cfg IMAPConfig, maxN int) ([]InboundMessage, 
 	if err != nil {
 		return nil, "", err
 	}
-	c, err := dialIMAP(addr, cfg, r.Timeout, r.LocalAddr)
+	c, err := dialIMAP(ctx, addr, cfg, r.Timeout, r.LocalAddr)
 	if err != nil {
 		return nil, "", err
 	}

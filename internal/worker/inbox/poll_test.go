@@ -39,11 +39,11 @@ type fakeReader struct {
 	junkFetchCalled bool
 }
 
-func (f *fakeReader) CurrentState(mail.IMAPConfig) (uint32, uint32, error) {
+func (f *fakeReader) CurrentState(context.Context, mail.IMAPConfig) (uint32, uint32, error) {
 	return f.uidValidity, f.uidNext, f.stateErr
 }
 
-func (f *fakeReader) Fetch(_ mail.IMAPConfig, sinceUID uint32, _ int) ([]mail.InboundMessage, uint32, error) {
+func (f *fakeReader) Fetch(_ context.Context, _ mail.IMAPConfig, sinceUID uint32, _ int) ([]mail.InboundMessage, uint32, error) {
 	f.fetchCalled = true
 	f.sinceUID = sinceUID
 	if f.fetchErr != nil {
@@ -52,7 +52,7 @@ func (f *fakeReader) Fetch(_ mail.IMAPConfig, sinceUID uint32, _ int) ([]mail.In
 	return f.msgs, f.uidValidity, nil
 }
 
-func (f *fakeReader) FetchJunk(_ mail.IMAPConfig, _ int) ([]mail.InboundMessage, string, error) {
+func (f *fakeReader) FetchJunk(_ context.Context, _ mail.IMAPConfig, _ int) ([]mail.InboundMessage, string, error) {
 	f.junkFetchCalled = true
 	if f.junkErr != nil {
 		return nil, "", f.junkErr
