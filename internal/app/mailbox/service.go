@@ -156,7 +156,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		return MailboxSafe{}, ErrDuplicateMailbox
 	}
 
-	if err := s.tester.TestSMTP(mail.SMTPConfig{
+	if err := s.tester.TestSMTP(ctx, mail.SMTPConfig{
 		Host:           in.SMTPHost,
 		Port:           in.SMTPPort,
 		Username:       in.SMTPUsername,

@@ -6,6 +6,7 @@
 package mail
 
 import (
+	"context"
 	netmail "net/mail"
 )
 
@@ -35,8 +36,15 @@ type IMAPConfig struct {
 // ConnectionTester verifies mailbox credentials against real servers before we
 // persist them (PRD 9.1.3). Domains depend on this interface, not the concrete
 // dialer, so they can be unit-tested with a fake.
+// Only TestSMTP takes a context, and the asymmetry is deliberate rather than an
+// oversight. The SMTP dial is ours (net.Dialer), so a caller that goes away can
+// cancel it. The IMAP dial goes through go-imap's client.DialWithDialer, which
+// accepts no context, so honouring one would mean dialing by hand at all four
+// IMAP call sites — including the worker egress paths that bind a source address.
+// A ctx parameter TestIMAP could not act on would claim cancellation it does not
+// have, which is worse than a signature that admits the gap.
 type ConnectionTester interface {
-	TestSMTP(cfg SMTPConfig) error
+	TestSMTP(ctx context.Context, cfg SMTPConfig) error
 	TestIMAP(cfg IMAPConfig) error
 }
 
