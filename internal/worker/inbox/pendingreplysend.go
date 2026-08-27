@@ -50,7 +50,8 @@ type PendingReplyCore interface {
 // the entire point of the feature: the task carries only a row id, and the ROW
 // decides whether to send at all. The operator's undo is an UPDATE on that row;
 // this task still fires and finds it unclaimable, so cancellation never depends
-// on reaching into the queue (asynq's Inspector is unused in this codebase).
+// on reaching into the queue (the codebase's only asynq Inspector is the
+// read-only one behind the queue-depth metric; it mutates nothing).
 //
 // Return-value discipline, since it decides between double-sending and losing
 // mail:

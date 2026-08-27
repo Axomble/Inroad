@@ -135,6 +135,14 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// pgx pool saturation, read on scrape: the API's own connection budget
+	// (INROAD_DB_MAX_CONNS) becoming visible before pool.Acquire blocks and
+	// requests start queueing behind it.
+	if err := mtx.RegisterPool(pool); err != nil {
+		logger.Error("register pool metrics failed", "err", err)
+		return err
+	}
+
 	sender, err := notify.New(notify.Config{
 		Driver: cfg.TransactionalDriver, SMTPHost: cfg.SystemSMTPHost, SMTPPort: cfg.SystemSMTPPort,
 		SMTPUsername: cfg.SystemSMTPUsername, SMTPPassword: cfg.SystemSMTPPassword, From: cfg.SystemEmailFrom,

@@ -19,6 +19,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/abtest"
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
 
@@ -468,6 +469,7 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
 	// advance" outcome.
 	if job.NotYetDue(time.Now()) {
+		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
 		return coreapi.ClaimDeferred, nil
 	}
 	ws, err := uuid.Parse(job.WorkspaceID)
@@ -497,13 +499,14 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 	defer func() { _ = tx.Rollback(ctx) }()
 	qtx := c.q.WithTx(tx)
 
-	if _, err := qtx.ClaimStepSend(ctx, gen.ClaimStepSendParams{
+	claimed, err := qtx.ClaimStepSend(ctx, gen.ClaimStepSendParams{
 		ID:          sendID,
 		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
 		ToEmail: job.ToEmail, StepOrder: int32(job.StepOrder), ReferencesHeader: job.References,
 		VariantID:    variantUUID(job.VariantID),
 		LeaseSeconds: claimLeaseSeconds,
-	}); err != nil {
+	})
+	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return coreapi.ClaimSkip, err
 		}
@@ -513,19 +516,23 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 		if serr != nil {
 			if errors.Is(serr, pgx.ErrNoRows) {
 				// Not visible to this workspace (cross-tenant / vanished): skip.
+				c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeLost)
 				return coreapi.ClaimSkip, nil
 			}
 			return coreapi.ClaimSkip, serr
 		}
 		if st.Status == "sent" {
+			c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeAlreadySent)
 			return coreapi.ClaimAlreadySent, nil
 		}
+		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeLost)
 		return coreapi.ClaimSkip, nil
 	}
 	if _, err := qtx.ReserveMailboxSendSlot(ctx, gen.ReserveMailboxSendSlotParams{
 		ID: mailboxID, WorkspaceID: ws,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
 			return coreapi.ClaimDeferred, nil
 		}
 		return coreapi.ClaimSkip, err
@@ -533,7 +540,25 @@ func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (cor
 	if err := tx.Commit(ctx); err != nil {
 		return coreapi.ClaimSkip, err
 	}
+	// Counted only AFTER the commit: a claim recorded before it could be rolled
+	// back, and a "won" that never actually owned the row would make the very
+	// metric operators use to trust the send path lie.
+	c.mtx.SendClaimed(stepClaimKind, claimWonOutcome(claimed.FreshlyInserted))
 	return coreapi.ClaimWon, nil
+}
+
+// stepClaimKind is the kind label every step-send claim reports under. Fixed
+// (not derived from anything caller-supplied) so this dimension stays bounded.
+const stepClaimKind = "step"
+
+// claimWonOutcome maps sqlc's freshly_inserted flag onto the metric's
+// won-vs-reclaimed distinction: a fresh INSERT is a normal claim, while
+// re-winning an expired lease means a previous worker died holding it.
+func claimWonOutcome(freshlyInserted bool) string {
+	if freshlyInserted {
+		return metrics.ClaimOutcomeWon
+	}
+	return metrics.ClaimOutcomeReclaimed
 }
 
 // MarkStepDelivered commits the step-send's successful delivery in its OWN

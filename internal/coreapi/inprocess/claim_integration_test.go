@@ -120,10 +120,15 @@ func TestClaimStepSendStateMachine(t *testing.T) {
 	p := stepClaimParams(fx, fx.ws, 1)
 	wantID := p.ID
 
-	// Fresh insert wins the claim.
+	// Fresh insert wins the claim, and reports itself as freshly inserted —
+	// which is what separates a normal "won" from a "reclaimed" crashed lease
+	// in inroad_send_claims_total.
 	got, err := q.ClaimStepSend(ctx, p)
-	if err != nil || got != wantID {
-		t.Fatalf("fresh claim: id=%v err=%v (want %v)", got, err, wantID)
+	if err != nil || got.ID != wantID {
+		t.Fatalf("fresh claim: id=%v err=%v (want %v)", got.ID, err, wantID)
+	}
+	if !got.FreshlyInserted {
+		t.Fatal("fresh insert must report freshly_inserted=true")
 	}
 
 	// A fresh 'sending' lease is owned by (this) worker: a second claim loses.
@@ -133,8 +138,14 @@ func TestClaimStepSendStateMachine(t *testing.T) {
 
 	// A STALE 'sending' lease (crashed worker) is reclaimable.
 	makeStale(t, ctx, pool, wantID)
-	if got, err := q.ClaimStepSend(ctx, p); err != nil || got != wantID {
-		t.Fatalf("stale reclaim: id=%v err=%v", got, err)
+	got, err = q.ClaimStepSend(ctx, p)
+	if err != nil || got.ID != wantID {
+		t.Fatalf("stale reclaim: id=%v err=%v", got.ID, err)
+	}
+	// A reclaim took over an EXISTING row, so it must NOT read as fresh: this
+	// is the exact signal that makes a dying-worker rate visible.
+	if got.FreshlyInserted {
+		t.Fatal("stale reclaim must report freshly_inserted=false")
 	}
 
 	// Release (retryable failure, ReleaseStepSend) expires the lease so a
@@ -142,8 +153,8 @@ func TestClaimStepSendStateMachine(t *testing.T) {
 	if err := q.ReleaseSend(ctx, gen.ReleaseSendParams{ID: wantID, WorkspaceID: fx.ws}); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if got, err := q.ClaimStepSend(ctx, p); err != nil || got != wantID {
-		t.Fatalf("reclaim after release: id=%v err=%v", got, err)
+	if got, err := q.ClaimStepSend(ctx, p); err != nil || got.ID != wantID {
+		t.Fatalf("reclaim after release: id=%v err=%v", got.ID, err)
 	}
 
 	// Finalized 'sent' is terminal: never re-claimed, even if aged.
@@ -175,8 +186,12 @@ func TestClaimStepSendCrashRecovery(t *testing.T) {
 	// After the lease expires (clock advanced past it), the crashed send is
 	// re-driven exactly once.
 	makeStale(t, ctx, pool, p.ID)
-	if got, err := q.ClaimStepSend(ctx, p); err != nil || got != p.ID {
-		t.Fatalf("post-lease reclaim: id=%v err=%v", got, err)
+	got, err := q.ClaimStepSend(ctx, p)
+	if err != nil || got.ID != p.ID {
+		t.Fatalf("post-lease reclaim: id=%v err=%v", got.ID, err)
+	}
+	if got.FreshlyInserted {
+		t.Fatal("crash recovery is a reclaim, so freshly_inserted must be false")
 	}
 }
 

@@ -72,6 +72,17 @@ func CounterValue(families map[string]*dto.MetricFamily, name string, labels map
 	return m.GetCounter().GetValue()
 }
 
+// GaugeValue returns the value of the gauge sample in family `name` matching
+// `labels` exactly, or 0 if no such sample exists yet. Pass nil labels for an
+// unlabeled gauge (the pool collector's series are deliberately unlabeled).
+func GaugeValue(families map[string]*dto.MetricFamily, name string, labels map[string]string) float64 {
+	m := FindMetric(families, name, labels)
+	if m == nil {
+		return 0
+	}
+	return m.GetGauge().GetValue()
+}
+
 // HistogramSampleCount returns the observation count of the histogram sample
 // in family `name` matching `labels` exactly, or 0 if no such sample exists
 // yet.

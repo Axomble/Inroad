@@ -19,6 +19,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -75,6 +76,25 @@ type client struct {
 	// fails on a Saturday. Mirrors deliverability.Service.now, for the same reason.
 	// New defaults it to time.Now; only tests replace it.
 	now func() time.Time
+	// mtx records claim-before-send outcomes (inroad_send_claims_total) from the
+	// one place every outcome is already branched on — the claim itself — so a
+	// lost or reclaimed lease is counted even on paths the calling worker never
+	// distinguishes. nil (the default, and what every test and cmd/seed gets) is
+	// a no-op: *metrics.Metrics is nil-receiver-safe throughout.
+	mtx *metrics.Metrics
+}
+
+// Option customises the in-process client at its composition root. It exists
+// so an optional cross-cutting concern (metrics today) can be wired without a
+// ninth positional parameter on New, and without every test and every other
+// caller having to pass a zero value for something they do not use.
+type Option func(*client)
+
+// WithMetrics wires the process's Prometheus metrics into the client, so the
+// claim-before-send path reports won/lost/reclaimed outcomes. Passing a nil
+// *metrics.Metrics is valid and equivalent to omitting the option.
+func WithMetrics(mtx *metrics.Metrics) Option {
+	return func(c *client) { c.mtx = mtx }
 }
 
 // New returns the in-process coreapi client backed by the given connection
@@ -87,10 +107,11 @@ type client struct {
 // (zero value disables Gmail); msOAuth does the same for m365 mailboxes (zero
 // value disables Microsoft 365); warmupSecret signs the warmup receipt token and
 // warmupContent is the injected warmup content library (both used only by the
-// warmup send path).
-func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth, warmupSecret []byte, warmupContent warmup.ContentGenerator) coreapi.Client {
+// warmup send path). opts carry the optional cross-cutting wiring (see
+// WithMetrics); omitting them all yields the same client as before.
+func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth, warmupSecret []byte, warmupContent warmup.ContentGenerator, opts ...Option) coreapi.Client {
 	q := gen.New(pool)
-	return client{
+	c := client{
 		pool: pool, q: q, keyring: keyring, jwtSecret: jwtSecret, publicURL: publicURL,
 		googleOAuth:   googleOAuth,
 		msOAuth:       msOAuth,
@@ -102,6 +123,10 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		replyClaims:   idempotency.NewPgStore(pool),
 		now:           time.Now,
 	}
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return c
 }
 
 // oauthConfigFor returns the provider's oauth2 config for a token refresh, or

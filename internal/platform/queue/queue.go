@@ -438,9 +438,11 @@ func inboxReplySendTaskID(threadID string, now time.Time) string {
 // free — a retried schedule of the SAME row dedups rather than producing two
 // deliveries. asynq's TaskID conflict is swallowed as success by c.enqueue.
 //
-// Note this task cannot be cancelled through the queue (asynq's Inspector is
-// not used in this codebase). Cancellation is a DB status flip that the handler
-// re-reads on pickup; the task still fires and no-ops. See
+// Note this task cannot be cancelled through the queue. The only asynq
+// Inspector in this codebase is the deliberately READ-ONLY one behind the
+// queue-depth metric (see inspect.go) — nothing here mutates a queued task.
+// Cancellation is a DB status flip that the handler re-reads on pickup; the
+// task still fires and no-ops. See
 // migrations/000066_inbox_pending_reply.up.sql for why.
 func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error {
 	b, err := json.Marshal(InboxPendingReplySendPayload{

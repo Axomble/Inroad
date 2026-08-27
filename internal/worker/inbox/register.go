@@ -5,6 +5,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/replyclassify"
 )
@@ -18,14 +19,15 @@ import (
 // §7/§9.4); enq schedules the warmup:engage follow-up when a warmup receipt
 // is detected. sender delivers manual replies queued from the unified inbox
 // (POST /inbox/threads/{id}/reply) — the SAME *mail.MultiSender every other
-// send path uses.
-func Register(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader, sender Mailer, enq *queue.Client, warmupSecret []byte) {
+// send path uses. mtx records the inbox sweep's duration and mailbox count; a
+// nil mtx no-ops.
+func Register(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader, sender Mailer, enq *queue.Client, warmupSecret []byte, mtx *metrics.Metrics) {
 	// New(nil): Layer 3 (the optional model) is UNWIRED — there is no AI
 	// provider yet, so a matched reply is classified by the deterministic,
 	// offline Layer 1 (headers) + Layer 2 (lexicon) only.
 	classifier := replyclassify.New(nil)
 	mux.HandleFunc(queue.TaskInboxPoll, PollHandler(core, reader, mail.NewGmailReader(), mail.NewGraphReader(), classifier, warmupSecret, enq))
-	mux.HandleFunc(queue.TaskInboxSweep, SweepHandler(core, enq))
+	mux.HandleFunc(queue.TaskInboxSweep, SweepHandler(core, enq, mtx))
 	// Manual reply send: registered by type assertion for the same reason as
 	// testsend.Core — the capability (load one reply's job, resolve the
 	// mailbox's decrypted transport) is consumed through ReplyCore rather
