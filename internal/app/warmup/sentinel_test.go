@@ -3,6 +3,7 @@ package warmup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -260,5 +261,82 @@ func TestSentinelPoolOversizedIsReportedNotEnforced(t *testing.T) {
 					len(ov.Mailboxes), len(tc.rows))
 			}
 		})
+	}
+}
+
+// The content-version rollup is EMITTED, with its own denominators and null rates.
+//
+// Asserted through the JSON for the same reason the sentinel fields are: a Go field
+// that is never populated and a JSON key that is never sent are the same defect from a
+// client's side, and this rollup spent a release built, tested and callerless.
+func TestOverviewEmitsContentVersionsWithTheirOwnDenominators(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 2
+	store.contentVersionStats = []pwarmup.ContentVersionStat{
+		// Enough to carry a rate.
+		{Version: "sl1:aaaaaaaaaaaaaaaa", Inbox: 60, Spam: 40},
+		// Below the floor: reported, but with no rate to read.
+		{Version: "sl1:bbbbbbbbbbbbbbbb", Inbox: 2, Spam: 1},
+	}
+	svc := withNow(NewService(store), time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("GetOverview: %v", err)
+	}
+	if len(ov.ContentVersions) != 2 {
+		t.Fatalf("content_versions = %+v, want both templates", ov.ContentVersions)
+	}
+
+	body, err := json.Marshal(ov)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(body)
+	if !strings.Contains(got, `"content_versions":[`) {
+		t.Errorf("content_versions key is absent from the payload:\n%s", got)
+	}
+
+	byVersion := map[string]WarmupContentVersionDTO{}
+	for _, cv := range ov.ContentVersions {
+		byVersion[cv.Version] = cv
+	}
+	big := byVersion["sl1:aaaaaaaaaaaaaaaa"]
+	if big.PlacementSample != 100 {
+		t.Errorf("placement_sample = %d, want 100 — this version's OWN denominator", big.PlacementSample)
+	}
+	if big.SpamRate == nil || *big.SpamRate != 0.4 {
+		t.Errorf("spam_rate = %v, want 0.4", big.SpamRate)
+	}
+
+	// The floor case: counts reported, rates withheld. Reporting 33% off three
+	// observations would be a confident number about a template nobody has sent.
+	small := byVersion["sl1:bbbbbbbbbbbbbbbb"]
+	if small.PlacementSample != 3 {
+		t.Errorf("placement_sample = %d, want 3", small.PlacementSample)
+	}
+	if small.SpamRate != nil || small.InboxRate != nil {
+		t.Errorf("rates = %v/%v below the sample floor, want null", small.InboxRate, small.SpamRate)
+	}
+}
+
+// A failed rollup must not take the overview down with it — the operator's window into
+// a degrading pool cannot go dark because one advisory panel could not be computed.
+func TestOverviewSurvivesAFailedContentVersionRead(t *testing.T) {
+	store := newFakeStore()
+	store.enabledCount = 1
+	store.contentVersionErr = errors.New("content versions exploded")
+	svc := withNow(NewService(store), time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC))
+
+	ov, err := svc.GetOverview(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("a failed content-version read failed the whole overview: %v", err)
+	}
+	if ov.ContentVersions == nil {
+		t.Error("content_versions is nil after a failed read; it marshals to null, and " +
+			"the contract says []")
+	}
+	if len(ov.ContentVersions) != 0 {
+		t.Errorf("content_versions = %+v after a failed read, want empty", ov.ContentVersions)
 	}
 }

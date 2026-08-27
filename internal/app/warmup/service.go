@@ -317,6 +317,7 @@ func (s *Service) GetOverview(ctx context.Context, ws uuid.UUID) (WarmupOverview
 	return WarmupOverviewDTO{
 		PoolSize:              int(count),
 		Active:                count >= 2,
+		ContentVersions:       s.contentVersions(ctx, ws),
 		SentinelCount:         sentinels,
 		SentinelPoolOversized: pwarmup.SentinelPoolOversized(sentinels, len(mailboxes)),
 		Mailboxes:             mailboxes,
@@ -530,6 +531,33 @@ func (s *Service) participantDTO(p Participant, todaySent int32) WarmupParticipa
 		TodayTarget:   targetFor(p.HealthState, p.StartVolume, p.MaxVolume, p.RampIncrement, p.StartedAt, s.now()),
 		IsSentinel:    p.IsSentinel,
 	}
+}
+
+// contentVersions reports the pool's placement per library template.
+//
+// It NEVER fails the overview. A read error degrades to an empty list and is logged,
+// exactly as incident detection does: this is a visibility panel, and the overview is
+// the operator's window into a degrading pool — it must not go dark because one
+// advisory rollup could not be computed.
+func (s *Service) contentVersions(ctx context.Context, ws uuid.UUID) []WarmupContentVersionDTO {
+	stats, err := s.store.ListContentVersionStats(ctx, ws)
+	if err != nil {
+		slog.ErrorContext(ctx, "warmup_content_versions_unavailable", "workspace_id", ws, "err", err)
+		return []WarmupContentVersionDTO{}
+	}
+	folded := pwarmup.FoldContentVersions(stats)
+	out := make([]WarmupContentVersionDTO, len(folded))
+	for i, f := range folded {
+		out[i] = WarmupContentVersionDTO{
+			Version: f.Version, Inbox: f.Inbox, Spam: f.Spam,
+			PlacementSample: f.PlacementSample,
+			// Passed through, not re-derived: FoldContentVersions already nulled the
+			// rates below the sample floor, and computing them a second time here
+			// would be a second opinion about when a template has earned one.
+			InboxRate: f.InboxRate, SpamRate: f.SpamRate,
+		}
+	}
+	return out
 }
 
 // targetFor computes today's ramp target: 0 while paused (spec §8), otherwise the

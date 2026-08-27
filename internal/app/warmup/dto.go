@@ -522,8 +522,16 @@ type WarmupOverviewDTO struct {
 	// Refusing to pair would stop warmup rather than tell the operator something, and
 	// a pool of one sentinel and nothing else is oversized AND useless — which is worth
 	// saying plainly rather than enforcing.
-	SentinelCount         int  `json:"sentinel_count"`
-	SentinelPoolOversized bool `json:"sentinel_pool_oversized"`
+	// ContentVersions is the pool's placement split by WHICH library template produced
+	// it — "this thread template lands in spam" told apart from "this mailbox is
+	// degrading", which until now were the same signal with opposite responses.
+	//
+	// Per WORKSPACE, not per mailbox: the library is shared across the pool, so a
+	// per-mailbox split would quarter an already-thin sample and report nothing about
+	// most templates. Always present, [] when nothing has been observed.
+	ContentVersions       []WarmupContentVersionDTO `json:"content_versions"`
+	SentinelCount         int                       `json:"sentinel_count"`
+	SentinelPoolOversized bool                      `json:"sentinel_pool_oversized"`
 	// Incidents is never null — `[]` when nothing correlated — and its order is the
 	// detector's own (strongest lift first, then a total order on dimension and
 	// value), which the read layer must not re-sort.
@@ -540,6 +548,26 @@ type WarmupOverviewDTO struct {
 }
 
 // WarmupDayStatDTO is the WarmupDayStat schema: one UTC day of counters.
+// WarmupContentVersionDTO is one library template's placement over the trailing 7
+// days, with ITS OWN denominator.
+//
+// The rates are null below the placement sample floor rather than zero, because a
+// template nobody has sent much of has not earned a rate — the fifth time that rule
+// has had to be applied in this subsystem, after bounce populations, tab capability,
+// per-route and per-observer.
+//
+// Reported for visibility only: nothing gates on it. The sample per version is small
+// by construction, and a template's apparent spam rate is confounded with whichever
+// mailboxes happened to draw it — two calibration problems, not one.
+type WarmupContentVersionDTO struct {
+	Version         string   `json:"version"`
+	Inbox           int      `json:"inbox"`
+	Spam            int      `json:"spam"`
+	PlacementSample int      `json:"placement_sample"`
+	InboxRate       *float64 `json:"inbox_rate"`
+	SpamRate        *float64 `json:"spam_rate"`
+}
+
 type WarmupDayStatDTO struct {
 	Day      string `json:"day"`
 	Sent     int32  `json:"sent"`

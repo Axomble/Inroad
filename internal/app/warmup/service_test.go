@@ -59,7 +59,9 @@ type fakeStore struct {
 	transitionWorkspace uuid.UUID
 	transitionLimits    []int32
 
-	upsertCalls int
+	upsertCalls         int
+	contentVersionStats []pwarmup.ContentVersionStat
+	contentVersionErr   error
 }
 
 func newFakeStore() *fakeStore {
@@ -136,6 +138,13 @@ func (s *fakeStore) DailyStats(_ context.Context, workspaceID, mailboxID uuid.UU
 
 func (s *fakeStore) SentToday(_ context.Context, _, mailboxID uuid.UUID) (int32, error) {
 	return s.sentToday[mailboxID], nil
+}
+
+// contentVersionStats and its error let a test drive both the reported list and the
+// degrade-to-empty path, which is the behaviour that keeps the overview from going
+// dark when one advisory rollup fails.
+func (s *fakeStore) ListContentVersionStats(_ context.Context, _ uuid.UUID) ([]pwarmup.ContentVersionStat, error) {
+	return s.contentVersionStats, s.contentVersionErr
 }
 
 func (s *fakeStore) ListOverviewRows(_ context.Context, _ uuid.UUID) ([]OverviewRow, error) {

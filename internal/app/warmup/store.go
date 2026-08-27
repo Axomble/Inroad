@@ -39,6 +39,10 @@ type Store interface {
 	DailyStats(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]DayStat, error)
 	SentToday(ctx context.Context, workspaceID, mailboxID uuid.UUID) (int32, error)
 	ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error)
+	// ListContentVersionStats returns the workspace's trailing-7-day placement split
+	// by which library template produced it — the counts warmup.FoldContentVersions
+	// turns into per-version rates.
+	ListContentVersionStats(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.ContentVersionStat, error)
 	// ListRoutes returns one mailbox's trailing-7-day placement counters split by
 	// the destination each message was delivered to, ordered by destination_esp.
 	ListRoutes(ctx context.Context, workspaceID, mailboxID uuid.UUID) ([]RouteRow, error)
@@ -247,6 +251,22 @@ func (s *PgStore) ListObserverStats(ctx context.Context, workspaceID uuid.UUID) 
 // ListOverviewRows returns one row per participant enriched with the mailbox
 // email and the trailing-7-day placement + today's sent counters — the single
 // workspace-pinned read behind GET /warmup/overview (no N+1 over the pool).
+// ListContentVersionStats projects the grouped rows into the platform type, so the
+// fold sees no generated struct and this package owns no rate arithmetic.
+func (s *PgStore) ListContentVersionStats(ctx context.Context, workspaceID uuid.UUID) ([]pwarmup.ContentVersionStat, error) {
+	rows, err := s.q.ListWarmupContentVersions(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pwarmup.ContentVersionStat, len(rows))
+	for i, r := range rows {
+		out[i] = pwarmup.ContentVersionStat{
+			Version: r.ContentVersion, Inbox: int(r.Inbox7d), Spam: int(r.Spam7d),
+		}
+	}
+	return out, nil
+}
+
 func (s *PgStore) ListOverviewRows(ctx context.Context, workspaceID uuid.UUID) ([]OverviewRow, error) {
 	rows, err := s.q.ListWarmupOverviewRows(ctx, workspaceID)
 	if err != nil {
