@@ -45,6 +45,11 @@ import { Route as AppSettingsReplyLabelsRouteImport } from './routes/app.setting
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
 import { Route as AuthGoogleCallbackRouteImport } from './routes/auth.google.callback'
+import { Route as AppCampaignsIdIndexRouteImport } from './routes/app.campaigns.$id.index'
+import { Route as AppCampaignsIdLeadsRouteImport } from './routes/app.campaigns.$id.leads'
+import { Route as AppCampaignsIdPreferencesRouteImport } from './routes/app.campaigns.$id.preferences'
+import { Route as AppCampaignsIdScheduleRouteImport } from './routes/app.campaigns.$id.schedule'
+import { Route as AppCampaignsIdStepsRouteImport } from './routes/app.campaigns.$id.steps'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -226,6 +231,32 @@ const AuthGoogleCallbackRoute = AuthGoogleCallbackRouteImport.update({
   path: '/auth/google/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppCampaignsIdIndexRoute = AppCampaignsIdIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppCampaignsIdRoute,
+} as any)
+const AppCampaignsIdLeadsRoute = AppCampaignsIdLeadsRouteImport.update({
+  id: '/leads',
+  path: '/leads',
+  getParentRoute: () => AppCampaignsIdRoute,
+} as any)
+const AppCampaignsIdPreferencesRoute =
+  AppCampaignsIdPreferencesRouteImport.update({
+    id: '/preferences',
+    path: '/preferences',
+    getParentRoute: () => AppCampaignsIdRoute,
+  } as any)
+const AppCampaignsIdScheduleRoute = AppCampaignsIdScheduleRouteImport.update({
+  id: '/schedule',
+  path: '/schedule',
+  getParentRoute: () => AppCampaignsIdRoute,
+} as any)
+const AppCampaignsIdStepsRoute = AppCampaignsIdStepsRouteImport.update({
+  id: '/steps',
+  path: '/steps',
+  getParentRoute: () => AppCampaignsIdRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -245,7 +276,7 @@ export interface FileRoutesByFullPath {
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
-  '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/campaigns/$id': typeof AppCampaignsIdRouteWithChildren
   '/app/companies/$id': typeof AppCompaniesIdRoute
   '/app/contacts/$id': typeof AppContactsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
@@ -264,6 +295,11 @@ export interface FileRoutesByFullPath {
   '/app/deals/': typeof AppDealsIndexRoute
   '/app/inbox/': typeof AppInboxIndexRoute
   '/app/settings/': typeof AppSettingsIndexRoute
+  '/app/campaigns/$id/leads': typeof AppCampaignsIdLeadsRoute
+  '/app/campaigns/$id/preferences': typeof AppCampaignsIdPreferencesRoute
+  '/app/campaigns/$id/schedule': typeof AppCampaignsIdScheduleRoute
+  '/app/campaigns/$id/steps': typeof AppCampaignsIdStepsRoute
+  '/app/campaigns/$id/': typeof AppCampaignsIdIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -281,7 +317,6 @@ export interface FileRoutesByTo {
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app': typeof AppIndexRoute
-  '/app/campaigns/$id': typeof AppCampaignsIdRoute
   '/app/companies/$id': typeof AppCompaniesIdRoute
   '/app/contacts/$id': typeof AppContactsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
@@ -300,6 +335,11 @@ export interface FileRoutesByTo {
   '/app/deals': typeof AppDealsIndexRoute
   '/app/inbox': typeof AppInboxIndexRoute
   '/app/settings': typeof AppSettingsIndexRoute
+  '/app/campaigns/$id/leads': typeof AppCampaignsIdLeadsRoute
+  '/app/campaigns/$id/preferences': typeof AppCampaignsIdPreferencesRoute
+  '/app/campaigns/$id/schedule': typeof AppCampaignsIdScheduleRoute
+  '/app/campaigns/$id/steps': typeof AppCampaignsIdStepsRoute
+  '/app/campaigns/$id': typeof AppCampaignsIdIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -320,7 +360,7 @@ export interface FileRoutesById {
   '/app/warmup': typeof AppWarmupRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/app/': typeof AppIndexRoute
-  '/app/campaigns/$id': typeof AppCampaignsIdRoute
+  '/app/campaigns/$id': typeof AppCampaignsIdRouteWithChildren
   '/app/companies/$id': typeof AppCompaniesIdRoute
   '/app/contacts/$id': typeof AppContactsIdRoute
   '/app/deals/$id': typeof AppDealsIdRoute
@@ -339,6 +379,11 @@ export interface FileRoutesById {
   '/app/deals/': typeof AppDealsIndexRoute
   '/app/inbox/': typeof AppInboxIndexRoute
   '/app/settings/': typeof AppSettingsIndexRoute
+  '/app/campaigns/$id/leads': typeof AppCampaignsIdLeadsRoute
+  '/app/campaigns/$id/preferences': typeof AppCampaignsIdPreferencesRoute
+  '/app/campaigns/$id/schedule': typeof AppCampaignsIdScheduleRoute
+  '/app/campaigns/$id/steps': typeof AppCampaignsIdStepsRoute
+  '/app/campaigns/$id/': typeof AppCampaignsIdIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -379,6 +424,11 @@ export interface FileRouteTypes {
     | '/app/deals/'
     | '/app/inbox/'
     | '/app/settings/'
+    | '/app/campaigns/$id/leads'
+    | '/app/campaigns/$id/preferences'
+    | '/app/campaigns/$id/schedule'
+    | '/app/campaigns/$id/steps'
+    | '/app/campaigns/$id/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -396,7 +446,6 @@ export interface FileRouteTypes {
     | '/app/warmup'
     | '/oauth/consent'
     | '/app'
-    | '/app/campaigns/$id'
     | '/app/companies/$id'
     | '/app/contacts/$id'
     | '/app/deals/$id'
@@ -415,6 +464,11 @@ export interface FileRouteTypes {
     | '/app/deals'
     | '/app/inbox'
     | '/app/settings'
+    | '/app/campaigns/$id/leads'
+    | '/app/campaigns/$id/preferences'
+    | '/app/campaigns/$id/schedule'
+    | '/app/campaigns/$id/steps'
+    | '/app/campaigns/$id'
   id:
     | '__root__'
     | '/'
@@ -453,6 +507,11 @@ export interface FileRouteTypes {
     | '/app/deals/'
     | '/app/inbox/'
     | '/app/settings/'
+    | '/app/campaigns/$id/leads'
+    | '/app/campaigns/$id/preferences'
+    | '/app/campaigns/$id/schedule'
+    | '/app/campaigns/$id/steps'
+    | '/app/campaigns/$id/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -721,6 +780,41 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthGoogleCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/app/campaigns/$id/': {
+      id: '/app/campaigns/$id/'
+      path: '/'
+      fullPath: '/app/campaigns/$id/'
+      preLoaderRoute: typeof AppCampaignsIdIndexRouteImport
+      parentRoute: typeof AppCampaignsIdRoute
+    }
+    '/app/campaigns/$id/leads': {
+      id: '/app/campaigns/$id/leads'
+      path: '/leads'
+      fullPath: '/app/campaigns/$id/leads'
+      preLoaderRoute: typeof AppCampaignsIdLeadsRouteImport
+      parentRoute: typeof AppCampaignsIdRoute
+    }
+    '/app/campaigns/$id/preferences': {
+      id: '/app/campaigns/$id/preferences'
+      path: '/preferences'
+      fullPath: '/app/campaigns/$id/preferences'
+      preLoaderRoute: typeof AppCampaignsIdPreferencesRouteImport
+      parentRoute: typeof AppCampaignsIdRoute
+    }
+    '/app/campaigns/$id/schedule': {
+      id: '/app/campaigns/$id/schedule'
+      path: '/schedule'
+      fullPath: '/app/campaigns/$id/schedule'
+      preLoaderRoute: typeof AppCampaignsIdScheduleRouteImport
+      parentRoute: typeof AppCampaignsIdRoute
+    }
+    '/app/campaigns/$id/steps': {
+      id: '/app/campaigns/$id/steps'
+      path: '/steps'
+      fullPath: '/app/campaigns/$id/steps'
+      preLoaderRoute: typeof AppCampaignsIdStepsRouteImport
+      parentRoute: typeof AppCampaignsIdRoute
+    }
   }
 }
 
@@ -750,6 +844,26 @@ const AppSettingsRouteWithChildren = AppSettingsRoute._addFileChildren(
   AppSettingsRouteChildren,
 )
 
+interface AppCampaignsIdRouteChildren {
+  AppCampaignsIdLeadsRoute: typeof AppCampaignsIdLeadsRoute
+  AppCampaignsIdPreferencesRoute: typeof AppCampaignsIdPreferencesRoute
+  AppCampaignsIdScheduleRoute: typeof AppCampaignsIdScheduleRoute
+  AppCampaignsIdStepsRoute: typeof AppCampaignsIdStepsRoute
+  AppCampaignsIdIndexRoute: typeof AppCampaignsIdIndexRoute
+}
+
+const AppCampaignsIdRouteChildren: AppCampaignsIdRouteChildren = {
+  AppCampaignsIdLeadsRoute: AppCampaignsIdLeadsRoute,
+  AppCampaignsIdPreferencesRoute: AppCampaignsIdPreferencesRoute,
+  AppCampaignsIdScheduleRoute: AppCampaignsIdScheduleRoute,
+  AppCampaignsIdStepsRoute: AppCampaignsIdStepsRoute,
+  AppCampaignsIdIndexRoute: AppCampaignsIdIndexRoute,
+}
+
+const AppCampaignsIdRouteWithChildren = AppCampaignsIdRoute._addFileChildren(
+  AppCampaignsIdRouteChildren,
+)
+
 interface AppRouteChildren {
   AppApprovalsRoute: typeof AppApprovalsRoute
   AppCrmRoute: typeof AppCrmRoute
@@ -760,7 +874,7 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRouteWithChildren
   AppWarmupRoute: typeof AppWarmupRoute
   AppIndexRoute: typeof AppIndexRoute
-  AppCampaignsIdRoute: typeof AppCampaignsIdRoute
+  AppCampaignsIdRoute: typeof AppCampaignsIdRouteWithChildren
   AppCompaniesIdRoute: typeof AppCompaniesIdRoute
   AppContactsIdRoute: typeof AppContactsIdRoute
   AppDealsIdRoute: typeof AppDealsIdRoute
@@ -782,7 +896,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRouteWithChildren,
   AppWarmupRoute: AppWarmupRoute,
   AppIndexRoute: AppIndexRoute,
-  AppCampaignsIdRoute: AppCampaignsIdRoute,
+  AppCampaignsIdRoute: AppCampaignsIdRouteWithChildren,
   AppCompaniesIdRoute: AppCompaniesIdRoute,
   AppContactsIdRoute: AppContactsIdRoute,
   AppDealsIdRoute: AppDealsIdRoute,

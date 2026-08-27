@@ -1,34 +1,37 @@
-import { Link, getRouteApi } from '@tanstack/react-router'
+import { Link, Outlet, getRouteApi } from '@tanstack/react-router'
 import { ArrowLeft } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusPill, StatusDot } from '@/components/shared/status-pill'
-import { Page, PageTopbar, StatStrip, Stat, SectionBar, PageBody } from '@/components/layout/page'
+import { Page, PageTopbar, StatStrip, Stat, SectionBar } from '@/components/layout/page'
 import { httpStatus } from '@/lib/rtk-error'
 import { useGetCampaignQuery } from './api'
 import { campaignTone, campaignLabel } from './status'
 import { LifecycleMenu, CampaignStatusButton, PauseResumeDialog } from './lifecycle-menu'
 import { usePauseResume } from './lifecycle-actions'
-import { MetricsPanel } from './metrics-panel'
-import { ResultsPanel } from './results-panel'
-import { CampaignEnrollmentsList } from './campaign-enrollments-list'
-import { SequenceEditor } from './sequence-editor'
-import { SchedulePanel } from './schedule-panel'
-import { SendersPanel } from './senders-panel'
-import { GuardrailsCard } from './guardrails-card'
+import { CampaignTabs } from './campaign-tabs'
 
 const routeApi = getRouteApi('/app/campaigns/$id')
 
 /**
- * One campaign, at its own address.
+ * One campaign's frame: identity, lifecycle controls, send counters, and the
+ * tab strip — everything that is true of the campaign regardless of which
+ * section is open. The active section renders into the `<Outlet/>` below.
  *
- * This used to render inline above the campaign list from `useState`, which meant
- * a campaign had no URL (nothing to link or bookmark), Back didn't close it, and
- * opening one pushed the row you clicked off the bottom of the screen. Being a
- * route fixes all three, and the router code-splits this chunk so the sequence
- * editor and metrics panel aren't in the list route's bundle.
+ * This used to be one page rendering all eight panels at once, which meant
+ * opening a campaign to check its stats also mounted the sequence editor, the
+ * schedule board, the senders table and the per-variant results breakdown, and
+ * shipped all of them in one chunk. Splitting them into sibling routes lets the
+ * router load only the section being looked at.
+ *
+ * The header lives HERE rather than in each child on purpose: it stays mounted
+ * across tab navigation, so switching sections neither refetches the campaign
+ * nor flashes a skeleton over the title. Children that need campaign fields
+ * (metrics, tracking) call `useGetCampaignQuery` themselves and are served from
+ * the RTK Query cache this component already populated — one request, not one
+ * per tab.
  */
-export function CampaignDetailPage() {
+export function CampaignDetailLayout() {
   const { id } = routeApi.useParams()
   const { data, isLoading, error } = useGetCampaignQuery({ id })
   const stats = data?.stats ?? {}
@@ -92,38 +95,13 @@ export function CampaignDetailPage() {
         </StatStrip>
       )}
 
-      <PageBody>
-        {/* The sequence is the campaign's definition — surface it first. Owns its
-            own loading/empty/error states. */}
-        <SequenceEditor campaignId={id} status={data?.status} />
+      <CampaignTabs id={id} />
 
-        {/* When a campaign sends is as much its definition as what it sends, so
-            the schedule sits directly under the steps. */}
-        <SchedulePanel campaignId={id} />
-
-        {/* Who it sends as belongs with when it sends: both shape every future
-            send without touching threads already in flight. */}
-        <SendersPanel campaignId={id} />
-
-        {/* What will stop it. Sits directly under who/when it sends as, because a
-            campaign that paused itself is answered here and nowhere else. Owns its
-            own loading/error states. */}
-        <GuardrailsCard campaignId={id} />
-
-        {!isLoading && !error && (
-          <MetricsPanel campaignId={id} metrics={data?.metrics} trackingEnabled={data?.tracking_enabled} />
-        )}
-
-        {/* The per-step, per-variant breakdown, directly under the campaign-wide
-            rollup it decomposes: the rollup answers "is this working", this
-            answers "which step and which copy". Owns its own loading/error
-            states. */}
-        <ResultsPanel campaignId={id} />
-
-        {/* Contacts + their classified replies. Owns its own loading/empty/error
-            states, so it mounts regardless of the campaign-detail query. */}
-        <CampaignEnrollmentsList campaignId={id} />
-      </PageBody>
+      {/* min-h-0 so a long section (the enrollments list, a 12-step sequence)
+          scrolls inside itself rather than stretching the page past the frame. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <Outlet />
+      </div>
     </Page>
   )
 }

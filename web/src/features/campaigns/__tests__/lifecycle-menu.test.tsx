@@ -30,7 +30,7 @@ function makeCampaign(overrides: Partial<Campaign> = {}): Campaign {
 /**
  * `LifecycleMenu` and `CampaignStatusButton` take a caller-owned `pauseResume`
  * controller rather than creating their own — this mirrors exactly how
- * `campaigns-page.tsx` (menu only) and `campaign-detail-page.tsx` (button +
+ * `campaigns-page.tsx` (menu only) and `campaign-detail-layout.tsx` (button +
  * menu, sharing one controller) actually compose them, rather than testing
  * the menu in a shape no real caller uses.
  */
@@ -182,7 +182,7 @@ test('a 409 on pause renders the API error copy returned by the server', async (
 // Finding 1 (review): CampaignStatusButton and LifecycleMenu each used to call
 // usePauseResume(campaign) independently — two mutation triggers, two confirm-
 // dialog states, so both could open their own dialog and each fire its own
-// POST /pause. `Topbar` shares one controller (as campaign-detail-page.tsx
+// POST /pause. `Topbar` shares one controller (as campaign-detail-layout.tsx
 // now does); this proves the sharing actually forecloses the double dialog.
 test('the dedicated Pause button and the overflow menu item share one confirm dialog and one mutation trigger — they cannot stack dialogs or double-fire', async () => {
   renderWithProviders(<Topbar campaign={makeCampaign({ status: 'running' })} />)
