@@ -96,6 +96,11 @@ func (s *fakeStore) UpsertParticipant(_ context.Context, arg UpsertParams) (Part
 	}
 	if ok {
 		p.HealthState = existing.HealthState
+		// The ON CONFLICT arm names the columns it writes and is_sentinel is not
+		// among them, so an update to the ramp settings leaves a designation alone.
+		// A fake that dropped it would let the service silently undesignate every
+		// sentinel whose settings were edited, and the test would still pass.
+		p.IsSentinel = existing.IsSentinel
 	}
 	s.participants[arg.MailboxID] = p
 	return p, nil

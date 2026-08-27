@@ -33,6 +33,16 @@ const warmupApi = api.enhanceEndpoints({
         { type: 'Warmup', id: arg.id },
       ],
     },
+    // Designation changes the POOL, not just this mailbox: the sentinel count, the
+    // advisory share and — once the sweep runs — every other mailbox's evidence
+    // label are all read off the overview, so the overview tag has to fall with the
+    // mailbox's own.
+    setWarmupSentinel: {
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Warmup', id: 'OVERVIEW' },
+        { type: 'Warmup', id: arg.mailboxId },
+      ],
+    },
   },
 })
 
@@ -42,4 +52,5 @@ export const {
   useListWarmupTransitionsQuery,
   useEnableMailboxWarmupMutation,
   useDisableMailboxWarmupMutation,
+  useSetWarmupSentinelMutation,
 } = warmupApi

@@ -12,6 +12,7 @@ import { useGetWarmupOverviewQuery } from './api'
 import { WarmupIncidentsPanel } from './warmup-incidents-panel'
 import { WarmupMailboxCard } from './warmup-mailbox-card'
 import { WarmupObserversPanel } from './warmup-observers-panel'
+import { WarmupSentinelsPanel } from './warmup-sentinels-panel'
 
 export function WarmupPage() {
   const { data: overview, isLoading: overviewLoading, isError: overviewError } = useGetWarmupOverviewQuery()
@@ -77,11 +78,30 @@ export function WarmupPage() {
         ) : (
           <>
             {/*
-              First of the two pool-level panels, because it qualifies the
-              evidence every figure below it rests on — the placement rates on the
-              cards, and the degradation the incidents panel correlates. It also
-              keeps the correlation panel adjacent to the list whose members it
-              names. Nothing is rendered when the overview failed to load:
+              First of the three pool-level panels, and the most upstream: it says
+              what this pool's measurement arrangement IS. Every card below it
+              carries an evidence label, and "Peer-only" is a term rather than a
+              sentence until something on the page explains it — including, most of
+              all, in the ordinary case where no sentinel is designated and every
+              row reads that way.
+
+              Nothing is rendered when the overview failed to load, or on a build
+              that does not report sentinels: `sentinel_count` is then undefined,
+              and "no sentinel is designated" would describe a pool nobody
+              described.
+            */}
+            <WarmupSentinelsPanel
+              count={overview?.sentinel_count}
+              oversized={overview?.sentinel_pool_oversized}
+              share={overview?.sentinel_pool_share}
+              pool={entries}
+            />
+            {/*
+              Then the evidence the pool actually produced: this qualifies every
+              figure below it — the placement rates on the cards, and the
+              degradation the incidents panel correlates. It also keeps the
+              correlation panel adjacent to the list whose members it names.
+              Nothing is rendered when the overview failed to load:
               `discounted_observers` is then undefined, and "no mailbox stands
               out" beside a load error would claim a comparison nobody ran.
             */}

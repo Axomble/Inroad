@@ -9,7 +9,9 @@ import type { Mailbox, WarmupMailbox } from '@/store/api'
 import { HealthBadge } from '@/components/shared/health-badge'
 import { LaneBadge } from '@/components/shared/lane-badge'
 import { WarmupIdentityPanel } from './warmup-identity-panel'
+import { WarmupSentinelToggle } from './warmup-sentinel-toggle'
 import { WarmupSettingsForm } from './warmup-settings-form'
+import { SENTINEL_MARK, confidenceReading } from './sentinel-copy'
 import { useGetMailboxWarmupQuery, useDisableMailboxWarmupMutation } from './api'
 
 // The sparkline is the one non-trivial visual and is only needed for enrolled
@@ -96,6 +98,7 @@ export function WarmupMailboxCard({
                     reputation (pill) then pool eligibility (squared, axis named). */}
                 <HealthBadge state={entry.health_state} reason={entry.health_reason} />
                 <LaneBadge lane={entry.lane} />
+                <SentinelMark designated={entry.is_sentinel} />
               </>
             ) : (
               <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">Not warming</span>
@@ -113,6 +116,10 @@ export function WarmupMailboxCard({
                 </span>
                 <span className="tabular-nums">{entry.placement_sample_7d} observations</span>
                 <TabbedPlacement rate={entry.tabbed_rate_7d} tabCapableSamples={entry.tab_capable_sample_7d} />
+                <EvidenceConfidence
+                  confidence={entry.evidence_confidence}
+                  sentinelObservations={entry.sentinel_observations_7d}
+                />
               </div>
               <LaneReason lane={entry.lane} reason={entry.lane_reason} />
             </>
@@ -172,6 +179,22 @@ export function WarmupMailboxCard({
           )}
         </div>
       </div>
+
+      {/*
+        Designation sits on its own line rather than in the action cluster above,
+        and not because of space: the cluster is four disclosures and a disable,
+        all of which are reversible in one click, while this one changes what mail
+        the mailbox RECEIVES — it starts taking traffic from degrading members that
+        the rest of the pool is shielded from. It asks before it writes, and the
+        sentence naming that exposure needs a full line to be read on.
+
+        The email comes from the overview row, not the mailbox record: the row's is
+        required by the contract, and the participant is the subject of the
+        designation.
+      */}
+      {enrolled && entry && (
+        <WarmupSentinelToggle mailboxId={id} email={entry.email} isSentinel={entry.is_sentinel} />
+      )}
 
       {enrolled && (
         <div className="px-5 pb-3">
@@ -258,6 +281,83 @@ function LaneReason({ lane, reason }: { lane: string; reason: string }) {
       <span className="sr-only">Pool status: </span>
       {reason}
     </p>
+  )
+}
+
+/**
+ * That this mailbox is a measurement sentinel — exposed to every lane on purpose.
+ *
+ * Deliberately NOT a badge component beside the other two. Health and lane are the
+ * subsystem's two axes and each has its own chip shape precisely so they cannot be
+ * read as one thing; a third chip in the same row would be read as a third value
+ * of one of them, which is exactly the confusion the design refuses ("sentinel" is
+ * a flag, not a lane, or a sentinel that starts degrading becomes unrepresentable).
+ * So it is typographically a mark rather than a chip, and the screen-reader prefix
+ * names it as neither axis.
+ *
+ * Absent — not false — renders nothing: a build that does not report designation
+ * has said nothing about this mailbox.
+ */
+function SentinelMark({ designated }: { designated: boolean | undefined }) {
+  if (!designated) return null
+  return (
+    <span
+      data-slot="sentinel-mark"
+      className="font-mono text-[10px] uppercase tracking-[0.1em] text-warm"
+      title={SENTINEL_MARK_TITLE}
+    >
+      <span className="sr-only">Measurement role: </span>
+      {SENTINEL_MARK}
+    </span>
+  )
+}
+
+const SENTINEL_MARK_TITLE =
+  'Designated as a measurement sentinel: exposed to every lane so degrading mailboxes have something dependable to be measured against. Not a lane — its health state and lane are unaffected.'
+
+/**
+ * WHO produced the placement evidence the rates on this row are computed from.
+ *
+ * A label, not a score, and the row has to render it as one. Peer-only is what a
+ * healthy pool mostly produces — every self-hosted pool with no sentinel reads
+ * this way — so a warning tone here would flag the ordinary case on every card at
+ * once. What it qualifies is independence, not quality: measured only by its own
+ * lane-mates, a mailbox and its measurers move together under a shared cause and
+ * the reading looks steady while nothing about it is. The full sentence lives in
+ * the pool panel above, said once; the row carries the label and its own count.
+ *
+ * "gates nothing" is the same note the tabbed rate carries, and it is not
+ * decoration: nothing is discounted for peer-only evidence and nothing is promoted
+ * sooner for corroborated evidence. Discounting it would be a threshold change
+ * with no calibration behind it.
+ *
+ * Absent renders nothing, for the reason the tabbed fields' absence does not
+ * default to a clean zero: a build that does not report the label has said nothing
+ * about who produced this evidence.
+ */
+function EvidenceConfidence({
+  confidence,
+  sentinelObservations,
+}: {
+  confidence: WarmupMailbox['evidence_confidence']
+  sentinelObservations: WarmupMailbox['sentinel_observations_7d']
+}) {
+  const reading = confidenceReading(confidence, sentinelObservations)
+  if (!reading) return null
+  const corroborations =
+    reading.corroborated && sentinelObservations !== undefined && sentinelObservations > 0
+      ? sentinelObservations
+      : null
+  return (
+    <span data-slot="evidence-confidence" title={reading.detail}>
+      evidence <span className="text-foreground">{reading.label}</span>
+      {corroborations !== null && (
+        <span className="whitespace-nowrap tabular-nums"> · {corroborations.toLocaleString()} from a sentinel</span>
+      )}
+      {/* Wrapped as a unit for the reason the tabbed note is: split across two
+          lines on a phone, "· gates" / "nothing" reads worse than a wrap. */}
+      <span className="whitespace-nowrap text-faint"> · gates nothing</span>
+    </span>
   )
 }
 

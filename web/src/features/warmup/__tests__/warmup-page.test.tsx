@@ -189,6 +189,51 @@ test('a published observer verdict is reported on the pool, above the mailbox li
 // can be isolated is a server that answers with a pool but no incidents, and
 // warmup-incidents-panel.test.tsx tests it there.
 
+/* ---------------------------------------------------------- sentinels */
+
+// The pool-level facts have to reach a panel: an operator cannot read
+// "sentinel-corroborated" off a card without somewhere that says what the pool's
+// measurement arrangement is, and how much of the pool is now doing the measuring.
+test('the sentinel pool facts are reported above the mailbox list', async () => {
+  const base = overviewWithIncident()
+  const [designated, ordinary] = base.mailboxes
+  overviewResponder = () =>
+    new Response(
+      JSON.stringify({
+        ...base,
+        sentinel_count: 1,
+        sentinel_pool_oversized: false,
+        sentinel_pool_share: 0.5,
+        mailboxes: [
+          { ...designated, is_sentinel: true },
+          { ...ordinary, is_sentinel: false },
+        ],
+      }),
+      { status: 200, headers: jsonHeaders },
+    )
+
+  renderWithProviders(<WarmupPage />)
+
+  const panel = await screen.findByRole('region', { name: /measurement sentinels/i })
+  expect(panel.querySelector('[data-slot="sentinel-mailbox"]')?.textContent).toBe('a@example.com')
+  expect(panel).toHaveTextContent(/1 of 2 mailboxes/)
+  // Nothing is enforced, so nothing here is an alert.
+  expect(panel.querySelector('[data-slot="sentinel-advisory"]')).toBeNull()
+})
+
+// An overview that says nothing about sentinels must not produce an empty state:
+// the field is absent on a build that does not report them, and "no sentinel is
+// designated" would describe a pool the server never described.
+test('an overview that never mentions sentinels draws no sentinel panel', async () => {
+  overviewResponder = () =>
+    new Response(JSON.stringify(overviewWithIncident()), { status: 200, headers: jsonHeaders })
+
+  renderWithProviders(<WarmupPage />)
+
+  await screen.findByRole('region', { name: /correlated degradation/i })
+  expect(screen.queryByRole('region', { name: /measurement sentinels/i })).toBeNull()
+})
+
 test('shows the no-mailboxes empty state when there are none to warm', async () => {
   mailboxesResponder = () => new Response(JSON.stringify([]), { status: 200, headers: jsonHeaders })
 

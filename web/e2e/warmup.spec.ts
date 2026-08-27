@@ -424,6 +424,63 @@ const UNATTRIBUTED_OVERVIEW = {
   incidents: [],
 }
 
+/* ------------------------------------------------------------- sentinels */
+
+/**
+ * A pool with one designated sentinel, and the two evidence labels side by side.
+ *
+ * `reference@acme.test` is the sentinel: healthy, in the healthy lane, and exposed
+ * to every lane on purpose — the three facts a UI that treated "sentinel" as a
+ * lane could not show at once.
+ *
+ * `watched@acme.test` is degrading and CORROBORATED, which is the pairing the
+ * feature exists for: the mailbox whose own lane-mates cannot be trusted to
+ * measure it is the one a sentinel is there to measure.
+ *
+ * `plain@acme.test` is peer-only, and it is the reading most at risk in a real
+ * browser: rendered with any warning tone it becomes a defect to chase on every
+ * card of every pool that has no sentinel — which is most of them.
+ *
+ * The pool is deliberately INSIDE the advised share (1 of 3), so the advisory's
+ * absence is a fact this fixture asserts rather than a coincidence.
+ */
+const SENTINEL_POOL = [
+  {
+    ...poolMember('mb-reference', 'reference@acme.test', 'none'),
+    is_sentinel: true,
+    evidence_confidence: 'sentinel_corroborated',
+    sentinel_observations_7d: 6,
+  },
+  {
+    ...poolMember('mb-watched', 'watched@acme.test', 'health'),
+    is_sentinel: false,
+    evidence_confidence: 'sentinel_corroborated',
+    sentinel_observations_7d: 9,
+  },
+  {
+    ...poolMember('mb-plain', 'plain@acme.test', 'none'),
+    is_sentinel: false,
+    evidence_confidence: 'peer_only',
+    sentinel_observations_7d: 0,
+  },
+]
+
+const SENTINEL_OVERVIEW = {
+  pool_size: SENTINEL_POOL.length,
+  incidents_min_pool: 4,
+  active: true,
+  sentinel_count: 1,
+  // The server's own verdict, never recomputed client-side: 1 of 3 is inside the
+  // advised share, so nothing is advised.
+  sentinel_pool_oversized: false,
+  sentinel_pool_share: 0.5,
+  mailboxes: SENTINEL_POOL,
+  incidents: [],
+}
+
+/** Every body sent to the sentinel endpoint, in order. */
+let sentinelWrites: string[] = []
+
 /**
  * The detail payload behind one mailbox's card. `series` is deliberately empty:
  * the sparkline is not what these fixtures are about, and its "not enough history
@@ -500,6 +557,7 @@ async function serveOverview(page: Page, fixture: typeof overview) {
 
 async function mockApi(page: Page) {
   transitionRequests = 0
+  sentinelWrites = []
   overview = OVERVIEW
   await page.route('**/api/v1/**', async (route: Route) => {
     const path = new URL(route.request().url()).pathname
@@ -527,6 +585,13 @@ async function mockApi(page: Page) {
     if (path.includes('/transitions')) {
       transitionRequests += 1
       return route.fulfill(json(TRANSITIONS))
+    }
+    // Designation. Recorded rather than merely answered: the property under test
+    // is that NOTHING is written until the operator has seen what it costs, and
+    // only the request log can show the difference between "asked" and "did".
+    if (path.endsWith('/sentinel')) {
+      sentinelWrites.push(route.request().postData() ?? '')
+      return route.fulfill(json({ ...warmupDetail('mb-plain').participant, is_sentinel: true }))
     }
     if (path.endsWith('/warmup/overview')) return route.fulfill(json(overview))
 
@@ -1177,4 +1242,61 @@ test('an observer verdict is a suspicion with its arithmetic, and excludes nothi
   const sevenCard = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'seven@partner.test' })
   await expect(sevenCard).toContainText(/healthy/i)
   await expect(sevenCard).not.toContainText(/reporting more spam/i)
+})
+
+/* ------------------------------------------------------------- sentinels */
+
+/**
+ * Designation is the one control on this screen that changes what a mailbox
+ * RECEIVES — it starts taking warmup mail from degrading members that the rest of
+ * the pool is shielded from — and the operator has to be told that BEFORE it
+ * happens, not after.
+ *
+ * Only a browser can rule out the two ways that fails. A unit test can assert the
+ * sentence exists; it cannot show the sentence was on screen before the request
+ * left, and it cannot show the ordinary case reads as a label rather than as a
+ * fault on a laid-out card. Both are the whole feature: peer-only is what a pool
+ * with no sentinel produces on every row, and a warning tone there invents a
+ * defect on most self-hosted installations at once.
+ */
+test('designating a sentinel shows what it costs before anything is written', async ({ page }) => {
+  await serveOverview(page, SENTINEL_OVERVIEW)
+
+  // The pool's arrangement, named — one sentinel out of three, and no advisory,
+  // because the server said this pool is inside the advised share.
+  const panel = page.getByRole('region', { name: 'Measurement sentinels' })
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('[data-slot="sentinel-mailbox"]')).toHaveText(['reference@acme.test'])
+  await expect(panel.locator('[data-slot="sentinel-advisory"]')).toHaveCount(0)
+  // A label, not a penalty — said once above the rows that carry the labels.
+  await expect(panel.locator('[data-slot="sentinel-gates-nothing"]')).toContainText(/never a penalty/i)
+
+  const plain = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'plain@acme.test' })
+  const label = plain.locator('[data-slot="evidence-confidence"]')
+  await expect(label).toContainText('Peer-only')
+  await expect(label).toContainText('gates nothing')
+  // The ordinary case is not a fault. Asserted on the label node alone, because
+  // the card around it legitimately carries a lane reason and a tabbed note that
+  // would make a card-wide assertion pass on somebody else's words.
+  await expect(label).not.toContainText(/insufficient|unreliable|weak|warning/i)
+
+  // The corroborated row ships the count behind its label, as every other
+  // inference on this screen ships its arithmetic.
+  const watched = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'watched@acme.test' })
+  await expect(watched.locator('[data-slot="evidence-confidence"]')).toContainText('9 from a sentinel')
+
+  // The first click asks. It must not write.
+  await page.getByRole('button', { name: 'Designate as sentinel for plain@acme.test' }).click()
+  const prompt = plain.locator('[data-slot="sentinel-prompt"]')
+  await expect(prompt).toContainText(/receive warmup mail from members that are degrading/i)
+  await expect(prompt).toContainText(/shielded/i)
+  // Containment outranks measurement: the prompt must not read as opening this
+  // mailbox to quarantined senders too.
+  await expect(prompt).toContainText(/quarantined or blocked mailbox is withheld/i)
+  expect(sentinelWrites, 'asking must not write').toEqual([])
+
+  await page.getByRole('button', { name: 'Designate as sentinel', exact: true }).click()
+
+  await expect.poll(() => sentinelWrites.length).toBe(1)
+  expect(sentinelWrites[0]).toBe('{"is_sentinel":true}')
 })

@@ -8,6 +8,10 @@ package db_test
 
 import (
 	"context"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -42,21 +46,31 @@ func TestMigrateToLandsOnTheVersionNamed(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema is dirty at version %d after a clean up-migration", head)
 	}
-	if head < 3 {
-		t.Fatalf("only %d migrations applied; this test needs at least 3 to distinguish "+
-			"targeting a version from stepping back one", head)
+	// Two back, not one. Landing on the SECOND-highest version is what a step count
+	// would do, so a target two away is the only way to tell targeting from stepping.
+	//
+	// Read from the embedded migration list rather than computed as head-2. Versions
+	// are no longer contiguous: since the timestamp convention a version is a
+	// YYYYMMDDHHMMSS instant, so head-2 is not a migration at all and MigrateTo would
+	// fail on a version that never existed. That is exactly what happened when the
+	// convention landed — this test went red on arithmetic, not on behaviour.
+	applied := appliedVersionsAscending(t)
+	if len(applied) < 3 {
+		t.Fatalf("only %d migrations embedded; this test needs at least 3 to distinguish "+
+			"targeting a version from stepping back one", len(applied))
 	}
-
-	// Two back, not one. Landing on head-1 is what a step count would do, so a
-	// target that is two away is the only way to tell the two apart.
-	target := head - 2
+	if got := applied[len(applied)-1]; got != head {
+		t.Fatalf("embedded head %d does not match the applied head %d", got, head)
+	}
+	target := applied[len(applied)-3]
+	stepBack := applied[len(applied)-2]
 	if err := db.MigrateTo(dsn, target); err != nil {
 		t.Fatalf("MigrateTo(%d) from %d: %v", target, head, err)
 	}
 	if got, dirty := schemaVersion(t, ctx, dsn); got != target || dirty {
 		t.Fatalf("after MigrateTo(%d): version = %d, dirty = %v; want %d and clean "+
 			"(version %d would mean it stepped back once instead of targeting)",
-			target, got, dirty, target, head-1)
+			target, got, dirty, target, stepBack)
 	}
 
 	// Asking for the version already in place must succeed and change nothing.
@@ -128,4 +142,37 @@ func schemaVersion(t *testing.T, ctx context.Context, dsn string) (uint, bool) {
 		t.Fatalf("read schema_migrations: %v", err)
 	}
 	return uint(version), dirty
+}
+
+// appliedVersionsAscending is every migration version on disk, ascending.
+//
+// It does NOT assume versions are contiguous, which they stopped being when
+// migrations moved to YYYYMMDDHHMMSS timestamps — head-2 is not a migration and
+// MigrateTo would fail on a version that never existed.
+//
+// Reads the directory rather than the embedded FS purely because this file is an
+// external test package and migrationsFS is unexported. migrationnames_test.go, which
+// is internal, guards the embedded set; between them the two cover both views.
+func appliedVersionsAscending(t *testing.T) []uint {
+	t.Helper()
+	const dir = "migrations"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	version := regexp.MustCompile(`^(\d+)_[a-z0-9_]+\.up\.sql$`)
+	out := make([]uint, 0, len(entries))
+	for _, e := range entries {
+		m := version.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		v, err := strconv.ParseUint(m[1], 10, 64)
+		if err != nil {
+			t.Fatalf("migration %q has an unparseable version: %v", e.Name(), err)
+		}
+		out = append(out, uint(v))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }

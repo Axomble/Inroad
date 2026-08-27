@@ -401,6 +401,16 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    setWarmupSentinel: build.mutation<
+      SetWarmupSentinelApiResponse,
+      SetWarmupSentinelApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/warmup/mailboxes/${queryArg.mailboxId}/sentinel`,
+        method: "PUT",
+        body: queryArg.warmupSentinelRequest,
+      }),
+    }),
     getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
       query: () => ({ url: `/pulse` }),
     }),
@@ -1695,6 +1705,43 @@ const injectedRtkApi = api.injectEndpoints({
         method: "DELETE",
       }),
     }),
+    listTaskDeadLetters: build.query<
+      ListTaskDeadLettersApiResponse,
+      ListTaskDeadLettersApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/dead-letters`,
+        params: {
+          status: queryArg.status,
+          limit: queryArg.limit,
+          offset: queryArg.offset,
+        },
+      }),
+    }),
+    getTaskDeadLetter: build.query<
+      GetTaskDeadLetterApiResponse,
+      GetTaskDeadLetterApiArg
+    >({
+      query: (queryArg) => ({ url: `/dead-letters/${queryArg.id}` }),
+    }),
+    replayTaskDeadLetter: build.mutation<
+      ReplayTaskDeadLetterApiResponse,
+      ReplayTaskDeadLetterApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/dead-letters/${queryArg.id}/replay`,
+        method: "POST",
+      }),
+    }),
+    discardTaskDeadLetter: build.mutation<
+      DiscardTaskDeadLetterApiResponse,
+      DiscardTaskDeadLetterApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/dead-letters/${queryArg.id}/discard`,
+        method: "POST",
+      }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -1914,6 +1961,12 @@ export type ListWarmupTransitionsApiResponse =
 export type ListWarmupTransitionsApiArg = {
   mailboxId: string;
   limit?: number;
+};
+export type SetWarmupSentinelApiResponse =
+  /** status 200 The participant as it now stands */ WarmupParticipant;
+export type SetWarmupSentinelApiArg = {
+  mailboxId: string;
+  warmupSentinelRequest: WarmupSentinelRequest;
 };
 export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
 export type GetPulseApiArg = void;
@@ -2726,6 +2779,30 @@ export type UnassignInboxThreadLabelApiArg = {
   id: string;
   labelId: string;
 };
+export type ListTaskDeadLettersApiResponse =
+  /** status 200 Dead letters */ TaskDeadLetterList;
+export type ListTaskDeadLettersApiArg = {
+  /** Restrict to one lifecycle state. Omit for all of them. */
+  status?: "pending" | "replayed" | "discarded";
+  /** Page size. Defaults to 50, capped at 200. */
+  limit?: number;
+  /** Rows to skip. Defaults to 0. */
+  offset?: number;
+};
+export type GetTaskDeadLetterApiResponse =
+  /** status 200 The dead letter */ TaskDeadLetter;
+export type GetTaskDeadLetterApiArg = {
+  id: string;
+};
+export type ReplayTaskDeadLetterApiResponse =
+  /** status 200 Replayed; the row is now in the replayed state */ TaskDeadLetter;
+export type ReplayTaskDeadLetterApiArg = {
+  id: string;
+};
+export type DiscardTaskDeadLetterApiResponse = unknown;
+export type DiscardTaskDeadLetterApiArg = {
+  id: string;
+};
 export type Membership = {
   workspace_id: string;
   workspace_name: string;
@@ -3004,6 +3081,8 @@ export type WarmupParticipant = {
   today_sent: number;
   /** today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this. */
   today_target: number;
+  /** Whether this mailbox is designated as a measurement sentinel — exposed to every lane on purpose, so degrading mailboxes have a dependable reference to be measured against. A THIRD, ORTHOGONAL fact, not a value of either axis above: a sentinel has its own health_state and its own lane and may itself be degrading. Absent — not false — on a build that does not report sentinels. The two are different facts and a client must be able to tell them apart: "this mailbox is not a sentinel" is a statement about the mailbox, while a missing field is a statement about the server. */
+  is_sentinel?: boolean;
 };
 export type WarmupDayStat = {
   /** UTC day */
@@ -3078,6 +3157,15 @@ export type WarmupMailbox = {
   inbox_rate_7d: number | null;
   /** of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed */
   spam_rate_7d: number | null;
+  /** Whether this mailbox is designated as a measurement sentinel (see WarmupParticipant.is_sentinel). Orthogonal to health_state and lane, and absent rather than false on a build that does not report sentinels — "no sentinel is designated in this pool" is an ordinary, working arrangement, while a missing field says nothing about the pool at all, and rendering the second as the first answers a question nobody asked. */
+  is_sentinel?: boolean;
+  /** WHO produced the placement evidence behind this row's rates. peer_only means every observation came from the mailbox's own lane-mates; sentinel_corroborated means at least one came from a sentinel.
+    A LABEL, NEVER A PENALTY, and a client must not render it as one. Peer-only is what a healthy pool mostly produces, and nothing is discounted for it: no threshold moves, no sample floor changes, and no promotion is withheld. What peer-only evidence is NOT is independent — when a mailbox is measured only by mailboxes in its own lane, a shared cause moves both sides of the comparison at once and the reading looks steady while nothing about it is. That is worth telling an operator and is not a deficiency to warn about.
+    Discounting it would be a threshold change with no calibration behind it: nobody has measured what a sentinel observation is worth next to a peer one in this system, and every prior slice that guessed a threshold had to be walked back (security.md invariants 57-60).
+    Absent on a build that does not report sentinels. */
+  evidence_confidence?: "peer_only" | "sentinel_corroborated";
+  /** How many of the trailing-7-day placement observations behind this row were filed by a mailbox that is a sentinel NOW — the count evidence_confidence is derived from, published beside the label so it is checkable rather than asserted, the same way an incident ships its counts. Counted against CURRENT designation rather than against who was a sentinel when the mail was observed, so undesignating one moves this figure for evidence already gathered. Absent on a build that does not report sentinels. */
+  sentinel_observations_7d?: number;
   /** The latest observed SENDING identity of this mailbox's warmup mail and the receiving provider's authentication verdicts on it. Null when no observation has yet carried identity facts. Reported for visibility only: no threshold, lane, or promotion decision reads any of it. The three verdicts separate an absence from a finding, and a UI that renders them alike is wrong: `unknown` means no Authentication-Results header could be trusted to speak for the receiving system (RFC 8601 §5), so nobody reported a verdict — permanent for a provider that stamps none, and never a failure — whereas `none` IS the receiver's finding, that it checked and there was no SPF record, no signature, or no DMARC record to check against. */
   identity?: {
     /** the DKIM d= signing domain, as the EXACT host and lower-cased; empty when the mail was unsigned or the signature was unparseable */
@@ -3095,6 +3183,12 @@ export type WarmupOverview = {
   /** The smallest pool in which correlated-incident detection can find anything: enough participants to form a cohort AND at least one outside it to compare against. Served so the UI can tell "we looked and found no shared cause" from "this pool is too small to look", which are different answers and must not render alike. It is here rather than hardcoded client-side because it is derived from a backend policy constant, and a client copy would drift the moment that constant is recalibrated — leaving the UI claiming it searched a pool the server never examined. */
   incidents_min_pool: number;
   active: boolean;
+  /** Enabled participants designated as sentinels. ZERO IS THE ORDINARY CASE — most self-hosted installations never designate one, warmup works exactly as it does without them, and a client must not render it as a misconfiguration to be corrected. Absent on a build that does not report sentinels, which is a different fact from zero. */
+  sentinel_count?: number;
+  /** Whether sentinels have grown past sentinel_pool_share of the enabled pool. ADVISORY, NEVER ENFORCED: exceeded, it is reported and nothing is refused. Refusing to pair would stop warmup rather than tell the operator something, and the cap exists to keep the references from becoming the network they are supposed to measure — not to gate sending. Served rather than recomputed client-side for the reason incidents_min_pool is: it is a backend policy verdict, and a client copy of the rule would drift the moment the share is recalibrated. Note a pool of one sentinel and nothing else is oversized by this measure AND is measuring nothing, which is worth saying plainly rather than hiding. */
+  sentinel_pool_oversized?: boolean;
+  /** The advisory ceiling sentinel_pool_oversized is measured against, as a fraction of the enabled pool (warmup.SentinelPoolShare). Published so a client can state the rule it is reporting instead of hardcoding a constant that would silently diverge from the server's. */
+  sentinel_pool_share?: number;
   mailboxes: WarmupMailbox[];
   /** Mailboxes that reported far more of the warmup mail they received as spam than their peers on the same receiving provider did. Placement is sender-attributed but recipient-observed, so one mailbox that reports everything it receives as spam — a misconfigured filter, a bulk-junked folder, one compromised account — makes every sender that mails it look worse than it is. Empty when no observer stands out from its peers. NOTHING IS EXCLUDED. Every report here still counts as evidence exactly as it did before, and no threshold, lane, health state or promotion decision reads any of it. An exclusion was built and removed: the peer comparison is gameable, because adding clean volume to a provider's mailboxes drags the peer rate down until an HONEST observer clears the multiple — silencing the mailbox reporting real spam and leaving the sender it reported looking cleaner than it is. Evidence that makes a sender look worse than it is costs sending and is visible; evidence that makes one look better goes unnoticed, which is the direction that matters. See security.md invariant 59 for what must be true before this can act. A client must not render it as a sanction: a legitimately strict provider looks identical from here, which is why the whole sum ships rather than a badge. Ordered worst-lift first, then by mailbox id. An observer whose history spans two receiving providers is compared against each separately and may appear once per cohort — the same mailbox, two comparisons, not two mailboxes. */
   discounted_observers: {
@@ -3191,6 +3285,9 @@ export type WarmupTransition = {
 };
 export type WarmupTransitionPage = {
   transitions: WarmupTransition[];
+};
+export type WarmupSentinelRequest = {
+  is_sentinel: boolean;
 };
 export type PulseAttention = {
   /** stable machine identifier; current producers: mailbox_error, senders_gated, dmarc_failing, cap_consumed */
@@ -3937,7 +4034,7 @@ export type FaultDomainShare = {
   share: number;
   /** The share this domain was judged against — max_fault_domain_share, or a LOWER one because the domain is degrading. Published because otherwise a reader cannot tell why a domain at 25% is over budget while another at 55% is not, and would reasonably conclude the figure was wrong. Compare each share against its own ceiling, never against max_fault_domain_share alone. */
   ceiling: number;
-  /** True when share exceeds max_fault_domain_share. Advisory: the rotation routes new contacts away from an over-budget domain when an alternative exists, but never withholds a send — a single-domain pool reports 1.0 here and keeps sending. */
+  /** True when share exceeds THIS ROW'S ceiling — not max_fault_domain_share, which is only the ceiling for a domain that is not degrading. A domain at 0.25 can be over budget while another at 0.55 is not; re-deriving this against the flat cap reproduces exactly the panel-versus-selector disagreement the ceiling field exists to remove. Advisory: the rotation routes new contacts away from an over-budget domain when an alternative exists, but never withholds a send — a single-domain pool reports 1.0 here and keeps sending. */
   over_budget: boolean;
 };
 export type CampaignSenderPool = {
@@ -4595,6 +4692,27 @@ export type UpsertInboxLabelRequest = {
   /** A hex colour, `#rrggbb` (case-insensitive on input, stored lowercase). Omitted on create means the server's default. */
   color?: string;
 };
+export type TaskDeadLetter = {
+  id: string;
+  /** The background task's type, e.g. sequence:advance, warmup:tick, inbox:pending_reply_send. An open vocabulary — new task types appear as handlers are added, so do not switch exhaustively on it. */
+  task_type: string;
+  /** The original task payload, verbatim — what replay re-enqueues. Its shape varies by task_type; every one carries workspace_id, and the rest are ids naming the work (enrollment_id, mailbox_id, …). Never contains a credential: secrets are resolved by the worker at execution time and never travel in a payload. */
+  payload: {
+    [key: string]: any;
+  };
+  /** The final error reported before the task was given up on. May be empty. */
+  last_error: string;
+  /** Attempts made before giving up, including the one that failed last. */
+  attempt_count: number;
+  /** pending — untriaged and replayable. replayed — re-enqueued; terminal. discarded — filed without re-running; terminal. */
+  status: "pending" | "replayed" | "discarded";
+  created_at: string;
+  /** When it was replayed; null in every other state. */
+  replayed_at: string | null;
+};
+export type TaskDeadLetterList = {
+  dead_letters: TaskDeadLetter[];
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -4645,6 +4763,7 @@ export const {
   useDisableMailboxWarmupMutation,
   useGetWarmupOverviewQuery,
   useListWarmupTransitionsQuery,
+  useSetWarmupSentinelMutation,
   useGetPulseQuery,
   useGetCampaignReportQuery,
   useGetAiSettingsQuery,
@@ -4799,4 +4918,8 @@ export const {
   useDeleteInboxLabelMutation,
   useAssignInboxThreadLabelMutation,
   useUnassignInboxThreadLabelMutation,
+  useListTaskDeadLettersQuery,
+  useGetTaskDeadLetterQuery,
+  useReplayTaskDeadLetterMutation,
+  useDiscardTaskDeadLetterMutation,
 } = injectedRtkApi;

@@ -51,6 +51,11 @@ func TestParticipantFromGen(t *testing.T) {
 				PausedUntil:   paused,
 				CreatedAt:     created,
 				UpdatedAt:     updated,
+				// The measurement-reference marker. Orthogonal to both axes: this
+				// row is on `watch` AND a sentinel, which is the combination a
+				// lane-valued "sentinel" could not express — a sentinel that starts
+				// degrading is exactly the case that has to stay representable.
+				IsSentinel: true,
 			},
 			want: Participant{
 				MailboxID:     mailboxID,
@@ -66,6 +71,7 @@ func TestParticipantFromGen(t *testing.T) {
 				PausedUntil:   paused,
 				CreatedAt:     created,
 				UpdatedAt:     updated,
+				IsSentinel:    true,
 			},
 		},
 	}

@@ -850,6 +850,54 @@ paths:
               schema: { $ref: '#/components/schemas/WarmupTransitionPage' }
         '401': { description: Unauthorized }
         '404': { description: Mailbox not found in this workspace }
+  /warmup/mailboxes/{mailbox_id}/sentinel:
+    put:
+      operationId: setWarmupSentinel
+      tags: [warmup]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Designate a mailbox as a warmup SENTINEL, or stop using it as one.
+
+        A sentinel is a mailbox the operator controls end to end and is willing to
+        expose to every lane, so a degrading mailbox has something dependable to be
+        measured against. Pairing is otherwise same-lane only, which leaves a
+        mailbox on watch measured solely by other mailboxes whose own standing is in
+        question.
+
+        It is a FLAG, not a lane. A sentinel keeps its own health_state and its own
+        lane and can degrade, be contained and recover like any other participant —
+        "sentinel" and "watch" must never become mutually exclusive, because a
+        sentinel that starts degrading is exactly the case that has to stay
+        representable.
+
+        Designating one has a cost the caller must have been shown BEFORE the
+        request, not after: the mailbox will receive warmup mail from degrading
+        members that the rest of the pool is shielded from. Containment still
+        outranks measurement — a sentinel never pairs with a quarantined or blocked
+        mailbox.
+
+        Idempotent: setting the value the participant already has is a 200 with the
+        unchanged row. Workspace-pinned on the token's workspace; the path id is
+        never trusted on its own.
+      parameters:
+        - name: mailbox_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WarmupSentinelRequest' }
+      responses:
+        '200':
+          description: The participant as it now stands
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WarmupParticipant' }
+        '400': { description: Invalid body (is_sentinel is required) }
+        '401': { description: Unauthorized }
+        '404': { description: "Mailbox not found in this workspace, or not a warmup participant" }
   /pulse:
     get:
       operationId: getPulse
@@ -5131,6 +5179,16 @@ components:
         max_volume: { type: integer, minimum: 1, maximum: 200, description: daily ceiling the ramp climbs to }
         ramp_increment: { type: integer, minimum: 1, description: emails/day added each day }
         reply_rate: { type: number, minimum: 0, maximum: 1, description: probability a warmup send is an in-thread reply }
+    WarmupSentinelRequest:
+      type: object
+      description: >-
+        Whether this mailbox should be used as a measurement sentinel. Required
+        rather than optional, unlike every field on WarmupSettings: a toggle whose
+        body may be omitted has to invent a default, and designating and
+        undesignating are not the same request.
+      required: [is_sentinel]
+      properties:
+        is_sentinel: { type: boolean }
     WarmupParticipant:
       type: object
       description: >-
@@ -5178,6 +5236,18 @@ components:
         started_at: { type: string, format: date-time }
         today_sent: { type: integer, description: warmup emails sent by this mailbox today }
         today_target: { type: integer, description: "today's intended (un-jittered) daily ramp target; 0 when paused. The worker applies a ±20% per-day jitter factor, so today_sent may occasionally exceed this." }
+        is_sentinel:
+          type: boolean
+          description: >-
+            Whether this mailbox is designated as a measurement sentinel — exposed to
+            every lane on purpose, so degrading mailboxes have a dependable reference
+            to be measured against. A THIRD, ORTHOGONAL fact, not a value of either
+            axis above: a sentinel has its own health_state and its own lane and may
+            itself be degrading.
+            Absent — not false — on a build that does not report sentinels. The two
+            are different facts and a client must be able to tell them apart:
+            "this mailbox is not a sentinel" is a statement about the mailbox, while a
+            missing field is a statement about the server.
     WarmupTransitionPage:
       type: object
       required: [transitions]
@@ -5322,6 +5392,50 @@ components:
             read clean.
         inbox_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' inboxes (0..1); null when no placement was observed" }
         spam_rate_7d: { type: number, nullable: true, description: "of this mailbox's SENT warmup mail over 7 days, the fraction that landed in partners' spam (0..1); null when no placement was observed" }
+        is_sentinel:
+          type: boolean
+          description: >-
+            Whether this mailbox is designated as a measurement sentinel (see
+            WarmupParticipant.is_sentinel). Orthogonal to health_state and lane, and
+            absent rather than false on a build that does not report sentinels —
+            "no sentinel is designated in this pool" is an ordinary, working
+            arrangement, while a missing field says nothing about the pool at all,
+            and rendering the second as the first answers a question nobody asked.
+        evidence_confidence:
+          type: string
+          enum: [peer_only, sentinel_corroborated]
+          description: >-
+            WHO produced the placement evidence behind this row's rates. peer_only
+            means every observation came from the mailbox's own lane-mates;
+            sentinel_corroborated means at least one came from a sentinel.
+
+            A LABEL, NEVER A PENALTY, and a client must not render it as one.
+            Peer-only is what a healthy pool mostly produces, and nothing is
+            discounted for it: no threshold moves, no sample floor changes, and no
+            promotion is withheld. What peer-only evidence is NOT is independent —
+            when a mailbox is measured only by mailboxes in its own lane, a shared
+            cause moves both sides of the comparison at once and the reading looks
+            steady while nothing about it is. That is worth telling an operator and
+            is not a deficiency to warn about.
+
+            Discounting it would be a threshold change with no calibration behind it:
+            nobody has measured what a sentinel observation is worth next to a peer
+            one in this system, and every prior slice that guessed a threshold had to
+            be walked back (security.md invariants 57-60).
+
+            Absent on a build that does not report sentinels.
+        sentinel_observations_7d:
+          type: integer
+          format: int64
+          description: >-
+            How many of the trailing-7-day placement observations behind this row were
+            filed by a mailbox that is a sentinel NOW — the count evidence_confidence
+            is derived from, published beside the label so it is checkable rather than
+            asserted, the same way an incident ships its counts.
+            Counted against CURRENT designation rather than against who was a sentinel
+            when the mail was observed, so undesignating one moves this figure for
+            evidence already gathered. Absent on a build that does not report
+            sentinels.
         identity:
           type: object
           nullable: true
@@ -5364,6 +5478,35 @@ components:
             client copy would drift the moment that constant is recalibrated —
             leaving the UI claiming it searched a pool the server never examined.
         active: { type: boolean }
+        sentinel_count:
+          type: integer
+          description: >-
+            Enabled participants designated as sentinels. ZERO IS THE ORDINARY CASE —
+            most self-hosted installations never designate one, warmup works exactly
+            as it does without them, and a client must not render it as a
+            misconfiguration to be corrected. Absent on a build that does not report
+            sentinels, which is a different fact from zero.
+        sentinel_pool_oversized:
+          type: boolean
+          description: >-
+            Whether sentinels have grown past sentinel_pool_share of the enabled pool.
+            ADVISORY, NEVER ENFORCED: exceeded, it is reported and nothing is refused.
+            Refusing to pair would stop warmup rather than tell the operator
+            something, and the cap exists to keep the references from becoming the
+            network they are supposed to measure — not to gate sending.
+            Served rather than recomputed client-side for the reason
+            incidents_min_pool is: it is a backend policy verdict, and a client copy
+            of the rule would drift the moment the share is recalibrated.
+            Note a pool of one sentinel and nothing else is oversized by this measure
+            AND is measuring nothing, which is worth saying plainly rather than
+            hiding.
+        sentinel_pool_share:
+          type: number
+          description: >-
+            The advisory ceiling sentinel_pool_oversized is measured against, as a
+            fraction of the enabled pool (warmup.SentinelPoolShare). Published so a
+            client can state the rule it is reporting instead of hardcoding a constant
+            that would silently diverge from the server's.
         mailboxes:
           type: array
           items: { $ref: '#/components/schemas/WarmupMailbox' }
