@@ -108,12 +108,24 @@ func (f recordFixture) send(t *testing.T, ctx context.Context, step int, status 
 		f.ws, f.campaign, f.contactID, f.mailbox, status, step, sentAt)
 }
 
+// track seeds a tracking event directly, so it must supply the HUMAN/MACHINE
+// verdict the tracking service's classifier (platform/botfilter) would have
+// assigned at write time. The exclusion of prefetches is no longer re-derived
+// by the reading query from the UA and timestamp -- it reads the stored
+// column -- so a fixture that omits the verdict is claiming every seeded event
+// was a genuine human one.
 func (f recordFixture) track(t *testing.T, ctx context.Context, sendID uuid.UUID, kind, userAgent string, at time.Time) {
 	t.Helper()
+	f.trackAs(t, ctx, sendID, kind, userAgent, at, "")
+}
+
+// trackAs seeds an event with an explicit machine reason ("" = a human event).
+func (f recordFixture) trackAs(t *testing.T, ctx context.Context, sendID uuid.UUID, kind, userAgent string, at time.Time, machineReason string) {
+	t.Helper()
 	if _, err := f.pool.Exec(ctx,
-		`INSERT INTO tracking_events(workspace_id,campaign_id,send_id,kind,user_agent,created_at)
-		 VALUES($1,$2,$3,$4::tracking_event_kind,$5,$6)`,
-		f.ws, f.campaign, sendID, kind, userAgent, at); err != nil {
+		`INSERT INTO tracking_events(workspace_id,campaign_id,send_id,kind,user_agent,created_at,is_machine,machine_reason)
+		 VALUES($1,$2,$3,$4::tracking_event_kind,$5,$6,$7,$8)`,
+		f.ws, f.campaign, sendID, kind, userAgent, at, machineReason != "", machineReason); err != nil {
 		t.Fatalf("tracking event: %v", err)
 	}
 }
@@ -185,9 +197,9 @@ func TestRecordDealCapHoldsAgainstPostgres(t *testing.T) {
 	}
 }
 
-// The engagement rollup end to end: sent counts, the proxy-open exclusion that
-// makes an "indicative" open indicative, clicks, stop-reason outcomes, and the
-// rates those imply.
+// The engagement rollup end to end: sent counts, the machine-open exclusion
+// that makes an "indicative" open indicative, clicks, stop-reason outcomes, and
+// the rates those imply.
 func TestEngagementRollupAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 	f := recordSetup(t, ctx)
@@ -198,11 +210,12 @@ func TestEngagementRollupAgainstPostgres(t *testing.T) {
 	// A queued send is not a sent one and must not enter the denominator.
 	f.send(t, ctx, 3, "queued", nil)
 
-	// Gmail's image proxy fetches the pixel on receipt: excluded by UA.
-	f.track(t, ctx, first, "open", "GoogleImageProxy/1.0", f.sentAt.Add(time.Second))
+	// Gmail's image proxy fetches the pixel on receipt: classified machine by
+	// UA at write time, so excluded from the indicative count.
+	f.trackAs(t, ctx, first, "open", "GoogleImageProxy/1.0", f.sentAt.Add(time.Second), "proxy_user_agent")
 	// A fetch within two seconds of the send is the same prefetch behaviour,
-	// UA-agnostic: excluded too.
-	f.track(t, ctx, second, "open", "Mozilla/5.0", secondAt.Add(time.Second))
+	// UA-agnostic (this is the Apple MPP shape): excluded too.
+	f.trackAs(t, ctx, second, "open", "Mozilla/5.0", secondAt.Add(time.Second), "prefetch_window")
 	// A real open, well after the send.
 	lastEvent := f.sentAt.Add(72 * time.Hour)
 	f.track(t, ctx, first, "open", "Mozilla/5.0", lastEvent)

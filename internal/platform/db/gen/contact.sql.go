@@ -133,11 +133,11 @@ func (q *Queries) ContactSendStats(ctx context.Context, arg ContactSendStatsPara
 
 const contactTrackingStats = `-- name: ContactTrackingStats :one
 SELECT count(DISTINCT te.send_id) FILTER (
-           WHERE te.kind = 'open'
-             AND te.user_agent NOT ILIKE '%GoogleImageProxy%'
-             AND (s.sent_at IS NULL OR te.created_at > s.sent_at + interval '2 seconds')
+           WHERE te.kind = 'open' AND NOT te.is_machine
        )::bigint AS opens_indicative,
-       count(DISTINCT te.send_id) FILTER (WHERE te.kind = 'click')::bigint AS clicks,
+       count(DISTINCT te.send_id) FILTER (
+           WHERE te.kind = 'click' AND NOT te.is_machine
+       )::bigint AS clicks,
        max(te.created_at)::timestamptz AS last_event_at
 FROM tracking_events te
 JOIN sends s ON s.id = te.send_id AND s.workspace_id = te.workspace_id
@@ -156,9 +156,16 @@ type ContactTrackingStatsRow struct {
 }
 
 // Per-send engagement numerators, defined exactly as the campaign rollup defines
-// them: an indicative open is a distinct send with an open event that is neither
-// from a known image proxy nor within two seconds of the send (CountHumanOpens),
-// and a click is a distinct send with a click event (CountEngagedSendsByKind).
+// them: both an indicative open and a click are a distinct send with a
+// human-classified event of that kind (platform/botfilter's write-time verdict,
+// the same column CountHumanOpens and CountEngagedSendsByKind read).
+//
+// last_event_at deliberately spans ALL events including machine ones: it answers
+// "when did anything last happen to this contact's mail", which is a diagnostic
+// an operator wants to be complete, not a rate that a prefetch would inflate.
+// The join to sends stays -- unlike the campaign queries this one is scoped by
+// contact_id, which only sends carries.
+//
 // Both tenancy filters are explicit -- te.workspace_id serves the pin and
 // s.workspace_id keeps the join from ever pairing rows across workspaces.
 func (q *Queries) ContactTrackingStats(ctx context.Context, arg ContactTrackingStatsParams) (ContactTrackingStatsRow, error) {

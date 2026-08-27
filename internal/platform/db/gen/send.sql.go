@@ -116,18 +116,23 @@ func (q *Queries) CountSentToday(ctx context.Context, mailboxID uuid.UUID) (int6
 }
 
 const getCampaignIDForSend = `-- name: GetCampaignIDForSend :one
-SELECT campaign_id, workspace_id FROM sends WHERE id = $1
+SELECT campaign_id, workspace_id, sent_at FROM sends WHERE id = $1
 `
 
 type GetCampaignIDForSendRow struct {
-	CampaignID  uuid.UUID `json:"campaign_id"`
-	WorkspaceID uuid.UUID `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	SentAt      pgtype.Timestamptz `json:"sent_at"`
 }
 
+// sent_at is selected for the tracking classifier's prefetch-window rule (an
+// open within seconds of the send is a machine fetch, not a read). It is NULL
+// for a send that has not gone out, which the classifier reads as "unknown send
+// time" and treats as no signal rather than guessing.
 func (q *Queries) GetCampaignIDForSend(ctx context.Context, id uuid.UUID) (GetCampaignIDForSendRow, error) {
 	row := q.db.QueryRow(ctx, getCampaignIDForSend, id)
 	var i GetCampaignIDForSendRow
-	err := row.Scan(&i.CampaignID, &i.WorkspaceID)
+	err := row.Scan(&i.CampaignID, &i.WorkspaceID, &i.SentAt)
 	return i, err
 }
 

@@ -119,8 +119,10 @@ type campaignDetailResponse struct {
 
 // metricsResponse is the engagement rollup on campaignDetailResponse. Rates
 // are fractions in 0..1 rounded to 4 decimal places (e.g. 0.4123 == 41.23%);
-// the frontend formats them as percentages. opens_indicative/open_rate are
-// proxy-filtered but remain approximate -- clicks are the reliable signal.
+// the frontend formats them as percentages. opens_indicative/open_rate AND
+// clicks/click_rate all count human-classified events only (platform/botfilter,
+// applied at write time); they remain approximate, and err toward counting a
+// doubtful hit as human -- see Metrics in service.go.
 // NOTE for the frontend tooltip: open_rate/click_rate are per-send (a
 // multi-step campaign sends multiple times per contact), while
 // reply_rate/bounce_rate/unsub_rate are per-contact (an enrollment stops at

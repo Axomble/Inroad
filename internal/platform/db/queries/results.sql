@@ -27,18 +27,23 @@ SELECT s.step_order,
        count(*) FILTER (WHERE o.send_id IS NOT NULL)::bigint AS opens,
        count(*) FILTER (WHERE c.send_id IS NOT NULL)::bigint AS clicks
 FROM sends s
+-- Both sides read the write-time verdict (platform/botfilter). A/B arm
+-- comparison is the reason this matters most: prefetch volume is not evenly
+-- distributed across variants (one subject line lands in more scanner-protected
+-- inboxes than another), so unfiltered machine hits do not cancel out between
+-- arms -- they can reverse which variant looks like the winner.
+-- Columns stay te-qualified inside each subquery: without the join to sends
+-- these are self-contained, but an unqualified campaign_id then resolves against
+-- the OUTER sends and the reference is ambiguous.
 LEFT JOIN (
     SELECT DISTINCT te.send_id
     FROM tracking_events te
-    JOIN sends js ON js.id = te.send_id AND js.workspace_id = te.workspace_id
-    WHERE te.workspace_id = $2 AND te.campaign_id = $1 AND te.kind = 'open'
-      AND te.user_agent NOT ILIKE '%GoogleImageProxy%'
-      AND (js.sent_at IS NULL OR te.created_at > js.sent_at + interval '2 seconds')
+    WHERE te.workspace_id = $2 AND te.campaign_id = $1 AND te.kind = 'open' AND NOT te.is_machine
 ) o ON o.send_id = s.id
 LEFT JOIN (
-    SELECT DISTINCT send_id
-    FROM tracking_events
-    WHERE workspace_id = $2 AND campaign_id = $1 AND kind = 'click'
+    SELECT DISTINCT te.send_id
+    FROM tracking_events te
+    WHERE te.workspace_id = $2 AND te.campaign_id = $1 AND te.kind = 'click' AND NOT te.is_machine
 ) c ON c.send_id = s.id
 WHERE s.workspace_id = $2 AND s.campaign_id = $1 AND s.status = 'sent'
 GROUP BY s.step_order, s.variant_id

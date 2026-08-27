@@ -152,9 +152,9 @@ LIMIT 1;
 -- show two different reply rates depending on where you looked. Ranking
 -- campaigns is a lifetime question anyway.
 --
--- The open definition is copied from CampaignEngagementResults, NOT re-derived:
--- proxy prefetches (GoogleImageProxy) and opens firing within 2 seconds of the
--- send are both excluded, because an open Inroad caused isn't engagement. A
+-- The open definition is not re-derived here, and can no longer drift: every
+-- reader now filters the SAME stored column, written once by platform/botfilter
+-- when the event was recorded. An open Inroad caused isn't engagement, and a
 -- second, laxer definition here would rank campaigns by how aggressively their
 -- recipients' mail providers prefetch images.
 --
@@ -167,19 +167,21 @@ WITH sent AS (
     WHERE workspace_id = $1 AND status = 'sent'
     GROUP BY 1
 ),
+-- Both engagement sources read the write-time verdict (platform/botfilter)
+-- rather than re-deriving one, so the join to sends for sent_at is gone. The
+-- click side gained a bot filter it never had: before this, a link scanner's
+-- prefetch counted as a click here even while the open side filtered proxies,
+-- so a scanned campaign could report more clicks than opens.
 opened AS (
-    SELECT te.campaign_id, COUNT(DISTINCT te.send_id)::bigint AS n
-    FROM tracking_events te
-    JOIN sends s ON s.id = te.send_id AND s.workspace_id = te.workspace_id
-    WHERE te.workspace_id = $1 AND te.kind = 'open'
-      AND te.user_agent NOT ILIKE '%GoogleImageProxy%'
-      AND (s.sent_at IS NULL OR te.created_at > s.sent_at + interval '2 seconds')
+    SELECT campaign_id, COUNT(DISTINCT send_id)::bigint AS n
+    FROM tracking_events
+    WHERE workspace_id = $1 AND kind = 'open' AND NOT is_machine
     GROUP BY 1
 ),
 clicked AS (
     SELECT campaign_id, COUNT(DISTINCT send_id)::bigint AS n
     FROM tracking_events
-    WHERE workspace_id = $1 AND kind = 'click'
+    WHERE workspace_id = $1 AND kind = 'click' AND NOT is_machine
     GROUP BY 1
 ),
 -- One pass over the enrollments gives both the denominator (every enrollment

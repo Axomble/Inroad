@@ -1068,7 +1068,81 @@ write history that never happened.
     system. Until that exists the answer is binary refusal, not a discount — every
     slice here that guessed a threshold and acted on it had to be walked back.
 
+## Open/click bot and prefetch classification
+
+63. **A tracking hit's classification is a reporting signal, never a security
+    boundary, and never an authorization input.** Every open/click is judged
+    HUMAN or MACHINE at write time by the pure classifier
+    (`internal/platform/botfilter`) and the verdict is stored on the event
+    (`tracking_events.is_machine` / `machine_reason`, a CHECK keeping the pair
+    consistent). Everything it reads except the send id — User-Agent, source
+    address, arrival time — arrives on a PUBLIC, unauthenticated endpoint and is
+    fully attacker-controllable, so a `human` verdict means "not obviously a
+    machine", never proof a person was there. Nothing may be authorized,
+    suppressed or granted on the strength of it.
+
+    **Tenancy is unchanged.** The workspace and campaign still come from the
+    `sends` row resolved server-side (invariant 4); a machine verdict is not a
+    path around that pin, and no request field influences it. The two classifier
+    lookups (`GetSendTrackingContext`, `CountRecentSendOpensFromSubnet`) are
+    keyed by the HMAC-signed send id and are deliberately NOT workspace-scoped:
+    there is no authenticated principal to scope by, they return a count and a
+    timestamp about that one send rather than row data, and scoping them would
+    mean trusting a workspace id supplied by an unauthenticated caller.
+
+    **The event is STORED, never dropped.** Machine hits are recorded like any
+    other and excluded from the headline rate by a FILTER on the stored column,
+    so reporting can say "N opens, M of them machine". Silently discarding them
+    would present a truncated count as the whole truth.
+
+    **No new outbound surface, and none may be added.** Classification does no
+    I/O beyond the two indexed reads above: no IP-intelligence provider, no DNS,
+    no network call of any kind. This endpoint takes unauthenticated traffic at
+    blast volume, so a per-hit lookup would put a third party on the hot path
+    and leak every recipient's address to them. Cloud-provider range lists, if
+    ever added, belong in a periodically-refreshed table read off this path.
+
+    **A failure degrades, it does not condemn.** An unreadable event history
+    classifies on the remaining signals rather than defaulting to machine: a
+    database blip must not permanently zero a workspace's open rate. The same
+    reasoning makes an absent User-Agent, an unresolvable IP, and a private or
+    loopback address all NOT machine — behind a misconfigured proxy every hit
+    carries a private address, and the fail-safe direction here is to
+    over-count a rate an operator can question rather than silently delete a
+    real person's engagement.
+
+    **`client_ip` is recipient personal data.** It is retained solely as the
+    burst rule's input, must never appear in an API response DTO, and is erased
+    with its workspace through `tracking_events`' existing `ON DELETE CASCADE`.
+
+    **A MACHINE verdict never changes what the endpoint DOES.** The pixel is
+    still served and the click is still redirected — a scanner that got a 404
+    would report the link broken and the human it protects would never reach the
+    page. The verdict governs reporting only.
+
 ## Deferred (documented, not yet built)
+- **Conditional branching on a sequence step must gate on HUMAN events only**
+  (invariant 63). This is written down BEFORE the feature exists because getting
+  it wrong is silent: a scanner's prefetch would fire an "if opened" branch and
+  send the contact the wrong follow-up, with nothing in the UI to show that a bot
+  rewrote a real sequence. A branch predicate must read the stored verdict —
+  `... AND kind = 'open' AND NOT is_machine`, the same filter `CountHumanOpens`
+  uses — and must never re-derive its own definition of an open, or the branch
+  and the reported open rate will disagree about the same contact. Two further
+  cautions: a `human` verdict is "not obviously a machine", so a branch whose
+  wrong side is expensive or irreversible should prefer the negative path; and
+  because the verdict is computed once at write time, rows recorded before that
+  migration are all marked human and a branch reading old history will
+  over-fire.
+- Datacenter/cloud IP ranges as a refreshed table (AWS/GCP/Azure publish
+  machine-readable lists; Apple's MPP relay egress likewise). `botfilter`'s
+  compiled-in range list covers only what is knowable from the address itself,
+  because invariant 63 forbids a lookup on the tracking hot path — a periodic
+  sweep into a table read off that path is the intended shape.
+- Re-classification backfill for `tracking_events` rows written before the
+  classification column existed (they default to `is_machine = false`). Deliberately
+  not a side effect of the migration: re-judging history is a decision an operator
+  should make, not something a schema change does silently.
 - Cloud KMS as a second `KeyProvider` (KEK) behind the existing seam — today only
   `LocalKeyProvider` (wraps DEKs under `INROAD_MASTER_KEY`) is implemented.
 - Eager re-seal/rotation CLI: backfill pre-DEK v1 blobs to v2 and re-encrypt DEKs
