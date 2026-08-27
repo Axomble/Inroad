@@ -22,8 +22,12 @@ interface CampaignTab {
 
 /**
  * Ordered the way an operator reads a campaign: what it's doing (overview),
- * what it says (steps), who it says it to (leads), when it sends (schedule),
- * and the configuration that shapes every future send (preferences).
+ * what it says (steps), who it says it to (leads), how much and through which
+ * mailboxes it sends (schedule), and what will stop it (preferences).
+ *
+ * Schedule carries the sender pool as well as the window board, because the
+ * campaign-wide daily limit is a total summed ACROSS that pool — the number and
+ * the mailboxes it divides between have to be readable together.
  */
 const CAMPAIGN_TABS: CampaignTab[] = [
   { label: 'Overview', to: '/app/campaigns/$id' },

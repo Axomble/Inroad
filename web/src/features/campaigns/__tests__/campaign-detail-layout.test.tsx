@@ -137,7 +137,7 @@ test('the campaign header renders once and survives tab navigation without refet
   fireEvent.click(within(tabs).getByRole('link', { name: 'Steps' }))
   await waitFor(() => expect(requests.some((r) => r.includes('/steps'))).toBe(true))
   fireEvent.click(within(tabs).getByRole('link', { name: 'Preferences' }))
-  await waitFor(() => expect(requests.some((r) => r.includes('/senders'))).toBe(true))
+  await waitFor(() => expect(requests.some((r) => r.includes('/deliverability'))).toBe(true))
 
   // The SAME DOM node, not merely equal text: the header belongs to the layout,
   // so navigating between sections must not tear it down and rebuild it. A
@@ -168,9 +168,21 @@ test('a deep link into a tab renders that section directly', async () => {
 
   // The header still comes from the layout on a cold entry...
   expect(await screen.findByText('Q3 outbound')).toBeInTheDocument()
-  // ...and the preferences section's own data is what loads, not the overview's.
-  await waitFor(() => expect(requests.some((r) => r.includes('/senders'))).toBe(true))
+  // ...and the preferences section's own data is what loads (guardrails), not
+  // the overview's results.
+  await waitFor(() => expect(requests.some((r) => r.includes('/deliverability'))).toBe(true))
   expect(requests.some((r) => r.includes('/results'))).toBe(false)
+})
+
+test('the schedule tab carries the sender pool the daily limit is summed across', async () => {
+  await renderAt(`/app/campaigns/${CAMPAIGN_ID}/schedule`)
+  await screen.findByText('Q3 outbound')
+
+  // The campaign-wide daily limit is defined as a total "across every sender in
+  // its pool", so the pool has to be on the same surface as the number — an
+  // operator setting it must see how many mailboxes it divides between.
+  await waitFor(() => expect(requests.some((r) => r.includes('/schedule'))).toBe(true))
+  await waitFor(() => expect(requests.some((r) => r.includes('/senders'))).toBe(true))
 })
 
 test('the active tab is marked for assistive tech and Overview does not stay active', async () => {
