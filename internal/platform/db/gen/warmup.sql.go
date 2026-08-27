@@ -785,7 +785,7 @@ func (q *Queries) GetWarmupSendState(ctx context.Context, arg GetWarmupSendState
 
 const getWarmupSenderBundle = `-- name: GetWarmupSenderBundle :one
 
-SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
+SELECT p.workspace_id, p.enabled, p.is_sentinel, p.start_volume, p.max_volume, p.ramp_increment,
        p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
        -- The lease expiry is minted HERE, from the database clock, because
        -- ClaimWarmupSend compares it against the database clock. Computing it in
@@ -808,6 +808,7 @@ type GetWarmupSenderBundleParams struct {
 type GetWarmupSenderBundleRow struct {
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`
 	Enabled          bool               `json:"enabled"`
+	IsSentinel       bool               `json:"is_sentinel"`
 	StartVolume      int32              `json:"start_volume"`
 	MaxVolume        int32              `json:"max_volume"`
 	RampIncrement    int32              `json:"ramp_increment"`
@@ -843,6 +844,7 @@ func (q *Queries) GetWarmupSenderBundle(ctx context.Context, arg GetWarmupSender
 	err := row.Scan(
 		&i.WorkspaceID,
 		&i.Enabled,
+		&i.IsSentinel,
 		&i.StartVolume,
 		&i.MaxVolume,
 		&i.RampIncrement,
@@ -2437,7 +2439,8 @@ func (q *Queries) ReleaseWarmupSend(ctx context.Context, arg ReleaseWarmupSendPa
 const selectWarmupPartner = `-- name: SelectWarmupPartner :one
 
 WITH candidates AS (
-    SELECT p.mailbox_id, m.email, m.display_name,
+    -- workspace_id, lane and is_sentinel come from the CANDIDATE'S OWN ROW, never copied
+SELECT p.mailbox_id, m.email, m.display_name, p.workspace_id, p.lane, p.is_sentinel,
            COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
            COALESCE(pair.sent_today, 0)::bigint AS sent_today
     FROM warmup_participants p
@@ -2477,7 +2480,7 @@ WITH candidates AS (
       AND p.lane NOT IN ('pending_auth','quarantine','blocked')
       AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 )
-SELECT mailbox_id, email, display_name
+SELECT mailbox_id, email, display_name, workspace_id, lane, is_sentinel
 FROM candidates c
 WHERE c.sent_today < $3::int
   AND (
@@ -2503,6 +2506,9 @@ type SelectWarmupPartnerRow struct {
 	MailboxID   uuid.UUID `json:"mailbox_id"`
 	Email       string    `json:"email"`
 	DisplayName string    `json:"display_name"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Lane        string    `json:"lane"`
+	IsSentinel  bool      `json:"is_sentinel"`
 }
 
 // ----------------------------------------------------------------------------
@@ -2534,6 +2540,10 @@ type SelectWarmupPartnerRow struct {
 // eligible SAME-LANE participants returns no row. sent_today is the SYMMETRIC
 // pair budget (see the note above), so it also orders the spread by what the pair
 // has actually exchanged rather than by what this sender happened to send.
+// from the request. The coordinator seam compares the candidate's workspace against
+// the requester's to refuse a cross-tenant partner, and a value copied from the
+// request would make that comparison test a value against itself — a tenancy check
+// that can never fail is worse than none, because it reads as one.
 func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartnerParams) (SelectWarmupPartnerRow, error) {
 	row := q.db.QueryRow(ctx, selectWarmupPartner,
 		arg.WorkspaceID,
@@ -2542,7 +2552,14 @@ func (q *Queries) SelectWarmupPartner(ctx context.Context, arg SelectWarmupPartn
 		arg.CooldownSince,
 	)
 	var i SelectWarmupPartnerRow
-	err := row.Scan(&i.MailboxID, &i.Email, &i.DisplayName)
+	err := row.Scan(
+		&i.MailboxID,
+		&i.Email,
+		&i.DisplayName,
+		&i.WorkspaceID,
+		&i.Lane,
+		&i.IsSentinel,
+	)
 	return i, err
 }
 

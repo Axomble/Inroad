@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/coordinator"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
@@ -133,17 +134,44 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 	// decision's seed is unchanged from before this tuning (partner spread for new
 	// threads is preserved); when a reply is wanted we may instead target a
 	// repliable partner below, but the new-thread fallback stays on this one.
-	spreadPartner, err := c.q.SelectWarmupPartner(ctx, gen.SelectWarmupPartnerParams{
-		WorkspaceID: ws, MailboxID: mbID, MaxPairSends: int32(pairCap),
-		CooldownSince: pgtype.Timestamptz{Time: now.Add(-warmup.PairCooldown), Valid: true},
+	// Through the coordinator seam rather than straight at the query. Today that
+	// resolves to LocalCoordinator over this workspace's own participants — the same
+	// selection, the same rows — and the reason to route through it is that a shared
+	// or federated pool (design §9) then becomes an adapter behind this interface
+	// instead of a rewrite of the send path.
+	//
+	// The seam earns its place here rather than merely existing: it re-proves the
+	// candidate is in the requester's OWN workspace, from the candidate's own row, and
+	// re-checks warmup.Pairable. Both are belt-and-braces over guarantees the SQL
+	// already makes, which is the same posture coreapi keeps behind its own pins.
+	assignment, err := c.coordinator().RequestPair(ctx, coordinator.PairRequest{
+		Requester: coordinator.Participant{
+			WorkspaceID: ws.String(), ID: mbID.String(),
+			Lane: b.Lane, IsSentinel: b.IsSentinel,
+		},
+		Constraints: coordinator.Constraints{
+			CooldownSince:      now.Add(-warmup.PairCooldown),
+			MaxPairSendsPerDay: pairCap,
+		},
+		Now: now,
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// No eligible partner (workspace has <2 usable participants) → skip.
+		// No eligible partner (workspace has <2 usable participants) → skip. It is a
+		// typed sentinel rather than a string match, so the caller cannot confuse it
+		// with a failure.
+		if errors.Is(err, coordinator.ErrNoPartner) {
 			return coreapi.WarmupSendJob{Skip: true}, nil
 		}
 		return coreapi.WarmupSendJob{}, err
 	}
+	partnerID, err := uuid.Parse(assignment.Partner.ID)
+	if err != nil {
+		return coreapi.WarmupSendJob{}, err
+	}
+	spreadPartner := struct {
+		MailboxID uuid.UUID
+		Email     string
+	}{MailboxID: partnerID, Email: assignment.Partner.Address}
 
 	dayKey := now.Format("2006-01-02")
 	sendIndex := int(sentToday)

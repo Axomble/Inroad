@@ -534,7 +534,7 @@ ORDER BY m.email;
 -- config, health and lane, and its decrypted-at-caller transport columns.
 -- workspace-pinned (belt-and-braces on the unguessable mailbox UUID); a foreign
 -- pair yields no row.
-SELECT p.workspace_id, p.enabled, p.start_volume, p.max_volume, p.ramp_increment,
+SELECT p.workspace_id, p.enabled, p.is_sentinel, p.start_volume, p.max_volume, p.ramp_increment,
        p.reply_rate, p.started_at, p.health_state, p.lane, p.paused_until,
        -- The lease expiry is minted HERE, from the database clock, because
        -- ClaimWarmupSend compares it against the database clock. Computing it in
@@ -619,7 +619,12 @@ WHERE p.workspace_id = $1
 -- pair budget (see the note above), so it also orders the spread by what the pair
 -- has actually exchanged rather than by what this sender happened to send.
 WITH candidates AS (
-    SELECT p.mailbox_id, m.email, m.display_name,
+    -- workspace_id, lane and is_sentinel come from the CANDIDATE'S OWN ROW, never copied
+-- from the request. The coordinator seam compares the candidate's workspace against
+-- the requester's to refuse a cross-tenant partner, and a value copied from the
+-- request would make that comparison test a value against itself — a tenancy check
+-- that can never fail is worse than none, because it reads as one.
+SELECT p.mailbox_id, m.email, m.display_name, p.workspace_id, p.lane, p.is_sentinel,
            COALESCE(pair.last_pair_at, 'epoch'::timestamptz) AS last_pair_at,
            COALESCE(pair.sent_today, 0)::bigint AS sent_today
     FROM warmup_participants p
@@ -659,7 +664,7 @@ WITH candidates AS (
       AND p.lane NOT IN ('pending_auth','quarantine','blocked')
       AND sender.lane NOT IN ('pending_auth','quarantine','blocked')
 )
-SELECT mailbox_id, email, display_name
+SELECT mailbox_id, email, display_name, workspace_id, lane, is_sentinel
 FROM candidates c
 WHERE c.sent_today < sqlc.arg(max_pair_sends)::int
   AND (
