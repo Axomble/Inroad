@@ -234,6 +234,45 @@ test('an overview that never mentions sentinels draws no sentinel panel', async 
   expect(screen.queryByRole('region', { name: /measurement sentinels/i })).toBeNull()
 })
 
+// The wiring assertion, and the reason it exists: `sentinel_count` was declared,
+// generated, read by the UI and never actually sent, so the undefined branch
+// rendered permanently and every unit test still passed. A panel is only shipped
+// once something proves the page mounts it against a real payload.
+test('a published content-version split reaches the page', async () => {
+  overviewResponder = () =>
+    new Response(
+      JSON.stringify({
+        pool_size: 2,
+        active: true,
+        mailboxes: [],
+        content_versions: [
+          { version: 'sl1:aaaaaaaaaaaaaaaa', inbox: 40, spam: 10, placement_sample: 50, inbox_rate: 0.8, spam_rate: 0.2 },
+          { version: 'sl1:bbbbbbbbbbbbbbbb', inbox: 8, spam: 2, placement_sample: 10, inbox_rate: null, spam_rate: null },
+        ],
+      }),
+      { status: 200, headers: jsonHeaders },
+    )
+
+  renderWithProviders(<WarmupPage />)
+
+  const panel = await screen.findByRole('region', { name: /placement by template/i })
+  expect(panel).toHaveTextContent('sl1:aaaaaaaa…')
+  expect(panel).toHaveTextContent('80%')
+  // The thin row keeps its evidence and states no rate — a 0% here would be the
+  // false-clean reading the whole panel is built to avoid.
+  expect(panel).toHaveTextContent(/8 inbox, 2 spam over 10 observations/)
+  expect(panel).toHaveTextContent(/Not established/)
+})
+
+// The counterpart: absent means a server that does not report the split, and
+// "nothing observed yet" would describe a window nobody measured.
+test('an overview that never mentions templates draws no template panel', async () => {
+  renderWithProviders(<WarmupPage />)
+
+  await screen.findByText(/warmup needs at least 2 mailboxes/i)
+  expect(screen.queryByRole('region', { name: /placement by template/i })).toBeNull()
+})
+
 test('shows the no-mailboxes empty state when there are none to warm', async () => {
   mailboxesResponder = () => new Response(JSON.stringify([]), { status: 200, headers: jsonHeaders })
 

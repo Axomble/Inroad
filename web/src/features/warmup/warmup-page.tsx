@@ -9,6 +9,7 @@ import type { WarmupHealth } from '@/lib/warmup-health'
 // live here rather than being injected into the mailboxes page.
 import { useListMailboxesQuery } from '@/features/mailboxes/api'
 import { useGetWarmupOverviewQuery } from './api'
+import { WarmupContentVersionsPanel } from './warmup-content-versions-panel'
 import { WarmupIncidentsPanel } from './warmup-incidents-panel'
 import { WarmupMailboxCard } from './warmup-mailbox-card'
 import { WarmupObserversPanel } from './warmup-observers-panel'
@@ -119,6 +120,18 @@ export function WarmupPage() {
               pool={entries}
               minPool={overview?.incidents_min_pool}
             />
+            {/*
+              Last of the pool-level panels and directly above the list, because it
+              is the one that says a bad number below might not be about a mailbox
+              at all. An operator reading the cards has already started attributing
+              spam to senders; this is the alternative explanation, and it has to be
+              in view at that moment rather than above three other panels.
+
+              Nothing is rendered when the overview failed to load —
+              `content_versions` is then undefined, and "nothing observed yet"
+              beside a load error would claim a window nobody measured.
+            */}
+            <WarmupContentVersionsPanel versions={overview?.content_versions} />
             <ul>
               {mailboxes.map((m) => (
                 <WarmupMailboxCard key={m.id ?? ''} mailbox={m} entry={entryById.get(m.id ?? '')} />
