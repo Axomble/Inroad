@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { KeyRound, ListPlus, Plug, Settings, ShieldCheck, Sparkles, Tags, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, KeyRound, ListPlus, Plug, Settings, ShieldCheck, Sparkles, Tags, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useHasRole } from '@/hooks/use-has-role'
 import type { WorkspaceRole } from '@/lib/rbac'
@@ -7,7 +7,7 @@ import type { WorkspaceRole } from '@/lib/rbac'
 /**
  * Second-level navigation for /app/settings/*.
  *
- * These seven screens used to be seven top-level sidebar rows, so workspace
+ * These screens used to be top-level sidebar rows, so workspace
  * administration occupied more of the primary nav than Inbox, Campaigns and
  * the whole CRM combined — and every new settings page made it worse. Moving
  * them one level down restores the sidebar to the operator's actual workflow
@@ -15,9 +15,9 @@ import type { WorkspaceRole } from '@/lib/rbac'
  *
  * The rail is vertical rather than a tab strip because each destination still
  * renders its own `<Page>` with its own topbar; a horizontal strip would sit
- * above seven different titles and read as a second, competing header.
+ * above as many different titles and read as a second, competing header.
  *
- * Below `sm` it becomes a horizontally scrollable row — a 7-item vertical rail
+ * Below `sm` it becomes a horizontally scrollable row — a full vertical rail
  * would push the actual settings content off a phone screen.
  */
 interface SettingsItem {
@@ -52,6 +52,10 @@ const SETTINGS_NAV: SettingsItem[] = [
   { label: 'API keys', to: '/app/settings/api-keys', icon: KeyRound, minRole: 'admin' },
   { label: 'Connected apps', to: '/app/settings/oauth-apps', icon: Plug, minRole: 'admin' },
   { label: 'AI', to: '/app/settings/ai', icon: Sparkles, minRole: 'admin' },
+  // No minRole: the list needs campaigns:read, which every member holds. Replay and
+  // discard need campaigns:send and are refused by the server with a 403 the row
+  // renders — the same courtesy-not-authorization split the rest of this table uses.
+  { label: 'Failed tasks', to: '/app/settings/dead-letters', icon: AlertTriangle },
 ]
 
 export function SettingsRail() {

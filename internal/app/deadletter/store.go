@@ -23,9 +23,9 @@ import (
 type Store interface {
 	// Insert records one retry-exhausted task.
 	Insert(ctx context.Context, in Capture) (gen.TaskDeadLetter, error)
-	// List returns the workspace's dead letters, newest first. status "" means
-	// any status.
-	List(ctx context.Context, ws uuid.UUID, status string, limit, offset int32) ([]gen.TaskDeadLetter, error)
+	// List returns up to q.Limit of the workspace's dead letters, newest first,
+	// resuming strictly after q.Cursor when one is given.
+	List(ctx context.Context, ws uuid.UUID, q ListQuery) ([]gen.TaskDeadLetter, error)
 	// Get loads one dead letter. ok=false means no such row IN THIS WORKSPACE —
 	// a row belonging to another tenant is indistinguishable from a row that
 	// does not exist, which is the intended behaviour.
@@ -43,6 +43,20 @@ type Store interface {
 	// Discard files a 'pending' row as triaged without re-running it.
 	// discarded=false means the row was not pending.
 	Discard(ctx context.Context, ws, id uuid.UUID) (bool, error)
+}
+
+// ListQuery is one page request against the store. It is deliberately dumb: the
+// Limit here is the number of rows to FETCH, cursors arrive already decoded, and
+// nothing about lookahead or token encoding lives at this layer — those are the
+// service's policy, and keeping them out means the store can be read as "run
+// this statement" and nothing else.
+type ListQuery struct {
+	// Status filters the lifecycle state; "" means any.
+	Status string
+	// Cursor resumes strictly after a row, or nil for the first page.
+	Cursor *Cursor
+	// Limit is how many rows to fetch, exactly as passed.
+	Limit int32
 }
 
 // PgStore implements Store over the sqlc-generated queries.
@@ -63,13 +77,18 @@ func (s *PgStore) Insert(ctx context.Context, in Capture) (gen.TaskDeadLetter, e
 	})
 }
 
-func (s *PgStore) List(ctx context.Context, ws uuid.UUID, status string, limit, offset int32) ([]gen.TaskDeadLetter, error) {
-	return s.q.ListTaskDeadLetters(ctx, gen.ListTaskDeadLettersParams{
+func (s *PgStore) List(ctx context.Context, ws uuid.UUID, q ListQuery) ([]gen.TaskDeadLetter, error) {
+	params := gen.ListTaskDeadLettersParams{
 		WorkspaceID: ws,
-		Status:      status,
-		RowLimit:    limit,
-		RowOffset:   offset,
-	})
+		Status:      q.Status,
+		PageLimit:   q.Limit,
+	}
+	if q.Cursor != nil {
+		params.Seek = true
+		params.CursorTime = pgtype.Timestamptz{Time: q.Cursor.CreatedAt, Valid: true}
+		params.CursorID = q.Cursor.ID
+	}
+	return s.q.ListTaskDeadLetters(ctx, params)
 }
 
 func (s *PgStore) Get(ctx context.Context, ws, id uuid.UUID) (gen.TaskDeadLetter, bool, error) {

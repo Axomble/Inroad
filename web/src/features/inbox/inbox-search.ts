@@ -121,7 +121,9 @@ export function scopeTimezoneOffset(forScope: InboxScope): number | undefined {
  * the last item of whatever page is on screen, no separate next_cursor field
  * needed. This packs the pair into the URL's one opaque `cursor` param and
  * unpacks it again. Neither an ISO timestamp nor a UUID can contain `::`, so
- * a plain split is safe.
+ * a plain split is safe. The stack of already-visited cursors behind the
+ * Previous button is not this module's business: `@/lib/cursor-stack` stores
+ * whatever string it is handed and never interprets one.
  */
 const CURSOR_SEPARATOR = '::'
 
@@ -143,25 +145,6 @@ export function decodeCursor(cursor: string | undefined): DecodedCursor | undefi
   const beforeId = cursor.slice(separatorIndex + CURSOR_SEPARATOR.length)
   if (!beforeLastMessageAt || !beforeId) return undefined
   return { beforeLastMessageAt, beforeId }
-}
-
-/**
- * Keyset pagination knows the next page but not "page N back", so the pages
- * already visited are stacked as they're left — same reasoning as
- * `features/contacts/contacts-search.ts`'s `CursorStack`, duplicated rather
- * than imported (features never import each other, and the two lists' cursor
- * encodings differ: contacts' is an opaque server token, this one is the
- * packed pair above). The empty string stands for the first page.
- */
-export type CursorStack = readonly string[]
-
-export function pushCursor(stack: CursorStack, current: string | undefined): CursorStack {
-  return [...stack, current ?? '']
-}
-
-/** Pops the page to return to. An empty stack yields `undefined` — the first page. */
-export function popCursor(stack: CursorStack): { stack: CursorStack; cursor: string | undefined } {
-  return { stack: stack.slice(0, -1), cursor: stack[stack.length - 1] || undefined }
 }
 
 /**

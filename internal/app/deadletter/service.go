@@ -44,6 +44,12 @@ var (
 	// ErrValidation is returned for a caller-fixable input problem (an unknown
 	// status filter).
 	ErrValidation = errors.New("deadletter: invalid")
+	// ErrBadCursor is returned for a page cursor this server did not mint, or
+	// minted for a different status filter. Separate from ErrValidation because
+	// it maps to 400 rather than 422: a cursor is opaque machine state, so a bad
+	// one is a malformed request rather than a value the operator chose wrongly.
+	// It is never silently ignored — see decodeCursor.
+	ErrBadCursor = errors.New("deadletter: bad cursor")
 )
 
 // Status values a dead letter can hold. Mirrors the CHECK constraint in
@@ -57,6 +63,11 @@ const (
 // Paging bounds for the triage list. The list is small by nature (it counts
 // tasks a workspace has permanently lost), so the cap is about refusing an
 // absurd request rather than about throughput.
+//
+// The cap silently shortening a page is only safe because NextCursor reports
+// whether more rows follow. Under the previous LIMIT/OFFSET surface it was not:
+// the client had to infer "more exist" from the page being as long as it asked
+// for, so a clamped request looked identical to the end of the list.
 const (
 	defaultLimit = 50
 	maxLimit     = 200
@@ -124,20 +135,38 @@ func (s *Service) Capture(ctx context.Context, in Capture) (gen.TaskDeadLetter, 
 	return row, nil
 }
 
-// ListParams is the read-side filter. Kept as a struct rather than four
-// positional arguments so a caller cannot transpose limit and offset.
+// ListParams is the read-side request: which lifecycle state, how many rows, and
+// where to resume. Kept as a struct rather than positional arguments so a caller
+// cannot transpose them.
 type ListParams struct {
 	Status string
 	Limit  int32
-	Offset int32
+	// Cursor is an opaque token from a previous page's NextCursor, empty for the
+	// first page. It is only valid under the SAME Status it was minted for.
+	Cursor string
 }
 
-// List returns the workspace's dead letters, newest first. An empty Status
-// means any; any other value must be one of the three known statuses, so a
-// typo'd filter is a 422 rather than a silently empty list.
-func (s *Service) List(ctx context.Context, ws uuid.UUID, p ListParams) ([]gen.TaskDeadLetter, error) {
+// Page is one keyset page. NextCursor is empty exactly when this is the last
+// page — never "the page looked short", which the client cannot distinguish
+// from a clamp (and could not, before this: the SPA inferred "more exist" from
+// len(rows) == the limit it asked for, so the service silently capping a
+// 250-row request at 200 made the Load-more button vanish and left every row
+// past 200 permanently unreachable, with no error anywhere).
+type Page struct {
+	Items      []gen.TaskDeadLetter
+	NextCursor string
+}
+
+// List returns one page of the workspace's dead letters, newest first. An empty
+// Status means any; any other value must be one of the three known statuses, so
+// a typo'd filter is a 422 rather than a silently empty list.
+//
+// The cursor is decoded AFTER the status is validated, so an unknown status is
+// reported as such even when the request also carries a cursor — the status is
+// what the operator typed, the cursor is machine state derived from it.
+func (s *Service) List(ctx context.Context, ws uuid.UUID, p ListParams) (Page, error) {
 	if p.Status != "" && !isKnownStatus(p.Status) {
-		return nil, fmt.Errorf("%w: unknown status %q", ErrValidation, p.Status)
+		return Page{}, fmt.Errorf("%w: unknown status %q", ErrValidation, p.Status)
 	}
 	if p.Limit <= 0 {
 		p.Limit = defaultLimit
@@ -145,14 +174,37 @@ func (s *Service) List(ctx context.Context, ws uuid.UUID, p ListParams) ([]gen.T
 	if p.Limit > maxLimit {
 		p.Limit = maxLimit
 	}
-	if p.Offset < 0 {
-		p.Offset = 0
+
+	q := ListQuery{Status: p.Status, Limit: p.Limit}
+	if p.Cursor != "" {
+		cur, err := decodeCursor(p.Status, p.Cursor)
+		if err != nil {
+			return Page{}, err
+		}
+		q.Cursor = &cur
 	}
-	rows, err := s.store.List(ctx, ws, p.Status, p.Limit, p.Offset)
+
+	// One row beyond the page. Its PRESENCE is what proves another page exists —
+	// not the page being full, which is only a guess (a page can be exactly full
+	// with nothing after it) and not a count, which would cost a second query on
+	// every request. Lookahead rather than crm's lastOfFullPage precisely because
+	// lastOfFullPage hands out a cursor for any full page, so the last full page
+	// leads the client to a phantom empty one.
+	q.Limit = p.Limit + 1
+	rows, err := s.store.List(ctx, ws, q)
 	if err != nil {
-		return nil, fmt.Errorf("deadletter: list: %w", err)
+		return Page{}, fmt.Errorf("deadletter: list: %w", err)
 	}
-	return rows, nil
+
+	page := Page{Items: rows}
+	if int32(len(rows)) > p.Limit {
+		page.Items = rows[:p.Limit]
+		// Minted from the last KEPT row, not the lookahead row: the next page
+		// must START at the lookahead row, and the seek is strictly-after.
+		last := page.Items[len(page.Items)-1]
+		page.NextCursor = encodeCursor(p.Status, Cursor{CreatedAt: last.CreatedAt.Time, ID: last.ID})
+	}
+	return page, nil
 }
 
 // Get loads one dead letter in this workspace.

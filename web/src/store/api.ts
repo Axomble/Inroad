@@ -1714,7 +1714,7 @@ const injectedRtkApi = api.injectEndpoints({
         params: {
           status: queryArg.status,
           limit: queryArg.limit,
-          offset: queryArg.offset,
+          cursor: queryArg.cursor,
         },
       }),
     }),
@@ -2782,12 +2782,12 @@ export type UnassignInboxThreadLabelApiArg = {
 export type ListTaskDeadLettersApiResponse =
   /** status 200 Dead letters */ TaskDeadLetterList;
 export type ListTaskDeadLettersApiArg = {
-  /** Restrict to one lifecycle state. Omit for all of them. */
+  /** Restrict to one lifecycle state. Omit for all of them. Changing it invalidates any cursor held: start the new filter from page one. */
   status?: "pending" | "replayed" | "discarded";
   /** Page size. Defaults to 50, capped at 200. */
   limit?: number;
-  /** Rows to skip. Defaults to 0. */
-  offset?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
 };
 export type GetTaskDeadLetterApiResponse =
   /** status 200 The dead letter */ TaskDeadLetter;
@@ -4724,7 +4724,10 @@ export type TaskDeadLetter = {
   replayed_at: string | null;
 };
 export type TaskDeadLetterList = {
-  dead_letters: TaskDeadLetter[];
+  items: TaskDeadLetter[];
+  /** Cursor for the next page, ABSENT on the last page. Absence is the only end-of-list signal: a short page is not one, because the server caps the page size and may return fewer rows than requested.
+    Valid only for the status filter that produced it — pass it back together with the same status (or the same absent status), or the request is rejected 400. Opaque: round-trip it untouched. */
+  next_cursor?: string;
 };
 export const {
   useAuthRegisterMutation,

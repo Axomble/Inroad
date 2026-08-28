@@ -20,6 +20,7 @@ import { ListSearchInput } from '@/components/shared/list-search-input'
 import { SortMenu } from '@/components/shared/sort-menu'
 import type { Contact, ImportResult } from '@/store/api'
 import { httpStatus } from '@/lib/rtk-error'
+import { popCursor, pushCursor, type CursorStack } from '@/lib/cursor-stack'
 import { useUrlState, useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListListsQuery, useListContactsQuery } from './api'
@@ -32,12 +33,9 @@ import {
   isTooShort,
   limitOrDefault,
   parseContactsSearch,
-  popCursor,
-  pushCursor,
   queryParam,
   rangeLabel,
   sortOrDefault,
-  type CursorStack,
 } from './contacts-search'
 import { NewListForm } from './new-list-form'
 import { ImportCsvForm } from './import-csv-form'
