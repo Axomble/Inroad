@@ -36,9 +36,16 @@ beforeEach(() => {
   responder = () => list([letter()])
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url
-      if (url.includes('/dead-letters')) listUrls.push(url)
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+      // LIST reads only. Recording every /dead-letters call would count a replay's own
+      // POST as a refetch, which is how the cache-invalidation test first passed with
+      // the invalidation removed.
+      if (method === 'GET' && /\/dead-letters(\?|$)/.test(url)) listUrls.push(url)
+      if (method !== 'GET') {
+        return new Response(JSON.stringify(letter({ status: 'discarded' })), { status: 200, headers: jsonHeaders })
+      }
       return responder(url)
     }),
   )
@@ -200,6 +207,76 @@ test('switching filters drops the cursor rather than carrying it to another queu
   // The stack went with it: Previous must not offer a page from the queue the
   // operator just left.
   expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+})
+
+// THE stranding bug. Triaging every row on page 2 empties it; a pager rendered only
+// beside rows takes Previous away at that exact moment, leaving no way off the page
+// under copy claiming the filter is clear. Same unreachable-rows failure this screen
+// was rewritten to remove, reached from the other side.
+test('a page that empties under you keeps Previous, and does not claim the filter is clear', async () => {
+  // Page one has rows and a next page; page two comes back empty — every row that
+  // was on it has been triaged away. Not driven by a filter switch, which resets the
+  // history by design and would make this assert nothing.
+  responder = (url) => (url.includes('cursor=cur-2') ? list([]) : list([letter()], 'cur-2'))
+
+  renderWithProviders(<DeadLettersPage />)
+  await screen.findByText('sequence:advance')
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  expect(await screen.findByText(/nothing left on this page/i)).toBeInTheDocument()
+  // Previous is still there and, once the fetch settles, still usable — the point.
+  // It is disabled mid-fetch on purpose, so this waits rather than racing it.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled())
+  // The lie it must not tell: earlier pages may be full of untriaged tasks.
+  expect(screen.queryByText(/other states may still have rows/i)).not.toBeInTheDocument()
+})
+
+// The 400 this PR added to the contract. Without recovery the refused cursor sits in
+// state with nothing able to clear it, and the screen is stuck on a banner.
+test('a refused cursor returns to the first page and says so', async () => {
+  responder = (url) =>
+    url.includes('cursor=')
+      ? new Response(JSON.stringify({ message: 'page cursor is not valid for this list' }), {
+          status: 400,
+          headers: jsonHeaders,
+        })
+      : list([letter()], 'cur-2')
+
+  renderWithProviders(<DeadLettersPage />)
+  await screen.findByText('sequence:advance')
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  // Recovered: back on page one with its rows, not stranded on an error banner.
+  //
+  // Queried inside waitFor rather than holding the node findByText returns: recovery
+  // re-renders, React swaps the notice for a fresh element, and asserting on the
+  // captured reference fails against a node that has already been detached.
+  // Asserted on the RECOVERED notice specifically, not on its text. The 400 error
+  // banner carries the same words, so a text query passes on the transient banner
+  // mid-recovery and proves nothing — which is exactly what it did until a revert
+  // that suppressed the notice failed to fail.
+  const notice = await screen.findByRole('status')
+  await waitFor(() => expect(notice).toHaveTextContent(/that page link expired/i))
+  expect(screen.getByText('sequence:advance')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+  // No error banner: the operator is not asked to act on something already handled.
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+// The whole point of the tag wiring in api.ts: a successful action must refresh the
+// list, or the operator stares at a row they have already dealt with. Nothing tested
+// that the invalidation is actually connected.
+test('a successful action refetches the list', async () => {
+  responder = () => list([letter()])
+
+  renderWithProviders(<DeadLettersPage />)
+  await screen.findByText('sequence:advance')
+  const before = listUrls.length
+
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Discard task' }))
+
+  await waitFor(() => expect(listUrls.length).toBeGreaterThan(before))
 })
 
 // Absence of next_cursor is the end of the list. A full page is NOT — the old code

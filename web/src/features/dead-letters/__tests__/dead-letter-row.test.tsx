@@ -38,7 +38,9 @@ beforeEach(() => {
         writes.push(`${method} ${url}`)
         return actionResponder()
       }
-      return new Response(JSON.stringify({ dead_letters: [] }), { status: 200, headers: jsonHeaders })
+      // The row issues no GET; this only keeps an unexpected one from 404-ing. Shape
+      // matches the current contract so a dead envelope cannot rot here unnoticed.
+      return new Response(JSON.stringify({ items: [] }), { status: 200, headers: jsonHeaders })
     }),
   )
 })
@@ -144,6 +146,20 @@ test('a 422 says the row can never be replayed', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Replay task' }))
 
   expect(await screen.findByRole('alert')).toHaveTextContent(/permanent/i)
+})
+
+// Someone else dealt with this row and the list has not caught up. Distinct from a
+// 409: there the row is still here in a terminal state, here it is gone entirely.
+test('a 404 says the row is gone and to refresh, not that the action failed', async () => {
+  actionResponder = () => new Response(JSON.stringify({ message: 'no such dead letter' }), { status: 404, headers: jsonHeaders })
+
+  renderWithProviders(<DeadLetterRow letter={letter()} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Discard task' }))
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(/no longer in the queue/i)
+  expect(alert).toHaveTextContent(/refresh/i)
 })
 
 /* ----------------------------------------------------------------- the payload */

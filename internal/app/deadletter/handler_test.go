@@ -286,11 +286,25 @@ func TestHandlerListRejectsAnUnknownStatusFilter(t *testing.T) {
 // is not tolerated; see TestHandlerListRejectsABadCursorWith400 for why the two
 // are treated differently.)
 func TestHandlerToleratesAGarbageLimit(t *testing.T) {
-	_, _, h, ws, _ := handlerFixture(t)
+	_, _, h, ws, row := handlerFixture(t)
 
 	for _, q := range []string{"?limit=abc", "?limit=-1", "?limit=0", "?limit=99999999999999999999"} {
-		if w := request(t, h, http.MethodGet, "/"+q, ws); w.Code != http.StatusOK {
+		w := request(t, h, http.MethodGet, "/"+q, ws)
+		if w.Code != http.StatusOK {
 			t.Errorf("GET /%s -> %d, want 200: %s", q, w.Code, w.Body)
+			continue
+		}
+		// The status alone proved nothing: swallowing a bad limit into an empty 200
+		// page would have passed this unchanged. Tolerating garbage means falling back
+		// to the DEFAULT page, so the seeded row has to actually come back.
+		var got listResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Errorf("GET /%s -> unreadable body: %v", q, err)
+			continue
+		}
+		if len(got.Items) != 1 || got.Items[0].ID != row.ID.String() {
+			t.Errorf("GET /%s returned %d items, want the one seeded row: a garbage limit must "+
+				"fall back to the default page, not silently return nothing", q, len(got.Items))
 		}
 	}
 }

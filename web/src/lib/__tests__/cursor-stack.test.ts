@@ -50,24 +50,6 @@ test('popping an empty stack is answerable, not an error: a deep link has no his
   expect(popCursor(nowhere.stack).cursor).toBeUndefined()
 })
 
-test('a filter change resets the stack, and no cursor minted before the reset comes back', () => {
-  // Two pages deep under the old filter.
-  const beforeReset = pushCursor(pushCursor([], undefined), 'old-filter-cur-2')
-
-  // Changing the filter drops the stack (the pages call setStack([])), because
-  // every cursor in it points into a result set that no longer exists.
-  const afterReset: CursorStack = []
-  expect(popCursor(afterReset).cursor).toBeUndefined()
-
-  // Walking the new results rebuilds history from nothing: one Next, then
-  // Previous, lands on the new first page — never on the old filter's cursor.
-  const back = popCursor(pushCursor(afterReset, undefined))
-  expect(back.cursor).toBeUndefined()
-  expect(back.stack).toHaveLength(0)
-
-  // The old walk is inert: it was a value, so a reset cannot be undone by one.
-  expect(beforeReset).toHaveLength(2)
-})
 
 test('a cursor is stored and returned verbatim, whatever the list encoded into it', () => {
   // This is what lets one stack serve both lists: contacts pages on an opaque

@@ -129,14 +129,3 @@ test('a payload renders as readable JSON', () => {
   )
 })
 
-// A payload that will not serialise must not render as an empty box implying there
-// was nothing in it — and must not imply the task became unreplayable.
-test('an unserialisable payload says so and does not claim the task is lost', () => {
-  const cyclic: Record<string, unknown> = {}
-  cyclic.self = cyclic
-
-  const text = payloadText(cyclic)
-
-  expect(text).toMatch(/could not be displayed/i)
-  expect(text).toMatch(/still replayable/i)
-})

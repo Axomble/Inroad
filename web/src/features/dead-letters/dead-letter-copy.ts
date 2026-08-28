@@ -97,6 +97,22 @@ export function emptyFiltered(filter: DeadLetterStatus): string {
   return `Other states may still have rows — clear the filter to see the whole queue. This view is only ${statusCopy(filter).label.toLowerCase()} tasks.`
 }
 
+/**
+ * This page emptied under the operator while they worked it — every row triaged, or
+ * the rows moved out of the filter. Distinct from "the queue is clear": earlier
+ * pages may be full, and saying the filter is empty here is the same lie the read
+ * error must not tell.
+ */
+export const EMPTY_PAGE_WITH_HISTORY =
+  'The rows that were here have been dealt with, or have moved out of this filter. Earlier pages may still have rows — go back to check.'
+
+/**
+ * Shown after a cursor is refused and the list has already returned to page one, so
+ * it reports a recovery rather than asking for one.
+ */
+export const STALE_CURSOR_NOTICE =
+  'That page link expired, so the list went back to the first page. Nothing failed and nothing was lost — page links stop working when the server is updated.'
+
 /* ---------------------------------------------------------------- the actions */
 
 /**
@@ -128,6 +144,11 @@ export function deadLetterErrorMessage(error: unknown, fallback: string): string
       return 'Your session expired. Refresh the page and try again.'
     case 403:
       return "You don't have access to this workspace's failed tasks."
+    case 400:
+      // The cursor this PR introduced. Only reachable when a held token outlives the
+      // encoding that minted it (a cursorVersion bump, a rolling deploy), so it is
+      // reported as a recovery that already happened rather than as a failure to act on.
+      return STALE_CURSOR_NOTICE
     case 422:
       return 'That status filter is not one the server recognises. Clear it to see the whole queue.'
     default:
@@ -193,14 +214,26 @@ export function attemptsText(attemptCount: number): string {
 /**
  * The payload as text for the disclosure.
  *
- * Pretty-printed rather than one line: it is read to find an id, and the contract
- * guarantees no credential is ever in it, so there is nothing here to redact. A
- * payload that will not serialise is reported rather than silently rendered empty.
+ * No try/catch: `payload` is always the product of JSON.parse on the wire response,
+ * so it can be neither cyclic nor a BigInt — the only two things that make
+ * JSON.stringify throw. Guarding it meant a branch production cannot reach and copy
+ * that can never render, reachable only by a test that manufactured a cycle by hand.
+ *
+ * Pretty-printed rather than one line: it is read to find an id.
+ *
+ * NO CREDENTIAL IS IN HERE, AND THAT IS NOT THE SAME AS "NOTHING TO REDACT" — an
+ * earlier version of this comment made that leap and it was wrong. Secrets are
+ * resolved by the worker at execution time and never travel in a task, so the
+ * credential claim holds. But CONTENT does travel: an `inbox:reply_send` payload
+ * carries `body_text`, the operator's free-text reply, and a `testsend` payload
+ * carries a recipient address. Rendering is collapsed by default for that reason
+ * and not merely for density.
+ *
+ * The disclosure this cannot fix is on the server: the list is gated on
+ * campaigns:read, while inbox:read — withheld from OAuth grants precisely because
+ * reply bodies are correspondence — is not required. Nothing the client does about
+ * a payload it has already been handed changes that.
  */
 export function payloadText(payload: unknown): string {
-  try {
-    return JSON.stringify(payload, null, 2)
-  } catch {
-    return 'This payload could not be displayed. Replay uses the payload the server captured, not this rendering, so the task is still replayable.'
-  }
+  return JSON.stringify(payload, null, 2)
 }

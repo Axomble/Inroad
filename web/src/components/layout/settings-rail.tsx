@@ -15,7 +15,7 @@ import type { WorkspaceRole } from '@/lib/rbac'
  *
  * The rail is vertical rather than a tab strip because each destination still
  * renders its own `<Page>` with its own topbar; a horizontal strip would sit
- * above seven different titles and read as a second, competing header.
+ * above as many different titles and read as a second, competing header.
  *
  * Below `sm` it becomes a horizontally scrollable row — a full vertical rail
  * would push the actual settings content off a phone screen.

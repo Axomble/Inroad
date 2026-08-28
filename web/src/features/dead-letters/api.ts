@@ -14,20 +14,15 @@ const deadLetterApi = api.enhanceEndpoints({
       // leave the pending list still showing a row that is now replayed.
       providesTags: [{ type: 'DeadLetter', id: 'LIST' }],
     },
-    getTaskDeadLetter: {
-      providesTags: (_result, _error, arg) => [{ type: 'DeadLetter', id: arg.id }],
-    },
     replayTaskDeadLetter: {
-      invalidatesTags: (_result, _error, arg) => [
-        { type: 'DeadLetter', id: 'LIST' },
-        { type: 'DeadLetter', id: arg.id },
-      ],
+      // LIST only. No detail view subscribes to a per-id tag, and wiring one for an
+      // endpoint nothing calls is a cache dependency nobody can observe.
+      invalidatesTags: [{ type: 'DeadLetter', id: 'LIST' }],
     },
     discardTaskDeadLetter: {
-      invalidatesTags: (_result, _error, arg) => [
-        { type: 'DeadLetter', id: 'LIST' },
-        { type: 'DeadLetter', id: arg.id },
-      ],
+      // LIST only. No detail view subscribes to a per-id tag, and wiring one for an
+      // endpoint nothing calls is a cache dependency nobody can observe.
+      invalidatesTags: [{ type: 'DeadLetter', id: 'LIST' }],
     },
   },
 })
