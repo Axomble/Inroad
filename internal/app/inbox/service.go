@@ -25,16 +25,15 @@ const errHalfSetCursor = "before_last_message_at and before_id must be set toget
 // interface (never the concrete PgStore), so it is unit-testable against a
 // fake without a database.
 //
-// suppression/replyEnq back Reply (see reply.go) and drafter backs DraftReply
-// (see draft.go). All three are OPTIONAL (nil-safe — see
-// checkRecipientNotSuppressed, Reply's own nil check, and DraftReply's),
-// injected via ServiceOption rather than added as NewService parameters, so
-// every existing caller of NewService(store) — and every existing unit test —
-// keeps compiling unchanged. Mirrors campaign.Service's identical shape.
+// suppression backs both reply paths (see reply.go) and drafter backs
+// DraftReply (see draft.go). Both are OPTIONAL (nil-safe — see
+// checkRecipientNotSuppressed and DraftReply's own check), injected via
+// ServiceOption rather than added as NewService parameters, so every existing
+// caller of NewService(store) — and every existing unit test — keeps compiling
+// unchanged. Mirrors campaign.Service's identical shape.
 type Service struct {
 	store       Store
 	suppression SuppressionChecker
-	replyEnq    ReplyEnqueuer
 	drafter     ReplyDrafter
 	// snoozes backs Snooze/Unsnooze/GetSnooze (see snooze.go). Optional like
 	// the rest: nil when a caller never snoozes, which keeps every existing
@@ -44,8 +43,10 @@ type Service struct {
 	// labels backs the label use cases (see label.go). Optional on the same
 	// terms as snoozes.
 	labels LabelStore
-	// pending/pendingEnq back the deferred-send use cases (see pending.go).
-	// Optional: without them the immediate Reply path is unaffected.
+	// pending/pendingEnq back BOTH reply paths (see pending.go): the deferred
+	// one and, since the body stopped travelling in a task payload, the
+	// immediate one too. Still optional in the sense that a Service built
+	// without them compiles and reads threads fine — it simply cannot send.
 	pending    PendingReplyStore
 	pendingEnq PendingReplyEnqueuer
 	// compose/composeEnq back writing a NEW email (see compose.go). Optional on
@@ -59,7 +60,7 @@ type Service struct {
 }
 
 // NewService builds a Service over store, applying any ServiceOptions (see
-// WithSuppressionChecker / WithReplyEnqueuer in reply.go).
+// WithSuppressionChecker in reply.go and WithPendingReplyStore below).
 func NewService(store Store, opts ...ServiceOption) *Service {
 	s := &Service{store: store}
 	for _, opt := range opts {
@@ -81,14 +82,15 @@ func WithLabelStore(labels LabelStore) ServiceOption {
 	return func(s *Service) { s.labels = labels }
 }
 
-// WithPendingReplyStore supplies the deferred-send persistence. PgStore
-// implements it alongside the other three store interfaces.
+// WithPendingReplyStore supplies the queued-reply persistence, which is where a
+// manual reply's BODY lives on both the immediate and the deferred path.
+// PgStore implements it alongside the other three store interfaces.
 func WithPendingReplyStore(pending PendingReplyStore) ServiceOption {
 	return func(s *Service) { s.pending = pending }
 }
 
-// WithPendingReplyEnqueuer supplies the delayed-task publisher for deferred
-// sends. Without it a scheduled row is still created (and a sweeper would pick
+// WithPendingReplyEnqueuer supplies the task publisher for queued replies.
+// Without it a scheduled row is still created (and a sweeper would pick
 // it up), but nothing is enqueued — which is why cmd/inroad always passes one.
 func WithPendingReplyEnqueuer(enq PendingReplyEnqueuer) ServiceOption {
 	return func(s *Service) { s.pendingEnq = enq }

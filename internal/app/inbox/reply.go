@@ -47,21 +47,29 @@ type SuppressionChecker interface {
 	IsSuppressed(ctx context.Context, ws uuid.UUID, email string) (bool, error)
 }
 
-// ReplyEnqueuer schedules an inbox:reply_send task. Defined here (consumer
-// side) with primitive args, like campaign.TestSendEnqueuer, so the domain
-// doesn't depend on platform/queue. Satisfied by *queue.Client.
+// ARCHITECTURE (both reply paths).
 //
-// ARCHITECTURE: decrypting a mailbox credential and dialing a provider must
-// happen ONLY in the execution plane (docs/security.md invariant 1 —
-// cmd/inroad never opens a Sealer or a provider connection). Reply therefore
-// does every synchronous validation here (thread ownership, an inbound
-// message exists, the recipient is not suppressed) and then ENQUEUES the
-// actual send as an inbox:reply_send task; internal/worker/inbox resolves the
-// transport (through the SAME coreapi credential path every real send uses)
-// and sends.
-type ReplyEnqueuer interface {
-	EnqueueInboxReplySend(threadID, bodyText, workspaceID string) error
-}
+// Decrypting a mailbox credential and dialing a provider must happen ONLY in
+// the execution plane (docs/security.md invariant 1 — cmd/inroad never opens a
+// Sealer or a provider connection). So the control plane does every synchronous
+// validation (thread ownership, an inbound message exists, the recipient is not
+// suppressed, the workspace is under its outstanding-send cap) and then hands
+// the send to the queue; internal/worker/inbox resolves the transport through
+// the SAME coreapi credential path every real send uses, and sends.
+//
+// WHAT IT HANDS THE QUEUE IS A POINTER. The reply's text is written to an
+// inbox_pending_replies row and the task carries that row's id. It used to carry
+// the text itself, in an inbox:reply_send payload, and that was a disclosure:
+// on terminal failure queue.DeadLetterErrorHandler stores a payload byte-for-
+// byte in task_dead_letters, and GET /dead-letters serves it verbatim under
+// campaigns:read — an OAuth-grantable scope, while inbox:read deliberately is
+// NOT one, precisely because reply bodies are correspondence
+// (internal/app/auth/scopes.go). A delegated third-party client could therefore
+// read reply text through a scope built to exclude it.
+//
+// Reply and ScheduleReply now differ ONLY in the send_after they resolve — an
+// immediate reply is a row whose send_after has already passed — and share
+// queueReply for everything else (see pending.go).
 
 // ServiceOption configures an optional Service dependency, mirroring
 // campaign.ServiceOption. Both are optional (nil-safe — see
@@ -79,52 +87,38 @@ func WithSuppressionChecker(c SuppressionChecker) ServiceOption {
 	return func(s *Service) { s.suppression = c }
 }
 
-// WithReplyEnqueuer wires Reply's inbox:reply_send task enqueue.
-func WithReplyEnqueuer(e ReplyEnqueuer) ServiceOption {
-	return func(s *Service) { s.replyEnq = e }
-}
-
-// Reply validates a manual reply on threadID (the thread exists in ws, has an
-// inbound message to reply to, and the recipient — that message's sender —
-// is not suppressed) and enqueues the actual render+send as an
-// inbox:reply_send task. Nothing is decrypted or dialed here — see
-// ReplyEnqueuer's doc. On success the thread is marked read: the caller who
-// just replied has, by construction, seen it.
+// Reply queues a manual reply for immediate delivery: it runs queueReply with a
+// send_after that has already passed, so the row is claimable the moment its
+// task fires (see immediateSendClaimSlack for why "already passed" and not
+// "now"). Nothing is decrypted or dialed here — see the ARCHITECTURE note above.
+//
+// The row it creates is returned to nobody. That is the one deliberate
+// difference from ScheduleReply: this endpoint's contract is a bodyless 202, and
+// handing back an id would imply an undo window that, by definition, this path
+// does not have. The row still exists, still appears in the outbox until it
+// sends, and is still what carries the body to the worker.
+//
+// On success the thread is marked read: the caller who just replied has, by
+// construction, seen it.
 //
 // A manual reply is NEVER blocked or delayed by the mailbox's daily cap or
 // minimum send interval (product decision — an operator's own reply is not
 // automation), but it IS counted toward the mailbox's daily sent volume (see
 // queries/send.sql's CountSentToday) so campaign scheduling still sees true
-// volume. Suppression, by contrast, is never bypassed.
-func (s *Service) Reply(ctx context.Context, ws, threadID uuid.UUID, bodyText string) error {
-	if err := validateReplyBody(bodyText); err != nil {
-		return err
-	}
-	detail, err := s.store.GetThread(ctx, ws, threadID)
-	if err != nil {
-		return err // already ErrNotFound-mapped by the store
-	}
-	latest, ok := latestInboundMessage(detail.Messages)
-	if !ok {
-		return ErrNoInboundMessage
-	}
-	if err := s.checkRecipientNotSuppressed(ctx, ws, latest.FromEmail); err != nil {
-		return err
-	}
-	if s.replyEnq == nil {
-		return errors.New("inbox: reply sending is not configured")
-	}
-	if err := s.replyEnq.EnqueueInboxReplySend(threadID.String(), bodyText, ws.String()); err != nil {
+// volume. Suppression, by contrast, is never bypassed — and neither, now, is
+// the workspace's outstanding-send cap, which this path inherits by writing the
+// same rows the deferred path does.
+func (s *Service) Reply(ctx context.Context, ws, threadID uuid.UUID, bodyText string, createdBy *uuid.UUID) error {
+	if _, err := s.queueReply(ctx, ws, threadID, bodyText, immediateSendAfter(s.now()), createdBy); err != nil {
 		return err
 	}
 	// The send is now QUEUED. From here, returning an error would surface as a
-	// 500 to the caller, who would reasonably retry — and the enqueue's
-	// unix-second dedup key does NOT catch a retry seconds later, so a
-	// SetUnread failure propagated here would risk a second reply actually
-	// going out. Marking read is cosmetic (an optimistic UI update the caller
-	// already knows the value of — see the handler's own doc), so a failure
-	// here is logged, not retried, mirroring how the worker treats a
-	// post-send RecordInboxReply failure for the identical reason.
+	// 500 to the caller, who would reasonably retry — and a retry would queue a
+	// SECOND row, which really would send twice. Marking read is cosmetic (an
+	// optimistic UI update the caller already knows the value of — see the
+	// handler's own doc), so a failure here is logged, not retried, mirroring
+	// how the worker treats a post-send RecordInboxReply failure for the
+	// identical reason.
 	if err := s.store.SetUnread(ctx, ws, threadID, false); err != nil {
 		slog.ErrorContext(ctx, "inbox_reply_mark_read_failed", "workspace_id", ws, "thread_id", threadID, "err", err)
 	}

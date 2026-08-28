@@ -1,9 +1,12 @@
 package inbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/hibiken/asynq"
@@ -105,15 +108,27 @@ func (m *stubMailer) Send(_ context.Context, tj mail.OutboundJob, msg mail.Messa
 	return "reply-message-id", nil
 }
 
+// legacyReplyTask wraps raw bytes in an inbox:reply_send task. Every task type
+// reference in this file goes through it, so the deprecation is acknowledged
+// once: the whole file tests a drain path, and naming the retired task type is
+// the only thing it could possibly be doing.
+//
+//nolint:staticcheck // SA1019: the deprecated task type is this file's subject.
+func legacyReplyTask(payload []byte) *asynq.Task {
+	return asynq.NewTask(queue.TaskInboxReplySend, payload)
+}
+
+//nolint:staticcheck // SA1019: same — the deprecated payload is the subject.
 func replySendTask(t *testing.T, p queue.InboxReplySendPayload) *asynq.Task {
 	t.Helper()
 	b, err := json.Marshal(p)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	return asynq.NewTask(queue.TaskInboxReplySend, b)
+	return legacyReplyTask(b)
 }
 
+//nolint:staticcheck // SA1019: same — the deprecated payload is the subject.
 func defaultReplyPayload() queue.InboxReplySendPayload {
 	return queue.InboxReplySendPayload{
 		ThreadID: "thread-1", BodyText: "thanks for reaching out", WorkspaceID: "ws-1", TaskID: "task-1",
@@ -422,8 +437,86 @@ func TestReplySendHandlerZeroizesTheCredentialAfterSend(t *testing.T) {
 }
 
 func TestReplySendHandlerRejectsMalformedPayload(t *testing.T) {
-	task := asynq.NewTask(queue.TaskInboxReplySend, []byte("not json"))
+	task := legacyReplyTask([]byte("not json"))
 	if err := ReplySendHandler(&stubReplyCore{}, &stubMailer{})(context.Background(), task); err == nil {
 		t.Fatal("err = nil, want an error for a malformed payload")
+	}
+}
+
+// --- Drain compatibility ----------------------------------------------------
+
+// legacyReplySendJSON is the payload shape as it was ENQUEUED, written out by
+// hand rather than marshalled from queue.InboxReplySendPayload.
+//
+// That is the whole point of it. This handler exists only to finish tasks that
+// were already sitting in Redis when the body stopped travelling in a payload;
+// the struct it unmarshals into is deprecated and is deleted in the release
+// after this one. A literal survives that deletion, so whoever removes the type
+// has to face this test and confirm the queue has actually drained — whereas a
+// test that marshalled the struct would vanish silently along with it, taking
+// the only proof of in-flight compatibility with it.
+const legacyReplySendJSON = `{
+	"thread_id": "thread-1",
+	"body_text": "thanks for reaching out",
+	"workspace_id": "ws-1",
+	"task_id": "task-1"
+}`
+
+// An old-shape task must still send from its own payload. Nothing produces one
+// any more, but one already in the queue has no row to read the body from — so
+// changing this handler to load from inbox_pending_replies would silently drop
+// every reply in flight at deploy time.
+func TestReplySendHandlerStillSendsAnOldShapePayloadFromItsOwnBody(t *testing.T) {
+	core := &stubReplyCore{
+		job:       defaultReplyJob(),
+		transport: coreapi.SenderTransport{Provider: "smtp", FromEmail: "me@x.test"},
+	}
+	mailer := &stubMailer{}
+
+	task := legacyReplyTask([]byte(legacyReplySendJSON))
+	if err := ReplySendHandler(core, mailer)(context.Background(), task); err != nil {
+		t.Fatalf("ReplySendHandler: %v", err)
+	}
+	if mailer.calls != 1 {
+		t.Fatalf("mailer calls = %d, want 1 — an in-flight legacy task must still be delivered", mailer.calls)
+	}
+	if mailer.msg.BodyText != "thanks for reaching out" {
+		t.Errorf("body_text = %q, want the legacy payload's own body: there is no row to read it from",
+			mailer.msg.BodyText)
+	}
+	if mailer.msg.To != "lead@x.test" {
+		t.Errorf("to = %q, want the job's recipient", mailer.msg.To)
+	}
+	if len(core.claimCalls) != 1 || core.claimCalls[0] != [2]string{"ws-1", "task-1"} {
+		t.Errorf("claim calls = %+v, want [{ws-1 task-1}] read from the legacy payload", core.claimCalls)
+	}
+}
+
+// The drain's own signal. An operator deletes this handler when it stops firing,
+// so it has to say it fired — with IDS ONLY. The payload is the operator's
+// correspondence; logging it here would recreate, in the log sink, exactly the
+// disclosure moving the body out of the payload closed.
+func TestReplySendHandlerLogsTheDrainWithIDsOnlyAndNeverTheBody(t *testing.T) {
+	restore := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	core := &stubReplyCore{job: defaultReplyJob(), transport: coreapi.SenderTransport{Provider: "smtp"}}
+	task := legacyReplyTask([]byte(legacyReplySendJSON))
+	if err := ReplySendHandler(core, &stubMailer{})(context.Background(), task); err != nil {
+		t.Fatalf("ReplySendHandler: %v", err)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "inbox_reply_send_legacy_drain") {
+		t.Fatalf("the drain was not logged, so nothing tells an operator this handler is still "+
+			"needed: %s", out)
+	}
+	if !strings.Contains(out, "thread-1") || !strings.Contains(out, "ws-1") {
+		t.Errorf("the drain log names no ids, so it cannot be traced: %s", out)
+	}
+	if strings.Contains(out, "thanks for reaching out") {
+		t.Errorf("the reply body was written to the log: %s", out)
 	}
 }

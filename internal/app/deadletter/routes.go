@@ -32,10 +32,23 @@ import (
 // would be the wrong way round.
 //
 // Neither write scope is OAuth-grantable (see auth.OAuthGrantableScopes), so a
-// third-party client can never replay or discard; campaigns:read is grantable,
-// which means a delegated client CAN read this list. That is consistent with it
-// already being able to read campaigns and sends — a dead letter's payload
-// names ids from data that scope already exposes.
+// third-party client can never replay or discard; campaigns:read IS grantable,
+// which means a delegated client can read this list — payloads and all.
+//
+// That is only acceptable while a payload is a POINTER. The list serves the
+// captured bytes verbatim, so whatever a task carries, this scope reads. It was
+// not always a pointer: inbox:reply_send carried the operator's free-text reply,
+// and campaigns:read therefore reached correspondence that inbox:read is
+// deliberately NOT granted (auth.OAuthGrantableScopes says why — reply bodies
+// are a materially more sensitive category than the structured CRM data this set
+// covers). The body now lives in an inbox_pending_replies row, capture of that
+// task type is refused outright (internal/platform/queue), and migration
+// 20260828133405 stripped the rows that already existed.
+//
+// The rule that has to hold for this scope choice to stay honest: a task payload
+// names WHAT failed — ids, plus at most contact-class data the campaign scopes
+// already expose — and never the content of a message.
+// internal/platform/queue's TestTaskPayloadsCarryNoContent is what enforces it.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.With(auth.RequireScope(auth.ScopeCampaignsRead)).Group(func(read chi.Router) {

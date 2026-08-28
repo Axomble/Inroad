@@ -154,16 +154,24 @@ type TestSendPayload struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
-// TaskInboxReplySend sends one manual reply queued from the unified inbox
-// (POST /inbox/threads/{id}/reply). One task per reply.
+// TaskInboxReplySend sent one manual reply whose body travelled in the task
+// payload. POST /inbox/threads/{id}/reply now queues an inbox_pending_replies
+// row and enqueues TaskInboxPendingReplySend instead, so nothing produces this
+// any more; the constant and its handler survive only to drain tasks that were
+// already in Redis when this shipped.
+//
+// Deprecated: drain-only; removed in the release after this one. Nothing
+// enqueues this.
 const TaskInboxReplySend = "inbox:reply_send"
 
-// TaskInboxPendingReplySend delivers a DEFERRED manual reply — one whose row in
-// inbox_pending_replies carries the body and the authoritative send_after.
-// Distinct from TaskInboxReplySend, which carries the body in its own payload
-// and has no row to cancel: this task is only a POINTER to a row, so the
-// operator can undo the send by updating that row while the task is still
-// pending in the queue.
+// TaskInboxPendingReplySend delivers a manual reply — one whose row in
+// inbox_pending_replies carries the body and the authoritative send_after. This
+// task is only a POINTER to a row, which is what lets the operator undo the send
+// by updating that row while the task is still pending in the queue, and what
+// keeps the body out of Redis and out of a captured dead letter.
+//
+// Both the immediate and the deferred send paths use it: an immediate reply is
+// a row whose send_after has already passed.
 const TaskInboxPendingReplySend = "inbox:pending_reply_send"
 
 // TaskInboxPendingComposeSend delivers a deferred COMPOSED email — a new
@@ -172,23 +180,12 @@ const TaskInboxPendingReplySend = "inbox:pending_reply_send"
 // TaskInboxPendingReplySend, and cancellable the same way.
 const TaskInboxPendingComposeSend = "inbox:pending_compose_send"
 
-// InboxReplySendPayload is the body of an inbox:reply_send task. WorkspaceID
-// travels alongside ThreadID so the worker can pin workspace_id in its
-// coreapi lookups (defense in depth on the unguessable thread UUID).
-// BodyText is the operator's free-text reply content — never logged by the
-// handler that consumes it, like every other piece of business
-// correspondence in this domain. TaskID carries the SAME id set as this
-// task's asynq.TaskID (below) — stable across retries AND a crash-induced
-// lease redelivery of this exact task, which is what makes it usable as the
-// claim-before-send key (internal/worker/inbox.ReplySendHandler). Carried in
-// the payload rather than read from the handler's context via
-// asynq.GetTaskID (which would work identically in production but is opaque
-// to construct in a unit test that builds a task directly) — this way the
-// SAME value is trivially assertable in tests.
 // InboxPendingReplySendPayload names a row in inbox_pending_replies. It
 // carries NO body: the row is the single source of truth for what to send and
 // whether to send it at all, so a payload copy could go stale the moment the
-// operator cancels.
+// operator cancels — and, as InboxReplySendPayload's history below shows, a
+// payload copy of a reply body is disclosed by GET /dead-letters under a scope
+// that is deliberately denied the inbox.
 type InboxPendingReplySendPayload struct {
 	PendingID   string `json:"pending_id"`
 	WorkspaceID string `json:"workspace_id"`
@@ -202,6 +199,29 @@ type InboxPendingComposeSendPayload struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// InboxReplySendPayload is the body of an inbox:reply_send task: a thread id, a
+// workspace pin, the claim key, and — the reason this type is being retired —
+// the operator's free-text reply in BodyText.
+//
+// A payload is not a private channel between an enqueuer and its handler. On
+// terminal failure DeadLetterErrorHandler stores it byte-for-byte in
+// task_dead_letters and GET /dead-letters serves it verbatim under
+// campaigns:read, which IS OAuth-grantable — while inbox:read is deliberately
+// NOT, precisely because reply bodies are correspondence (see
+// internal/app/auth/scopes.go). Carrying the body here therefore handed
+// correspondence to a scope that is structurally denied it.
+//
+// The replacement is the pointer shape InboxPendingReplySendPayload already
+// had: the body lives in an inbox_pending_replies row and the task names it.
+// Nothing constructs this type any more, capture of its task type is suppressed
+// (see legacyContentBearingTaskTypes in deadletter.go), and the only consumer
+// left is the drain handler internal/worker/inbox.ReplySendHandler.
+//
+// TaskID carried the SAME id as the task's own asynq.TaskID, which is what made
+// it usable as the claim-before-send key across retries and lease redeliveries.
+//
+// Deprecated: drain-only; removed in the release after this one. Nothing
+// enqueues this.
 type InboxReplySendPayload struct {
 	ThreadID    string `json:"thread_id"`
 	BodyText    string `json:"body_text"`
@@ -415,20 +435,7 @@ func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID 
 	)
 }
 
-// inboxReplySendTaskID keys an inbox:reply_send on (thread, due-second),
-// mirroring testSendTaskID's dedup discipline: a double-submitted "send
-// reply" click within the same second collapses to one send, while a
-// genuinely distinct reply a moment later still enqueues. There is no
-// downstream row-claim backing this as a correctness guarantee (unlike
-// enqueueAdvance) — this key only cuts an accidental double-click. The reply
-// body is deliberately NOT part of the key (free-text business
-// correspondence, kept out of a Redis-visible identifier).
-func inboxReplySendTaskID(threadID string, now time.Time) string {
-	return fmt.Sprintf("inboxreply:%s:%d", threadID, now.Unix())
-}
-
-// EnqueuePendingInboxReply schedules a deferred manual reply for delivery at
-// sendAfter.
+// EnqueuePendingInboxReply schedules a manual reply for delivery at sendAfter.
 //
 // asynq.ProcessAt, not ProcessIn: the moment is already absolute (the row's
 // send_after), and converting it to a duration here would introduce a skew
@@ -473,27 +480,6 @@ func (c *Client) EnqueuePendingInboxCompose(pendingID, workspaceID string, sendA
 	return c.enqueue(asynq.NewTask(TaskInboxPendingComposeSend, b),
 		asynq.TaskID("inboxcompose:"+pendingID),
 		asynq.ProcessAt(sendAfter),
-		asynq.MaxRetry(sendMaxRetry),
-		asynq.Timeout(sendTimeout),
-		asynq.Retention(taskRetention),
-	)
-}
-
-// EnqueueInboxReplySend enqueues an inbox:reply_send task for immediate
-// processing. The SAME generated id is set as both the payload's TaskID
-// field and the task's own asynq.TaskID, so the handler's claim key and
-// asynq's own dedup/retry identity are always the one value — see
-// InboxReplySendPayload.TaskID's doc for why the payload carries it at all.
-func (c *Client) EnqueueInboxReplySend(threadID, bodyText, workspaceID string) error {
-	taskID := inboxReplySendTaskID(threadID, time.Now())
-	b, err := json.Marshal(InboxReplySendPayload{
-		ThreadID: threadID, BodyText: bodyText, WorkspaceID: workspaceID, TaskID: taskID,
-	})
-	if err != nil {
-		return err
-	}
-	return c.enqueue(asynq.NewTask(TaskInboxReplySend, b),
-		asynq.TaskID(taskID),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),

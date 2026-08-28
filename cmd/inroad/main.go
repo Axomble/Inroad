@@ -482,7 +482,6 @@ func run() error {
 		// before dialing (defense in depth against a race with an incoming
 		// unsubscribe between enqueue and the task running).
 		inbox.WithSuppressionChecker(suppStore),
-		inbox.WithReplyEnqueuer(enq),
 		inbox.WithReplyDrafter(replyDrafterAdapter{runtime: runtime}),
 		inbox.WithSnoozeStore(inboxStore),
 		inbox.WithLabelStore(inboxStore),

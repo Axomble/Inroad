@@ -21,10 +21,13 @@ type cleanupCore struct {
 	observationsErr     error
 	workersDeleted      int64
 	workersErr          error
+	deadLettersDeleted  int64
+	deadLettersErr      error
 	called              bool
 	idempotencyCalled   bool
 	observationsCalled  bool
 	workersCalled       bool
+	deadLettersCalled   bool
 }
 
 func (c *cleanupCore) CleanupExpired(context.Context) (int64, error) {
@@ -47,8 +50,13 @@ func (c *cleanupCore) PurgeDeadWorkers(context.Context) (int64, error) {
 	return c.workersDeleted, c.workersErr
 }
 
+func (c *cleanupCore) PurgeDeadLetters(context.Context) (int64, error) {
+	c.deadLettersCalled = true
+	return c.deadLettersDeleted, c.deadLettersErr
+}
+
 func TestCleanupHandler(t *testing.T) {
-	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2}
+	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2, deadLettersDeleted: 4}
 	if err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil)); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -63,6 +71,24 @@ func TestCleanupHandler(t *testing.T) {
 	}
 	if !core.workersCalled {
 		t.Fatal("PurgeDeadWorkers was not called")
+	}
+	if !core.deadLettersCalled {
+		t.Fatal("PurgeDeadLetters was not called")
+	}
+}
+
+// task_dead_letters had no retention sweep before this and grows with failures
+// nobody schedules, so a purge that silently stopped running would be invisible
+// until the table was a problem. The failure surfaces for retry instead.
+func TestCleanupHandlerReturnsErrorOnDeadLetterPurgeFailure(t *testing.T) {
+	want := errors.New("db unavailable")
+	core := &cleanupCore{deadLettersErr: want}
+	err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
+	if !errors.Is(err, want) {
+		t.Fatalf("handler error = %v, want %v", err, want)
+	}
+	if !core.workersCalled {
+		t.Fatal("the earlier purges should still have run")
 	}
 }
 
@@ -103,6 +129,9 @@ func TestCleanupHandlerReturnsErrorForRetry(t *testing.T) {
 	}
 	if core.observationsCalled {
 		t.Fatal("PurgeWarmupObservations must not run when CleanupExpired already failed")
+	}
+	if core.deadLettersCalled {
+		t.Fatal("PurgeDeadLetters must not run when CleanupExpired already failed")
 	}
 }
 

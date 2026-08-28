@@ -105,12 +105,19 @@ func (c client) RecordInboxReply(ctx context.Context, in coreapi.RecordInboxRepl
 const inboxReplyClaimKeyPrefix = "inbox-reply:"
 
 // ClaimInboxReply attempts to claim taskID for delivery — claim-before-send
-// for a manual reply, the SAME correctness problem ClaimStepSend/
-// ClaimWarmupSend solve for a sequence/warmup send, solved here by reusing
-// the EXISTING generic Idempotency-Key replay cache (migration 000045)
-// rather than inventing a THIRD claim table: taskID is stable across every
-// retry/redelivery of one enqueued inbox:reply_send task (see
-// queue.InboxReplySendPayload.TaskID's doc), so claiming (workspace_id,
+// for a manual reply.
+//
+// DRAIN ONLY, like the handler that calls it: a manual reply is now a row in
+// inbox_pending_replies and the row's own status guard is its claim
+// (ClaimInboxPendingReply), which is strictly stronger than this. This exists
+// for tasks that were already in Redis at the cutover, and is deleted with
+// worker/inbox.ReplySendHandler in the release after this one.
+//
+// It solves the SAME correctness problem ClaimStepSend/ClaimWarmupSend solve
+// for a sequence/warmup send, by reusing the EXISTING generic Idempotency-Key
+// replay cache (migration 000045) rather than inventing a THIRD claim table:
+// taskID is stable across every retry/redelivery of one enqueued
+// inbox:reply_send task, so claiming (workspace_id,
 // "inbox-reply:"+taskID) once and skipping every later attempt at the SAME
 // task is exactly the claim semantics this needs. claimed=false means
 // another attempt at this exact task already reached the dial (a prior

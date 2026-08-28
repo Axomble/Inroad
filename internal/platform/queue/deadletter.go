@@ -22,8 +22,44 @@ import (
 // interpret a task's body beyond extracting the workspace id (see
 // workspaceFromPayload): every task type has its own shape, and a capture path
 // that had to know all of them would break the moment a handler was added.
+// legacyContentBearingTaskTypes is the ONE deliberate exception to that design,
+// and it is temporary — see its doc.
 type DeadLetterRecorder interface {
 	RecordDeadLetter(ctx context.Context, in DeadLetter) error
+}
+
+// legacyContentBearingTaskTypes names the task types whose payload carries
+// business content rather than ids, and whose capture must therefore be
+// suppressed outright.
+//
+// There is exactly one, and it is on its way out. inbox:reply_send carried the
+// operator's free-text reply in queue.InboxReplySendPayload.BodyText. Capturing
+// one stored that text in task_dead_letters, where GET /dead-letters serves the
+// payload verbatim under campaigns:read — an OAuth-grantable scope, while
+// inbox:read is deliberately NOT one, precisely because reply bodies are
+// correspondence (internal/app/auth/scopes.go). So the capture path handed
+// correspondence to a scope structurally denied it.
+//
+// Redacting the body on capture instead was considered and rejected: a
+// body-stripped row is REPLAYABLE, and replaying it would send a BLANK reply to
+// a real contact. A body-bearing row is the disclosure. Neither is acceptable,
+// so the row is not written at all — the failure is logged loudly instead, which
+// is the same outcome an unownable payload already gets.
+//
+// This IS an exception to this file's "does not interpret a task's body" design,
+// and it is not a precedent: a task type belongs here only while it is draining.
+// Nothing enqueues an inbox:reply_send any more, so this map, the drain handler
+// (internal/worker/inbox.ReplySendHandler), and the payload type are all deleted
+// together in the release after this one.
+var legacyContentBearingTaskTypes = map[string]struct{}{
+	TaskInboxReplySend: {},
+}
+
+// isLegacyContentBearing reports whether capturing this task type would store
+// business correspondence rather than a pointer to it.
+func isLegacyContentBearing(taskType string) bool {
+	_, ok := legacyContentBearingTaskTypes[taskType]
+	return ok
 }
 
 // DeadLetter is one retry-exhausted task, as observed at asynq's terminal
@@ -68,37 +104,70 @@ func DeadLetterErrorHandler(recorder DeadLetterRecorder, logger *slog.Logger) as
 		if !terminal {
 			return
 		}
-
-		workspaceID, ok := workspaceFromPayload(task.Payload())
-		if !ok {
-			// Nothing can own this row and nothing could ever list or replay
-			// it, so storing it would be worse than useless: it would be an
-			// unreachable row on a tenant-scoped table. The task type and the
-			// error are still worth an operator's attention, so they are
-			// logged loudly. The PAYLOAD is deliberately absent from the log —
-			// task payloads carry reply bodies and recipient addresses.
-			logger.ErrorContext(ctx, "task exhausted retries but carries no workspace; not captured",
-				"task_type", task.Type(), "attempts", retried+1, "err", taskErr)
-			return
-		}
-
-		in := DeadLetter{
-			WorkspaceID:  workspaceID,
-			TaskType:     task.Type(),
-			Payload:      task.Payload(),
-			LastError:    errorMessage(taskErr),
-			AttemptCount: retried + 1, // retries made, plus the attempt that just failed
-		}
-		if err := recorder.RecordDeadLetter(ctx, in); err != nil {
-			logger.ErrorContext(ctx, "failed to record dead letter",
-				"task_type", task.Type(), "workspace_id", workspaceID,
-				"attempts", in.AttemptCount, "err", err)
-			return
-		}
-		logger.WarnContext(ctx, "task exhausted retries and was dead-lettered",
-			"task_type", task.Type(), "workspace_id", workspaceID,
-			"attempts", in.AttemptCount, "max_retry", maxRetry, "err", taskErr)
+		recordTerminalFailure(ctx, recorder, logger, task, taskErr, retried+1, maxRetry)
 	})
+}
+
+// recordTerminalFailure is the capture itself: decide whether this failure can
+// be stored, then store it. attempts is the retries already made plus the one
+// that just failed.
+//
+// Split from the handler above for the same reason isLastAttempt is split from
+// isTerminalFailure: asynq populates the retry counters through an internal
+// package this module cannot import, so a genuinely terminal context cannot be
+// constructed in a test. Everything that could actually be WRONG about capture
+// — which task types are refused, what is logged, what reaches the recorder —
+// lives here, where a test can reach it.
+func recordTerminalFailure(
+	ctx context.Context,
+	recorder DeadLetterRecorder,
+	logger *slog.Logger,
+	task *asynq.Task,
+	taskErr error,
+	attempts, maxRetry int,
+) {
+	if isLegacyContentBearing(task.Type()) {
+		// Not captured, and not redacted-then-captured either: a body-stripped
+		// row stays REPLAYABLE and would send a blank reply to a real contact,
+		// while a body-bearing row is the disclosure this suppression exists to
+		// close (see legacyContentBearingTaskTypes). Logged loudly instead —
+		// this is still a permanently dropped send, and the log line is now the
+		// operator's only record of it. Ids and the error only; the payload is
+		// the correspondence and never appears.
+		logger.ErrorContext(ctx, "task exhausted retries and was NOT captured; its payload carries correspondence",
+			"task_type", task.Type(), "attempts", attempts, "max_retry", maxRetry, "err", taskErr)
+		return
+	}
+
+	workspaceID, ok := workspaceFromPayload(task.Payload())
+	if !ok {
+		// Nothing can own this row and nothing could ever list or replay
+		// it, so storing it would be worse than useless: it would be an
+		// unreachable row on a tenant-scoped table. The task type and the
+		// error are still worth an operator's attention, so they are
+		// logged loudly. The PAYLOAD is deliberately absent from the log —
+		// task payloads carry recipient addresses.
+		logger.ErrorContext(ctx, "task exhausted retries but carries no workspace; not captured",
+			"task_type", task.Type(), "attempts", attempts, "err", taskErr)
+		return
+	}
+
+	in := DeadLetter{
+		WorkspaceID:  workspaceID,
+		TaskType:     task.Type(),
+		Payload:      task.Payload(),
+		LastError:    errorMessage(taskErr),
+		AttemptCount: attempts,
+	}
+	if err := recorder.RecordDeadLetter(ctx, in); err != nil {
+		logger.ErrorContext(ctx, "failed to record dead letter",
+			"task_type", task.Type(), "workspace_id", workspaceID,
+			"attempts", in.AttemptCount, "err", err)
+		return
+	}
+	logger.WarnContext(ctx, "task exhausted retries and was dead-lettered",
+		"task_type", task.Type(), "workspace_id", workspaceID,
+		"attempts", in.AttemptCount, "max_retry", maxRetry, "err", taskErr)
 }
 
 // isTerminalFailure reports whether this failure is the LAST one for the task —

@@ -312,8 +312,9 @@ func (s *Service) releaseClaim(ctx context.Context, row gen.TaskDeadLetter) {
 		// Logged, not returned: the caller is already failing for a reason the
 		// operator needs to see, and this row is now stranded in 'replayed'
 		// with nothing enqueued — which is precisely the state this log line
-		// exists to make findable. The payload is NOT logged (task payloads
-		// carry reply bodies and recipient addresses).
+		// exists to make findable. The payload is NOT logged: it carries
+		// recipient addresses, and a log sink is a different audience from the
+		// tenant this API answers to.
 		slog.ErrorContext(releaseCtx, "dead-letter replay claim could not be released",
 			"dead_letter_id", row.ID, "workspace_id", row.WorkspaceID,
 			"task_type", row.TaskType, "err", err)

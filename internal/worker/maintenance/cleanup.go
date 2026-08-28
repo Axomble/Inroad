@@ -27,12 +27,19 @@ type Cleaner interface {
 	// window plus the mailbox assignments pinned to them. Separate again: this is
 	// global infrastructure state, not a security artifact or an HTTP concern.
 	PurgeDeadWorkers(ctx context.Context) (deleted int64, err error)
+	// PurgeDeadLetters removes captured retry-exhausted tasks past their 90-day
+	// retention. Separate for the same reason as the two above: a dead letter is
+	// a record of dropped work, neither a security artifact nor an HTTP concern.
+	// It is here at all because the table had no sweep and grows with failures
+	// nobody schedules — the reasoning behind invariant 55's warmup purge.
+	PurgeDeadLetters(ctx context.Context) (deleted int64, err error)
 }
 
-// CleanupHandler purges expired security artifacts, expired Idempotency-Key
-// replay-cache rows, AND warmup evidence past its retention window. Returning a database error from either
-// purge lets asynq retry; successful runs log each affected count for
-// observability.
+// CleanupHandler purges, in order: expired security artifacts, expired
+// Idempotency-Key replay-cache rows, warmup evidence past its retention window,
+// dead workers with their mailbox assignments, and captured dead letters past
+// theirs. Returning a database error from any purge lets asynq retry; successful
+// runs log each affected count for observability.
 func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, _ *asynq.Task) error {
 		deleted, err := core.CleanupExpired(ctx)
@@ -58,6 +65,12 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "dead workers and their assignments purged", "rows", workersDeleted)
+
+		deadLettersDeleted, err := core.PurgeDeadLetters(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired dead letters purged", "rows", deadLettersDeleted)
 		return nil
 	}
 }

@@ -5,6 +5,7 @@ package deadletter
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -456,6 +457,145 @@ func TestDiscardIsStatusGuarded(t *testing.T) {
 	}
 	if ok, err := store.Discard(ctx, ws, row.ID); err != nil || ok {
 		t.Errorf("Discard of a replayed row: ok=%v err=%v, want ok=false", ok, err)
+	}
+}
+
+// migrationBeforeRedaction is the version immediately preceding
+// 20260828133405_task_dead_letters_redact_reply_bodies. Named rather than
+// computed because MigrateTo rejects a version that does not exist, so
+// "mine minus one" is not a thing a timestamped scheme can express.
+//
+// A migration landing BETWEEN this one and the redaction is harmless: the roll
+// back simply goes one step further and the following Migrate re-applies both.
+const migrationBeforeRedaction = 20260828095015
+
+// TestMigrationRedactsLegacyReplyBodies runs the real data migration against
+// rows shaped exactly as the pre-fix capture path produced them.
+//
+// Two things have to be true at once, and neither alone is enough:
+//
+//   - the BODY is gone. It is the disclosure: task_dead_letters is served
+//     verbatim by GET /dead-letters under campaigns:read, an OAuth-grantable
+//     scope, while inbox:read is deliberately not one because reply bodies are
+//     correspondence.
+//   - the row SURVIVES, and a pending one becomes discarded. Deleting it would
+//     destroy the operator's only record that a send was lost; leaving it
+//     pending would leave a body-stripped reply REPLAYABLE, and replaying one
+//     delivers a blank message to a real contact.
+//
+// A scratch database, because this rolls the schema backwards: doing that on the
+// shared test database would pull the schema out from under every other
+// integration package running beside it.
+func TestMigrationRedactsLegacyReplyBodies(t *testing.T) {
+	ctx := context.Background()
+	dsn := dbtest.ScratchDSN(t, "deadletter_redact")
+
+	// Everything up to, but not including, the redaction.
+	if err := db.MigrateTo(dsn, migrationBeforeRedaction); err != nil {
+		t.Fatalf("migrate to %d: %v", migrationBeforeRedaction, err)
+	}
+	pool, err := db.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	var ws uuid.UUID
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO workspaces (name) VALUES ('deadletter-redact-it') RETURNING id").Scan(&ws); err != nil {
+		t.Fatalf("insert workspace: %v", err)
+	}
+
+	const sentinel = "SENTINEL-please-send-me-your-pricing-8b71"
+	threadID := uuid.NewString()
+	legacyPayload := `{"thread_id":"` + threadID + `","body_text":"` + sentinel +
+		`","workspace_id":"` + ws.String() + `","task_id":"inboxreply:t:1700000000"}`
+
+	// One of each status, so the CASE arm is exercised in both directions, plus a
+	// row of a DIFFERENT task type that must be left completely alone.
+	var pendingID, discardedID, replayedID, otherID uuid.UUID
+	seed := func(taskType, payload, status string) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
+			VALUES ($1, $2, $3::jsonb, 'smtp: connection refused', 6, $4) RETURNING id`,
+			ws, taskType, payload, status).Scan(&id); err != nil {
+			t.Fatalf("seed %s/%s: %v", taskType, status, err)
+		}
+		return id
+	}
+	pendingID = seed("inbox:reply_send", legacyPayload, "pending")
+	discardedID = seed("inbox:reply_send", legacyPayload, "discarded")
+	replayedID = seed("inbox:reply_send", legacyPayload, "replayed")
+	otherID = seed("sequence:advance",
+		`{"enrollment_id":"`+uuid.NewString()+`","workspace_id":"`+ws.String()+`"}`, "pending")
+
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	type row struct {
+		payload  string
+		status   string
+		thread   *string
+		hasBody  bool
+		wsInside *string
+	}
+	read := func(id uuid.UUID) row {
+		t.Helper()
+		var r row
+		if err := pool.QueryRow(ctx, `
+			SELECT payload::text, status, payload->>'thread_id', payload ? 'body_text', payload->>'workspace_id'
+			FROM task_dead_letters WHERE id = $1`, id).
+			Scan(&r.payload, &r.status, &r.thread, &r.hasBody, &r.wsInside); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		return r
+	}
+
+	for name, tc := range map[string]struct {
+		id         uuid.UUID
+		wantStatus string
+	}{
+		"pending becomes discarded": {pendingID, StatusDiscarded},
+		"discarded stays discarded": {discardedID, StatusDiscarded},
+		"replayed stays replayed":   {replayedID, StatusReplayed},
+	} {
+		got := read(tc.id)
+		if got.hasBody {
+			t.Errorf("%s: payload still carries body_text: %s", name, got.payload)
+		}
+		if strings.Contains(got.payload, sentinel) {
+			t.Errorf("%s: the reply body survived under some other key: %s", name, got.payload)
+		}
+		if got.status != tc.wantStatus {
+			t.Errorf("%s: status = %q, want %q", name, got.status, tc.wantStatus)
+		}
+		// The row is REDACTED, not emptied: what it names is the operator's
+		// record that this send was lost, and it has to still say which thread.
+		if got.thread == nil || *got.thread != threadID {
+			t.Errorf("%s: thread_id = %v, want it preserved (%s)", name, got.thread, threadID)
+		}
+		if got.wsInside == nil || *got.wsInside != ws.String() {
+			t.Errorf("%s: workspace_id = %v, want it preserved — without it the row cannot be "+
+				"validated for replay at all", name, got.wsInside)
+		}
+	}
+
+	// Untouched: the statement is scoped to the one task type whose payload
+	// carried content.
+	if other := read(otherID); other.status != StatusPending {
+		t.Errorf("a sequence:advance row was changed to %q; the migration must touch only "+
+			"inbox:reply_send", other.status)
+	}
+
+	// And the consequence a caller sees: a redacted row is no longer replayable,
+	// so nobody can re-enqueue a reply with no body.
+	store := NewPgStore(gen.New(pool))
+	if _, claimed, err := store.ClaimReplay(ctx, ws, pendingID); err != nil || claimed {
+		t.Errorf("ClaimReplay on a redacted row: claimed=%v err=%v, want claimed=false — "+
+			"replaying it would send a blank reply to a real contact", claimed, err)
 	}
 }
 

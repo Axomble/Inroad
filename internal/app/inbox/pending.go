@@ -115,9 +115,10 @@ type PendingReplyStore interface {
 	SetUndoWindow(ctx context.Context, workspaceID uuid.UUID, seconds int32) error
 }
 
-// PendingReplyEnqueuer hands a scheduled send to the execution plane. Separate
-// from ReplyEnqueuer because the payload differs (a pending-reply id, not a
-// thread id and body) and because this one carries a delay.
+// PendingReplyEnqueuer hands a queued send to the execution plane. Its
+// arguments are the whole contract, and the absence in them is the point: two
+// ids and an instant, never the body. The row is the single source of truth for
+// what to send, so the task is only a pointer to it — see queueReply.
 type PendingReplyEnqueuer interface {
 	EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error
 }
@@ -144,15 +145,10 @@ const (
 // sendAt nil means "as soon as the undo window allows" — the ordinary Send
 // button. A non-nil sendAt is an explicit schedule and is bounded.
 //
-// Every validation Reply already performs (body length, thread exists, an
-// inbound message to reply to, recipient not suppressed) runs here too, and for
-// the same reasons: rejecting at schedule time is far better than accepting and
-// silently dropping the send minutes later when the worker discovers it.
-//
-// The suppression check is re-run by the worker as well. That is not redundant
-// — with a delay window the race it guards is now seconds-to-minutes wide, so a
-// contact who unsubscribes between scheduling and sending is a real case rather
-// than a theoretical one.
+// The validation, row write and enqueue are queueReply's, shared verbatim with
+// the immediate path: the two differ only in the send_after they resolve, and
+// letting them differ in anything else is how "accepted for scheduling but
+// rejected at send time" gets reintroduced.
 func (s *Service) ScheduleReply(
 	ctx context.Context,
 	workspaceID, threadID uuid.UUID,
@@ -162,6 +158,56 @@ func (s *Service) ScheduleReply(
 ) (PendingReply, error) {
 	if s.pending == nil {
 		return PendingReply{}, fmt.Errorf("%w: deferred replies are not configured", ErrValidation)
+	}
+	// Resolved first because it reads the workspace's undo window, which
+	// queueReply has no business knowing about; a bad explicit instant is the
+	// caller's own input and is worth reporting ahead of anything else.
+	sendAfter, err := s.resolveSendAfter(ctx, workspaceID, sendAt)
+	if err != nil {
+		return PendingReply{}, err
+	}
+	// Marking read is deliberately NOT done here, unlike the immediate Reply
+	// path. An undone send should not leave the thread read: the operator
+	// changed their mind, and the thread is still theirs to deal with. It moves
+	// to the moment the send actually lands (RecordOutboundReply's caller).
+	return s.queueReply(ctx, workspaceID, threadID, bodyText, sendAfter, createdBy)
+}
+
+// queueReply is the ONE path a manual reply takes into the queue, shared by the
+// immediate (Reply) and deferred (ScheduleReply) entry points. Everything
+// between validating the body and handing the queue a row id lives here, so the
+// two cannot drift: a body accepted for scheduling is one the immediate path
+// would also have accepted, and neither can acquire a check the other lacks.
+//
+// The body is written to an inbox_pending_replies row and the queue is handed
+// that row's ID. That is the shape, and it is load-bearing rather than
+// incidental: a task payload is stored byte-for-byte in task_dead_letters on
+// terminal failure and served by GET /dead-letters under campaigns:read — an
+// OAuth-grantable scope, while inbox:read deliberately is not, because reply
+// bodies are correspondence. A body in a payload is therefore a body in a
+// response to a scope structurally denied it.
+//
+// Every validation runs BEFORE the row is created: rejecting at queue time is
+// far better than accepting and silently dropping the send later when the
+// worker discovers the problem, and a row written then abandoned would sit in
+// the operator's outbox offering an Undo for mail that is going nowhere.
+//
+// The suppression check is re-run by the worker as well. That is not redundant:
+// with any delay at all the race it guards is real, so a contact who
+// unsubscribes between queueing and sending is a case rather than a theory.
+func (s *Service) queueReply(
+	ctx context.Context,
+	workspaceID, threadID uuid.UUID,
+	bodyText string,
+	sendAfter time.Time,
+	createdBy *uuid.UUID,
+) (PendingReply, error) {
+	// ScheduleReply checks this first (it reads the undo window before getting
+	// here), so in practice this guard is the immediate path's. There is no safe
+	// "unwired" default for actually sending mail: without somewhere to put the
+	// body, failing is the only honest answer.
+	if s.pending == nil {
+		return PendingReply{}, errors.New("inbox: reply sending is not configured")
 	}
 	if err := validateReplyBody(bodyText); err != nil {
 		return PendingReply{}, err
@@ -180,11 +226,6 @@ func (s *Service) ScheduleReply(
 	}
 
 	if err := s.checkOutstandingSendCapacity(ctx, workspaceID); err != nil {
-		return PendingReply{}, err
-	}
-
-	sendAfter, err := s.resolveSendAfter(ctx, workspaceID, sendAt)
-	if err != nil {
 		return PendingReply{}, err
 	}
 
@@ -228,10 +269,6 @@ func (s *Service) ScheduleReply(
 		}
 	}
 
-	// Marking read is deliberately NOT done here, unlike the immediate Reply
-	// path. An undone send should not leave the thread read: the operator
-	// changed their mind, and the thread is still theirs to deal with. It moves
-	// to the moment the send actually lands (RecordOutboundReply's caller).
 	return saved, nil
 }
 
@@ -250,6 +287,29 @@ func (s *Service) checkOutstandingSendCapacity(ctx context.Context, workspaceID 
 	return nil
 }
 
+// immediateSendClaimSlack backdates the send_after of a reply that is due NOW,
+// so the row is claimable the instant its task fires.
+//
+// The two clocks do not agree. send_after is stamped from the APP clock
+// (Service.now), while ClaimInboxPendingReply guards on `send_after <= now()`
+// evaluated on the DATABASE clock (queries/inbox.sql). An instant equal to "now"
+// therefore loses to any forward skew between them: the task fires, the guarded
+// UPDATE matches no row, ErrPendingNotClaimable is not retryable, and the row
+// sits 'scheduled' forever — there is no sweeper over stranded rows (see
+// queueReply). The operator is told the reply was sent and it never leaves.
+//
+// Thirty seconds is far beyond any sane NTP-synced skew and costs nothing: the
+// row is already due, so the only effect is that the claim's guard is satisfied
+// rather than raced. It is applied ONLY where the resolved instant is not in the
+// future — a genuinely scheduled send keeps its exact moment, because the undo
+// window is a promise to the operator and nothing may shorten it. The SQL guard
+// itself is deliberately NOT relaxed: it is what stops a task that fires early
+// from delivering a scheduled reply ahead of time.
+const immediateSendClaimSlack = 30 * time.Second
+
+// immediateSendAfter is the send_after of a reply that should go out at once.
+func immediateSendAfter(now time.Time) time.Time { return now.Add(-immediateSendClaimSlack) }
+
 // resolveSendAfter turns an optional explicit instant into the moment the send
 // should leave, bounding an explicit one and applying the workspace's undo
 // window otherwise.
@@ -260,7 +320,14 @@ func (s *Service) resolveSendAfter(ctx context.Context, workspaceID uuid.UUID, s
 		if err != nil {
 			return time.Time{}, err
 		}
-		return now.Add(window), nil
+		resolved := now.Add(window)
+		if !resolved.After(now) {
+			// A workspace that opted out of undo (window 0) wants this gone now,
+			// which means the row must be claimable now — see
+			// immediateSendClaimSlack for why "now" is not good enough.
+			return immediateSendAfter(now), nil
+		}
+		return resolved, nil
 	}
 	if !sendAt.After(now) {
 		return time.Time{}, ErrScheduleInPast

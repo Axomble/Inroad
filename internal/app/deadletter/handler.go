@@ -31,12 +31,19 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 //
 // payload IS included. It is the whole point of the record — an operator
 // triaging a dropped send needs to see which enrollment or mailbox it named —
-// and it is the tenant's own data being returned to that tenant. It carries no
-// credential: task payloads in this codebase are ids plus, for a manual reply,
-// the operator's own text; secrets are resolved by the worker through the
-// keyring at execution time and never travel in a payload (docs/security.md
-// invariant 1). It is emitted as raw JSON rather than a string so a client can
-// read its fields without a second parse.
+// and it is the tenant's own data being returned to that tenant.
+//
+// What makes that safe is a rule enforced elsewhere: a task payload names WHAT
+// failed and never the content of a message (internal/platform/queue's
+// TestTaskPayloadsCarryNoContent). It carries no credential — secrets are
+// resolved by the worker through the keyring at execution time and never travel
+// in a payload (docs/security.md invariant 1) — and, since the manual-reply body
+// moved into an inbox_pending_replies row, no correspondence either. This field
+// is why that rule matters: whatever a payload holds, campaigns:read reads
+// verbatim, and campaigns:read is OAuth-grantable while inbox:read is not.
+//
+// Emitted as raw JSON rather than a string so a client can read its fields
+// without a second parse.
 type deadLetterResponse struct {
 	ID           string          `json:"id"`
 	TaskType     string          `json:"task_type"`

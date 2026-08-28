@@ -395,7 +395,11 @@ type sendReplyRequest struct {
 // (unknown fields rejected — the same house style as replylabel's decode) so
 // a typo'd field is a 400 rather than a silently-ignored one. A successful
 // enqueue returns 202: the send itself happens asynchronously in the
-// execution plane (see internal/worker/inbox.ReplySendHandler).
+// execution plane (see internal/worker/inbox.PendingReplySendHandler).
+//
+// Still a bodyless 202 even though the service now writes a durable row: this
+// path has no undo window, so there is no handle worth returning. Callers that
+// want one use POST .../schedule-reply, which is what the SPA composer does.
 func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
@@ -413,7 +417,7 @@ func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := h.svc.Reply(r.Context(), wid, id, req.BodyText); err != nil {
+	if err := h.svc.Reply(r.Context(), wid, id, req.BodyText, callerUserID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
