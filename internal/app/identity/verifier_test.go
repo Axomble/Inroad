@@ -194,3 +194,114 @@ func TestSessionVerifierCacheElidesLookupsAndBustReloads(t *testing.T) {
 		t.Fatalf("after Bust the revoke must take effect, got ok=%v err=%v", ok, err)
 	}
 }
+
+// SessionLive is the realtime handshake's revocation check: a WebSocket
+// authenticates with a signed connect ticket rather than a bearer token, and
+// must still refuse a session logged out between minting that ticket and
+// spending it. These cover the branches the socket depends on.
+
+func TestSessionLive_TrueForALiveSession(t *testing.T) {
+	sid := uuid.New()
+	store := &fakeAuthStore{states: map[uuid.UUID]SessionAuthState{
+		sid: {UserID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)},
+	}}
+	v := NewSessionVerifier(verifierSecret, store, 0)
+
+	live, err := v.SessionLive(context.Background(), sid.String())
+	if err != nil {
+		t.Fatalf("SessionLive: %v", err)
+	}
+	if !live {
+		t.Error("live = false, want true")
+	}
+}
+
+// The case the whole method exists for: the socket must not open after a logout.
+func TestSessionLive_FalseForARevokedSession(t *testing.T) {
+	sid := uuid.New()
+	store := &fakeAuthStore{states: map[uuid.UUID]SessionAuthState{
+		sid: {UserID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour), Revoked: true},
+	}}
+	v := NewSessionVerifier(verifierSecret, store, 0)
+
+	live, err := v.SessionLive(context.Background(), sid.String())
+	if err != nil {
+		t.Fatalf("SessionLive: %v", err)
+	}
+	if live {
+		t.Error("live = true for a revoked session; a logged-out user could open a socket")
+	}
+}
+
+func TestSessionLive_FalseForAnExpiredSession(t *testing.T) {
+	sid := uuid.New()
+	store := &fakeAuthStore{states: map[uuid.UUID]SessionAuthState{
+		sid: {UserID: uuid.New(), ExpiresAt: time.Now().Add(-time.Second)},
+	}}
+	v := NewSessionVerifier(verifierSecret, store, 0)
+
+	live, err := v.SessionLive(context.Background(), sid.String())
+	if err != nil {
+		t.Fatalf("SessionLive: %v", err)
+	}
+	if live {
+		t.Error("live = true for an expired session")
+	}
+}
+
+// An unknown session and a malformed id are both definite "no"s, not failures to
+// determine liveness — so neither may surface as an error the caller might treat
+// as a transient outage.
+func TestSessionLive_UnknownAndMalformedAreDefiniteNo(t *testing.T) {
+	v := NewSessionVerifier(verifierSecret, &fakeAuthStore{states: map[uuid.UUID]SessionAuthState{}}, 0)
+
+	for _, id := range []string{uuid.NewString(), "not-a-uuid", ""} {
+		live, err := v.SessionLive(context.Background(), id)
+		if err != nil {
+			t.Errorf("SessionLive(%q) err = %v, want nil", id, err)
+		}
+		if live {
+			t.Errorf("SessionLive(%q) = true, want false", id)
+		}
+	}
+}
+
+// A store outage must FAIL CLOSED. Returning (false, nil) here would be worse
+// than the error: the handshake would read it as a definite "not live" and, more
+// dangerously, a future refactor could invert it into an open socket.
+func TestSessionLive_PropagatesAStoreFailure(t *testing.T) {
+	wantErr := errors.New("postgres is down")
+	v := NewSessionVerifier(verifierSecret, &fakeAuthStore{err: wantErr}, 0)
+
+	live, err := v.SessionLive(context.Background(), uuid.NewString())
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want %v", err, wantErr)
+	}
+	if live {
+		t.Error("live = true despite a store failure")
+	}
+}
+
+// SessionLive shares `load` with Verify, so it inherits the same cache — and a
+// Bust must be visible to the socket path too, or a revoke would keep sockets
+// alive for the cache TTL.
+func TestSessionLive_ObservesBust(t *testing.T) {
+	sid := uuid.New()
+	states := map[uuid.UUID]SessionAuthState{
+		sid: {UserID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	store := &fakeAuthStore{states: states}
+	v := NewSessionVerifier(verifierSecret, store, time.Minute) // caching ON
+
+	if live, err := v.SessionLive(context.Background(), sid.String()); err != nil || !live {
+		t.Fatalf("first call: live=%v err=%v, want true/nil", live, err)
+	}
+
+	// Revoke out of band, then bust as the session-management path does.
+	states[sid] = SessionAuthState{UserID: states[sid].UserID, ExpiresAt: states[sid].ExpiresAt, Revoked: true}
+	v.Bust(sid)
+
+	if live, err := v.SessionLive(context.Background(), sid.String()); err != nil || live {
+		t.Errorf("after Bust: live=%v err=%v, want false/nil", live, err)
+	}
+}

@@ -266,3 +266,45 @@ func TestSkipIdempotencyGuardSeesTheFullMountedPath(t *testing.T) {
 		})
 	}
 }
+
+// TestRealtimeRoutesRejectAnonymous is the assertion the realtime spec (§8,
+// slice 3) asks for: both endpoints sit in a protected group, so neither is
+// reachable without a session.
+//
+// The socket is the interesting half. It authenticates with a signed connect
+// ticket in the query string rather than a bearer token, because a browser
+// cannot set an Authorization header on `new WebSocket()` — and that makes it
+// easy to assume it must therefore be mounted OUTSIDE the auth group. It is not:
+// RequireAuth still runs, so an anonymous caller is refused before any ticket is
+// parsed, and the ticket is a second gate rather than the only one.
+func TestRealtimeRoutesRejectAnonymous(t *testing.T) {
+	rt := chi.NewRouter()
+	rt.Post("/ticket", okHandler().ServeHTTP)
+	rt.Get("/ws", okHandler().ServeHTTP)
+
+	r := buildRouter(discardLogger(), nil, nil, []protectedGroup{{
+		verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
+		mounts:    []mount{{pattern: "/api/v1/realtime", handler: rt}},
+	}})
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"ticket mint", http.MethodPost, "/api/v1/realtime/ticket"},
+		{"socket", http.MethodGet, "/api/v1/realtime/ws"},
+		// A ticket in the query string must not substitute for a session on the
+		// protected mount: the group's verifier runs first either way.
+		{"socket with a ticket param", http.MethodGet, "/api/v1/realtime/ws?ticket=anything"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := do(t, r, tc.method, tc.path, "", nil); code != http.StatusUnauthorized {
+				t.Errorf("no token: got %d, want 401", code)
+			}
+			if code := do(t, r, tc.method, tc.path, bearerFor(t), nil); code != http.StatusOK {
+				t.Errorf("valid token: got %d, want 200", code)
+			}
+		})
+	}
+}
