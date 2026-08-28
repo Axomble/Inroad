@@ -76,6 +76,17 @@ var (
 	// splitting them would invite a caller to treat one as retryable, which is
 	// the mistake that double-sends mail.
 	ErrPendingNotClaimable = errors.New("inbox: pending reply is not claimable")
+	// ErrTooManyPendingSends is returned once the workspace already holds
+	// MaxOutstandingPendingSends queued replies.
+	//
+	// Its own sentinel rather than ErrValidation, because the two map to
+	// different statuses and the difference is the whole point: ErrValidation is
+	// a MALFORMED request (400), while this request was well-formed and was
+	// refused for the state the WORKSPACE is in (422) — the same class as
+	// ErrTooManyLabels and the schedule bounds. A client branching on the status
+	// must be able to tell "fix your JSON" from "wait for your outbox to drain".
+	ErrTooManyPendingSends = fmt.Errorf(
+		"inbox: a workspace may have at most %d replies queued for delivery at once", MaxOutstandingPendingSends)
 )
 
 // PendingReply is one manual reply waiting to go out.
@@ -281,8 +292,7 @@ func (s *Service) checkOutstandingSendCapacity(ctx context.Context, workspaceID 
 		return err
 	}
 	if outstanding >= MaxOutstandingPendingSends {
-		return fmt.Errorf("%w: this workspace already has %d replies queued for delivery",
-			ErrValidation, outstanding)
+		return fmt.Errorf("%w (%d queued)", ErrTooManyPendingSends, outstanding)
 	}
 	return nil
 }

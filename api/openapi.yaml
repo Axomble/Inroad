@@ -3245,6 +3245,12 @@ paths:
         than only a scheduled task.
 
 
+        A workspace may hold at most 500 replies queued for delivery at once,
+        counting everything still waiting on BOTH this route and sendInboxReply.
+        Past that the request is refused with 422 until the outbox drains; the
+        cap bounds abuse rather than use, so an ordinary operator never meets it.
+
+
         Scheduling deliberately does NOT mark the thread read, unlike
         sendInboxReply: an undone reply should leave the thread exactly as the
         operator found it.
@@ -3266,8 +3272,10 @@ paths:
         '422':
           description: >-
             The body is empty or too long, the thread has no message to reply to,
-            or send_at parsed but is out of range (already past, or more than 30
-            days ahead).
+            send_at parsed but is out of range (already past, or more than 30
+            days ahead), or the workspace already has the maximum number of
+            replies queued for delivery (the same outstanding-sends cap
+            sendInboxReply enforces).
   /inbox/outbox:
     get:
       operationId: listInboxOutbox

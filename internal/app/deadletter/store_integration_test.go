@@ -62,7 +62,7 @@ func seedRow(t *testing.T, store *PgStore, ws uuid.UUID) gen.TaskDeadLetter {
 	row, err := store.Insert(context.Background(), Capture{
 		WorkspaceID: ws, TaskType: "sequence:advance", Payload: payload,
 		LastError: "dial timeout", AttemptCount: 5,
-	})
+	}, StatusPending)
 	if err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
@@ -512,8 +512,17 @@ func TestMigrationRedactsLegacyReplyBodies(t *testing.T) {
 		`","workspace_id":"` + ws.String() + `","task_id":"inboxreply:t:1700000000"}`
 
 	// One of each status, so the CASE arm is exercised in both directions, plus a
-	// row of a DIFFERENT task type that must be left completely alone.
-	var pendingID, discardedID, replayedID, otherID uuid.UUID
+	// row of a DIFFERENT task type that must be left completely alone, plus a row
+	// whose payload is a JSONB SCALAR rather than an object.
+	//
+	// The scalar is the one that decides whether this migration can run at all.
+	// `payload - 'body_text'` is only defined on a jsonb object: on a scalar
+	// Postgres raises "cannot delete from scalar", which aborts the statement,
+	// aborts the migration, and leaves schema_migrations DIRTY — every later
+	// migration blocked and every fresh deploy broken, over one malformed row.
+	// Capture normalises an absent payload to JSON `null`, which is exactly such a
+	// scalar, so this is not a hypothetical shape.
+	var pendingID, discardedID, replayedID, otherID, scalarID uuid.UUID
 	seed := func(taskType, payload, status string) uuid.UUID {
 		t.Helper()
 		var id uuid.UUID
@@ -530,9 +539,11 @@ func TestMigrationRedactsLegacyReplyBodies(t *testing.T) {
 	replayedID = seed("inbox:reply_send", legacyPayload, "replayed")
 	otherID = seed("sequence:advance",
 		`{"enrollment_id":"`+uuid.NewString()+`","workspace_id":"`+ws.String()+`"}`, "pending")
+	scalarID = seed("inbox:reply_send", `"`+sentinel+`"`, "pending")
 
 	if err := db.Migrate(dsn); err != nil {
-		t.Fatalf("migrate up: %v", err)
+		t.Fatalf("migrate up: %v — a single malformed payload must not be able to abort the "+
+			"migration and leave schema_migrations dirty", err)
 	}
 
 	type row struct {
@@ -590,6 +601,14 @@ func TestMigrationRedactsLegacyReplyBodies(t *testing.T) {
 			"inbox:reply_send", other.status)
 	}
 
+	// The scalar row: filed like every other legacy row, and emptied rather than
+	// key-stripped. A scalar cannot be shown to be free of correspondence — this
+	// one plainly is not — and there are no ids in it to preserve.
+	if scalar := read(scalarID); scalar.status != StatusDiscarded || strings.Contains(scalar.payload, sentinel) {
+		t.Errorf("scalar-payload row = status %q payload %s, want discarded with the text gone",
+			scalar.status, scalar.payload)
+	}
+
 	// And the consequence a caller sees: a redacted row is no longer replayable,
 	// so nobody can re-enqueue a reply with no body.
 	store := NewPgStore(gen.New(pool))
@@ -605,7 +624,7 @@ func TestInsertRejectsAnUnknownWorkspace(t *testing.T) {
 	_, store := setup(t)
 	_, err := store.Insert(context.Background(), Capture{
 		WorkspaceID: uuid.New(), TaskType: "sequence:advance", Payload: []byte(`{}`),
-	})
+	}, StatusPending)
 	if err == nil {
 		t.Fatal("insert succeeded for a workspace that does not exist")
 	}

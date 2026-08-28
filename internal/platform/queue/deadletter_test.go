@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -257,11 +258,108 @@ func TestTerminalFailureOfTheLegacyReplySendIsNotCaptured(t *testing.T) {
 		if len(legacyContentBearingTaskTypes) != 1 {
 			t.Fatalf("legacyContentBearingTaskTypes = %v, want exactly the one drain type", legacyContentBearingTaskTypes)
 		}
-		if !isLegacyContentBearing(TaskInboxReplySend) {
+		if !IsLegacyContentBearingTaskType(TaskInboxReplySend) {
 			t.Errorf("inbox:reply_send is not suppressed")
 		}
-		if isLegacyContentBearing(TaskInboxPendingReplySend) {
+		if IsLegacyContentBearingTaskType(TaskInboxPendingReplySend) {
 			t.Errorf("inbox:pending_reply_send is suppressed; it carries only a row id and must be captured")
+		}
+	})
+}
+
+// The suppression predicate must match EVERYTHING asynq would route to the
+// drain handler, not merely the exact registered type.
+//
+// asynq's ServeMux falls back to strings.HasPrefix over its registered patterns
+// (servemux.go match(): exact map lookup, then longest prefix), so a task typed
+// `inbox:reply_send<anything>` runs ReplySendHandler and can therefore carry a
+// body-bearing InboxReplySendPayload. An exact-match suppression misses exactly
+// that type, and the two predicates disagreeing is the bug — the capture gate
+// must cover every type the handler it is protecting can be reached by.
+//
+// Nothing enqueues an arbitrary type today (EnqueueReplay is the only path, and
+// it is fed from captured rows), so this is not reachable now. It is the
+// disagreement itself that is worth closing: the next arbitrary-type enqueue
+// would reopen the disclosure silently.
+func TestSuppressionCoversEveryTypeTheDrainHandlerWouldRun(t *testing.T) {
+	mux := asynq.NewServeMux()
+	// The registration internal/worker/inbox.Register makes for the drain. The
+	// deprecated type IS the subject here, so naming it is the point.
+	mux.HandleFunc(TaskInboxReplySend, func(context.Context, *asynq.Task) error { return nil })
+	mux.HandleFunc(TaskInboxPendingReplySend, func(context.Context, *asynq.Task) error { return nil })
+
+	for _, taskType := range []string{
+		TaskInboxReplySend,
+		TaskInboxReplySend + ":retry",
+		TaskInboxReplySend + "X",
+		TaskInboxPendingReplySend,
+		TaskInboxPoll,
+		"inbox:reply_sen", // one character short: a different type entirely
+	} {
+		_, pattern := mux.Handler(asynq.NewTask(taskType, nil))
+		routesToTheDrain := pattern == TaskInboxReplySend
+		if got := IsLegacyContentBearingTaskType(taskType); got != routesToTheDrain {
+			t.Errorf("%q: asynq routes it to %q (drain=%v) but IsLegacyContentBearingTaskType = %v — "+
+				"the capture gate and the handler that produces the row must agree, or a task "+
+				"the drain handler runs is captured with the operator's reply in it",
+				taskType, pattern, routesToTheDrain, got)
+		}
+	}
+}
+
+// last_error is BOUNDED, and it has to be for two separate reasons.
+//
+// The row's own last_error is truncated at 500 (inbox.truncateError); the
+// dead-letter copy of the same failure was not truncated at all, so a provider
+// that answers with a wall of text wrote all of it into a table that is served
+// verbatim under campaigns:read and swept only at 90 days.
+//
+// The rune boundary is not cosmetic. last_error is a Postgres TEXT column, and
+// Postgres REJECTS a byte sequence that is not valid UTF-8 — a naive byte slice
+// through a multi-byte rune would fail the INSERT and lose the whole dead
+// letter, at exactly the moment the record matters most.
+func TestCapturedLastErrorIsBoundedAndStaysValidUTF8(t *testing.T) {
+	ws := uuid.New().String()
+
+	capture := func(t *testing.T, taskErr error) DeadLetter {
+		t.Helper()
+		rec := &fakeRecorder{}
+		recordTerminalFailure(context.Background(), rec, quietLogger(),
+			asynq.NewTask(TaskSequenceAdvance, mustPayload(t, ws)), taskErr, 6, sendMaxRetry)
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorded %d dead letters, want 1", len(rec.calls))
+		}
+		return rec.calls[0]
+	}
+
+	t.Run("an ordinary message is stored whole", func(t *testing.T) {
+		got := capture(t, errors.New("dial timeout")).LastError
+		if got != "dial timeout" {
+			t.Errorf("last_error = %q, want the message untouched", got)
+		}
+	})
+
+	t.Run("a wall of provider text is cut to the same bound the row uses", func(t *testing.T) {
+		long := "550 5.7.1 " + strings.Repeat("x", 10_000)
+		got := capture(t, errors.New(long)).LastError
+		if len(got) > maxLastErrorLength {
+			t.Errorf("last_error is %d bytes, want at most %d", len(got), maxLastErrorLength)
+		}
+		if !strings.HasPrefix(long, got) || got == "" {
+			t.Errorf("last_error = %q, want the leading bytes of the real message — the head is "+
+				"the diagnostic part", got)
+		}
+	})
+
+	t.Run("a cut through a multi-byte rune leaves valid UTF-8", func(t *testing.T) {
+		// Every rune is 3 bytes, so the byte limit lands mid-rune whatever it is.
+		got := capture(t, errors.New(strings.Repeat("→", 10_000))).LastError
+		if len(got) > maxLastErrorLength {
+			t.Errorf("last_error is %d bytes, want at most %d", len(got), maxLastErrorLength)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("last_error is not valid UTF-8, so Postgres would reject the INSERT and the "+
+				"dead letter would be lost entirely: %q", got)
 		}
 	})
 }

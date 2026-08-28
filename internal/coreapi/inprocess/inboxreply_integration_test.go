@@ -216,6 +216,17 @@ func TestImmediateReplyRowIsClaimableAgainstTheRealSQLGuard(t *testing.T) {
 	}
 }
 
+// scheduledButSoon is how far ahead the deferred reply below is scheduled.
+//
+// Deliberately INSIDE immediateSendClaimSlack (30s) rather than comfortably
+// past it. The test's whole sentence is "the slack must not leak into a
+// scheduled send", and an hour would satisfy it under the very implementation it
+// is meant to reject: relax the SQL guard by an unconditional 30 seconds and a
+// row due in an hour is still unclaimable, so the test would pass and prove
+// nothing. Five seconds is claimable under that mistake and not under the real
+// statement.
+const scheduledButSoon = 5 * time.Second
+
 // The slack must not leak into a genuinely SCHEDULED send. A reply the operator
 // deferred is not claimable before its moment: the SQL guard is what stops a
 // task that fires early from delivering ahead of time, and relaxing it — rather
@@ -232,14 +243,16 @@ func TestScheduledReplyIsNotClaimableBeforeItsMoment(t *testing.T) {
 	)
 
 	threadID := seedThreadForReply(t, ctx, pool, fx.ws, fx.mailboxID, "Later reply")
-	at := time.Now().Add(time.Hour)
+	at := time.Now().Add(scheduledButSoon)
 	row, err := svc.ScheduleReply(ctx, fx.ws, threadID, "not yet", &at, nil)
 	if err != nil {
 		t.Fatalf("ScheduleReply: %v", err)
 	}
 
 	if err := svc.ClaimPendingReply(ctx, fx.ws, row.ID); !errors.Is(err, inbox.ErrPendingNotClaimable) {
-		t.Fatalf("ClaimPendingReply on a reply due in an hour = %v, want ErrPendingNotClaimable", err)
+		t.Fatalf("ClaimPendingReply on a reply due in %v = %v, want ErrPendingNotClaimable — a send "+
+			"scheduled within the immediate-path slack must still wait for its own moment",
+			scheduledButSoon, err)
 	}
 }
 

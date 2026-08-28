@@ -712,6 +712,40 @@ func TestOutboxEndpointListsAndCancels(t *testing.T) {
 	}
 }
 
+// THE CAP'S STATUS CODE, asserted at the HANDLER on BOTH send routes.
+//
+// The service-level test (TestReplyIsSubjectToTheOutstandingSendCap) proves the
+// cap fires and names its sentinel; it says nothing about what a client sees,
+// which is how the cap shipped documented as 422 and answering 400. A
+// workspace-state rejection of a well-formed request is 422 — the same class as
+// ErrTooManyLabels and the snooze bounds — and the SPA branches on the status,
+// so the two routes must agree with each other and with the OpenAPI contract.
+func TestBothSendRoutesReturn422AtTheOutstandingSendCap(t *testing.T) {
+	f := newPendingFixture(t)
+	ctx := context.Background()
+	for range inbox.MaxOutstandingPendingSends {
+		if _, err := f.pending.CreatePendingReply(ctx, inbox.CreatePendingReplyInput{
+			WorkspaceID: testWS, ThreadID: f.thread.ID, BodyText: "queued",
+			SendAfter: f.now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	for _, tc := range []struct{ name, path, body string }{
+		{"immediate", "/reply", `{"body_text":"one too many"}`},
+		{"deferred", "/schedule-reply", `{"body_text":"one too many"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := serve(t, f.handler, http.MethodPost,
+				"/inbox/threads/"+f.thread.ID.String()+tc.path, tc.body)
+			if res.Code != http.StatusUnprocessableEntity {
+				t.Errorf("POST %s at capacity = %d, want 422 (%s)", tc.path, res.Code, res.Body.String())
+			}
+		})
+	}
+}
+
 // 409, not 404: the reply exists and the operator needs told why the click
 // failed.
 func TestCancelEndpointConflictsOnceSending(t *testing.T) {

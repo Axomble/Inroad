@@ -110,8 +110,8 @@ func (q *Queries) GetTaskDeadLetter(ctx context.Context, arg GetTaskDeadLetterPa
 
 const insertTaskDeadLetter = `-- name: InsertTaskDeadLetter :one
 
-INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at
 `
 
@@ -121,6 +121,7 @@ type InsertTaskDeadLetterParams struct {
 	Payload      []byte    `json:"payload"`
 	LastError    string    `json:"last_error"`
 	AttemptCount int32     `json:"attempt_count"`
+	Status       string    `json:"status"`
 }
 
 // Dead-letter capture and replay (migration 000069). Every tenant-facing
@@ -140,6 +141,15 @@ type InsertTaskDeadLetterParams struct {
 // deployment maintenance rather than a tenant read; its own comment says why.
 // Records one retry-exhausted task. Written by the capture path
 // (queue.DeadLetterErrorHandler via coreapi), never by an HTTP caller.
+//
+// @status is passed rather than left to the column default because capture is
+// not always "this is replayable". A terminal inbox:reply_send arriving from a
+// worker that predates the payload fix is stored REDACTED and already
+// 'discarded' (deadletter.Service.Capture), for the same reason migration
+// 20260828133405 flips the historical ones: a body-stripped reply left pending
+// would be replayable, and replaying it delivers a blank message to a real
+// contact. The service is the only caller and it never takes the value from a
+// request.
 func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLetterParams) (TaskDeadLetter, error) {
 	row := q.db.QueryRow(ctx, insertTaskDeadLetter,
 		arg.WorkspaceID,
@@ -147,6 +157,7 @@ func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLe
 		arg.Payload,
 		arg.LastError,
 		arg.AttemptCount,
+		arg.Status,
 	)
 	var i TaskDeadLetter
 	err := row.Scan(

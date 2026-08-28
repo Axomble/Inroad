@@ -17,8 +17,17 @@
 -- name: InsertTaskDeadLetter :one
 -- Records one retry-exhausted task. Written by the capture path
 -- (queue.DeadLetterErrorHandler via coreapi), never by an HTTP caller.
-INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count)
-VALUES (@workspace_id, @task_type, @payload, @last_error, @attempt_count)
+--
+-- @status is passed rather than left to the column default because capture is
+-- not always "this is replayable". A terminal inbox:reply_send arriving from a
+-- worker that predates the payload fix is stored REDACTED and already
+-- 'discarded' (deadletter.Service.Capture), for the same reason migration
+-- 20260828133405 flips the historical ones: a body-stripped reply left pending
+-- would be replayable, and replaying it delivers a blank message to a real
+-- contact. The service is the only caller and it never takes the value from a
+-- request.
+INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
+VALUES (@workspace_id, @task_type, @payload, @last_error, @attempt_count, @status)
 RETURNING *;
 
 -- name: ListTaskDeadLetters :many

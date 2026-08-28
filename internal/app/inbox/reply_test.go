@@ -325,8 +325,16 @@ func TestReplyIsSubjectToTheOutstandingSendCap(t *testing.T) {
 		}
 	}
 
-	if err := f.svc.Reply(ctx, testWS, f.threadID, "one too many", nil); !errors.Is(err, inbox.ErrValidation) {
-		t.Fatalf("Reply at capacity = %v, want ErrValidation", err)
+	err := f.svc.Reply(ctx, testWS, f.threadID, "one too many", nil)
+	if !errors.Is(err, inbox.ErrTooManyPendingSends) {
+		t.Fatalf("Reply at capacity = %v, want ErrTooManyPendingSends", err)
+	}
+	// NOT ErrValidation, which is this domain's 400. The cap is a
+	// workspace-state rejection of a well-formed request and must reach the
+	// client as a 422 (TestBothSendRoutesReturn422AtTheOutstandingSendCap holds
+	// the status itself); sharing ErrValidation is what made it a 400.
+	if errors.Is(err, inbox.ErrValidation) {
+		t.Errorf("the cap is an ErrValidation, so the handler maps it to 400: %v", err)
 	}
 }
 

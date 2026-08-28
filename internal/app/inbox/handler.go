@@ -46,8 +46,12 @@ func writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrLabelNameTaken):
 		httpx.Error(w, http.StatusConflict, err.Error())
 	// 422, like the snooze bounds: the request was well-formed and the limit is
-	// a property of the workspace, not of the syntax.
-	case errors.Is(err, ErrTooManyLabels):
+	// a property of the workspace, not of the syntax. ErrTooManyPendingSends is
+	// the same class and shares the reasoning: the caller's JSON was fine, their
+	// outbox is full. It reached both send routes as a 400 for a release because
+	// it was raised as an ErrValidation, which is why it now has a sentinel of
+	// its own rather than a wrapped one.
+	case errors.Is(err, ErrTooManyLabels), errors.Is(err, ErrTooManyPendingSends):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	// Same reasoning as the snooze bounds: a well-formed timestamp that is out
 	// of range is 422, not 400, so a client can tell a malformed request from a

@@ -26,6 +26,30 @@ const (
 	reasonNoInboundMessage       = "the thread no longer has a message to reply to"
 )
 
+// ErrDeliveryAttemptFailed is what a retryable delivery failure returns to
+// asynq, carrying one of the stable reasons above and nothing else.
+//
+// THE ERROR RETURNED HERE IS A PUBLISHED STRING, which is not obvious and is why
+// this exists. asynq hands the LAST attempt's error to
+// queue.DeadLetterErrorHandler, which stores it in task_dead_letters.last_error,
+// and GET /dead-letters serves last_error verbatim under campaigns:read — an
+// OAuth-grantable scope. Returning the wrapped provider error therefore
+// published the remote server's raw rejection text and, because go-mail's
+// SendError.Error() appends ", affected recipient(s): <address>", a contact's
+// email address too. The row's own last_error had always been a token; the dead
+// letter was the copy nobody looked at.
+//
+// Exported so a caller (and a test) can identify a delivery failure without
+// matching on its text, which is the mistake this replaces.
+var ErrDeliveryAttemptFailed = errors.New("inbox: delivery attempt failed")
+
+// attemptFailure renders a failed attempt for asynq: the sentinel plus the same
+// stable reason the row records, and never the cause. The cause goes to the log
+// line at the call site, where operators can read it and clients cannot.
+func attemptFailure(reason string) error {
+	return fmt.Errorf("%w: %s", ErrDeliveryAttemptFailed, reason)
+}
+
 // PendingReplyCore is the narrow execution-plane seam for deferred manual
 // replies. Consumer-defined here (not a widening of coreapi.Client, which
 // already carries ~40 methods and ~13 test fakes) and satisfied by the
@@ -56,12 +80,16 @@ type PendingReplyCore interface {
 // Return-value discipline, since it decides between double-sending and losing
 // mail:
 //   - Not claimable -> nil. The task is done; retrying would never claim.
-//   - Load/transport failure -> release, then return err so asynq retries.
-//   - Send failure -> release, then return err. Releasing FIRST matters: a
+//   - Load/transport failure -> release, then return a failure so asynq retries.
+//   - Send failure -> release, then return a failure. Releasing FIRST matters: a
 //     retry that found its own abandoned 'sending' row would have to wait out
 //     the full lease before trying again.
 //   - Send succeeded -> mark sent, and NEVER return an error afterwards. A
 //     non-nil return past the dial would retry a reply that has already left.
+//
+// "a failure" is ErrDeliveryAttemptFailed carrying a stable reason, never the
+// provider's error — see its doc: what this returns is published, because the
+// last attempt's error becomes the dead letter's last_error.
 func PendingReplySendHandler(core PendingReplyCore, sender Mailer) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPendingReplySendPayload
@@ -163,16 +191,21 @@ func PendingReplySendHandler(core PendingReplyCore, sender Mailer) func(context.
 
 // releaseAndReturn returns the claim before propagating a transient failure, so
 // the retry can claim immediately rather than waiting out the lease. A failed
-// release is logged but does not replace the original error — the caller needs
-// to know what actually went wrong.
+// release is logged but does not stop the failure being reported — the caller
+// still has to retry.
 //
-// `reason` is a STABLE TOKEN, never cause.Error(). last_error is persisted and
-// served to any inbox:read caller, and a wrapped provider error echoes the SMTP
-// host and port, the provider's raw rejection text, and (on the transport arm)
-// internal keyring error shapes. docs/security.md closes exactly this hole one
-// endpoint over — the draft route returns only its own sentinel precisely
-// because "an upstream string can echo request detail back". The full error goes
-// to the log line, where operators can see it and clients cannot.
+// `reason` is a STABLE TOKEN, and it is what BOTH outputs carry: the row's
+// last_error, and the error handed back to asynq. Neither is a private channel.
+// last_error is served to any inbox:read caller; the returned error becomes the
+// dead letter's last_error, served to any campaigns:read caller. A wrapped
+// provider error echoes the SMTP host and port, the provider's raw rejection
+// text, the recipient's address (go-mail appends it), and — on the transport arm
+// — internal keyring error shapes. docs/security.md closes exactly this hole one
+// endpoint over: the draft route returns only its own sentinel precisely because
+// "an upstream string can echo request detail back".
+//
+// cause is not discarded; it is the log line's `err`, where operators can see it
+// and clients cannot.
 func releaseAndReturn(
 	ctx context.Context,
 	core PendingReplyCore,
@@ -185,7 +218,7 @@ func releaseAndReturn(
 	if err := core.ReleasePendingInboxReply(ctx, p.WorkspaceID, p.PendingID, reason); err != nil {
 		slog.ErrorContext(ctx, "inbox_pending_reply_release_failed", "pending_id", p.PendingID, "err", err)
 	}
-	return cause
+	return attemptFailure(reason)
 }
 
 // failPending marks the row permanently failed. It returns nothing because

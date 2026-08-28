@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/hibiken/asynq"
 
@@ -28,9 +30,16 @@ type DeadLetterRecorder interface {
 	RecordDeadLetter(ctx context.Context, in DeadLetter) error
 }
 
-// legacyContentBearingTaskTypes names the task types whose payload carries
-// business content rather than ids, and whose capture must therefore be
+// legacyContentBearingTaskTypes names the task-type PREFIXES whose payload
+// carries business content rather than ids, and whose capture must therefore be
 // suppressed outright.
+//
+// Prefixes, not exact names, because that is how the handler they protect is
+// reached: asynq's ServeMux matches a task's type by exact lookup and then by
+// longest registered PREFIX (servemux.go match()), so `inbox:reply_send:anything`
+// runs the drain handler and can carry a body-bearing payload. A gate that
+// matched only the exact string would disagree with the router it exists to
+// cover — see TestSuppressionCoversEveryTypeTheDrainHandlerWouldRun.
 //
 // There is exactly one, and it is on its way out. inbox:reply_send carried the
 // operator's free-text reply in queue.InboxReplySendPayload.BodyText. Capturing
@@ -40,11 +49,18 @@ type DeadLetterRecorder interface {
 // correspondence (internal/app/auth/scopes.go). So the capture path handed
 // correspondence to a scope structurally denied it.
 //
-// Redacting the body on capture instead was considered and rejected: a
-// body-stripped row is REPLAYABLE, and replaying it would send a BLANK reply to
-// a real contact. A body-bearing row is the disclosure. Neither is acceptable,
-// so the row is not written at all — the failure is logged loudly instead, which
-// is the same outcome an unownable payload already gets.
+// Nothing is written at all HERE, and the failure is logged loudly instead —
+// the same outcome an unownable payload already gets. A body-stripped row would
+// still be REPLAYABLE, and replaying one sends a BLANK reply to a real contact,
+// so redacting alone would not have been enough.
+//
+// The control plane makes the opposite trade for the same reason, and the two
+// are not in conflict. app/deadletter.Service.Capture is the gate for a WORKER
+// OLDER THAN THIS ONE, still failing these tasks during a rolling deploy; it
+// cannot decline to record what it is handed without losing the only evidence
+// that a send was lost, so it redacts the body AND files the row as 'discarded'
+// in one write — replayability closed by the status rather than by the refusal.
+// Its Replay refuses this task type outright, which is the third gate.
 //
 // This IS an exception to this file's "does not interpret a task's body" design,
 // and it is not a precedent: a task type belongs here only while it is draining.
@@ -55,11 +71,23 @@ var legacyContentBearingTaskTypes = map[string]struct{}{
 	TaskInboxReplySend: {},
 }
 
-// isLegacyContentBearing reports whether capturing this task type would store
-// business correspondence rather than a pointer to it.
-func isLegacyContentBearing(taskType string) bool {
-	_, ok := legacyContentBearingTaskTypes[taskType]
-	return ok
+// IsLegacyContentBearingTaskType reports whether capturing this task type would
+// store business correspondence rather than a pointer to it. Prefix-matched, to
+// agree with asynq's own routing — see legacyContentBearingTaskTypes.
+//
+// Exported because the CONTROL plane needs the same answer: this gate lives in
+// the worker binary, and during a rolling deploy an old worker still hands
+// terminal inbox:reply_send failures to app/deadletter through coreapi. That
+// domain asks this function rather than keeping a list of its own, so the two
+// gates cannot drift — the drift between the exact-match gate and asynq's
+// prefix routing is precisely the bug the prefix match above fixes.
+func IsLegacyContentBearingTaskType(taskType string) bool {
+	for prefix := range legacyContentBearingTaskTypes {
+		if strings.HasPrefix(taskType, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeadLetter is one retry-exhausted task, as observed at asynq's terminal
@@ -126,7 +154,7 @@ func recordTerminalFailure(
 	taskErr error,
 	attempts, maxRetry int,
 ) {
-	if isLegacyContentBearing(task.Type()) {
+	if IsLegacyContentBearingTaskType(task.Type()) {
 		// Not captured, and not redacted-then-captured either: a body-stripped
 		// row stays REPLAYABLE and would send a blank reply to a real contact,
 		// while a body-bearing row is the disclosure this suppression exists to
@@ -237,13 +265,38 @@ func workspaceFromPayload(payload []byte) (string, bool) {
 	return envelope.WorkspaceID, true
 }
 
+// maxLastErrorLength bounds what one failure can write into
+// task_dead_letters.last_error. It matches inbox.maxLastErrorLength, which
+// bounds the SAME failure's text on the inbox_pending_replies row: the two are
+// copies of one message and it would be odd for the copy nobody triages to be
+// the unbounded one.
+//
+// The bound is not only about size. last_error is served verbatim by
+// GET /dead-letters under campaigns:read and swept only at 90 days, and a
+// misbehaving SMTP server can answer with a great deal of text; the column is
+// only ever read by a human glancing at a failure.
+const maxLastErrorLength = 500
+
 // errorMessage renders the failure for storage. A nil error is possible in
 // principle (asynq's interface does not forbid it) and must not panic here.
+//
+// The cut is made at a RUNE boundary, not a byte one. last_error is a Postgres
+// TEXT column and Postgres rejects invalid UTF-8 outright, so slicing through a
+// multi-byte rune in a provider's non-ASCII response would fail the INSERT and
+// lose the dead letter entirely — at the exact moment the record matters most.
 func errorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	msg := err.Error()
+	if len(msg) <= maxLastErrorLength {
+		return msg
+	}
+	cut := maxLastErrorLength
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut]
 }
 
 // EnqueueReplay puts a captured payload back on the queue under the caller's
