@@ -15,6 +15,8 @@ import (
 	// across Alpine, a developer's machine, and CI.
 	_ "time/tzdata"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/config"
@@ -28,6 +30,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
+	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
 )
@@ -129,11 +132,24 @@ func run() error {
 		RedirectURL:  cfg.MSRedirectURL,
 		Tenant:       cfg.MSTenant,
 	}
+	// Realtime fan-out. The worker is a SEPARATE PROCESS from the API, so an
+	// in-process channel reaches no browser: every worker-originated event goes
+	// through Redis, and this hub is that path. It publishes only — the worker
+	// holds no sockets, so nothing here subscribes.
+	realtimeRedis := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	defer func() { _ = realtimeRedis.Close() }()
+	realtimeHub := platformrealtime.New(realtimeRedis)
+	defer func() { _ = realtimeHub.Close() }()
+
 	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(),
 		// The claim-before-send outcome counter (won/reclaimed/lost/…) is
 		// emitted from inside the claim, which is the only place every outcome
 		// is already distinguished.
-		inprocess.WithMetrics(mtx))
+		inprocess.WithMetrics(mtx),
+		// Enables PublishRealtime. Omitting it would leave every publish a no-op
+		// and browsers on their polling fallback — correct, but the point of the
+		// slice is that an inbound reply reaches an open tab without one.
+		inprocess.WithRealtime(realtimeHub))
 
 	// Resolve the optional worker egress IP once. When set, outbound SMTP/IMAP
 	// dials bind their SOURCE address to it (spec §15) so a mailbox's mail
