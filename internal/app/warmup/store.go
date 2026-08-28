@@ -212,6 +212,7 @@ func (s *PgStore) ListIncidentParticipants(ctx context.Context, workspaceID uuid
 			Route:            r.DestinationEsp,
 			SigningDomain:    r.DkimDomain,
 			ReturnPathDomain: r.ReturnPathDomain,
+			RelayIP:          r.ObservedRelayIp,
 		}
 	}
 	return out, nil

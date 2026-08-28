@@ -52,22 +52,35 @@ func enrollParticipant(t *testing.T, f fixture, ws, mailbox uuid.UUID, health, l
 	}
 }
 
+// dims is the set of fault-dimension values one seeded observation carries.
+//
+// A struct rather than four adjacent string parameters: destination, signing domain,
+// return path and relay are all strings, and a call that transposed two of them would
+// seed the wrong dimension and still pass. Each is set independently so a test can
+// leave one unresolved while the others carry a value — the case the per-column
+// projection exists for — and an omitted field is the zero value, which is exactly
+// "this observation resolved nothing here".
+type dims struct {
+	destination string
+	dkimDomain  string
+	returnPath  string
+	relayIP     string
+}
+
 // seedDimensionObservation writes one placement observation carrying an explicit set
 // of fault-dimension values, at an explicit age and trust.
-//
-// destination_esp, dkim_domain and return_path_domain are set independently so a test
-// can leave one unresolved while the others carry a value — which is the case the
-// per-column projection exists for.
 func seedDimensionObservation(t *testing.T, f fixture, ws, mailbox uuid.UUID,
-	key string, age time.Duration, destination, dkimDomain, returnPath string, trusted bool) {
+	key string, age time.Duration, d dims, trusted bool) {
 	t.Helper()
 	if _, err := f.pool.Exec(f.ctx,
 		`INSERT INTO warmup_observations (workspace_id, mailbox_id, kind, placement, tab_capable,
 		                                  destination_esp, dkim_domain, return_path_domain,
+		                                  observed_relay_ip,
 		                                  source, attribution_trusted, idempotency_key, observed_at)
-		 VALUES ($1, $2, 'placement', 'inbox', false, $3, $4, $5,
-		         'warmup_receipt', $6, $7, now() - $8::interval)`,
-		ws, mailbox, destination, dkimDomain, returnPath, trusted, key, age.String()); err != nil {
+		 VALUES ($1, $2, 'placement', 'inbox', false, $3, $4, $5, $6,
+		         'warmup_receipt', $7, $8, now() - $9::interval)`,
+		ws, mailbox, d.destination, d.dkimDomain, d.returnPath, d.relayIP,
+		trusted, key, age.String()); err != nil {
 		t.Fatalf("seed observation %s: %v", key, err)
 	}
 }
@@ -99,11 +112,12 @@ func TestIncidentParticipantsProjectEachDimensionsLatestResolvedValue(t *testing
 	enrollParticipant(t, f, f.ws.ID, mb, pwarmup.StateWatch, pwarmup.LaneProbation)
 
 	seedDimensionObservation(t, f, f.ws.ID, mb, "oldest", 5*time.Hour,
-		"google", "old.test", "bounce.old.test", true)
+		dims{destination: "google", dkimDomain: "old.test", returnPath: "bounce.old.test",
+			relayIP: "198.51.100.7"}, true)
 	seedDimensionObservation(t, f, f.ws.ID, mb, "middle", 3*time.Hour,
-		"unknown", "", "bounce.new.test", true)
+		dims{destination: "unknown", returnPath: "bounce.new.test"}, true)
 	seedDimensionObservation(t, f, f.ws.ID, mb, "newest", time.Hour,
-		"unknown", "new.test", "", true)
+		dims{destination: "unknown", dkimDomain: "new.test"}, true)
 
 	got := oneIncidentParticipant(t, f, f.ws.ID)
 	if got.SigningDomain != "new.test" {
@@ -112,6 +126,12 @@ func TestIncidentParticipantsProjectEachDimensionsLatestResolvedValue(t *testing
 	if got.ReturnPathDomain != "bounce.new.test" {
 		t.Errorf("return path = %q, want bounce.new.test: the NEWEST row has none, so the newest row that "+
 			"resolved this column wins — not the newest row overall", got.ReturnPathDomain)
+	}
+	// The relay resolves from the OLDEST row — the only one that carried an address —
+	// so it is the column most likely to be silently dropped by a single-row projection.
+	if got.RelayIP != "198.51.100.7" {
+		t.Errorf("relay = %q, want 198.51.100.7: the two newer rows observed no trustworthy hop, "+
+			"and an unobserved relay must not erase one we recorded", got.RelayIP)
 	}
 	if got.Route != "google" {
 		t.Errorf("route = %q, want google: the two newer rows never resolved a destination, and `unknown` "+
@@ -135,12 +155,12 @@ func TestIncidentParticipantsIgnoreStaleAndUntrustedObservations(t *testing.T) {
 
 	// Outside the trailing 7 days.
 	seedDimensionObservation(t, f, f.ws.ID, mb, "stale", 8*24*time.Hour,
-		"microsoft", "stale.test", "bounce.stale.test", true)
+		dims{destination: "microsoft", dkimDomain: "stale.test", returnPath: "bounce.stale.test"}, true)
 	// Inside the window, but the attribution was never established — the same gate
 	// every placement rate in this subsystem uses, because anyone can send mail to a
 	// connected mailbox claiming to be someone else.
 	seedDimensionObservation(t, f, f.ws.ID, mb, "untrusted", time.Hour,
-		"google", "forged.test", "bounce.forged.test", false)
+		dims{destination: "google", dkimDomain: "forged.test", returnPath: "bounce.forged.test"}, false)
 
 	got := oneIncidentParticipant(t, f, f.ws.ID)
 	if got.Route != "" || got.SigningDomain != "" || got.ReturnPathDomain != "" {
@@ -189,7 +209,7 @@ func incidentCohort(t *testing.T, f fixture, ws uuid.UUID, prefix, signingDomain
 		}
 		enrollParticipant(t, f, ws, mb, health, lane)
 		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("%s-%d", prefix, i), time.Hour,
-			"unknown", signingDomain, "", true)
+			dims{destination: "unknown", dkimDomain: signingDomain}, true)
 	}
 	return members
 }
@@ -326,11 +346,11 @@ func TestALaterUnresolvedObservationDoesNotEraseAKnownFaultDomain(t *testing.T) 
 		}
 		enrollParticipant(t, f, ws, mb, pwarmup.StateHealthy, lane)
 		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("faded-known-%d", i), 2*time.Hour,
-			"unknown", "bad.test", "", true)
+			dims{destination: "unknown", dkimDomain: "bad.test"}, true)
 		// Newer, and carrying nothing at all: the column defaults, exactly as an
 		// observation written by a poll that could not parse an identity looks.
 		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("faded-blank-%d", i), time.Hour,
-			"unknown", "", "", true)
+			dims{destination: "unknown"}, true)
 	}
 	incidentCohort(t, f, ws, "outside", "", 3, 0)
 
@@ -417,14 +437,14 @@ func TestOverviewReportsARouteConcentratedIncident(t *testing.T) {
 		}
 		enrollParticipant(t, f, ws, mb, health, lane)
 		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("ms-%d", i), time.Hour,
-			"microsoft", fmt.Sprintf("sign-ms%d.test", i), "", true)
+			dims{destination: "microsoft", dkimDomain: fmt.Sprintf("sign-ms%d.test", i)}, true)
 	}
 	// Outside: three clean mailboxes delivered to Google.
 	for i := 1; i <= 3; i++ {
 		mb := incidentMailbox(t, f, ws, "goog", fmt.Sprintf("goog%d.test", i))
 		enrollParticipant(t, f, ws, mb, pwarmup.StateHealthy, pwarmup.LaneHealthy)
 		seedDimensionObservation(t, f, ws, mb, fmt.Sprintf("goog-%d", i), time.Hour,
-			"google", fmt.Sprintf("sign-goog%d.test", i), "", true)
+			dims{destination: "google", dkimDomain: fmt.Sprintf("sign-goog%d.test", i)}, true)
 	}
 
 	ov, err := NewService(f.store).GetOverview(f.ctx, ws)

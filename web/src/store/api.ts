@@ -3225,7 +3225,8 @@ export type WarmupOverview = {
       | "destination_route"
       | "signing_domain"
       | "return_path_domain"
-      | "sender_domain";
+      | "sender_domain"
+      | "relay_ip";
     /** the shared value, e.g. a signing domain or an ESP name */
     value: string;
     /** the DEGRADED members of the cohort */

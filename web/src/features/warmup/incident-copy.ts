@@ -278,6 +278,11 @@ const DIMENSION_COPY: Record<IncidentDimension, DimensionCopy> = {
     detail:
       'They send from the same organizational domain, so what is concentrated may be one domain rather than several mailboxes. Which of the two it is, this does not say.',
   },
+  relay_ip: {
+    label: 'relay address',
+    detail:
+      'Their warmup mail was seen arriving from the same address — the machine it actually came out of, recorded by the receiver rather than claimed by the sender. The most concrete thing on this list and still not a cause: a provider\'s whole outbound pool shares addresses, so mailboxes on one host or ESP group here whether or not the relay has anything to do with the degradation.',
+  },
 }
 
 /**
