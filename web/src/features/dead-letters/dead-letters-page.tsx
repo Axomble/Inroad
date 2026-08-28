@@ -3,6 +3,7 @@ import { AlertCircle } from 'lucide-react'
 import { EmptyBlock, Page, PageBody, PageTopbar } from '@/components/layout/page'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { popCursor, pushCursor, type CursorStack } from '@/lib/cursor-stack'
 import { cn } from '@/lib/utils'
 import { useListTaskDeadLettersQuery } from './api'
 import { DeadLetterRow } from './dead-letter-row'
@@ -16,7 +17,9 @@ import {
   type StatusFilter,
 } from './dead-letter-copy'
 
-/** The API's own page size, named here so the "load more" arithmetic cannot drift from it. */
+// How many rows to ask for. A page size the client chooses, NOT a copy of a server
+// policy constant: the server's cap (200) and default are its own, and nothing here
+// re-derives either. `next_cursor` — not this number — decides whether more exist.
 const PAGE_SIZE = 50
 
 const FILTERS: readonly StatusFilter[] = ['all', 'pending', 'replayed', 'discarded']
@@ -40,27 +43,49 @@ function filterLabel(filter: StatusFilter): string {
  */
 export function DeadLettersPage() {
   const [filter, setFilter] = useState<StatusFilter>('pending')
-  const [pages, setPages] = useState(1)
+  const [cursor, setCursor] = useState<string | undefined>(undefined)
+  const [visited, setVisited] = useState<CursorStack>([])
 
   const { data, isLoading, isFetching, isError, error } = useListTaskDeadLettersQuery({
     // The contract's filter is "omit for all of them", so 'all' sends nothing rather
     // than a sentinel string the server would reject with a 422.
     ...(filter === 'all' ? {} : { status: filter }),
-    limit: PAGE_SIZE * pages,
+    limit: PAGE_SIZE,
+    ...(cursor === undefined ? {} : { cursor }),
   })
 
-  const letters = data?.dead_letters ?? []
-  // The list endpoint reports no total, so "there may be more" is inferred from a
-  // full page. It can be wrong by one request — the last page being exactly full
-  // shows a button that returns nothing new — which is the honest limit of what the
-  // response says, and better than hiding rows that exist.
-  const mayHaveMore = letters.length === PAGE_SIZE * pages
+  const letters = data?.items ?? []
+  // The server answers this now, and the answer is exact. The previous version grew
+  // `limit` per page and inferred "more exist" from a full page, which was wrong
+  // twice over: the service silently clamps limit at 200, so the fifth page asked
+  // for 250, got 200, compared 200 to 250, and hid the button — leaving every row
+  // past the cap unreachable with no error. `next_cursor` is absent on the last page
+  // and present otherwise; a short page is not the end-of-list signal.
+  const nextCursor = data?.next_cursor
+  const canGoBack = visited.length > 0
+
+  function goNext() {
+    if (nextCursor === undefined) return
+    setVisited((stack) => pushCursor(stack, cursor))
+    setCursor(nextCursor)
+  }
+
+  function goBack() {
+    const { stack, cursor: previous } = popCursor(visited)
+    setVisited(stack)
+    // No prev_cursor on this response to fall back on — a forward-only triage list —
+    // so an exhausted stack goes home rather than nowhere.
+    setCursor(previous)
+  }
 
   function changeFilter(next: StatusFilter) {
     setFilter(next)
-    // Paging is per-filter: keeping the depth across a switch would request four
-    // pages of a queue the operator has not looked at yet.
-    setPages(1)
+    // Both, and this is load-bearing: a cursor is only valid under the filter that
+    // minted it, and the server now answers a carried-over one with a 400. Dropping
+    // the cursor without clearing the stack would leave Previous holding cursors
+    // from a list the operator is no longer looking at.
+    setCursor(undefined)
+    setVisited([])
   }
 
   return (
@@ -116,10 +141,18 @@ export function DeadLettersPage() {
                 <DeadLetterRow key={letter.id} letter={letter} />
               ))}
             </ul>
-            {mayHaveMore && (
-              <div className="px-4 py-3 sm:px-5">
-                <Button variant="outline" size="sm" disabled={isFetching} onClick={() => setPages((n) => n + 1)}>
-                  {isFetching ? 'Loading…' : 'Load more'}
+            {(canGoBack || nextCursor !== undefined) && (
+              <div className="flex items-center gap-2 px-4 py-3 sm:px-5">
+                <Button variant="outline" size="sm" disabled={!canGoBack || isFetching} onClick={goBack}>
+                  Previous
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={nextCursor === undefined || isFetching}
+                  onClick={goNext}
+                >
+                  Next
                 </Button>
               </div>
             )}

@@ -24,8 +24,11 @@ function letter(overrides: Partial<TaskDeadLetter> = {}): TaskDeadLetter {
   }
 }
 
-function list(letters: TaskDeadLetter[]): Response {
-  return new Response(JSON.stringify({ dead_letters: letters }), { status: 200, headers: jsonHeaders })
+function list(letters: TaskDeadLetter[], nextCursor?: string): Response {
+  // next_cursor is OMITTED on the last page, never null and never '' — absence is
+  // the end-of-list signal the server promises, so the fixture must model absence.
+  const body = nextCursor === undefined ? { items: letters } : { items: letters, next_cursor: nextCursor }
+  return new Response(JSON.stringify(body), { status: 200, headers: jsonHeaders })
 }
 
 beforeEach(() => {
@@ -122,31 +125,90 @@ test('a failed read never renders as an empty, healthy queue', async () => {
   expect(screen.queryByText(/nothing has been silently dropped/i)).not.toBeInTheDocument()
 })
 
-test('switching filters resets paging rather than requesting four pages of a new queue', async () => {
-  responder = () => list(Array.from({ length: 50 }, (_, i) => letter({ id: `dl-${i}` })))
+// The page size is FIXED. The old version multiplied it per page, which the service
+// silently clamped at 200 — so the fifth page asked for 250, got 200, inferred
+// "no more", and hid every row past the cap with no error.
+test('the requested page size never grows', async () => {
+  responder = () => list([letter()], 'cur-2')
 
   renderWithProviders(<DeadLettersPage />)
-  await screen.findAllByText('sequence:advance')
+  await screen.findByText('sequence:advance')
 
-  fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-  await waitFor(() => expect(listUrls[listUrls.length - 1]).toMatch(/limit=100/))
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  await waitFor(() => expect(listUrls.length).toBeGreaterThan(1))
+  for (const url of listUrls) {
+    expect(url).toMatch(/limit=50(&|$)/)
+  }
+})
+
+test('Next follows the cursor the server handed back', async () => {
+  responder = () => list([letter()], 'cur-2')
+
+  renderWithProviders(<DeadLettersPage />)
+  await screen.findByText('sequence:advance')
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+  await waitFor(() => expect(listUrls[listUrls.length - 1]).toMatch(/cursor=cur-2/))
+})
+
+// Previous walks the stack home, and the first page is a request with NO cursor —
+// sending an empty one would be sending a malformed cursor the server now 400s.
+test('Previous returns to a cursor-less first page', async () => {
+  responder = () => list([letter()], 'cur-2')
+
+  renderWithProviders(<DeadLettersPage />)
+  await screen.findByText('sequence:advance')
+  expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+  await waitFor(() => expect(listUrls[listUrls.length - 1]).toMatch(/cursor=cur-2/))
+
+  fireEvent.click(screen.getByRole('button', { name: 'Previous' }))
+
+  // Asserted on being home rather than on the last URL: page one is already in the
+  // RTK Query cache, so returning to it issues no request at all — a last-URL check
+  // would read the still-cursored page-two fetch and fail for the wrong reason.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled())
+
+  // And the trip home must not have sent an EMPTY cursor. '' is a different cache
+  // key, so it would have issued a real request — and the server 400s a malformed
+  // cursor, which is exactly what sending the stack's floor verbatim would do.
+  for (const url of listUrls) {
+    expect(url).not.toMatch(/cursor=(&|$)/)
+  }
+})
+
+// A cursor is valid only under the filter that minted it — the server answers a
+// carried-over one with a 400 — so switching tabs must drop it AND the stack.
+test('switching filters drops the cursor rather than carrying it to another queue', async () => {
+  responder = () => list([letter()], 'cur-2')
+
+  renderWithProviders(<DeadLettersPage />)
+  await screen.findByText('sequence:advance')
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+  await waitFor(() => expect(listUrls[listUrls.length - 1]).toMatch(/cursor=cur-2/))
 
   fireEvent.click(screen.getByRole('button', { name: 'Discarded' }))
 
   await waitFor(() => {
     const latest = listUrls[listUrls.length - 1] ?? ''
     expect(latest).toMatch(/status=discarded/)
-    expect(latest).toMatch(/limit=50/)
+    expect(latest).not.toMatch(/cursor=/)
   })
+  // The stack went with it: Previous must not offer a page from the queue the
+  // operator just left.
+  expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
 })
 
-// A short page means there is nothing more to ask for; offering the button anyway
-// trains an operator to click something that never does anything.
-test('a partial page offers no load-more', async () => {
-  responder = () => list([letter()])
+// Absence of next_cursor is the end of the list. A full page is NOT — the old code
+// read a full page as "more exist", which is the inference this replaced.
+test('the last page offers no Next, even when it is exactly full', async () => {
+  responder = () => list(Array.from({ length: 50 }, (_, i) => letter({ id: `dl-${i}` })))
 
   renderWithProviders(<DeadLettersPage />)
-  await screen.findByText('sequence:advance')
+  await screen.findAllByText('sequence:advance')
 
-  expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
 })
