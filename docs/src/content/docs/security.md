@@ -939,17 +939,24 @@ write history that never happened.
 
 58. **A correlated incident is an inference over influenceable inputs, and gates
     nothing.** `warmup.DetectIncidents` groups degraded participants by a shared
-    fault dimension — destination route, DKIM signing domain, return-path domain, or
-    sender organizational domain — and reports concentration as a lift over the rest
-    of the pool. It is computed at read time, persists nothing, and no threshold,
+    fault dimension — destination route, DKIM signing domain, return-path domain,
+    sender organizational domain, or observed relay address — and reports
+    concentration as a lift over the rest of the pool. It is computed at read time, persists nothing, and no threshold,
     lane, health state or promotion decision reads it.
-    **Three of the four dimensions are steerable inside a workspace, and two of them
+    **Four of the five dimensions are steerable inside a workspace, and two of them
     by a weaker actor than invariant 57 describes.** `destination_esp` needs MX
     control. `dkim_domain` and `return_path_domain` do not: `ExtractIdentity` reads
     them straight off `DKIM-Signature d=` and `Return-Path` *before* the invariant-56
     trust rule, which gates only the SPF/DKIM/DMARC verdicts — so read/write on one
     warmup recipient mailbox is enough to deliver a crafted copy of a token-carrying
     message and choose the value recorded against every sender that mails it.
+    `observed_relay_ip` is steerable only by SUPPRESSION, and the distinction is the
+    reason it is admissible as a dimension at all: `ObservedRelayIP` trusts nothing
+    but receiver-attributable hops and every failure direction returns `''`, so an
+    attacker can blank a participant out of a cohort and can never place a chosen
+    value into one. A relay cohort is therefore always real, and only ever
+    incomplete — which is a different failure from the identity dimensions, where the
+    cohort itself can be manufactured.
     What that cannot do is fabricate a member: membership comes only from
     participants the evaluator already marked degraded, over evidence invariant 52
     binds. What it can do is decide which correlation ranks highest, and the pulse
@@ -1009,7 +1016,10 @@ write history that never happened.
     Each mailbox's own lane still applies before the budget, so containment is not
     weakened — but new leads drift toward the least domain-contained class of mailbox.
 
-61. **The observed relay IP and the content version are recorded and gate nothing.**
+61. **The observed relay IP and the content version are reported and gate nothing.**
+    The relay IP is now also a correlation dimension (invariant 58) and the content
+    version is rendered on the warmup pool page; neither changes what reads them,
+    which is nothing that decides whether a mailbox may send.
     `warmup_observations.observed_relay_ip` is the address the RECEIVER saw its peer
     connect from, taken from the topmost `Received` hop the receiving infrastructure
     wrote. `content_version` fingerprints the library template a send carried, copied

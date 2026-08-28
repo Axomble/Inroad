@@ -438,6 +438,10 @@ ORDER BY o.observer_mailbox_id, o.destination_esp;
 -- both degradation axes, and the most recent RESOLVED value the mailbox carries on
 -- each observed fault dimension (slice D, design §4).
 --
+-- observed_relay_ip is the fourth such column and the reason the lateral exists in
+-- this shape: it is what makes "these senders fail through one relay" answerable by
+-- NAME rather than by inference from the identities they happen to share.
+--
 -- Read-time, and deliberately NOT materialized into a warmup_incidents table. An
 -- incident has no fact of its own — it is entirely a function of state already
 -- stored — so persisting one can only create a version of it that is wrong, which is
@@ -466,13 +470,13 @@ ORDER BY o.observer_mailbox_id, o.destination_esp;
 -- row an operator disabled by direct write.
 --
 -- A participant with NO observations in the window still appears, carrying an EMPTY
--- value on all three observed dimensions (design §9). It is therefore in none of
--- those three cohorts, but it is still part of the pool the concentration is measured
+-- value on all four observed dimensions (design §9). It is therefore in none of
+-- those four cohorts, but it is still part of the pool the concentration is measured
 -- against — and it keeps its sender_domain, which the fold derives from the ADDRESS
 -- and needs no observation for.
 --
--- ONE lateral, not three correlated subqueries, so the attribution predicate above is
--- written exactly ONCE. Three copies of it would be three things that must agree
+-- ONE lateral, not four correlated subqueries, so the attribution predicate above is
+-- written exactly ONCE. Four copies of it would be four things that must agree
 -- about which mail counts. The cost is that the aggregate reads the mailbox's whole
 -- 7-day window rather than stopping at the first resolved row of each column; that
 -- window is one pool member's warmup mail for a week (tens to low hundreds of rows),
@@ -490,12 +494,13 @@ SELECT
     p.lane,
     COALESCE(dims.destination_esp, '')::text    AS destination_esp,
     COALESCE(dims.dkim_domain, '')::text        AS dkim_domain,
-    COALESCE(dims.return_path_domain, '')::text AS return_path_domain
+    COALESCE(dims.return_path_domain, '')::text AS return_path_domain,
+    COALESCE(dims.observed_relay_ip, '')::text  AS observed_relay_ip
 FROM warmup_participants p
 JOIN mailboxes m ON m.id = p.mailbox_id AND m.workspace_id = p.workspace_id
 LEFT JOIN LATERAL (
     -- The newest observation that actually RESOLVED each column, per column
-    -- independently. Picking one row for all three would let a later observation that
+    -- independently. Picking one row for all four would let a later observation that
     -- carried only a destination erase a signing domain we know perfectly well.
     --
     -- The empty string and 'unknown' are skipped when CHOOSING the row rather than
@@ -509,7 +514,14 @@ LEFT JOIN LATERAL (
         (array_agg(o.dkim_domain ORDER BY o.observed_at DESC)
             FILTER (WHERE o.dkim_domain NOT IN ('', 'unknown')))[1]        AS dkim_domain,
         (array_agg(o.return_path_domain ORDER BY o.observed_at DESC)
-            FILTER (WHERE o.return_path_domain NOT IN ('', 'unknown')))[1] AS return_path_domain
+            FILTER (WHERE o.return_path_domain NOT IN ('', 'unknown')))[1] AS return_path_domain,
+        -- Same filter shape as the three above rather than one special-cased to '':
+        -- ObservedRelayIP writes '' for "nothing trustworthy was observed" and never
+        -- writes 'unknown', so the extra term is inert here. It is kept so all four
+        -- columns state the same rule, because the one that differs is the one a
+        -- later edit changes without noticing.
+        (array_agg(o.observed_relay_ip ORDER BY o.observed_at DESC)
+            FILTER (WHERE o.observed_relay_ip NOT IN ('', 'unknown')))[1]  AS observed_relay_ip
     FROM warmup_observations o
     WHERE o.workspace_id = $1
       AND o.mailbox_id = p.mailbox_id

@@ -110,10 +110,11 @@ func TestDetectIncidentsNeedsAnOutsideToCompareAgainst(t *testing.T) {
 		pool = append(pool, IncidentInput{
 			MailboxID: fmt.Sprintf("m%d", i), Email: fmt.Sprintf("m%d@acme.test", i),
 			Degraded: i < 3, Route: "google", SigningDomain: "mail.acme.test", ReturnPathDomain: "b.acme.test",
+			RelayIP: "198.51.100.7",
 		})
 	}
 
-	for _, d := range []string{DimensionRoute, DimensionSigning, DimensionReturnPath, DimensionSenderDomain} {
+	for _, d := range []string{DimensionRoute, DimensionSigning, DimensionReturnPath, DimensionSenderDomain, DimensionRelay} {
 		assertNone(t, DetectIncidents(pool), d)
 	}
 }
@@ -174,6 +175,7 @@ func TestDetectIncidentsNeverCorrelatesOnUnresolvedValues(t *testing.T) {
 				pool = append(pool, IncidentInput{
 					MailboxID: fmt.Sprintf("u%d", i), Email: fmt.Sprintf("u%d@u%d.test", i, i),
 					Degraded: true, Route: unresolved, SigningDomain: unresolved, ReturnPathDomain: unresolved,
+					RelayIP: unresolved,
 				})
 			}
 
@@ -183,6 +185,54 @@ func TestDetectIncidentsNeverCorrelatesOnUnresolvedValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The relay dimension, and the reason the column was recorded: "these senders fail
+// through one machine" is answerable by NAME here rather than inferred from the
+// identities they happen to share. Their signing domains and routes differ on
+// purpose, so a hit can only come from the relay.
+func TestDetectIncidentsReportsAConcentratedRelay(t *testing.T) {
+	pool := clean(20)
+	for i := 0; i < 3; i++ {
+		pool = append(pool, IncidentInput{
+			MailboxID:        fmt.Sprintf("r%d", i),
+			Email:            fmt.Sprintf("r%d@sender%d.test", i, i),
+			Degraded:         true,
+			Route:            fmt.Sprintf("esp%d", i),
+			SigningDomain:    fmt.Sprintf("mail.sender%d.test", i),
+			ReturnPathDomain: fmt.Sprintf("bounce.sender%d.test", i),
+			RelayIP:          "198.51.100.7",
+		})
+	}
+
+	got := find(t, DetectIncidents(pool), DimensionRelay, "198.51.100.7")
+
+	if len(got.Members) != 3 {
+		t.Errorf("named %d members, want the 3 sharing the relay: %v", len(got.Members), got.Members)
+	}
+	if got.DegradedInside != 3 || got.CohortSize != 3 {
+		t.Errorf("cohort = %d/%d, want 3/3", got.DegradedInside, got.CohortSize)
+	}
+}
+
+// Suppression is the only influence available on this dimension (ObservedRelayIP
+// returns "" on every failure path), so a blanked relay must drop the participant
+// OUT of every relay cohort rather than into a shared empty one. A cohort of
+// mailboxes whose relay nobody observed would correlate on our own blindness — and
+// it is the cohort an attacker could actually manufacture, since blanking is exactly
+// what they can do.
+func TestDetectIncidentsNeverBuildsACohortOfSuppressedRelays(t *testing.T) {
+	pool := clean(20)
+	for i := 0; i < 5; i++ {
+		pool = append(pool, IncidentInput{
+			MailboxID: fmt.Sprintf("s%d", i),
+			Email:     fmt.Sprintf("s%d@sender%d.test", i, i),
+			Degraded:  true,
+			RelayIP:   "", // nothing trustworthy was observed
+		})
+	}
+
+	assertNone(t, DetectIncidents(pool), DimensionRelay)
 }
 
 // A zero-degradation outside is the STRONGEST signal available, not a divide-by-zero
@@ -386,6 +436,7 @@ func TestDetectIncidentsReportsOneCohortOnEveryDimensionItShares(t *testing.T) {
 			Email:     fmt.Sprintf("shared-%d@acme.test", i),
 			Degraded:  true,
 			Route:     "microsoft", SigningDomain: "mail.acme.test", ReturnPathDomain: "bounce.acme.test",
+			RelayIP: "198.51.100.7",
 		})
 	}
 
@@ -395,7 +446,7 @@ func TestDetectIncidentsReportsOneCohortOnEveryDimensionItShares(t *testing.T) {
 	for _, in := range got {
 		byDimension[in.Dimension] = in
 	}
-	for _, want := range []string{DimensionRoute, DimensionSigning, DimensionReturnPath, DimensionSenderDomain} {
+	for _, want := range []string{DimensionRoute, DimensionSigning, DimensionReturnPath, DimensionSenderDomain, DimensionRelay} {
 		if _, ok := byDimension[want]; !ok {
 			t.Errorf("no %s incident; one fault with several names must be reported under each, "+
 				"because which dimension carries it is what an operator acts on. got %+v", want, got)

@@ -5604,7 +5604,7 @@ components:
             type: object
             required: [dimension, value, member_mailbox_ids, cohort_size, degraded_inside, cohort_outside, degraded_outside, lift]
             properties:
-              dimension:          { type: string, enum: [destination_route, signing_domain, return_path_domain, sender_domain] }
+              dimension:          { type: string, enum: [destination_route, signing_domain, return_path_domain, sender_domain, relay_ip] }
               value:              { type: string, description: "the shared value, e.g. a signing domain or an ESP name" }
               member_mailbox_ids: { type: array, items: { type: string }, description: "the DEGRADED members of the cohort" }
               cohort_size:        { type: integer, description: "participants carrying this value, degraded or not" }

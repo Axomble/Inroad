@@ -23,6 +23,9 @@ const (
 	DimensionSigning      = "signing_domain"
 	DimensionReturnPath   = "return_path_domain"
 	DimensionSenderDomain = "sender_domain"
+	// DimensionRelay is the address the RECEIVER saw its peer connect from — the
+	// machine the mail actually came out of, which no other dimension names.
+	DimensionRelay = "relay_ip"
 )
 
 // The whole policy surface of this slice, and these three numbers are guesses.
@@ -79,6 +82,10 @@ type IncidentInput struct {
 	Route            string
 	SigningDomain    string
 	ReturnPathDomain string
+	// RelayIP is receiver-attributed (warmup.ObservedRelayIP) and therefore
+	// influenceable only by SUPPRESSION: every failure direction in that scan
+	// returns "", so an attacker can blank the value and can never choose it.
+	RelayIP string
 }
 
 // Incident is one detected correlation, carrying the arithmetic that produced it.
@@ -108,7 +115,7 @@ type Incident struct {
 // sentence an operator reads and can dismiss; it is not tolerable for a threshold
 // that withholds sending.
 //
-// And THREE of the four dimensions are influenceable within a workspace, which is a
+// And FOUR of the five dimensions are influenceable within a workspace, which is a
 // weaker attacker than it first looks:
 //
 //   - destination_route rests on destination_esp — security.md invariant 57, whoever
@@ -119,6 +126,12 @@ type Incident struct {
 //     at all: read/write on ONE warmup recipient mailbox is enough to deliver a
 //     crafted copy of a token-carrying message and choose the value recorded against
 //     every sender that mails it.
+//   - relay_ip is influenceable only by SUPPRESSION, which is strictly weaker than
+//     the two above. ObservedRelayIP trusts nothing but receiver-attributable hops
+//     and every failure direction returns "", so an attacker can blank a participant
+//     out of the cohort — shrinking it, hiding a correlation, changing which finding
+//     ranks strongest — and can never place a chosen value in one. A cohort here is
+//     therefore always real, even when it is incomplete.
 //
 // What that CANNOT do is invent a member: Members comes only from participants the
 // evaluator already marked degraded, over evidence invariant 52 binds. What it can do
@@ -142,6 +155,7 @@ func DetectIncidents(participants []IncidentInput) []Incident {
 		{DimensionRoute, func(p IncidentInput) string { return p.Route }},
 		{DimensionSigning, func(p IncidentInput) string { return p.SigningDomain }},
 		{DimensionReturnPath, func(p IncidentInput) string { return p.ReturnPathDomain }},
+		{DimensionRelay, func(p IncidentInput) string { return p.RelayIP }},
 		// Derived, not observed: one implementation of "what domain is this", which is
 		// the rule this package keeps proving it needs.
 		{DimensionSenderDomain, func(p IncidentInput) string { return OrganizationalDomain(p.Email) }},
