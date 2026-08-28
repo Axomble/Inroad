@@ -1160,19 +1160,45 @@ write history that never happened.
     so only on failure, which is exactly when nobody is looking. That is how
     `inbox:reply_send.body_text` went unnoticed: the field had no doc comment of
     its own, and the disclosure needed a send to fail before it existed.
-    **One accepted exception:** `TestSendPayload.To`, a single operator-typed
+    **One permanent exception:** `TestSendPayload.To`, a single operator-typed
     recipient address. It is structured contact-class data that `contacts:read`
     already grants wholesale, not a third party's correspondence, and a row
     holding one address for thirty seconds would be the wrong abstraction. The
     acceptance is named in the payload's doc comment and in the test's allowlist,
     so it is a decision on record rather than an oversight repeated.
-    Enforced by `TestTaskPayloadsCarryNoContent`, which reflects over every
-    payload type against a named field allowlist AND parses `queue.go` so a
-    brand-new payload type cannot slip past unlisted, and by
-    `TestDeadLetterListNeverServesReplyBody`, which asserts a sentinel body never
-    appears in the raw bytes an API-key principal holding only `campaigns:read`
-    receives — a substring check, so re-adding content under a different field
-    name or a different task type still fails it.
+    **And one temporary one:** `InboxReplySendPayload.body_text` remains in the
+    allowlist while that type survives as a drain for tasks enqueued before the
+    fix. Nothing produces it; the worker refuses to capture it at all, and the
+    control plane strips the body and files the row `discarded` — deliberately
+    different, because the control plane must still leave the operator a record
+    that a send was permanently lost, which is the whole reason the table exists.
+    The type and its allowlist entry are deleted together in the release after
+    the drain completes. Until then the allowlist has exactly two non-id entries.
+    Both are keyed by the WIRE key (`TestSendPayload.to`,
+    `InboxReplySendPayload.body_text`), not the Go field name, because the wire is
+    what a dead letter stores: a field named `To` tagged `json:"body_text"`
+    publishes a body while reading as an allowlisted address.
+    **The same rule governs `last_error`**, which is stored verbatim and served
+    in the same response. A provider's rejection string names the recipient and
+    echoes the server's own text, so a handler returns a stable token to the queue
+    and keeps the raw cause in its log line; the stored message is truncated on a
+    rune boundary, because a byte cut through a multi-byte response is invalid
+    UTF-8 and Postgres would reject the whole row.
+    **Three gates, one predicate** (`queue.IsLegacyContentBearingTaskType`): the
+    worker refuses capture, the control plane strips and files as `discarded`, and
+    the read path redacts. The worker gate alone was not enough — it lives in the
+    worker binary, so a pre-fix pod still running through a rolling deploy could
+    write a fresh body-bearing row after the one-shot migration had already run,
+    and the packaged Helm chart has no migration hook to order that for you.
+    Enforced by `TestTaskPayloadsCarryNoContent`, which walks the JSON a payload
+    actually emits — not its Go fields, so an embedded struct cannot smuggle a key
+    past the allowlist — and parses the package so a brand-new payload type cannot
+    slip past unlisted; and by `TestDeadLetterListNeverServesReplyBody`, which
+    seeds an UNMIGRATED body-bearing row and asserts the sentinel appears nowhere
+    in the bytes an API-key principal holding only `campaigns:read` receives. That
+    test was vacuous on its first draft — every fixture was built without a body,
+    so it searched bytes that could never have contained one and passed with the
+    entire fix reverted.
     `task_dead_letters` is swept at 90 days by the maintenance job, for the
     reasoning invariant 55 gives: an append-only table reachable by outside input
     needs a horizon, or a single exposure becomes a permanent one.
