@@ -1,6 +1,7 @@
 // The contacts list's URL contract and the pure rules around it — parsing the
-// search params, deciding what `q` is worth sending, the cursor stack that gives
-// keyset pagination a Previous button, and the copy for counts and failures.
+// search params, deciding what `q` is worth sending, and the copy for counts and
+// failures. The visited-page stack behind the Previous button is not here: it is
+// the same rule for every keyset-paged list, so it lives in `@/lib/cursor-stack`.
 // Component-free so each rule is unit-tested directly and the page file only
 // exports components (fast refresh).
 import { httpStatus } from '@/lib/rtk-error'
@@ -102,22 +103,6 @@ export function queryParam(typed: string): string | undefined {
 export function isTooShort(typed: string): boolean {
   const trimmed = typed.trim()
   return trimmed.length > 0 && trimmed.length < MIN_QUERY_LENGTH
-}
-
-/**
- * Keyset pagination knows the next page and the one it came from, but not
- * "page N back" — so the pages already visited are stacked as they are left.
- * The empty string stands for the first page, which has no cursor.
- */
-export type CursorStack = readonly string[]
-
-export function pushCursor(stack: CursorStack, current: string | undefined): CursorStack {
-  return [...stack, current ?? '']
-}
-
-/** Pops the page to return to. An empty stack yields `undefined` — the first page. */
-export function popCursor(stack: CursorStack): { stack: CursorStack; cursor: string | undefined } {
-  return { stack: stack.slice(0, -1), cursor: stack[stack.length - 1] || undefined }
 }
 
 /**

@@ -10,6 +10,7 @@ import { useUrlPatch } from '@/hooks/use-url-state'
 import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { useListKeyboardNav, LIST_NAV_HINTS } from '@/hooks/use-list-keyboard-nav'
 import { useMediaQuery } from '@/hooks/use-media-query'
+import { popCursor, pushCursor, type CursorStack } from '@/lib/cursor-stack'
 import { useListMailboxesQuery } from '@/store/api'
 // Cross-feature query-hook imports are allowed for read-only reference data
 // (see features/campaigns/campaign-form.tsx). Cross-feature UI imports remain
@@ -33,14 +34,11 @@ import {
   parseInboxSearch,
   encodeCursor,
   decodeCursor,
-  pushCursor,
-  popCursor,
   isStaleCursorError,
   inboxErrorMessage,
   timezoneOffsetMinutes,
   scopeTimezoneOffset,
   SCOPE_LABELS,
-  type CursorStack,
   type InboxScope,
 } from './inbox-search'
 

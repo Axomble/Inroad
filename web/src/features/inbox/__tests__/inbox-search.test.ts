@@ -4,8 +4,6 @@ import {
   encodeCursor,
   isStaleCursorError,
   parseInboxSearch,
-  popCursor,
-  pushCursor,
 } from '../inbox-search'
 
 // The inbox's keyset cursor is two real values taken off the last row of
@@ -46,25 +44,6 @@ test('decode returns undefined for a missing, half-set, or malformed cursor', ()
   // Separator present but one side empty.
   expect(decodeCursor('::t-1')).toBeUndefined()
   expect(decodeCursor('2026-08-05T10:00:00Z::')).toBeUndefined()
-})
-
-test('the cursor stack walks forward and back, with the first page as the floor', () => {
-  let stack = pushCursor([], undefined) // leaving page 1
-  expect(stack).toEqual([''])
-  const page1Cursor = encodeCursor('2026-08-05T10:00:00Z', 't-24')
-  stack = pushCursor(stack, page1Cursor) // leaving page 2 (the page reached via page1Cursor)
-  expect(stack).toEqual(['', page1Cursor])
-
-  const back = popCursor(stack)
-  expect(back.cursor).toBe(page1Cursor)
-  expect(back.stack).toEqual([''])
-
-  const home = popCursor(back.stack)
-  expect(home.cursor).toBeUndefined() // '' is the cursor-less first page
-  expect(home.stack).toEqual([])
-
-  // Popping an empty stack is not an error: a pasted deep link has no history.
-  expect(popCursor([]).cursor).toBeUndefined()
 })
 
 test('a cursor the server rejects (400) is recognised as stale; anything else is a real error', () => {

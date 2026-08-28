@@ -6,8 +6,6 @@ import {
   isTooShort,
   limitOrDefault,
   parseContactsSearch,
-  popCursor,
-  pushCursor,
   queryParam,
   rangeLabel,
   sortOrDefault,
@@ -63,24 +61,6 @@ test('a query is only sent once it is long enough to search', () => {
   expect(isTooShort('a')).toBe(true)
   expect(isTooShort('')).toBe(false)
   expect(isTooShort('ac')).toBe(false)
-})
-
-test('the cursor stack walks forward and back, with the first page as the floor', () => {
-  let stack = pushCursor([], undefined) // leaving page 1
-  expect(stack).toEqual([''])
-  stack = pushCursor(stack, 'c1') // leaving page 2
-  expect(stack).toEqual(['', 'c1'])
-
-  const back = popCursor(stack)
-  expect(back.cursor).toBe('c1')
-  expect(back.stack).toEqual([''])
-
-  const home = popCursor(back.stack)
-  expect(home.cursor).toBeUndefined() // '' is the cursor-less first page
-  expect(home.stack).toEqual([])
-
-  // Popping an empty stack is not an error: a pasted deep link has no history.
-  expect(popCursor([]).cursor).toBeUndefined()
 })
 
 function page(overrides: Partial<ContactPage> = {}): ContactPage {
