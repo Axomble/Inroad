@@ -510,8 +510,15 @@ limit / abuse control here is tracked in the Deferred list below.
     an incoming unsubscribe) — suppression is never bypassed, in either
     direction. The credential is decrypted ONLY in the execution plane
     (`ReplyCore.ResolveSenderTransport`, invariant 1): the control plane only
-    ever enqueues an `inbox:reply_send` task carrying ids and the free-text
-    body, never a credential. The new `inbox:send` scope is in
+    ever enqueues a task carrying ids, never a credential — and, since the
+    correspondence fix, never the body either. Both reply routes now create an
+    `inbox_pending_replies` row and enqueue `inbox:pending_reply_send` carrying
+    `{pending_id, workspace_id}`, so the reply text never leaves Postgres
+    (invariant 64). The earlier `inbox:reply_send` payload carried the free-text
+    body, and because a terminal failure captures a payload verbatim into
+    `task_dead_letters`, that body was readable under `campaigns:read` — a scope
+    this file deliberately grants to OAuth clients while withholding
+    `inbox:read`. The new `inbox:send` scope is in
     `auth.AllScopes` (a workspace-minted API key or a session may send a
     reply) but deliberately absent from `OAuthGrantableScopes` — sending mail
     is never delegable to a third-party client, the same rule
@@ -525,7 +532,15 @@ limit / abuse control here is tracked in the Deferred list below.
     `UNIQUE(campaign_id, contact_id)`, which a legacy direct-send thread's
     reply cannot satisfy and a threaded one would collide with).
 
-    **Claim-before-send.** `ReplySendHandler` claims the task (workspace-
+    **Claim-before-send.** Both reply routes now go through
+    `PendingReplySendHandler`, whose claim is the row itself: a status-guarded
+    `scheduled` -> `sending` UPDATE plus a lease, which is both the claim and the
+    operator's cancel handle. The paragraph below describes the claim used by the
+    legacy `inbox:reply_send` drain handler, which survives only until the last
+    pre-fix task is drained (invariant 64) and is deleted with it. It is kept
+    documented because the drain path is still registered and still sends mail.
+
+    `ReplySendHandler` claims the task (workspace-
     pinned, keyed on the enqueue-time `asynq.TaskID` — stable across every
     retry/redelivery of that ONE enqueued task, carried in
     `InboxReplySendPayload.TaskID`) immediately before `ResolveSenderTransport`,
@@ -1130,6 +1145,38 @@ write history that never happened.
     would report the link broken and the human it protects would never reach the
     page. The verdict governs reporting only.
 
+64. **A task payload is a pointer, never content.** Every payload in
+    `internal/platform/queue` carries ids plus `workspace_id` and nothing else.
+    Anything a handler needs that is not an id lives in a row the handler
+    re-reads, so the row stays the single source of truth and the payload carries
+    nothing worth disclosing.
+    **The rule is structural, not stylistic.** `queue.DeadLetterErrorHandler`
+    stores `task.Payload()` byte-for-byte into `task_dead_letters`, and
+    `GET /dead-letters` serves it verbatim under `campaigns:read` — which IS in
+    `auth.OAuthGrantableScopes`, while `ScopeInboxRead` is deliberately excluded
+    from it because "reply bodies are free-text correspondence content, a
+    materially more sensitive category". A payload carrying content therefore
+    hands correspondence to a scope that was structurally denied it, and it does
+    so only on failure, which is exactly when nobody is looking. That is how
+    `inbox:reply_send.body_text` went unnoticed: the field had no doc comment of
+    its own, and the disclosure needed a send to fail before it existed.
+    **One accepted exception:** `TestSendPayload.To`, a single operator-typed
+    recipient address. It is structured contact-class data that `contacts:read`
+    already grants wholesale, not a third party's correspondence, and a row
+    holding one address for thirty seconds would be the wrong abstraction. The
+    acceptance is named in the payload's doc comment and in the test's allowlist,
+    so it is a decision on record rather than an oversight repeated.
+    Enforced by `TestTaskPayloadsCarryNoContent`, which reflects over every
+    payload type against a named field allowlist AND parses `queue.go` so a
+    brand-new payload type cannot slip past unlisted, and by
+    `TestDeadLetterListNeverServesReplyBody`, which asserts a sentinel body never
+    appears in the raw bytes an API-key principal holding only `campaigns:read`
+    receives — a substring check, so re-adding content under a different field
+    name or a different task type still fails it.
+    `task_dead_letters` is swept at 90 days by the maintenance job, for the
+    reasoning invariant 55 gives: an append-only table reachable by outside input
+    needs a horizon, or a single exposure becomes a permanent one.
+
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**
   (invariant 63). This is written down BEFORE the feature exists because getting
@@ -1184,6 +1231,9 @@ write history that never happened.
       responses/logs.
 - [ ] New outbound dial to a user-supplied host? → routed through the SSRF guard.
 - [ ] New tenant-scoped query? → filtered by `workspace_id` from the JWT.
+- [ ] New task payload? → ids + `workspace_id` only; anything else lives in a row
+      the handler re-reads (invariant 64). A payload is served verbatim to
+      `campaigns:read` when the task finally fails.
 - [ ] New secret/config? → env-loaded, fail-closed in compose, in `.env.example`.
 - [ ] New OAuth/state-authenticated flow? → `state` HMAC-signed + TTL + a
       `oauthstate.Purpose` of its own (so it cannot be replayed at another flow's
