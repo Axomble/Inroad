@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -164,20 +165,20 @@ func TestHandlerListShape(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body)
 	}
 	var envelope struct {
-		DeadLetters []map[string]json.RawMessage `json:"dead_letters"`
+		Items []map[string]json.RawMessage `json:"items"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(envelope.DeadLetters) != 1 {
-		t.Fatalf("returned %d rows, want 1", len(envelope.DeadLetters))
+	if len(envelope.Items) != 1 {
+		t.Fatalf("returned %d rows, want 1", len(envelope.Items))
 	}
-	if _, leaked := envelope.DeadLetters[0]["workspace_id"]; leaked {
+	if _, leaked := envelope.Items[0]["workspace_id"]; leaked {
 		t.Error("the response echoes workspace_id back to the caller")
 	}
 	// payload is raw JSON, not a string, so a client reads its fields directly.
 	var payload map[string]string
-	if err := json.Unmarshal(envelope.DeadLetters[0]["payload"], &payload); err != nil {
+	if err := json.Unmarshal(envelope.Items[0]["payload"], &payload); err != nil {
 		t.Fatalf("payload is not raw JSON: %v", err)
 	}
 
@@ -186,13 +187,83 @@ func TestHandlerListShape(t *testing.T) {
 		t.Fatalf("empty list status = %d, want 200", empty.Code)
 	}
 	var emptyEnvelope struct {
-		DeadLetters []deadLetterResponse `json:"dead_letters"`
+		Items []deadLetterResponse `json:"items"`
 	}
 	if err := json.Unmarshal(empty.Body.Bytes(), &emptyEnvelope); err != nil {
 		t.Fatalf("decode empty: %v", err)
 	}
-	if emptyEnvelope.DeadLetters == nil {
+	if emptyEnvelope.Items == nil {
 		t.Error("an empty list serialised as null, want []")
+	}
+}
+
+// next_cursor is ABSENT on the last page and PRESENT when rows follow. Absence
+// is the end-of-list signal the client keys on — a short page is not, because
+// the server caps the page size — so `null` or `""` would both be wrong.
+func TestHandlerListNextCursorIsAbsentOnlyOnTheLastPage(t *testing.T) {
+	store, _, svc, ws, _ := seedPending(t)
+	h := NewHandler(svc)
+
+	// One row, one page: nothing follows, so the field must not appear at all.
+	raw := map[string]json.RawMessage{}
+	w := request(t, h, http.MethodGet, "/", ws)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := raw["next_cursor"]; present {
+		t.Errorf("next_cursor is present on a single-row final page (%s); absence is what "+
+			"tells the client the list has ended", w.Body)
+	}
+
+	// Enough rows to need a second page: now it must appear, and be usable.
+	seedRows(t, store, ws, 5)
+	w = request(t, h, http.MethodGet, "/?limit=2", ws)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body)
+	}
+	var page struct {
+		Items      []deadLetterResponse `json:"items"`
+		NextCursor string               `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("returned %d rows, want the requested 2", len(page.Items))
+	}
+	if page.NextCursor == "" {
+		t.Fatal("next_cursor is absent while rows remain, so the client cannot reach them")
+	}
+	next := request(t, h, http.MethodGet, "/?limit=2&cursor="+url.QueryEscape(page.NextCursor), ws)
+	if next.Code != http.StatusOK {
+		t.Fatalf("following the cursor -> %d, want 200: %s", next.Code, next.Body)
+	}
+	var second struct {
+		Items []deadLetterResponse `json:"items"`
+	}
+	if err := json.Unmarshal(next.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode page 2: %v", err)
+	}
+	if len(second.Items) == 0 {
+		t.Fatal("the cursor led to an empty page")
+	}
+	if second.Items[0].ID == page.Items[0].ID {
+		t.Error("page 2 restarted at page 1's first row; the cursor was ignored")
+	}
+}
+
+// A cursor the server did not mint is a 400, not a silent first page. The two
+// are indistinguishable to a client, and the silent one reads as rows vanishing.
+func TestHandlerListRejectsABadCursorWith400(t *testing.T) {
+	_, _, h, ws, _ := handlerFixture(t)
+
+	for _, q := range []string{"?cursor=not-base64", "?cursor=" + url.QueryEscape("aGVsbG8"), "?status=pending&cursor=zzz"} {
+		if w := request(t, h, http.MethodGet, "/"+q, ws); w.Code != http.StatusBadRequest {
+			t.Errorf("GET /%s -> %d, want 400: %s", q, w.Code, w.Body)
+		}
 	}
 }
 
@@ -210,12 +281,14 @@ func TestHandlerListRejectsAnUnknownStatusFilter(t *testing.T) {
 	}
 }
 
-// A garbage limit/offset falls back to the default page rather than erroring —
-// paging is a convenience, not a contract the client can break.
-func TestHandlerTolueratesGarbagePaging(t *testing.T) {
+// A garbage limit falls back to the default page rather than erroring — a page
+// SIZE is a convenience, not a contract the client can break. (A garbage CURSOR
+// is not tolerated; see TestHandlerListRejectsABadCursorWith400 for why the two
+// are treated differently.)
+func TestHandlerToleratesAGarbageLimit(t *testing.T) {
 	_, _, h, ws, _ := handlerFixture(t)
 
-	for _, q := range []string{"?limit=abc", "?limit=-1", "?offset=abc", "?limit=99999999999999999999"} {
+	for _, q := range []string{"?limit=abc", "?limit=-1", "?limit=0", "?limit=99999999999999999999"} {
 		if w := request(t, h, http.MethodGet, "/"+q, ws); w.Code != http.StatusOK {
 			t.Errorf("GET /%s -> %d, want 200: %s", q, w.Code, w.Body)
 		}

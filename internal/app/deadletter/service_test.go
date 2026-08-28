@@ -1,9 +1,11 @@
 package deadletter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -33,11 +35,20 @@ type fakeStore struct {
 	// Observed calls.
 	releases int
 	inserted []Capture
+	lastList ListQuery
+	// seeded counts seed() calls so each row gets a distinct created_at and the
+	// ordering under test is deterministic rather than map-iteration order.
+	seeded int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{rows: map[uuid.UUID]gen.TaskDeadLetter{}}
 }
+
+// seedEpoch is an arbitrary fixed instant. Seeded rows are spaced a second apart
+// from it so "newest first" is a real, checkable order rather than an accident
+// of insertion.
+var seedEpoch = time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
 
 // seed inserts a row directly, bypassing Insert, so a test can set up a
 // non-pending row without going through the service.
@@ -49,6 +60,13 @@ func (f *fakeStore) seed(row gen.TaskDeadLetter) gen.TaskDeadLetter {
 	}
 	if row.Status == "" {
 		row.Status = StatusPending
+	}
+	if !row.CreatedAt.Valid {
+		f.seeded++
+		row.CreatedAt = pgtype.Timestamptz{
+			Time:  seedEpoch.Add(time.Duration(f.seeded) * time.Second),
+			Valid: true,
+		}
 	}
 	f.rows[row.ID] = row
 	return row
@@ -70,32 +88,52 @@ func (f *fakeStore) Insert(_ context.Context, in Capture) (gen.TaskDeadLetter, e
 	return row, nil
 }
 
-func (f *fakeStore) List(_ context.Context, ws uuid.UUID, status string, limit, offset int32) ([]gen.TaskDeadLetter, error) {
+// List reproduces the SQL statement's three load-bearing behaviours: the
+// workspace pin, the (created_at DESC, id DESC) total order, and the strictly-
+// after row-compare seek. A fake that ignored the pin would let the tenant tests
+// pass vacuously; one that ignored the cursor or the limit would make every
+// paging assertion below assert nothing at all.
+func (f *fakeStore) List(_ context.Context, ws uuid.UUID, q ListQuery) ([]gen.TaskDeadLetter, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastList = q
 	var out []gen.TaskDeadLetter
 	for _, row := range f.rows {
-		// The workspace pin is the fake's job to honour too: a fake that
-		// ignored it would let a tenant-isolation test pass vacuously.
 		if row.WorkspaceID != ws {
 			continue
 		}
-		if status != "" && row.Status != status {
+		if q.Status != "" && row.Status != q.Status {
+			continue
+		}
+		if q.Cursor != nil && !rowIsBefore(row, *q.Cursor) {
 			continue
 		}
 		out = append(out, row)
 	}
-	if int(offset) >= len(out) {
-		return nil, nil
-	}
-	out = out[offset:]
-	if int(limit) < len(out) {
-		out = out[:limit]
+	slices.SortFunc(out, func(a, b gen.TaskDeadLetter) int {
+		if c := b.CreatedAt.Time.Compare(a.CreatedAt.Time); c != 0 {
+			return c
+		}
+		return bytes.Compare(b.ID[:], a.ID[:])
+	})
+	if q.Limit > 0 && int32(len(out)) > q.Limit {
+		out = out[:q.Limit]
 	}
 	return out, nil
+}
+
+// rowIsBefore is Postgres's `(created_at, id) < (@cursor_time, @cursor_id)` row
+// compare. The id tiebreak is compared as raw bytes because that is how Postgres
+// orders the uuid type, so rows sharing a created_at land in the same relative
+// order here as in the database.
+func rowIsBefore(row gen.TaskDeadLetter, cur Cursor) bool {
+	if c := row.CreatedAt.Time.Compare(cur.CreatedAt); c != 0 {
+		return c < 0
+	}
+	return bytes.Compare(row.ID[:], cur.ID[:]) < 0
 }
 
 func (f *fakeStore) Get(_ context.Context, ws, id uuid.UUID) (gen.TaskDeadLetter, bool, error) {
@@ -368,11 +406,11 @@ func TestGetAndListAreWorkspacePinned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(mine) != 1 {
-		t.Fatalf("List returned %d rows, want only this workspace's 1", len(mine))
+	if len(mine.Items) != 1 {
+		t.Fatalf("List returned %d rows, want only this workspace's 1", len(mine.Items))
 	}
-	if mine[0].WorkspaceID != ws {
-		t.Errorf("List leaked workspace %v", mine[0].WorkspaceID)
+	if mine.Items[0].WorkspaceID != ws {
+		t.Errorf("List leaked workspace %v", mine.Items[0].WorkspaceID)
 	}
 	_ = enq
 }
@@ -582,7 +620,7 @@ func TestCapture(t *testing.T) {
 }
 
 // List's boundary validation: an unknown status filter is a client error, and
-// paging is clamped rather than trusted.
+// the page size is clamped rather than trusted.
 func TestListValidatesAndClampsItsInput(t *testing.T) {
 	store := newFakeStore()
 	svc := NewService(store, &fakeEnqueuer{})
@@ -605,24 +643,207 @@ func TestListValidatesAndClampsItsInput(t *testing.T) {
 			Payload: payloadFor(t, ws), Status: StatusPending,
 		})
 	}
-	rows, err := svc.List(context.Background(), ws, ListParams{Limit: 10_000, Offset: -5})
+	page, err := svc.List(context.Background(), ws, ListParams{Limit: 10_000})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(rows) != maxLimit {
-		t.Errorf("returned %d rows, want the clamp at %d", len(rows), maxLimit)
+	if len(page.Items) != maxLimit {
+		t.Errorf("returned %d rows, want the clamp at %d", len(page.Items), maxLimit)
+	}
+	// THE REGRESSION THIS ENDPOINT CHANGED SHAPE FOR. The clamp is fine; the
+	// clamp being INVISIBLE was not. Before keyset paging the client inferred
+	// "more exist" from the page being as long as it asked for, so a clamped
+	// 10,000-row request looked exactly like the end of the list and every row
+	// past 200 became unreachable with no error anywhere.
+	if page.NextCursor == "" {
+		t.Error("a clamped page reported no next cursor, so the rows past the cap are unreachable")
 	}
 }
 
-// An empty workspace lists cleanly rather than erroring.
+// An empty workspace lists cleanly rather than erroring, and offers no cursor.
 func TestListOfAnEmptyWorkspace(t *testing.T) {
 	svc := NewService(newFakeStore(), &fakeEnqueuer{})
-	rows, err := svc.List(context.Background(), uuid.New(), ListParams{})
+	page, err := svc.List(context.Background(), uuid.New(), ListParams{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Errorf("returned %d rows, want 0", len(rows))
+	if len(page.Items) != 0 {
+		t.Errorf("returned %d rows, want 0", len(page.Items))
+	}
+	if page.NextCursor != "" {
+		t.Errorf("an empty page offered next cursor %q", page.NextCursor)
+	}
+}
+
+// seedRows fills a workspace with n pending dead letters and returns them
+// newest-first — the order the list is expected to produce.
+func seedRows(t *testing.T, store *fakeStore, ws uuid.UUID, n int) []gen.TaskDeadLetter {
+	t.Helper()
+	rows := make([]gen.TaskDeadLetter, 0, n)
+	for range n {
+		rows = append(rows, store.seed(gen.TaskDeadLetter{
+			WorkspaceID: ws, TaskType: "inbox:poll",
+			Payload: payloadFor(t, ws), Status: StatusPending,
+		}))
+	}
+	slices.Reverse(rows) // seed() stamps ascending created_at; the list is newest first.
+	return rows
+}
+
+func ids(rows []gen.TaskDeadLetter) []uuid.UUID {
+	out := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID
+	}
+	return out
+}
+
+// The lookahead: the store is asked for one row MORE than the page, and that
+// extra row is trimmed off rather than returned.
+func TestListFetchesOneRowBeyondThePageAndTrimsIt(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeEnqueuer{})
+	ws := uuid.New()
+	seedRows(t, store, ws, 10)
+
+	page, err := svc.List(context.Background(), ws, ListParams{Limit: 3})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if store.lastList.Limit != 4 {
+		t.Errorf("store was asked for %d rows, want the page size plus one lookahead (4)", store.lastList.Limit)
+	}
+	if len(page.Items) != 3 {
+		t.Fatalf("returned %d rows, want the lookahead trimmed off (3)", len(page.Items))
+	}
+	if page.NextCursor == "" {
+		t.Error("a page with rows after it offered no next cursor")
+	}
+}
+
+// A short page is the end of the list, and says so by omitting the cursor.
+func TestListOfAShortPageHasNoNextCursor(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeEnqueuer{})
+	ws := uuid.New()
+	seedRows(t, store, ws, 2)
+
+	page, err := svc.List(context.Background(), ws, ListParams{Limit: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("returned %d rows, want 2", len(page.Items))
+	}
+	if page.NextCursor != "" {
+		t.Errorf("a short page offered next cursor %q", page.NextCursor)
+	}
+}
+
+// The case the lookahead exists for, and the one lastOfFullPage gets wrong: a
+// page that is EXACTLY full with nothing after it must still end the listing.
+// Emitting a cursor here would send the client to a phantom empty page.
+func TestListOfAnExactlyFullFinalPageHasNoNextCursor(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeEnqueuer{})
+	ws := uuid.New()
+	seedRows(t, store, ws, 4)
+
+	page, err := svc.List(context.Background(), ws, ListParams{Limit: 4})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(page.Items) != 4 {
+		t.Fatalf("returned %d rows, want the full 4", len(page.Items))
+	}
+	if page.NextCursor != "" {
+		t.Errorf("an exactly-full LAST page offered next cursor %q, which walks the client "+
+			"into an empty page", page.NextCursor)
+	}
+}
+
+// Walking every page must yield every row exactly once, in order, and terminate.
+func TestListPagesThroughEveryRowExactlyOnce(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeEnqueuer{})
+	ws := uuid.New()
+	want := ids(seedRows(t, store, ws, 11))
+
+	var got []uuid.UUID
+	cursor := ""
+	for page := range 20 { // bounded: a cursor that never ends is a bug, not a hang
+		p, err := svc.List(context.Background(), ws, ListParams{Limit: 4, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("page %d: %v", page, err)
+		}
+		got = append(got, ids(p.Items)...)
+		if p.NextCursor == "" {
+			break
+		}
+		if len(p.Items) == 0 {
+			t.Fatal("an empty page offered a next cursor, so paging would never terminate")
+		}
+		cursor = p.NextCursor
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("paging yielded %d rows, want the %d seeded in newest-first order "+
+			"with no skips or repeats", len(got), len(want))
+	}
+}
+
+// A cursor is scoped to the status filter that minted it. Replaying an
+// all-statuses cursor against status=pending would land mid-list and hide every
+// pending row above it, so it is refused rather than honoured.
+func TestListRejectsACursorFromAnotherStatusFilter(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeEnqueuer{})
+	ws := uuid.New()
+	seedRows(t, store, ws, 6)
+
+	all, err := svc.List(context.Background(), ws, ListParams{Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if all.NextCursor == "" {
+		t.Fatal("no cursor to replay")
+	}
+
+	_, err = svc.List(context.Background(), ws, ListParams{Status: StatusPending, Cursor: all.NextCursor})
+	if !errors.Is(err, ErrBadCursor) {
+		t.Fatalf("error = %v, want ErrBadCursor", err)
+	}
+	// And the cursor still works under the filter it was minted for.
+	if _, err := svc.List(context.Background(), ws, ListParams{Limit: 2, Cursor: all.NextCursor}); err != nil {
+		t.Fatalf("cursor replayed under its own filter: %v", err)
+	}
+}
+
+// A cursor the server did not mint is a loud error, never a silent reset to the
+// first page — which the operator would read as the list having lost its place.
+func TestListRejectsAGarbageCursor(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(store, &fakeEnqueuer{})
+	ws := uuid.New()
+	seedRows(t, store, ws, 3)
+
+	page, err := svc.List(context.Background(), ws, ListParams{Cursor: "not-a-cursor!!"})
+	if !errors.Is(err, ErrBadCursor) {
+		t.Fatalf("error = %v, want ErrBadCursor", err)
+	}
+	if len(page.Items) != 0 {
+		t.Errorf("a rejected cursor still returned %d rows", len(page.Items))
+	}
+}
+
+// The status filter is validated BEFORE the cursor, so a typo'd status is
+// reported as such even when the request also carries a cursor for it.
+func TestListReportsAnUnknownStatusAheadOfTheCursor(t *testing.T) {
+	svc := NewService(newFakeStore(), &fakeEnqueuer{})
+	_, err := svc.List(context.Background(), uuid.New(), ListParams{
+		Status: "exploded", Cursor: "not-a-cursor!!",
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("error = %v, want ErrValidation (the status the operator typed), not the cursor", err)
 	}
 }
 

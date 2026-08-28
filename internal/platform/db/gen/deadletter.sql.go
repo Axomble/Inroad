@@ -156,33 +156,53 @@ const listTaskDeadLetters = `-- name: ListTaskDeadLetters :many
 SELECT id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at FROM task_dead_letters
 WHERE workspace_id = $1
   AND ($2::text = '' OR status = $2::text)
+  AND ($3::bool = false
+       OR (created_at, id) < ($4::timestamptz, $5::uuid))
 ORDER BY created_at DESC, id DESC
-LIMIT $4 OFFSET $3
+LIMIT $6
 `
 
 type ListTaskDeadLettersParams struct {
-	WorkspaceID uuid.UUID `json:"workspace_id"`
-	Status      string    `json:"status"`
-	RowOffset   int32     `json:"row_offset"`
-	RowLimit    int32     `json:"row_limit"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	Status      string             `json:"status"`
+	Seek        bool               `json:"seek"`
+	CursorTime  pgtype.Timestamptz `json:"cursor_time"`
+	CursorID    uuid.UUID          `json:"cursor_id"`
+	PageLimit   int32              `json:"page_limit"`
 }
 
 // The operator's triage list, newest first. @status is the filter and the empty
 // string means "any": passing a sentinel rather than splitting this into two
-// queries keeps one statement (and one index access path) for both cases, and
-// ” can never collide with a real status because the CHECK constraint on the
-// column admits only the three named values.
+// queries keeps one statement for both cases, and ” can never collide with a
+// real status because the CHECK constraint on the column admits only the three
+// named values.
 //
-// Paged by LIMIT/OFFSET rather than a keyset cursor: this list is bounded by how
-// many tasks a workspace has permanently lost, which is a number that should be
-// small enough to read, and an operator paging deep into it has a bigger problem
-// than pagination cost.
+// KEYSET, not LIMIT/OFFSET, and the reason is correctness rather than depth-scan
+// cost. This is a QUEUE THE READER MUTATES: replaying or discarding a row does
+// not delete it, but it DOES move it out of the status-filtered set the operator
+// is paging through. Triage three rows on page one under status=pending and every
+// later row shifts three positions up; OFFSET 50 then starts three rows past
+// where page two begins, and those three are never shown. Silently. A keyset
+// cursor names a ROW rather than a count, so page two resumes exactly where page
+// one stopped no matter what left the set in between.
+//
+// The seek is the standard row-compare trick: @seek false yields the first page,
+// true resumes strictly after (@cursor_time, @cursor_id). Comparing the pair as a
+// tuple — not `created_at < x OR (created_at = x AND id < y)` — is what lets the
+// planner range-seek the index directly, and it needs the tiebreak because a
+// burst of retry exhaustions shares one created_at (see the migration).
+//
+// The workspace pin is FIRST and unconditional, outside the seek guard: a cursor
+// is caller-supplied, and a tenant filter that any caller-supplied value can
+// switch off is not a tenant filter.
 func (q *Queries) ListTaskDeadLetters(ctx context.Context, arg ListTaskDeadLettersParams) ([]TaskDeadLetter, error) {
 	rows, err := q.db.Query(ctx, listTaskDeadLetters,
 		arg.WorkspaceID,
 		arg.Status,
-		arg.RowOffset,
-		arg.RowLimit,
+		arg.Seek,
+		arg.CursorTime,
+		arg.CursorID,
+		arg.PageLimit,
 	)
 	if err != nil {
 		return nil, err

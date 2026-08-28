@@ -168,7 +168,7 @@ func TestEveryStatementIsWorkspacePinned(t *testing.T) {
 	if ok, err := store.Discard(ctx, intruder, row.ID); err != nil || ok {
 		t.Errorf("Discard across tenants: ok=%v err=%v, want ok=false", ok, err)
 	}
-	rows, err := store.List(ctx, intruder, "", 100, 0)
+	rows, err := store.List(ctx, intruder, ListQuery{Limit: 100})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestListFilterByStatus(t *testing.T) {
 		StatusDiscarded: discarded.ID,
 	}
 	for status, wantID := range cases {
-		rows, err := store.List(ctx, ws, status, 100, 0)
+		rows, err := store.List(ctx, ws, ListQuery{Status: status, Limit: 100})
 		if err != nil {
 			t.Fatalf("List(%q): %v", status, err)
 		}
@@ -223,7 +223,7 @@ func TestListFilterByStatus(t *testing.T) {
 		}
 	}
 
-	all, err := store.List(ctx, ws, "", 100, 0)
+	all, err := store.List(ctx, ws, ListQuery{Limit: 100})
 	if err != nil {
 		t.Fatalf("List(any): %v", err)
 	}
@@ -236,29 +236,167 @@ func TestListFilterByStatus(t *testing.T) {
 	}
 }
 
-// Paging clamps at the SQL level too, and an offset past the end is an empty
-// page rather than an error.
-func TestListPaging(t *testing.T) {
+// THE REGRESSION THIS ENDPOINT'S PAGING SHAPE EXISTS FOR, against real Postgres.
+//
+// A dead-letter list is a queue the reader MUTATES: triaging a row (replay or
+// discard) does not delete it, but it does move it out of the status=pending set
+// the operator is paging through. Under OFFSET that is silent data loss — every
+// row triaged on page one shifts the rest up, so OFFSET 3 starts three rows past
+// where page two actually begins and those rows are never shown. Under a keyset
+// cursor page two resumes at the ROW page one stopped at, so nothing can slip
+// between the pages no matter what left the set.
+//
+// The test triages half of page one before reading page two, which is not a
+// contrived race — it is the literal workflow the screen is for.
+func TestKeysetPagingSkipsNothingWhenPageOneIsTriaged(t *testing.T) {
 	pool, store := setup(t)
 	ws := mintWorkspace(t, pool)
 	ctx := context.Background()
-	for range 3 {
+	const total, pageSize = 6, 3
+	for range total {
 		seedRow(t, store, ws)
 	}
 
-	page, err := store.List(ctx, ws, "", 2, 0)
+	// Ground truth: the full pending list in the order the index serves it.
+	// Derived by reading rather than assumed from insertion order, so a
+	// created_at tie between two inserts cannot make the expectation wrong.
+	all, err := store.List(ctx, ws, ListQuery{Status: StatusPending, Limit: 100})
+	if err != nil {
+		t.Fatalf("List(all): %v", err)
+	}
+	if len(all) != total {
+		t.Fatalf("seeded %d rows, read back %d", total, len(all))
+	}
+
+	first, err := store.List(ctx, ws, ListQuery{Status: StatusPending, Limit: pageSize})
+	if err != nil {
+		t.Fatalf("List(page 1): %v", err)
+	}
+	if len(first) != pageSize {
+		t.Fatalf("page 1 has %d rows, want %d", len(first), pageSize)
+	}
+	for i := range first {
+		if first[i].ID != all[i].ID {
+			t.Fatalf("page 1 row %d is not the %dth row of the full list", i, i)
+		}
+	}
+
+	// Triage two of page one's three rows — the whole point of the screen.
+	for _, row := range first[:2] {
+		if ok, err := store.Discard(ctx, ws, row.ID); err != nil || !ok {
+			t.Fatalf("Discard: ok=%v err=%v", ok, err)
+		}
+	}
+
+	// Page two, resumed from the LAST ROW OF PAGE ONE.
+	last := first[len(first)-1]
+	second, err := store.List(ctx, ws, ListQuery{
+		Status: StatusPending,
+		Cursor: &Cursor{CreatedAt: last.CreatedAt.Time, ID: last.ID},
+		Limit:  pageSize,
+	})
+	if err != nil {
+		t.Fatalf("List(page 2): %v", err)
+	}
+
+	// Every row after the cursor, still pending, exactly once and in order.
+	want := all[pageSize:]
+	if len(second) != len(want) {
+		t.Fatalf("page 2 has %d rows, want %d — rows were skipped or repeated", len(second), len(want))
+	}
+	for i := range want {
+		if second[i].ID != want[i].ID {
+			t.Errorf("page 2 row %d = %v, want %v", i, second[i].ID, want[i].ID)
+		}
+	}
+	// The cursor row itself must NOT reappear: the seek is strictly-after.
+	for _, row := range second {
+		if row.ID == last.ID {
+			t.Error("page 2 repeated the row page 1 ended on; the seek is not strict")
+		}
+	}
+
+	// And the premise, stated as an assertion rather than a comment: the OFFSET
+	// form this replaced does skip here. If this ever stops being true the
+	// migration away from OFFSET has lost its justification and should be
+	// re-examined, not silently kept.
+	var offsetPageTwo []uuid.UUID
+	rows, err := pool.Query(ctx,
+		`SELECT id FROM task_dead_letters
+		 WHERE workspace_id = $1 AND status = 'pending'
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $2 OFFSET $2`, ws, pageSize)
+	if err != nil {
+		t.Fatalf("offset query: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		offsetPageTwo = append(offsetPageTwo, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("offset query rows: %v", err)
+	}
+	if len(offsetPageTwo) >= len(second) {
+		t.Errorf("OFFSET page 2 returned %d rows and keyset returned %d — OFFSET was expected "+
+			"to lose the rows that shifted up when page 1 was triaged",
+			len(offsetPageTwo), len(second))
+	}
+}
+
+// A cursor past the end of the list is an empty page, not an error.
+func TestListPastTheEndIsEmpty(t *testing.T) {
+	pool, store := setup(t)
+	ws := mintWorkspace(t, pool)
+	ctx := context.Background()
+	seedRow(t, store, ws)
+
+	rows, err := store.List(ctx, ws, ListQuery{Limit: 10})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(page) != 2 {
-		t.Errorf("first page has %d rows, want 2", len(page))
+	if len(rows) != 1 {
+		t.Fatalf("read back %d rows, want 1", len(rows))
 	}
-	beyond, err := store.List(ctx, ws, "", 2, 99)
+	beyond, err := store.List(ctx, ws, ListQuery{
+		Cursor: &Cursor{CreatedAt: rows[0].CreatedAt.Time, ID: rows[0].ID},
+		Limit:  10,
+	})
 	if err != nil {
 		t.Fatalf("List past the end: %v", err)
 	}
 	if len(beyond) != 0 {
 		t.Errorf("page past the end has %d rows, want 0", len(beyond))
+	}
+}
+
+// The cursor is workspace-pinned by the STATEMENT, not by the token: a cursor is
+// caller-supplied, so the seek predicate must never be able to widen the tenant
+// filter. Replaying a valid cursor as another tenant returns nothing.
+func TestACursorCannotCrossTenants(t *testing.T) {
+	pool, store := setup(t)
+	ws := mintWorkspace(t, pool)
+	intruder := mintWorkspace(t, pool)
+	ctx := context.Background()
+	for range 3 {
+		seedRow(t, store, ws)
+	}
+
+	mine, err := store.List(ctx, ws, ListQuery{Limit: 1})
+	if err != nil || len(mine) != 1 {
+		t.Fatalf("List: rows=%d err=%v", len(mine), err)
+	}
+	cur := &Cursor{CreatedAt: mine[0].CreatedAt.Time, ID: mine[0].ID}
+
+	stolen, err := store.List(ctx, intruder, ListQuery{Cursor: cur, Limit: 10})
+	if err != nil {
+		t.Fatalf("List as intruder: %v", err)
+	}
+	if len(stolen) != 0 {
+		t.Fatalf("a cursor minted in one workspace returned %d rows in another", len(stolen))
 	}
 }
 
