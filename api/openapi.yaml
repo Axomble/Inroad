@@ -916,6 +916,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Pulse' }
         '401': { description: Unauthorized }
+  /realtime/ticket:
+    post:
+      operationId: createRealtimeTicket
+      tags: [realtime]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Mint a single-use, short-lived ticket for the realtime WebSocket
+        handshake, then connect to `GET /api/v1/realtime/ws?ticket=...`.
+
+
+        This exists because a browser cannot set an `Authorization` header on
+        `new WebSocket()` and the access token is held in memory rather than a
+        cookie. A ticket is valid for `expires_in` seconds, is refused after its
+        first use, and is bound to the calling session — logging out invalidates
+        it immediately. It carries the caller's workspace, so the socket's event
+        stream cannot be pointed at another tenant.
+
+
+        The socket endpoint itself is not described here: an HTTP Upgrade and its
+        subsequent frames are outside what OpenAPI 3.0 can express. Its envelope
+        format is documented in `docs/superpowers/specs/realtime-websocket.md`.
+      responses:
+        '200':
+          description: A connect ticket
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RealtimeTicket' }
+        '401': { description: 'Unauthorized, or the caller is not a session principal' }
+        '429': { description: Too many ticket requests }
   /reports/campaigns:
     get:
       operationId: getCampaignReport
@@ -5698,6 +5727,20 @@ components:
                   Inbox-side placements on this route whose reader could have seen a tab —
                   the denominator of this row's tabbed_rate_7d, and smaller than this row's
                   placement_sample_7d by construction.
+    RealtimeTicket:
+      type: object
+      required: [ticket, expires_in]
+      properties:
+        ticket:
+          type: string
+          description: >-
+            Opaque signed credential to pass as the `ticket` query parameter on
+            the WebSocket upgrade. Single-use; treat it as a secret and do not
+            log it.
+        expires_in:
+          type: integer
+          description: Seconds until the ticket expires.
+          example: 30
     Pulse:
       type: object
       description: >-

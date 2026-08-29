@@ -103,6 +103,45 @@ func (v *SessionVerifier) Verify(ctx context.Context, r *http.Request) (auth.Pri
 // the store. Called after an in-process revoke / token_version bump.
 func (v *SessionVerifier) Bust(sid uuid.UUID) { v.cache.bust(sid) }
 
+// SessionLive reports whether a session is still usable, WITHOUT a bearer token.
+//
+// It exists for the realtime WebSocket handshake, which authenticates with a
+// signed connect ticket rather than an Authorization header (a browser cannot
+// set one on `new WebSocket()`) and must still refuse a session that was logged
+// out in the seconds between minting that ticket and spending it.
+//
+// It shares `load` and the liveness rules with Verify rather than restating
+// them, so a new revocation condition cannot be added to one path and forgotten
+// in the other. It deliberately does NOT check a token version: there is no
+// token here to compare against, and the ticket's own 30-second TTL plus this
+// revocation check are what bound its validity.
+//
+// An unknown session is (false, nil) — a definite "no". A store failure is a
+// non-nil error, which the caller must treat as a refusal rather than a pass.
+func (v *SessionVerifier) SessionLive(ctx context.Context, sessionID string) (bool, error) {
+	// A session id that is not a uuid, and an id naming no row, are both
+	// definitively "not live" — neither is a failure to determine liveness. They
+	// are folded into the same branch as a revoked session so this method has one
+	// answer shape and no path that returns a nil error beside a live=false it
+	// derived from a non-nil one.
+	wellFormed := uuid.Validate(sessionID) == nil
+	if !wellFormed {
+		return false, nil
+	}
+	sid := uuid.MustParse(sessionID) // Validate above guarantees this parses.
+
+	st, err := v.load(ctx, sid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		st, err = SessionAuthState{Revoked: true}, nil
+	}
+	if err != nil {
+		// The store could not be read. Propagate so the caller refuses rather than
+		// guesses — a socket must not open because Postgres was briefly down.
+		return false, err
+	}
+	return !st.Revoked && time.Now().Before(st.ExpiresAt), nil
+}
+
 // load returns sid's auth state, serving a fresh cache entry when present and
 // otherwise reading through to the store and caching the result.
 func (v *SessionVerifier) load(ctx context.Context, sid uuid.UUID) (SessionAuthState, error) {
