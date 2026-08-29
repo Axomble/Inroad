@@ -38,6 +38,7 @@ import (
 	"github.com/inroad/inroad/internal/app/deadletter"
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
+	"github.com/inroad/inroad/internal/app/events"
 	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/inbox"
@@ -250,6 +251,10 @@ func run() error {
 	realtimeRedis := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
 	defer func() { _ = realtimeRedis.Close() }()
 	realtimeHub := platformrealtime.New(realtimeRedis)
+	// The control plane's seam onto that hub. One publisher shared by every
+	// domain that announces; nil when no hub exists, which every service treats
+	// as "realtime disabled" rather than as an error.
+	realtimeEvents := events.NewHubPublisher(realtimeHub)
 	// Closed BEFORE srv.Shutdown below: http.Server does not track hijacked
 	// connections, so the hub's own registry is the only thing that can end a live
 	// socket, and a graceful shutdown would otherwise hang out its whole budget.
@@ -360,6 +365,8 @@ func run() error {
 	suppStore := suppression.NewStore(queries)
 	campaignSvc := campaign.NewService(campaignStore, ownershipChecker{mailboxes: mailboxStore, lists: listSvc},
 		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
+		// Announces campaign.launched to the workspace's open tabs.
+		campaign.WithEvents(realtimeEvents),
 		// The personalization_tokens preflight check needs to know which
 		// {{custom.*}} keys the workspace actually defines; contact owns them.
 		campaign.WithCustomFields(customFieldAdapter{contacts: contactSvc}),
@@ -417,7 +424,11 @@ func run() error {
 	// replyLabelAdapter (app/* packages never import each other). Unwired it
 	// degrades to the old literal rule, so a deployment mid-migration keeps
 	// capturing positives.
-	crmSvc := crm.NewService(crm.NewPgStore(pool), crm.WithReplyLabels(replyLabelAdapter{labels: replyLabelSvc}))
+	crmSvc := crm.NewService(crm.NewPgStore(pool),
+		crm.WithReplyLabels(replyLabelAdapter{labels: replyLabelSvc}),
+		// Announces deal.moved. The board already applies an optimistic patch on
+		// drag, so the envelope's actor is what stops a mover's own tab fighting it.
+		crm.WithEvents(realtimeEvents))
 	crmHandler := crm.NewHandler(crmSvc)
 	// AI settings (agent platform PR A1). No shipped model catalog: native
 	// model metadata comes from models.dev at runtime, cached in Postgres with
