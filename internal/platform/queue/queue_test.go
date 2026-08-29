@@ -134,6 +134,10 @@ func TestTestSendPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+// The DRAIN shape. Nothing enqueues an inbox:reply_send any more, but tasks
+// already in Redis still carry this payload and its JSON keys, so the wire shape
+// and the task name are frozen until the drain handler is deleted with them —
+// changing either would silently strand every reply in flight at deploy time.
 func TestInboxReplySendPayloadRoundTrip(t *testing.T) {
 	p := InboxReplySendPayload{ThreadID: "t1", BodyText: "thanks!", WorkspaceID: "w1", TaskID: "inboxreply:t1:1700000000"}
 	b, err := json.Marshal(p)

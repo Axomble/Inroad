@@ -425,20 +425,21 @@ func TestSetReadInvalidJSONIs400(t *testing.T) {
 func TestReplyHappyPathIs202(t *testing.T) {
 	store := newFakeStore()
 	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
-	enq := &fakeReplyEnqueuer{}
-	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(enq)))
+	deps := newReplyDeps(store, nil)
+	h := inbox.NewHandler(inbox.NewService(store, deps.opts...))
 
 	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `{"body_text":"thanks!"}`)
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("want 202, got %d: %s", w.Code, w.Body.String())
 	}
-	if enq.calls != 1 {
-		t.Fatalf("enqueue called %d times, want 1", enq.calls)
+	if len(deps.enq.calls) != 1 {
+		t.Fatalf("enqueue called %d times, want 1", len(deps.enq.calls))
 	}
 }
 
 func TestReplyUnknownThreadIs404(t *testing.T) {
-	h := inbox.NewHandler(inbox.NewService(newFakeStore(), inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+	store := newFakeStore()
+	h := inbox.NewHandler(inbox.NewService(store, newReplyDeps(store, nil).opts...))
 
 	w := serve(t, h, http.MethodPost, "/inbox/threads/"+uuid.New().String()+"/reply", `{"body_text":"hi"}`)
 	if w.Code != http.StatusNotFound {
@@ -449,7 +450,7 @@ func TestReplyUnknownThreadIs404(t *testing.T) {
 func TestReplyWithNoInboundMessageIs409(t *testing.T) {
 	store := newFakeStore()
 	th := seedThread(store, testWS, uuid.New(), "Re: Hi", "neutral") // no messages seeded
-	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+	h := inbox.NewHandler(inbox.NewService(store, newReplyDeps(store, nil).opts...))
 
 	w := serve(t, h, http.MethodPost, "/inbox/threads/"+th.ID.String()+"/reply", `{"body_text":"hi"}`)
 	if w.Code != http.StatusConflict {
@@ -461,8 +462,7 @@ func TestReplyToSuppressedRecipientIs409(t *testing.T) {
 	store := newFakeStore()
 	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
 	h := inbox.NewHandler(inbox.NewService(store,
-		inbox.WithSuppressionChecker(&fakeSuppressionChecker{suppressed: true}),
-		inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+		newReplyDeps(store, nil, inbox.WithSuppressionChecker(&fakeSuppressionChecker{suppressed: true})).opts...))
 
 	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `{"body_text":"hi"}`)
 	if w.Code != http.StatusConflict {
@@ -473,7 +473,7 @@ func TestReplyToSuppressedRecipientIs409(t *testing.T) {
 func TestReplyEmptyBodyIs422(t *testing.T) {
 	store := newFakeStore()
 	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
-	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+	h := inbox.NewHandler(inbox.NewService(store, newReplyDeps(store, nil).opts...))
 
 	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `{"body_text":""}`)
 	if w.Code != http.StatusUnprocessableEntity {
@@ -484,7 +484,7 @@ func TestReplyEmptyBodyIs422(t *testing.T) {
 func TestReplyMalformedJSONIs400(t *testing.T) {
 	store := newFakeStore()
 	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
-	h := inbox.NewHandler(inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+	h := inbox.NewHandler(inbox.NewService(store, newReplyDeps(store, nil).opts...))
 
 	w := serve(t, h, http.MethodPost, "/inbox/threads/"+threadID.String()+"/reply", `not json`)
 	if w.Code != http.StatusBadRequest {
@@ -493,7 +493,8 @@ func TestReplyMalformedJSONIs400(t *testing.T) {
 }
 
 func TestReplyUnauthenticatedIs401(t *testing.T) {
-	h := inbox.NewHandler(inbox.NewService(newFakeStore(), inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})))
+	store := newFakeStore()
+	h := inbox.NewHandler(inbox.NewService(store, newReplyDeps(store, nil).opts...))
 	w := do(t, h, http.MethodPost, "/inbox/threads/"+uuid.New().String()+"/reply", `{"body_text":"hi"}`, "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("want 401, got %d: %s", w.Code, w.Body.String())

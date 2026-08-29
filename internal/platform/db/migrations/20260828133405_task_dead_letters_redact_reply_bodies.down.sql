@@ -1,0 +1,26 @@
+-- Deliberately a NO-OP, and this file exists to say so rather than to be empty.
+--
+-- The up migration destroys data on purpose: it deletes the 'body_text' key from
+-- every captured inbox:reply_send payload. Those bytes are gone — they were the
+-- only copy, the tasks that carried them have long since been archived out of
+-- Redis, and nothing else in the schema holds them. There is no source to
+-- restore from, so a down migration that claimed to reverse this would be
+-- lying about the one thing that matters.
+--
+-- The status flip (pending -> discarded) is not reversed either, and that is the
+-- more important half. Un-discarding a row would make a body-stripped reply
+-- REPLAYABLE again, and replaying one delivers a BLANK message to a real
+-- contact. A rollback must never be able to reintroduce a way to send empty mail
+-- to a workspace's contacts; a stuck-discarded row is visible, inert, and
+-- something an operator can act on by hand.
+--
+-- Rolling back past this migration therefore leaves the redaction in place. That
+-- is the intended, safe direction, and it is the same posture as
+-- 000034_contact_search.down.sql, which deliberately leaves its extensions
+-- installed rather than performing a "complete" reversal that would break more
+-- than it restored.
+--
+-- golang-migrate requires the file to exist and to be valid SQL, so it holds a
+-- statement with no effect rather than nothing at all: an empty file reads as an
+-- oversight, and the next person would add a "fix".
+SELECT 1 WHERE false;

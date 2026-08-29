@@ -1,0 +1,21 @@
+-- The retention sweep needs an index it can actually seek.
+--
+-- PurgeTaskDeadLetters deletes by `created_at < now() - interval '90 days'` with no
+-- workspace predicate, and every existing index on this table leads with
+-- workspace_id, so the planner had only a Seq Scan plus a Sort — verified by EXPLAIN
+-- against a populated table. A sweep that costs a full scan on a table whose whole
+-- purpose is to absorb a provider outage is a retention window in name only: at 5000
+-- rows a day against a million-row backlog it would take most of a year to drain,
+-- paying for the entire table on every run.
+--
+-- This is the index the DELETE's own ORDER BY asks for. Not CONCURRENTLY: golang-
+-- migrate runs a file in one transaction and CREATE INDEX CONCURRENTLY cannot, the
+-- same constraint 20260827185855_inbox_messages_mailbox_id records. The table is
+-- low-write and the SHARE lock only blocks captures, which are themselves failures.
+--
+-- warmup_observations has the same gap for the same reason (PurgeWarmupObservations
+-- filters on observed_at while its indexes lead with workspace_id). Deliberately not
+-- fixed here: it is a different table with its own access patterns, and bundling it
+-- would put an unrelated index behind this change's review.
+CREATE INDEX IF NOT EXISTS idx_task_dead_letters_created
+    ON task_dead_letters (created_at);

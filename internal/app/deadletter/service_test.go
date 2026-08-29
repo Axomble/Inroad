@@ -72,7 +72,11 @@ func (f *fakeStore) seed(row gen.TaskDeadLetter) gen.TaskDeadLetter {
 	return row
 }
 
-func (f *fakeStore) Insert(_ context.Context, in Capture) (gen.TaskDeadLetter, error) {
+// Insert stores the row in the status the SERVICE resolved, exactly as the SQL
+// does. Hardcoding StatusPending here would make the capture gate's "filed as
+// discarded" untestable — the fake would report pending whatever the service
+// decided, and the assertion would be about the fake.
+func (f *fakeStore) Insert(_ context.Context, in Capture, status string) (gen.TaskDeadLetter, error) {
 	if f.insertErr != nil {
 		return gen.TaskDeadLetter{}, f.insertErr
 	}
@@ -82,7 +86,7 @@ func (f *fakeStore) Insert(_ context.Context, in Capture) (gen.TaskDeadLetter, e
 	row := gen.TaskDeadLetter{
 		ID: uuid.New(), WorkspaceID: in.WorkspaceID, TaskType: in.TaskType,
 		Payload: in.Payload, LastError: in.LastError, AttemptCount: in.AttemptCount,
-		Status: StatusPending,
+		Status: status,
 	}
 	f.rows[row.ID] = row
 	return row, nil

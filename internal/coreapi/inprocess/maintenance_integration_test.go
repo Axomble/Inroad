@@ -147,6 +147,89 @@ func TestPurgeDeadWorkersReapsRegistryAndAssignments(t *testing.T) {
 	}
 }
 
+// task_dead_letters had NO retention sweep at all: one row per permanently
+// failed background task, kept forever. Invariant 55's reasoning applies —
+// warmup_observations was bounded at 90 days for the same reason, and this table
+// is written by the same kind of event (a failure nobody schedules and nobody
+// caps). 90 days is far beyond any triage window: a dropped send nobody looked
+// at in three months is not going to be replayed.
+//
+// The purge is GLOBAL and unpinned, like every other statement in the
+// maintenance sweep: retention is deployment maintenance, not a tenant read. The
+// test proves that directly by seeding two workspaces and expecting both to lose
+// their expired row.
+func TestPurgeDeadLettersPurgesOnlyOutsideRetentionWindow(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+
+	wsA, err := q.CreateWorkspace(ctx, "Dead letter retention A "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace A: %v", err)
+	}
+	wsB, err := q.CreateWorkspace(ctx, "Dead letter retention B "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace B: %v", err)
+	}
+
+	seed := func(ws uuid.UUID, age string) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, created_at)
+			VALUES ($1, 'sequence:advance', $2::jsonb, 'dial timeout', 6, now() - $3::interval)
+			RETURNING id`,
+			ws, `{"enrollment_id":"`+uuid.NewString()+`","workspace_id":"`+ws.String()+`"}`, age).Scan(&id); err != nil {
+			t.Fatalf("seed %s row: %v", age, err)
+		}
+		return id
+	}
+	// 89 and 91 days, not 1 and 365: the only interesting values are the ones
+	// either side of the boundary, and a wide pair would pass even if the
+	// interval in the query were wrong by a month.
+	expiredA, freshA := seed(wsA.ID, "91 days"), seed(wsA.ID, "89 days")
+	expiredB, freshB := seed(wsB.ID, "91 days"), seed(wsB.ID, "89 days")
+
+	deleted, err := (client{q: q}).PurgeDeadLetters(ctx)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted < 2 {
+		t.Fatalf("deleted rows = %d, want at least the 2 expired rows (one per workspace)", deleted)
+	}
+
+	exists := func(id uuid.UUID) bool {
+		t.Helper()
+		var ok bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_dead_letters WHERE id = $1)`, id).
+			Scan(&ok); err != nil {
+			t.Fatalf("verify %s: %v", id, err)
+		}
+		return ok
+	}
+	for name, tc := range map[string]struct {
+		id   uuid.UUID
+		want bool
+	}{
+		"workspace A, 91 days old": {expiredA, false},
+		"workspace A, 89 days old": {freshA, true},
+		"workspace B, 91 days old": {expiredB, false},
+		"workspace B, 89 days old": {freshB, true},
+	} {
+		if got := exists(tc.id); got != tc.want {
+			t.Errorf("%s: exists = %t, want %t", name, got, tc.want)
+		}
+	}
+
+	// Idempotent: the sweep runs daily, so "nothing left in window" is its steady
+	// state rather than an edge case.
+	if _, err := (client{q: q}).PurgeDeadLetters(ctx); err != nil {
+		t.Fatalf("second purge: %v", err)
+	}
+	if !exists(freshA) || !exists(freshB) {
+		t.Error("a second sweep removed rows that were inside the retention window")
+	}
+}
+
 func TestPurgeIdempotencyKeysPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)

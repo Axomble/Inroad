@@ -110,8 +110,8 @@ func (q *Queries) GetTaskDeadLetter(ctx context.Context, arg GetTaskDeadLetterPa
 
 const insertTaskDeadLetter = `-- name: InsertTaskDeadLetter :one
 
-INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at
 `
 
@@ -121,14 +121,35 @@ type InsertTaskDeadLetterParams struct {
 	Payload      []byte    `json:"payload"`
 	LastError    string    `json:"last_error"`
 	AttemptCount int32     `json:"attempt_count"`
+	Status       string    `json:"status"`
 }
 
-// Dead-letter capture and replay (migration 000069). Every statement is
-// workspace-pinned: a dead letter carries a task payload naming a mailbox, an
-// enrollment or a reply body, so a missing pin here would leak one tenant's
-// pending work to another.
+// Dead-letter capture and replay (migration 000069). Every tenant-facing
+// statement is workspace-pinned: a dead letter carries a task payload naming a
+// mailbox, an enrollment or a recipient, so a missing pin here would leak one
+// tenant's pending work to another.
+//
+// A payload names WHAT failed; it never carries the content of a message. That
+// is enforced upstream, in internal/platform/queue, and it has teeth here
+// because GET /dead-letters returns the payload verbatim under campaigns:read —
+// an OAuth-grantable scope. (It was not always true: inbox:reply_send carried
+// the operator's reply text, which migration
+// 20260828133405_task_dead_letters_redact_reply_bodies strips from the rows that
+// already exist.)
+//
+// The one unpinned statement is the retention purge at the bottom, which is
+// deployment maintenance rather than a tenant read; its own comment says why.
 // Records one retry-exhausted task. Written by the capture path
 // (queue.DeadLetterErrorHandler via coreapi), never by an HTTP caller.
+//
+// @status is passed rather than left to the column default because capture is
+// not always "this is replayable". A terminal inbox:reply_send arriving from a
+// worker that predates the payload fix is stored REDACTED and already
+// 'discarded' (deadletter.Service.Capture), for the same reason migration
+// 20260828133405 flips the historical ones: a body-stripped reply left pending
+// would be replayable, and replaying it delivers a blank message to a real
+// contact. The service is the only caller and it never takes the value from a
+// request.
 func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLetterParams) (TaskDeadLetter, error) {
 	row := q.db.QueryRow(ctx, insertTaskDeadLetter,
 		arg.WorkspaceID,
@@ -136,6 +157,7 @@ func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLe
 		arg.Payload,
 		arg.LastError,
 		arg.AttemptCount,
+		arg.Status,
 	)
 	var i TaskDeadLetter
 	err := row.Scan(
@@ -230,6 +252,48 @@ func (q *Queries) ListTaskDeadLetters(ctx context.Context, arg ListTaskDeadLette
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeTaskDeadLetters = `-- name: PurgeTaskDeadLetters :one
+WITH deleted AS (
+    DELETE FROM task_dead_letters
+    WHERE id IN (
+        SELECT id FROM task_dead_letters
+        WHERE created_at < now() - interval '90 days'
+        ORDER BY created_at LIMIT 5000
+    )
+    RETURNING 1
+)
+SELECT count(*)::bigint AS deleted_rows FROM deleted
+`
+
+// Bound the table. task_dead_letters is append-only from the application's point
+// of view (triage flips a status, it never deletes) and it was in NO maintenance
+// sweep at all, so it grew forever — one row per permanently failed background
+// task, on a system whose failure modes are provider outages that fail hundreds
+// of queued sends at once.
+//
+// Invariant 55's reasoning applies unchanged: warmup_observations was bounded at
+// 90 days because it is append-only and written by events nobody schedules, and
+// this is the same shape. 90 days is comfortably beyond any triage window — a
+// dropped send nobody has looked at in three months is not going to be replayed
+// — and it keeps the audit answer migration 000069 exists for ("what did we
+// re-run last week") intact by a wide margin.
+//
+// Batched at 5000 rows like every other purge in queries/maintenance.sql, to cap
+// one sweep's lock/IO footprint. Deleting oldest-first (ORDER BY created_at)
+// means repeated sweeps make monotonic progress rather than re-reading the same
+// head of the table.
+//
+// Global (no workspace pin), for the same reason PurgeExpiredSecurityArtifacts
+// is: retention is deployment maintenance, not a tenant read. It removes rows by
+// age alone and returns only a count, so it can neither surface nor cross tenant
+// data.
+func (q *Queries) PurgeTaskDeadLetters(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, purgeTaskDeadLetters)
+	var deleted_rows int64
+	err := row.Scan(&deleted_rows)
+	return deleted_rows, err
 }
 
 const releaseTaskDeadLetterReplay = `-- name: ReleaseTaskDeadLetterReplay :execrows

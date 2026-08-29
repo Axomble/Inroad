@@ -21,8 +21,12 @@ import (
 // called without one: the tenant pin is a property of the interface, not
 // something a caller may forget to pass.
 type Store interface {
-	// Insert records one retry-exhausted task.
-	Insert(ctx context.Context, in Capture) (gen.TaskDeadLetter, error)
+	// Insert records one retry-exhausted task in the lifecycle state the service
+	// resolved for it. status is a parameter rather than the column's default
+	// because capture is not always "this is replayable": a legacy
+	// content-bearing task is stored redacted and already filed — see
+	// Service.Capture. It never comes from a request.
+	Insert(ctx context.Context, in Capture, status string) (gen.TaskDeadLetter, error)
 	// List returns up to q.Limit of the workspace's dead letters, newest first,
 	// resuming strictly after q.Cursor when one is given.
 	List(ctx context.Context, ws uuid.UUID, q ListQuery) ([]gen.TaskDeadLetter, error)
@@ -67,13 +71,14 @@ func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
 
 var _ Store = (*PgStore)(nil)
 
-func (s *PgStore) Insert(ctx context.Context, in Capture) (gen.TaskDeadLetter, error) {
+func (s *PgStore) Insert(ctx context.Context, in Capture, status string) (gen.TaskDeadLetter, error) {
 	return s.q.InsertTaskDeadLetter(ctx, gen.InsertTaskDeadLetterParams{
 		WorkspaceID:  in.WorkspaceID,
 		TaskType:     in.TaskType,
 		Payload:      in.Payload,
 		LastError:    in.LastError,
 		AttemptCount: in.AttemptCount,
+		Status:       status,
 	})
 }
 

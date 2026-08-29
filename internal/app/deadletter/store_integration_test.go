@@ -5,6 +5,7 @@ package deadletter
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -61,7 +62,7 @@ func seedRow(t *testing.T, store *PgStore, ws uuid.UUID) gen.TaskDeadLetter {
 	row, err := store.Insert(context.Background(), Capture{
 		WorkspaceID: ws, TaskType: "sequence:advance", Payload: payload,
 		LastError: "dial timeout", AttemptCount: 5,
-	})
+	}, StatusPending)
 	if err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
@@ -459,13 +460,171 @@ func TestDiscardIsStatusGuarded(t *testing.T) {
 	}
 }
 
+// migrationBeforeRedaction is the version immediately preceding
+// 20260828133405_task_dead_letters_redact_reply_bodies. Named rather than
+// computed because MigrateTo rejects a version that does not exist, so
+// "mine minus one" is not a thing a timestamped scheme can express.
+//
+// A migration landing BETWEEN this one and the redaction is harmless: the roll
+// back simply goes one step further and the following Migrate re-applies both.
+const migrationBeforeRedaction = 20260828095015
+
+// TestMigrationRedactsLegacyReplyBodies runs the real data migration against
+// rows shaped exactly as the pre-fix capture path produced them.
+//
+// Two things have to be true at once, and neither alone is enough:
+//
+//   - the BODY is gone. It is the disclosure: task_dead_letters is served
+//     verbatim by GET /dead-letters under campaigns:read, an OAuth-grantable
+//     scope, while inbox:read is deliberately not one because reply bodies are
+//     correspondence.
+//   - the row SURVIVES, and a pending one becomes discarded. Deleting it would
+//     destroy the operator's only record that a send was lost; leaving it
+//     pending would leave a body-stripped reply REPLAYABLE, and replaying one
+//     delivers a blank message to a real contact.
+//
+// A scratch database, because this rolls the schema backwards: doing that on the
+// shared test database would pull the schema out from under every other
+// integration package running beside it.
+func TestMigrationRedactsLegacyReplyBodies(t *testing.T) {
+	ctx := context.Background()
+	dsn := dbtest.ScratchDSN(t, "deadletter_redact")
+
+	// Everything up to, but not including, the redaction.
+	if err := db.MigrateTo(dsn, migrationBeforeRedaction); err != nil {
+		t.Fatalf("migrate to %d: %v", migrationBeforeRedaction, err)
+	}
+	pool, err := db.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	var ws uuid.UUID
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO workspaces (name) VALUES ('deadletter-redact-it') RETURNING id").Scan(&ws); err != nil {
+		t.Fatalf("insert workspace: %v", err)
+	}
+
+	const sentinel = "SENTINEL-please-send-me-your-pricing-8b71"
+	threadID := uuid.NewString()
+	legacyPayload := `{"thread_id":"` + threadID + `","body_text":"` + sentinel +
+		`","workspace_id":"` + ws.String() + `","task_id":"inboxreply:t:1700000000"}`
+
+	// One of each status, so the CASE arm is exercised in both directions, plus a
+	// row of a DIFFERENT task type that must be left completely alone, plus a row
+	// whose payload is a JSONB SCALAR rather than an object.
+	//
+	// The scalar is the one that decides whether this migration can run at all.
+	// `payload - 'body_text'` is only defined on a jsonb object: on a scalar
+	// Postgres raises "cannot delete from scalar", which aborts the statement,
+	// aborts the migration, and leaves schema_migrations DIRTY — every later
+	// migration blocked and every fresh deploy broken, over one malformed row.
+	// Capture normalises an absent payload to JSON `null`, which is exactly such a
+	// scalar, so this is not a hypothetical shape.
+	var pendingID, discardedID, replayedID, otherID, scalarID uuid.UUID
+	seed := func(taskType, payload, status string) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
+			VALUES ($1, $2, $3::jsonb, 'smtp: connection refused', 6, $4) RETURNING id`,
+			ws, taskType, payload, status).Scan(&id); err != nil {
+			t.Fatalf("seed %s/%s: %v", taskType, status, err)
+		}
+		return id
+	}
+	pendingID = seed("inbox:reply_send", legacyPayload, "pending")
+	discardedID = seed("inbox:reply_send", legacyPayload, "discarded")
+	replayedID = seed("inbox:reply_send", legacyPayload, "replayed")
+	otherID = seed("sequence:advance",
+		`{"enrollment_id":"`+uuid.NewString()+`","workspace_id":"`+ws.String()+`"}`, "pending")
+	scalarID = seed("inbox:reply_send", `"`+sentinel+`"`, "pending")
+
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatalf("migrate up: %v — a single malformed payload must not be able to abort the "+
+			"migration and leave schema_migrations dirty", err)
+	}
+
+	type row struct {
+		payload  string
+		status   string
+		thread   *string
+		hasBody  bool
+		wsInside *string
+	}
+	read := func(id uuid.UUID) row {
+		t.Helper()
+		var r row
+		if err := pool.QueryRow(ctx, `
+			SELECT payload::text, status, payload->>'thread_id', payload ? 'body_text', payload->>'workspace_id'
+			FROM task_dead_letters WHERE id = $1`, id).
+			Scan(&r.payload, &r.status, &r.thread, &r.hasBody, &r.wsInside); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		return r
+	}
+
+	for name, tc := range map[string]struct {
+		id         uuid.UUID
+		wantStatus string
+	}{
+		"pending becomes discarded": {pendingID, StatusDiscarded},
+		"discarded stays discarded": {discardedID, StatusDiscarded},
+		"replayed stays replayed":   {replayedID, StatusReplayed},
+	} {
+		got := read(tc.id)
+		if got.hasBody {
+			t.Errorf("%s: payload still carries body_text: %s", name, got.payload)
+		}
+		if strings.Contains(got.payload, sentinel) {
+			t.Errorf("%s: the reply body survived under some other key: %s", name, got.payload)
+		}
+		if got.status != tc.wantStatus {
+			t.Errorf("%s: status = %q, want %q", name, got.status, tc.wantStatus)
+		}
+		// The row is REDACTED, not emptied: what it names is the operator's
+		// record that this send was lost, and it has to still say which thread.
+		if got.thread == nil || *got.thread != threadID {
+			t.Errorf("%s: thread_id = %v, want it preserved (%s)", name, got.thread, threadID)
+		}
+		if got.wsInside == nil || *got.wsInside != ws.String() {
+			t.Errorf("%s: workspace_id = %v, want it preserved — without it the row cannot be "+
+				"validated for replay at all", name, got.wsInside)
+		}
+	}
+
+	// Untouched: the statement is scoped to the one task type whose payload
+	// carried content.
+	if other := read(otherID); other.status != StatusPending {
+		t.Errorf("a sequence:advance row was changed to %q; the migration must touch only "+
+			"inbox:reply_send", other.status)
+	}
+
+	// The scalar row: filed like every other legacy row, and emptied rather than
+	// key-stripped. A scalar cannot be shown to be free of correspondence — this
+	// one plainly is not — and there are no ids in it to preserve.
+	if scalar := read(scalarID); scalar.status != StatusDiscarded || strings.Contains(scalar.payload, sentinel) {
+		t.Errorf("scalar-payload row = status %q payload %s, want discarded with the text gone",
+			scalar.status, scalar.payload)
+	}
+
+	// And the consequence a caller sees: a redacted row is no longer replayable,
+	// so nobody can re-enqueue a reply with no body.
+	store := NewPgStore(gen.New(pool))
+	if _, claimed, err := store.ClaimReplay(ctx, ws, pendingID); err != nil || claimed {
+		t.Errorf("ClaimReplay on a redacted row: claimed=%v err=%v, want claimed=false — "+
+			"replaying it would send a blank reply to a real contact", claimed, err)
+	}
+}
+
 // The workspace FK is real: a dead letter cannot be orphaned onto a workspace
 // that does not exist, which is what keeps the tenant-scoped list total.
 func TestInsertRejectsAnUnknownWorkspace(t *testing.T) {
 	_, store := setup(t)
 	_, err := store.Insert(context.Background(), Capture{
 		WorkspaceID: uuid.New(), TaskType: "sequence:advance", Payload: []byte(`{}`),
-	})
+	}, StatusPending)
 	if err == nil {
 		t.Fatal("insert succeeded for a workspace that does not exist")
 	}

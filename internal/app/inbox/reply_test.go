@@ -12,22 +12,8 @@ import (
 	"github.com/inroad/inroad/internal/app/inbox"
 )
 
-// fakeReplyEnqueuer is Reply's mocked enqueue seam: it never touches Redis,
-// it just records the payload it was asked to enqueue.
-type fakeReplyEnqueuer struct {
-	threadID, bodyText, workspaceID string
-	calls                           int
-	err                             error
-}
-
-func (f *fakeReplyEnqueuer) EnqueueInboxReplySend(threadID, bodyText, workspaceID string) error {
-	f.threadID, f.bodyText, f.workspaceID = threadID, bodyText, workspaceID
-	f.calls++
-	return f.err
-}
-
-// fakeSuppressionChecker is Reply's mocked SuppressionChecker: suppressed/err
-// are set per test, lastEmail records the address it was last asked about.
+// fakeSuppressionChecker is the mocked SuppressionChecker: suppressed/err are
+// set per test, lastEmail records the address it was last asked about.
 type fakeSuppressionChecker struct {
 	suppressed bool
 	err        error
@@ -50,142 +36,317 @@ func seedThreadWithInbound(store *fakeStore, ws uuid.UUID, fromEmail string) uui
 	return th.ID
 }
 
-func TestReplyUnknownThreadIsNotFound(t *testing.T) {
-	svc := inbox.NewService(newFakeStore())
-	err := svc.Reply(context.Background(), uuid.New(), uuid.New(), "hello")
-	if !errors.Is(err, inbox.ErrNotFound) {
-		t.Fatalf("Reply on unknown thread = %v, want ErrNotFound", err)
+// replyDeps wires the immediate-reply path the way cmd/inroad does: a
+// pending-reply ROW store plus the pointer-carrying enqueuer. Reply no longer
+// has an enqueue seam of its own — an immediate reply is a queued row whose
+// send_after has already passed, which is the entire point of this change: the
+// body lives in the row, and the task carries only its id.
+type replyDeps struct {
+	pending *fakePendingStore
+	enq     *recordingPendingEnqueuer
+	opts    []inbox.ServiceOption
+}
+
+func newReplyDeps(store *fakeStore, clock func() time.Time, extra ...inbox.ServiceOption) replyDeps {
+	if clock == nil {
+		clock = time.Now
+	}
+	pending := newFakePendingStore(clock, store)
+	enq := &recordingPendingEnqueuer{}
+	opts := append([]inbox.ServiceOption{
+		inbox.WithPendingReplyStore(pending),
+		inbox.WithPendingReplyEnqueuer(enq),
+		inbox.WithClock(clock),
+	}, extra...)
+	return replyDeps{pending: pending, enq: enq, opts: opts}
+}
+
+type replyFixture struct {
+	svc      *inbox.Service
+	store    *fakeStore
+	deps     replyDeps
+	now      time.Time
+	threadID uuid.UUID
+}
+
+func newReplyFixture(t *testing.T, extra ...inbox.ServiceOption) *replyFixture {
+	t.Helper()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	store := newFakeStore()
+	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
+	deps := newReplyDeps(store, func() time.Time { return now }, extra...)
+	return &replyFixture{
+		svc: inbox.NewService(store, deps.opts...), store: store,
+		deps: deps, now: now, threadID: threadID,
 	}
 }
 
+// scheduled returns the one row Reply created, failing if there is not exactly
+// one — "did it write a row at all" is half of what these tests assert.
+func (f *replyFixture) scheduled(t *testing.T) inbox.PendingReply {
+	t.Helper()
+	rows, err := f.svc.ListPendingReplies(context.Background(), testWS, 100)
+	if err != nil {
+		t.Fatalf("ListPendingReplies: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d queued replies, want exactly 1", len(rows))
+	}
+	return rows[0]
+}
+
+// THE SHAPE CHANGE. Reply writes the body to a row and hands the queue that
+// row's id. Nothing about the reply's text reaches the task — which is what
+// keeps it out of task_dead_letters, and therefore out of a GET /dead-letters
+// response served under campaigns:read.
+func TestReplyQueuesARowAndEnqueuesOnlyItsID(t *testing.T) {
+	f := newReplyFixture(t)
+
+	if err := f.svc.Reply(context.Background(), testWS, f.threadID, "thanks for reaching out", nil); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	row := f.scheduled(t)
+	if row.BodyText != "thanks for reaching out" {
+		t.Errorf("row body = %q, want the operator's text stored on the row", row.BodyText)
+	}
+	if row.ThreadID != f.threadID || row.WorkspaceID != testWS {
+		t.Errorf("row = %+v, want it pinned to the thread and workspace", row)
+	}
+	if len(f.deps.enq.calls) != 1 {
+		t.Fatalf("%d enqueue calls, want 1", len(f.deps.enq.calls))
+	}
+	call := f.deps.enq.calls[0]
+	if call.pendingID != row.ID.String() {
+		t.Errorf("enqueued %q, want the row id %q", call.pendingID, row.ID)
+	}
+	if call.workspaceID != testWS.String() {
+		t.Errorf("enqueued workspace %q, want %q", call.workspaceID, testWS)
+	}
+	if !call.sendAfter.Equal(row.SendAfter) {
+		t.Errorf("enqueued for %v but the row says %v", call.sendAfter, row.SendAfter)
+	}
+}
+
+// An immediate reply's send_after must be STRICTLY in the past, not "now".
+//
+// ClaimInboxPendingReply guards on `send_after <= now()` evaluated on the
+// DATABASE clock, while this instant is stamped from the APP clock. Equal-to-now
+// therefore loses to any forward skew between the two: the task fires, the claim
+// matches no row, and — because there is no sweeper over stranded 'scheduled'
+// rows (see ScheduleReply's own note) — the reply never leaves and the operator
+// is told it was sent.
+func TestReplySendAfterIsStrictlyInThePastToSurviveClockSkew(t *testing.T) {
+	f := newReplyFixture(t)
+
+	if err := f.svc.Reply(context.Background(), testWS, f.threadID, "on it", nil); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	row := f.scheduled(t)
+	if !row.SendAfter.Before(f.now) {
+		t.Fatalf("send_after = %v, want strictly before now (%v): an equal instant is unclaimable "+
+			"under any forward skew between the app and database clocks", row.SendAfter, f.now)
+	}
+	// And the consequence, asserted rather than described: the row a worker
+	// picks up the instant its task fires is claimable.
+	if err := f.svc.ClaimPendingReply(context.Background(), testWS, row.ID); err != nil {
+		t.Fatalf("ClaimPendingReply on a just-created immediate reply: %v, want it claimable at once", err)
+	}
+}
+
+// The thread is marked read: whoever just replied has, by construction, seen it.
+func TestReplyMarksTheThreadRead(t *testing.T) {
+	f := newReplyFixture(t)
+
+	if err := f.svc.Reply(context.Background(), testWS, f.threadID, "hello", nil); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	detail, err := f.svc.GetThread(context.Background(), testWS, f.threadID)
+	if err != nil {
+		t.Fatalf("GetThread: %v", err)
+	}
+	if detail.Thread.Unread {
+		t.Fatal("thread still unread after a successful Reply")
+	}
+}
+
+// Every rejection must land BEFORE a row exists. A row written and then
+// abandoned would sit in the operator's outbox offering an Undo for mail that
+// was never going anywhere.
+func TestReplyRejectionsHappenBeforeAnyRowIsCreated(t *testing.T) {
+	suppressed := &fakeSuppressionChecker{suppressed: true}
+	cases := []struct {
+		name  string
+		build func(t *testing.T) (*replyFixture, uuid.UUID, string)
+		want  error
+	}{
+		{
+			name: "empty body",
+			build: func(t *testing.T) (*replyFixture, uuid.UUID, string) {
+				f := newReplyFixture(t)
+				return f, f.threadID, ""
+			},
+			want: inbox.ErrReplyBodyInvalid,
+		},
+		{
+			name: "oversized body",
+			build: func(t *testing.T) (*replyFixture, uuid.UUID, string) {
+				f := newReplyFixture(t)
+				return f, f.threadID, strings.Repeat("a", 100001)
+			},
+			want: inbox.ErrReplyBodyInvalid,
+		},
+		{
+			name: "unknown thread",
+			build: func(t *testing.T) (*replyFixture, uuid.UUID, string) {
+				return newReplyFixture(t), uuid.New(), "hi"
+			},
+			want: inbox.ErrNotFound,
+		},
+		{
+			name: "thread with no inbound message",
+			build: func(t *testing.T) (*replyFixture, uuid.UUID, string) {
+				f := newReplyFixture(t)
+				bare := inbox.Thread{ID: uuid.New(), WorkspaceID: testWS, MailboxID: uuid.New(), Subject: "Hi"}
+				f.store.threads[bare.ID] = bare
+				return f, bare.ID, "hi"
+			},
+			want: inbox.ErrNoInboundMessage,
+		},
+		{
+			name: "suppressed recipient",
+			build: func(t *testing.T) (*replyFixture, uuid.UUID, string) {
+				f := newReplyFixture(t, inbox.WithSuppressionChecker(suppressed))
+				return f, f.threadID, "hi"
+			},
+			want: inbox.ErrRecipientSuppressed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, threadID, body := tc.build(t)
+			if err := f.svc.Reply(context.Background(), testWS, threadID, body, nil); !errors.Is(err, tc.want) {
+				t.Fatalf("Reply = %v, want %v", err, tc.want)
+			}
+			rows, err := f.svc.ListPendingReplies(context.Background(), testWS, 100)
+			if err != nil {
+				t.Fatalf("ListPendingReplies: %v", err)
+			}
+			if len(rows) != 0 {
+				t.Errorf("a rejected reply left %d rows queued", len(rows))
+			}
+			if len(f.deps.enq.calls) != 0 {
+				t.Errorf("a rejected reply enqueued %d tasks", len(f.deps.enq.calls))
+			}
+		})
+	}
+	if suppressed.lastEmail != "lead@x.test" {
+		t.Errorf("suppression checked %q, want the latest inbound message's From: address", suppressed.lastEmail)
+	}
+}
+
+// A cross-workspace thread is indistinguishable from one that does not exist.
 func TestReplyCrossWorkspaceThreadIsNotFound(t *testing.T) {
-	store := newFakeStore()
-	wsA, wsB := uuid.New(), uuid.New()
-	threadID := seedThreadWithInbound(store, wsA, "lead@x.test")
-	svc := inbox.NewService(store)
-	if err := svc.Reply(context.Background(), wsB, threadID, "hello"); !errors.Is(err, inbox.ErrNotFound) {
+	f := newReplyFixture(t)
+	if err := f.svc.Reply(context.Background(), uuid.New(), f.threadID, "hello", nil); !errors.Is(err, inbox.ErrNotFound) {
 		t.Fatalf("Reply across workspaces = %v, want ErrNotFound", err)
-	}
-}
-
-func TestReplyWithNoInboundMessageIsConflict(t *testing.T) {
-	store := newFakeStore()
-	ws := uuid.New()
-	th := inbox.Thread{ID: uuid.New(), WorkspaceID: ws, MailboxID: uuid.New(), Subject: "Hi"}
-	store.threads[th.ID] = th // no messages seeded at all
-	svc := inbox.NewService(store)
-	if err := svc.Reply(context.Background(), ws, th.ID, "hello"); !errors.Is(err, inbox.ErrNoInboundMessage) {
-		t.Fatalf("Reply with no inbound message = %v, want ErrNoInboundMessage", err)
-	}
-}
-
-func TestReplyToSuppressedRecipientIsConflict(t *testing.T) {
-	store := newFakeStore()
-	ws := uuid.New()
-	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
-	checker := &fakeSuppressionChecker{suppressed: true}
-	svc := inbox.NewService(store, inbox.WithSuppressionChecker(checker), inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{}))
-
-	if err := svc.Reply(context.Background(), ws, threadID, "hello"); !errors.Is(err, inbox.ErrRecipientSuppressed) {
-		t.Fatalf("Reply to suppressed recipient = %v, want ErrRecipientSuppressed", err)
-	}
-	if checker.lastEmail != "lead@x.test" {
-		t.Fatalf("suppression checked %q, want the latest inbound message's From: address", checker.lastEmail)
 	}
 }
 
 // A suppression-checker error fails closed, like campaign.Service's identical
 // rule: never treated as "not suppressed".
 func TestReplySuppressionCheckerErrorPropagates(t *testing.T) {
-	store := newFakeStore()
-	ws := uuid.New()
-	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
 	boom := errors.New("redis down")
-	svc := inbox.NewService(store,
-		inbox.WithSuppressionChecker(&fakeSuppressionChecker{err: boom}),
-		inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{}))
+	f := newReplyFixture(t, inbox.WithSuppressionChecker(&fakeSuppressionChecker{err: boom}))
 
-	if err := svc.Reply(context.Background(), ws, threadID, "hello"); !errors.Is(err, boom) {
+	if err := f.svc.Reply(context.Background(), testWS, f.threadID, "hello", nil); !errors.Is(err, boom) {
 		t.Fatalf("Reply with a suppression-checker error = %v, want %v", err, boom)
 	}
 }
 
-func TestReplyRejectsEmptyOrOversizedBody(t *testing.T) {
-	store := newFakeStore()
-	ws := uuid.New()
-	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
-	svc := inbox.NewService(store, inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{}))
+// The orphan compensation: the row exists but nothing will ever claim it, so it
+// is marked failed rather than left 'scheduled' — which would show the operator
+// a reply in flight, counting against their outbox cap, for mail that is never
+// going to leave.
+func TestReplyEnqueueFailureMarksTheRowFailed(t *testing.T) {
+	f := newReplyFixture(t)
+	f.deps.enq.err = errors.New("redis down")
 
-	if err := svc.Reply(context.Background(), ws, threadID, ""); !errors.Is(err, inbox.ErrReplyBodyInvalid) {
-		t.Fatalf("Reply with empty body = %v, want ErrReplyBodyInvalid", err)
+	err := f.svc.Reply(context.Background(), testWS, f.threadID, "on it", nil)
+	if err == nil {
+		t.Fatal("Reply reported success despite an enqueue failure")
 	}
-	oversized := strings.Repeat("a", 100001)
-	if err := svc.Reply(context.Background(), ws, threadID, oversized); !errors.Is(err, inbox.ErrReplyBodyInvalid) {
-		t.Fatalf("Reply with an oversized body = %v, want ErrReplyBodyInvalid", err)
+	if !errors.Is(err, f.deps.enq.err) {
+		t.Errorf("error = %v, want it to wrap the enqueue failure", err)
+	}
+	// Not in the outbox any more, because the outbox is what is still waiting.
+	if rows, listErr := f.svc.ListPendingReplies(context.Background(), testWS, 100); listErr != nil || len(rows) != 0 {
+		t.Errorf("outbox = %d rows (err %v), want the orphan marked failed and gone", len(rows), listErr)
+	}
+	var failed inbox.PendingReply
+	for _, row := range f.deps.pending.rows {
+		failed = row
+	}
+	if failed.Status != inbox.PendingStatusFailed {
+		t.Errorf("row status = %q, want %q", failed.Status, inbox.PendingStatusFailed)
+	}
+	if failed.LastError == "" {
+		t.Error("the failed row carries no reason, so the outbox cannot say what happened")
 	}
 }
 
-// The happy path: enqueued with the right args, and the thread is marked
-// read as a side effect (the caller who just replied has, by construction,
-// seen it).
-func TestReplyEnqueuesAndMarksThreadRead(t *testing.T) {
-	store := newFakeStore()
-	ws := uuid.New()
-	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
-	enq := &fakeReplyEnqueuer{}
-	checker := &fakeSuppressionChecker{suppressed: false}
-	svc := inbox.NewService(store, inbox.WithSuppressionChecker(checker), inbox.WithReplyEnqueuer(enq))
+// A SetUnread failure AFTER the row is queued must be swallowed (logged, not
+// returned): the send is committed, so a 500 here would make the caller retry
+// and risk a second reply actually going out.
+func TestReplySwallowsAMarkReadFailureAfterTheRowIsQueued(t *testing.T) {
+	f := newReplyFixture(t)
+	f.store.setUnreadErr = errors.New("db down")
 
-	if err := svc.Reply(context.Background(), ws, threadID, "thanks for reaching out"); err != nil {
-		t.Fatalf("Reply: %v", err)
+	if err := f.svc.Reply(context.Background(), testWS, f.threadID, "hello", nil); err != nil {
+		t.Fatalf("Reply: %v, want nil (the reply is queued; a mark-read failure must not surface)", err)
 	}
-	if enq.calls != 1 {
-		t.Fatalf("enqueue called %d times, want 1", enq.calls)
-	}
-	if enq.threadID != threadID.String() || enq.bodyText != "thanks for reaching out" || enq.workspaceID != ws.String() {
-		t.Fatalf("enqueue args = (%q,%q,%q), want (%q,%q,%q)",
-			enq.threadID, enq.bodyText, enq.workspaceID, threadID.String(), "thanks for reaching out", ws.String())
-	}
-	got, err := svc.GetThread(context.Background(), ws, threadID)
-	if err != nil {
-		t.Fatalf("GetThread: %v", err)
-	}
-	if got.Thread.Unread {
-		t.Fatal("thread still unread after a successful Reply")
+	if len(f.deps.enq.calls) != 1 {
+		t.Fatalf("enqueue called %d times, want 1", len(f.deps.enq.calls))
 	}
 }
 
-// A SetUnread failure AFTER a successful enqueue must be swallowed (logged,
-// not returned): the send is already queued, so a 500 here would make the
-// caller retry and risk a second reply actually going out — the enqueue's
-// unix-second dedup key does not catch a retry seconds later. This mirrors
-// how the worker treats a post-send RecordInboxReply failure.
-func TestReplySwallowsAMarkReadFailureAfterASuccessfulEnqueue(t *testing.T) {
-	store := newFakeStore()
-	ws := uuid.New()
-	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
-	store.setUnreadErr = errors.New("db down")
-	enq := &fakeReplyEnqueuer{}
-	svc := inbox.NewService(store, inbox.WithReplyEnqueuer(enq))
-
-	if err := svc.Reply(context.Background(), ws, threadID, "hello"); err != nil {
-		t.Fatalf("Reply: %v, want nil (the send is queued; a mark-read failure must not surface as an error)", err)
+// The outstanding-sends cap now applies to the immediate path too, because it
+// now writes the same rows the deferred path does. Without it, POST /reply would
+// be an uncapped way around MaxOutstandingPendingSends.
+func TestReplyIsSubjectToTheOutstandingSendCap(t *testing.T) {
+	f := newReplyFixture(t)
+	ctx := context.Background()
+	for range inbox.MaxOutstandingPendingSends {
+		if _, err := f.deps.pending.CreatePendingReply(ctx, inbox.CreatePendingReplyInput{
+			WorkspaceID: testWS, ThreadID: f.threadID, BodyText: "queued", SendAfter: f.now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
 	}
-	if enq.calls != 1 {
-		t.Fatalf("enqueue called %d times, want 1 (the enqueue itself must still have happened)", enq.calls)
+
+	err := f.svc.Reply(ctx, testWS, f.threadID, "one too many", nil)
+	if !errors.Is(err, inbox.ErrTooManyPendingSends) {
+		t.Fatalf("Reply at capacity = %v, want ErrTooManyPendingSends", err)
+	}
+	// NOT ErrValidation, which is this domain's 400. The cap is a
+	// workspace-state rejection of a well-formed request and must reach the
+	// client as a 422 (TestBothSendRoutesReturn422AtTheOutstandingSendCap holds
+	// the status itself); sharing ErrValidation is what made it a 400.
+	if errors.Is(err, inbox.ErrValidation) {
+		t.Errorf("the cap is an ErrValidation, so the handler maps it to 400: %v", err)
 	}
 }
 
-// Without a ReplyEnqueuer wired, Reply must fail rather than silently drop
-// the reply -- unlike the optional SuppressionChecker, there is no safe
-// "unwired" default for actually sending mail.
-func TestReplyWithoutAnEnqueuerFails(t *testing.T) {
+// Without a pending-reply store there is nowhere to put the body, so Reply must
+// fail rather than silently drop it — unlike the optional SuppressionChecker,
+// there is no safe "unwired" default for actually sending mail.
+func TestReplyWithoutAPendingStoreFails(t *testing.T) {
 	store := newFakeStore()
-	ws := uuid.New()
-	threadID := seedThreadWithInbound(store, ws, "lead@x.test")
+	threadID := seedThreadWithInbound(store, testWS, "lead@x.test")
 	svc := inbox.NewService(store)
 
-	if err := svc.Reply(context.Background(), ws, threadID, "hello"); err == nil {
-		t.Fatal("Reply with no ReplyEnqueuer wired = nil error, want an error")
+	if err := svc.Reply(context.Background(), testWS, threadID, "hello", nil); err == nil {
+		t.Fatal("Reply with no pending-reply store wired = nil error, want an error")
 	}
 }

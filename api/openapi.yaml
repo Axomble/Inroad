@@ -3083,6 +3083,18 @@ paths:
         third-party client. The recipient's suppression status is checked both
         here and again at send time; a manual reply is never blocked by the
         mailbox's daily cap, but it counts toward it.
+
+
+        The reply is queued as a durable row (the same one scheduleInboxReply
+        creates, with its send-after already in the past) and the background job
+        carries only that row's id, never the text. A consequence worth knowing:
+        this endpoint is now subject to the SAME per-workspace outstanding-sends
+        cap as scheduleInboxReply, and returns 422 when the workspace is at it.
+
+
+        Still a bodyless 202 rather than the queued reply's id: there is no undo
+        window on this path, so there would be no handle worth returning. Use
+        scheduleInboxReply when you need one.
       tags: [inbox]
       security: [{ bearerAuth: [] }]
       requestBody:
@@ -3096,7 +3108,7 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: Not found }
         '409': { description: "The recipient is suppressed, or the thread has no inbound message to reply to" }
-        '422': { description: Validation error (empty or oversized body) }
+        '422': { description: "Validation error: an empty or oversized body, or the workspace already has the maximum number of replies queued for delivery (the same outstanding-sends cap scheduleInboxReply enforces)" }
   /inbox/threads/{id}/draft-reply:
     parameters: [{ $ref: '#/components/parameters/ID' }]
     post:
@@ -3233,6 +3245,12 @@ paths:
         than only a scheduled task.
 
 
+        A workspace may hold at most 500 replies queued for delivery at once,
+        counting everything still waiting on BOTH this route and sendInboxReply.
+        Past that the request is refused with 422 until the outbox drains; the
+        cap bounds abuse rather than use, so an ordinary operator never meets it.
+
+
         Scheduling deliberately does NOT mark the thread read, unlike
         sendInboxReply: an undone reply should leave the thread exactly as the
         operator found it.
@@ -3254,8 +3272,10 @@ paths:
         '422':
           description: >-
             The body is empty or too long, the thread has no message to reply to,
-            or send_at parsed but is out of range (already past, or more than 30
-            days ahead).
+            send_at parsed but is out of range (already past, or more than 30
+            days ahead), or the workspace already has the maximum number of
+            replies queued for delivery (the same outstanding-sends cap
+            sendInboxReply enforces).
   /inbox/outbox:
     get:
       operationId: listInboxOutbox

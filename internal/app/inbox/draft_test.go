@@ -135,18 +135,21 @@ func TestDraftReplyNeverEnqueuesASendOrMarksThreadRead(t *testing.T) {
 	store := newFakeStore()
 	ws := uuid.New()
 	threadID := seedThreadWithConversation(store, ws)
-	enq := &fakeReplyEnqueuer{}
 	suppression := &fakeSuppressionChecker{suppressed: true} // would BLOCK a real reply
-	svc := inbox.NewService(store,
-		inbox.WithReplyEnqueuer(enq),
+	deps := newReplyDeps(store, nil,
 		inbox.WithSuppressionChecker(suppression),
 		inbox.WithReplyDrafter(&fakeDrafter{draft: "Happy to explain."}))
+	svc := inbox.NewService(store, deps.opts...)
 
 	if _, err := svc.DraftReply(context.Background(), ws, threadID); err != nil {
 		t.Fatalf("DraftReply: %v", err)
 	}
-	if enq.calls != 0 {
-		t.Fatalf("DraftReply enqueued %d sends, want 0", enq.calls)
+	if len(deps.enq.calls) != 0 {
+		t.Fatalf("DraftReply enqueued %d sends, want 0", len(deps.enq.calls))
+	}
+	if len(deps.pending.rows) != 0 {
+		t.Fatalf("DraftReply queued %d replies, want 0 — a draft is inert until a human sends it",
+			len(deps.pending.rows))
 	}
 	if suppression.lastEmail != "" {
 		t.Fatal("DraftReply consulted the suppression list; only sending does that")
@@ -268,7 +271,7 @@ func draftHandler(t *testing.T, drafter inbox.ReplyDrafter) (*inbox.Handler, uui
 	t.Helper()
 	store := newFakeStore()
 	threadID := seedThreadWithConversation(store, testWS)
-	opts := []inbox.ServiceOption{inbox.WithReplyEnqueuer(&fakeReplyEnqueuer{})}
+	opts := newReplyDeps(store, nil).opts
 	if drafter != nil {
 		opts = append(opts, inbox.WithReplyDrafter(drafter))
 	}

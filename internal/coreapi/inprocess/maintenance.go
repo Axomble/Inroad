@@ -27,6 +27,17 @@ func (c client) PurgeWarmupObservations(ctx context.Context) (int64, error) {
 	return c.q.PurgeWarmupObservations(ctx)
 }
 
+// PurgeDeadLetters removes captured retry-exhausted tasks past their 90-day
+// retention window. task_dead_letters is append-only in practice — triage flips
+// a status, it never deletes — and had no sweep at all, so it grew forever on a
+// system whose failure mode is a provider outage failing hundreds of queued
+// sends at once. Same reasoning as PurgeWarmupObservations above (invariant 55),
+// and kept separate from CleanupExpired for the same reason: a dead letter is a
+// record of dropped work, not an authentication artifact.
+func (c client) PurgeDeadLetters(ctx context.Context) (int64, error) {
+	return c.q.PurgeTaskDeadLetters(ctx)
+}
+
 // PurgeDeadWorkers reaps worker-registry rows whose heartbeat stopped long ago,
 // plus the mailbox assignments pinned to them. Kept separate from CleanupExpired
 // for the same reason as the two above: `workers` is global infrastructure state,

@@ -140,7 +140,10 @@ func allRecipients(c coreapi.PendingInboxCompose) []string {
 }
 
 // releaseCompose mirrors releaseAndReturn, including the reason-token rule: a
-// raw provider error must never reach last_error, which is served to clients.
+// raw provider error must never reach last_error, which is served to clients —
+// nor the error returned to asynq, which becomes the DEAD LETTER's last_error
+// and is served to clients too. See releaseAndReturn for the full reasoning; the
+// hole was identical on both handlers and is closed the same way.
 func releaseCompose(
 	ctx context.Context,
 	core ComposeCore,
@@ -153,7 +156,7 @@ func releaseCompose(
 	if err := core.ReleasePendingInboxCompose(ctx, p.WorkspaceID, p.PendingID, reason); err != nil {
 		slog.ErrorContext(ctx, "inbox_pending_compose_release_failed", "pending_id", p.PendingID, "err", err)
 	}
-	return cause
+	return attemptFailure(reason)
 }
 
 func failCompose(ctx context.Context, core ComposeCore, p queue.InboxPendingComposeSendPayload, reason string) {

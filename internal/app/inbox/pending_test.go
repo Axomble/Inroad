@@ -24,17 +24,19 @@ type fakePendingStore struct {
 	now        func() time.Time
 	undoWindow time.Duration
 	createErr  error
-	// knownThreads limits which thread ids may be scheduled against, modelling
-	// the INSERT … SELECT's self-enforcing tenancy.
-	knownThreads map[uuid.UUID]uuid.UUID
+	// threads models the INSERT … SELECT's self-enforcing tenancy: a row is
+	// written only for a thread that exists IN THAT WORKSPACE. Reading the same
+	// thread store the Service reads means a fixture cannot accidentally teach
+	// this fake about a thread the Service has never heard of.
+	threads *fakeStore
 }
 
-func newFakePendingStore(now func() time.Time) *fakePendingStore {
+func newFakePendingStore(now func() time.Time, threads *fakeStore) *fakePendingStore {
 	return &fakePendingStore{
-		rows:         map[uuid.UUID]inbox.PendingReply{},
-		now:          now,
-		undoWindow:   10 * time.Second,
-		knownThreads: map[uuid.UUID]uuid.UUID{},
+		rows:       map[uuid.UUID]inbox.PendingReply{},
+		now:        now,
+		undoWindow: 10 * time.Second,
+		threads:    threads,
 	}
 }
 
@@ -44,7 +46,7 @@ func (f *fakePendingStore) CreatePendingReply(_ context.Context, in inbox.Create
 	}
 	// The real INSERT … SELECT writes zero rows for a thread outside the
 	// workspace, which surfaces as not-found.
-	if ws, ok := f.knownThreads[in.ThreadID]; !ok || ws != in.WorkspaceID {
+	if th, ok := f.threads.threads[in.ThreadID]; !ok || th.WorkspaceID != in.WorkspaceID {
 		return inbox.PendingReply{}, inbox.ErrNotFound
 	}
 	row := inbox.PendingReply{
@@ -81,9 +83,21 @@ func (f *fakePendingStore) ListPendingReplies(_ context.Context, ws uuid.UUID, l
 	return out, nil
 }
 
-func (f *fakePendingStore) CountPendingReplies(ctx context.Context, ws uuid.UUID) (int64, error) {
-	rows, err := f.ListPendingReplies(ctx, ws, inbox.MaxPendingReplyPageLimit)
-	return int64(len(rows)), err
+// CountPendingReplies is a COUNT(*), not a counted page: the real query has no
+// LIMIT, and reusing the paged list here would silently cap the count at the
+// page size — which is well below MaxOutstandingPendingSends, so the capacity
+// guard could never fire and every test of it would pass vacuously.
+func (f *fakePendingStore) CountPendingReplies(_ context.Context, ws uuid.UUID) (int64, error) {
+	var n int64
+	for _, row := range f.rows {
+		if row.WorkspaceID != ws {
+			continue
+		}
+		if row.Status == inbox.PendingStatusScheduled || row.Status == inbox.PendingStatusSending {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (f *fakePendingStore) PendingReplyForThread(_ context.Context, ws, threadID uuid.UUID) (inbox.PendingReply, error) {
@@ -171,21 +185,25 @@ func (f *fakePendingStore) FailPendingReply(_ context.Context, ws, id uuid.UUID,
 // recordingPendingEnqueuer captures what was scheduled, so a test can assert
 // the delay actually reached the queue.
 type recordingPendingEnqueuer struct {
-	calls []struct {
-		pendingID string
-		sendAfter time.Time
-	}
-	err error
+	calls []pendingEnqueueCall
+	err   error
 }
 
-func (r *recordingPendingEnqueuer) EnqueuePendingInboxReply(pendingID, _ string, sendAfter time.Time) error {
+// pendingEnqueueCall is the WHOLE payload the queue is handed: two ids and an
+// instant. There is deliberately no body field to record, because the interface
+// has no body argument — that absence is the fix this package's tests exist to
+// hold in place.
+type pendingEnqueueCall struct {
+	pendingID   string
+	workspaceID string
+	sendAfter   time.Time
+}
+
+func (r *recordingPendingEnqueuer) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error {
 	if r.err != nil {
 		return r.err
 	}
-	r.calls = append(r.calls, struct {
-		pendingID string
-		sendAfter time.Time
-	}{pendingID, sendAfter})
+	r.calls = append(r.calls, pendingEnqueueCall{pendingID, workspaceID, sendAfter})
 	return nil
 }
 
@@ -204,7 +222,7 @@ func newPendingFixture(t *testing.T) *pendingFixture {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	threads := newFakeStore()
-	pending := newFakePendingStore(clock)
+	pending := newFakePendingStore(clock, threads)
 	enq := &recordingPendingEnqueuer{}
 
 	svc := inbox.NewService(threads,
@@ -222,7 +240,6 @@ func newPendingFixture(t *testing.T) *pendingFixture {
 	if err != nil {
 		t.Fatalf("seed thread: %v", err)
 	}
-	pending.knownThreads[th.ID] = testWS
 
 	return &pendingFixture{
 		svc: svc, handler: inbox.NewHandler(svc),
@@ -250,8 +267,16 @@ func TestScheduleReplyAppliesTheUndoWindow(t *testing.T) {
 	}
 }
 
-// A zero window means send immediately — the workspace opted out of undo.
-func TestScheduleReplyWithNoUndoWindowSendsImmediately(t *testing.T) {
+// A zero window means send immediately — the workspace opted out of undo — and
+// "immediately" has to mean STRICTLY IN THE PAST, not "now".
+//
+// ClaimInboxPendingReply guards on `send_after <= now()` evaluated on the
+// DATABASE clock (queries/inbox.sql); this instant is stamped from the APP
+// clock. An equal instant therefore loses to any forward skew between the two:
+// the task fires, the claim matches nothing, and — there being no sweeper over
+// stranded 'scheduled' rows — the reply never leaves while the operator is told
+// it is on its way.
+func TestScheduleReplyWithNoUndoWindowIsDueStrictlyBeforeNow(t *testing.T) {
 	f := newPendingFixture(t)
 	f.pending.undoWindow = 0
 
@@ -259,8 +284,29 @@ func TestScheduleReplyWithNoUndoWindowSendsImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScheduleReply: %v", err)
 	}
-	if !got.SendAfter.Equal(f.now) {
-		t.Errorf("SendAfter = %v, want now (%v)", got.SendAfter, f.now)
+	if !got.SendAfter.Before(f.now) {
+		t.Errorf("SendAfter = %v, want strictly before now (%v)", got.SendAfter, f.now)
+	}
+	// The point of being in the past, asserted rather than described: the row is
+	// claimable the moment its task fires.
+	if err := f.svc.ClaimPendingReply(context.Background(), testWS, got.ID); err != nil {
+		t.Errorf("ClaimPendingReply on a zero-window row: %v, want it claimable at once", err)
+	}
+}
+
+// A NON-zero window still lands exactly on now+window: the skew slack is for the
+// already-due case only, and must never pull a genuinely scheduled send early.
+func TestScheduleReplyDoesNotApplySkewSlackToAScheduledSend(t *testing.T) {
+	f := newPendingFixture(t)
+	f.pending.undoWindow = 30 * time.Second
+
+	got, err := f.svc.ScheduleReply(context.Background(), testWS, f.thread.ID, "on it", nil, nil)
+	if err != nil {
+		t.Fatalf("ScheduleReply: %v", err)
+	}
+	if !got.SendAfter.Equal(f.now.Add(30 * time.Second)) {
+		t.Errorf("SendAfter = %v, want exactly now+30s (%v): the undo window is a promise to the "+
+			"operator, so nothing may shorten it", got.SendAfter, f.now.Add(30*time.Second))
 	}
 }
 
@@ -356,7 +402,6 @@ func TestScheduleReplyValidatesLikeTheImmediatePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	f.pending.knownThreads[bare.ID] = testWS
 	if _, err := f.svc.ScheduleReply(ctx, testWS, bare.ID, "x", nil, nil); !errors.Is(err, inbox.ErrNoInboundMessage) {
 		t.Errorf("no inbound: error = %v, want ErrNoInboundMessage", err)
 	}
@@ -664,6 +709,40 @@ func TestOutboxEndpointListsAndCancels(t *testing.T) {
 	}
 	if len(emptyPage.Items) != 0 {
 		t.Errorf("outbox still lists %d items after cancelling", len(emptyPage.Items))
+	}
+}
+
+// THE CAP'S STATUS CODE, asserted at the HANDLER on BOTH send routes.
+//
+// The service-level test (TestReplyIsSubjectToTheOutstandingSendCap) proves the
+// cap fires and names its sentinel; it says nothing about what a client sees,
+// which is how the cap shipped documented as 422 and answering 400. A
+// workspace-state rejection of a well-formed request is 422 — the same class as
+// ErrTooManyLabels and the snooze bounds — and the SPA branches on the status,
+// so the two routes must agree with each other and with the OpenAPI contract.
+func TestBothSendRoutesReturn422AtTheOutstandingSendCap(t *testing.T) {
+	f := newPendingFixture(t)
+	ctx := context.Background()
+	for range inbox.MaxOutstandingPendingSends {
+		if _, err := f.pending.CreatePendingReply(ctx, inbox.CreatePendingReplyInput{
+			WorkspaceID: testWS, ThreadID: f.thread.ID, BodyText: "queued",
+			SendAfter: f.now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	for _, tc := range []struct{ name, path, body string }{
+		{"immediate", "/reply", `{"body_text":"one too many"}`},
+		{"deferred", "/schedule-reply", `{"body_text":"one too many"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := serve(t, f.handler, http.MethodPost,
+				"/inbox/threads/"+f.thread.ID.String()+tc.path, tc.body)
+			if res.Code != http.StatusUnprocessableEntity {
+				t.Errorf("POST %s at capacity = %d, want 422 (%s)", tc.path, res.Code, res.Body.String())
+			}
+		})
 	}
 }
 

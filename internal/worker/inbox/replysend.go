@@ -18,7 +18,8 @@ import (
 // ReplyCore is the narrow coreapi capability ReplySendHandler needs: load one
 // manual reply's job (mailbox, recipient, threading headers), re-check
 // suppression, resolve the sending mailbox's decrypted transport, and record
-// the delivered reply. Defined here (consumer side) — the same "avoid
+// the delivered reply. It is deleted with that handler — see its doc for when.
+// Defined here (consumer side) — the same "avoid
 // widening coreapi.Client's ~40-method surface for one call site" trade as
 // testsend.Core — and satisfied by the in-process client via type assertion
 // at the composition root (internal/worker/handlers.go). IsSuppressed and
@@ -29,11 +30,10 @@ type ReplyCore interface {
 	// GetInboxReplyJob loads one thread's reply job, workspace-pinned.
 	GetInboxReplyJob(ctx context.Context, threadID, workspaceID string) (coreapi.InboxReplyJob, error)
 	// IsSuppressed reports whether `to` is on the workspace's suppression
-	// list. This is the defense-in-depth half of the fix in
-	// internal/app/inbox.Service.Reply's own suppression check: that API-side
-	// check can race an incoming unsubscribe between enqueue and this task
-	// running, so the worker re-checks the SAME table right before dialing,
-	// workspace-pinned.
+	// list. This is the defense-in-depth half of the API-side suppression
+	// check: that check can race an incoming unsubscribe between enqueue and
+	// this task running — and on a drain path the gap can be long — so the
+	// worker re-checks the SAME table right before dialing, workspace-pinned.
 	IsSuppressed(ctx context.Context, workspaceID, to string) (bool, error)
 	// ResolveSenderTransport decrypts the resolved mailbox's send credential
 	// (refreshing an OAuth token for gmail/m365), workspace-pinned.
@@ -81,26 +81,56 @@ func reSubject(subject string) string {
 	return rePrefix + subject
 }
 
-// ReplySendHandler returns an asynq handler for inbox:reply_send tasks: the
-// execution-plane half of POST /inbox/threads/{id}/reply. The API
-// (internal/app/inbox) does every synchronous validation (thread ownership,
-// an inbound message exists, the recipient is not suppressed) and enqueues;
-// decrypting the mailbox credential and dialing the provider happen ONLY
+// ReplySendHandler returns an asynq handler for inbox:reply_send tasks. It is a
+// DRAIN PATH: nothing produces this task any more.
+//
+// POST /inbox/threads/{id}/reply now writes the reply body to an
+// inbox_pending_replies row and enqueues inbox:pending_reply_send, which carries
+// only that row's id (see internal/app/inbox.queueReply for why: a task payload
+// is stored verbatim in task_dead_letters and served by GET /dead-letters under
+// campaigns:read, an OAuth-grantable scope that must never see correspondence).
+// queue.EnqueueInboxReplySend is deleted, which is what makes this drain finite.
+//
+// This handler stays only so tasks that were ALREADY in Redis when that shipped
+// still get delivered. Its behaviour is deliberately unchanged — it must keep
+// sending from the payload's own BodyText, because a legacy task has no row to
+// read a body from, and "load it from the row instead" would silently drop every
+// reply in flight at deploy time.
+//
+// WHEN TO DELETE IT: the release after this one. Its entry log
+// ("inbox_reply_send_legacy_drain") is the signal — once it has stopped
+// appearing for longer than the queue's retention, nothing is left to drain, and
+// this file goes together with queue.TaskInboxReplySend,
+// queue.InboxReplySendPayload, the legacyContentBearingTaskTypes entry that
+// suppresses its capture, and this registration in register.go.
+//
+// Decrypting the mailbox credential and dialing the provider still happen ONLY
 // here (docs/security.md invariant 1).
 func ReplySendHandler(core ReplyCore, sender Mailer) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, t *asynq.Task) error {
+		//nolint:staticcheck // SA1019: the deprecated payload is the point — this
+		// handler exists solely to finish tasks that already carry it.
 		var p queue.InboxReplySendPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
 			return err
 		}
 
+		// The drain's own signal, and the operator's evidence that deleting this
+		// path is (or is not yet) safe. IDS ONLY — never the payload: BodyText is
+		// the operator's correspondence, and logging it would recreate in the log
+		// sink exactly the disclosure that moving the body out of the payload
+		// closed. WARN rather than INFO because every line here is a task from
+		// before the cutover, which is worth noticing rather than filtering.
+		slog.WarnContext(ctx, "inbox_reply_send_legacy_drain",
+			"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID, "task_id", p.TaskID)
+
 		job, err := core.GetInboxReplyJob(ctx, p.ThreadID, p.WorkspaceID)
 		if err != nil {
 			if errors.Is(err, coreapi.ErrInboxNoInbound) {
-				// The API-side check in Service.Reply already rejects this
-				// before enqueuing; seeing it here means the thread changed
-				// shape between enqueue and this task running (or a direct
-				// enqueue bypassed the API). Permanent — retrying cannot fix
+				// The API-side check rejected this before the task was ever
+				// enqueued; seeing it here means the thread changed shape
+				// between then and now (these tasks predate the cutover, so
+				// "then" may be a while ago). Permanent — retrying cannot fix
 				// a thread with no inbound message. Log and drop.
 				slog.WarnContext(ctx, "inbox_reply_no_inbound_message",
 					"workspace_id", p.WorkspaceID, "thread_id", p.ThreadID)
@@ -110,9 +140,9 @@ func ReplySendHandler(core ReplyCore, sender Mailer) func(context.Context, *asyn
 		}
 
 		// Defense in depth (docs/security.md): re-check suppression right
-		// here, before any credential is decrypted. The API-side check in
-		// Service.Reply can race an incoming unsubscribe between enqueue and
-		// this task running; a suppressed recipient is skipped (not an error
+		// here, before any credential is decrypted. The API-side check can
+		// race an incoming unsubscribe between enqueue and this task running,
+		// and these tasks are old; a suppressed recipient is skipped (not an error
 		// — the task should not retry) and logged at WARN so a persistent
 		// hit is observable. The raw recipient address is deliberately not
 		// logged.

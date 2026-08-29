@@ -222,17 +222,19 @@ export function attemptsText(attemptCount: number): string {
  * Pretty-printed rather than one line: it is read to find an id.
  *
  * NO CREDENTIAL IS IN HERE, AND THAT IS NOT THE SAME AS "NOTHING TO REDACT" — an
- * earlier version of this comment made that leap and it was wrong. Secrets are
- * resolved by the worker at execution time and never travel in a task, so the
- * credential claim holds. But CONTENT does travel: an `inbox:reply_send` payload
- * carries `body_text`, the operator's free-text reply, and a `testsend` payload
- * carries a recipient address. Rendering is collapsed by default for that reason
- * and not merely for density.
+ * earlier version of this comment made exactly that leap and it was wrong. Secrets
+ * are resolved by the worker at execution time and never travel in a task, so the
+ * credential half always held. CONTENT was the part it missed: `inbox:reply_send`
+ * carried `body_text`, the operator's free-text reply, and this list is served
+ * under campaigns:read while inbox:read is withheld from OAuth grants precisely
+ * because reply bodies are correspondence.
  *
- * The disclosure this cannot fix is on the server: the list is gated on
- * campaigns:read, while inbox:read — withheld from OAuth grants precisely because
- * reply bodies are correspondence — is not required. Nothing the client does about
- * a payload it has already been handed changes that.
+ * That hole is closed on the server (security.md invariant 64): a task payload is
+ * a pointer now, the reply body lives in its row, and existing rows were redacted.
+ * What can still appear is a test-send recipient address — one operator-typed
+ * address, the single accepted exception, and contact-class data that
+ * contacts:read already grants. Still collapsed by default: a payload is read to
+ * find an id, and twenty expanded ones are unreadable.
  */
 export function payloadText(payload: unknown): string {
   return JSON.stringify(payload, null, 2)

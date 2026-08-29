@@ -31,12 +31,19 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 //
 // payload IS included. It is the whole point of the record — an operator
 // triaging a dropped send needs to see which enrollment or mailbox it named —
-// and it is the tenant's own data being returned to that tenant. It carries no
-// credential: task payloads in this codebase are ids plus, for a manual reply,
-// the operator's own text; secrets are resolved by the worker through the
-// keyring at execution time and never travel in a payload (docs/security.md
-// invariant 1). It is emitted as raw JSON rather than a string so a client can
-// read its fields without a second parse.
+// and it is the tenant's own data being returned to that tenant.
+//
+// What makes that safe is a rule enforced elsewhere: a task payload names WHAT
+// failed and never the content of a message (internal/platform/queue's
+// TestTaskPayloadsCarryNoContent). It carries no credential — secrets are
+// resolved by the worker through the keyring at execution time and never travel
+// in a payload (docs/security.md invariant 1) — and, since the manual-reply body
+// moved into an inbox_pending_replies row, no correspondence either. This field
+// is why that rule matters: whatever a payload holds, campaigns:read reads
+// verbatim, and campaigns:read is OAuth-grantable while inbox:read is not.
+//
+// Emitted as raw JSON rather than a string so a client can read its fields
+// without a second parse.
 type deadLetterResponse struct {
 	ID           string          `json:"id"`
 	TaskType     string          `json:"task_type"`
@@ -48,11 +55,17 @@ type deadLetterResponse struct {
 	ReplayedAt   *string         `json:"replayed_at"`
 }
 
+// toResponse is the ONE place a stored row becomes bytes on the wire — list,
+// single read and replay all go through it — which is why the legacy-body
+// redaction is applied here rather than in each read. It is a no-op for every
+// task type but the one deprecated content-bearing one, and it is what protects
+// a deployment whose redaction migration has not run yet (the Helm chart has no
+// migration hook); see redactLegacyReplyBody.
 func toResponse(d gen.TaskDeadLetter) deadLetterResponse {
 	out := deadLetterResponse{
 		ID:           d.ID.String(),
 		TaskType:     d.TaskType,
-		Payload:      json.RawMessage(d.Payload),
+		Payload:      json.RawMessage(redactLegacyReplyBody(d.TaskType, d.Payload)),
 		LastError:    d.LastError,
 		AttemptCount: d.AttemptCount,
 		Status:       d.Status,
@@ -211,6 +224,13 @@ func writeError(w http.ResponseWriter, err error) {
 		// it, and an operator needs to know the task cannot be re-run rather
 		// than seeing a generic server error and trying again.
 		httpx.Error(w, http.StatusUnprocessableEntity, "dead letter payload cannot be replayed")
+	case errors.Is(err, ErrUnreplayableTaskType):
+		// 422 for the same reason, one level up: it is the TASK TYPE that can
+		// never be re-run, not this row's contents. The message says so, because
+		// "try again later" is the one thing the operator must not do — their
+		// option is to discard it.
+		httpx.Error(w, http.StatusUnprocessableEntity,
+			"this task type can no longer be replayed; discard the row instead")
 	case errors.Is(err, ErrValidation):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, ErrBadCursor):

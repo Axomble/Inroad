@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/queue"
 )
 
 var (
@@ -41,6 +42,19 @@ var (
 	// does not carry the workspace that owns the row. Replaying such a payload
 	// would hand the queue a task nobody can safely execute, so it is refused.
 	ErrMalformedPayload = errors.New("deadletter: malformed payload")
+	// ErrUnreplayableTaskType is returned when the row's TASK TYPE may never be
+	// re-enqueued, whatever its payload says. There is one: the deprecated
+	// inbox:reply_send, whose payload carried the operator's reply text. A row
+	// of that type is either still body-bearing (re-enqueuing it delivers
+	// correspondence through a drain handler that is still registered) or has
+	// been redacted (re-enqueuing it delivers a BLANK message to a real
+	// contact). Neither is acceptable, so the type is refused rather than the
+	// payload inspected.
+	//
+	// Separate from ErrMalformedPayload because nothing is wrong with the row —
+	// it is a perfectly well-formed record of a send that is simply never going
+	// to be re-run. Both map to 422 for the same reason: permanent, do not retry.
+	ErrUnreplayableTaskType = errors.New("deadletter: this task type can no longer be replayed")
 	// ErrValidation is returned for a caller-fixable input problem (an unknown
 	// status filter).
 	ErrValidation = errors.New("deadletter: invalid")
@@ -114,6 +128,22 @@ func NewService(store Store, enq Enqueuer) *Service {
 
 // Capture records one retry-exhausted task. Called by the execution plane
 // through coreapi, never by an HTTP handler.
+//
+// THIS IS A GATE, not just a write. The suppression that keeps an operator's
+// reply text out of task_dead_letters lives in internal/platform/queue — inside
+// the WORKER binary. A worker that predates it is still running during any
+// rolling deploy, and its terminal inbox:reply_send failures arrive here, after
+// the one-shot redaction migration has already swept the table. Without a gate
+// on this side that stale worker writes a fresh body-bearing 'pending' row:
+// readable under campaigns:read, and replayable. The Helm chart has no migration
+// hook at all, so the ordering cannot be assumed either.
+//
+// The row is REDACTED AND FILED rather than refused. Refusing would lose the
+// operator's record that a send was permanently lost, which is the entire
+// reason this table exists; the row is worth keeping and the body is not. It is
+// filed as 'discarded' for the same reason migration 20260828133405 flips the
+// historical ones: a body-stripped reply left replayable would deliver a BLANK
+// message to a real contact.
 func (s *Service) Capture(ctx context.Context, in Capture) (gen.TaskDeadLetter, error) {
 	if in.WorkspaceID == uuid.Nil {
 		return gen.TaskDeadLetter{}, fmt.Errorf("%w: capture without a workspace", ErrValidation)
@@ -128,7 +158,20 @@ func (s *Service) Capture(ctx context.Context, in Capture) (gen.TaskDeadLetter, 
 	if len(in.Payload) == 0 {
 		in.Payload = []byte("null")
 	}
-	row, err := s.store.Insert(ctx, in)
+
+	status := StatusPending
+	if queue.IsLegacyContentBearingTaskType(in.TaskType) {
+		in.Payload = redactLegacyReplyBody(in.TaskType, in.Payload)
+		status = StatusDiscarded
+		// Loud, because this only happens when a worker older than this control
+		// plane is still processing — an operational fact worth acting on, and
+		// the signal that the drain window has not closed. Ids only: the payload
+		// is the correspondence and never reaches a log sink either.
+		slog.WarnContext(ctx, "captured a content-bearing legacy task; body redacted and the row filed",
+			"task_type", in.TaskType, "workspace_id", in.WorkspaceID, "attempts", in.AttemptCount)
+	}
+
+	row, err := s.store.Insert(ctx, in, status)
 	if err != nil {
 		return gen.TaskDeadLetter{}, fmt.Errorf("deadletter: insert: %w", err)
 	}
@@ -250,6 +293,22 @@ func (s *Service) Replay(ctx context.Context, ws, id uuid.UUID) (gen.TaskDeadLet
 		return gen.TaskDeadLetter{}, s.explainFailedClaim(ctx, ws, id)
 	}
 
+	// The task type is an ALLOWLIST decision, not a payload one. row.TaskType is
+	// re-enqueued verbatim, so a row captured before the payload fix would put a
+	// real inbox:reply_send back on the queue — where the drain handler is still
+	// registered and would deliver it. Refused whether or not the body survives:
+	// with it, replay discloses correspondence; without it, replay sends a blank
+	// message to a real contact.
+	//
+	// Checked AFTER the claim rather than before, so the refusal costs no extra
+	// read on the path that matters and reuses the same compensation the
+	// malformed-payload refusal below does. The claim is given straight back, so
+	// the row stays exactly as the operator found it and can still be discarded.
+	if queue.IsLegacyContentBearingTaskType(row.TaskType) {
+		s.releaseClaim(ctx, row)
+		return gen.TaskDeadLetter{}, fmt.Errorf("%w: %s", ErrUnreplayableTaskType, row.TaskType)
+	}
+
 	// Belt-and-braces on the tenant pin: the payload we are about to hand the
 	// execution plane must name the SAME workspace as the row we claimed. The
 	// SQL WHERE clause already guarantees the row is this tenant's; this
@@ -312,8 +371,9 @@ func (s *Service) releaseClaim(ctx context.Context, row gen.TaskDeadLetter) {
 		// Logged, not returned: the caller is already failing for a reason the
 		// operator needs to see, and this row is now stranded in 'replayed'
 		// with nothing enqueued — which is precisely the state this log line
-		// exists to make findable. The payload is NOT logged (task payloads
-		// carry reply bodies and recipient addresses).
+		// exists to make findable. The payload is NOT logged: it carries
+		// recipient addresses, and a log sink is a different audience from the
+		// tenant this API answers to.
 		slog.ErrorContext(releaseCtx, "dead-letter replay claim could not be released",
 			"dead_letter_id", row.ID, "workspace_id", row.WorkspaceID,
 			"task_type", row.TaskType, "err", err)

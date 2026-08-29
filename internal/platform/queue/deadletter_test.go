@@ -1,12 +1,15 @@
 package queue
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -139,18 +142,9 @@ func TestWorkspaceFromPayload(t *testing.T) {
 	ws := uuid.New().String()
 
 	t.Run("resolves every real task payload shape", func(t *testing.T) {
-		payloads := map[string]any{
-			"AdvancePayload":                 AdvancePayload{EnrollmentID: uuid.New().String(), WorkspaceID: ws},
-			"InboxPollPayload":               InboxPollPayload{MailboxID: uuid.New().String(), WorkspaceID: ws},
-			"WarmupTickPayload":              WarmupTickPayload{MailboxID: uuid.New().String(), WorkspaceID: ws},
-			"WarmupEngagePayload":            WarmupEngagePayload{ReceiptID: uuid.New().String(), WorkspaceID: ws},
-			"TestSendPayload":                TestSendPayload{CampaignID: uuid.New().String(), WorkspaceID: ws},
-			"InboxReplySendPayload":          InboxReplySendPayload{ThreadID: uuid.New().String(), WorkspaceID: ws},
-			"InboxPendingReplySendPayload":   InboxPendingReplySendPayload{PendingID: uuid.New().String(), WorkspaceID: ws},
-			"InboxPendingComposeSendPayload": InboxPendingComposeSendPayload{PendingID: uuid.New().String(), WorkspaceID: ws},
-			"DeliverabilityEvaluatePayload":  DeliverabilityEvaluatePayload{CampaignID: uuid.New().String(), WorkspaceID: ws},
-		}
-		for name, p := range payloads {
+		// The shared list (payload_content_test.go), so a payload added there and
+		// forgotten here — or the reverse — cannot exist.
+		for name, p := range allTaskPayloads(ws) {
 			b, err := json.Marshal(p)
 			if err != nil {
 				t.Fatalf("marshal %s: %v", name, err)
@@ -182,6 +176,190 @@ func TestWorkspaceFromPayload(t *testing.T) {
 			if _, ok := workspaceFromPayload(tc.payload); ok {
 				t.Errorf("%s: resolved a workspace it should not have", tc.name)
 			}
+		}
+	})
+}
+
+// THE SUPPRESSION. A terminal inbox:reply_send must record NOTHING, because its
+// payload carries the operator's reply body and a captured row is served by
+// GET /dead-letters under campaigns:read — an OAuth-grantable scope, unlike
+// inbox:read. Every other task type must still record: this is a targeted,
+// temporary exception, not a hole in capture.
+//
+// Driven through recordTerminalFailure rather than the exported handler because
+// asynq populates its retry counters through an internal package this module
+// cannot import, so a genuinely terminal context cannot be built here — the same
+// reason isLastAttempt is split out and tested at its own boundary.
+func TestTerminalFailureOfTheLegacyReplySendIsNotCaptured(t *testing.T) {
+	ws := uuid.New().String()
+	const sentinel = "the-operators-private-reply-text"
+
+	t.Run("inbox:reply_send records nothing and logs no payload", func(t *testing.T) {
+		rec := &fakeRecorder{}
+		var logged bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logged, nil))
+		payload, err := json.Marshal(InboxReplySendPayload{
+			ThreadID: uuid.New().String(), BodyText: sentinel, WorkspaceID: ws, TaskID: "task-1",
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+
+		recordTerminalFailure(context.Background(), rec, logger,
+			asynq.NewTask(TaskInboxReplySend, payload), errors.New("smtp: connection refused"), 6, sendMaxRetry)
+
+		if len(rec.calls) != 0 {
+			t.Fatalf("recorded %d dead letters for inbox:reply_send, want 0 — the payload is "+
+				"correspondence and the row would be readable under campaigns:read", len(rec.calls))
+		}
+		if strings.Contains(logged.String(), sentinel) {
+			t.Errorf("the reply body was written to the log: %s", logged.String())
+		}
+		// Suppressing capture must still be LOUD: this is a permanently dropped
+		// send, and the operator's only remaining signal is this line.
+		if !strings.Contains(logged.String(), TaskInboxReplySend) {
+			t.Errorf("the suppressed failure was not logged at all: %s", logged.String())
+		}
+	})
+
+	t.Run("every other task type still records", func(t *testing.T) {
+		payloads := map[string]any{
+			TaskSequenceAdvance:         AdvancePayload{EnrollmentID: uuid.New().String(), WorkspaceID: ws},
+			TaskInboxPoll:               InboxPollPayload{MailboxID: uuid.New().String(), WorkspaceID: ws},
+			TaskWarmupTick:              WarmupTickPayload{MailboxID: uuid.New().String(), WorkspaceID: ws},
+			TaskWarmupEngage:            WarmupEngagePayload{ReceiptID: uuid.New().String(), WorkspaceID: ws},
+			TaskTestSend:                TestSendPayload{CampaignID: uuid.New().String(), WorkspaceID: ws},
+			TaskInboxPendingReplySend:   InboxPendingReplySendPayload{PendingID: uuid.New().String(), WorkspaceID: ws},
+			TaskInboxPendingComposeSend: InboxPendingComposeSendPayload{PendingID: uuid.New().String(), WorkspaceID: ws},
+			TaskDeliverabilityEvaluate:  DeliverabilityEvaluatePayload{CampaignID: uuid.New().String(), WorkspaceID: ws},
+		}
+		for taskType, p := range payloads {
+			rec := &fakeRecorder{}
+			b, err := json.Marshal(p)
+			if err != nil {
+				t.Fatalf("marshal %s: %v", taskType, err)
+			}
+			recordTerminalFailure(context.Background(), rec, quietLogger(),
+				asynq.NewTask(taskType, b), errors.New("dial timeout"), 6, sendMaxRetry)
+			if len(rec.calls) != 1 {
+				t.Errorf("%s: recorded %d dead letters, want 1 — the suppression must be "+
+					"targeted, not a hole in capture", taskType, len(rec.calls))
+				continue
+			}
+			if rec.calls[0].TaskType != taskType || rec.calls[0].WorkspaceID != ws {
+				t.Errorf("%s: recorded %+v, want the task type and its workspace", taskType, rec.calls[0])
+			}
+		}
+	})
+
+	// One entry, and it names the drain type. A second entry means someone is
+	// suppressing capture for a task that has no drain plan behind it.
+	t.Run("exactly one task type is suppressed", func(t *testing.T) {
+		if len(legacyContentBearingTaskTypes) != 1 {
+			t.Fatalf("legacyContentBearingTaskTypes = %v, want exactly the one drain type", legacyContentBearingTaskTypes)
+		}
+		if !IsLegacyContentBearingTaskType(TaskInboxReplySend) {
+			t.Errorf("inbox:reply_send is not suppressed")
+		}
+		if IsLegacyContentBearingTaskType(TaskInboxPendingReplySend) {
+			t.Errorf("inbox:pending_reply_send is suppressed; it carries only a row id and must be captured")
+		}
+	})
+}
+
+// The suppression predicate must match EVERYTHING asynq would route to the
+// drain handler, not merely the exact registered type.
+//
+// asynq's ServeMux falls back to strings.HasPrefix over its registered patterns
+// (servemux.go match(): exact map lookup, then longest prefix), so a task typed
+// `inbox:reply_send<anything>` runs ReplySendHandler and can therefore carry a
+// body-bearing InboxReplySendPayload. An exact-match suppression misses exactly
+// that type, and the two predicates disagreeing is the bug — the capture gate
+// must cover every type the handler it is protecting can be reached by.
+//
+// Nothing enqueues an arbitrary type today (EnqueueReplay is the only path, and
+// it is fed from captured rows), so this is not reachable now. It is the
+// disagreement itself that is worth closing: the next arbitrary-type enqueue
+// would reopen the disclosure silently.
+func TestSuppressionCoversEveryTypeTheDrainHandlerWouldRun(t *testing.T) {
+	mux := asynq.NewServeMux()
+	// The registration internal/worker/inbox.Register makes for the drain. The
+	// deprecated type IS the subject here, so naming it is the point.
+	mux.HandleFunc(TaskInboxReplySend, func(context.Context, *asynq.Task) error { return nil })
+	mux.HandleFunc(TaskInboxPendingReplySend, func(context.Context, *asynq.Task) error { return nil })
+
+	for _, taskType := range []string{
+		TaskInboxReplySend,
+		TaskInboxReplySend + ":retry",
+		TaskInboxReplySend + "X",
+		TaskInboxPendingReplySend,
+		TaskInboxPoll,
+		"inbox:reply_sen", // one character short: a different type entirely
+	} {
+		_, pattern := mux.Handler(asynq.NewTask(taskType, nil))
+		routesToTheDrain := pattern == TaskInboxReplySend
+		if got := IsLegacyContentBearingTaskType(taskType); got != routesToTheDrain {
+			t.Errorf("%q: asynq routes it to %q (drain=%v) but IsLegacyContentBearingTaskType = %v — "+
+				"the capture gate and the handler that produces the row must agree, or a task "+
+				"the drain handler runs is captured with the operator's reply in it",
+				taskType, pattern, routesToTheDrain, got)
+		}
+	}
+}
+
+// last_error is BOUNDED, and it has to be for two separate reasons.
+//
+// The row's own last_error is truncated at 500 (inbox.truncateError); the
+// dead-letter copy of the same failure was not truncated at all, so a provider
+// that answers with a wall of text wrote all of it into a table that is served
+// verbatim under campaigns:read and swept only at 90 days.
+//
+// The rune boundary is not cosmetic. last_error is a Postgres TEXT column, and
+// Postgres REJECTS a byte sequence that is not valid UTF-8 — a naive byte slice
+// through a multi-byte rune would fail the INSERT and lose the whole dead
+// letter, at exactly the moment the record matters most.
+func TestCapturedLastErrorIsBoundedAndStaysValidUTF8(t *testing.T) {
+	ws := uuid.New().String()
+
+	capture := func(t *testing.T, taskErr error) DeadLetter {
+		t.Helper()
+		rec := &fakeRecorder{}
+		recordTerminalFailure(context.Background(), rec, quietLogger(),
+			asynq.NewTask(TaskSequenceAdvance, mustPayload(t, ws)), taskErr, 6, sendMaxRetry)
+		if len(rec.calls) != 1 {
+			t.Fatalf("recorded %d dead letters, want 1", len(rec.calls))
+		}
+		return rec.calls[0]
+	}
+
+	t.Run("an ordinary message is stored whole", func(t *testing.T) {
+		got := capture(t, errors.New("dial timeout")).LastError
+		if got != "dial timeout" {
+			t.Errorf("last_error = %q, want the message untouched", got)
+		}
+	})
+
+	t.Run("a wall of provider text is cut to the same bound the row uses", func(t *testing.T) {
+		long := "550 5.7.1 " + strings.Repeat("x", 10_000)
+		got := capture(t, errors.New(long)).LastError
+		if len(got) > maxLastErrorLength {
+			t.Errorf("last_error is %d bytes, want at most %d", len(got), maxLastErrorLength)
+		}
+		if !strings.HasPrefix(long, got) || got == "" {
+			t.Errorf("last_error = %q, want the leading bytes of the real message — the head is "+
+				"the diagnostic part", got)
+		}
+	})
+
+	t.Run("a cut through a multi-byte rune leaves valid UTF-8", func(t *testing.T) {
+		// Every rune is 3 bytes, so the byte limit lands mid-rune whatever it is.
+		got := capture(t, errors.New(strings.Repeat("→", 10_000))).LastError
+		if len(got) > maxLastErrorLength {
+			t.Errorf("last_error is %d bytes, want at most %d", len(got), maxLastErrorLength)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("last_error is not valid UTF-8, so Postgres would reject the INSERT and the "+
+				"dead letter would be lost entirely: %q", got)
 		}
 	})
 }

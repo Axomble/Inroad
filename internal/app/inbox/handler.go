@@ -46,8 +46,12 @@ func writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrLabelNameTaken):
 		httpx.Error(w, http.StatusConflict, err.Error())
 	// 422, like the snooze bounds: the request was well-formed and the limit is
-	// a property of the workspace, not of the syntax.
-	case errors.Is(err, ErrTooManyLabels):
+	// a property of the workspace, not of the syntax. ErrTooManyPendingSends is
+	// the same class and shares the reasoning: the caller's JSON was fine, their
+	// outbox is full. It reached both send routes as a 400 for a release because
+	// it was raised as an ErrValidation, which is why it now has a sentinel of
+	// its own rather than a wrapped one.
+	case errors.Is(err, ErrTooManyLabels), errors.Is(err, ErrTooManyPendingSends):
 		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
 	// Same reasoning as the snooze bounds: a well-formed timestamp that is out
 	// of range is 422, not 400, so a client can tell a malformed request from a
@@ -395,7 +399,11 @@ type sendReplyRequest struct {
 // (unknown fields rejected — the same house style as replylabel's decode) so
 // a typo'd field is a 400 rather than a silently-ignored one. A successful
 // enqueue returns 202: the send itself happens asynchronously in the
-// execution plane (see internal/worker/inbox.ReplySendHandler).
+// execution plane (see internal/worker/inbox.PendingReplySendHandler).
+//
+// Still a bodyless 202 even though the service now writes a durable row: this
+// path has no undo window, so there is no handle worth returning. Callers that
+// want one use POST .../schedule-reply, which is what the SPA composer does.
 func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 	wid, ok := auth.WorkspaceID(w, r)
 	if !ok {
@@ -413,7 +421,7 @@ func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := h.svc.Reply(r.Context(), wid, id, req.BodyText); err != nil {
+	if err := h.svc.Reply(r.Context(), wid, id, req.BodyText, callerUserID(r)); err != nil {
 		writeErr(w, err)
 		return
 	}

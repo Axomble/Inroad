@@ -210,13 +210,14 @@ func newComposeFixture(t *testing.T) *composeFixture {
 	t.Helper()
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
+	threads := newFakeStore()
 	compose := newFakeComposeStore(clock)
-	pending := newFakePendingStore(clock)
+	pending := newFakePendingStore(clock, threads)
 	supp := &fakeSuppression{suppressed: map[string]bool{}}
 	mailbox := uuid.New()
 	compose.knownMailboxes[mailbox] = testWS
 
-	svc := inbox.NewService(newFakeStore(),
+	svc := inbox.NewService(threads,
 		inbox.WithComposeStore(compose),
 		inbox.WithPendingReplyStore(pending),
 		inbox.WithSuppressionChecker(supp),
