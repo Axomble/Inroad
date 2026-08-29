@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/app/events"
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/validate"
 )
@@ -377,7 +378,15 @@ func (h *Handler) launch(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "bad id")
 		return
 	}
-	res, err := h.svc.Launch(r.Context(), ws, id, h.enq)
+	// Tag the request with who launched it, so the launching operator's own tab
+	// drops the echo instead of re-rendering over its optimistic update. A
+	// missing principal yields no actor, which is safe: the event then reads as
+	// system-originated and every tab treats it as somebody else's.
+	ctx := r.Context()
+	if p, ok := auth.UserFromContext(ctx); ok {
+		ctx = events.WithActor(ctx, p.UserID)
+	}
+	res, err := h.svc.Launch(ctx, ws, id, h.enq)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not found")

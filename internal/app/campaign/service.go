@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/app/events"
+
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -61,6 +63,10 @@ type Service struct {
 	suppression  SuppressionChecker
 	customFields CustomFieldReader
 	results      ResultsStore
+	// events announces state changes to a workspace's open tabs. NIL IS VALID
+	// and means realtime is disabled — events.Emit treats it as a no-op — so a
+	// service built without one behaves exactly as it did before sockets.
+	events events.Publisher
 }
 
 // ServiceOption configures an optional Service dependency. See the Service
@@ -106,6 +112,11 @@ func WithTestSendEnqueuer(e TestSendEnqueuer) ServiceOption {
 // unlimited (see Service.checkTestSendRateLimit) -- a deployment choice made
 // once at wiring time, not a silent bypass.
 func WithRateLimiter(l RateLimiter) ServiceOption { return func(s *Service) { s.limiter = l } }
+
+// WithEvents wires realtime announcements. Omitting it (or passing nil) leaves
+// the service silent, which is the pre-socket behaviour: clients learn about a
+// launch on their next refetch.
+func WithEvents(p events.Publisher) ServiceOption { return func(s *Service) { s.events = p } }
 
 // WithSuppressionChecker wires test-send's suppression-list guard: a test
 // email must never go to an address the workspace has explicitly
@@ -451,6 +462,14 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 		return LaunchResult{}, ErrEmptyList
 	}
 	res := LaunchResult{TotalEnrolled: len(enrollments)}
+	// EnrollTx has committed, so the campaign is launched from here on — every
+	// exit below is a success as far as an observer is concerned, and each one
+	// announces it. Emitting once here rather than at each return would be
+	// wrong in the other direction: the two error paths below still leave a
+	// running campaign, and a client that never heard about it would show a
+	// draft until the next refetch.
+	s.announceLaunched(ctx, ws, campaignID, len(enrollments))
+
 	due, err := s.spread(ctx, ws, campaignSchedule{id: campaignID, timezone: c.Timezone}, enrollments)
 	if err != nil {
 		// The enrollments are committed; without due times they'd all be due
@@ -475,6 +494,23 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 		res.LastScheduledAt = maxTime(res.LastScheduledAt, due[e.ID])
 	}
 	return res, nil
+}
+
+// announceLaunched tells the workspace's open tabs a campaign started sending.
+//
+// Ids and counts only: a client refetches the campaign through the normal
+// authorized endpoint, so this cannot become a way around the checks that
+// endpoint applies. The enrolled count rides along because it is the one number
+// a launch toast wants and it reveals nothing a list view would not.
+func (s *Service) announceLaunched(ctx context.Context, ws, campaignID uuid.UUID, enrolled int) {
+	events.Emit(ctx, s.events, ws.String(), events.Event{
+		Type:        "campaign.launched",
+		SubjectKind: "campaign",
+		SubjectID:   campaignID.String(),
+		ActorID:     events.ActorFrom(ctx),
+		OccurredAt:  time.Now().UTC(),
+		Data:        map[string]any{"campaign_id": campaignID.String(), "enrolled": enrolled},
+	})
 }
 
 // spread assigns each new enrollment its own send instant: offsets drawn through

@@ -9,9 +9,15 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	// Aliased: this domain already calls its ACTIVITY-FEED rows "events"
+	// (see ListEvents/mergeEvents). realtimeevents keeps the two apart —
+	// one is durable history, the other a best-effort notification.
+	realtimeevents "github.com/inroad/inroad/internal/app/events"
 )
 
 const (
@@ -69,10 +75,22 @@ func WithReplyLabels(r ReplyLabelReader) ServiceOption {
 	return func(s *Service) { s.replyLabels = r }
 }
 
+// WithEvents wires realtime announcements. Unwired, the service is silent and
+// clients learn about a move on their next refetch — the pre-socket behaviour.
+func WithEvents(p realtimeevents.Publisher) ServiceOption {
+	return func(s *Service) { s.realtime = p }
+}
+
 type Service struct {
 	store Store
 	// replyLabels is optional; nil is a supported state (see capturesDeal).
 	replyLabels ReplyLabelReader
+	// realtime announces changes to a workspace's open tabs. Named `realtime`
+	// rather than `events` because this domain already has an `emit` for the
+	// ACTIVITY FEED (a durable record, and an error there fails the write). These
+	// are different things: one is persisted history, the other a best-effort
+	// notification. Nil is valid and means realtime is disabled.
+	realtime realtimeevents.Publisher
 }
 
 func NewService(store Store, opts ...ServiceOption) *Service {
@@ -260,7 +278,38 @@ func (s *Service) MoveDeal(ctx context.Context, workspaceID, dealID uuid.UUID, i
 		return Deal{}, err
 	}
 	deal, err := store.MoveDeal(ctx, workspaceID, dealID, in)
-	return deal, translateWriteError(err)
+	if err != nil {
+		return deal, translateWriteError(err)
+	}
+
+	// The move is committed, so announce it. This is the event the spec singles
+	// out (§6): crm/api.ts already applies an OPTIMISTIC patch when a card is
+	// dragged, so the mover's own tab would fight the echo of its own action and
+	// the card would visibly snap back and forth.
+	//
+	// The actor comes from in.Actor, which MoveDeal already requires for the
+	// activity feed — no context lookup needed here, unlike campaign.Launch. A
+	// "system" actor (an automation moving a deal) carries no user id, and every
+	// tab then correctly treats the move as somebody else's.
+	actorID := ""
+	if in.Actor.Type == "user" {
+		actorID = in.Actor.ID
+	}
+	realtimeevents.Emit(ctx, s.realtime, workspaceID.String(), realtimeevents.Event{
+		Type:        "deal.moved",
+		SubjectKind: "deal",
+		SubjectID:   dealID.String(),
+		ActorID:     actorID,
+		OccurredAt:  time.Now().UTC(),
+		// Ids only: which deal, which stage it landed in, and where in the order.
+		// A client patches its cached board from this; anything richer it refetches
+		// through the authorized endpoint.
+		Data: map[string]any{
+			"deal_id":  dealID.String(),
+			"stage_id": in.StageID.String(),
+		},
+	})
+	return deal, nil
 }
 
 func (s *Service) GetSettings(ctx context.Context, workspaceID uuid.UUID) (CRMSettings, error) {
