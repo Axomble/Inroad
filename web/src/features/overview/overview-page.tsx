@@ -15,13 +15,14 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusPill, type StatusTone } from '@/components/shared/status-pill'
 import { Page, PageBody, PageTopbar } from '@/components/layout/page'
+import { SEVERITY_SR, attentionLabel, linkProps, sortAttention } from '@/components/layout/pulse-attention'
+import { usePulse } from '@/components/layout/use-pulse'
 import { useAppSelector } from '@/store/hooks'
-import { useListMailboxesQuery } from '@/features/mailboxes/api'
-import { useGetWarmupOverviewQuery } from '@/features/warmup/api'
 import { useListCampaignsQuery } from '@/features/campaigns/api'
-import { useListListsQuery } from '@/features/contacts/api'
+import type { PulseSeverity } from '@/features/pulse/api'
 import type { Campaign } from '@/store/api'
 import { cn } from '@/lib/utils'
+import { SetupChecklist } from './setup-checklist'
 
 const campaignTone: Record<string, StatusTone> = {
   running: 'running',
@@ -30,45 +31,34 @@ const campaignTone: Record<string, StatusTone> = {
   done: 'done',
 }
 
+// Semantic scale, same mapping as the sidebar's pulse card — color plus the
+// visually-hidden severity word, never color alone.
+const severityDot: Record<PulseSeverity, string> = {
+  danger: 'bg-danger',
+  warn: 'bg-warn',
+  info: 'bg-ok',
+}
+
 export function OverviewPage() {
   const name = useAppSelector((state) => state.auth.userName)
-  const { data: mailboxes = [], isLoading: mailboxesLoading, isError: mailboxesError } = useListMailboxesQuery()
+  // Every aggregate on this page reads the one shared pulse subscription —
+  // the same O(1) payload (and the same 45s cadence) the sidebar meter and
+  // nav counts use, so "Daily capacity" here IS the meter's denominator.
+  const { data: pulse, isError: pulseError } = usePulse()
+  // The one surviving list query: the "Work in motion" panel renders actual
+  // campaign rows (name, subject, sent count, status), which no aggregate
+  // read-model carries.
   const { data: campaigns = [], isLoading: campaignsLoading, isError: campaignsError } = useListCampaignsQuery()
-  const { data: warmup, isLoading: warmupLoading, isError: warmupError } = useGetWarmupOverviewQuery()
-  const { data: lists = [], isLoading: listsLoading } = useListListsQuery()
 
-  const activeMailboxes = mailboxes.filter((mailbox) => mailbox.status === 'active')
-  const runningCampaigns = campaigns.filter((campaign) => campaign.status === 'running')
-  const draftCampaigns = campaigns.filter((campaign) => campaign.status === 'draft')
-  const enabledWarmup = warmup?.mailboxes.filter((mailbox) => mailbox.enabled) ?? []
-  const healthyWarmup = enabledWarmup.filter((mailbox) => mailbox.health_state === 'healthy')
-  const dailyCapacity = activeMailboxes.reduce((total, mailbox) => total + (mailbox.daily_cap ?? 0), 0)
-  const healthScore = enabledWarmup.length > 0 ? Math.round((healthyWarmup.length / enabledWarmup.length) * 100) : null
+  const healthScore =
+    pulse && pulse.warmup.pool > 0 ? Math.round((pulse.warmup.healthy / pulse.warmup.pool) * 100) : null
   const firstName = name?.trim().split(/\s+/)[0]
-  const hasQueryError = mailboxesError || campaignsError || warmupError
+  const hasQueryError = pulseError || campaignsError
 
-  const attention = [
-    ...mailboxes
-      .filter((mailbox) => mailbox.status === 'error')
-      .map((mailbox) => ({
-        id: `mailbox-${mailbox.id}`,
-        label: mailbox.email ?? 'Mailbox connection',
-        detail: mailbox.last_error || 'The mailbox needs to be reconnected.',
-        to: '/app/mailboxes' as const,
-        tone: 'danger' as const,
-      })),
-    ...enabledWarmup
-      .filter((mailbox) => mailbox.health_state === 'watch' || mailbox.health_state === 'throttled')
-      .map((mailbox) => ({
-        id: `warmup-${mailbox.mailbox_id}`,
-        label: mailbox.email,
-        detail: mailbox.health_reason || 'Warmup reputation needs review.',
-        to: '/app/warmup' as const,
-        tone: 'warm' as const,
-      })),
-  ].slice(0, 4)
-
-  const loading = mailboxesLoading || campaignsLoading || warmupLoading || listsLoading
+  // Server-defined attention rows (pulse.attention[]), worst-first — the same
+  // producers the sidebar card renders, replacing the client-side scan of the
+  // full mailbox + warmup lists this panel used to derive its rows from.
+  const attention = pulse ? sortAttention(pulse.attention).slice(0, 4) : []
 
   return (
     <Page>
@@ -86,6 +76,8 @@ export function OverviewPage() {
       />
       <PageBody>
         <div className="mx-auto w-full max-w-[1480px] p-4 sm:p-6 lg:p-8">
+          <SetupChecklist />
+
           {/* Spotlight, not chrome: this hero inverts against the page in both
               themes, so it uses the --spotlight family rather than the app-shell
               tokens, which follow the light/dark theme. */}
@@ -126,10 +118,10 @@ export function OverviewPage() {
           )}
 
           <section className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <MetricCard icon={Mail} label="Active mailboxes" value={loading ? null : activeMailboxes.length} sub={`${mailboxes.length} connected`} tone="primary" />
-            <MetricCard icon={Gauge} label="Daily capacity" value={loading ? null : dailyCapacity} sub="messages across active senders" tone="data" />
-            <MetricCard icon={Megaphone} label="Live campaigns" value={loading ? null : runningCampaigns.length} sub={`${draftCampaigns.length} drafts ready to refine`} tone="security" />
-            <MetricCard icon={Flame} label="Warmup healthy" value={loading ? null : healthyWarmup.length} sub={`${enabledWarmup.length} enrolled`} tone="warm" />
+            <MetricCard icon={Mail} label="Active mailboxes" value={pulse?.mailboxes.active ?? null} sub={pulse ? `${pulse.mailboxes.total} connected` : '—'} tone="primary" />
+            <MetricCard icon={Gauge} label="Daily capacity" value={pulse?.sending.daily_cap ?? null} sub={pulse ? `${pulse.sending.sent_today.toLocaleString()} sent today` : '—'} tone="data" />
+            <MetricCard icon={Megaphone} label="Live campaigns" value={pulse?.campaigns.running ?? null} sub={pulse ? `${pulse.campaigns.draft} drafts ready to refine` : '—'} tone="security" />
+            <MetricCard icon={Flame} label="Warmup healthy" value={pulse?.warmup.healthy ?? null} sub={pulse ? `${pulse.warmup.pool} enrolled` : '—'} tone="warm" />
           </section>
 
           <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.75fr)]">
@@ -156,9 +148,10 @@ export function OverviewPage() {
                   <HealthRing score={healthScore} />
                 </div>
                 <div className="mt-5 grid grid-cols-3 gap-2">
-                  <MiniStat label="Healthy" value={healthyWarmup.length} className="text-ok" />
-                  <MiniStat label="Watching" value={enabledWarmup.filter((m) => m.health_state === 'watch').length} className="text-warn" />
-                  <MiniStat label="Throttled" value={enabledWarmup.filter((m) => m.health_state === 'throttled').length} className="text-danger" />
+                  <MiniStat label="Healthy" value={pulse?.warmup.healthy ?? 0} className="text-ok" />
+                  <MiniStat label="Watching" value={pulse?.warmup.watch ?? 0} className="text-warn" />
+                  {/* at_risk buckets throttled + paused on the reputation axis. */}
+                  <MiniStat label="At risk" value={pulse?.warmup.at_risk ?? 0} className="text-danger" />
                 </div>
                 <Button asChild variant="secondary" size="sm" className="mt-4 w-full">
                   <Link to="/app/warmup"><Flame />Review warmup</Link>
@@ -170,12 +163,15 @@ export function OverviewPage() {
                 {attention.length > 0 ? (
                   <ul className="divide-y divide-border">
                     {attention.map((item) => (
-                      <li key={item.id}>
-                        <Link to={item.to} className="group flex gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/70">
-                          <span className={cn('mt-1.5 size-2 shrink-0 rounded-full', item.tone === 'danger' ? 'bg-danger' : 'bg-warm')} />
+                      <li key={item.kind}>
+                        <Link {...linkProps(item.href)} className="group flex gap-3 px-5 py-3.5 transition-colors hover:bg-surface-2/70">
+                          <span className={cn('mt-1.5 size-2 shrink-0 rounded-full', severityDot[item.severity])} aria-hidden="true" />
+                          <span className="sr-only">{SEVERITY_SR[item.severity]}</span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium">{item.label}</span>
-                            <span className="mt-0.5 line-clamp-2 block text-xs leading-5 text-muted-foreground">{item.detail}</span>
+                            <span className="block truncate text-sm font-medium">
+                              <span className="font-mono tabular-nums">{item.count}</span> {attentionLabel(item.kind, item.count)}
+                            </span>
+                            <span className="mt-0.5 line-clamp-2 block text-xs leading-5 text-muted-foreground">{item.reason}</span>
                           </span>
                           <ArrowRight className="mt-1 size-4 text-faint transition-transform group-hover:translate-x-0.5" />
                         </Link>
@@ -191,12 +187,6 @@ export function OverviewPage() {
               </section>
             </div>
           </div>
-
-          <section className="mt-4 grid gap-3 md:grid-cols-3">
-            <LaunchCard step="01" icon={Mail} title="Connect sending" copy={mailboxes.length ? `${mailboxes.length} sender${mailboxes.length === 1 ? '' : 's'} connected` : 'Add Gmail, Microsoft 365, or SMTP'} to="/app/mailboxes" complete={mailboxes.length > 0} />
-            <LaunchCard step="02" icon={Users} title="Build an audience" copy={lists.length ? `${lists.length} contact list${lists.length === 1 ? '' : 's'} ready` : 'Import a clean CSV into a list'} to="/app/contacts" complete={lists.length > 0} />
-            <LaunchCard step="03" icon={Rocket} title="Launch outreach" copy={campaigns.length ? `${campaigns.length} campaign${campaigns.length === 1 ? '' : 's'} created` : 'Create and review your first sequence'} to="/app/campaigns" complete={campaigns.length > 0} />
-          </section>
         </div>
       </PageBody>
     </Page>
@@ -253,8 +243,4 @@ function MiniStat({ label, value, className }: { label: string; value: number; c
 
 function EmptyPanel({ icon: Icon, title, copy, to, action }: { icon: typeof Send; title: string; copy: string; to: '/app/campaigns'; action: string }) {
   return <div className="flex flex-col items-center px-6 py-12 text-center"><div className="grid size-11 place-items-center rounded-xl bg-primary/15 text-accent-ink"><Icon className="size-5" /></div><h3 className="mt-3 text-sm font-semibold">{title}</h3><p className="mt-1 max-w-sm text-sm text-muted-foreground">{copy}</p><Button asChild variant="primary" size="sm" className="mt-4"><Link to={to}>{action}</Link></Button></div>
-}
-
-function LaunchCard({ step, icon: Icon, title, copy, to, complete }: { step: string; icon: typeof Mail; title: string; copy: string; to: '/app/mailboxes' | '/app/contacts' | '/app/campaigns'; complete: boolean }) {
-  return <Link to={to} className="group flex items-center gap-3 rounded-2xl border border-border bg-surface p-4 transition-all hover:-translate-y-0.5 hover:border-border-strong hover:shadow-[0_12px_30px_rgba(20,28,12,0.08)]"><div className={cn('grid size-10 shrink-0 place-items-center rounded-xl', complete ? 'bg-ok/10 text-ok' : 'bg-surface-2 text-muted-foreground')}><Icon className="size-4" /></div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-[9px] text-faint">{step}</span><span className="text-sm font-semibold">{title}</span></div><div className="mt-0.5 truncate text-xs text-muted-foreground">{copy}</div></div><ArrowRight className="size-4 text-faint transition-transform group-hover:translate-x-0.5" /></Link>
 }

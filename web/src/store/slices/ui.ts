@@ -7,6 +7,11 @@ interface UiState {
   agentPanelOpen: boolean
   agentPanelWidth: number
   agentPanelPage: 'chat' | 'history'
+  // A one-way "hide" for the Overview setup checklist. Deliberately not
+  // "completed": completion is always re-derived from live pulse data and
+  // wins regardless of this flag — persisting it would freeze a moment in
+  // time, and un-completing (a deleted mailbox) must resurface the panel.
+  setupChecklistDismissed: boolean
 }
 
 // Stored as a tri-state rather than a resolved boolean: 'system' must keep
@@ -18,6 +23,7 @@ const initialState: UiState = {
   agentPanelOpen: false,
   agentPanelWidth: 420,
   agentPanelPage: 'chat',
+  setupChecklistDismissed: false,
 }
 
 const uiSlice = createSlice({
@@ -39,6 +45,11 @@ const uiSlice = createSlice({
     setAgentPanelPage: (s, action: PayloadAction<'chat' | 'history'>) => {
       s.agentPanelPage = action.payload
     },
+    // One-way by design: nothing un-dismisses. The checklist also unmounts
+    // itself the moment every step derives complete, dismissed or not.
+    dismissSetupChecklist: (s) => {
+      s.setupChecklistDismissed = true
+    },
   },
 })
 
@@ -48,5 +59,6 @@ export const {
   toggleAgentPanel,
   setAgentPanelWidth,
   setAgentPanelPage,
+  dismissSetupChecklist,
 } = uiSlice.actions
 export default uiSlice.reducer
