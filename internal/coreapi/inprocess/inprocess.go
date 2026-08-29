@@ -20,6 +20,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/realtime"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -54,6 +55,12 @@ type client struct {
 	// it through EvaluateCampaignBreaker, so there is exactly one implementation and
 	// the API and the execution plane cannot disagree about when a campaign stops.
 	breaker *deliverability.Service
+	// realtime fans events out to a workspace's connected browsers. NIL IS
+	// VALID and means "no realtime": PublishRealtime becomes a no-op and clients
+	// fall back to polling. Injected rather than dialled here so the API and
+	// worker processes share one hub configuration decided at their composition
+	// roots.
+	realtime realtime.Publisher
 	// inbox owns unified-inbox thread/message storage. Composed here (needs
 	// nothing beyond pool, like enroll/breaker above) so the inbox poller's
 	// StoreInboundMessage writes through the SAME transactional
@@ -95,6 +102,17 @@ type Option func(*client)
 // *metrics.Metrics is valid and equivalent to omitting the option.
 func WithMetrics(mtx *metrics.Metrics) Option {
 	return func(c *client) { c.mtx = mtx }
+}
+
+// WithRealtime wires the realtime fan-out hub in, enabling PublishRealtime.
+//
+// Optional on purpose. Omitting it (or passing nil) leaves the client without
+// the capability, and every publish becomes a no-op: browsers then learn about a
+// change on their next poll or refetch, which is exactly today's behaviour. A
+// socket event is an optimisation over polling, never the only path, so a worker
+// without a hub still does all of its real work.
+func WithRealtime(pub realtime.Publisher) Option {
+	return func(c *client) { c.realtime = pub }
 }
 
 // New returns the in-process coreapi client backed by the given connection

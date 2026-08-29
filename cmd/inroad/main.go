@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/inroad/inroad/internal/app/agentchat"
 	"github.com/inroad/inroad/internal/app/agentrun"
@@ -46,6 +47,7 @@ import (
 	"github.com/inroad/inroad/internal/app/oauthprovider"
 	"github.com/inroad/inroad/internal/app/passkey"
 	"github.com/inroad/inroad/internal/app/pulse"
+	apprealtime "github.com/inroad/inroad/internal/app/realtime"
 	"github.com/inroad/inroad/internal/app/replylabel"
 	"github.com/inroad/inroad/internal/app/reporting"
 	"github.com/inroad/inroad/internal/app/sendingdomain"
@@ -69,6 +71,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/notify"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/ratelimit"
+	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
 	"github.com/inroad/inroad/internal/platform/throttle"
 )
 
@@ -239,6 +242,19 @@ func run() error {
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
 
+	// Realtime fan-out. The hub borrows a client rather than dialling its own (see
+	// platform/realtime.New): this is one more code path on the Redis dependency
+	// the queue and the rate limiter already require, not a second dependency.
+	// The same client backs the connect-ticket nonce burn, so a spent ticket and a
+	// published envelope cannot end up on different instances.
+	realtimeRedis := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	defer func() { _ = realtimeRedis.Close() }()
+	realtimeHub := platformrealtime.New(realtimeRedis)
+	// Closed BEFORE srv.Shutdown below: http.Server does not track hijacked
+	// connections, so the hub's own registry is the only thing that can end a live
+	// socket, and a graceful shutdown would otherwise hang out its whole budget.
+	defer func() { _ = realtimeHub.Close() }()
+
 	// Scoped API keys. The verifier authenticates `inrd_` tokens on the data-plane
 	// REST surface (attenuated to the key's granted scopes via RequireScope); the
 	// management handler (create/list/revoke) is session-authed and mounts under
@@ -284,6 +300,21 @@ func run() error {
 	// cap. It bounds an unauthenticated DB write rather than a credential guess --
 	// see identity.RouteDeps.GoogleStartThrottle.
 	googleStartThrottle := newThrottle("google-signin-start", cfg.RateLimitSensitiveIP, 0)
+	// Connect-ticket minting is AUTHENTICATED but mints a credential, so it is
+	// throttled like the pre-auth endpoints rather than like a read. The account
+	// key is the WORKSPACE (as with draft-reply), not an email: the body carries
+	// none, and a workspace is what a burst would actually be attacking.
+	realtimeTicketThrottle := throttle.Config{
+		Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
+		IPLimit: cfg.RateLimitRealtimeTicketIP, AcctLimit: cfg.RateLimitRealtimeTicketWorkspace,
+		AcctKey: func(r *http.Request) string {
+			p, ok := auth.UserFromContext(r.Context())
+			if !ok {
+				return ""
+			}
+			return p.WorkspaceID
+		},
+	}.Middleware("realtime-ticket")
 
 	// OAuth 2.1 authorization server (Inroad as an OAuth PROVIDER). Self-contained
 	// domain mounted under /oauth2 (distinct from the mailbox-connect /oauth mount).
@@ -457,6 +488,26 @@ func run() error {
 	runManager := agentrun.NewManager(ctx, runtime, agentStore, agentStream, agentStream, logger, cfg.AgentMaxConcurrentRuns)
 	runManager.StartExpirySweep()
 	agentHandler := agentchat.NewHandler(agentchat.NewService(agentStore, runManager, agentStream))
+
+	// The realtime handshake. The Origin allowlist reuses RPOrigin — the
+	// fully-qualified origin a browser must present, already derived from
+	// INROAD_PUBLIC_URL and already binding passkey ceremonies — so an operator who
+	// configured passkeys has configured this. When it is unset (no PUBLIC_URL
+	// either), the allowlist is empty and every browser handshake is refused:
+	// the socket does not work, rather than working for every site on the internet.
+	//
+	// sessionVerifier doubles as the SessionChecker, so the socket's logout
+	// re-check shares one implementation of the revocation rules with RequireAuth
+	// instead of restating them.
+	realtimeHandler := apprealtime.NewHandler(
+		realtimeHub, apprealtime.NewRedisTicketBurner(realtimeRedis), sessionVerifier, logger,
+		apprealtime.Options{
+			Secret:          cfg.WSTicketSecret,
+			AllowedOrigins:  []string{cfg.RPOrigin},
+			MaxPerUser:      cfg.RealtimeMaxConnsPerUser,
+			MaxPerWorkspace: cfg.RealtimeMaxConnsPerWorkspace,
+		},
+	)
 
 	// Unified inbox (thread/message read model). The write path (RecordReply)
 	// is called by the reply-polling worker through its own coreapi seam
@@ -639,6 +690,11 @@ func run() error {
 		// The in-app agent always acts on behalf of a human session. API keys and
 		// OAuth clients cannot create threads or inherit a user's tool authority.
 		{pattern: "/api/v1/agent", handler: agentHandler.Routes()},
+		// The realtime socket, for the same reason as agentchat above: it acts on
+		// behalf of a human session, so an `inrd_` key or an OAuth client cannot
+		// open one. The workspace it fans out comes from the signed connect ticket,
+		// never from the request.
+		{pattern: "/api/v1/realtime", handler: realtimeHandler.Routes(realtimeTicketThrottle)},
 	}
 	// Idempotency-Key replay cache: generic cross-cutting middleware, mounted
 	// inside every authenticated group (after RequireAuth resolves the

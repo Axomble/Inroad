@@ -229,6 +229,22 @@ type Config struct {
 	// the "account" key is the WORKSPACE (which owns the budget), not an email.
 	RateLimitDraftReplyIP        int // POST /inbox/threads/{id}/draft-reply per IP
 	RateLimitDraftReplyWorkspace int // POST /inbox/threads/{id}/draft-reply per workspace
+
+	// Realtime connect-ticket minting, in requests per minute. Authenticated, like
+	// draft-reply above, and keyed on the WORKSPACE rather than an email — but
+	// throttled for a different reason: this endpoint mints a CREDENTIAL, so an
+	// unbounded caller could farm tickets. The cap is generous because a normal
+	// tab mints one per connect and a reconnect storm after a deploy is legitimate
+	// traffic; it exists to bound abuse, not to shape ordinary use.
+	RateLimitRealtimeTicketIP        int // POST /realtime/ticket per IP
+	RateLimitRealtimeTicketWorkspace int // POST /realtime/ticket per workspace
+
+	// Realtime connection caps, per open socket. Zero takes the package defaults
+	// (8 per user, 200 per workspace). An unbounded socket count is a trivial
+	// resource-exhaustion vector: each connection costs a goroutine, a buffer and
+	// a registry slot.
+	RealtimeMaxConnsPerUser      int
+	RealtimeMaxConnsPerWorkspace int
 }
 
 func Load() (*Config, error) {
@@ -417,6 +433,14 @@ func Load() (*Config, error) {
 	// while the per-workspace cap is what actually bounds spend.
 	cfg.RateLimitDraftReplyIP = getenvInt("INROAD_RATELIMIT_DRAFT_REPLY_IP", 20)
 	cfg.RateLimitDraftReplyWorkspace = getenvInt("INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE", 60)
+
+	// Generous by design: one mint per socket connect, and a rolling deploy has
+	// every open tab reconnecting at once. 60/min per IP still covers a shared
+	// office NAT; 600/min per workspace bounds a farming loop.
+	cfg.RateLimitRealtimeTicketIP = getenvInt("INROAD_RATELIMIT_REALTIME_TICKET_IP", 60)
+	cfg.RateLimitRealtimeTicketWorkspace = getenvInt("INROAD_RATELIMIT_REALTIME_TICKET_WORKSPACE", 600)
+	cfg.RealtimeMaxConnsPerUser = getenvInt("INROAD_REALTIME_MAX_CONNS_PER_USER", 0)
+	cfg.RealtimeMaxConnsPerWorkspace = getenvInt("INROAD_REALTIME_MAX_CONNS_PER_WORKSPACE", 0)
 
 	return cfg, nil
 }
