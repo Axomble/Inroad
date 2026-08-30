@@ -6,10 +6,12 @@ import (
 	"fmt"
 	netmail "net/mail" // aliased: platform/mail below owns the unqualified name here
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/app/events"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -47,10 +49,28 @@ type Service struct {
 	// M365 connect flow in oauth.go.
 	msOAuth     mail.MicrosoftOAuth
 	msExchanger TokenExchanger
+	// events announces status transitions to a workspace's open tabs. NIL IS
+	// VALID and means realtime is disabled — events.Emit treats it as a no-op.
+	events events.Publisher
 }
 
-func NewService(store Store, tester mail.ConnectionTester, keyring *crypto.Keyring, oauth mail.GoogleOAuth, exchanger TokenExchanger, msOAuth mail.MicrosoftOAuth, msExchanger TokenExchanger) *Service {
-	return &Service{store: store, tester: tester, keyring: keyring, oauth: oauth, exchanger: exchanger, msOAuth: msOAuth, msExchanger: msExchanger}
+// ServiceOption configures an optional collaborator. An option rather than an
+// eighth positional parameter: this constructor already takes seven, and every
+// existing caller and test would otherwise have to pass a zero value for
+// something it does not use.
+type ServiceOption func(*Service)
+
+// WithEvents wires realtime announcements. Unwired (or nil) the service is
+// silent and clients learn about a status change on their next refetch — the
+// pre-socket behaviour.
+func WithEvents(p events.Publisher) ServiceOption { return func(s *Service) { s.events = p } }
+
+func NewService(store Store, tester mail.ConnectionTester, keyring *crypto.Keyring, oauth mail.GoogleOAuth, exchanger TokenExchanger, msOAuth mail.MicrosoftOAuth, msExchanger TokenExchanger, opts ...ServiceOption) *Service {
+	s := &Service{store: store, tester: tester, keyring: keyring, oauth: oauth, exchanger: exchanger, msOAuth: msOAuth, msExchanger: msExchanger}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ConnectInput carries the fields needed to connect a new SMTP/IMAP mailbox.
@@ -216,12 +236,41 @@ func (s *Service) Get(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSa
 
 // Pause stops a mailbox from sending or polling without deleting it.
 func (s *Service) Pause(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
-	return s.store.UpdateStatus(ctx, workspaceID, id, "paused", "")
+	return s.setStatus(ctx, workspaceID, id, "paused")
 }
 
 // Resume re-activates a paused mailbox.
 func (s *Service) Resume(ctx context.Context, workspaceID, id uuid.UUID) (MailboxSafe, error) {
-	return s.store.UpdateStatus(ctx, workspaceID, id, "active", "")
+	return s.setStatus(ctx, workspaceID, id, "active")
+}
+
+// setStatus applies a status transition and announces it. Pause and Resume
+// differ only in the target status, and routing both through here means a future
+// transition cannot be added with the write but without the announcement.
+func (s *Service) setStatus(ctx context.Context, workspaceID, id uuid.UUID, status string) (MailboxSafe, error) {
+	box, err := s.store.UpdateStatus(ctx, workspaceID, id, status, "")
+	if err != nil {
+		return box, err
+	}
+	s.announceChanged(ctx, workspaceID, id, status)
+	return box, nil
+}
+
+// announceChanged tells the workspace's open tabs a mailbox's state moved.
+//
+// Ids and the new status only — never the address, host or credentials. The
+// console's mailbox counts are derived from status, so this is what lets them
+// update without the 45s pulse poll; anything richer the client refetches
+// through the authorized endpoint.
+func (s *Service) announceChanged(ctx context.Context, workspaceID, id uuid.UUID, status string) {
+	events.Emit(ctx, s.events, workspaceID.String(), events.Event{
+		Type:        "mailbox.changed",
+		SubjectKind: "mailbox",
+		SubjectID:   id.String(),
+		ActorID:     events.ActorFrom(ctx),
+		OccurredAt:  time.Now().UTC(),
+		Data:        map[string]any{"mailbox_id": id.String(), "status": status},
+	})
 }
 
 // Delete removes a mailbox from the workspace. Returns ErrNotFound if no row
@@ -234,5 +283,9 @@ func (s *Service) Delete(ctx context.Context, workspaceID, id uuid.UUID) error {
 	if rows == 0 {
 		return ErrNotFound
 	}
+	// "deleted" is not a stored status — the row is gone — but the console needs
+	// to drop it from its counts, and a client cannot infer a deletion from
+	// silence.
+	s.announceChanged(ctx, workspaceID, id, "deleted")
 	return nil
 }

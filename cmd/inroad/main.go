@@ -231,18 +231,6 @@ func run() error {
 	// overview mounts at /api/v1/warmup below.
 	warmupSvc := warmup.NewService(warmup.NewPgStore(queries))
 	warmupHandler := warmup.NewHandler(warmupSvc)
-	mailboxSvc := mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), keyring,
-		googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
-		msOAuth, mailbox.NewMicrosoftExchanger(msOAuth))
-	mbHandler := mailbox.NewHandler(
-		mailboxSvc,
-		cfg.JWTSecret, cfg.AppBaseURL,
-		warmupHandler,
-	)
-
-	enq := queue.NewClient(cfg.RedisAddr)
-	defer enq.Close()
-
 	// Realtime fan-out. The hub borrows a client rather than dialling its own (see
 	// platform/realtime.New): this is one more code path on the Redis dependency
 	// the queue and the rate limiter already require, not a second dependency.
@@ -255,6 +243,22 @@ func run() error {
 	// domain that announces; nil when no hub exists, which every service treats
 	// as "realtime disabled" rather than as an error.
 	realtimeEvents := events.NewHubPublisher(realtimeHub)
+
+	mailboxSvc := mailbox.NewService(mailboxStore, mail.NewNetTester(cfg.MailAllowPrivateHosts), keyring,
+		googleOAuth, mailbox.NewGoogleExchanger(googleOAuth),
+		msOAuth, mailbox.NewMicrosoftExchanger(msOAuth),
+		// Announces mailbox.changed on pause/resume/delete, so the console's
+		// mailbox counts move without waiting for the 45s pulse poll.
+		mailbox.WithEvents(realtimeEvents))
+	mbHandler := mailbox.NewHandler(
+		mailboxSvc,
+		cfg.JWTSecret, cfg.AppBaseURL,
+		warmupHandler,
+	)
+
+	enq := queue.NewClient(cfg.RedisAddr)
+	defer enq.Close()
+
 	// Closed BEFORE srv.Shutdown below: http.Server does not track hijacked
 	// connections, so the hub's own registry is the only thing that can end a live
 	// socket, and a graceful shutdown would otherwise hang out its whole budget.
