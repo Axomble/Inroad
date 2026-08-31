@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -108,6 +109,15 @@ type PendingReply struct {
 	ContactEmail  string
 }
 
+// immediateReplyDedupWindow is how long an identical immediate reply to the same
+// thread is treated as a double-submit rather than a second reply.
+//
+// One second, matching the asynq TaskID this replaced ("inboxreply:<thread>:<unix-
+// second>") — restoring the old behaviour rather than inventing a wider one. A
+// window is the right shape and a small one is the right size: a double-click is
+// milliseconds apart, and anything longer starts eating deliberate re-sends.
+const immediateReplyDedupWindow = time.Second
+
 // Cancellable reports whether an undo would still succeed. Mirrors the SQL
 // guard on CancelInboxPendingReply, so the UI can hide the control rather than
 // offering one that will fail.
@@ -120,6 +130,10 @@ type PendingReplyStore interface {
 	ListPendingReplies(ctx context.Context, workspaceID uuid.UUID, limit int32) ([]PendingReply, error)
 	CountPendingReplies(ctx context.Context, workspaceID uuid.UUID) (int64, error)
 	PendingReplyForThread(ctx context.Context, workspaceID, threadID uuid.UUID) (PendingReply, error)
+	// FindDuplicatePendingReply returns the id of an identical reply already
+	// queued to this thread inside `within`, or uuid.Nil when there is none. It
+	// exists to collapse a double-submitted immediate reply — see Service.Reply.
+	FindDuplicatePendingReply(ctx context.Context, workspaceID, threadID uuid.UUID, bodyText string, within time.Duration) (uuid.UUID, error)
 	CancelPendingReply(ctx context.Context, workspaceID, id uuid.UUID) error
 	// UndoWindow returns the workspace's configured undo delay.
 	UndoWindow(ctx context.Context, workspaceID uuid.UUID) (time.Duration, error)
@@ -557,6 +571,24 @@ func (s *PgStore) PendingReplyForThread(ctx context.Context, workspaceID, thread
 		return PendingReply{}, mapNotFound(err)
 	}
 	return pendingFromRow(row), nil
+}
+
+// FindDuplicatePendingReply reports an identical reply already queued to this
+// thread inside `within`. uuid.Nil (with a nil error) means there is none — an
+// absence, not a failure, which is why ErrNotFound is folded here rather than
+// propagated: "no duplicate" is the ordinary answer on every single-click reply.
+func (s *PgStore) FindDuplicatePendingReply(ctx context.Context, workspaceID, threadID uuid.UUID, bodyText string, within time.Duration) (uuid.UUID, error) {
+	id, err := s.q.FindDuplicateInboxPendingReply(ctx, gen.FindDuplicateInboxPendingReplyParams{
+		WorkspaceID: workspaceID, ThreadID: threadID, BodyText: bodyText,
+		Within: pgtype.Interval{Microseconds: within.Microseconds(), Valid: true},
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
 func (s *PgStore) CancelPendingReply(ctx context.Context, workspaceID, id uuid.UUID) error {

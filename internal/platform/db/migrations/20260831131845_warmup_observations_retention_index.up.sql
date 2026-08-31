@@ -1,0 +1,21 @@
+-- The evidence retention sweep needs an index it can seek, for the same reason
+-- task_dead_letters did (20260828152300).
+--
+-- PurgeWarmupObservations deletes by `observed_at < now() - interval '90 days'`
+-- with no workspace predicate. Every existing index on this table leads with
+-- workspace_id AND is partial (000054: one WHERE mailbox_id IS NOT NULL, one
+-- WHERE observer_mailbox_id IS NOT NULL), so none can serve an unpinned scan by
+-- age — the planner had a Seq Scan plus a Sort.
+--
+-- That matters more here than the cost of one query. The sweep is batched at 5000
+-- rows and runs daily, so on a table this one is designed to accumulate — every
+-- placement observation for every participant, plus invalid-token rows written on
+-- behalf of anyone who can email a connected mailbox — a backlog drains at
+-- 5000/day while paying for a full scan each run. A 90-day window that cannot keep
+-- up is a retention policy in name only, which is the thing invariant 55 asserts.
+--
+-- Not partial and not CONCURRENTLY: the purge reads rows regardless of which
+-- mailbox column is set, and golang-migrate runs a file in one transaction, which
+-- CREATE INDEX CONCURRENTLY cannot join (see 20260827185855_inbox_messages_mailbox_id).
+CREATE INDEX IF NOT EXISTS idx_warmup_observations_observed_at
+    ON warmup_observations (observed_at);

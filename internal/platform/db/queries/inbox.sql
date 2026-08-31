@@ -404,6 +404,35 @@ FROM inbox_threads t
 WHERE t.id = @thread_id AND t.workspace_id = @workspace_id
 RETURNING *;
 
+-- name: FindDuplicateInboxPendingReply :one
+-- A double-submitted immediate reply, so the second one can be collapsed instead
+-- of delivered.
+--
+-- POST /inbox/threads/{id}/reply used to be deduped by its asynq TaskID
+-- ("inboxreply:<thread>:<unix-second>"), which swallowed a second click inside the
+-- same second as success. Routing that path through a pending row replaced that key
+-- with the row's own uuid, so two clicks became two rows and two real emails. This
+-- restores the guard where the row is created, which is the only place it can now
+-- live.
+--
+-- Matched on the BODY, not merely on the thread: two different replies queued to one
+-- thread is legitimate and must not be refused, while a double-click is by
+-- definition the identical text. Bounded by a window rather than open-ended for the
+-- same reason — sending the same sentence twice an hour apart is a choice, not a
+-- misfire.
+--
+-- Only 'scheduled' rows count. A row already claimed, sent or cancelled is not a
+-- pending duplicate, and collapsing against a sent one would silently drop a
+-- deliberate re-send.
+SELECT id FROM inbox_pending_replies
+WHERE workspace_id = @workspace_id
+  AND thread_id = @thread_id
+  AND body_text = @body_text
+  AND status = 'scheduled'
+  AND created_at > now() - @within::interval
+ORDER BY created_at DESC
+LIMIT 1;
+
 -- name: GetInboxPendingReply :one
 SELECT * FROM inbox_pending_replies WHERE id = @id AND workspace_id = @workspace_id;
 
