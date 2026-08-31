@@ -16,7 +16,7 @@ import { api } from '@/store/api'
 // One source of truth for shapes: re-export the generated definitions rather than
 // restating them. The `Crm` prefix is the code generator's, taken from the
 // OpenAPI operation ids; the shapes themselves are record-generic.
-export type { CrmEvent, CrmNote, CrmTask, CrmTargetFields } from '@/store/api'
+export type { CrmEvent, CrmNote, CrmTask, CrmTaskInput, CrmTargetFields } from '@/store/api'
 
 import type { CrmTargetFields } from '@/store/api'
 
@@ -77,4 +77,6 @@ export const {
   useCrmCreateNoteMutation,
   useCrmListTasksQuery,
   useCrmCreateTaskMutation,
+  useCrmUpdateTaskMutation,
+  useCrmDeleteTaskMutation,
 } = recordsApi
