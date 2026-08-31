@@ -70,7 +70,16 @@ describe('GuardrailsCard', () => {
     stubCard({ pages: [OK] })
     renderWithProviders(<GuardrailsCard campaignId="c1" />)
 
-    expect(await screen.findByLabelText('Bounce threshold')).toHaveValue(8)
+    // waitFor on the VALUE, not findBy on the element. The card seeds both drafts
+    // from the query in a useEffect, and an effect runs after the render commits —
+    // so the input exists, with value '', one render before it is populated.
+    // `findByLabelText` resolves on that first render and `toHaveValue` then runs
+    // synchronously against an empty input. Locally the query settles fast enough to
+    // hide it; on a loaded CI runner it failed and turned main red.
+    //
+    // Line 169 below already had this right; this assertion was the one that missed
+    // the pattern.
+    await waitFor(() => expect(screen.getByLabelText('Bounce threshold')).toHaveValue(8))
     expect(screen.getByLabelText('Complaint threshold')).toHaveValue(1.5)
     expect(screen.getByRole('switch', { name: 'Turn automatic pausing off' })).toHaveAttribute(
       'aria-checked',
