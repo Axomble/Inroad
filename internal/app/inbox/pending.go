@@ -180,7 +180,14 @@ func (s *Service) ScheduleReply(
 	// Marking read is deliberately NOT done here, unlike the immediate Reply
 	// path. An undone send should not leave the thread read: the operator
 	// changed their mind, and the thread is still theirs to deal with. It moves
-	// to the moment the send actually lands (RecordOutboundReply's caller).
+	// to the moment the send actually lands — BumpInboxThreadLastMessageAt, in
+	// the same transaction that records the outbound message.
+	//
+	// That last sentence was a promise nothing kept until now: the query
+	// explicitly did not touch unread, on the stale grounds that Service.Reply
+	// had already cleared it at enqueue. Reply is not the path the product uses —
+	// the composer sends through here for both Send and Send-later — so every
+	// thread replied to through the UI stayed unread forever.
 	return s.queueReply(ctx, workspaceID, threadID, bodyText, sendAfter, createdBy)
 }
 

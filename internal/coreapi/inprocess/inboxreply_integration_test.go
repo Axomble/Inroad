@@ -113,11 +113,16 @@ func TestGetInboxReplyJobAndRecordInboxReplyRoundTrip(t *testing.T) {
 	if outbound.Direction != "outbound" || outbound.BodyText != "here's our pricing" {
 		t.Errorf("outbound message = %+v, want the just-recorded reply", outbound)
 	}
-	// RecordInboxReply itself never flips unread (Service.Reply already did,
-	// before enqueuing, on the API path this test bypasses) — the thread
-	// stays exactly as RecordReply left it (unread=true on first insert).
-	if !detail.Thread.Unread {
-		t.Error("RecordInboxReply must not have touched unread")
+	// Recording the delivered reply clears unread, and this assertion used to say
+	// the opposite. Its reasoning — "Service.Reply already did, before enqueuing,
+	// on the API path this test bypasses" — was the bug written down: the composer
+	// does not use that path, it schedules, and the scheduled path deliberately
+	// does not mark read at enqueue. So nothing cleared it and every thread replied
+	// to through the UI stayed unread. The newest message here is the outbound
+	// reply, so the thread has been dealt with.
+	if detail.Thread.Unread {
+		t.Error("the thread is still unread after its reply was recorded; a landed reply marks " +
+			"the thread read when it is the newest message")
 	}
 
 	// CountSentToday's extension (queries/send.sql): the manual reply just
