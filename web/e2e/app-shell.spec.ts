@@ -28,6 +28,35 @@ async function mockApi(page: Page) {
         email_verified: true,
       }))
     }
+    // The overview's tiles read this one endpoint. They used to sum the mailbox
+    // list client-side — which is where the 125 the test asserts came from, 75 + 50
+    // — and #157 replaced that with the pulse. This route was never added, so every
+    // tile rendered a dash and the assertion broke. daily_cap stays 125 so the
+    // assertion keeps meaning "the overview shows the workspace's daily capacity"
+    // rather than being retargeted at whatever the new page happens to render.
+    if (path.endsWith('/pulse')) {
+      return route.fulfill(json({
+        mailboxes: { total: 2, active: 2, paused: 0, error: 0 },
+        warmup: { pool: 2, unknown: 0, healthy: 1, watch: 1, at_risk: 0, probation: 0, quarantine: 0 },
+        campaigns: { total: 1, running: 1, draft: 0, paused: 0 },
+        contacts: { total: 3 },
+        sending: { sent_today: 7, daily_cap: 125 },
+        inbox: { unread: 1, interested: 1 },
+        // The degrading mailbox's reason used to reach this page through the warmup
+        // overview's health_reason. The pulse now owns the priority queue, so the
+        // same fact arrives as a server-defined attention row — which is what the
+        // assertion below reads, and what the page actually renders.
+        attention: [
+          {
+            kind: 'warmup_watch',
+            severity: 'warn',
+            count: 1,
+            reason: 'Inbox placement is trending down.',
+            href: '/app/warmup',
+          },
+        ],
+      }))
+    }
     if (path.endsWith('/mailboxes')) {
       return route.fulfill(json([
         { id: 'mb-1', email: 'founder@atlas.test', display_name: 'Atlas Founder', provider: 'gmail', status: 'active', daily_cap: 75 },
@@ -87,9 +116,20 @@ test('operator can navigate, inspect live metrics, search commands, and switch t
   await mockApi(page)
   await signIn(page)
 
-  await expect(page.getByText('125')).toBeVisible()
+  // Scoped to the tile rather than a bare getByText('125'): the pulse's daily cap
+  // now appears in more than one place on this page, and an unscoped match is a
+  // strict-mode violation. Naming the tile also states what is being checked — the
+  // overview reports the workspace's daily capacity — instead of asserting that the
+  // digits exist somewhere.
+  await expect(page.locator('article', { hasText: 'Daily capacity' })).toContainText('125')
   await expect(page.getByText('Founder signal')).toBeVisible()
-  await expect(page.getByText('Inbox placement is trending down.')).toBeVisible()
+  // Scoped for the same reason as the tile above: the reason string reaches the DOM
+  // in more than one place. Reading it inside the priority queue is also the
+  // stronger claim — it asserts the degrading mailbox is SURFACED for triage, not
+  // merely that the sentence exists somewhere on the page.
+  await expect(page.locator('section', { hasText: 'Needs attention' })).toContainText(
+    'Inbox placement is trending down.',
+  )
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.getByRole('searchbox', { name: 'Search commands' }).fill('warm')

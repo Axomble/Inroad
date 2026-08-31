@@ -99,6 +99,65 @@ func (f *replyFixture) scheduled(t *testing.T) inbox.PendingReply {
 // row's id. Nothing about the reply's text reaches the task — which is what
 // keeps it out of task_dead_letters, and therefore out of a GET /dead-letters
 // response served under campaigns:read.
+// A double-clicked Send must not deliver twice.
+//
+// The old asynq TaskID ("inboxreply:<thread>:<unix-second>") collapsed this, and
+// routing the path through a pending row replaced that key with the row's uuid —
+// so without the guard two clicks are two rows and two real emails to a contact.
+func TestReplyCollapsesADoubleSubmit(t *testing.T) {
+	f := newReplyFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := f.svc.Reply(ctx, testWS, f.threadID, "thanks for reaching out", nil); err != nil {
+			t.Fatalf("Reply %d: %v", i+1, err)
+		}
+	}
+
+	// One row, one enqueue. The second call reports success — the same thing the
+	// TaskID conflict did, and this route returns no id, so a caller cannot tell.
+	if n := len(f.deps.pending.rows); n != 1 {
+		t.Errorf("%d pending rows after two identical clicks, want 1", n)
+	}
+	if n := len(f.deps.enq.calls); n != 1 {
+		t.Errorf("%d enqueues after two identical clicks, want 1", n)
+	}
+}
+
+// The other half, and the reason the guard matches on the BODY rather than just
+// the thread: two DIFFERENT replies to one thread is a deliberate act.
+func TestReplyDoesNotCollapseADifferentReply(t *testing.T) {
+	f := newReplyFixture(t)
+	ctx := context.Background()
+
+	if err := f.svc.Reply(ctx, testWS, f.threadID, "first thought", nil); err != nil {
+		t.Fatalf("Reply 1: %v", err)
+	}
+	if err := f.svc.Reply(ctx, testWS, f.threadID, "actually, one more thing", nil); err != nil {
+		t.Fatalf("Reply 2: %v", err)
+	}
+
+	if n := len(f.deps.pending.rows); n != 2 {
+		t.Errorf("%d pending rows for two different replies, want 2 — the guard must not "+
+			"refuse a deliberate second reply", n)
+	}
+}
+
+// A failed duplicate check fails the request rather than falling through to a
+// send. Guessing "probably not a duplicate" on an unreadable answer is how a
+// double-send gets reintroduced by an unrelated database blip.
+func TestReplyFailsClosedWhenTheDuplicateCheckErrors(t *testing.T) {
+	f := newReplyFixture(t)
+	f.deps.pending.findDupErr = errors.New("boom")
+
+	if err := f.svc.Reply(context.Background(), testWS, f.threadID, "hello", nil); err == nil {
+		t.Error("Reply succeeded despite an unreadable duplicate check")
+	}
+	if n := len(f.deps.enq.calls); n != 0 {
+		t.Errorf("%d enqueues after a failed duplicate check, want 0", n)
+	}
+}
+
 func TestReplyQueuesARowAndEnqueuesOnlyItsID(t *testing.T) {
 	f := newReplyFixture(t)
 

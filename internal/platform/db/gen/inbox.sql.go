@@ -486,6 +486,55 @@ func (q *Queries) FailInboxPendingReply(ctx context.Context, arg FailInboxPendin
 	return err
 }
 
+const findDuplicateInboxPendingReply = `-- name: FindDuplicateInboxPendingReply :one
+SELECT id FROM inbox_pending_replies
+WHERE workspace_id = $1
+  AND thread_id = $2
+  AND body_text = $3
+  AND status = 'scheduled'
+  AND created_at > now() - $4::interval
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindDuplicateInboxPendingReplyParams struct {
+	WorkspaceID uuid.UUID       `json:"workspace_id"`
+	ThreadID    uuid.UUID       `json:"thread_id"`
+	BodyText    string          `json:"body_text"`
+	Within      pgtype.Interval `json:"within"`
+}
+
+// A double-submitted immediate reply, so the second one can be collapsed instead
+// of delivered.
+//
+// POST /inbox/threads/{id}/reply used to be deduped by its asynq TaskID
+// ("inboxreply:<thread>:<unix-second>"), which swallowed a second click inside the
+// same second as success. Routing that path through a pending row replaced that key
+// with the row's own uuid, so two clicks became two rows and two real emails. This
+// restores the guard where the row is created, which is the only place it can now
+// live.
+//
+// Matched on the BODY, not merely on the thread: two different replies queued to one
+// thread is legitimate and must not be refused, while a double-click is by
+// definition the identical text. Bounded by a window rather than open-ended for the
+// same reason — sending the same sentence twice an hour apart is a choice, not a
+// misfire.
+//
+// Only 'scheduled' rows count. A row already claimed, sent or cancelled is not a
+// pending duplicate, and collapsing against a sent one would silently drop a
+// deliberate re-send.
+func (q *Queries) FindDuplicateInboxPendingReply(ctx context.Context, arg FindDuplicateInboxPendingReplyParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, findDuplicateInboxPendingReply,
+		arg.WorkspaceID,
+		arg.ThreadID,
+		arg.BodyText,
+		arg.Within,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const findInboxLabelByName = `-- name: FindInboxLabelByName :one
 SELECT id, workspace_id, name, color, created_at, updated_at FROM inbox_labels
 WHERE workspace_id = $1 AND lower(name) = lower($2)

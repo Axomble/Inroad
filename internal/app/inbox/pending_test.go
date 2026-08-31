@@ -24,6 +24,7 @@ type fakePendingStore struct {
 	now        func() time.Time
 	undoWindow time.Duration
 	createErr  error
+	findDupErr error
 	// threads models the INSERT … SELECT's self-enforcing tenancy: a row is
 	// written only for a thread that exists IN THAT WORKSPACE. Reading the same
 	// thread store the Service reads means a fixture cannot accidentally teach
@@ -98,6 +99,26 @@ func (f *fakePendingStore) CountPendingReplies(_ context.Context, ws uuid.UUID) 
 		}
 	}
 	return n, nil
+}
+
+// FindDuplicatePendingReply mirrors the real query's discriminators — same
+// workspace, same thread, same BODY, still 'scheduled', inside the window — rather
+// than just answering "a row exists". A fake that ignored the body would make the
+// dedup tests pass while the production guard refused legitimate second replies.
+func (f *fakePendingStore) FindDuplicatePendingReply(_ context.Context, ws, threadID uuid.UUID, bodyText string, within time.Duration) (uuid.UUID, error) {
+	if f.findDupErr != nil {
+		return uuid.Nil, f.findDupErr
+	}
+	cutoff := f.now().Add(-within)
+	for _, row := range f.rows {
+		if row.WorkspaceID != ws || row.ThreadID != threadID || row.BodyText != bodyText {
+			continue
+		}
+		if row.Status == inbox.PendingStatusScheduled && row.CreatedAt.After(cutoff) {
+			return row.ID, nil
+		}
+	}
+	return uuid.Nil, nil
 }
 
 func (f *fakePendingStore) PendingReplyForThread(_ context.Context, ws, threadID uuid.UUID) (inbox.PendingReply, error) {

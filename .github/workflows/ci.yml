@@ -58,15 +58,20 @@ jobs:
       # here — and 10 findings merged that way.
       - id: linter
         run: echo "version=$(sed -n 's/^GOLANGCI_VERSION := //p' Makefile)" >> "$GITHUB_OUTPUT"
-      # install-mode goinstall, not the default prebuilt binary: a published binary
-      # built with an older Go refuses to load a config whose target Go version
-      # (from go.mod) is newer than its own build toolchain. Compiling it with the
-      # Go set up above keeps this identical to the locally installed one — which is
-      # now true of the VERSION as well, not just the toolchain.
+      # The PREBUILT binary, not `go install` — the same call the sqlc step below
+      # makes, for the same reason. golangci-lint v2.12's module declares a Go newer
+      # than the 1.25.x set up above, and actions/setup-go pins GOTOOLCHAIN=local, so
+      # building it from source dies mid-compile. A published binary carries no
+      # toolchain constraint.
+      #
+      # goinstall was here because v2.1.6's prebuilt binary was built with go1.24 and
+      # refused to load a config targeting go1.25 (go.mod). That objection dies with
+      # the pin bump: v2.12.2's published binary is built with a Go newer than this
+      # module targets, so it loads the config directly. Compiling from source was
+      # only ever a workaround for an old binary.
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v${{ steps.linter.outputs.version }}
-          install-mode: goinstall
 
   go-test:
     name: Go unit tests
