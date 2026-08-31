@@ -50,15 +50,22 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
-      # install-mode goinstall, not the default prebuilt binary: the published
-      # v2.1.6 binary is built with go1.24, and golangci-lint refuses to load a
-      # config whose target Go version (1.25.0, from go.mod) is newer than its own
-      # build toolchain. Compiling it here with the Go set up above makes the CI
-      # linter identical to the `go install`-ed one `make lint` runs locally, so
-      # neither side can pass while the other fails.
+      # The version comes from the Makefile's GOLANGCI_VERSION, not a literal here.
+      # A literal is what let the two diverge: this file pinned v2.1.6 while
+      # CLAUDE.md told developers `@latest`, so `make lint` ran an eleven-minor
+      # newer rule set than the gate. The older linter did not have the checks the
+      # newer one flagged, so main could be red on a developer's machine and green
+      # here — and 10 findings merged that way.
+      - id: linter
+        run: echo "version=$(sed -n 's/^GOLANGCI_VERSION := //p' Makefile)" >> "$GITHUB_OUTPUT"
+      # install-mode goinstall, not the default prebuilt binary: a published binary
+      # built with an older Go refuses to load a config whose target Go version
+      # (from go.mod) is newer than its own build toolchain. Compiling it with the
+      # Go set up above keeps this identical to the locally installed one — which is
+      # now true of the VERSION as well, not just the toolchain.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.1.6
+          version: v${{ steps.linter.outputs.version }}
           install-mode: goinstall
 
   go-test:
