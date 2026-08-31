@@ -3,6 +3,7 @@ package inprocess
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -285,5 +286,47 @@ func (c client) MarkBounced(ctx context.Context, enrollmentID, workspaceID, emai
 	// Reason literal is "bounce", not "bounced" — the suppression CHECK
 	// constraint allows 'unsubscribe','bounce','manual' (distinct from the
 	// enrollment stop_reason vocabulary used just above).
-	return c.q.AddSuppression(ctx, gen.AddSuppressionParams{WorkspaceID: ws, Email: email, Reason: "bounce"})
+	if err := c.q.AddSuppression(ctx, gen.AddSuppressionParams{WorkspaceID: ws, Email: email, Reason: "bounce"}); err != nil {
+		return err
+	}
+
+	c.publishSendBounced(ctx, workspaceID, enrollmentID)
+	return nil
+}
+
+// publishSendBounced tells the workspace's open tabs a hard bounce landed, so a
+// campaign's failed count and the console's attention rows move without waiting
+// for a poll.
+//
+// THE EMAIL IS NOT IN THE PAYLOAD, and that is the whole point of this being its
+// own function rather than an inline Emit. `email` is a recipient address in
+// scope right here, one field away, and a socket event is a WORKSPACE-WIDE
+// broadcast: every connected tab receives it, including tabs whose operator has
+// no business seeing who bounced. Same reasoning as logUnresolvedBounce
+// declining to log Final-Recipient (spec §7.3). A client that needs the address
+// refetches the enrollment through the authorized endpoint.
+//
+// Returns nothing: the suppression is already committed, and a broker outage
+// must not fail a poller task that would then retry and re-read the mailbox.
+func (c client) publishSendBounced(ctx context.Context, workspaceID, enrollmentID string) {
+	if c.realtime == nil {
+		return
+	}
+	data := map[string]any{}
+	// Absent for a bounce that matched no enrollment (a reply to a direct send,
+	// or a DSN this workspace cannot attribute). Omitted rather than sent empty,
+	// so a client never tries to look up "".
+	if enrollmentID != "" {
+		data["enrollment_id"] = enrollmentID
+	}
+	// No actor: a bounce is something that happened to us, not something anyone
+	// did. Every tab treats an actorless event as somebody else's.
+	_ = c.PublishRealtime(ctx, coreapi.RealtimeEventInput{
+		WorkspaceID: workspaceID,
+		Type:        "send.bounced",
+		SubjectKind: "enrollment",
+		SubjectID:   enrollmentID,
+		OccurredAt:  time.Now().UTC(),
+		Data:        data,
+	})
 }

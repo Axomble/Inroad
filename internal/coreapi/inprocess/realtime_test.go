@@ -257,3 +257,71 @@ func TestPublishInboxMessageCreated_WithoutAHubDoesNothing(t *testing.T) {
 
 	c.publishInboxMessageCreated(context.Background(), thread.WorkspaceID.String(), thread, time.Now())
 }
+
+// --- send.bounced ---------------------------------------------------------
+
+// THE test for this event. `email` — a recipient address — is in scope one field
+// away from the emit, and a socket event is a WORKSPACE-WIDE broadcast reaching
+// every connected tab. The address must never ride along (spec §7.3, the same
+// reasoning that keeps Final-Recipient out of the bounce log).
+func TestPublishSendBounced_NeverCarriesTheRecipientAddress(t *testing.T) {
+	pub := &recordingPublisher{}
+	c := client{realtime: pub}
+	enrollmentID := uuid.NewString()
+
+	c.publishSendBounced(context.Background(), uuid.NewString(), enrollmentID)
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("published %d events, want 1", len(pub.calls))
+	}
+	raw := string(pub.calls[0].envelope.Data)
+	for _, forbidden := range []string{"@", "email", "recipient", "to_email"} {
+		if strings.Contains(raw, forbidden) {
+			t.Errorf("envelope data contains %q — a recipient address must never be broadcast: %s", forbidden, raw)
+		}
+	}
+	// It still says WHICH enrollment, which is what a client needs to patch.
+	var data map[string]any
+	if err := json.Unmarshal(pub.calls[0].envelope.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data["enrollment_id"] != enrollmentID {
+		t.Errorf("enrollment_id = %v, want %q", data["enrollment_id"], enrollmentID)
+	}
+}
+
+// A bounce is something that happened TO the workspace, not something a user
+// did, so it carries no actor and every tab treats it as somebody else's.
+func TestPublishSendBounced_HasNoActor(t *testing.T) {
+	pub := &recordingPublisher{}
+	c := client{realtime: pub}
+
+	c.publishSendBounced(context.Background(), uuid.NewString(), uuid.NewString())
+
+	if got := pub.calls[0].envelope.ActorID; got != "" {
+		t.Errorf("ActorID = %q, want empty", got)
+	}
+}
+
+// An unattributable bounce (a DSN matching no enrollment) still publishes — the
+// campaign counts move either way — but omits the id rather than sending "",
+// which a client would try to look up.
+func TestPublishSendBounced_OmitsAnUnmatchedEnrollment(t *testing.T) {
+	pub := &recordingPublisher{}
+	c := client{realtime: pub}
+
+	c.publishSendBounced(context.Background(), uuid.NewString(), "")
+
+	var data map[string]any
+	if err := json.Unmarshal(pub.calls[0].envelope.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if _, ok := data["enrollment_id"]; ok {
+		t.Errorf("enrollment_id present for an unmatched bounce: %#v", data)
+	}
+}
+
+func TestPublishSendBounced_WithoutAHubDoesNothing(t *testing.T) {
+	c := client{} // no realtime
+	c.publishSendBounced(context.Background(), uuid.NewString(), uuid.NewString())
+}
