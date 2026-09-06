@@ -325,3 +325,84 @@ func TestPublishSendBounced_WithoutAHubDoesNothing(t *testing.T) {
 	c := client{} // no realtime
 	c.publishSendBounced(context.Background(), uuid.NewString(), uuid.NewString())
 }
+
+// --- inbox.reply.classified -------------------------------------------------
+
+// THE test for this event's shape: the frontend patch
+// (web/src/features/realtime/cache-patch.ts patchReplyClassified) keys on
+// subject {kind: "thread"} and a non-empty string data.reply_class, so this
+// pins exactly that contract — and pins that the label key is the ONLY thing
+// in Data. The message's subject, sender and body are all in scope near the
+// call site, and a workspace-wide broadcast must not carry correspondence.
+func TestPublishReplyClassified_CarriesOnlyTheLabelKey(t *testing.T) {
+	pub := &recordingPublisher{}
+	c := client{realtime: pub}
+	workspaceID, threadID := uuid.New(), uuid.NewString()
+
+	c.publishReplyClassified(context.Background(), workspaceID.String(), threadID, "positive")
+
+	if len(pub.calls) != 1 {
+		t.Fatalf("published %d events, want 1", len(pub.calls))
+	}
+	got := pub.calls[0]
+	if got.workspaceID != workspaceID {
+		t.Errorf("workspace = %v, want %v", got.workspaceID, workspaceID)
+	}
+	env := got.envelope
+	if env.Type != "inbox.reply.classified" {
+		t.Errorf("Type = %q, want inbox.reply.classified", env.Type)
+	}
+	if env.Subject.Kind != "thread" || env.Subject.ID != threadID {
+		t.Errorf("Subject = %+v, want {thread %s}", env.Subject, threadID)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data["reply_class"] != "positive" {
+		t.Errorf("reply_class = %v, want %q", data["reply_class"], "positive")
+	}
+	if len(data) != 1 {
+		t.Errorf("data = %#v, want the label key and nothing else", data)
+	}
+}
+
+// A classifier verdict is nobody's click: no actor, so the client's self-echo
+// guard treats it as somebody else's and every open tab applies it.
+func TestPublishReplyClassified_HasNoActor(t *testing.T) {
+	pub := &recordingPublisher{}
+	c := client{realtime: pub}
+
+	c.publishReplyClassified(context.Background(), uuid.NewString(), uuid.NewString(), "out_of_office")
+
+	if got := pub.calls[0].envelope.ActorID; got != "" {
+		t.Errorf("ActorID = %q, want empty for a classifier verdict", got)
+	}
+}
+
+// An unclassified capture is not a verdict: nothing goes on the wire, matching
+// the client, which ignores an empty reply_class rather than blanking a chip.
+func TestPublishReplyClassified_SkipsAnEmptyClass(t *testing.T) {
+	pub := &recordingPublisher{}
+	c := client{realtime: pub}
+
+	c.publishReplyClassified(context.Background(), uuid.NewString(), uuid.NewString(), "")
+
+	if len(pub.calls) != 0 {
+		t.Errorf("published %d events for an empty class, want 0", len(pub.calls))
+	}
+}
+
+// The class is already committed by RecordReply when this runs, so a broker
+// outage must neither panic nor give the caller anything to fail on — a failed
+// poller task would retry and re-read the mailbox.
+func TestPublishReplyClassified_SwallowsAPublishFailure(t *testing.T) {
+	c := client{realtime: &recordingPublisher{err: errors.New("redis is down")}}
+
+	c.publishReplyClassified(context.Background(), uuid.NewString(), uuid.NewString(), "positive")
+}
+
+func TestPublishReplyClassified_WithoutAHubDoesNothing(t *testing.T) {
+	c := client{} // no realtime
+	c.publishReplyClassified(context.Background(), uuid.NewString(), uuid.NewString(), "positive")
+}

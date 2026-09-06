@@ -53,6 +53,7 @@ func (c client) StoreInboundMessage(ctx context.Context, in coreapi.InboxMessage
 	}
 
 	c.publishInboxMessageCreated(ctx, in.WorkspaceID, thread, in.OccurredAt)
+	c.publishReplyClassified(ctx, in.WorkspaceID, thread.ID.String(), in.ReplyClass)
 	return nil
 }
 
@@ -99,6 +100,46 @@ func (c client) publishInboxMessageCreated(ctx context.Context, workspaceID stri
 		SubjectID:   thread.ID.String(),
 		OccurredAt:  occurredAt,
 		Data:        data,
+	})
+}
+
+// publishReplyClassified tells the workspace's open tabs which label the
+// classifier put on the thread's latest reply, so an open inbox list moves its
+// label chip without a refetch.
+//
+// Emitted from here rather than from the worker's dispatch, because RecordReply
+// above is where the class actually COMMITS (the thread's last_reply_class and
+// the message row's reply_class, in one transaction) and the first point a
+// thread id exists at all. The worker's later MarkReplied/RecordReplyClass
+// writes tag the ENROLLMENT with the same class; publishing there would mean
+// threading the thread id through the dispatch for an event that is already
+// certainly true here.
+//
+// Data is the label KEY and nothing else — no subject line, no sender, no body
+// snippet: a socket event is a workspace-wide broadcast and must not carry
+// correspondence (same rule as publishInboxMessageCreated above). No actor: a
+// classifier verdict is nobody's click, so every tab treats it as somebody
+// else's.
+//
+// Returns nothing: the class is already committed, and a broker outage must not
+// fail a poller task that would then retry and re-read the mailbox.
+func (c client) publishReplyClassified(ctx context.Context, workspaceID, threadID, replyClass string) {
+	if c.realtime == nil {
+		return
+	}
+	// An unclassified capture (the input carried no class) is not a verdict —
+	// there is nothing to announce, and the client ignores an empty reply_class
+	// anyway rather than blanking a chip.
+	if replyClass == "" {
+		return
+	}
+	_ = c.PublishRealtime(ctx, coreapi.RealtimeEventInput{
+		WorkspaceID: workspaceID,
+		Type:        "inbox.reply.classified",
+		SubjectKind: "thread",
+		SubjectID:   threadID,
+		OccurredAt:  time.Now().UTC(),
+		Data:        map[string]any{"reply_class": replyClass},
 	})
 }
 
