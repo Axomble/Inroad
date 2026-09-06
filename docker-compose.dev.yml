@@ -186,7 +186,12 @@ services:
   docs:
     image: node:22-alpine
     working_dir: /docs
-    command: sh -c "npm ci && npm run dev -- --host --port 4321"
+    # astro dev writes a PID lock into the bind-mounted tree (.astro/dev.json),
+    # so a container that died uncleanly blocks the next boot with "another
+    # astro dev is already running". Deleting it is the safe reset; `--force`
+    # is NOT — the stale PID can match a live process in the fresh container,
+    # and astro then SIGTERMs its own process tree.
+    command: sh -c "npm ci && rm -f .astro/dev.json && npm run dev -- --host --port 4321"
     volumes:
       - ./docs:/docs
       # Container-private node_modules for the same platform reasons as web.
