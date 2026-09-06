@@ -4,6 +4,7 @@ package inprocess
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -197,9 +198,11 @@ func newInboxCaptureClientWithRealtime(
 	return capture
 }
 
-// A stored inbound reply publishes exactly one realtime event, pinned to the
-// storing workspace — the first real event in the system, and the whole point of
-// the realtime slice.
+// A stored classified reply publishes exactly two realtime events, both pinned
+// to the storing workspace: inbox.message.created (the reply landed) then
+// inbox.reply.classified (which label the classifier put on it). Both emit from
+// the same place because RecordReply commits the thread, the message and its
+// reply class in one transaction.
 func TestStoreInboundMessagePublishesARealtimeEvent(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
@@ -221,18 +224,40 @@ func TestStoreInboundMessagePublishesARealtimeEvent(t *testing.T) {
 		t.Fatalf("StoreInboundMessage: %v", err)
 	}
 
-	if len(pub.calls) != 1 {
-		t.Fatalf("published %d events, want exactly 1", len(pub.calls))
+	if len(pub.calls) != 2 {
+		t.Fatalf("published %d events, want exactly 2 (created, then classified)", len(pub.calls))
 	}
-	got := pub.calls[0]
-	if got.workspaceID != fx.ws {
-		t.Errorf("published to workspace %v, want %v", got.workspaceID, fx.ws)
+	created := pub.calls[0]
+	if created.workspaceID != fx.ws {
+		t.Errorf("published to workspace %v, want %v", created.workspaceID, fx.ws)
 	}
-	if got.envelope.Type != "inbox.message.created" {
-		t.Errorf("Type = %q, want inbox.message.created", got.envelope.Type)
+	if created.envelope.Type != "inbox.message.created" {
+		t.Errorf("Type = %q, want inbox.message.created", created.envelope.Type)
 	}
-	if got.envelope.Subject.Kind != "thread" || got.envelope.Subject.ID == "" {
-		t.Errorf("Subject = %+v, want a thread id", got.envelope.Subject)
+	if created.envelope.Subject.Kind != "thread" || created.envelope.Subject.ID == "" {
+		t.Errorf("Subject = %+v, want a thread id", created.envelope.Subject)
+	}
+
+	classified := pub.calls[1]
+	if classified.workspaceID != fx.ws {
+		t.Errorf("classified event published to workspace %v, want %v", classified.workspaceID, fx.ws)
+	}
+	if classified.envelope.Type != "inbox.reply.classified" {
+		t.Errorf("Type = %q, want inbox.reply.classified", classified.envelope.Type)
+	}
+	// The classified event names the SAME thread the created event does — that
+	// is what lets the client patch the row it just learned about.
+	if classified.envelope.Subject.Kind != "thread" ||
+		classified.envelope.Subject.ID != created.envelope.Subject.ID {
+		t.Errorf("classified Subject = %+v, want the created event's thread %q",
+			classified.envelope.Subject, created.envelope.Subject.ID)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(classified.envelope.Data, &data); err != nil {
+		t.Fatalf("decode classified data: %v", err)
+	}
+	if data["reply_class"] != "interested" {
+		t.Errorf("reply_class = %v, want %q", data["reply_class"], "interested")
 	}
 }
 
