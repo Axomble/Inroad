@@ -14,8 +14,8 @@ export INROAD_DATABASE_URL="${INROAD_DATABASE_URL:-postgres://inroad:inroad@loca
 export INROAD_REDIS_ADDR="${INROAD_REDIS_ADDR:-localhost:6379}"
 
 echo "==> Postgres + Redis"
-docker compose -f deploy/compose/docker-compose.dev.yml up -d
-PG=$(docker compose -f deploy/compose/docker-compose.dev.yml ps -q postgres)
+docker compose -f docker-compose.dev.yml up -d
+PG=$(docker compose -f docker-compose.dev.yml ps -q postgres)
 until docker exec "$PG" pg_isready -U inroad >/dev/null 2>&1; do sleep 1; done
 
 echo "==> migrate + seed"

@@ -8,7 +8,7 @@
 `make` is optional (raw commands shown on the right):
 ```
 cp .env.example .env            # fill in secrets (openssl rand -base64 32)
-make db-up        # docker compose -f deploy/compose/docker-compose.dev.yml up -d   (Postgres :5433 + Redis)
+make db-up        # docker compose -f docker-compose.dev.yml up -d   (Postgres :5433 + Redis)
 make migrate-up   # go run ./cmd/migrate up
 make run-api      # go run ./cmd/inroad          (API on :8080)
 make run-worker   # go run ./cmd/worker          (separate shell)
@@ -16,7 +16,7 @@ make run-worker   # go run ./cmd/worker          (separate shell)
 Frontend: `cd web && npm install && npm run dev`.
 
 ### Reading transactional email locally
-The full dev stack (`docker compose -f deploy/compose/docker-compose.dev.yml up`)
+The full dev stack (`docker compose -f docker-compose.dev.yml up`)
 runs Mailpit and points the API at it, so verification, password-reset, login-code,
 and invite emails are delivered and readable at **http://localhost:8025** — click
 the link straight out of the message. Nothing leaves the machine.

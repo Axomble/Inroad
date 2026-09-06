@@ -11,10 +11,10 @@ help:
 	@grep -E '^[a-zA-Z_-]+:.*?##' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "%-18s %s\n", $$1, $$2}'
 
 db-up: ## Start dev Postgres + Redis
-	docker compose -f deploy/compose/docker-compose.dev.yml up -d
+	docker compose -f docker-compose.dev.yml up -d
 
 db-down: ## Stop dev Postgres + Redis
-	docker compose -f deploy/compose/docker-compose.dev.yml down
+	docker compose -f docker-compose.dev.yml down
 
 migrate-up: ## Apply all migrations
 	go run ./cmd/migrate up
@@ -89,10 +89,10 @@ lint-web: ## Run oxlint + strict typecheck on the SPA
 	cd web && npm run lint && npm run typecheck
 
 dev-docker: ## Start the WHOLE stack in Docker (no local Go/Node/make needed)
-	docker compose -f deploy/compose/docker-compose.dev.yml up
+	docker compose -f docker-compose.dev.yml up
 
 dev-docker-down: ## Stop the Docker dev stack (add ARGS=-v to wipe its data)
-	docker compose -f deploy/compose/docker-compose.dev.yml down $(ARGS)
+	docker compose -f docker-compose.dev.yml down $(ARGS)
 
 dev: db-up db-wait migrate-up ## Start everything natively: services, migrations, api + worker + web
 	@echo ""
@@ -105,4 +105,4 @@ dev: db-up db-wait migrate-up ## Start everything natively: services, migrations
 
 db-wait: ## Block until Postgres accepts connections
 	@echo "waiting for postgres..."
-	@for i in $$(seq 1 30); do 		docker compose -f deploy/compose/docker-compose.dev.yml exec -T postgres pg_isready -U inroad -q && exit 0; 		sleep 1; 	done; 	echo "postgres did not become ready" >&2; exit 1
+	@for i in $$(seq 1 30); do 		docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U inroad -q && exit 0; 		sleep 1; 	done; 	echo "postgres did not become ready" >&2; exit 1
