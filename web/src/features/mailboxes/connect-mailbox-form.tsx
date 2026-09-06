@@ -305,7 +305,10 @@ function Field({
     <div className={className}>
       <div className="mb-1.5 flex items-center gap-2">
         <Label htmlFor={id}>{label}</Label>
-        {hint && <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">{hint}</span>}
+        {/* Plain muted text, not the mono-caps treatment: tracked uppercase is
+            the app's structural voice (section bars, column headers) and loses
+            its signal when field hints shout in it too. */}
+        {hint && <span className="text-[11px] text-muted-foreground">{hint}</span>}
       </div>
       <div>{children(id)}</div>
       {error && (

@@ -130,10 +130,12 @@ function Field({
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={id}>{label}</Label>
       {children}
+      {/* Hint is plain muted text — mono-caps stays reserved for structure
+          (section bars, column headers), not field hints. */}
       {error ? (
         <span className="text-xs text-danger">{error}</span>
       ) : (
-        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">{hint}</span>
+        <span className="text-[11px] text-muted-foreground">{hint}</span>
       )}
     </div>
   )
