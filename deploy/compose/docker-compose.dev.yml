@@ -14,8 +14,9 @@
 #
 # Dev credentials are hardcoded on purpose. This file must never run anything
 # reachable from the internet: the JWT secret and master key below are public
-# knowledge. Production is deploy/compose/docker-compose.yml, which takes every
-# secret from the environment and refuses to start without them.
+# knowledge. Production is the repo-root docker-compose.yml, which generates
+# real random secrets on first boot (init-secrets) or takes them from the
+# environment — never a fixed default.
 
 x-go-env: &go-env
   INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
