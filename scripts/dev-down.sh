@@ -7,5 +7,5 @@ export PATH="$PATH:/c/Program Files/Docker/Docker/resources/bin"
 for pidfile in /tmp/inroad-api.pid /tmp/inroad-web.pid; do
   [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null; rm -f "$pidfile"
 done
-docker compose -f deploy/compose/docker-compose.dev.yml down
+docker compose -f docker-compose.dev.yml down
 echo "stack stopped."

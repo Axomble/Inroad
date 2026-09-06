@@ -44,10 +44,10 @@ See the [environment variables reference](/deploy/environment-variables/) for th
 
 ## Local Development
 
-Development does not use the production manifest. The dev stack lives at `deploy/compose/docker-compose.dev.yml` and bind-mounts the source tree:
+Development does not use the production manifest. The dev stack lives at `docker-compose.dev.yml` and bind-mounts the source tree:
 
 ```bash
-docker compose -f deploy/compose/docker-compose.dev.yml up
+docker compose -f docker-compose.dev.yml up
 ```
 
 It runs Go with `air` hot-reloading, the SPA under Vite HMR on `:5173`, Mailpit catching all transactional email on `:8025`, the Astro docs site on `:4321`, and creates the `inroad_test` database for integration tests. Dev secrets are deliberately hardcoded in that file; it must never serve anything internet-reachable.

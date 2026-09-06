@@ -1,7 +1,7 @@
-# Full dev stack: Postgres, Redis, migrations, api, worker, the SPA, and a mail
-# catcher.
+# Full dev stack: Postgres, Redis, migrations, api, worker, the SPA, the docs
+# site, and a mail catcher.
 #
-#   docker compose -f deploy/compose/docker-compose.dev.yml up
+#   docker compose -f docker-compose.dev.yml up
 #
 # No local Go, Node, or make required — the repo is bind-mounted and rebuilt
 # inside the containers on change (air for Go, Vite HMR for the SPA). Ctrl+C
@@ -17,6 +17,11 @@
 # knowledge. Production is the repo-root docker-compose.yml, which generates
 # real random secrets on first boot (init-secrets) or takes them from the
 # environment — never a fixed default.
+
+# Stable project name: without it the project is named after the manifest's
+# directory, so moving this file (it used to live in deploy/compose/) would
+# silently orphan the previous stack's containers and volumes.
+name: inroad-dev
 
 x-go-env: &go-env
   INROAD_DATABASE_URL: postgres://inroad:inroad@postgres:5432/inroad?sslmode=disable
@@ -40,11 +45,12 @@ x-go-env: &go-env
   INROAD_SYSTEM_SMTP_PORT: "1025"
   INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT: "true"
   INROAD_SYSTEM_EMAIL_FROM: no-reply@inroad.test
-  # Google / Microsoft OAuth (optional). Interpolated at `docker compose` time
-  # from the shell or an --env-file (e.g. the repo-root .env:
-  #   docker compose --env-file .env -f deploy/compose/docker-compose.dev.yml up -d
-  # ). Blank keeps the provider disabled; redirect URLs default in-app to
-  # INROAD_PUBLIC_URL-derived paths, and the app treats empty as unset.
+  # Google / Microsoft OAuth (optional). This file lives at the repo root, so
+  # compose auto-loads the root .env for these interpolations — set the values
+  # there (or in the shell) and restart; no --env-file flag needed. Blank keeps
+  # the provider disabled; redirect URLs default in-app to INROAD_PUBLIC_URL-
+  # derived paths, and the app treats empty as unset. The dev DSN and secrets
+  # above are pinned literals, so a native-dev .env can never leak those in.
   INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
   INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
   INROAD_GOOGLE_REDIRECT_URL: ${INROAD_GOOGLE_REDIRECT_URL:-}
@@ -58,10 +64,10 @@ x-go-env: &go-env
 
 x-go-build: &go-build
   build:
-    context: ../..
+    context: .
     dockerfile: deploy/docker/Dockerfile.dev-go
   volumes:
-    - ../..:/src
+    - .:/src
     # Named volumes for the module and build caches. Without these, every
     # container restart recompiles the whole dependency graph — the difference
     # between a 5-second and a 3-minute restart.
@@ -87,7 +93,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       # Integration tests expect a separate database; create it on first boot
       # so `go test -tags=integration` works against this stack too.
-      - ./initdb-test-db.sh:/docker-entrypoint-initdb.d/10-test-db.sh:ro
+      - ./deploy/docker/initdb-test-db.sh:/docker-entrypoint-initdb.d/10-test-db.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U inroad"]
       interval: 3s
@@ -153,11 +159,11 @@ services:
 
   web:
     build:
-      context: ../..
+      context: .
       dockerfile: deploy/docker/Dockerfile.dev-web
     volumes:
-      - ../../web:/web
-      - ../../api:/api          # openapi.yaml, for `npm run gen:api`
+      - ./web:/web
+      - ./api:/api          # openapi.yaml, for `npm run gen:api`
       # Anonymous volume shadows the bind mount so the container keeps its own
       # node_modules: host binaries are the wrong platform, and a bind-mounted
       # node_modules is pathologically slow on Windows and macOS.
@@ -182,7 +188,7 @@ services:
     working_dir: /docs
     command: sh -c "npm ci && npm run dev -- --host --port 4321"
     volumes:
-      - ../../docs:/docs
+      - ./docs:/docs
       # Container-private node_modules for the same platform reasons as web.
       - /docs/node_modules
     ports: ["4321:4321"]

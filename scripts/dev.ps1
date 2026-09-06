@@ -70,12 +70,12 @@ function Import-DotEnv {
 
 function Start-Services {
   Write-Host "starting postgres + redis..." -ForegroundColor Cyan
-  docker compose -f deploy/compose/docker-compose.dev.yml up -d | Out-Null
+  docker compose -f docker-compose.dev.yml up -d | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "docker compose failed. Is Docker Desktop running?" }
 
   Write-Host "waiting for postgres..." -NoNewline
   foreach ($i in 1..30) {
-    docker compose -f deploy/compose/docker-compose.dev.yml exec -T postgres pg_isready -U inroad -q 2>$null
+    docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U inroad -q 2>$null
     if ($LASTEXITCODE -eq 0) { Write-Host " ready"; return }
     Start-Sleep -Seconds 1
     Write-Host "." -NoNewline

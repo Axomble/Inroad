@@ -71,7 +71,7 @@ Language-agnostic rules for writing code in this repo — apply to every languag
 
 **One command, no local toolchain** (no Go, Node, or make needed):
 
-    docker compose -f deploy/compose/docker-compose.dev.yml up
+    docker compose -f docker-compose.dev.yml up
 
 Brings up Postgres, Redis, migrations, api (:8080), worker, and the SPA (:5173).
 Go rebuilds via `air` and the SPA hot-reloads via Vite — both watch the
