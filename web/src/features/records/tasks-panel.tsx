@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
@@ -5,13 +6,11 @@ import { CalendarClock, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useCrmCreateTaskMutation, type CrmTargetType } from './api'
+import { useCrmCreateTaskMutation, type CrmTargetFields, type CrmTargetType } from './api'
 import { recordErrorMessage } from './error-copy'
-import { formatDateTime } from '@/lib/datetime'
-import { parseActor } from './actor'
-import { ActorBadge } from './actor-badge'
 import { InlineLoading, MoreExist, MutedEmpty, QueryErrorBanner, Section } from '@/components/shared/record-page'
-import { useOpenTasks } from './use-open-tasks'
+import { isOpenTask, useOpenTasks } from './use-open-tasks'
+import { TaskRow } from './task-row'
 
 const taskSchema = z.object({
   title: z.string().trim().min(1, 'Add a task title.').max(200),
@@ -22,7 +21,34 @@ type TaskValues = z.infer<typeof taskSchema>
 
 /** The open follow-up work on any CRM record, and the form that adds to it. */
 export function TasksPanel({ targetType, targetId }: { targetType: CrmTargetType; targetId: string }) {
-  const { query, open } = useOpenTasks(targetType, targetId)
+  // The shared hook, so this list and the stat strip that counts open tasks above
+  // it are one query arg — one request, and a count that cannot contradict the
+  // list. The rows below come from the same cached page.
+  const { query } = useOpenTasks(targetType, targetId)
+
+  /**
+   * The tasks completed during this visit, which keep their place in the list —
+   * struck through, labelled Completed, with Reopen beside them.
+   *
+   * A done task is not open work, so it is filtered out of the counts and would
+   * otherwise leave the list the instant it was ticked: no confirmation that the
+   * right row was ticked, and no way back from a mis-click, because nothing on
+   * this panel can reach a done task again. Holding only the ones completed here
+   * keeps "What's next" a list of next actions rather than an archive — the
+   * durable record of the completion is the activity feed — and a reload clears
+   * it, by which point undo is no longer what the operator is reaching for.
+   */
+  const [completedHere, setCompletedHere] = useState<readonly string[]>([])
+  function trackCompletedHere(taskId: string, completed: boolean) {
+    setCompletedHere((ids) =>
+      completed ? (ids.includes(taskId) ? ids : [...ids, taskId]) : ids.filter((id) => id !== taskId),
+    )
+  }
+
+  // The target lives on the panel, never on the task: `CrmTask` carries no
+  // target_type/target_id, and `CrmTaskInput` requires both.
+  const target: CrmTargetFields = { target_type: targetType, target_id: targetId }
+  const shown = (query.data?.items ?? []).filter((task) => isOpenTask(task) || completedHere.includes(task.id))
 
   return (
     <Section title="What's next" description="Concrete follow-up work, visible to the whole workspace.">
@@ -37,23 +63,12 @@ export function TasksPanel({ targetType, targetId }: { targetType: CrmTargetType
         />
       ) : null}
       <ul className="mt-4 space-y-2">
-        {open.map((task) => (
-          <li key={task.id} className="rounded-lg border border-border bg-background p-3">
-            <div className="flex items-start gap-2">
-              <CalendarClock className="mt-0.5 size-4 text-accent-ink" aria-hidden="true" />
-              <div className="min-w-0">
-                <p className="text-sm font-medium">{task.title}</p>
-                <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <ActorBadge actor={parseActor(task.created_by_actor)} />
-                  {task.due_at ? <time dateTime={task.due_at}>Due {formatDateTime(task.due_at)}</time> : null}
-                </p>
-              </div>
-            </div>
-          </li>
+        {shown.map((task) => (
+          <TaskRow key={task.id} task={task} target={target} onCompletedHere={trackCompletedHere} />
         ))}
         {query.data?.next_cursor != null ? <MoreExist noun="tasks" /> : null}
       </ul>
-      {!query.isLoading && !query.isError && open.length === 0 ? (
+      {!query.isLoading && !query.isError && shown.length === 0 ? (
         <MutedEmpty text="No open tasks. Add the next concrete action." />
       ) : null}
     </Section>
