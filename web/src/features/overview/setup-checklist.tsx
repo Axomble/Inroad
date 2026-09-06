@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { ArrowRight, Check, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { SectionBar } from '@/components/layout/page'
 import { usePulseSelect } from '@/components/layout/use-pulse'
 // Read-only RTK Query hook from another feature's api.ts (hooks only, never
 // UI/state — the house exception): the sending-domain rows already answer
@@ -143,29 +144,17 @@ export const SetupChecklist = memo(function SetupChecklist() {
   const firstOpenId = steps.find((step) => !step.done)?.id
 
   return (
-    <section
-      aria-label="Setup checklist"
-      className="mb-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_12px_35px_rgba(20,28,12,0.06)]"
-    >
-      <header className="flex items-start gap-3 border-b border-border px-5 py-4">
-        <div>
-          <div className="font-mono text-[9px] uppercase tracking-[0.18em] text-faint">Getting started</div>
-          <h2 className="mt-0.5 text-base font-semibold tracking-tight">Set up your sending operation</h2>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="font-mono text-[10px] tabular-nums text-faint">
-            {doneCount}/{steps.length} done
-          </span>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Hide setup checklist"
-            onClick={() => dispatch(dismissSetupChecklist())}
-          >
-            <X className="size-4" />
-          </Button>
-        </div>
-      </header>
+    <section aria-label="Setup checklist" className="border-b border-border bg-surface/60">
+      <SectionBar label="Getting started" count={`${doneCount}/${steps.length} done`}>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Hide setup checklist"
+          onClick={() => dispatch(dismissSetupChecklist())}
+        >
+          <X className="size-4" />
+        </Button>
+      </SectionBar>
       <ul className="divide-y divide-border">
         {steps.map((step, index) => (
           <li key={step.id} className="flex items-center gap-3 px-5 py-3">
@@ -228,13 +217,10 @@ function ChecklistSkeleton() {
     <section
       aria-hidden="true"
       data-slot="setup-checklist-skeleton"
-      className="mb-4 overflow-hidden rounded-2xl border border-border bg-surface"
+      className="border-b border-border bg-surface/60"
     >
-      <div className="flex items-center border-b border-border px-5 py-4">
-        <div className="flex flex-col gap-1.5">
-          <Skeleton className="h-2 w-24" />
-          <Skeleton className="h-4 w-56" />
-        </div>
+      <div className="flex min-h-10 items-center border-b border-border px-4 py-1.5 sm:px-5">
+        <Skeleton className="h-3 w-32" />
         <Skeleton className="ml-auto h-3 w-14" />
       </div>
       <ul className="divide-y divide-border">

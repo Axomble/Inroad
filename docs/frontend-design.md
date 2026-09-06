@@ -174,6 +174,28 @@ the same rhythm:
 (tables, flow canvas) scrolls inside its own `overflow-x-auto` container so the page never scrolls
 sideways.
 
+**The scroll contract — one scroll region per view.** A page is pinned chrome (topbar, banners,
+StatStrip, SectionBar) plus exactly ONE `PageBody`, and everything that can grow lives inside it. Two
+sibling scroll regions splitting the viewport, or growable content rendered as a pinned sibling above
+the `PageBody`, are how submit buttons end up unreachable below the fold (the mailbox connect form
+shipped that bug twice). When a long form opens inline, it *takes over* the `PageBody` and the list
+returns on close — never stack them. Dialogs follow the same contract via
+`components/shared/scroll-dialog.tsx`: `ScrollDialogContent` + `ScrollDialogBody` pin the title and the
+action buttons and scroll only the fields. Never put `max-h + overflow-y-auto` on a whole
+`AlertDialogContent`.
+
+**Shape.** Page structure is square: bands separated by hairlines, no rounded cards, no soft drop
+shadows — the Overview page is built from the same `StatStrip`/`SectionBar` bands as every list page,
+with the inverted `--spotlight` band as its one signature. Radii are for floating and small surfaces
+only: controls/inputs (`rounded-md`/`rounded-lg`), overlays (menus, dialogs, palette, toasts), pills and
+dots. If a `rounded-xl`+shadow "card" appears in a page flow, it is drift — reach for a band instead.
+
+**The mono-caps voice is structural, and rationed.** Tracked-uppercase mono is reserved for structure:
+`SectionBar` labels, `ListHeader` columns, `Stat` labels, `StatusPill` text. Field-level hints
+("optional", "defaults to email"), helper copy, and explanations are plain lowercase
+`text-muted-foreground` — when everything is labeled in the structural voice, nothing reads as
+structure.
+
 **Z-index scale:** `10` dropdowns · `20` sticky chrome · `30` drawer · `40` scrim · `50` modal/toast.
 
 ---

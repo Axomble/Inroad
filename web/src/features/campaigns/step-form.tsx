@@ -163,9 +163,7 @@ export function StepForm({
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2">
           <Label htmlFor={subjectId}>Subject</Label>
-          {!isFirstStep && (
-            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">optional</span>
-          )}
+          {!isFirstStep && <span className="text-[11px] text-muted-foreground">optional</span>}
         </div>
         <Input
           id={subjectId}
@@ -193,8 +191,8 @@ export function StepForm({
           placeholder={'Hi {{first_name}},\n\n…'}
           {...register('body_text')}
         />
-        <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">
-          {'{{first_name}}'} and {'{{email}}'} are personalized per contact — {'{option a|option b}'}{' '}
+        <span className="text-xs text-muted-foreground">
+          {'{{first_name}}'} and {'{{email}}'} are personalized per contact; {'{option a|option b}'}{' '}
           spins a random variant per send
         </span>
       </div>

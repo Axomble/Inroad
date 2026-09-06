@@ -116,12 +116,13 @@ test('operator can navigate, inspect live metrics, search commands, and switch t
   await mockApi(page)
   await signIn(page)
 
-  // Scoped to the tile rather than a bare getByText('125'): the pulse's daily cap
+  // Scoped to the stat rather than a bare getByText('125'): the pulse's daily cap
   // now appears in more than one place on this page, and an unscoped match is a
-  // strict-mode violation. Naming the tile also states what is being checked — the
+  // strict-mode violation. Naming the stat also states what is being checked — the
   // overview reports the workspace's daily capacity — instead of asserting that the
-  // digits exist somewhere.
-  await expect(page.locator('article', { hasText: 'Daily capacity' })).toContainText('125')
+  // digits exist somewhere. (The metric is a StatStrip band, not a card article,
+  // since the Volt design pass.)
+  await expect(page.locator('[data-slot="stat"]', { hasText: 'Daily capacity' })).toContainText('125')
   await expect(page.getByText('Founder signal')).toBeVisible()
   // Scoped for the same reason as the tile above: the reason string reaches the DOM
   // in more than one place. Reading it inside the priority queue is also the
