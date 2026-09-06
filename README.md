@@ -14,7 +14,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](web/package.json)
-[![Postgres](https://img.shields.io/badge/Postgres-16-336791?logo=postgresql&logoColor=white)](deploy/compose/docker-compose.yml)
+[![Postgres](https://img.shields.io/badge/Postgres-16-336791?logo=postgresql&logoColor=white)](docker-compose.yml)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-docker%20compose-2496ED?logo=docker&logoColor=white)](docs/self-hosting.md)
 
 [Features](#features) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Self-hosting](#self-hosting) · [Docs](#documentation) · [Security](#security) · [Contributing](#contributing)
@@ -268,7 +268,7 @@ docker compose up -d
 
 The stack uses default environment fallback values so `docker compose up -d` boots out of the box. The Nginx SPA runs on <http://localhost> (Port 80), the API serves on <http://localhost:8080>, database migrations execute automatically before API/Worker boot, and the worker attaches to Redis.
 
-For local live-reloading dev, copy `cp docker-compose.override.yml.example docker-compose.override.yml` and run `docker compose up` (Air hot reloading for Go backend, Vite HMR for React SPA).
+For local live-reloading dev, run `docker compose -f deploy/compose/docker-compose.dev.yml up` (Air hot reloading for the Go backend, Vite HMR for the React SPA, Mailpit catching transactional email on <http://localhost:8025>, and the Astro docs site on <http://localhost:4321>).
 
 For cloud infrastructure, production deployment manifests are included in the repository:
 - **AWS Cloud (Terraform):** Complete VPC, RDS PostgreSQL, ElastiCache Redis, S3, ECS Fargate (API & Worker), ALB, IAM roles, and KMS key manifests in [`deploy/terraform/aws/main.tf`](deploy/terraform/aws/main.tf).
