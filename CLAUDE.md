@@ -90,7 +90,10 @@ Note the Go binaries do **not** read `.env` themselves — running them directly
 means exporting it first (`set -a && . ./.env && set +a`).
 
 Tests: `make test` (unit) · `make test-integration` (needs the DB up).
-Lint: `make lint` (Go + web) · `make lint-go` · `make lint-web`. Needs `golangci-lint` on PATH (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`).
+Lint: `make lint` (Go + web) · `make lint-go` · `make lint-web`. Needs the PINNED `golangci-lint` on PATH — `make lint-go` refuses a different one, because a
+different version is a different rule set and would not match CI. The version lives in the
+Makefile (`GOLANGCI_VERSION`), which CI reads too:
+`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2`.
 
 ## More docs
 

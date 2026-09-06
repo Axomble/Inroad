@@ -32,7 +32,18 @@ func (q *Queries) AssignInboxThreadLabel(ctx context.Context, arg AssignInboxThr
 }
 
 const bumpInboxThreadLastMessageAt = `-- name: BumpInboxThreadLastMessageAt :exec
-UPDATE inbox_threads SET last_message_at = now() WHERE id = $1 AND workspace_id = $2
+UPDATE inbox_threads t
+SET last_message_at = now(),
+    unread = CASE
+        WHEN (
+            SELECT m.direction FROM inbox_messages m
+            WHERE m.thread_id = t.id AND m.workspace_id = t.workspace_id
+            ORDER BY m.occurred_at DESC, m.id DESC
+            LIMIT 1
+        ) = 'outbound' THEN false
+        ELSE t.unread
+    END
+WHERE t.id = $1 AND t.workspace_id = $2
 `
 
 type BumpInboxThreadLastMessageAtParams struct {
@@ -41,11 +52,36 @@ type BumpInboxThreadLastMessageAtParams struct {
 }
 
 // Advances a thread's last_message_at after an operator's manual reply is
-// recorded (Service.RecordOutboundReply), WITHOUT touching unread or
-// last_reply_class: unread was already cleared by Service.Reply when it
-// enqueued the send (POST /inbox/threads/{id}/reply marks the thread read),
-// and an operator's own outbound reply is not itself a classified inbound
-// reply. Mirrors UpsertInboxThread's bump but deliberately narrower.
+// recorded (Service.RecordOutboundReply), and clears unread.
+//
+// Clearing unread here is a FIX, not a widening. The previous comment said
+// unread was "already cleared by Service.Reply when it enqueued the send", and
+// that was true when POST /inbox/threads/{id}/reply was the only way to reply.
+// It is not the way the product replies: the composer sends through
+// /schedule-reply for both Send and Send-later (a zero undo window is an
+// immediate send), and that path deliberately does NOT mark read at enqueue,
+// because an undone send must not leave the thread read. Nothing cleared it
+// afterwards, so every thread replied to through the UI stayed unread forever.
+// ScheduleReply's own comment promised this moment ("it moves to the moment the
+// send actually lands"); nothing implemented it.
+//
+// The rule is "if the newest message in this thread is an outbound reply, the
+// thread has been dealt with". Stated that way rather than as an unconditional
+// clear, because a reply can land AFTER fresh inbound mail: the operator writes a
+// reply, a new message arrives while it waits out the undo window, and clearing
+// unread then would bury something nobody has read. In that case the newest
+// message is inbound, the CASE leaves unread alone, and the thread stays unread —
+// correctly, since the new message is not what this reply answers.
+//
+// Derived from the messages rather than taken as a parameter. The value would
+// have to be the moment the operator WROTE the reply (not when it sent, which is
+// after the inbound), which means threading a timestamp through coreapi that a
+// future caller can forget — the same "a writer cannot forget a value it does not
+// supply" reasoning this file applies to mailbox_id above. This runs in the same
+// transaction as the outbound INSERT, so that row is already visible here.
+//
+// last_reply_class is still untouched: an operator's own outbound reply is not a
+// classified inbound reply. Mirrors UpsertInboxThread's bump but narrower.
 func (q *Queries) BumpInboxThreadLastMessageAt(ctx context.Context, arg BumpInboxThreadLastMessageAtParams) error {
 	_, err := q.db.Exec(ctx, bumpInboxThreadLastMessageAt, arg.ID, arg.WorkspaceID)
 	return err
@@ -448,6 +484,55 @@ type FailInboxPendingReplyParams struct {
 func (q *Queries) FailInboxPendingReply(ctx context.Context, arg FailInboxPendingReplyParams) error {
 	_, err := q.db.Exec(ctx, failInboxPendingReply, arg.LastError, arg.ID, arg.WorkspaceID)
 	return err
+}
+
+const findDuplicateInboxPendingReply = `-- name: FindDuplicateInboxPendingReply :one
+SELECT id FROM inbox_pending_replies
+WHERE workspace_id = $1
+  AND thread_id = $2
+  AND body_text = $3
+  AND status = 'scheduled'
+  AND created_at > now() - $4::interval
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindDuplicateInboxPendingReplyParams struct {
+	WorkspaceID uuid.UUID       `json:"workspace_id"`
+	ThreadID    uuid.UUID       `json:"thread_id"`
+	BodyText    string          `json:"body_text"`
+	Within      pgtype.Interval `json:"within"`
+}
+
+// A double-submitted immediate reply, so the second one can be collapsed instead
+// of delivered.
+//
+// POST /inbox/threads/{id}/reply used to be deduped by its asynq TaskID
+// ("inboxreply:<thread>:<unix-second>"), which swallowed a second click inside the
+// same second as success. Routing that path through a pending row replaced that key
+// with the row's own uuid, so two clicks became two rows and two real emails. This
+// restores the guard where the row is created, which is the only place it can now
+// live.
+//
+// Matched on the BODY, not merely on the thread: two different replies queued to one
+// thread is legitimate and must not be refused, while a double-click is by
+// definition the identical text. Bounded by a window rather than open-ended for the
+// same reason — sending the same sentence twice an hour apart is a choice, not a
+// misfire.
+//
+// Only 'scheduled' rows count. A row already claimed, sent or cancelled is not a
+// pending duplicate, and collapsing against a sent one would silently drop a
+// deliberate re-send.
+func (q *Queries) FindDuplicateInboxPendingReply(ctx context.Context, arg FindDuplicateInboxPendingReplyParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, findDuplicateInboxPendingReply,
+		arg.WorkspaceID,
+		arg.ThreadID,
+		arg.BodyText,
+		arg.Within,
+	)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const findInboxLabelByName = `-- name: FindInboxLabelByName :one

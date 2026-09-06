@@ -68,7 +68,21 @@ tidy: ## Tidy go.mod
 
 lint: lint-go lint-web ## Run all linters (Go + web)
 
-lint-go: ## Run golangci-lint on the Go backend
+# The ONE place the linter version is written down. CI reads this same line (see
+# .github/workflows/ci.yml), because the two drifting apart is not hypothetical: CI
+# pinned v2.1.6 while CLAUDE.md told developers to install @latest, so `make lint`
+# and the CI gate ran different rule sets for months. main went red locally while
+# every PR was green, and 10 noctx findings merged unnoticed.
+GOLANGCI_VERSION := 2.12.2
+
+lint-go: ## Run golangci-lint on the Go backend (version-checked)
+	@have=$$(golangci-lint version 2>/dev/null | sed -n 's/.*version \([0-9.]*\).*/\1/p'); \
+	if [ "$$have" != "$(GOLANGCI_VERSION)" ]; then \
+		echo "golangci-lint $(GOLANGCI_VERSION) required, found $${have:-none}."; \
+		echo "A different version is a different rule set — the gate would not match CI."; \
+		echo "  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_VERSION)"; \
+		exit 1; \
+	fi
 	golangci-lint run ./...
 
 lint-web: ## Run oxlint + strict typecheck on the SPA

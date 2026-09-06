@@ -1,6 +1,7 @@
 package realtime
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -94,13 +95,13 @@ func TestOriginAllowed_AcceptsAnyEntryInAMultiOriginAllowlist(t *testing.T) {
 func TestCheckOrigin_ReadsTheOriginHeader(t *testing.T) {
 	check := checkOrigin(allowed)
 
-	ok := httptest.NewRequest(http.MethodGet, "/ws", http.NoBody)
+	ok := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ws", http.NoBody)
 	ok.Header.Set("Origin", "https://app.example.com")
 	if !check(ok) {
 		t.Error("the configured origin was refused through checkOrigin")
 	}
 
-	bad := httptest.NewRequest(http.MethodGet, "/ws", http.NoBody)
+	bad := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/ws", http.NoBody)
 	bad.Header.Set("Origin", "https://evil.example.com")
 	if check(bad) {
 		t.Error("a foreign origin was accepted through checkOrigin")

@@ -50,16 +50,28 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: true
-      # install-mode goinstall, not the default prebuilt binary: the published
-      # v2.1.6 binary is built with go1.24, and golangci-lint refuses to load a
-      # config whose target Go version (1.25.0, from go.mod) is newer than its own
-      # build toolchain. Compiling it here with the Go set up above makes the CI
-      # linter identical to the `go install`-ed one `make lint` runs locally, so
-      # neither side can pass while the other fails.
+      # The version comes from the Makefile's GOLANGCI_VERSION, not a literal here.
+      # A literal is what let the two diverge: this file pinned v2.1.6 while
+      # CLAUDE.md told developers `@latest`, so `make lint` ran an eleven-minor
+      # newer rule set than the gate. The older linter did not have the checks the
+      # newer one flagged, so main could be red on a developer's machine and green
+      # here — and 10 findings merged that way.
+      - id: linter
+        run: echo "version=$(sed -n 's/^GOLANGCI_VERSION := //p' Makefile)" >> "$GITHUB_OUTPUT"
+      # The PREBUILT binary, not `go install` — the same call the sqlc step below
+      # makes, for the same reason. golangci-lint v2.12's module declares a Go newer
+      # than the 1.25.x set up above, and actions/setup-go pins GOTOOLCHAIN=local, so
+      # building it from source dies mid-compile. A published binary carries no
+      # toolchain constraint.
+      #
+      # goinstall was here because v2.1.6's prebuilt binary was built with go1.24 and
+      # refused to load a config targeting go1.25 (go.mod). That objection dies with
+      # the pin bump: v2.12.2's published binary is built with a Go newer than this
+      # module targets, so it loads the config directly. Compiling from source was
+      # only ever a workaround for an old binary.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.1.6
-          install-mode: goinstall
+          version: v${{ steps.linter.outputs.version }}
 
   go-test:
     name: Go unit tests

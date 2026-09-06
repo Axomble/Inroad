@@ -109,6 +109,36 @@ func WithSuppressionChecker(c SuppressionChecker) ServiceOption {
 // the workspace's outstanding-send cap, which this path inherits by writing the
 // same rows the deferred path does.
 func (s *Service) Reply(ctx context.Context, ws, threadID uuid.UUID, bodyText string, createdBy *uuid.UUID) error {
+	// Collapse a double-submit rather than delivering it twice.
+	//
+	// This route used to be deduped by its asynq TaskID — "inboxreply:<thread>:
+	// <unix-second>" — whose conflict asynq swallows as success, so a second click
+	// inside the same second sent once. Routing the path through a pending row
+	// replaced that key with the row's own uuid, and two clicks became two rows and
+	// two real emails to a contact. The guard has to live here now, because the row
+	// is created before anything is enqueued.
+	//
+	// Returning nil on a hit is the same observable behaviour the TaskID conflict
+	// had, and this route hands back no id, so a caller cannot tell the difference —
+	// which is the point. It is checked BEFORE queueReply so a duplicate does not
+	// consume a slot against the outstanding-send cap.
+	// Nil-checked here rather than relying on queueReply's identical guard below:
+	// this runs BEFORE it, so an unwired store panicked instead of returning the
+	// clean "deferred replies are not configured" error. Caught by
+	// TestReplyWithoutAPendingStoreFails, which existed and was right.
+	if s.pending == nil {
+		return fmt.Errorf("%w: deferred replies are not configured", ErrValidation)
+	}
+	dupe, err := s.pending.FindDuplicatePendingReply(ctx, ws, threadID, bodyText, immediateReplyDedupWindow)
+	if err != nil {
+		return err
+	}
+	if dupe != uuid.Nil {
+		slog.InfoContext(ctx, "inbox_reply_duplicate_collapsed",
+			"workspace_id", ws, "thread_id", threadID, "existing_pending_id", dupe)
+		return nil
+	}
+
 	if _, err := s.queueReply(ctx, ws, threadID, bodyText, immediateSendAfter(s.now()), createdBy); err != nil {
 		return err
 	}

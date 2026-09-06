@@ -141,7 +141,7 @@ func authed(h *Handler) http.Handler {
 func mintedTicket(t *testing.T, h *Handler) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	authed(h).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/realtime/ticket", http.NoBody))
+	authed(h).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/realtime/ticket", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("mint: got %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -159,7 +159,7 @@ func mintedTicket(t *testing.T, h *Handler) string {
 // recorder cannot hijack — so these tests assert the REFUSALS, which all happen
 // before the upgrade. The accept path is covered by the integration test below.
 func wsRequest(ticket, origin string) *http.Request {
-	r := httptest.NewRequest(http.MethodGet, "/realtime/ws?ticket="+ticket, http.NoBody)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/realtime/ws?ticket="+ticket, http.NoBody)
 	if origin != "" {
 		r.Header.Set("Origin", origin)
 	}
@@ -197,7 +197,7 @@ func TestMintTicket_RejectsAnUnauthenticatedRequest(t *testing.T) {
 	h := testHandler(t, &fakeHub{}, newFakeBurner(), fakeSessions{live: true})
 
 	rec := httptest.NewRecorder()
-	router(h, anonymousVerifier{}, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/realtime/ticket", http.NoBody))
+	router(h, anonymousVerifier{}, nil).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/realtime/ticket", http.NoBody))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("got %d, want 401", rec.Code)
@@ -212,7 +212,7 @@ func TestMintTicket_RejectsAPrincipalWithNoSession(t *testing.T) {
 	rec := httptest.NewRecorder()
 	// A principal with no session id — the shape an api-key or OAuth caller has.
 	router(h, sessionVerifier{sessionID: ""}, nil).
-		ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/realtime/ticket", http.NoBody))
+		ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/realtime/ticket", http.NoBody))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("got %d, want 401", rec.Code)
@@ -254,7 +254,7 @@ func TestServeWS_RejectsAMissingTicket(t *testing.T) {
 	h := testHandler(t, &fakeHub{}, newFakeBurner(), fakeSessions{live: true})
 
 	rec := httptest.NewRecorder()
-	authed(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/realtime/ws", http.NoBody))
+	authed(h).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/realtime/ws", http.NoBody))
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("got %d, want 401", rec.Code)
@@ -453,7 +453,7 @@ func TestLastSeq(t *testing.T) {
 		{"12abc", -1},
 		{"99999999999999999999", -1},
 	} {
-		r := httptest.NewRequest(http.MethodGet, "/realtime/ws?last_seq="+tc.query, http.NoBody)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/realtime/ws?last_seq="+tc.query, http.NoBody)
 		if got := lastSeq(r); got != tc.want {
 			t.Errorf("lastSeq(%q) = %d, want %d", tc.query, got, tc.want)
 		}
@@ -477,7 +477,7 @@ func TestRoutes_ThrottleMiddlewareIsAppliedToTicketMinting(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	router(h, sessionVerifier{sessionID: testSession}, throttle).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/realtime/ticket", http.NoBody))
+	router(h, sessionVerifier{sessionID: testSession}, throttle).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/realtime/ticket", http.NoBody))
 
 	if !called {
 		t.Error("throttle middleware was not applied to POST /ticket")
@@ -515,7 +515,7 @@ func TestRoutes_TicketRejectsGET(t *testing.T) {
 	h := testHandler(t, &fakeHub{}, newFakeBurner(), fakeSessions{live: true})
 
 	rec := httptest.NewRecorder()
-	authed(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/realtime/ticket", http.NoBody))
+	authed(h).ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/realtime/ticket", http.NoBody))
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("got %d, want 405", rec.Code)
