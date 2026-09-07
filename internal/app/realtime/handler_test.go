@@ -125,11 +125,24 @@ func (anonymousVerifier) Verify(context.Context, *http.Request) (auth.Principal,
 	return auth.Principal{}, false, nil
 }
 
-// router mounts the handler behind RequireAuth, the way cmd/inroad does.
+// router mounts the handler the way cmd/inroad does: ticket minting behind
+// RequireAuth, and the socket PUBLIC, because a browser cannot put a bearer
+// token on an Upgrade and RequireAuth reads the credential only from the
+// Authorization header. The socket's own gates (ticket signature + expiry,
+// session re-check, nonce burn, Origin allowlist) are what authenticate it, so
+// the tests below exercise it without a principal — as a real browser does.
 func router(h *Handler, v auth.Verifier, throttle func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
-	r.Use(auth.RequireAuth(v))
-	r.Mount("/realtime", h.Routes(throttle))
+	r.Group(func(pr chi.Router) {
+		pr.Use(auth.RequireAuth(v))
+		pr.Mount("/realtime", h.TicketRoutes(throttle))
+	})
+	// The socket mounts on the FULL path, the way cmd/inroad does: the mint
+	// endpoint already mounts the "/realtime" prefix above, and chi panics on a
+	// duplicate Mount of the same pattern. That yields the same two URLs
+	// production serves — /realtime/ticket behind the verifier, /realtime/ws in
+	// front of it.
+	r.Mount("/realtime/ws", h.SocketRoutes())
 	return r
 }
 
