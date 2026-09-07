@@ -32,11 +32,16 @@ import (
 // Unknown rather than held onto.
 const lookupTimeout = 5 * time.Second
 
-// dkimProbeBudget bounds ALL the selector probes together. Nine selectors at the
-// per-lookup timeout would be 45 seconds of an operator's recheck spent on the
+// dkimProbeBudget bounds ALL the selector probes together. The default set at
+// the per-lookup timeout would be a minute of an operator's recheck spent on the
 // one part of the check that cannot change the answer, so the probe gives up as
 // a whole and reports "not detected" — which is what an unmatched selector
 // already means.
+//
+// This is a WALL-CLOCK ceiling, deliberately not a per-selector multiple, so
+// adding a selector to DefaultSelectors never lengthens a recheck. The cost of a
+// longer list is paid only by domains that sign on a late selector or do not
+// sign at all, and only up to this bound.
 const dkimProbeBudget = 10 * time.Second
 
 // State is the verdict for a domain. It is a string because it is persisted and
@@ -115,13 +120,33 @@ func (r Result) State() State {
 }
 
 // DefaultSelectors are the DKIM selectors worth guessing: the ones Google
-// Workspace, Microsoft 365, and the common ESPs publish. It returns a fresh
-// slice rather than exposing a package-level variable a caller could mutate.
+// Workspace, Microsoft 365, the common ESPs, and the shared hosts operators
+// actually buy mailboxes from publish. It returns a fresh slice rather than
+// exposing a package-level variable a caller could mutate.
 //
-// The list is a heuristic and is expected to miss custom selectors — which is
-// exactly why a miss is advisory (package doc, judgement 1).
+// Ordered cheapest-guess-first, because probeDKIM stops at the first hit and
+// shares one wall-clock budget across every probe: a selector late in this list
+// is only reached when the earlier ones miss, so the providers most likely to
+// answer come first.
+//
+// hostingermail1..3 are here for a concrete reason, not for completeness.
+// Hostinger signs on `hostingermail1` and sells cheap high-mailbox-count plans,
+// so it is a provider this product's operators land on — and with the selector
+// missing from this list, a domain whose SPF, DKIM and DMARC were all published
+// and valid still reported "DKIM not detected" on every check, on-demand recheck
+// included. The recheck could never fix it: the probe never queried the name.
+//
+// The list remains a heuristic and will still miss genuinely custom selectors —
+// which is exactly why a miss is advisory (package doc, judgement 1). Adding a
+// provider here is the right fix when the provider is KNOWN; do not try to infer
+// selectors from the MX record, which breaks whenever outbound and inbound hosts
+// differ.
 func DefaultSelectors() []string {
-	return []string{"google", "default", "selector1", "selector2", "k1", "mail", "dkim", "s1", "s2"}
+	return []string{
+		"google", "default", "selector1", "selector2",
+		"hostingermail1", "hostingermail2", "hostingermail3",
+		"k1", "mail", "dkim", "s1", "s2",
+	}
 }
 
 // Check performs the three lookups for one domain. selectors extends (does not

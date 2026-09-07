@@ -237,6 +237,27 @@ func TestSelectorProbeStopsAtFirstHit(t *testing.T) {
 	}
 }
 
+// TestHostingerSelectorIsProbedByDefault is the regression test for a real
+// false negative: a domain with valid SPF, DKIM and DMARC reported "DKIM not
+// detected" forever because Hostinger signs on `hostingermail1` and that
+// selector was not in the default probe set. No amount of re-checking could fix
+// it — the probe never queried the name — so this asserts the default set alone
+// finds it, with no operator-supplied selector.
+func TestHostingerSelectorIsProbedByDefault(t *testing.T) {
+	res := &fakeResolver{txt: map[string][]string{
+		domain:                                {spfRecord},
+		"_dmarc." + domain:                    {dmarcRecord},
+		"hostingermail1._domainkey." + domain: {dkimRecord},
+	}}
+	got := Check(context.Background(), res, domain, nil)
+	if !got.DKIM.Found || got.DKIM.Selector != "hostingermail1" {
+		t.Fatalf("DKIM = %+v, want found on hostingermail1", got.DKIM)
+	}
+	if got.State() != StatePassing {
+		t.Fatalf("State() = %q, want %q", got.State(), StatePassing)
+	}
+}
+
 func TestOperatorSuppliedSelectorIsProbedAfterTheDefaults(t *testing.T) {
 	res := &fakeResolver{txt: map[string][]string{
 		"custom2024._domainkey." + domain: {dkimRecord},
