@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { config } from '@/lib/config'
 import type { WorkspacePulse } from '@/features/pulse/api'
 import { usePulseSelect } from './use-pulse'
+import { BrandMark } from './brand-mark'
 
 /**
  * App shell header. Deliberately feature-agnostic — the workspace switcher and
@@ -58,10 +59,10 @@ export function AppHeader({
       </Button>
 
       <div className="flex items-center gap-2.5">
-        <div className="relative grid size-7 place-items-center rounded-lg bg-primary text-sm font-black text-primary-foreground shadow-[0_0_18px_rgba(195,245,60,0.28)]">
-          <span className="relative z-10">I</span>
-          <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full border-2 border-chrome bg-data" aria-hidden="true" />
-        </div>
+        {/* The mark is monochrome and inherits the chrome's text colour, so it
+            works on both themes from one asset. No lime chip: the accent is
+            spent on actions (the primary button), not on the logo. */}
+        <BrandMark className="size-7 text-chrome-text" />
         <div className="leading-none">
           <span className="text-[15px] font-bold tracking-[-0.025em]">Inroad</span>
           <span className="ml-2 hidden font-mono text-[8px] uppercase tracking-[0.18em] text-chrome-muted lg:inline">Outreach OS</span>

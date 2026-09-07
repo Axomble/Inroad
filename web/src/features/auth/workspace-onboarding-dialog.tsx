@@ -1,4 +1,5 @@
 import { useId, useRef } from 'react'
+import { BrandMark } from '@/components/layout/brand-mark'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -117,9 +118,7 @@ export default function OnboardingDialog({
         className="w-full max-w-xl gap-0 rounded-xl border-border bg-surface p-8 shadow-2xl sm:p-10"
       >
         <div className="flex items-center gap-2">
-          <div className="grid size-7 place-items-center rounded-lg bg-primary text-[13px] font-bold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_0_var(--primary-edge)]">
-            I
-          </div>
+          <BrandMark className="size-7 text-foreground" />
           <span className="text-sm font-bold tracking-tight text-foreground">Inroad</span>
         </div>
 

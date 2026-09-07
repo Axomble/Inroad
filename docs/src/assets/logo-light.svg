@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Inroad">
+  <title>Inroad</title>
+  <!--
+    Docs sidebar mark, LIGHT theme (dark ink). Starlight picks between this and
+    logo-dark.svg itself, so neither file can use prefers-color-scheme.
+    Geometry is identical to web/src/components/layout/brand-mark.tsx; keep the
+    three path "d" values in sync when either changes.
+  -->
+  <g fill="#11150d">
+    <path d="M44 6 26 43 21 27Z" opacity="0.45"/>
+    <path d="M21 27 44 6 26 43Z" opacity="0.7"/>
+    <path d="M4 21 44 6 21 27Z"/>
+  </g>
+</svg>

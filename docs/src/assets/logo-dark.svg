@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Inroad">
+  <title>Inroad</title>
+  <!--
+    Docs sidebar mark, DARK theme (off-white). Twin of logo-light.svg: same
+    geometry, inverted ink. Starlight swaps them via its own theme state.
+  -->
+  <g fill="#f2f7e8">
+    <path d="M44 6 26 43 21 27Z" opacity="0.45"/>
+    <path d="M21 27 44 6 26 43Z" opacity="0.7"/>
+    <path d="M4 21 44 6 21 27Z"/>
+  </g>
+</svg>

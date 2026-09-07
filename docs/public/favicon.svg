@@ -1,1 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><path fill-rule="evenodd" d="M81 36 64 0 47 36l-1 2-9-10a6 6 0 0 0-9 9l10 10h-2L0 64l36 17h2L28 91a6 6 0 1 0 9 9l9-10 1 2 17 36 17-36v-2l9 10a6 6 0 1 0 9-9l-9-9 2-1 36-17-36-17-2-1 9-9a6 6 0 1 0-9-9l-9 10v-2Zm-17 2-2 5c-4 8-11 15-19 19l-5 2 5 2c8 4 15 11 19 19l2 5 2-5c4-8 11-15 19-19l5-2-5-2c-8-4-15-11-19-19l-2-5Z" clip-rule="evenodd"/><path d="M118 19a6 6 0 0 0-9-9l-3 3a6 6 0 1 0 9 9l3-3Zm-96 4c-2 2-6 2-9 0l-3-3a6 6 0 1 1 9-9l3 3c3 2 3 6 0 9Zm0 82c-2-2-6-2-9 0l-3 3a6 6 0 1 0 9 9l3-3c3-2 3-6 0-9Zm96 4a6 6 0 0 1-9 9l-3-3a6 6 0 1 1 9-9l3 3Z"/><style>path{fill:#000}@media (prefers-color-scheme:dark){path{fill:#fff}}</style></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="Inroad">
+  <title>Inroad</title>
+  <!--
+    Same geometry as brand/inroad-mark.svg and the BrandMark component. Kept as
+    its own file rather than a copy-by-reference because a favicon is fetched
+    standalone by the browser and cannot inherit anything from the page.
+    The previous favicon was a purple glyph left over from a template; it
+    matched nothing else in the product.
+  -->
+  <style>
+    .mark { fill: #11150d; }
+    @media (prefers-color-scheme: dark) { .mark { fill: #f2f7e8; } }
+  </style>
+  <g class="mark">
+    <path d="M44 6 26 43 21 27Z" opacity="0.45"/>
+    <path d="M21 27 44 6 26 43Z" opacity="0.7"/>
+    <path d="M4 21 44 6 21 27Z"/>
+  </g>
+</svg>

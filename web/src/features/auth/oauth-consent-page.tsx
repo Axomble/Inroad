@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { BrandMark } from '@/components/layout/brand-mark'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { AlertCircle, Check, Loader2, ShieldCheck, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -195,9 +196,7 @@ function ConsentShell({ children }: { children: React.ReactNode }) {
     <div className="grid min-h-dvh place-items-center bg-background px-4 py-10">
       <div className="w-full max-w-md">
         <div className="mb-6 flex items-center justify-center gap-2">
-          <div className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_0_var(--primary-edge)]">
-            I
-          </div>
+          <BrandMark className="size-8 text-foreground" />
           <span className="text-[15px] font-bold tracking-tight">Inroad</span>
         </div>
         <div className="rounded-xl border border-border bg-card p-6 sm:p-8">{children}</div>
