@@ -1264,6 +1264,33 @@ type WebauthnCredential struct {
 	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
 }
 
+type WebhookDelivery struct {
+	ID             uuid.UUID          `json:"id"`
+	EndpointID     uuid.UUID          `json:"endpoint_id"`
+	WorkspaceID    uuid.UUID          `json:"workspace_id"`
+	EventType      string             `json:"event_type"`
+	Payload        []byte             `json:"payload"`
+	Status         string             `json:"status"`
+	Attempts       int32              `json:"attempts"`
+	LastError      string             `json:"last_error"`
+	ResponseStatus *int32             `json:"response_status"`
+	NextAttemptAt  pgtype.Timestamptz `json:"next_attempt_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	DeliveredAt    pgtype.Timestamptz `json:"delivered_at"`
+}
+
+type WebhookEndpoint struct {
+	ID               uuid.UUID          `json:"id"`
+	WorkspaceID      uuid.UUID          `json:"workspace_id"`
+	Url              string             `json:"url"`
+	Description      string             `json:"description"`
+	SecretCiphertext []byte             `json:"secret_ciphertext"`
+	EventTypes       []string           `json:"event_types"`
+	Active           bool               `json:"active"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Worker struct {
 	WorkerID   string             `json:"worker_id"`
 	EgressIp   string             `json:"egress_ip"`
