@@ -52,7 +52,7 @@ export function MetricsPanel({
         <MetricCell
           label="Clicks"
           badge={
-            <Badge variant="ok" className="rounded-sm px-1.5 py-0 text-[9.5px] normal-case tracking-normal">
+            <Badge variant="ok" className="rounded-sm px-1.5 py-0 text-[10.5px] normal-case tracking-normal">
               Reliable
             </Badge>
           }
@@ -95,7 +95,7 @@ function MetricCell({
       >
         {value}
       </div>
-      {rate && <div className="mt-1 font-mono text-[11px] text-muted-foreground">{rate}</div>}
+      {rate && <div className="mt-1 font-mono text-[12px] text-muted-foreground">{rate}</div>}
     </div>
   )
 }
@@ -108,7 +108,7 @@ function IndicativeBadge() {
         <TooltipTrigger asChild>
           <Badge
             variant="outline"
-            className="cursor-help gap-0.5 rounded-sm px-1.5 py-0 text-[9.5px] normal-case tracking-normal"
+            className="cursor-help gap-0.5 rounded-sm px-1.5 py-0 text-[10.5px] normal-case tracking-normal"
           >
             Indicative
             <Info className="size-3" />
@@ -142,7 +142,7 @@ function TrackingToggle({ campaignId, enabled }: { campaignId: string; enabled: 
   return (
     <div className="flex items-center gap-2">
       {failed && (
-        <span role="alert" className="font-mono text-[10px] normal-case tracking-normal text-danger">
+        <span role="alert" className="font-mono text-[11px] normal-case tracking-normal text-danger">
           Couldn't update tracking — try again.
         </span>
       )}

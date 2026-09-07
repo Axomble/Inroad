@@ -82,7 +82,7 @@ export function DeadLetterRow({ letter }: { letter: TaskDeadLetter }) {
               {status.label}
             </span>
           </p>
-          <p data-slot="dead-letter-meta" className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+          <p data-slot="dead-letter-meta" className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
             {attemptsText(letter.attempt_count)} · gave up {relativeTime(letter.created_at)}
             {letter.replayed_at && ` · replayed ${relativeTime(letter.replayed_at)}`}
           </p>
@@ -106,7 +106,7 @@ export function DeadLetterRow({ letter }: { letter: TaskDeadLetter }) {
         )}
       </div>
 
-      <p data-slot="dead-letter-error" className="mt-1.5 max-w-prose text-[11px] leading-snug text-faint">
+      <p data-slot="dead-letter-error" className="mt-1.5 max-w-prose text-[12px] leading-snug text-faint">
         {lastErrorText(letter.last_error)}
       </p>
 
@@ -122,7 +122,7 @@ export function DeadLetterRow({ letter }: { letter: TaskDeadLetter }) {
       {showPayload && (
         <pre
           data-slot="dead-letter-payload"
-          className="mt-1.5 max-h-64 overflow-auto rounded border border-border bg-surface/60 p-2 text-[11px] leading-snug text-muted-foreground"
+          className="mt-1.5 max-h-64 overflow-auto rounded border border-border bg-surface/60 p-2 text-[12px] leading-snug text-muted-foreground"
         >
           {payloadText(letter.payload)}
         </pre>
@@ -132,7 +132,7 @@ export function DeadLetterRow({ letter }: { letter: TaskDeadLetter }) {
         <p
           role="alert"
           data-slot="dead-letter-action-error"
-          className="mt-2 flex items-start gap-1.5 text-[11px] leading-snug text-danger"
+          className="mt-2 flex items-start gap-1.5 text-[12px] leading-snug text-danger"
         >
           <AlertCircle className="mt-px size-3.5 shrink-0" aria-hidden="true" />
           <span>{actionError}</span>

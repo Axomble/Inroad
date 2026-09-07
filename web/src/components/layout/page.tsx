@@ -71,7 +71,7 @@ export function SectionBar({
       className={cn('flex min-h-10 flex-wrap items-center gap-2 border-b border-border px-4 py-1.5 sm:px-5', className)}
     >
       <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-faint">{label}</span>
-      {count != null && <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{count}</span>}
+      {count != null && <span className="font-mono text-[12px] tabular-nums text-muted-foreground">{count}</span>}
       {children && <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">{children}</div>}
     </div>
   )
@@ -111,7 +111,7 @@ export function Stat({
         {label}
       </div>
       <div className="mt-1.5 text-[29px] font-light leading-none tracking-[-0.04em] tabular-nums text-foreground">{value}</div>
-      {sub && <div className="mt-1 font-mono text-[11px] text-muted-foreground">{sub}</div>}
+      {sub && <div className="mt-1 font-mono text-[12px] text-muted-foreground">{sub}</div>}
     </div>
   )
 }
@@ -166,13 +166,13 @@ export function HintBar({
     <div
       data-slot="hint-bar"
       className={cn(
-        'flex h-8 shrink-0 items-center gap-3 border-t border-border px-5 text-[11px] text-faint',
+        'flex h-8 shrink-0 items-center gap-3 border-t border-border px-5 text-[12px] text-faint',
         className,
       )}
     >
       {hints.map((h) => (
         <span key={h.keys} className="flex items-center gap-1.5">
-          <kbd className="rounded border border-border bg-surface-2 px-1 font-mono text-[10px] text-muted-foreground">
+          <kbd className="rounded border border-border bg-surface-2 px-1 font-mono text-[11px] text-muted-foreground">
             {h.keys}
           </kbd>
           {h.label}

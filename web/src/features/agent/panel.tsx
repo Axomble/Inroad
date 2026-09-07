@@ -118,7 +118,7 @@ function EmptyConversation({ onPrompt }: { onPrompt: (text: string) => void }) {
         <Sparkles className="size-5" aria-hidden="true" />
       </div>
       <h2 className="mt-4 text-[15px] font-semibold tracking-tight text-foreground">What can I help you move forward?</h2>
-      <p className="mt-1.5 max-w-xs text-[11px] leading-5 text-muted-foreground">
+      <p className="mt-1.5 max-w-xs text-[12px] leading-5 text-muted-foreground">
         Ask about campaigns, contacts, mailbox health, or let the assistant take a safe action for you.
       </p>
       <div className="mt-5 grid w-full gap-2">
@@ -127,7 +127,7 @@ function EmptyConversation({ onPrompt }: { onPrompt: (text: string) => void }) {
             key={text}
             type="button"
             onClick={() => onPrompt(text)}
-            className="rounded-xl border border-border bg-surface px-3 py-2.5 text-left text-[11px] leading-4 text-muted-foreground transition-colors hover:border-border-strong hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="rounded-xl border border-border bg-surface px-3 py-2.5 text-left text-[12px] leading-4 text-muted-foreground transition-colors hover:border-border-strong hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {text}
           </button>

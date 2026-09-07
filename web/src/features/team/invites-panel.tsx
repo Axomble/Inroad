@@ -102,7 +102,7 @@ function InviteRow({ invite, workspaceId }: { invite: Invite; workspaceId: strin
     <li className="flex items-center gap-4 border-b border-border px-5 py-3">
       <div className="min-w-0 flex-1">
         <span className="truncate text-[13.5px] font-medium text-foreground">{invite.email}</span>
-        <div className="mt-0.5 font-mono text-[11px] text-faint">Invited as {invite.role ?? 'member'}</div>
+        <div className="mt-0.5 font-mono text-[12px] text-faint">Invited as {invite.role ?? 'member'}</div>
       </div>
 
       {/* GET /workspaces/{id}/invites only ever returns pending invites (see

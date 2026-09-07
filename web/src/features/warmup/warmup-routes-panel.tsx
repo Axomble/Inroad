@@ -57,7 +57,7 @@ export default function WarmupRoutesPanel({ mailboxId }: { mailboxId: string }) 
 
       {!detail.isLoading && !detail.isError && (
         <>
-          <p className="mb-3 max-w-prose text-[11.5px] leading-snug text-muted-foreground">{ROUTES_INTRO}</p>
+          <p className="mb-3 max-w-prose text-[12px] leading-snug text-muted-foreground">{ROUTES_INTRO}</p>
 
           {reading.kind === 'unobserved' ? (
             <MutedEmpty text={reading.message} />
@@ -69,7 +69,7 @@ export default function WarmupRoutesPanel({ mailboxId }: { mailboxId: string }) 
                 footnote tells them the pool only reaches one provider.
               */}
               {reading.soleNote && (
-                <p data-slot="route-sole-destination" className="mb-3 max-w-prose text-[11.5px] leading-snug text-warn">
+                <p data-slot="route-sole-destination" className="mb-3 max-w-prose text-[12px] leading-snug text-warn">
                   {reading.soleNote}
                 </p>
               )}
@@ -95,7 +95,7 @@ export default function WarmupRoutesPanel({ mailboxId }: { mailboxId: string }) 
                 </table>
               </div>
 
-              <p className="mt-3 text-[10.5px] leading-snug text-faint">{ROUTES_GATES_NOTHING}</p>
+              <p className="mt-3 text-[11px] leading-snug text-faint">{ROUTES_GATES_NOTHING}</p>
             </>
           )}
         </>
@@ -166,7 +166,7 @@ function RateCell({ rate }: { rate: RouteRate }) {
       >
         {rate.value}
       </span>
-      <span data-slot="route-population" className="mt-0.5 block text-[10.5px] leading-snug tabular-nums text-faint">
+      <span data-slot="route-population" className="mt-0.5 block text-[11px] leading-snug tabular-nums text-faint">
         {rate.population}
       </span>
       {rate.detail && <Detail text={rate.detail} />}
@@ -175,5 +175,5 @@ function RateCell({ rate }: { rate: RouteRate }) {
 }
 
 function Detail({ text }: { text: string }) {
-  return <span className="mt-0.5 block max-w-[22rem] text-[10.5px] leading-snug text-faint">{text}</span>
+  return <span className="mt-0.5 block max-w-[22rem] text-[11px] leading-snug text-faint">{text}</span>
 }

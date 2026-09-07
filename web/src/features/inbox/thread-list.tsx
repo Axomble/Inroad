@@ -59,7 +59,7 @@ export function ThreadList({
                 type="button"
                 aria-expanded={!isCollapsed}
                 onClick={() => onToggleGroup(group.bucket)}
-                className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11.5px] font-semibold text-foreground transition-colors hover:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[12px] font-semibold text-foreground transition-colors hover:bg-surface-2/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               >
                 <ChevronDown
                   className={cn('size-3 shrink-0 text-muted-foreground transition-transform', isCollapsed && '-rotate-90')}
@@ -67,7 +67,7 @@ export function ThreadList({
                 />
                 {group.label}
                 {isCollapsed && (
-                  <span className="font-mono text-[10px] font-normal tabular-nums text-faint">{group.items.length}</span>
+                  <span className="font-mono text-[11px] font-normal tabular-nums text-faint">{group.items.length}</span>
                 )}
               </button>
             </h3>
@@ -166,7 +166,7 @@ function ThreadRow({
               and only their visibility is exchanged. */}
           <time
             className={cn(
-              'shrink-0 font-mono text-[11px] tabular-nums transition-opacity group-focus-within:opacity-0 group-hover:opacity-0',
+              'shrink-0 font-mono text-[12px] tabular-nums transition-opacity group-focus-within:opacity-0 group-hover:opacity-0',
               thread.unread ? 'font-semibold text-accent-ink' : 'text-muted-foreground',
             )}
             dateTime={thread.last_message_at}
@@ -189,7 +189,7 @@ function ThreadRow({
           {/* One chip, the way a mail client shows one category on a row —
               the rest surface as "+N" and in full inside the reader. */}
           <LabelChips labels={thread.labels} max={1} className="shrink-0" />
-          <span className="ml-auto min-w-0 truncate font-mono text-[10px] text-faint">{mailboxLabel}</span>
+          <span className="ml-auto min-w-0 truncate font-mono text-[11px] text-faint">{mailboxLabel}</span>
         </div>
       </div>
 

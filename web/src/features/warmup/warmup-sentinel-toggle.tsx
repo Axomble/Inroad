@@ -89,7 +89,7 @@ export function WarmupSentinelToggle({
           {isSentinel ? 'Sentinel' : 'Make sentinel'}
         </Button>
         {isSentinel && (
-          <span data-slot="sentinel-mark-detail" className="max-w-prose text-[10.5px] leading-snug text-faint">
+          <span data-slot="sentinel-mark-detail" className="max-w-prose text-[11px] leading-snug text-faint">
             {SENTINEL_MARK_DETAIL}
           </span>
         )}
@@ -108,7 +108,7 @@ export function WarmupSentinelToggle({
           <p id={titleId} className="text-[12px] font-medium text-foreground">
             {prompt.title}
           </p>
-          <p className="mt-1 text-[11.5px] leading-snug text-muted-foreground">{prompt.body}</p>
+          <p className="mt-1 text-[12px] leading-snug text-muted-foreground">{prompt.body}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button variant="outline" size="xs" disabled={isLoading} onClick={() => void onConfirm()}>
               {isLoading && <Loader2 className="size-3.5 animate-spin" />}
@@ -129,7 +129,7 @@ export function WarmupSentinelToggle({
       )}
 
       {error && (
-        <p role="alert" className="mt-1.5 text-[11px] text-danger">
+        <p role="alert" className="mt-1.5 text-[12px] text-danger">
           {error}
         </p>
       )}

@@ -181,7 +181,7 @@ export function ComposeWindow({
           {subject || 'New message'}
         </h2>
         {/* A saving indicator, so autosave is visible rather than a promise. */}
-        {isSaving && <span className="shrink-0 text-[10px] text-faint">Saving…</span>}
+        {isSaving && <span className="shrink-0 text-[11px] text-faint">Saving…</span>}
         <Button variant="ghost" size="icon-sm" aria-label="Minimize compose" onClick={() => setMinimized(true)}>
           <Minus className="size-3.5" />
         </Button>
@@ -192,7 +192,7 @@ export function ComposeWindow({
 
       <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto p-3">
         <div className="flex items-center gap-2">
-          <span className="w-10 shrink-0 font-mono text-[10px] tracking-wide text-faint uppercase">From</span>
+          <span className="w-10 shrink-0 font-mono text-[11px] tracking-wide text-faint uppercase">From</span>
           {/* Its own picker rather than the shared SortMenu: choosing a sending
               mailbox is not an ordering, and a trigger reading "Sort" here
               taught the wrong model of what the menu does. */}
@@ -234,7 +234,7 @@ export function ComposeWindow({
         ) : (
           <button
             type="button"
-            className="self-start pl-12 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            className="self-start pl-12 text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
             onClick={() => setShowCcBcc(true)}
           >
             Add Cc / Bcc
@@ -242,7 +242,7 @@ export function ComposeWindow({
         )}
 
         <div className="flex items-center gap-2">
-          <label htmlFor={subjectId} className="w-10 shrink-0 font-mono text-[10px] tracking-wide text-faint uppercase">
+          <label htmlFor={subjectId} className="w-10 shrink-0 font-mono text-[11px] tracking-wide text-faint uppercase">
             Subj
           </label>
           <Input
@@ -269,7 +269,7 @@ export function ComposeWindow({
         {/* One alert surface. Client-side complaints take precedence over a
             stale server error, since they describe what is on screen now. */}
         {(invalidAddress || overRecipientCap || overSubject || overBody || sendError !== undefined) && (
-          <p role="alert" className="text-[11px] text-danger">
+          <p role="alert" className="text-[12px] text-danger">
             {invalidAddress
               ? "One of the addresses doesn't look like an email — check the highlighted chips."
               : overRecipientCap
@@ -286,7 +286,7 @@ export function ComposeWindow({
             they hit Send rather than after someone asks why nobody could
             reply-all. */}
         {recipientCount > 1 && (
-          <p className="text-[10px] text-faint">
+          <p className="text-[11px] text-faint">
             Each recipient receives their own copy — they won't see each other.
           </p>
         )}
@@ -309,7 +309,7 @@ export function ComposeWindow({
               Schedule
             </Button>
             {scheduleError && (
-              <p role="alert" className="text-[11px] text-danger">
+              <p role="alert" className="text-[12px] text-danger">
                 {scheduleError}
               </p>
             )}

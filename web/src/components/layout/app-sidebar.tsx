@@ -115,7 +115,7 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
       {count != null && (
         // Right-aligned, tabular, and quiet — a reference number, not a badge
         // demanding action.
-        <span className="ml-auto rounded-md bg-chrome-surface px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-chrome-muted">{count}</span>
+        <span className="ml-auto rounded-md bg-chrome-surface px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-chrome-muted">{count}</span>
       )}
     </>
   )
@@ -157,7 +157,7 @@ export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void })
       >
         <Sparkles className="size-4 shrink-0 text-primary" strokeWidth={1.75} aria-hidden="true" />
         <span>Agent</span>
-        <kbd className="ml-auto rounded border border-chrome/30 px-1.5 py-0.5 font-mono text-[9px] text-chrome/70">@</kbd>
+        <kbd className="ml-auto rounded border border-chrome/30 px-1.5 py-0.5 font-mono text-[10px] text-chrome/70">@</kbd>
       </Button>
       <nav aria-label="Primary" className="flex flex-col gap-5">
         {NAV.map((group, index) => {

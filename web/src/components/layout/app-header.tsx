@@ -79,7 +79,7 @@ export function AppHeader({
       >
         <Search className="size-3.5" aria-hidden="true" />
         <span className="flex-1">Jump to anything</span>
-        <kbd className="rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[9px] text-chrome-muted">⌘ K</kbd>
+        <kbd className="rounded border border-chrome-border px-1.5 py-0.5 font-mono text-[10px] text-chrome-muted">⌘ K</kbd>
       </button>
 
       {/* Icon-only utilities, full-strength chrome text (black on light, white

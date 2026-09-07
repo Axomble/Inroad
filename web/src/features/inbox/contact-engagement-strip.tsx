@@ -22,7 +22,7 @@ export function ContactEngagementStrip({ contactId }: { contactId: string }) {
   if (isLoading) return <InlineLoading label="Loading engagement" />
   if (error !== undefined) {
     return (
-      <p role="status" className="text-[11px] text-warn">
+      <p role="status" className="text-[12px] text-warn">
         {recordErrorMessage(error, "Engagement couldn't be loaded.")}
       </p>
     )
@@ -44,14 +44,14 @@ export function ContactEngagementStrip({ contactId }: { contactId: string }) {
           `opens_measurable` flag rather than from `campaigns[].tracking_enabled`,
           which is capped at 20 and so cannot answer this. */}
       {opensUnmeasured(data) && (
-        <p className="flex items-start gap-1 text-[10px] text-faint">
+        <p className="flex items-start gap-1 text-[11px] text-faint">
           <AlertCircle className="mt-px size-2.5 shrink-0" aria-hidden="true" />
           <span>Open tracking is off for this contact's campaigns — opens are not measurable.</span>
         </p>
       )}
 
       {(data.bounces > 0 || data.unsubscribes > 0) && (
-        <p className="text-[10px] text-warn">
+        <p className="text-[11px] text-warn">
           {data.bounces > 0 && `${data.bounces} bounced`}
           {data.bounces > 0 && data.unsubscribes > 0 && ' · '}
           {data.unsubscribes > 0 && `${data.unsubscribes} unsubscribed`}
@@ -59,7 +59,7 @@ export function ContactEngagementStrip({ contactId }: { contactId: string }) {
       )}
 
       {data.last_activity_at && (
-        <p className="text-[10px] text-faint">Last activity {relativeTime(data.last_activity_at)}</p>
+        <p className="text-[11px] text-faint">Last activity {relativeTime(data.last_activity_at)}</p>
       )}
     </div>
   )
@@ -77,7 +77,7 @@ function opensUnmeasured(data: ContactEngagement): boolean {
 function Metric({ label, value }: { label: string; value: number }) {
   return (
     <div className="min-w-0">
-      <dt className="truncate font-mono text-[9px] tracking-wide text-faint uppercase">{label}</dt>
+      <dt className="truncate font-mono text-[10px] tracking-wide text-faint uppercase">{label}</dt>
       <dd className="font-mono text-[13px] tabular-nums text-foreground">{value}</dd>
     </div>
   )

@@ -13,7 +13,7 @@ export function LabelChip({ label, className }: { label: InboxLabel; className?:
   return (
     <span
       className={cn(
-        'inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-foreground',
+        'inline-flex max-w-[10rem] items-center gap-1 rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[11px] font-medium text-foreground',
         className,
       )}
     >
@@ -60,7 +60,7 @@ export function LabelChips({
         <LabelChip key={label.id} label={label} />
       ))}
       {hidden > 0 && (
-        <span className="shrink-0 font-mono text-[10px] text-faint">
+        <span className="shrink-0 font-mono text-[11px] text-faint">
           +{hidden}
           <span className="sr-only"> more labels</span>
         </span>

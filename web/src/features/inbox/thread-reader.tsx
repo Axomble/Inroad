@@ -189,10 +189,10 @@ function MessageCard({ message }: { message: InboxMessage }) {
         <div className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold text-foreground">{sender}</span>
           {message.to_email && (
-            <span className="block truncate text-[11.5px] text-muted-foreground">To: {message.to_email}</span>
+            <span className="block truncate text-[12px] text-muted-foreground">To: {message.to_email}</span>
           )}
         </div>
-        <time className="shrink-0 font-mono text-[11px] text-muted-foreground" dateTime={message.occurred_at}>
+        <time className="shrink-0 font-mono text-[12px] text-muted-foreground" dateTime={message.occurred_at}>
           {relativeTime(message.occurred_at)}
         </time>
       </header>

@@ -229,7 +229,7 @@ function CampaignRow({ campaign }: { campaign: Campaign }) {
   const content = (
     <>
         <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{campaign.name || 'Untitled campaign'}</div><div className="mt-0.5 truncate text-xs text-muted-foreground">{campaign.subject || 'No subject yet'}</div></div>
-        <div className="hidden text-right sm:block"><div className="font-mono text-xs tabular-nums">{sent.toLocaleString()}</div><div className="text-[10px] text-faint">sent</div></div>
+        <div className="hidden text-right sm:block"><div className="font-mono text-xs tabular-nums">{sent.toLocaleString()}</div><div className="text-[11px] text-faint">sent</div></div>
         <StatusPill tone={campaignTone[campaign.status ?? ''] ?? 'draft'}>{campaign.status ?? 'draft'}</StatusPill>
         <ArrowRight className="size-4 text-faint transition-transform group-hover:translate-x-0.5" />
     </>
@@ -257,7 +257,7 @@ function MiniStat({ label, value, className }: { label: string; value: number; c
   return (
     <div>
       <div className={cn('font-mono text-base font-semibold tabular-nums', className)}>{value}</div>
-      <div className="mt-0.5 text-[10px] text-muted-foreground">{label}</div>
+      <div className="mt-0.5 text-[11px] text-muted-foreground">{label}</div>
     </div>
   )
 }

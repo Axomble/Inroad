@@ -260,13 +260,13 @@ function CampaignRow({
     >
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13.5px] font-medium text-foreground">{campaign.name}</div>
-        <div className="truncate font-mono text-[11px] text-faint">{campaign.subject}</div>
+        <div className="truncate font-mono text-[12px] text-faint">{campaign.subject}</div>
         {/* Its own line, not a suffix on the truncated subject: a launch failure
             now carries actionable copy (the verification gate's is a whole
             sentence), and truncation would swallow the actionable half. Mirrors
             MailboxRow's inline action error. */}
         {error && (
-          <div role="alert" className="mt-0.5 text-[11px] text-danger">
+          <div role="alert" className="mt-0.5 text-[12px] text-danger">
             {error}
           </div>
         )}

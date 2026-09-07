@@ -61,7 +61,7 @@ export function StepCardBody({
       {dragHandle}
 
       <div className="mt-0.5 shrink-0">
-        <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-border-strong bg-surface-2 px-1.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+        <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-md border border-border-strong bg-surface-2 px-1.5 font-mono text-[12px] tabular-nums text-muted-foreground">
           {position}
         </span>
       </div>
@@ -70,7 +70,7 @@ export function StepCardBody({
         <div className="flex items-center gap-2">
           <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-faint">Step {position}</span>
           <span className="text-faint">·</span>
-          <span className="text-[11.5px] text-muted-foreground">{humanizeDelay(step.delay_seconds)}</span>
+          <span className="text-[12px] text-muted-foreground">{humanizeDelay(step.delay_seconds)}</span>
         </div>
         {sameThread ? (
           <div className="mt-1 flex min-w-0 items-center gap-2">

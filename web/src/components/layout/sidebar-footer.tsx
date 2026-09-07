@@ -23,7 +23,7 @@ export function SidebarFooter() {
     <div data-slot="sidebar-footer" className="mt-auto flex items-center gap-2.5 border-t border-chrome-border px-2.5 pt-3">
       {initials ? (
         <Avatar className="size-7">
-          <AvatarFallback className="text-[10px]">{initials}</AvatarFallback>
+          <AvatarFallback className="text-[11px]">{initials}</AvatarFallback>
         </Avatar>
       ) : (
         <Skeleton className="size-7 shrink-0 bg-chrome-surface" />
@@ -33,7 +33,7 @@ export function SidebarFooter() {
           <>
             <p className="truncate text-[12.5px] font-medium text-chrome-text">{displayName}</p>
             {userEmail && userEmail !== displayName && (
-              <p className="truncate font-mono text-[10px] text-chrome-muted">{userEmail}</p>
+              <p className="truncate font-mono text-[11px] text-chrome-muted">{userEmail}</p>
             )}
           </>
         ) : (

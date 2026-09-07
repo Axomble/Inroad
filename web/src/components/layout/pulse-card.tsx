@@ -44,14 +44,14 @@ const rowClass =
 function AttentionRow({ item }: { item: PulseAttentionItem }) {
   return (
     <Link {...linkProps(item.href)} data-slot="pulse-attention-row" className={cn(rowClass, 'text-[12px] text-chrome-text')}>
-      <span className={cn('shrink-0 font-mono text-[10px] leading-none', SEVERITY_TEXT[item.severity])} aria-hidden="true">
+      <span className={cn('shrink-0 font-mono text-[11px] leading-none', SEVERITY_TEXT[item.severity])} aria-hidden="true">
         {SEVERITY_GLYPH[item.severity]}
       </span>
       <span className="sr-only">{SEVERITY_SR[item.severity]}</span>
       <span className="truncate">
         <span className="font-mono tabular-nums">{item.count}</span> {attentionLabel(item.kind, item.count)}
       </span>
-      <span className="ml-auto shrink-0 font-mono text-[10px] text-chrome-muted">{item.reason}</span>
+      <span className="ml-auto shrink-0 font-mono text-[11px] text-chrome-muted">{item.reason}</span>
     </Link>
   )
 }
@@ -155,7 +155,7 @@ export function PulseCard() {
         <span className="font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-chrome-muted/70">Pulse</span>
         {/* Freshness tick — the query's fulfilledTimeStamp, an honest "last
             successful fetch", not a fake latency stat. */}
-        <span className="ml-auto flex items-center gap-1 font-mono text-[10px] tabular-nums text-chrome-muted">
+        <span className="ml-auto flex items-center gap-1 font-mono text-[11px] tabular-nums text-chrome-muted">
           <span className={cn('size-1.5 rounded-full', isError ? 'bg-danger' : 'bg-ok')} aria-hidden="true" />
           <span className="sr-only">{isError ? 'Last successful update' : 'Updated'}</span>
           {/* 24-hour: this card has no room for an AM/PM suffix. */}

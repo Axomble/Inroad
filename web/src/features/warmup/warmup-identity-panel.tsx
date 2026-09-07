@@ -43,7 +43,7 @@ export function WarmupIdentityPanel({ identity }: { identity: WarmupMailbox['ide
         <MutedEmpty text={reading.message} />
       ) : (
         <>
-          <p className="mb-3 max-w-prose text-[11.5px] leading-snug text-muted-foreground">{IDENTITY_INTRO}</p>
+          <p className="mb-3 max-w-prose text-[12px] leading-snug text-muted-foreground">{IDENTITY_INTRO}</p>
 
           <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
             {reading.facts.map((fact) => (
@@ -60,12 +60,12 @@ export function WarmupIdentityPanel({ identity }: { identity: WarmupMailbox['ide
             ))}
           </dl>
           {reading.verdicts.every((verdict) => !verdict.reported) && (
-            <p className="mt-2 max-w-prose text-[11px] leading-snug text-muted-foreground">
+            <p className="mt-2 max-w-prose text-[12px] leading-snug text-muted-foreground">
               {IDENTITY_NOTHING_REPORTED}
             </p>
           )}
 
-          <p className="mt-3 text-[10.5px] leading-snug text-faint">{IDENTITY_GATES_NOTHING}</p>
+          <p className="mt-3 text-[11px] leading-snug text-faint">{IDENTITY_GATES_NOTHING}</p>
         </>
       )}
     </div>
@@ -79,7 +79,7 @@ export function WarmupIdentityPanel({ identity }: { identity: WarmupMailbox['ide
  */
 function ObservedAt({ iso }: { iso: string }) {
   return (
-    <time dateTime={iso} className="font-mono text-[10.5px] text-muted-foreground">
+    <time dateTime={iso} className="font-mono text-[11px] text-muted-foreground">
       <span className="text-faint">observed </span>
       {formatDateTime(iso)}
       <span className="text-faint"> · {relativeTime(iso)}</span>
@@ -149,5 +149,5 @@ function Label({ text }: { text: string }) {
 }
 
 function Detail({ text }: { text: string }) {
-  return <span className="mt-0.5 block text-[10.5px] leading-snug text-faint">{text}</span>
+  return <span className="mt-0.5 block text-[11px] leading-snug text-faint">{text}</span>
 }

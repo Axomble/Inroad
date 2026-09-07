@@ -64,7 +64,7 @@ export function WarmupIncidentsPanel({
 
       {reading.kind === 'detected' ? (
         <>
-          <p className="mb-3 max-w-prose text-[11.5px] leading-snug text-muted-foreground">{INCIDENTS_INTRO}</p>
+          <p className="mb-3 max-w-prose text-[12px] leading-snug text-muted-foreground">{INCIDENTS_INTRO}</p>
 
           <ul className="space-y-3">
             {reading.incidents.map((incident) => (
@@ -73,12 +73,12 @@ export function WarmupIncidentsPanel({
           </ul>
 
           {reading.truncated && (
-            <p data-slot="incident-truncated" className="mt-3 max-w-prose text-[10.5px] leading-snug text-faint">
+            <p data-slot="incident-truncated" className="mt-3 max-w-prose text-[11px] leading-snug text-faint">
               {reading.truncated}
             </p>
           )}
 
-          <p className="mt-3 max-w-prose text-[10.5px] leading-snug text-faint">{INCIDENTS_GATES_NOTHING}</p>
+          <p className="mt-3 max-w-prose text-[11px] leading-snug text-faint">{INCIDENTS_GATES_NOTHING}</p>
         </>
       ) : (
         // A real answer, not an apology — and which of the answers it is comes
@@ -125,7 +125,7 @@ function Incident({ incident }: { incident: IncidentReading }) {
       </dl>
 
       {incident.members.length > 0 && (
-        <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
+        <p className="mt-1.5 text-[12px] leading-snug text-muted-foreground">
           <span className="text-faint">Degraded: </span>
           <span data-slot="incident-members" className="font-mono">
             {incident.members.join(', ')}
@@ -133,7 +133,7 @@ function Incident({ incident }: { incident: IncidentReading }) {
         </p>
       )}
 
-      <p className="mt-1 max-w-prose text-[10.5px] leading-snug text-faint">{incident.dimensionDetail}</p>
+      <p className="mt-1 max-w-prose text-[11px] leading-snug text-faint">{incident.dimensionDetail}</p>
     </li>
   )
 }
@@ -152,7 +152,7 @@ function Stat({ stat }: { stat: IncidentStat }) {
           {stat.value}
         </span>
         {stat.detail && (
-          <span className="mt-0.5 block max-w-[22rem] text-[10.5px] leading-snug text-faint">{stat.detail}</span>
+          <span className="mt-0.5 block max-w-[22rem] text-[11px] leading-snug text-faint">{stat.detail}</span>
         )}
       </dd>
     </div>

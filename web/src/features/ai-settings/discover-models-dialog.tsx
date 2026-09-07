@@ -189,7 +189,7 @@ export function DiscoverModelsDialog({
                         <span className="block truncate text-[13px] text-foreground">
                           {candidate.label?.trim() ? candidate.label : candidate.name}
                         </span>
-                        <span className="block truncate font-mono text-[10.5px] text-faint">
+                        <span className="block truncate font-mono text-[11px] text-faint">
                           {candidate.name}
                           {candidate.context_window_tokens != null &&
                             ` · ${formatTokens(candidate.context_window_tokens)}`}

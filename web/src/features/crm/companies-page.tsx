@@ -122,7 +122,7 @@ const CompaniesList = memo(function CompaniesList({
           </div>
           <div className="text-right">
             <p className="font-mono text-xs tabular-nums">{company.deal_count} deals</p>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               {company.annual_revenue_micros == null
                 ? 'Revenue not set'
                 : formatMoney(company.annual_revenue_micros, company.currency)}

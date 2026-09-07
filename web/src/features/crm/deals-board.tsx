@@ -206,7 +206,7 @@ const DealCard = memo(function DealCard({
                 hand-made one without opening it. */}
             <ActorBadge actor={parseActor(deal.created_by_actor)} source={deal.source} />
           </div>
-          <label className="mt-3 block text-[11px] font-medium text-muted-foreground">
+          <label className="mt-3 block text-[12px] font-medium text-muted-foreground">
             Move to stage
             <Select
               className="mt-1 h-8 text-xs"

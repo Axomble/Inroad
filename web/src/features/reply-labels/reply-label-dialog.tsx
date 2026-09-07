@@ -209,7 +209,7 @@ export function ReplyLabelDialog({
             <div>
               <span className="text-[13px] font-medium text-foreground">Key</span>
               <p className="mt-1 text-[12px] text-muted-foreground">
-                <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px]">{initial.key}</code>
+                <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[12px]">{initial.key}</code>
                 <span className="ml-2">
                   Permanent — recorded classifications reference it, so it never changes.
                 </span>
@@ -234,7 +234,7 @@ export function ReplyLabelDialog({
                       />
                       <span>
                         {flag.title}
-                        <span className="block text-[11px] text-muted-foreground">{flag.description}</span>
+                        <span className="block text-[12px] text-muted-foreground">{flag.description}</span>
                       </span>
                     </label>
                     {fieldError && (

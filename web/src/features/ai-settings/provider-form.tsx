@@ -64,7 +64,7 @@ export function AddProviderDialog({
                           <Icon className="mt-0.5 size-4 shrink-0 text-foreground" />
                           <span className="min-w-0">
                             <span className="block text-[13px] font-medium text-foreground">{kind.title}</span>
-                            <span className="mt-0.5 block text-[11.5px] leading-snug text-muted-foreground">
+                            <span className="mt-0.5 block text-[12px] leading-snug text-muted-foreground">
                               {kind.blurb}
                             </span>
                           </span>
@@ -279,7 +279,7 @@ function ProviderConnectForm({
                   />
                 )}
               </div>
-              {field.helper && <p className="mt-1 text-[11px] text-muted-foreground">{field.helper}</p>}
+              {field.helper && <p className="mt-1 text-[12px] text-muted-foreground">{field.helper}</p>}
             </div>
           )
         })}

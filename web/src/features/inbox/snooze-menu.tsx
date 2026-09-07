@@ -103,7 +103,7 @@ export function SnoozeMenu({ threadId, snooze }: { threadId: string; snooze: Inb
           {presets.map((preset) => (
             <DropdownMenuItem key={preset.id} onSelect={() => void apply(preset.at)}>
               <span className="flex-1">{preset.label}</span>
-              <span className="font-mono text-[10px] text-faint">{formatSnoozeUntil(preset.at, now)}</span>
+              <span className="font-mono text-[11px] text-faint">{formatSnoozeUntil(preset.at, now)}</span>
             </DropdownMenuItem>
           ))}
 
@@ -133,7 +133,7 @@ export function SnoozeMenu({ threadId, snooze }: { threadId: string; snooze: Inb
               className="h-8 text-[12px]"
             />
             {customError && (
-              <p role="alert" className="mt-1 text-[11px] text-danger">
+              <p role="alert" className="mt-1 text-[12px] text-danger">
                 {customError}
               </p>
             )}
@@ -148,7 +148,7 @@ export function SnoozeMenu({ threadId, snooze }: { threadId: string; snooze: Inb
           parked, and silence here would lose it. 422 is the server's own bound
           rejecting the moment; anything else is reported by status. */}
       {error !== undefined && (
-        <p role="alert" className="text-[11px] text-danger">
+        <p role="alert" className="text-[12px] text-danger">
           {httpStatus(error) === 422
             ? `Pick a moment in the future, within ${SNOOZE_MAX_DAYS} days.`
             : `Couldn't update the snooze${httpStatus(error) ? ` (${httpStatus(error)})` : ''}.`}

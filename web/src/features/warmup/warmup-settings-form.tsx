@@ -135,7 +135,7 @@ function Field({
       {error ? (
         <span className="text-xs text-danger">{error}</span>
       ) : (
-        <span className="text-[11px] text-muted-foreground">{hint}</span>
+        <span className="text-[12px] text-muted-foreground">{hint}</span>
       )}
     </div>
   )

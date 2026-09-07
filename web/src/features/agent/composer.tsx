@@ -146,8 +146,8 @@ export function AgentComposer({
         <div className="mb-2 flex max-h-20 flex-col gap-1 overflow-y-auto">
           {queue.map((item, index) => (
             <div key={item.id} className="flex items-center gap-2 rounded-md bg-surface-2 px-2 py-1.5">
-              <span className="font-mono text-[9px] text-faint">{index + 1}</span>
-              <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">{item.text}</span>
+              <span className="font-mono text-[10px] text-faint">{index + 1}</span>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{item.text}</span>
               <button
                 type="button"
                 className="text-faint hover:text-danger"
@@ -168,7 +168,7 @@ export function AgentComposer({
         />
       )}
       {noProvider && (
-        <p className="mb-2 rounded-md border border-border bg-surface-2 px-2.5 py-2 text-[11px] leading-4 text-muted-foreground">
+        <p className="mb-2 rounded-md border border-border bg-surface-2 px-2.5 py-2 text-[12px] leading-4 text-muted-foreground">
           No AI provider is configured yet, so the assistant cannot answer.{' '}
           <Link to="/app/settings/ai" className="font-medium text-accent-ink underline underline-offset-2">
             Add a provider in AI settings
@@ -177,7 +177,7 @@ export function AgentComposer({
         </p>
       )}
       {modelsQuery.isError && (
-        <p className="mb-2 text-[11px] text-muted-foreground">
+        <p className="mb-2 text-[12px] text-muted-foreground">
           The model list could not be loaded — sending will use the workspace default.
         </p>
       )}
@@ -202,7 +202,7 @@ export function AgentComposer({
             value={model}
             onChange={(event) => setModel(event.target.value)}
             wrapperClassName="min-w-0 flex-1"
-            className="h-7 border-0 bg-transparent py-0 pl-2 text-[10px] shadow-none"
+            className="h-7 border-0 bg-transparent py-0 pl-2 text-[11px] shadow-none"
             aria-label="Agent model"
           >
             <option value={DEFAULT_MODEL}>Auto - recommended</option>

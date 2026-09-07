@@ -28,7 +28,7 @@ export function ContactDealChip({ deal }: { deal: ContactDeal }) {
       >
         {deal.name}
       </Link>
-      <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+      <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground">
         {/* Colour is decoration; the label is what states the stage. */}
         <span
           className="size-1.5 shrink-0 rounded-full"

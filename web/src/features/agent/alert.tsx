@@ -21,7 +21,7 @@ export function AgentAlert({
     <div
       role="alert"
       className={cn(
-        'flex items-start gap-2 border-y border-danger/25 bg-danger/10 px-3 py-2 text-[11px] leading-4 text-danger',
+        'flex items-start gap-2 border-y border-danger/25 bg-danger/10 px-3 py-2 text-[12px] leading-4 text-danger',
         className,
       )}
     >

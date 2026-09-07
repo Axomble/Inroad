@@ -437,10 +437,10 @@ export function InboxPage() {
               </div>
 
               <div className="flex items-center gap-2 border-t border-border px-4 py-2 sm:px-5">
-                <span className="font-mono text-[11px] tabular-nums text-faint">
+                <span className="font-mono text-[12px] tabular-nums text-faint">
                   {items.length === 1 ? '1 thread' : `${items.length} threads`}
                 </span>
-                {busy && <span className="text-[11px] text-muted-foreground">Loading…</span>}
+                {busy && <span className="text-[12px] text-muted-foreground">Loading…</span>}
                 <div className="ml-auto flex items-center gap-2">
                   <Button variant="outline" size="sm" aria-label="Previous page" disabled={!canGoPrev || busy} onClick={goPrev}>
                     Previous
