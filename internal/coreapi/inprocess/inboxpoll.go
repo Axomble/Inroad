@@ -222,6 +222,9 @@ func (c client) MarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID,
 		return err
 	}
 	if enrollmentID == "" {
+		// A reply-unsubscribe to a legacy direct-send: the suppression above is
+		// the whole operation, and it is done — emit and return.
+		c.emitContactUnsubscribed(ctx, workspaceID, email, "reply")
 		return nil
 	}
 	eid, err := uuid.Parse(enrollmentID)
@@ -231,7 +234,13 @@ func (c client) MarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID,
 	if err := c.enroll.MarkStepStopped(ctx, ws, eid, enrollment.StopUnsubscribed); err != nil {
 		return err
 	}
-	return c.recordReplyClass(ctx, eid, ws, "unsubscribe", "", 0)
+	if err := c.recordReplyClass(ctx, eid, ws, "unsubscribe", "", 0); err != nil {
+		return err
+	}
+	// Outbound webhook: contact.unsubscribed. AFTER the suppression + stop + tag
+	// have committed; swallowed on failure.
+	c.emitContactUnsubscribed(ctx, workspaceID, email, "reply")
+	return nil
 }
 
 // recordReplyClass persists the classified reply (class/source/confidence +
@@ -291,6 +300,9 @@ func (c client) MarkBounced(ctx context.Context, enrollmentID, workspaceID, emai
 	}
 
 	c.publishSendBounced(ctx, workspaceID, enrollmentID)
+	// Outbound webhook: email.bounced. AFTER the suppression + stop have
+	// committed; swallowed on failure.
+	c.emitEmailBounced(ctx, workspaceID, email, enrollmentID)
 	return nil
 }
 

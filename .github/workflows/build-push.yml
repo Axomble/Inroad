@@ -1,0 +1,94 @@
+name: Images
+
+# Publishes container images to the GitHub Container Registry:
+#   ghcr.io/<owner>/inroad-api      (API server + migrate + built SPA)
+#   ghcr.io/<owner>/inroad-worker   (execution-plane worker)
+#   ghcr.io/<owner>/inroad-web      (nginx serving the SPA, for a split deploy)
+#
+# A push to main publishes a moving `edge` tag. A version tag (v1.2.3) publishes
+# `1.2.3`, `1.2`, and `latest`. Every build also gets an immutable `sha-<short>`
+# tag so a deploy can pin exactly what it ran.
+#
+# The GitHub Release itself (notes + binaries) is release.yml; the two run in
+# parallel on a tag and do not depend on each other.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+# One build per ref. A newer push to main supersedes an in-flight edge build;
+# tag builds are never cancelled (each tag must produce its own image).
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: deploy/docker/Dockerfile.api
+          - name: worker
+            dockerfile: deploy/docker/Dockerfile.worker
+          - name: web
+            dockerfile: deploy/docker/Dockerfile.web
+    steps:
+      - uses: actions/checkout@v7
+
+      # GHCR image names must be lowercase; a repo/owner with any uppercase
+      # letter would otherwise fail the push. Computed once here.
+      - name: Resolve image name
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-${{ matrix.name }}" >> "$GITHUB_ENV"
+
+      - name: Build stamp
+        id: stamp
+        run: |
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+          # `latest` only on a real version tag, never on an edge build.
+          flavor: latest=auto
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          # Repo root: the Dockerfiles COPY both web/ and api/ and the Go module.
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.stamp.outputs.commit }}
+            DATE=${{ steps.stamp.outputs.date }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

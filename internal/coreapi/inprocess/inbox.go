@@ -54,6 +54,26 @@ func (c client) StoreInboundMessage(ctx context.Context, in coreapi.InboxMessage
 
 	c.publishInboxMessageCreated(ctx, in.WorkspaceID, thread, in.OccurredAt)
 	c.publishReplyClassified(ctx, in.WorkspaceID, thread.ID.String(), in.ReplyClass)
+
+	// Outbound webhook: reply.received. Emitted here for the same reason the
+	// realtime events above are — RecordReply is the one call that commits the
+	// thread + message atomically, so this is the first point the event is
+	// certainly true. A dispatch failure is swallowed by webhook.Emit and never
+	// fails the poller task.
+	c.emitReplyReceived(ctx, inboundReplyEvent{
+		workspaceID: in.WorkspaceID,
+		threadID:    thread.ID.String(),
+		mailboxID:   in.MailboxID,
+		campaignID:  in.CampaignID,
+		contactID:   in.ContactID,
+		messageID:   in.MessageID,
+		fromEmail:   in.FromEmail,
+		toEmail:     in.ToEmail,
+		subject:     in.Subject,
+		bodyText:    in.BodyText,
+		replyClass:  in.ReplyClass,
+		occurredAt:  in.OccurredAt,
+	})
 	return nil
 }
 

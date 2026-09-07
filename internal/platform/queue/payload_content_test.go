@@ -45,6 +45,7 @@ func allTaskPayloads(workspaceID string) map[string]any {
 		"InboxPendingReplySendPayload":   InboxPendingReplySendPayload{PendingID: uuid.New().String(), WorkspaceID: workspaceID},
 		"InboxPendingComposeSendPayload": InboxPendingComposeSendPayload{PendingID: uuid.New().String(), WorkspaceID: workspaceID},
 		"DeliverabilityEvaluatePayload":  DeliverabilityEvaluatePayload{CampaignID: uuid.New().String(), WorkspaceID: workspaceID},
+		"WebhookDeliverPayload":          WebhookDeliverPayload{DeliveryID: uuid.New().String(), WorkspaceID: workspaceID},
 	}
 }
 
@@ -77,6 +78,7 @@ var payloadFieldAllowlist = map[string]string{
 	"InboxPendingReplySendPayload.pending_id":   "row id; the body lives in inbox_pending_replies",
 	"InboxPendingComposeSendPayload.pending_id": "row id; the body lives in inbox_pending_composes",
 	"DeliverabilityEvaluatePayload.campaign_id": "row id",
+	"WebhookDeliverPayload.delivery_id":         "row id; the body + signing secret are resolved from webhook_deliveries/webhook_endpoints",
 	"InboxReplySendPayload.thread_id":           "row id",
 	"InboxReplySendPayload.task_id":             "server-minted claim key; carries no tenant content",
 

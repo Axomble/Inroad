@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/redisconn"
 )
 
 // Pool-sizing defaults. Aliased from db so the numbers have ONE home (the
@@ -75,6 +76,13 @@ type Config struct {
 	// convenience is an explicit opt-in, not a default hole (agent-platform spec
 	// §3). Link-local (incl. cloud metadata) and multicast stay blocked always.
 	AIAllowPrivateBaseURL bool
+
+	// WebhookAllowPrivate permits outbound webhook receiver URLs on
+	// private/loopback hosts (a receiver on the dev box). Default false — the same
+	// explicit-opt-in posture as AIAllowPrivateBaseURL. Link-local (incl. cloud
+	// metadata) and multicast stay blocked always. cmd/inroad logs a warning at
+	// startup when this is set.
+	WebhookAllowPrivate bool
 
 	// AgentMaxConcurrentRuns caps how many agent runs one API process executes
 	// simultaneously. Runs are goroutines in the API binary (never asynq), so
@@ -256,6 +264,14 @@ func Load() (*Config, error) {
 	}
 	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
 
+	// INROAD_REDIS_ADDR is either a bare host:port or a redis:// / rediss:// URL
+	// (auth, db, TLS). Reject a malformed URL here, at the boundary, so it fails
+	// at startup with the offending value rather than as a panic inside a client
+	// constructor after the process is half wired.
+	if err := redisconn.Validate(cfg.RedisAddr); err != nil {
+		return nil, fmt.Errorf("INROAD_REDIS_ADDR: %w", err)
+	}
+
 	secret := os.Getenv("INROAD_JWT_SECRET")
 	if len(secret) < 16 {
 		return nil, fmt.Errorf("INROAD_JWT_SECRET must be set and at least 16 bytes")
@@ -313,6 +329,7 @@ func Load() (*Config, error) {
 	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
+	cfg.WebhookAllowPrivate = getenvBool("INROAD_WEBHOOK_ALLOW_PRIVATE", false)
 	// Zero is passed through and means "use the run manager's own default";
 	// platform packages never import app packages, so the number itself lives
 	// in agentrun.DefaultMaxConcurrentRuns.

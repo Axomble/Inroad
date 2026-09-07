@@ -1,0 +1,147 @@
+name: Security
+
+# Supply-chain scanning, kept out of ci.yml on purpose: these jobs depend on an
+# external advisory database, so a brand-new CVE can turn them red with no code
+# change. Branch protection points at ci.yml's aggregate `ci` job, so a finding
+# here is loud but does not by itself block a merge — decide per finding.
+#
+# Runs on every PR and push to main for fast feedback, and weekly so a CVE
+# disclosed against unchanged code still surfaces.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays, 04:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Go vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: true
+      # govulncheck reports only vulnerabilities in code paths the binary
+      # actually reaches, so a finding here is real, not a transitive-dep alert.
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  npm-audit:
+    name: npm advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      # `high` and above fail; moderates are reported but do not block, because
+      # most land in build-only tooling that never ships to a browser.
+      - name: Audit
+        working-directory: web
+        run: npm audit --audit-level=high
+
+  trivy:
+    name: Trivy filesystem scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # SARIF upload needs this; harmless on a fork where code scanning is off
+    # (the upload step is guarded below).
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      # The tag is v-PREFIXED. `@0.28.0` does not resolve ("unable to find
+      # version"), which failed this job in 3 seconds before Trivy ever ran, so
+      # the scan was never actually executing.
+      #
+      # TWO scans, deliberately, because the two scanner families have different
+      # remediation costs and lumping them together means the cheap one can
+      # never gate anything.
+      #
+      # 1. vuln + secret: BLOCKING. A vulnerable dependency or a committed
+      #    credential is fixed by upgrading or revoking, and neither should ever
+      #    reach main.
+      #    NOTE ON FORMAT: this gate deliberately uses `table`, not `sarif`.
+      #    In SARIF mode the action logs "Building SARIF report with all
+      #    severities" and DROPS the severity filter, so exit-code 1 fires on
+      #    anything at all -- including two UNRATED x/crypto/ssh DoS CVEs that
+      #    this repo cannot even reach (`go list -deps` shows x/crypto/ssh is
+      #    not in the build; govulncheck, which does reachability analysis,
+      #    reports nothing). Chasing those meant bumping x/crypto to v0.56.0,
+      #    which requires go 1.26 and would have broken all five CI jobs that
+      #    pin 1.25.x. The severity filter is the thing that was broken, not
+      #    the dependency.
+      - name: Scan for vulnerabilities and secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          format: table
+          exit-code: "1"
+
+      # The SARIF upload is a SEPARATE, non-gating pass, so the Security tab
+      # still gets the full picture at every severity while the gate above stays
+      # scoped to HIGH/CRITICAL.
+      - name: Build SARIF for the Security tab
+        if: always() && github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          format: sarif
+          output: trivy.sarif
+          exit-code: "0"
+
+      # 2. misconfig: REPORTING ONLY, for now. The scan finds ~20 real hardening
+      #    gaps in deploy/terraform/aws and deploy/helm (public ALB on HTTP,
+      #    unrestricted egress, no readOnlyRootFilesystem, no transit encryption
+      #    on the replication group). Those are genuine and worth fixing, but
+      #    they are an infrastructure change, not something to land inside this
+      #    branch — and blocking on them would make every unrelated PR red until
+      #    someone does that work.
+      #
+      #    exit-code 0 keeps them visible in the Security tab and in this job's
+      #    log without gating. Flip this to "1" once deploy/ is hardened.
+      #    TODO(infra): harden deploy/terraform/aws + deploy/helm, then block.
+      - name: Scan infrastructure for misconfiguration (report only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: misconfig
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore.yaml
+          format: table
+          exit-code: "0"
+      # Feed the findings into the Security tab when this is the canonical repo.
+      - name: Upload SARIF
+        if: always() && github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif

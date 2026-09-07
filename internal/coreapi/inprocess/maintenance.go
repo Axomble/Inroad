@@ -38,6 +38,15 @@ func (c client) PurgeDeadLetters(ctx context.Context) (int64, error) {
 	return c.q.PurgeTaskDeadLetters(ctx)
 }
 
+// PurgeWebhookDeliveries removes webhook_deliveries rows past their 30-day
+// retention window. task_dead_letters / warmup_observations reasoning
+// (invariant 55): the table grows one row per (event, endpoint) and is never
+// deleted by the application, so it needs a sweep. Kept separate from
+// CleanupExpired, whose doc scopes it to authentication artifacts.
+func (c client) PurgeWebhookDeliveries(ctx context.Context) (int64, error) {
+	return c.q.PurgeWebhookDeliveries(ctx)
+}
+
 // PurgeDeadWorkers reaps worker-registry rows whose heartbeat stopped long ago,
 // plus the mailbox assignments pinned to them. Kept separate from CleanupExpired
 // for the same reason as the two above: `workers` is global infrastructure state,

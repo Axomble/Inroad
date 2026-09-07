@@ -414,6 +414,12 @@ const injectedRtkApi = api.injectEndpoints({
     getPulse: build.query<GetPulseApiResponse, GetPulseApiArg>({
       query: () => ({ url: `/pulse` }),
     }),
+    createRealtimeTicket: build.mutation<
+      CreateRealtimeTicketApiResponse,
+      CreateRealtimeTicketApiArg
+    >({
+      query: () => ({ url: `/realtime/ticket`, method: "POST" }),
+    }),
     getCampaignReport: build.query<
       GetCampaignReportApiResponse,
       GetCampaignReportApiArg
@@ -1742,6 +1748,77 @@ const injectedRtkApi = api.injectEndpoints({
         method: "POST",
       }),
     }),
+    listWebhookEndpoints: build.query<
+      ListWebhookEndpointsApiResponse,
+      ListWebhookEndpointsApiArg
+    >({
+      query: () => ({ url: `/webhook-endpoints` }),
+    }),
+    createWebhookEndpoint: build.mutation<
+      CreateWebhookEndpointApiResponse,
+      CreateWebhookEndpointApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/webhook-endpoints`,
+        method: "POST",
+        body: queryArg.webhookEndpointInput,
+      }),
+    }),
+    getWebhookEndpoint: build.query<
+      GetWebhookEndpointApiResponse,
+      GetWebhookEndpointApiArg
+    >({
+      query: (queryArg) => ({ url: `/webhook-endpoints/${queryArg.id}` }),
+    }),
+    updateWebhookEndpoint: build.mutation<
+      UpdateWebhookEndpointApiResponse,
+      UpdateWebhookEndpointApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/webhook-endpoints/${queryArg.id}`,
+        method: "PATCH",
+        body: queryArg.webhookEndpointPatch,
+      }),
+    }),
+    deleteWebhookEndpoint: build.mutation<
+      DeleteWebhookEndpointApiResponse,
+      DeleteWebhookEndpointApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/webhook-endpoints/${queryArg.id}`,
+        method: "DELETE",
+      }),
+    }),
+    rotateWebhookEndpointSecret: build.mutation<
+      RotateWebhookEndpointSecretApiResponse,
+      RotateWebhookEndpointSecretApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/webhook-endpoints/${queryArg.id}/rotate-secret`,
+        method: "POST",
+      }),
+    }),
+    pingWebhookEndpoint: build.mutation<
+      PingWebhookEndpointApiResponse,
+      PingWebhookEndpointApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/webhook-endpoints/${queryArg.id}/ping`,
+        method: "POST",
+      }),
+    }),
+    listWebhookDeliveries: build.query<
+      ListWebhookDeliveriesApiResponse,
+      ListWebhookDeliveriesApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/webhook-endpoints/${queryArg.id}/deliveries`,
+        params: {
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -1970,6 +2047,9 @@ export type SetWarmupSentinelApiArg = {
 };
 export type GetPulseApiResponse = /** status 200 Workspace pulse */ Pulse;
 export type GetPulseApiArg = void;
+export type CreateRealtimeTicketApiResponse =
+  /** status 200 A connect ticket */ RealtimeTicket;
+export type CreateRealtimeTicketApiArg = void;
 export type GetCampaignReportApiResponse =
   /** status 200 Cross-campaign performance report */ CampaignReport;
 export type GetCampaignReportApiArg = void;
@@ -2803,6 +2883,48 @@ export type DiscardTaskDeadLetterApiResponse = unknown;
 export type DiscardTaskDeadLetterApiArg = {
   id: string;
 };
+export type ListWebhookEndpointsApiResponse =
+  /** status 200 Endpoints */ WebhookEndpointList;
+export type ListWebhookEndpointsApiArg = void;
+export type CreateWebhookEndpointApiResponse =
+  /** status 201 Created; `secret` is present exactly this once */ WebhookEndpointWithSecret;
+export type CreateWebhookEndpointApiArg = {
+  webhookEndpointInput: WebhookEndpointInput;
+};
+export type GetWebhookEndpointApiResponse =
+  /** status 200 The endpoint */ WebhookEndpoint;
+export type GetWebhookEndpointApiArg = {
+  id: string;
+};
+export type UpdateWebhookEndpointApiResponse =
+  /** status 200 Updated */ WebhookEndpoint;
+export type UpdateWebhookEndpointApiArg = {
+  id: string;
+  webhookEndpointPatch: WebhookEndpointPatch;
+};
+export type DeleteWebhookEndpointApiResponse = unknown;
+export type DeleteWebhookEndpointApiArg = {
+  id: string;
+};
+export type RotateWebhookEndpointSecretApiResponse =
+  /** status 200 Rotated; `secret` is the new value, shown once */ WebhookEndpointWithSecret;
+export type RotateWebhookEndpointSecretApiArg = {
+  id: string;
+};
+export type PingWebhookEndpointApiResponse =
+  /** status 202 Ping delivery queued */ WebhookDelivery;
+export type PingWebhookEndpointApiArg = {
+  id: string;
+};
+export type ListWebhookDeliveriesApiResponse =
+  /** status 200 Deliveries */ WebhookDeliveryList;
+export type ListWebhookDeliveriesApiArg = {
+  id: string;
+  /** Page size. Defaults to 50, capped at 100. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
 export type Membership = {
   workspace_id: string;
   workspace_name: string;
@@ -3354,6 +3476,12 @@ export type Pulse = {
     interested: number;
   };
   attention: PulseAttention[];
+};
+export type RealtimeTicket = {
+  /** Opaque signed credential to pass as the `ticket` query parameter on the WebSocket upgrade. Single-use; treat it as a secret and do not log it. */
+  ticket: string;
+  /** Seconds until the ticket expires. */
+  expires_in: number;
 };
 export type PerformanceCounts = {
   /** Messages sent. */
@@ -4729,6 +4857,57 @@ export type TaskDeadLetterList = {
     Valid only for the status filter that produced it — pass it back together with the same status (or the same absent status), or the request is rejected 400. Opaque: round-trip it untouched. */
   next_cursor?: string;
 };
+export type WebhookEndpoint = {
+  id: string;
+  url: string;
+  description: string;
+  /** subscribed events; an empty array means every event */
+  event_types: string[];
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+export type WebhookEndpointList = {
+  items: WebhookEndpoint[];
+};
+export type WebhookEndpointWithSecret = WebhookEndpoint & {
+  /** The base64-encoded HMAC signing secret, returned ONCE at create and rotate-secret time. It is the key for the Inroad-Signature header: `t=<unix>,v1=<hex hmac-sha256(secret, "<t>.<rawBody>")>`. */
+  secret: string;
+};
+export type WebhookEndpointInput = {
+  /** http/https receiver URL. Rejected if it resolves to a loopback, private, link-local, unspecified or multicast address. */
+  url: string;
+  description?: string;
+  /** Events to subscribe to. Empty or omitted = every event. Entries must be from this enum; "ping" is always delivered on demand and is not a subscribable type. */
+  event_types?: ("reply.received" | "email.bounced" | "contact.unsubscribed")[];
+};
+export type WebhookEndpointPatch = {
+  url?: string;
+  description?: string;
+  /** `[]` means subscribe to every event */
+  event_types?: ("reply.received" | "email.bounced" | "contact.unsubscribed")[];
+  active?: boolean;
+};
+export type WebhookDelivery = {
+  id: string;
+  event_type: string;
+  /** pending — queued or awaiting a retry. delivered — a 2xx was received; terminal. failed — the retry schedule was exhausted; terminal. */
+  status: "pending" | "delivered" | "failed";
+  /** POST attempts made so far */
+  attempts: number;
+  /** diagnostic from the last failed attempt; empty on success */
+  last_error: string;
+  /** HTTP status from the last attempt; null for a transport-level failure or before the first attempt. */
+  response_status: number | null;
+  created_at: string;
+  /** when a 2xx was received; null otherwise */
+  delivered_at: string | null;
+};
+export type WebhookDeliveryList = {
+  items: WebhookDelivery[];
+  /** Cursor for the next page; null on the last page. Opaque — round-trip it untouched. */
+  next_cursor: string | null;
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -4781,6 +4960,7 @@ export const {
   useListWarmupTransitionsQuery,
   useSetWarmupSentinelMutation,
   useGetPulseQuery,
+  useCreateRealtimeTicketMutation,
   useGetCampaignReportQuery,
   useGetAiSettingsQuery,
   useUpdateAiSettingsMutation,
@@ -4938,4 +5118,12 @@ export const {
   useGetTaskDeadLetterQuery,
   useReplayTaskDeadLetterMutation,
   useDiscardTaskDeadLetterMutation,
+  useListWebhookEndpointsQuery,
+  useCreateWebhookEndpointMutation,
+  useGetWebhookEndpointQuery,
+  useUpdateWebhookEndpointMutation,
+  useDeleteWebhookEndpointMutation,
+  useRotateWebhookEndpointSecretMutation,
+  usePingWebhookEndpointMutation,
+  useListWebhookDeliveriesQuery,
 } = injectedRtkApi;

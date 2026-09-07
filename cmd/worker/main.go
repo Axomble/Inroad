@@ -17,6 +17,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/inroad/inroad/internal/app/webhook"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/config"
@@ -31,6 +32,8 @@ import (
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
+	"github.com/inroad/inroad/internal/platform/redisconn"
+	"github.com/inroad/inroad/internal/platform/version"
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
 )
@@ -136,10 +139,21 @@ func run() error {
 	// in-process channel reaches no browser: every worker-originated event goes
 	// through Redis, and this hub is that path. It publishes only — the worker
 	// holds no sockets, so nothing here subscribes.
-	realtimeRedis := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	realtimeRedis := redis.NewClient(redisconn.MustOptions(cfg.RedisAddr))
 	defer func() { _ = realtimeRedis.Close() }()
 	realtimeHub := platformrealtime.New(realtimeRedis)
 	defer func() { _ = realtimeHub.Close() }()
+
+	// Created before the coreapi client so the webhook emitter (which enqueues
+	// webhook:deliver tasks) can be wired into it. Closed on return.
+	enq := queue.NewClient(cfg.RedisAddr)
+	defer enq.Close()
+
+	// The outbound-webhook emitter: reply.received / email.bounced /
+	// contact.unsubscribed fan out to a workspace's registered endpoints from the
+	// inbox poller's coreapi writes.
+	webhookEmitter := webhook.NewServiceEmitter(
+		webhook.NewService(webhook.NewPgStore(gen.New(pool)), keyring, enq, cfg.WebhookAllowPrivate))
 
 	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(),
 		// The claim-before-send outcome counter (won/reclaimed/lost/…) is
@@ -149,7 +163,9 @@ func run() error {
 		// Enables PublishRealtime. Omitting it would leave every publish a no-op
 		// and browsers on their polling fallback — correct, but the point of the
 		// slice is that an inbound reply reaches an open tab without one.
-		inprocess.WithRealtime(realtimeHub))
+		inprocess.WithRealtime(realtimeHub),
+		// Enables outbound webhook fan-out for the three catalog events.
+		inprocess.WithWebhooks(webhookEmitter))
 
 	// Resolve the optional worker egress IP once. When set, outbound SMTP/IMAP
 	// dials bind their SOURCE address to it (spec §15) so a mailbox's mail
@@ -173,8 +189,6 @@ func run() error {
 	imapEngager := mail.NewNetEngager(cfg.MailAllowPrivateHosts)
 	imapEngager.LocalAddr = egressAddr
 	engager := mail.NewMultiEngager(imapEngager, mail.NewGmailEngager())
-	enq := queue.NewClient(cfg.RedisAddr)
-	defer enq.Close()
 
 	// Queue backlog per queue, read on scrape. Wired on the worker (not the
 	// API) because the worker is what consumes the queues, so the depth and the
@@ -229,9 +243,9 @@ func run() error {
 	// a DNS lookup dials the host's configured nameservers, never the name being
 	// looked up, so no user-supplied host is ever connected to here.
 	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), esp.NewResolver(),
-		enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret, mtx)
+		enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret, cfg.WebhookAllowPrivate, mtx)
 
-	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
+	logger.Info("worker starting", "version", version.String(), "redis", redisconn.Redact(cfg.RedisAddr), "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
 		logger.Error("worker error", "err", err)
 		return err

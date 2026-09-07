@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/inroad/inroad/internal/platform/redisconn"
 )
 
 // incrWindow atomically increments the counter at KEYS[1] and, on the first hit
@@ -33,11 +35,12 @@ type RedisLimiter struct {
 	rdb *redis.Client
 }
 
-// NewRedisLimiter builds a limiter over a Redis client dialed at addr. It reuses
-// the same address the queue transport connects to; the client pools connections
-// internally.
+// NewRedisLimiter builds a limiter over a Redis client dialed at addr, which is
+// a bare host:port or a redis:// / rediss:// URL (see platform/redisconn). It
+// reuses the same address the queue transport connects to; the client pools
+// connections internally.
 func NewRedisLimiter(addr string) *RedisLimiter {
-	return &RedisLimiter{rdb: redis.NewClient(&redis.Options{Addr: addr})}
+	return &RedisLimiter{rdb: redis.NewClient(redisconn.MustOptions(addr))}
 }
 
 // Allow reports whether one more request under key is permitted within the

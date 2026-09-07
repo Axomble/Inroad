@@ -26,11 +26,14 @@ type cleanupCore struct {
 	workersErr          error
 	deadLettersDeleted  int64
 	deadLettersErr      error
+	webhooksDeleted     int64
+	webhooksErr         error
 	called              bool
 	idempotencyCalled   bool
 	observationsCalled  bool
 	workersCalled       bool
 	deadLettersCalled   bool
+	webhooksCalled      bool
 }
 
 func (c *cleanupCore) CleanupExpired(context.Context) (int64, error) {
@@ -58,13 +61,18 @@ func (c *cleanupCore) PurgeDeadLetters(context.Context) (int64, error) {
 	return c.deadLettersDeleted, c.deadLettersErr
 }
 
+func (c *cleanupCore) PurgeWebhookDeliveries(context.Context) (int64, error) {
+	c.webhooksCalled = true
+	return c.webhooksDeleted, c.webhooksErr
+}
+
 func TestCleanupHandler(t *testing.T) {
-	// Five DISTINCT counts. The log line is the only observable this job has —
+	// Six DISTINCT counts. The log line is the only observable this job has —
 	// nothing returns the numbers — so the assertion below is what makes the
 	// fixture values mean anything, and distinct values are what turn "a count was
-	// logged" into "the RIGHT count was logged": five identical numbers would pass
-	// a handler that logged the same variable five times.
-	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2, deadLettersDeleted: 4}
+	// logged" into "the RIGHT count was logged": identical numbers would pass a
+	// handler that logged the same variable every time.
+	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2, deadLettersDeleted: 4, webhooksDeleted: 9}
 
 	restore := slog.Default()
 	var logs bytes.Buffer
@@ -89,6 +97,9 @@ func TestCleanupHandler(t *testing.T) {
 	if !core.deadLettersCalled {
 		t.Fatal("PurgeDeadLetters was not called")
 	}
+	if !core.webhooksCalled {
+		t.Fatal("PurgeWebhookDeliveries was not called")
+	}
 
 	for _, want := range []struct {
 		msg  string
@@ -99,6 +110,7 @@ func TestCleanupHandler(t *testing.T) {
 		{"expired warmup observations purged", 7},
 		{"dead workers and their assignments purged", 2},
 		{"expired dead letters purged", 4},
+		{"expired webhook deliveries purged", 9},
 	} {
 		if got := loggedRows(t, logs.Bytes(), want.msg); got != want.rows {
 			t.Errorf("%q logged rows=%d, want %d — the count is this job's only observable",

@@ -12,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/inroad/inroad/internal/platform/redisconn"
 )
 
 // streamTTL bounds how long a run's chunk log survives. It is a REPLAY buffer,
@@ -119,11 +121,12 @@ type reader struct {
 	closed   bool
 }
 
-// NewRedisStream dials Redis at addr — the same instance the queue and rate
-// limiter use; go-redis pools connections internally, so this is one more
-// client on one more code path, not a second Redis dependency.
+// NewRedisStream dials Redis at addr (a bare host:port or a redis:// / rediss://
+// URL — see platform/redisconn) — the same instance the queue and rate limiter
+// use; go-redis pools connections internally, so this is one more client on one
+// more code path, not a second Redis dependency.
 func NewRedisStream(addr string) *RedisStream {
-	return NewRedisStreamWithClient(redis.NewClient(&redis.Options{Addr: addr}))
+	return NewRedisStreamWithClient(redis.NewClient(redisconn.MustOptions(addr)))
 }
 
 // NewRedisStreamWithClient wraps an existing client (integration tests supply

@@ -132,6 +132,7 @@ var tenancyExceptions = map[string]string{
 	"recipientdomain.sql:DeleteExpiredRecipientDomains": "retention sweep over a DNS-fact cache, by age alone. A lost row costs one re-lookup.",
 	"warmup.sql:PurgeWarmupObservations":                "retention sweep over append-only warmup evidence, by age alone, returning a count (design §4.6).",
 	"deadletter.sql:PurgeTaskDeadLetters":               "retention sweep over captured retry-exhausted tasks, by age alone, returning a count. Same shape and same reasoning as PurgeWarmupObservations: the table is append-only in practice and had no sweep at all.",
+	"webhook.sql:PurgeWebhookDeliveries":                "retention sweep over the outbound-webhook delivery log, by age alone, returning a count. Same shape and reasoning as PurgeTaskDeadLetters: one row per (event, endpoint), append-only from the app, and no sweep of its own.",
 	"agentchat.sql:FailStuckAgentRuns":                  "crash recovery at API startup: a run still 'running' at boot belongs to a process that is gone. Deployment-scoped repair, not a tenant read.",
 	"agentchat.sql:ResetStuckAgentMessages":             "companion to FailStuckAgentRuns; marks messages abandoned by a crashed process terminal.",
 
@@ -456,7 +457,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 45
+	const known = 46
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

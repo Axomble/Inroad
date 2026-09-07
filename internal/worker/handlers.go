@@ -18,6 +18,7 @@ import (
 	"github.com/inroad/inroad/internal/worker/sequence"
 	"github.com/inroad/inroad/internal/worker/testsend"
 	"github.com/inroad/inroad/internal/worker/warmup"
+	webhookworker "github.com/inroad/inroad/internal/worker/webhook"
 )
 
 // Register attaches all execution-plane handlers to the mux. publicURL and
@@ -30,7 +31,7 @@ import (
 // send handlers' finalize points, and inroad_sweep_seconds /
 // inroad_sweep_rows_total at the enrollment, inbox and warmup sweeps; a nil
 // mtx (metrics disabled) no-ops.
-func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, resolver dnsauth.Resolver, mxResolver esp.Resolver, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte, mtx *metrics.Metrics) {
+func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, engager mail.Engager, reader mail.InboxReader, resolver dnsauth.Resolver, mxResolver esp.Resolver, enq *queue.Client, publicURL string, trackingSecret, warmupSecret []byte, webhookAllowPrivate bool, mtx *metrics.Metrics) {
 	if cleaner, ok := core.(maintenance.Cleaner); ok {
 		mux.HandleFunc(queue.TaskMaintenanceCleanup, maintenance.CleanupHandler(cleaner))
 	}
@@ -74,4 +75,11 @@ func Register(mux *asynq.ServeMux, core coreapi.Client, sndr *mail.MultiSender, 
 	// Reply & bounce detection: poll one mailbox's INBOX per task + reconcile.
 	// warmupSecret lets the poller verify + isolate warmup mail (spec §7/§9.4).
 	inbox.Register(mux, core, reader, sndr, enq, warmupSecret, mtx)
+	// Outbound webhooks: POST one signed delivery per task, retry on backoff.
+	// Registered by type assertion for the same reason as the cleaner/breaker
+	// above — the capability (load a delivery + open its endpoint secret) is
+	// consumed through webhookworker.Core rather than widening coreapi.Client.
+	if wc, ok := core.(webhookworker.Core); ok {
+		webhookworker.Register(mux, wc, enq, webhookAllowPrivate)
+	}
 }

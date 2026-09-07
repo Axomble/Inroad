@@ -1,0 +1,34 @@
+# Trivy suppressions. Every entry needs a reason and, where it is a deferral
+# rather than a false positive, a linked issue. An unexplained id here is how a
+# scanner quietly stops meaning anything.
+#
+# Nothing in this file suppresses a VULNERABILITY. Dependency CVEs are fixed by
+# upgrading, never ignored: govulncheck and `npm audit` are the gates for those.
+#
+# NB: do not quote the matched literal in these comments. An earlier version of
+# this file spelled out the JSON key the secret rule looks for, which made the
+# ignore file itself a HIGH finding.
+
+secrets:
+  # FALSE POSITIVE. The flagged lines are placeholder strings in a form-field
+  # definition, shown to the operator so they know what shape of JSON to paste
+  # into the Vertex AI credential box. Trivy's gcp-service-account rule matches
+  # the JSON key name that appears in that sample text.
+  #
+  # There is no key material in the repo: the real value the operator pastes is
+  # sealed by the keyring and never committed.
+  - id: gcp-service-account
+    paths:
+      - "web/src/features/ai-settings/provider-kinds.ts"
+    statement: UI placeholder text in a form field, not a credential.
+
+misconfigurations:
+  # The dev-only images run as root because they bind-mount the developer's
+  # source tree and must write into it (air rebuilds, vite's cache). Giving them
+  # a non-root USER breaks the dev loop on every host whose uid is not 1000.
+  # They are never deployed; docker-compose.dev.yml is the only consumer.
+  - id: DS-0002
+    paths:
+      - "deploy/docker/Dockerfile.dev-go"
+      - "deploy/docker/Dockerfile.dev-web"
+    statement: Development-only image, never deployed; needs write access to the bind-mounted source.
