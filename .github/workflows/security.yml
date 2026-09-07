@@ -72,8 +72,11 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v7
+      # The tag is v-PREFIXED. `@0.28.0` does not resolve ("unable to find
+      # version"), which failed this job in 3 seconds before Trivy ever ran, so
+      # the scan was never actually executing.
       - name: Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scanners: vuln,secret,misconfig
