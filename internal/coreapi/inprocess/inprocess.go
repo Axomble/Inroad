@@ -137,7 +137,7 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		breaker:       deliverability.NewService(deliverability.NewPgStore(pool)),
 		warmupSecret:  warmupSecret,
 		warmupContent: warmupContent,
-		inbox:         inbox.NewService(inbox.NewPgStore(pool)),
+		inbox:         newInboxService(pool),
 		replyClaims:   idempotency.NewPgStore(pool),
 		now:           time.Now,
 	}
@@ -145,6 +145,30 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 		opt(&c)
 	}
 	return c
+}
+
+// newInboxService builds the EXECUTION plane's view of the inbox domain.
+//
+// The compose and pending-reply stores must be supplied explicitly. They are
+// optional ServiceOptions, and the worker's service was constructed with none
+// of them: `inbox.NewService(inbox.NewPgStore(pool))`. That left s.compose and
+// s.pending nil, so every claim path failed its ComposeClaimer /
+// PendingReplyClaimer type assertion with "this compose store cannot claim" and
+// NO composed email or deferred reply could ever be sent. The row stayed
+// `scheduled` with an empty last_error while the asynq task retried to
+// exhaustion and was archived, so the UI showed a queued message that silently
+// never left.
+//
+// One store satisfies every interface (the split is about who may call what,
+// not about where the rows live), so this passes the same *PgStore three times.
+// The enqueuers are deliberately NOT wired: the execution plane completes work
+// it was handed, it does not schedule new work for itself.
+func newInboxService(pool *pgxpool.Pool) *inbox.Service {
+	store := inbox.NewPgStore(pool)
+	return inbox.NewService(store,
+		inbox.WithComposeStore(store),
+		inbox.WithPendingReplyStore(store),
+	)
 }
 
 // oauthConfigFor returns the provider's oauth2 config for a token refresh, or

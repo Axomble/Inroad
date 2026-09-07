@@ -41,17 +41,34 @@ const SEVERITY_TEXT: Record<PulseSeverity, string> = { danger: 'text-danger', wa
 const rowClass =
   '-mx-1 flex items-center gap-2 rounded-md px-1 py-0.5 outline-none transition-colors hover:bg-chrome-hover focus-visible:ring-2 focus-visible:ring-primary'
 
+/**
+ * Two lines, not one: the reason is server prose of unbounded length ("warmup
+ * health limiting sending: 4 mailboxes degrading through one signing domain
+ * (mail.acme.test)"). Beside the label with `shrink-0` it crushed the label to
+ * zero width and pushed the whole sidebar into a horizontal scrollbar. On its
+ * own line it truncates, and the full text survives in `title`.
+ */
 function AttentionRow({ item }: { item: PulseAttentionItem }) {
   return (
-    <Link {...linkProps(item.href)} data-slot="pulse-attention-row" className={cn(rowClass, 'text-[12px] text-chrome-text')}>
-      <span className={cn('shrink-0 font-mono text-[11px] leading-none', SEVERITY_TEXT[item.severity])} aria-hidden="true">
+    <Link {...linkProps(item.href)} data-slot="pulse-attention-row" className={cn(rowClass, 'items-start text-[12px] text-chrome-text')}>
+      {/* items-start + mt-1: the row is now two lines, so a centred glyph would
+          float between them instead of marking the first one. */}
+      <span className={cn('mt-1 shrink-0 font-mono text-[11px] leading-none', SEVERITY_TEXT[item.severity])} aria-hidden="true">
         {SEVERITY_GLYPH[item.severity]}
       </span>
       <span className="sr-only">{SEVERITY_SR[item.severity]}</span>
-      <span className="truncate">
-        <span className="font-mono tabular-nums">{item.count}</span> {attentionLabel(item.kind, item.count)}
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate">
+          <span className="font-mono tabular-nums">{item.count}</span> {attentionLabel(item.kind, item.count)}
+        </span>
+        <span className="truncate font-mono text-[11px] text-chrome-muted" title={item.reason}>
+          {item.reason}
+        </span>
       </span>
-      <span className="ml-auto shrink-0 font-mono text-[11px] text-chrome-muted">{item.reason}</span>
+      {/* No trailing reason span here: main still had the OLD single-line
+          version, which rendered the reason a second time. It already appears
+          on its own truncating line above, which is the whole point of this
+          two-line layout. */}
     </Link>
   )
 }

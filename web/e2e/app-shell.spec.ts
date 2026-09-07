@@ -54,6 +54,17 @@ async function mockApi(page: Page) {
             reason: 'Inbox placement is trending down.',
             href: '/app/warmup',
           },
+          // A reason wider than the 256px sidebar. The real server writes these
+          // (internal/app/pulse/service.go gatedReason names the shared signing
+          // domain in full); the sidebar test below is what keeps it from
+          // scrolling the rail sideways again.
+          {
+            kind: 'senders_gated',
+            severity: 'warn',
+            count: 2,
+            reason: 'warmup health limiting sending: 4 mailboxes degrading through one signing domain (mail.atlas.test)',
+            href: '/app/warmup',
+          },
         ],
       }))
     }
@@ -176,4 +187,26 @@ test('mobile navigation and core screens stay within the viewport', async ({ pag
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false)
   await page.screenshot({ path: testInfo.outputPath('overview-mobile.png'), fullPage: true })
+})
+
+test('a long pulse reason never scrolls the sidebar sideways', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1891, height: 1084 })
+  await mockApi(page)
+  await signIn(page)
+
+  // The desktop rail only: the mobile drawer mounts a second, inert copy after it.
+  const sidebar = page.locator('[data-slot="pulse-card"]').first().locator('..')
+  const row = sidebar.locator('[data-slot="pulse-attention-row"]', { hasText: 'senders gated' })
+  // The label must survive with real width — the bug crushed it to zero and left
+  // only the reason on screen.
+  await expect(row.getByText('2 senders gated')).toBeVisible()
+  await expect(row).toContainText('warmup health limiting sending')
+
+  const metrics = await sidebar.evaluate((el) => ({
+    railOverflowsX: el.scrollWidth > el.clientWidth,
+    pageOverflowsX: document.documentElement.scrollWidth > window.innerWidth,
+    pageOverflowsY: document.documentElement.scrollHeight > window.innerHeight,
+  }))
+  expect(metrics).toEqual({ railOverflowsX: false, pageOverflowsX: false, pageOverflowsY: false })
+  await sidebar.screenshot({ path: testInfo.outputPath('sidebar-long-reason.png') })
 })
