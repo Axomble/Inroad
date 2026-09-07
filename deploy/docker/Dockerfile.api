@@ -13,8 +13,19 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/inroad ./cmd/inroad
-RUN CGO_ENABLED=0 go build -o /out/migrate ./cmd/migrate
+# Stamped into internal/platform/version at link time so the running binary can
+# report which release it is (startup log line, and any future /version route).
+# An un-passed build keeps the package defaults ("dev"/"unknown"), which is what
+# a plain `docker build` with no args produces.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+ENV LDFLAGS="-s -w \
+  -X github.com/inroad/inroad/internal/platform/version.Version=${VERSION} \
+  -X github.com/inroad/inroad/internal/platform/version.Commit=${COMMIT} \
+  -X github.com/inroad/inroad/internal/platform/version.Date=${DATE}"
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="${LDFLAGS}" -o /out/inroad ./cmd/inroad
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 # --- runtime ---
 FROM alpine:3.20

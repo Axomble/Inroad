@@ -31,6 +31,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
 	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
+	"github.com/inroad/inroad/internal/platform/version"
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
 )
@@ -231,7 +232,7 @@ func run() error {
 	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), esp.NewResolver(),
 		enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret, mtx)
 
-	logger.Info("worker starting", "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
+	logger.Info("worker starting", "version", version.String(), "redis", cfg.RedisAddr, "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
 		logger.Error("worker error", "err", err)
 		return err

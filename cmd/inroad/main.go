@@ -74,6 +74,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/ratelimit"
 	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
 	"github.com/inroad/inroad/internal/platform/throttle"
+	"github.com/inroad/inroad/internal/platform/version"
 )
 
 func main() {
@@ -749,7 +750,7 @@ func run() error {
 	}
 
 	srv := httpx.NewServer(cfg.HTTPAddr, router)
-	logger.Info("api listening", "addr", cfg.HTTPAddr)
+	logger.Info("api listening", "version", version.String(), "addr", cfg.HTTPAddr)
 	if err := httpx.Run(ctx, srv); err != nil {
 		logger.Error("server error", "err", err)
 		return err

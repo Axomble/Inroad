@@ -1,0 +1,92 @@
+name: Release
+
+# Fires on a version tag (v1.2.3). Builds the CLI binaries for the platforms
+# people actually run Inroad on, then cuts a GitHub Release whose body is the
+# matching CHANGELOG.md section followed by the auto-generated commit list.
+#
+# Container images are published by images.yml (build-push.yml), which also
+# triggers on the tag; the two are independent.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the release-notes step and GitHub's auto notes can
+          # diff against the previous tag.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: true
+
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          PKG=github.com/inroad/inroad/internal/platform/version
+          LDFLAGS="-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT} -X ${PKG}.Date=${DATE}"
+
+          mkdir -p dist
+          # Only the binaries a self-hoster needs: the API server, the worker,
+          # and the migrator. `seed` is a dev convenience and is left out.
+          for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS="${target%/*}"; GOARCH="${target#*/}"
+            ext=""; [ "$GOOS" = windows ] && ext=".exe"
+            stage="inroad_${VERSION}_${GOOS}_${GOARCH}"
+            mkdir -p "$stage"
+            for cmd in inroad worker migrate; do
+              CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+                go build -trimpath -ldflags="$LDFLAGS" -o "$stage/${cmd}${ext}" "./cmd/${cmd}"
+            done
+            cp LICENSE README.md CHANGELOG.md "$stage/"
+            if [ "$GOOS" = windows ]; then
+              (cd "$stage" && zip -qr "../dist/${stage}.zip" .)
+            else
+              tar -C "$stage" -czf "dist/${stage}.tar.gz" .
+            fi
+            rm -rf "$stage"
+          done
+          (cd dist && sha256sum ./* > checksums.txt)
+          ls -la dist
+
+      - name: Extract changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          # Print the body between "## [VER]" and the next "## [" heading.
+          awk -v ver="$VER" '
+            $0 ~ ("^## \\[" ver "\\]") { grab = 1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md || true
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "No CHANGELOG.md section for ${VER}; the release will carry only the auto-generated notes."
+            printf '_No hand-written notes for this release._\n' > RELEASE_NOTES.md
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
+          # A tag containing a hyphen (v1.2.3-rc.1) is a pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
