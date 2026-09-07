@@ -15,7 +15,24 @@ import { useGetPulseQuery, type WorkspacePulse } from '@/features/pulse/api'
  * Skipped until a workspace is active — the server resolves the workspace
  * from the session, so before it settles there is nothing truthful to ask for.
  */
-const POLL_OPTIONS = { pollingInterval: 45_000, skipPollingIfUnfocused: true } as const
+/**
+ * The poll is a BACKSTOP, not the primary freshness mechanism — realtime is
+ * (see features/realtime/cache-patch.ts, where five of the six event types call
+ * refetchPulse because they move a pulse aggregate).
+ *
+ * It stays because realtime cannot cover everything the pulse reports: warmup
+ * lane transitions and the deliverability counters are written by workers with
+ * no event behind them, and anything that changes while the socket is down is
+ * missed unless something asks again. Deleting the poll would make those go
+ * stale silently until the next navigation.
+ *
+ * 4 minutes rather than 45s: at 45s this fired ~80 times an hour per open tab to
+ * re-fetch a value realtime had usually already patched. Six components share
+ * this one deduped subscription, so the interval is the whole cost. Raising it
+ * cuts ~90% of those requests while still bounding how long a worker-written
+ * value can read stale — a bound only the poll provides.
+ */
+const POLL_OPTIONS = { pollingInterval: 240_000, skipPollingIfUnfocused: true } as const
 
 function usePulseArg() {
   const workspaceId = useAppSelector((s) => s.auth.activeWorkspaceId)

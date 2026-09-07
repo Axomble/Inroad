@@ -621,6 +621,19 @@ func run() error {
 			ForgotThrottle:      forgotThrottle,
 			GoogleStartThrottle: googleStartThrottle,
 		})},
+		// The realtime WebSocket. Public because a browser cannot put a bearer
+		// token on an Upgrade, so RequireAuth (which reads the credential ONLY
+		// from Authorization: Bearer, with no cookie fallback) refused every
+		// handshake with a 401 and the socket was unreachable. Its own gates —
+		// signed single-use ticket, session re-check, nonce burn, Origin
+		// allowlist — are what authenticate it, and the ticket is minted only by
+		// the session-protected endpoint in sessionOnly. See
+		// realtime.SocketRoutes for the full argument.
+		//
+		// Mounted on the FULL path, not the "/api/v1/realtime" prefix: the mint
+		// endpoint already mounts that prefix in the protected group, and chi
+		// panics at startup on a duplicate Mount of the same pattern.
+		{pattern: "/api/v1/realtime/ws", handler: realtimeHandler.SocketRoutes()},
 		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore, suppression.WithWebhooks(webhookEmitter)).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
@@ -725,7 +738,7 @@ func run() error {
 		// behalf of a human session, so an `inrd_` key or an OAuth client cannot
 		// open one. The workspace it fans out comes from the signed connect ticket,
 		// never from the request.
-		{pattern: "/api/v1/realtime", handler: realtimeHandler.Routes(realtimeTicketThrottle)},
+		{pattern: "/api/v1/realtime", handler: realtimeHandler.TicketRoutes(realtimeTicketThrottle)},
 	}
 	// Idempotency-Key replay cache: generic cross-cutting middleware, mounted
 	// inside every authenticated group (after RequireAuth resolves the

@@ -267,44 +267,70 @@ func TestSkipIdempotencyGuardSeesTheFullMountedPath(t *testing.T) {
 	}
 }
 
-// TestRealtimeRoutesRejectAnonymous is the assertion the realtime spec (§8,
-// slice 3) asks for: both endpoints sit in a protected group, so neither is
-// reachable without a session.
-//
-// The socket is the interesting half. It authenticates with a signed connect
-// ticket in the query string rather than a bearer token, because a browser
-// cannot set an Authorization header on `new WebSocket()` — and that makes it
-// easy to assume it must therefore be mounted OUTSIDE the auth group. It is not:
-// RequireAuth still runs, so an anonymous caller is refused before any ticket is
-// parsed, and the ticket is a second gate rather than the only one.
-func TestRealtimeRoutesRejectAnonymous(t *testing.T) {
+// TestRealtimeTicketMintRejectsAnonymous pins the half of the realtime handshake
+// that IS bearer-authenticated: minting a connect ticket. The mint endpoint is
+// what proves the caller holds a live session, so it sits in a protected group
+// and an anonymous caller gets nothing to present to the socket.
+func TestRealtimeTicketMintRejectsAnonymous(t *testing.T) {
 	rt := chi.NewRouter()
 	rt.Post("/ticket", okHandler().ServeHTTP)
-	rt.Get("/ws", okHandler().ServeHTTP)
 
 	r := buildRouter(discardLogger(), nil, nil, []protectedGroup{{
 		verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
 		mounts:    []mount{{pattern: "/api/v1/realtime", handler: rt}},
 	}})
 
-	for _, tc := range []struct {
-		name   string
-		method string
-		path   string
-	}{
-		{"ticket mint", http.MethodPost, "/api/v1/realtime/ticket"},
-		{"socket", http.MethodGet, "/api/v1/realtime/ws"},
-		// A ticket in the query string must not substitute for a session on the
-		// protected mount: the group's verifier runs first either way.
-		{"socket with a ticket param", http.MethodGet, "/api/v1/realtime/ws?ticket=anything"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if code := do(t, r, tc.method, tc.path, "", nil); code != http.StatusUnauthorized {
-				t.Errorf("no token: got %d, want 401", code)
-			}
-			if code := do(t, r, tc.method, tc.path, bearerFor(t), nil); code != http.StatusOK {
-				t.Errorf("valid token: got %d, want 200", code)
-			}
-		})
+	if code := do(t, r, http.MethodPost, "/api/v1/realtime/ticket", "", nil); code != http.StatusUnauthorized {
+		t.Errorf("no token: got %d, want 401", code)
+	}
+	if code := do(t, r, http.MethodPost, "/api/v1/realtime/ticket", bearerFor(t), nil); code != http.StatusOK {
+		t.Errorf("valid token: got %d, want 200", code)
+	}
+}
+
+// TestRealtimeSocketMountIsNotBearerGated is the regression test for a bug that
+// made realtime unreachable from a browser entirely.
+//
+// The socket used to be mounted in the same RequireAuth group as the mint
+// endpoint, on the reasoning that the ticket should be a second gate rather than
+// the only one. That reasoning is appealing and wrong in one specific way:
+// `new WebSocket()` cannot set request headers, and auth.RequireAuth reads the
+// credential ONLY from `Authorization: Bearer` (no cookie fallback). So every
+// real handshake was refused with 401 before serveWS ran, no event ever reached
+// a client, and the connection indicator sat on "reconnecting" forever. Nothing
+// caught it: the e2e suite mocks /api/v1 in-page and the unit tests inject a
+// fake socket, so both stayed green.
+//
+// The socket therefore mounts PUBLIC and authenticates itself — signed
+// single-use ticket, session re-check, nonce burn, Origin allowlist, all inside
+// realtime.serveWS. This test asserts the mount reaches its handler WITHOUT a
+// bearer token; the refusal of a missing/forged/replayed ticket is the realtime
+// package's own business and is tested there.
+// It also pins the two mounts COEXISTING. They share the /api/v1/realtime
+// prefix but sit in different groups, and mounting both on that same prefix
+// panics chi at startup ("attempting to Mount() a handler on an existing
+// path") — a crash no per-group test sees, because each group builds fine
+// alone. The socket therefore mounts on the full path while the mint endpoint
+// keeps the prefix.
+func TestRealtimeSocketMountIsNotBearerGated(t *testing.T) {
+	mint := chi.NewRouter()
+	mint.Post("/ticket", okHandler().ServeHTTP)
+	socket := chi.NewRouter()
+	socket.Get("/", okHandler().ServeHTTP)
+
+	r := buildRouter(discardLogger(), nil,
+		[]mount{{pattern: "/api/v1/realtime/ws", handler: socket}},
+		[]protectedGroup{{
+			verifiers: []auth.Verifier{auth.NewJWTVerifier(testSecret)},
+			mounts:    []mount{{pattern: "/api/v1/realtime", handler: mint}},
+		}})
+
+	// No Authorization header — exactly what a browser sends on an Upgrade.
+	if code := do(t, r, http.MethodGet, "/api/v1/realtime/ws?ticket=anything", "", nil); code != http.StatusOK {
+		t.Errorf("anonymous handshake: got %d, want 200 (the ticket gates it, not RequireAuth)", code)
+	}
+	// The mint endpoint must still be bearer-gated on the neighbouring mount.
+	if code := do(t, r, http.MethodPost, "/api/v1/realtime/ticket", "", nil); code != http.StatusUnauthorized {
+		t.Errorf("anonymous mint: got %d, want 401", code)
 	}
 }
