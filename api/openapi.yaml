@@ -3760,6 +3760,139 @@ paths:
         '403': { description: Missing campaigns:send }
         '404': { description: No such dead letter in this workspace }
         '409': { description: Already replayed or discarded }
+  /webhook-endpoints:
+    get:
+      operationId: listWebhookEndpoints
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Every outbound-webhook endpoint registered in the workspace.
+
+        An endpoint receives a signed POST for each subscribed event
+        (reply.received, email.bounced, contact.unsubscribed). The signing
+        secret is never returned here — only createWebhookEndpoint and
+        rotateWebhookEndpointSecret return it, once.
+      responses:
+        '200':
+          description: Endpoints
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointList' } } }
+        '401': { description: Unauthorized }
+    post:
+      operationId: createWebhookEndpoint
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Register an endpoint. The server mints a 32-byte signing secret and
+        returns it base64-encoded in `secret` — ONCE. Store it: it is not
+        recoverable, and only rotateWebhookEndpointSecret can replace it.
+
+        `url` must be http/https and must not resolve to a loopback, private,
+        link-local, unspecified or multicast address (SSRF guard, re-checked in
+        the worker before every delivery). `event_types` entries must be from
+        the known catalog; an empty or omitted list subscribes to every event.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointInput' } } }
+      responses:
+        '201':
+          description: Created; `secret` is present exactly this once
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' } } }
+        '401': { description: Unauthorized }
+        '422': { description: Invalid URL (SSRF-blocked or malformed) or unknown event type }
+  /webhook-endpoints/{id}:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: getWebhookEndpoint
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The endpoint
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpoint' } } }
+        '401': { description: Unauthorized }
+        '404': { description: No such endpoint in this workspace }
+    patch:
+      operationId: updateWebhookEndpoint
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Partial update; omitted fields are unchanged. A present `url` is
+        re-checked by the SSRF guard. A present `event_types` of `[]` means
+        "subscribe to every event".
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointPatch' } } }
+      responses:
+        '200':
+          description: Updated
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpoint' } } }
+        '401': { description: Unauthorized }
+        '404': { description: No such endpoint in this workspace }
+        '422': { description: Invalid URL or unknown event type }
+    delete:
+      operationId: deleteWebhookEndpoint
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: Deletes the endpoint and its delivery log (cascade).
+      responses:
+        '204': { description: Deleted }
+        '401': { description: Unauthorized }
+        '404': { description: No such endpoint in this workspace }
+  /webhook-endpoints/{id}/rotate-secret:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: rotateWebhookEndpointSecret
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Mints a new signing secret and returns it once in `secret`. The previous
+        secret stops verifying immediately — update the receiver in step.
+      responses:
+        '200':
+          description: Rotated; `secret` is the new value, shown once
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' } } }
+        '401': { description: Unauthorized }
+        '404': { description: No such endpoint in this workspace }
+  /webhook-endpoints/{id}/ping:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    post:
+      operationId: pingWebhookEndpoint
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Queues a synthetic `ping` delivery to this endpoint, ignoring its
+        subscription filter, so an operator can confirm the receiver is
+        reachable and verifies the signature. Returns the created delivery row;
+        poll listWebhookDeliveries for its outcome.
+      responses:
+        '202':
+          description: Ping delivery queued
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookDelivery' } } }
+        '401': { description: Unauthorized }
+        '404': { description: No such endpoint in this workspace }
+  /webhook-endpoints/{id}/deliveries:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: listWebhookDeliveries
+      tags: [webhooks]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        This endpoint's delivery attempts, newest first, KEYSET-paginated.
+        `next_cursor` is null on the last page.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50, capped at 100.
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: Deliveries
+          content: { application/json: { schema: { $ref: '#/components/schemas/WebhookDeliveryList' } } }
+        '400': { description: The cursor is not one this server minted }
+        '401': { description: Unauthorized }
+        '404': { description: No such endpoint in this workspace }
 components:
   securitySchemes:
     bearerAuth:
@@ -6435,6 +6568,107 @@ components:
           type: array
           items: { type: string, format: uuid }
           description: every label in the workspace, exactly once, in the new order
+    WebhookEndpointInput:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: >-
+            http/https receiver URL. Rejected if it resolves to a loopback,
+            private, link-local, unspecified or multicast address.
+        description: { type: string, maxLength: 500, default: '' }
+        event_types:
+          type: array
+          items: { type: string, enum: [reply.received, email.bounced, contact.unsubscribed] }
+          description: >-
+            Events to subscribe to. Empty or omitted = every event. Entries must
+            be from this enum; "ping" is always delivered on demand and is not a
+            subscribable type.
+    WebhookEndpointPatch:
+      type: object
+      description: Partial update; omitted fields are left unchanged.
+      properties:
+        url: { type: string, format: uri, maxLength: 2048 }
+        description: { type: string, maxLength: 500 }
+        event_types:
+          type: array
+          items: { type: string, enum: [reply.received, email.bounced, contact.unsubscribed] }
+          description: '`[]` means subscribe to every event'
+        active: { type: boolean }
+    WebhookEndpoint:
+      type: object
+      required: [id, url, description, event_types, active, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        description: { type: string }
+        event_types:
+          type: array
+          items: { type: string }
+          description: subscribed events; an empty array means every event
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WebhookEndpointWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpoint'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: >-
+                The base64-encoded HMAC signing secret, returned ONCE at create
+                and rotate-secret time. It is the key for the Inroad-Signature
+                header: `t=<unix>,v1=<hex hmac-sha256(secret, "<t>.<rawBody>")>`.
+    WebhookEndpointList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WebhookEndpoint' } }
+    WebhookDelivery:
+      type: object
+      required: [id, event_type, status, attempts, last_error, response_status, created_at, delivered_at]
+      properties:
+        id: { type: string, format: uuid }
+        event_type: { type: string, example: reply.received }
+        status:
+          type: string
+          enum: [pending, delivered, failed]
+          description: >-
+            pending — queued or awaiting a retry. delivered — a 2xx was
+            received; terminal. failed — the retry schedule was exhausted;
+            terminal.
+        attempts: { type: integer, description: POST attempts made so far }
+        last_error:
+          type: string
+          description: diagnostic from the last failed attempt; empty on success
+        response_status:
+          type: integer
+          nullable: true
+          description: >-
+            HTTP status from the last attempt; null for a transport-level
+            failure or before the first attempt.
+        created_at: { type: string, format: date-time }
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: when a 2xx was received; null otherwise
+    WebhookDeliveryList:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WebhookDelivery' } }
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Cursor for the next page; null on the last page. Opaque —
+            round-trip it untouched.
     CRMPipelineInput:
       type: object
       required: [name]

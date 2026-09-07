@@ -77,6 +77,13 @@ type Config struct {
 	// §3). Link-local (incl. cloud metadata) and multicast stay blocked always.
 	AIAllowPrivateBaseURL bool
 
+	// WebhookAllowPrivate permits outbound webhook receiver URLs on
+	// private/loopback hosts (a receiver on the dev box). Default false — the same
+	// explicit-opt-in posture as AIAllowPrivateBaseURL. Link-local (incl. cloud
+	// metadata) and multicast stay blocked always. cmd/inroad logs a warning at
+	// startup when this is set.
+	WebhookAllowPrivate bool
+
 	// AgentMaxConcurrentRuns caps how many agent runs one API process executes
 	// simultaneously. Runs are goroutines in the API binary (never asynq), so
 	// without a bound a burst of sends is unbounded concurrency against the
@@ -322,6 +329,7 @@ func Load() (*Config, error) {
 	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
+	cfg.WebhookAllowPrivate = getenvBool("INROAD_WEBHOOK_ALLOW_PRIVATE", false)
 	// Zero is passed through and means "use the run manager's own default";
 	// platform packages never import app packages, so the number itself lives
 	// in agentrun.DefaultMaxConcurrentRuns.

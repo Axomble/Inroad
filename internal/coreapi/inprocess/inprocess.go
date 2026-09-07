@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/app/enrollment"
 	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/inbox"
+	"github.com/inroad/inroad/internal/app/webhook"
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -75,6 +76,12 @@ type client struct {
 	// dedicated one), no new schema for what is structurally the identical
 	// problem (see ClaimInboxReply's own doc).
 	replyClaims *idempotency.PgStore
+	// webhookEmitter fans domain events (reply.received, email.bounced,
+	// contact.unsubscribed) out to a workspace's registered webhook endpoints.
+	// NIL IS VALID and means "webhooks disabled": emitWebhook becomes a no-op.
+	// Injected here rather than dialled because Dispatch needs the pool and the
+	// queue client, which the composition root already holds.
+	webhookEmitter webhook.Emitter
 	// now is the client's clock, injected rather than read from time.Now() at each
 	// call site. The warmup scheduler's day shape is a function of the CALENDAR DAY
 	// (warmup.EffectiveDailyVolume drops weekends hard and skips ~4% of weekdays
@@ -113,6 +120,13 @@ func WithMetrics(mtx *metrics.Metrics) Option {
 // without a hub still does all of its real work.
 func WithRealtime(pub realtime.Publisher) Option {
 	return func(c *client) { c.realtime = pub }
+}
+
+// WithWebhooks wires the outbound-webhook emitter in, enabling reply.received /
+// email.bounced / contact.unsubscribed fan-out. Omitting it (or passing nil)
+// leaves the client without the capability and every emit is a no-op.
+func WithWebhooks(e webhook.Emitter) Option {
+	return func(c *client) { c.webhookEmitter = e }
 }
 
 // New returns the in-process coreapi client backed by the given connection

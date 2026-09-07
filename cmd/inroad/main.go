@@ -57,6 +57,7 @@ import (
 	"github.com/inroad/inroad/internal/app/tracking"
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
+	"github.com/inroad/inroad/internal/app/webhook"
 	"github.com/inroad/inroad/internal/platform/ai"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
@@ -425,6 +426,15 @@ func run() error {
 	// operator action on the control plane, never something the execution plane
 	// initiates.
 	deadLetterSvc := deadletter.NewService(deadletter.NewPgStore(queries), enq)
+	// Outbound webhooks: endpoint management + the delivery log. The service also
+	// backs the Emitter (webhook.NewServiceEmitter) the poller's coreapi writes
+	// fan out through in the worker; here it is passed to the one-click
+	// unsubscribe handler so a manual opt-out fires contact.unsubscribed too.
+	webhookSvc := webhook.NewService(webhook.NewPgStore(queries), keyring, enq, cfg.WebhookAllowPrivate)
+	webhookEmitter := webhook.NewServiceEmitter(webhookSvc)
+	if cfg.WebhookAllowPrivate {
+		logger.Warn("INROAD_WEBHOOK_ALLOW_PRIVATE is set: webhook endpoints may target private/loopback addresses — dev only, never production")
+	}
 	// Auto-capture is no longer pinned to reply_class="positive": it fires for
 	// any label carrying captures_deal, read through the narrow
 	// replyLabelAdapter (app/* packages never import each other). Unwired it
@@ -611,7 +621,7 @@ func run() error {
 			ForgotThrottle:      forgotThrottle,
 			GoogleStartThrottle: googleStartThrottle,
 		})},
-		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore).Routes()},
+		{pattern: "/u", handler: suppression.NewHandler(cfg.JWTSecret, suppStore, suppression.WithWebhooks(webhookEmitter)).Routes()},
 		// Recipients follow open-pixel/click-redirect links unauthenticated,
 		// same as /u — mounted here, not the protected group.
 		{pattern: "/t", handler: trackHandler.Routes()},
@@ -707,6 +717,10 @@ func run() error {
 		// The in-app agent always acts on behalf of a human session. API keys and
 		// OAuth clients cannot create threads or inherit a user's tool authority.
 		{pattern: "/api/v1/agent", handler: agentHandler.Routes()},
+		// Outbound webhook endpoint management + delivery log. Session-only: an
+		// endpoint carries an HMAC signing secret and is integration
+		// infrastructure, not part of the api-key/OAuth data contract.
+		{pattern: "/api/v1/webhook-endpoints", handler: webhook.NewHandler(webhookSvc).Routes()},
 		// The realtime socket, for the same reason as agentchat above: it acts on
 		// behalf of a human session, so an `inrd_` key or an OAuth client cannot
 		// open one. The workspace it fans out comes from the signed connect ticket,

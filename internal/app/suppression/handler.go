@@ -3,10 +3,12 @@ package suppression
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/app/webhook"
 	"github.com/inroad/inroad/internal/platform/httpx"
 	"github.com/inroad/inroad/internal/platform/unsub"
 )
@@ -19,13 +21,28 @@ type Adder interface {
 
 // Handler serves the public, stateless unsubscribe endpoint.
 type Handler struct {
-	secret []byte
-	store  Adder
+	secret  []byte
+	store   Adder
+	emitter webhook.Emitter
 }
+
+// Option configures an optional collaborator.
+type Option func(*Handler)
+
+// WithWebhooks wires the outbound-webhook emitter so a one-click unsubscribe
+// fires a contact.unsubscribed event. Unwired (or nil) the handler is silent —
+// the pre-webhooks behaviour.
+func WithWebhooks(e webhook.Emitter) Option { return func(h *Handler) { h.emitter = e } }
 
 // NewHandler builds a Handler that verifies tokens with secret and records
 // suppressions via store.
-func NewHandler(secret []byte, store Adder) *Handler { return &Handler{secret: secret, store: store} }
+func NewHandler(secret []byte, store Adder, opts ...Option) *Handler {
+	h := &Handler{secret: secret, store: store}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
 
 // unsubscribePOST is the RFC 8058 one-click endpoint: the token is verified
 // and the suppression row is inserted here. Email preview scanners (Gmail
@@ -39,6 +56,21 @@ func (h *Handler) unsubscribePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = h.store.Add(r.Context(), wsID, email, "unsubscribe") // idempotent; ignore dup
+	// Outbound webhook: contact.unsubscribed. AFTER the suppression insert;
+	// webhook.Emit swallows any dispatch failure, so a broken endpoint never
+	// affects the one-click response the recipient's MUA is waiting on.
+	now := time.Now().UTC()
+	webhook.Emit(r.Context(), h.emitter, wsID.String(), webhook.Event{
+		Type:       webhook.EventContactUnsubscribed,
+		OccurredAt: now,
+		Data: map[string]any{
+			"contact_id":  nil,
+			"email":       email,
+			"reason":      "unsubscribe",
+			"source":      "one_click",
+			"occurred_at": now.Format(time.RFC3339),
+		},
+	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("<html><body><p>You have been unsubscribed. You will no longer receive emails.</p></body></html>"))

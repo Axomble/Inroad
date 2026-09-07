@@ -13,6 +13,20 @@ the headings exactly `## [x.y.z] - YYYY-MM-DD`.
 
 ### Added
 
+- Outbound webhooks. A workspace registers HTTPS endpoints under
+  `/api/v1/webhook-endpoints` (list / create / get / patch / delete /
+  rotate-secret / ping / paginated delivery log) and receives a signed `POST`
+  for each subscribed event. v1 catalog: `reply.received`, `email.bounced`,
+  `contact.unsubscribed` (an empty subscription list means all of them). Each
+  delivery carries an `Inroad-Signature: t=<unix>,v1=<hex hmac-sha256(secret,
+  "<t>.<rawBody>")>` header; the 32-byte signing secret is returned base64 once,
+  at create and rotate time, and sealed at rest under the per-workspace DEK.
+  Receiver URLs are SSRF-guarded (loopback / private / link-local / metadata /
+  multicast rejected) at create, at update, and again in the worker before every
+  dial; `INROAD_WEBHOOK_ALLOW_PRIVATE=true` relaxes only the loopback/private
+  part for local dev. Failed deliveries retry on a `{1m, 5m, 30m, 2h, 6h}`
+  schedule (6 attempts total) before being marked `failed`; the delivery log is
+  purged after 30 days by the daily maintenance job.
 - Release automation: tagged GitHub Releases with binaries for linux
   (amd64/arm64), macOS (arm64) and Windows (amd64), plus multi-arch container
   images published to the GitHub Container Registry for the api, worker and web
