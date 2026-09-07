@@ -143,8 +143,10 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
 export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void }) {
   const counts = useNavCounts()
 
+  // overflow-x-hidden: a row that fails to truncate must clip, never hand the
+  // whole rail a horizontal scrollbar (overflow-y alone makes overflow-x auto).
   return (
-    <div className="flex h-full w-64 flex-col overflow-y-auto bg-chrome px-3 pb-3 pt-4">
+    <div className="flex h-full w-64 flex-col overflow-x-hidden overflow-y-auto bg-chrome px-3 pb-3 pt-4">
       <PulseCard />
       {/* Inverse chrome, like the overview banner: near-black on the light
           theme, near-white on the dark one (chrome-text/chrome swap roles).
