@@ -33,6 +33,10 @@ type Cleaner interface {
 	// It is here at all because the table had no sweep and grows with failures
 	// nobody schedules — the reasoning behind invariant 55's warmup purge.
 	PurgeDeadLetters(ctx context.Context) (deleted int64, err error)
+	// PurgeWebhookDeliveries removes webhook_deliveries rows past their 30-day
+	// retention. Same reasoning as PurgeDeadLetters: append-only in practice,
+	// grows one row per (event, endpoint), and had no sweep of its own.
+	PurgeWebhookDeliveries(ctx context.Context) (deleted int64, err error)
 }
 
 // CleanupHandler purges, in order: expired security artifacts, expired
@@ -71,6 +75,12 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired dead letters purged", "rows", deadLettersDeleted)
+
+		webhookDeliveriesDeleted, err := core.PurgeWebhookDeliveries(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired webhook deliveries purged", "rows", webhookDeliveriesDeleted)
 		return nil
 	}
 }

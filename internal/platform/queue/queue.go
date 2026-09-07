@@ -243,6 +243,48 @@ type DeliverabilityEvaluatePayload struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// TaskWebhookDeliver delivers one outbound webhook: POST the signed event body
+// to a registered endpoint. Enqueued by webhook.Service.Dispatch (control plane)
+// after the originating domain operation has committed; retried by the handler
+// itself on the app-level backoff schedule.
+const TaskWebhookDeliver = "webhook:deliver"
+
+// Per-attempt asynq ceilings for a webhook delivery. These are a BACKSTOP for a
+// crashed or lost handler, not the retry policy: the real policy is the handler
+// re-enqueuing itself via EnqueueWebhookDeliverIn on a {1m,5m,30m,2h,6h} schedule
+// (up to 6 attempts). asynq's own retry only covers one attempt's handler dying
+// mid-POST, so a low count is right — and the DB status='pending' guard makes a
+// duplicate delivery a no-op regardless.
+const (
+	webhookMaxRetry = 3
+	// Comfortably above the handler's 10s POST timeout so a slow-but-responding
+	// receiver is not cut off, while still bounding a wedged handler.
+	webhookDeliverTimeout = 30 * time.Second
+)
+
+// WebhookDeliverPayload names a row in webhook_deliveries. It is a POINTER to the
+// row and carries NO body and NO secret: the row is the single source of truth
+// for what to send, the signing secret is resolved control-plane-side through the
+// keyring at delivery time, and — as InboxReplySendPayload's history shows — a
+// payload copy of content is disclosed by GET /dead-letters under a scope the
+// webhook feature never intends to expose it to. WorkspaceID travels alongside so
+// every coreapi lookup the handler makes is workspace-pinned (defense in depth on
+// the unguessable delivery UUID).
+type WebhookDeliverPayload struct {
+	DeliveryID  string `json:"delivery_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// webhookDeliverTaskID keys a webhook:deliver on (delivery, due-second) so a
+// double-enqueue for the SAME instant (a Dispatch racing a reconcile sweep)
+// collapses to one task, while the handler's own later re-enqueue for a backoff
+// retry — a genuinely different due time — still enqueues. Whole-second
+// granularity is safe because the row's status='pending' guard, not this key, is
+// the delivery-idempotency guarantee.
+func webhookDeliverTaskID(deliveryID string, due time.Time) string {
+	return fmt.Sprintf("webhook:%s:%d", deliveryID, due.Unix())
+}
+
 // evaluateDedupWindow collapses the per-send fan-out. One evaluation per campaign
 // per window is enough: the breaker reads committed state, so a slightly later
 // evaluation sees strictly more evidence than the one it replaced, and without
@@ -554,6 +596,31 @@ func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 		asynq.Timeout(pollTimeout),
 		asynq.Retention(taskRetention),
 	)
+}
+
+// EnqueueWebhookDeliver enqueues a webhook:deliver task for immediate processing.
+func (c *Client) EnqueueWebhookDeliver(deliveryID, workspaceID string) error {
+	return c.enqueueWebhookDeliver(deliveryID, workspaceID, time.Now())
+}
+
+// EnqueueWebhookDeliverIn enqueues a webhook:deliver task after delay d — the
+// handler's own backoff-retry path.
+func (c *Client) EnqueueWebhookDeliverIn(deliveryID, workspaceID string, d time.Duration) error {
+	return c.enqueueWebhookDeliver(deliveryID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
+}
+
+func (c *Client) enqueueWebhookDeliver(deliveryID, workspaceID string, due time.Time, opts ...asynq.Option) error {
+	b, err := json.Marshal(WebhookDeliverPayload{DeliveryID: deliveryID, WorkspaceID: workspaceID})
+	if err != nil {
+		return err
+	}
+	opts = append(opts,
+		asynq.TaskID(webhookDeliverTaskID(deliveryID, due)),
+		asynq.MaxRetry(webhookMaxRetry),
+		asynq.Timeout(webhookDeliverTimeout),
+		asynq.Retention(taskRetention),
+	)
+	return c.enqueue(asynq.NewTask(TaskWebhookDeliver, b), opts...)
 }
 
 // Publish makes *Client satisfy bus.Dispatcher, so the new warmup and routing
