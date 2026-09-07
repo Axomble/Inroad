@@ -73,6 +73,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/ratelimit"
 	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
+	"github.com/inroad/inroad/internal/platform/redisconn"
 	"github.com/inroad/inroad/internal/platform/throttle"
 	"github.com/inroad/inroad/internal/platform/version"
 )
@@ -237,7 +238,7 @@ func run() error {
 	// the queue and the rate limiter already require, not a second dependency.
 	// The same client backs the connect-ticket nonce burn, so a spent ticket and a
 	// published envelope cannot end up on different instances.
-	realtimeRedis := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	realtimeRedis := redis.NewClient(redisconn.MustOptions(cfg.RedisAddr))
 	defer func() { _ = realtimeRedis.Close() }()
 	realtimeHub := platformrealtime.New(realtimeRedis)
 	// The control plane's seam onto that hub. One publisher shared by every
@@ -733,11 +734,20 @@ func run() error {
 		{verifiers: []auth.Verifier{apiKeyVerifier, oauthVerifier, sessionVerifier}, mounts: dataPlane},
 		{verifiers: []auth.Verifier{sessionVerifier}, mounts: sessionOnly},
 	}, idempotencyMW)
+	// Readiness gates traffic, so it checks every backing store the API cannot
+	// serve a request without. Redis is one of them: with it down, every sign-in
+	// fails closed at the rate limiter and every enqueue errors, yet a
+	// Postgres-only probe would still report ready and the load balancer would
+	// keep routing.
 	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := pool.Ping(ctx); err != nil {
 			httpx.Error(w, http.StatusServiceUnavailable, "database unavailable")
+			return
+		}
+		if err := realtimeRedis.Ping(ctx).Err(); err != nil {
+			httpx.Error(w, http.StatusServiceUnavailable, "redis unavailable")
 			return
 		}
 		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ready"})

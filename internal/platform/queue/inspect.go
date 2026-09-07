@@ -27,7 +27,7 @@ type Inspector struct {
 // NewInspector opens a read-only inspector against the same Redis the worker
 // consumes from.
 func NewInspector(redisAddr string) *Inspector {
-	return &Inspector{inner: asynq.NewInspector(asynq.RedisClientOpt{Addr: redisAddr})}
+	return &Inspector{inner: asynq.NewInspector(asynqConnOpt(redisAddr))}
 }
 
 // Close releases the inspector's Redis connection.

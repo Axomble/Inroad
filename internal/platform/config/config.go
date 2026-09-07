@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/inroad/inroad/internal/platform/db"
+	"github.com/inroad/inroad/internal/platform/redisconn"
 )
 
 // Pool-sizing defaults. Aliased from db so the numbers have ONE home (the
@@ -255,6 +256,14 @@ func Load() (*Config, error) {
 		RedisAddr:   getenv("INROAD_REDIS_ADDR", "localhost:6379"),
 	}
 	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
+
+	// INROAD_REDIS_ADDR is either a bare host:port or a redis:// / rediss:// URL
+	// (auth, db, TLS). Reject a malformed URL here, at the boundary, so it fails
+	// at startup with the offending value rather than as a panic inside a client
+	// constructor after the process is half wired.
+	if err := redisconn.Validate(cfg.RedisAddr); err != nil {
+		return nil, fmt.Errorf("INROAD_REDIS_ADDR: %w", err)
+	}
 
 	secret := os.Getenv("INROAD_JWT_SECRET")
 	if len(secret) < 16 {

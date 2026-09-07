@@ -14,6 +14,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/bus"
 	"github.com/inroad/inroad/internal/platform/bus/redisbus"
+	"github.com/inroad/inroad/internal/platform/redisconn"
 )
 
 // Delivery-idempotency defense in depth (the claim in the send/advance handlers
@@ -254,13 +255,35 @@ type DeliverabilityEvaluatePayload struct {
 // nothing.
 const evaluateDedupWindow = time.Minute
 
+// asynqConnOpt turns INROAD_REDIS_ADDR (a bare host:port or a redis:// /
+// rediss:// URL) into asynq's connection option, carrying any username,
+// password, database number and TLS across. redisconn owns the URL parsing;
+// this is the one spot that maps its result onto asynq's struct, keeping asynq
+// contained to this package. redisconn.MustOptions never fails for the bare
+// form, and config.Load has already rejected a malformed URL.
+func asynqConnOpt(redisAddr string) asynq.RedisConnOpt {
+	opt := redisconn.MustOptions(redisAddr)
+	network := opt.Network
+	if network == "" {
+		network = "tcp"
+	}
+	return asynq.RedisClientOpt{
+		Network:   network,
+		Addr:      opt.Addr,
+		Username:  opt.Username,
+		Password:  opt.Password,
+		DB:        opt.DB,
+		TLSConfig: opt.TLSConfig,
+	}
+}
+
 // Client enqueues tasks onto Redis.
 type Client struct {
 	inner *asynq.Client
 }
 
 func NewClient(redisAddr string) *Client {
-	return &Client{inner: asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})}
+	return &Client{inner: asynq.NewClient(asynqConnOpt(redisAddr))}
 }
 
 // warmupTickTaskID keys a warmup:tick on (mailbox, due-second) so duplicate
@@ -576,7 +599,7 @@ func NewServer(redisAddr string, logger *slog.Logger, concurrency int, queues []
 	if qmap := queuePriorities(queues); len(qmap) > 0 {
 		cfg.Queues = qmap
 	}
-	return asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr}, cfg)
+	return asynq.NewServer(asynqConnOpt(redisAddr), cfg)
 }
 
 // queuePriorities maps an ordered queue list to asynq's weighted-priority map.
@@ -608,7 +631,7 @@ func NewMux() *asynq.ServeMux { return asynq.NewServeMux() }
 // their cron interval; the worker picks them up like any other task.
 func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
 	return asynq.NewScheduler(
-		asynq.RedisClientOpt{Addr: redisAddr},
+		asynqConnOpt(redisAddr),
 		&asynq.SchedulerOpts{Logger: newAsynqLogger(logger)},
 	)
 }
