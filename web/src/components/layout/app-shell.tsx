@@ -99,7 +99,12 @@ export function AppShell({
 
   return (
     <TooltipProvider>
-      <div className="flex h-full flex-col overflow-hidden bg-rail text-foreground">
+      {/* `relative` is load-bearing: overflow clipping skips absolutely
+          positioned descendants whose containing block is an ancestor of the
+          clipper. Every `sr-only` label is `position: absolute`, so without a
+          positioned frame the ones below the fold in a long list sized the
+          DOCUMENT instead and gave the whole app a page scrollbar. */}
+      <div className="relative flex h-full flex-col overflow-hidden bg-rail text-foreground">
         <AppHeader
           navOpen={navOpen}
           onToggleNav={() => setNavOpen((value) => !value)}
@@ -150,7 +155,7 @@ export function AppShell({
             }} />
           </div>
 
-          <main className="workspace-grid min-w-0 flex-1 overflow-hidden bg-background md:rounded-tl-[22px] md:border-l md:border-t md:border-chrome-border">
+          <main className="workspace-grid relative min-w-0 flex-1 overflow-hidden bg-background md:rounded-tl-[22px] md:border-l md:border-t md:border-chrome-border">
             {children}
           </main>
           {agentLoaded && (

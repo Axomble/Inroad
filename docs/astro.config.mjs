@@ -8,10 +8,15 @@ export default defineConfig({
 		starlight({
 			title: 'Inroad Documentation',
 			description: 'Self-hostable cold email sequencing & mailbox warmup platform. Open-core alternative to Instantly and Smartlead.',
+			// Per-theme SVGs rather than one raster: the mark is monochrome, so
+			// the dark site needs the inverted ink. Replaces a 435 KB logo.png
+			// that carried a baked-in dark background and a misspelled tagline.
 			logo: {
-				src: './src/assets/logo.png',
+				light: './src/assets/logo-light.svg',
+				dark: './src/assets/logo-dark.svg',
 				replacesTitle: false,
 			},
+			favicon: '/favicon.svg',
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/Axomble/Inroad' },
 			],

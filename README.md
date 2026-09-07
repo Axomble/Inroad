@@ -19,14 +19,14 @@
 
 [Quick start](#quick-start) · [Features](#features) · [How it works](#how-it-works) · [Docs](#documentation) · [Security](#security)
 
-⭐ **If Inroad saves you a per-seat subscription, star the repo** — it's the cheapest way to help.
+⭐ **If Inroad saves you a per-seat subscription, star the repo**. It's the cheapest way to help.
 
 </div>
 
 ---
 
-Inroad sends cold email sequences from the mailboxes you already own — Gmail, Microsoft 365, or plain
-SMTP — and paces them on a warm-up ramp so they keep landing in the inbox. Replies, bounces, and
+Inroad sends cold email sequences from the mailboxes you already own (Gmail, Microsoft 365, or plain
+SMTP) and paces them on a warm-up ramp so they keep landing in the inbox. Replies, bounces, and
 opt-outs are polled back in, classified, and used to stop the sequence automatically. Everything runs
 on your own hardware: one Postgres, one Redis, two Go binaries, and a React SPA. No SaaS account, no
 per-seat pricing, no third party holding your mailbox credentials.
@@ -35,14 +35,14 @@ It's an open-source alternative to Instantly and Smartlead, built for people who
 infrastructure than rent it.
 
 <div align="center">
-  <img src="docs/images/login.png" alt="Inroad sign-in" width="100%">
+  <img src="docs/images/overview.png" alt="The Inroad console: sending capacity, sender health, and what needs attention" width="100%">
 </div>
 
 ---
 
 ## Quick start
 
-**Run it** (self-hosting — only Docker required):
+**Run it** (self-hosting, only Docker required):
 
 ```bash
 git clone https://github.com/Axomble/Inroad && cd Inroad
@@ -53,7 +53,7 @@ That's the whole install. Secrets are generated on first boot, migrations run au
 app is on <http://localhost>. Deployment options (env vars, Gmail/M365 OAuth setup, Terraform, Helm)
 are in [docs/self-hosting.md](docs/self-hosting.md).
 
-**Hack on it** (live-reloading dev stack — still only Docker required):
+**Hack on it** (live-reloading dev stack, still only Docker required):
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d
@@ -68,37 +68,35 @@ docker compose -f docker-compose.dev.yml exec api go run ./cmd/seed
 # → login demo@inroad.test / demodemo
 ```
 
-Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md) — `make dev` (or
+Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md). `make dev` (or
 `.\scripts\dev.ps1` on Windows) does the same thing without containers for the binaries.
 
 ---
 
 ## Features
 
-- **Sequencing** — multi-step campaigns with per-step delays, merge fields, A/B variants per step,
+- **Sequencing**: multi-step campaigns with per-step delays, merge fields, A/B variants per step,
   timezone-aware send windows, and a natural send cadence that never emits on a uniform interval.
-- **Sending infrastructure** — Gmail API, Microsoft Graph, and SMTP/IMAP behind one seam; sender
+- **Sending infrastructure**: Gmail API, Microsoft Graph, and SMTP/IMAP behind one seam; sender
   pools with round-robin / LRU / weighted rotation; ramped daily caps and campaign-wide limits
   enforced on the send path.
-- **Warm-up** — opted-in mailboxes exchange real threaded mail on a ramping volume; placement is
+- **Warm-up**: opted-in mailboxes exchange real threaded mail on a ramping volume; placement is
   measured (inbox vs spam), health is recomputed from it, and a mailbox that turns bad is paused
   instead of pushed. Warmup health gates cold sending.
-- **Replies & deliverability** — reply polling across all three transports with deterministic,
+- **Replies & deliverability**: reply polling across all three transports with deterministic,
   offline classification plus a user-definable taxonomy driving automation; DSN bounce handling;
   suppression and one-click unsubscribe; SPF/DKIM/DMARC checks per sending domain; a deliverability
   dashboard and cross-campaign reporting.
-- **Unified inbox & CRM** — every reply from every mailbox in one threaded view, reply-from-inbox
+- **Unified inbox & CRM**: every reply from every mailbox in one threaded view, reply-from-inbox
   through the owning mailbox; companies, deals, pipelines, notes, tasks and an activity feed; typed
   custom fields validated at import and preflight; contacts at scale (trigram search, keyset paging).
-- **AI, human-in-the-loop** — an in-app agent and AI-drafted replies behind an approval queue;
+- **AI, human-in-the-loop**: an in-app agent and AI-drafted replies behind an approval queue;
   bring your own key, and the entire feature is off (and makes no calls) until you add one.
-- **Platform** — multi-workspace teams and roles; passkeys, TOTP, Google sign-in, refresh-token
+- **Platform**: multi-workspace teams and roles; passkeys, TOTP, Google sign-in, refresh-token
   rotation; scoped API keys, an OAuth 2.0 provider, and an MCP server exposing the agent's typed
   tools; envelope-encrypted credentials with per-workspace crypto-shredding.
 
-![Campaign metrics and reply classification](docs/images/campaign-metrics.png)
-
-![Warmup pool with per-mailbox health](docs/images/warmup.png)
+![The unified inbox: every reply from every mailbox, classified and labelled](docs/images/inbox.png)
 
 ---
 
@@ -139,12 +137,12 @@ IP. Secrets are envelope-encrypted per workspace behind a `KeyProvider` seam. Th
 | Read this | To learn |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | The control/execution split, transports, encryption, reply classification |
-| [docs/security.md](docs/security.md) | The security invariants — read before touching credentials, dials, or tenant queries |
+| [docs/security.md](docs/security.md) | The security invariants. Read before touching credentials, dials, or tenant queries |
 | [docs/self-hosting.md](docs/self-hosting.md) | Deploying, env vars, and connecting Gmail / M365 (OAuth setup, scopes, redirect URIs) |
-| [api/openapi.yaml](api/openapi.yaml) | The REST contract — the SPA's typed client is generated from it |
+| [api/openapi.yaml](api/openapi.yaml) | The REST contract. The SPA's typed client is generated from it |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev loop, native setup, tests, and what a good PR looks like |
 
-The same docs ship as a browsable site (`docs/`, Astro/Starlight) — the dev stack serves it on
+The same docs ship as a browsable site (`docs/`, Astro/Starlight). The dev stack serves it on
 <http://localhost:4321>.
 
 ---
@@ -176,7 +174,7 @@ is pinned to a `workspace_id`, user-supplied hosts are dialed only through the S
 enforced by default on SMTP and IMAP. The invariants are written down in
 [docs/security.md](docs/security.md).
 
-**Found a vulnerability?** Please report it privately — open a
+**Found a vulnerability?** Please report it privately: open a
 [GitHub security advisory](https://github.com/Axomble/Inroad/security/advisories/new) rather than a
 public issue. Responsible disclosure is credited in the release notes.
 

@@ -1300,3 +1300,28 @@ test('designating a sentinel shows what it costs before anything is written', as
   await expect.poll(() => sentinelWrites.length).toBe(1)
   expect(sentinelWrites[0]).toBe('{"is_sentinel":true}')
 })
+
+// Every card carries `sr-only` labels, which are `position: absolute`. In a list
+// long enough to run past the fold those labels used to size the DOCUMENT — the
+// main pane's overflow clip cannot reach an absolute descendant unless some
+// ancestor is positioned — so a three-mailbox pool gave the whole app a page
+// scrollbar and scrolled the header and sidebar away with it.
+test('a pool longer than the viewport scrolls inside the page, never the document', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 480 })
+  await expect(card(page, 'withheld@acme.test')).toBeVisible()
+
+  const metrics = await page.evaluate(() => {
+    const srBelowFold = [...document.querySelectorAll('main .sr-only')].filter(
+      (el) => el.getBoundingClientRect().top > window.innerHeight,
+    ).length
+    return {
+      srBelowFold,
+      documentScrollsY: document.documentElement.scrollHeight > window.innerHeight,
+      documentScrollsX: document.documentElement.scrollWidth > window.innerWidth,
+    }
+  })
+  // The precondition first: if nothing sits below the fold, the test proves nothing.
+  expect(metrics.srBelowFold).toBeGreaterThan(0)
+  expect(metrics.documentScrollsY).toBe(false)
+  expect(metrics.documentScrollsX).toBe(false)
+})

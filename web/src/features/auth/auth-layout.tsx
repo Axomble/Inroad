@@ -1,3 +1,4 @@
+import { BrandMark } from '@/components/layout/brand-mark'
 import { AuthShowcase } from './auth-showcase'
 
 /**
@@ -12,9 +13,7 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
       {/* form column */}
       <div className="relative flex min-h-dvh flex-col px-6 py-8 sm:px-10">
         <div className="auth-rise flex items-center gap-2" style={{ animationDelay: '40ms' }}>
-          <div className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_2px_0_var(--primary-edge)]">
-            I
-          </div>
+          <BrandMark className="size-8 text-foreground" />
           <span className="text-[15px] font-bold tracking-tight">Inroad</span>
         </div>
 

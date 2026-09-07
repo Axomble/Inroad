@@ -27,3 +27,7 @@ Thumbs.db
 !.claude/commands/
 .superpowers/
 /docs/superpowers/
+# Local-only brand tooling: generates favicon.ico / logo candidates. The
+# OUTPUT is committed, the generator is not.
+scripts/build-favicon-ico.mjs
+scripts/generate-logo.mjs
