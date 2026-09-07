@@ -4,7 +4,7 @@
 # and macOS a bind-mounted node_modules is the single biggest source of slow
 # installs and flaky file watching, and the host's platform-specific binaries
 # (esbuild, rollup) are the wrong architecture for the container anyway.
-FROM node:22-alpine
+FROM node:26-alpine
 
 WORKDIR /web
 

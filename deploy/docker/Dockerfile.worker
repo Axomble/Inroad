@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -13,7 +13,7 @@ ENV LDFLAGS="-s -w \
   -X github.com/inroad/inroad/internal/platform/version.Date=${DATE}"
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="${LDFLAGS}" -o /out/worker ./cmd/worker
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN adduser -D -u 10001 inroad
 COPY --from=build /out/worker /usr/local/bin/worker
 COPY deploy/docker/load-secrets.sh /usr/local/bin/load-secrets.sh
