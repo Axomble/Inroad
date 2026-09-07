@@ -155,7 +155,7 @@ export function DeadLettersPage() {
       )}
 
       <PageBody>
-        <p className="max-w-prose px-4 pt-3 text-[11.5px] leading-snug text-muted-foreground sm:px-5">{PAGE_INTRO}</p>
+        <p className="max-w-prose px-4 pt-3 text-[12px] leading-snug text-muted-foreground sm:px-5">{PAGE_INTRO}</p>
 
         <div role="group" aria-label="Filter by state" className="flex flex-wrap gap-1.5 px-4 py-3 sm:px-5">
           {FILTERS.map((option) => (

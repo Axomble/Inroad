@@ -62,7 +62,7 @@ export function ContactContextPanel({ contactId }: { contactId: string | null | 
   if (error !== undefined || !data) {
     return (
       <PanelShell>
-        <p role="status" className="text-[11px] text-warn">
+        <p role="status" className="text-[12px] text-warn">
           {recordErrorMessage(error, "This contact couldn't be loaded.")}
         </p>
       </PanelShell>
@@ -133,16 +133,16 @@ function ContactIdentity({ contact }: { contact: ContactDetail }) {
         </Link>
         {/* The email is shown even when it IS the display name, so the row
             never leaves you guessing which address this thread is with. */}
-        <p className="truncate text-[11px] text-muted-foreground">{contact.email}</p>
+        <p className="truncate text-[12px] text-muted-foreground">{contact.email}</p>
       </div>
 
-      {contact.job_title && <p className="truncate text-[11px] text-muted-foreground">{contact.job_title}</p>}
+      {contact.job_title && <p className="truncate text-[12px] text-muted-foreground">{contact.job_title}</p>}
 
       {contact.company && (
         <Link
           to="/app/companies/$id"
           params={{ id: contact.company.id }}
-          className="block truncate text-[11px] text-muted-foreground underline-offset-2 hover:text-accent-ink hover:underline"
+          className="block truncate text-[12px] text-muted-foreground underline-offset-2 hover:text-accent-ink hover:underline"
         >
           {contact.company.name}
         </Link>
@@ -155,7 +155,7 @@ function ContactIdentity({ contact }: { contact: ContactDetail }) {
           // noreferrer as well as noopener: an outbound link from an operator's
           // inbox should not leak which thread they were reading.
           rel="noopener noreferrer"
-          className="block truncate text-[11px] text-muted-foreground underline-offset-2 hover:text-accent-ink hover:underline"
+          className="block truncate text-[12px] text-muted-foreground underline-offset-2 hover:text-accent-ink hover:underline"
         >
           LinkedIn
         </a>
@@ -168,7 +168,7 @@ function ContactIdentity({ contact }: { contact: ContactDetail }) {
       {contact.suppression && (
         <p
           role="status"
-          className="flex items-start gap-1 rounded-md bg-warn/10 px-1.5 py-1 text-[10px] text-warn"
+          className="flex items-start gap-1 rounded-md bg-warn/10 px-1.5 py-1 text-[11px] text-warn"
         >
           <Ban className="mt-px size-2.5 shrink-0" aria-hidden="true" />
           <span>

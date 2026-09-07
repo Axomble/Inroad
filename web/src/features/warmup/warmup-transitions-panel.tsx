@@ -106,14 +106,14 @@ function TransitionEntry({ transition }: { transition: WarmupTransition }) {
 
       <div className="min-w-0 flex-1 space-y-2">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <time dateTime={transition.created_at} className="font-mono text-[11px] text-muted-foreground">
+          <time dateTime={transition.created_at} className="font-mono text-[12px] text-muted-foreground">
             {formatDateTime(transition.created_at)}
             <span className="text-faint"> · {relativeTime(transition.created_at)}</span>
           </time>
           {/* Which thresholds decided this, so the row stays readable after they
               move. Labelled in text rather than a `title`, which no keyboard or
               touch reader ever sees. */}
-          <span className="font-mono text-[10px] text-faint">
+          <span className="font-mono text-[11px] text-faint">
             <span className="opacity-70">policy </span>
             {transition.policy_version}
           </span>
@@ -170,7 +170,7 @@ function HealthAxis({ change }: { change: HealthChange }) {
 function PoolAxis({ change }: { change: LaneChange }) {
   if (change.kind === 'unrecorded') {
     return (
-      <span className="text-[11px] text-muted-foreground">
+      <span className="text-[12px] text-muted-foreground">
         No pool lane was recorded — this entry predates pool lanes.
       </span>
     )
@@ -221,7 +221,7 @@ function Unchanged() {
 }
 
 function Explanation({ text, tone }: { text: string; tone?: string }) {
-  return <p className={cn('text-[11.5px] leading-snug sm:pl-[76px]', tone ?? 'text-muted-foreground')}>{text}</p>
+  return <p className={cn('text-[12px] leading-snug sm:pl-[76px]', tone ?? 'text-muted-foreground')}>{text}</p>
 }
 
 /**
@@ -241,7 +241,7 @@ function Evidence({ rows }: { rows: EvidenceRow[] }) {
             <span className={cn('text-[12px] tabular-nums', row.proven ? 'text-foreground' : 'text-muted-foreground')}>
               {row.value}
             </span>
-            <span className="mt-0.5 block text-[10.5px] leading-snug text-faint">{row.detail}</span>
+            <span className="mt-0.5 block text-[11px] leading-snug text-faint">{row.detail}</span>
           </dd>
         </div>
       ))}

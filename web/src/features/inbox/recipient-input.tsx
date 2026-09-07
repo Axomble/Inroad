@@ -45,14 +45,14 @@ export function RecipientInput({
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1">
-      <label htmlFor={id} className="w-10 shrink-0 font-mono text-[10px] tracking-wide text-faint uppercase">
+      <label htmlFor={id} className="w-10 shrink-0 font-mono text-[11px] tracking-wide text-faint uppercase">
         {label}
       </label>
       {values.map((value) => (
         <span
           key={value}
           className={cn(
-            'inline-flex max-w-[14rem] items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px]',
+            'inline-flex max-w-[14rem] items-center gap-1 rounded-md border px-1.5 py-0.5 text-[12px]',
             looksLikeEmail(value)
               ? 'border-border bg-surface-2 text-foreground'
               : 'border-danger/40 bg-danger/10 text-danger',

@@ -74,7 +74,7 @@ function ComponentRow({ component }: { component: ComponentCopy }) {
         <span className="text-[13.5px] font-medium text-foreground">{component.label}</span>
         <StatusPill tone={component.tone}>{component.status}</StatusPill>
         {component.penaltyLabel && (
-          <span className="ml-auto font-mono text-[11px] tabular-nums text-muted-foreground">
+          <span className="ml-auto font-mono text-[12px] tabular-nums text-muted-foreground">
             {component.penaltyLabel}
           </span>
         )}

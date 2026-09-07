@@ -141,9 +141,9 @@ export function LabelPicker({
           )}
 
           {isLoading ? (
-            <p className="px-2 py-2 text-[11px] text-faint">Loading labels…</p>
+            <p className="px-2 py-2 text-[12px] text-faint">Loading labels…</p>
           ) : matches.length === 0 && !canCreate ? (
-            <p className="px-2 py-2 text-[11px] text-faint">
+            <p className="px-2 py-2 text-[12px] text-faint">
               {trimmed ? 'No labels match.' : 'No labels yet — type a name to create one.'}
             </p>
           ) : (
@@ -189,7 +189,7 @@ export function LabelPicker({
           {errorMessage && (
             <>
               <DropdownMenuSeparator />
-              <p role="alert" className="px-2 py-1.5 text-[11px] text-danger">
+              <p role="alert" className="px-2 py-1.5 text-[12px] text-danger">
                 {errorMessage}
               </p>
             </>
@@ -200,7 +200,7 @@ export function LabelPicker({
       {/* And outside it, for the case where the menu has since closed — a
           failed assign/unassign leaves no menu open to carry the message. */}
       {errorMessage && !open && (
-        <p role="alert" className="text-[11px] text-danger">
+        <p role="alert" className="text-[12px] text-danger">
           {errorMessage}
         </p>
       )}

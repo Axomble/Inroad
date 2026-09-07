@@ -102,7 +102,7 @@ export function FolderPane({
       className="flex max-h-48 w-full shrink-0 flex-col gap-1 overflow-y-auto border-b border-border bg-rail py-2 lg:max-h-none lg:w-56 lg:border-b-0 lg:border-r"
     >
       {overviewError !== undefined && (
-        <p role="status" className="flex items-start gap-1.5 px-4 py-1 text-[11px] text-warn">
+        <p role="status" className="flex items-start gap-1.5 px-4 py-1 text-[12px] text-warn">
           <AlertCircle className="mt-px size-3 shrink-0" aria-hidden="true" />
           <span>Counts unavailable{httpStatus(overviewError) ? ` (${httpStatus(overviewError)})` : ''}.</span>
         </p>
@@ -135,7 +135,7 @@ export function FolderPane({
       </FolderSection>
 
       {mailboxesError !== undefined ? (
-        <p role="alert" className="px-4 py-2 text-[11px] text-danger">
+        <p role="alert" className="px-4 py-2 text-[12px] text-danger">
           Couldn't load mailboxes{httpStatus(mailboxesError) ? ` (${httpStatus(mailboxesError)})` : ''}.
         </p>
       ) : (
@@ -196,7 +196,7 @@ function FolderSection({ title, children }: { title: string; children: React.Rea
         type="button"
         aria-expanded={!collapsed}
         onClick={() => setCollapsed((c) => !c)}
-        className="flex w-full items-center gap-1 px-3 py-1 text-left text-[11px] font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        className="flex w-full items-center gap-1 px-3 py-1 text-left text-[12px] font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       >
         <ChevronDown
           className={cn('size-3 shrink-0 transition-transform', collapsed && '-rotate-90')}
@@ -251,13 +251,13 @@ function FolderRow({
             counts; the total follows muted. A row with no unread shows only
             its total, never a "0" claim. */}
         {unread > 0 && (
-          <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-accent-ink">
+          <span className="shrink-0 font-mono text-[12px] font-semibold tabular-nums text-accent-ink">
             {unread}
             <span className="sr-only"> unread</span>
           </span>
         )}
         {count !== undefined && (
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-faint">{count}</span>
+          <span className="shrink-0 font-mono text-[11px] tabular-nums text-faint">{count}</span>
         )}
       </button>
     </li>

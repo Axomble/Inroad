@@ -337,7 +337,7 @@ function PreferencesForm({
                         </span>
                       )}
                     </span>
-                    <span className="block font-mono text-[11px] text-muted-foreground">
+                    <span className="block font-mono text-[12px] text-muted-foreground">
                       {formatTokens(model.context_window_tokens)} context
                       {model.supports_reasoning ? ' · reasoning' : ''}
                     </span>
@@ -356,14 +356,14 @@ function PreferencesForm({
           <Select id={smartId} className="mt-1.5" value={smart} onChange={(e) => setSmart(e.target.value)}>
             <ModelOptions sentinel={DEFAULT_SMART_MODEL} current={smart} enabledModels={enabledModels} models={models} />
           </Select>
-          <p className="mt-1 text-[11px] text-muted-foreground">Used for chat and multi-step agent work.</p>
+          <p className="mt-1 text-[12px] text-muted-foreground">Used for chat and multi-step agent work.</p>
         </div>
         <div>
           <Label htmlFor={fastId}>Default fast model</Label>
           <Select id={fastId} className="mt-1.5" value={fast} onChange={(e) => setFast(e.target.value)}>
             <ModelOptions sentinel={DEFAULT_FAST_MODEL} current={fast} enabledModels={enabledModels} models={models} />
           </Select>
-          <p className="mt-1 text-[11px] text-muted-foreground">Used for quick tasks like naming threads.</p>
+          <p className="mt-1 text-[12px] text-muted-foreground">Used for quick tasks like naming threads.</p>
         </div>
       </div>
 
@@ -377,7 +377,7 @@ function PreferencesForm({
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
         />
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-[12px] text-muted-foreground">
           Appended to the assistant's instructions for every conversation in this workspace.
         </p>
       </div>

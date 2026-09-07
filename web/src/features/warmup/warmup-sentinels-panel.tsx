@@ -61,7 +61,7 @@ export function WarmupSentinelsPanel({ count, oversized, share, pool }: Sentinel
         <MutedEmpty text={reading.message} />
       ) : (
         <>
-          <p data-slot="sentinel-summary" className="max-w-prose text-[11.5px] leading-snug text-muted-foreground">
+          <p data-slot="sentinel-summary" className="max-w-prose text-[12px] leading-snug text-muted-foreground">
             {reading.summary}
           </p>
 
@@ -85,7 +85,7 @@ export function WarmupSentinelsPanel({ count, oversized, share, pool }: Sentinel
             // enforcement the sentence spends its length denying.
             <p
               data-slot="sentinel-advisory"
-              className="mt-2 max-w-prose border-l border-border pl-3 text-[11.5px] leading-snug text-muted-foreground"
+              className="mt-2 max-w-prose border-l border-border pl-3 text-[12px] leading-snug text-muted-foreground"
             >
               {reading.advisory}
             </p>
@@ -95,7 +95,7 @@ export function WarmupSentinelsPanel({ count, oversized, share, pool }: Sentinel
 
       <p
         data-slot="sentinel-gates-nothing"
-        className="mt-2 max-w-prose text-[10.5px] leading-snug text-faint"
+        className="mt-2 max-w-prose text-[11px] leading-snug text-faint"
       >
         {SENTINEL_CONFIDENCE_GATES_NOTHING}
       </p>

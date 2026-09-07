@@ -57,12 +57,12 @@ export function UndoSendPill({ pending }: { pending: InboxPendingReply }) {
             Undo
           </Button>
         ) : (
-          <span className="shrink-0 text-[11px] text-faint">On its way</span>
+          <span className="shrink-0 text-[12px] text-faint">On its way</span>
         )}
       </div>
 
       {error !== undefined && (
-        <p role="alert" className="flex items-start gap-1 text-[11px] text-warn">
+        <p role="alert" className="flex items-start gap-1 text-[12px] text-warn">
           <AlertCircle className="mt-px size-3 shrink-0" aria-hidden="true" />
           <span>
             {/* 409 is the race this feature is defined by: the worker claimed

@@ -77,7 +77,7 @@ export function DomainAuthHeader({
           </div>
         )}
 
-        <span className="ml-auto shrink-0 font-mono text-[11px] text-faint">
+        <span className="ml-auto shrink-0 font-mono text-[12px] text-faint">
           {mailboxCountLabel(group.mailboxes.length)}
           {auth ? ` · ${lastCheckedLabel(auth.checked_at)}` : null}
         </span>

@@ -106,7 +106,7 @@ export function WarmupMailboxCard({
           </div>
           {enrolled && entry && (
             <>
-              <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px] text-muted-foreground">
+              <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[12px] text-muted-foreground">
                 <RampProgress sent={entry.today_sent} target={entry.today_target} />
                 <span>
                   inbox 7d <span className="tabular-nums text-foreground">{formatPct(entry.inbox_rate_7d)}</span>
@@ -249,7 +249,7 @@ export function WarmupMailboxCard({
       </div>
 
       {actionError && (
-        <div role="alert" className="px-5 pb-3 text-[11px] text-danger">
+        <div role="alert" className="px-5 pb-3 text-[12px] text-danger">
           {actionError}
         </div>
       )}
@@ -277,7 +277,7 @@ export function WarmupMailboxCard({
 function LaneReason({ lane, reason }: { lane: string; reason: string }) {
   if (!reason) return null
   return (
-    <p className={cn('mt-1 text-[11px] leading-snug', laneMeta[toWarmupLane(lane)].text)}>
+    <p className={cn('mt-1 text-[12px] leading-snug', laneMeta[toWarmupLane(lane)].text)}>
       <span className="sr-only">Pool status: </span>
       {reason}
     </p>

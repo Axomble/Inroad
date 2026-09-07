@@ -59,7 +59,7 @@ export function WarmupObserversPanel({
 
       {reading.kind === 'flagged' ? (
         <>
-          <p className="mb-2 max-w-prose text-[11.5px] leading-snug text-muted-foreground">{OBSERVERS_INTRO}</p>
+          <p className="mb-2 max-w-prose text-[12px] leading-snug text-muted-foreground">{OBSERVERS_INTRO}</p>
 
           {/*
             Above the rows, not under them — the only panel in this feature that
@@ -70,7 +70,7 @@ export function WarmupObserversPanel({
           */}
           <p
             data-slot="observers-nothing-excluded"
-            className="mb-3 max-w-prose border-l border-border pl-3 text-[11.5px] leading-snug text-muted-foreground"
+            className="mb-3 max-w-prose border-l border-border pl-3 text-[12px] leading-snug text-muted-foreground"
           >
             {OBSERVERS_NOTHING_EXCLUDED}
           </p>
@@ -115,7 +115,7 @@ function Observer({ observer }: { observer: ObserverReading }) {
         </span>
       </p>
 
-      <p data-slot="observer-comparison" className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+      <p data-slot="observer-comparison" className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
         {observer.comparison}
       </p>
 
@@ -131,7 +131,7 @@ function Observer({ observer }: { observer: ObserverReading }) {
       </dl>
 
       {observer.repeated && (
-        <p data-slot="observer-repeated" className="mt-1.5 max-w-prose text-[10.5px] leading-snug text-faint">
+        <p data-slot="observer-repeated" className="mt-1.5 max-w-prose text-[11px] leading-snug text-faint">
           {observer.repeated}
         </p>
       )}
@@ -153,7 +153,7 @@ function Stat({ stat }: { stat: ObserverStat }) {
           {stat.value}
         </span>
         {stat.detail && (
-          <span className="mt-0.5 block max-w-[22rem] text-[10.5px] leading-snug text-faint">{stat.detail}</span>
+          <span className="mt-0.5 block max-w-[22rem] text-[11px] leading-snug text-faint">{stat.detail}</span>
         )}
       </dd>
     </div>

@@ -104,7 +104,7 @@ function EnrollmentRow({ enrollment }: { enrollment: CampaignEnrollment }) {
     <li className="flex items-center gap-4 border-b border-border px-5 py-3 last:border-b-0">
       <div className="min-w-0 flex-1">
         <div className="truncate text-[13.5px] text-foreground">{enrollment.first_name || '—'}</div>
-        <div className="truncate font-mono text-[11px] text-faint">{enrollment.email}</div>
+        <div className="truncate font-mono text-[12px] text-faint">{enrollment.email}</div>
       </div>
 
       <span className="w-24 shrink-0 truncate font-mono text-[10.5px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -117,7 +117,7 @@ function EnrollmentRow({ enrollment }: { enrollment: CampaignEnrollment }) {
         <ReplyClassPill replyClass={enrollment.reply_class} />
       </div>
 
-      <span className="w-24 shrink-0 text-right font-mono text-[11px] tabular-nums text-faint">
+      <span className="w-24 shrink-0 text-right font-mono text-[12px] tabular-nums text-faint">
         {formatRepliedAt(enrollment.replied_at)}
       </span>
     </li>

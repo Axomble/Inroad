@@ -78,14 +78,14 @@ function Panel({ panel }: { panel: SeriesPanel }) {
       <div className="flex items-baseline justify-between gap-2">
         <h3 className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-faint">{panel.title}</h3>
         {panel.measured && (
-          <span className="font-mono text-[10.5px] tabular-nums text-faint">{panel.peakLabel}</span>
+          <span className="font-mono text-[11px] tabular-nums text-faint">{panel.peakLabel}</span>
         )}
       </div>
 
       {/* One live readout per panel: the hovered/focused day, or the summary.
           Values are never colour-coded here — this is text, so it wears a text
           token and the mark beside it carries the hue. */}
-      <p aria-live="polite" className="mt-0.5 min-h-4 text-[11.5px] text-muted-foreground">
+      <p aria-live="polite" className="mt-0.5 min-h-4 text-[12px] text-muted-foreground">
         {activePoint
           ? `${shortDate(activePoint.date)} — ${panelValueLabel(panel, activePoint)}`
           : panel.summary}
@@ -96,14 +96,14 @@ function Panel({ panel }: { panel: SeriesPanel }) {
       ) : (
         // Not measured is a sentence, never an empty plot: a blank axis reads as
         // "zero all week", which is the misreading this whole surface avoids.
-        <p className="mt-2 rounded-md bg-surface-2/70 px-2.5 py-3 text-[11.5px] text-muted-foreground">
+        <p className="mt-2 rounded-md bg-surface-2/70 px-2.5 py-3 text-[12px] text-muted-foreground">
           <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">Not measured</span>{' '}
           — {panel.notMeasured}
         </p>
       )}
 
       {panel.measured && first && last && (
-        <div className="mt-1 flex justify-between font-mono text-[10px] tabular-nums text-faint">
+        <div className="mt-1 flex justify-between font-mono text-[11px] tabular-nums text-faint">
           <span>{shortDate(first.date)}</span>
           <span>{shortDate(last.date)}</span>
         </div>
@@ -332,7 +332,7 @@ function SeriesTable({ panels }: { panels: SeriesPanel[] }) {
         Show these days as a table
       </summary>
       <div className="overflow-x-auto px-3.5 pb-3">
-        <table className="w-full text-left text-[11.5px] tabular-nums">
+        <table className="w-full text-left text-[12px] tabular-nums">
           <caption className="sr-only">Deliverability signals per day</caption>
           <thead>
             <tr className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">

@@ -76,7 +76,7 @@ export function ListSearchInput({
         </button>
       ) : (
         hint && (
-          <span className="pointer-events-none absolute right-2 font-mono text-[10px] tabular-nums text-faint">
+          <span className="pointer-events-none absolute right-2 font-mono text-[11px] tabular-nums text-faint">
             {hint}
           </span>
         )

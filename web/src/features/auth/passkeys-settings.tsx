@@ -128,7 +128,7 @@ function PasskeyRow({ passkey, onNotice }: { passkey: PasskeyInfo; onNotice: (n:
 
       <div className="min-w-0 flex-1">
         <span className="truncate text-[13.5px] font-medium text-foreground">{passkey.label}</span>
-        <div className="mt-0.5 font-mono text-[11px] text-faint">
+        <div className="mt-0.5 font-mono text-[12px] text-faint">
           added {formatDateTime(passkey.created_at)}
           {passkey.last_used_at ? ` · last used ${relativeTime(passkey.last_used_at)}` : ' · never used'}
         </div>

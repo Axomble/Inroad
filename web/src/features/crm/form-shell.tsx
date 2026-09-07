@@ -60,7 +60,7 @@ export function Field({
     <div className="flex min-w-0 flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-2">
         <Label htmlFor={id}>{label}</Label>
-        {hint && <span className="text-[10px] text-muted-foreground">{hint}</span>}
+        {hint && <span className="text-[11px] text-muted-foreground">{hint}</span>}
       </div>
       {children}
       {error && <span role="alert" className="text-xs text-danger">{error}</span>}

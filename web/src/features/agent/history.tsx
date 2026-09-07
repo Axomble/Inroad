@@ -87,7 +87,7 @@ function HistoryRow({
           autoFocus
           value={title}
           maxLength={120}
-          className="h-7 min-w-0 flex-1 text-[11px]"
+          className="h-7 min-w-0 flex-1 text-[12px]"
           onChange={(event) => setTitle(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Escape') {
@@ -121,7 +121,7 @@ function HistoryRow({
         <span className="block truncate text-[12px] font-medium text-foreground">
           {thread.title || 'New conversation'}
         </span>
-        <span className="mt-0.5 block text-[9px] text-faint">
+        <span className="mt-0.5 block text-[10px] text-faint">
           {formatShortDateTime(thread.updated_at)}
         </span>
       </button>

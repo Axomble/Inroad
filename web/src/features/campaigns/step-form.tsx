@@ -163,7 +163,7 @@ export function StepForm({
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2">
           <Label htmlFor={subjectId}>Subject</Label>
-          {!isFirstStep && <span className="text-[11px] text-muted-foreground">optional</span>}
+          {!isFirstStep && <span className="text-[12px] text-muted-foreground">optional</span>}
         </div>
         <Input
           id={subjectId}

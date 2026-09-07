@@ -52,7 +52,7 @@ export function WarmupContentVersionsPanel({
 
       {reading.kind === 'observed' ? (
         <>
-          <p className="mb-2 max-w-prose text-[11.5px] leading-snug text-muted-foreground">{VERSIONS_INTRO}</p>
+          <p className="mb-2 max-w-prose text-[12px] leading-snug text-muted-foreground">{VERSIONS_INTRO}</p>
 
           <ul className="space-y-3">
             {reading.versions.map((version) => (
@@ -68,7 +68,7 @@ export function WarmupContentVersionsPanel({
           */}
           <p
             data-slot="versions-gates-nothing"
-            className="mt-3 max-w-prose border-l border-border pl-3 text-[11px] leading-snug text-faint"
+            className="mt-3 max-w-prose border-l border-border pl-3 text-[12px] leading-snug text-faint"
           >
             {VERSIONS_GATES_NOTHING}
           </p>
@@ -76,7 +76,7 @@ export function WarmupContentVersionsPanel({
           {reading.soleNote && (
             <p
               data-slot="versions-sole-note"
-              className="mt-2 max-w-prose border-l border-border pl-3 text-[11px] leading-snug text-faint"
+              className="mt-2 max-w-prose border-l border-border pl-3 text-[12px] leading-snug text-faint"
             >
               {reading.soleNote}
             </p>
@@ -114,7 +114,7 @@ function Version({ version }: { version: VersionReading }) {
         </span>
       </p>
 
-      <p data-slot="version-counts" className="mt-0.5 text-[11px] leading-snug tabular-nums text-muted-foreground">
+      <p data-slot="version-counts" className="mt-0.5 text-[12px] leading-snug tabular-nums text-muted-foreground">
         {version.counts}
       </p>
 
@@ -145,11 +145,11 @@ function Figure({ figure }: { figure: VersionFigure }) {
         <span data-slot="version-figure" className="block text-[12px] leading-snug tabular-nums text-foreground">
           {figure.value}
         </span>
-        <span data-slot="version-population" className="mt-0.5 block text-[10.5px] leading-snug text-faint">
+        <span data-slot="version-population" className="mt-0.5 block text-[11px] leading-snug text-faint">
           {figure.population}
         </span>
         {figure.detail && (
-          <span className="mt-0.5 block max-w-[22rem] text-[10.5px] leading-snug text-faint">{figure.detail}</span>
+          <span className="mt-0.5 block max-w-[22rem] text-[11px] leading-snug text-faint">{figure.detail}</span>
         )}
       </dd>
     </div>

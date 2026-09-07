@@ -82,7 +82,7 @@ export function AgentMarkdown({ text }: { text: string }) {
         <a
           key={`ref-${index}`}
           href={href}
-          className="mx-0.5 inline-flex items-center rounded-full border border-border-strong bg-surface-2 px-2 py-0.5 text-[11px] font-semibold text-foreground hover:border-primary"
+          className="mx-0.5 inline-flex items-center rounded-full border border-border-strong bg-surface-2 px-2 py-0.5 text-[12px] font-semibold text-foreground hover:border-primary"
         >
           {label}
         </a>

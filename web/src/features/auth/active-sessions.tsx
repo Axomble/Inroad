@@ -132,7 +132,7 @@ function SessionRow({ session, onError }: { session: SessionInfo; onError: (n: N
             <StatusPill tone="running">This device</StatusPill>
           )}
         </div>
-        <div className="mt-0.5 font-mono text-[11px] text-faint">
+        <div className="mt-0.5 font-mono text-[12px] text-faint">
           {session.ip ?? 'Unknown IP'} · started {formatDateTime(session.created_at)} · expires{' '}
           {relativeTime(session.expires_at)}
         </div>

@@ -44,7 +44,7 @@ export function FaultDomainExposure({ pool }: { pool: CampaignSenderPool | undef
 
       {reading.kind === 'measured' ? (
         <>
-          <p className="mt-1.5 max-w-prose text-[11.5px] leading-snug text-muted-foreground">{EXPOSURE_INTRO}</p>
+          <p className="mt-1.5 max-w-prose text-[12px] leading-snug text-muted-foreground">{EXPOSURE_INTRO}</p>
 
           <ul className="mt-2.5 space-y-2.5">
             {reading.domains.map((domain) => (
@@ -53,18 +53,18 @@ export function FaultDomainExposure({ pool }: { pool: CampaignSenderPool | undef
           </ul>
 
           {reading.soleNote && (
-            <p data-slot="exposure-sole" className="mt-2.5 max-w-prose text-[11px] leading-snug text-muted-foreground">
+            <p data-slot="exposure-sole" className="mt-2.5 max-w-prose text-[12px] leading-snug text-muted-foreground">
               {reading.soleNote}
             </p>
           )}
 
           {reading.uncovered && (
-            <p data-slot="exposure-uncovered" className="mt-2.5 max-w-prose text-[10.5px] leading-snug text-faint">
+            <p data-slot="exposure-uncovered" className="mt-2.5 max-w-prose text-[11px] leading-snug text-faint">
               {reading.uncovered}
             </p>
           )}
 
-          <p className="mt-2.5 max-w-prose text-[10.5px] leading-snug text-faint">{EXPOSURE_ADVISORY}</p>
+          <p className="mt-2.5 max-w-prose text-[11px] leading-snug text-faint">{EXPOSURE_ADVISORY}</p>
         </>
       ) : (
         // A real answer, not an apology — and which of the two it is comes from
@@ -125,7 +125,7 @@ function DomainRow({ domain }: { domain: DomainExposure }) {
 
       {domain.meter && <Meter share={domain.meter.share} ceiling={domain.meter.ceiling} tone={domain.tone} />}
 
-      <p className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+      <p className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[12px] text-muted-foreground">
         <span>
           <span data-slot="exposure-share" className="font-mono tabular-nums text-foreground">
             {domain.share}
@@ -142,12 +142,12 @@ function DomainRow({ domain }: { domain: DomainExposure }) {
       </p>
 
       {domain.detail && (
-        <p data-slot="exposure-detail" className="mt-0.5 max-w-prose text-[10.5px] leading-snug text-faint">
+        <p data-slot="exposure-detail" className="mt-0.5 max-w-prose text-[11px] leading-snug text-faint">
           {domain.detail}
         </p>
       )}
       {domain.tightened && (
-        <p data-slot="exposure-tightened" className="mt-0.5 max-w-prose text-[10.5px] leading-snug text-faint">
+        <p data-slot="exposure-tightened" className="mt-0.5 max-w-prose text-[11px] leading-snug text-faint">
           {domain.tightened}
         </p>
       )}

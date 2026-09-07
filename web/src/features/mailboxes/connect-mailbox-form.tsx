@@ -308,7 +308,7 @@ function Field({
         {/* Plain muted text, not the mono-caps treatment: tracked uppercase is
             the app's structural voice (section bars, column headers) and loses
             its signal when field hints shout in it too. */}
-        {hint && <span className="text-[11px] text-muted-foreground">{hint}</span>}
+        {hint && <span className="text-[12px] text-muted-foreground">{hint}</span>}
       </div>
       <div>{children(id)}</div>
       {error && (

@@ -113,7 +113,7 @@ export function AuthShowcase() {
     function caption(text: string, x: number, y: number, color: string) {
       const c = ctx as CanvasRenderingContext2D & { letterSpacing?: string }
       ctx!.save()
-      ctx!.font = '600 9px "Geist Mono Variable", ui-monospace, Menlo, monospace'
+      ctx!.font = '600 9px "JetBrains Mono Variable", ui-monospace, Menlo, monospace'
       if ('letterSpacing' in c) c.letterSpacing = '2px'
       ctx!.textAlign = 'center'
       ctx!.fillStyle = color

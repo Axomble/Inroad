@@ -155,7 +155,7 @@ function ApiKeyRow({ apiKey, onNotice }: { apiKey: ApiKey; onNotice: (n: Notice)
         <div className="flex items-center gap-2">
           <span className="truncate text-[13.5px] font-medium text-foreground">{apiKey.name}</span>
           <StatusPill tone={state.tone}>{state.label}</StatusPill>
-          <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+          <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground">
             {apiKey.prefix}…
           </code>
         </div>
@@ -163,13 +163,13 @@ function ApiKeyRow({ apiKey, onNotice }: { apiKey: ApiKey; onNotice: (n: Notice)
           {apiKey.scopes.map((scope) => (
             <span
               key={scope}
-              className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground"
+              className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
             >
               {scope}
             </span>
           ))}
         </div>
-        <div className="mt-1 font-mono text-[11px] text-faint">
+        <div className="mt-1 font-mono text-[12px] text-faint">
           created {formatDateTime(apiKey.created_at)}
           {apiKey.last_used_at ? ` · last used ${relativeTime(apiKey.last_used_at)}` : ' · never used'}
           {apiKey.expires_at ? ` · expires ${relativeTime(apiKey.expires_at)}` : ' · no expiry'}
@@ -342,7 +342,7 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
                             />
                             <span>
                               {scope.label}
-                              <span className="block text-[11px] text-muted-foreground">{scope.description}</span>
+                              <span className="block text-[12px] text-muted-foreground">{scope.description}</span>
                             </span>
                           </label>
                         ))}
@@ -396,7 +396,7 @@ function CreateApiKeyDialog({ onClose, onCreated }: { onClose: () => void; onCre
                     setError(null)
                   }}
                 />
-                <p className="mt-1 text-[11px] text-muted-foreground">
+                <p className="mt-1 text-[12px] text-muted-foreground">
                   Comma-separated IPs or CIDRs. Leave blank for no restriction.
                 </p>
               </div>

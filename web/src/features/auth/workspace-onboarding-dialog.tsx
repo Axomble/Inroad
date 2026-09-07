@@ -182,7 +182,7 @@ export default function OnboardingDialog({
             {!isLoading && <ArrowRight className="size-4" aria-hidden="true" />}
           </Button>
 
-          <p className="mt-3 text-center text-[11px] leading-relaxed text-faint">
+          <p className="mt-3 text-center text-[12px] leading-relaxed text-faint">
             That's the only thing we need. Invite your team and connect mailboxes whenever you're ready —
             both live in Settings.
           </p>

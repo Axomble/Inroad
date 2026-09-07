@@ -96,12 +96,12 @@ function OutboxRow({ item, now }: { item: InboxPendingReply; now: Date }) {
         <p className="truncate text-[12px] text-muted-foreground">
           {item.contact_email || 'No linked contact'}
           {' · '}
-          <span className="font-mono text-[11px]">{item.body_text.slice(0, 80)}</span>
+          <span className="font-mono text-[12px]">{item.body_text.slice(0, 80)}</span>
         </p>
         {/* A failed reply keeps its row precisely so this can be shown — the
             alternative is the reply silently vanishing. */}
         {item.last_error && (
-          <p className="mt-0.5 flex items-start gap-1 text-[11px] text-warn">
+          <p className="mt-0.5 flex items-start gap-1 text-[12px] text-warn">
             <AlertCircle className="mt-px size-3 shrink-0" aria-hidden="true" />
             <span className="truncate">{item.last_error}</span>
           </p>
@@ -112,7 +112,7 @@ function OutboxRow({ item, now }: { item: InboxPendingReply; now: Date }) {
         <p className="text-[12px] text-foreground">{sendTimingLabel(item.send_after, now)}</p>
         <p
           className={cn(
-            'font-mono text-[10px] uppercase',
+            'font-mono text-[11px] uppercase',
             status === 'failed' ? 'text-danger' : 'text-faint',
           )}
         >
@@ -132,10 +132,10 @@ function OutboxRow({ item, now }: { item: InboxPendingReply; now: Date }) {
             Cancel
           </Button>
         ) : (
-          <span className="text-[11px] text-faint">On its way</span>
+          <span className="text-[12px] text-faint">On its way</span>
         )}
         {error !== undefined && (
-          <p role="alert" className="text-right text-[10px] text-warn">
+          <p role="alert" className="text-right text-[11px] text-warn">
             {httpStatus(error) === 409
               ? 'Already sent.'
               : `Couldn't cancel${httpStatus(error) ? ` (${httpStatus(error)})` : ''}.`}

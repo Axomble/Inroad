@@ -563,12 +563,12 @@ function MailboxRow({
           {mailbox.display_name && <span className="truncate text-xs text-muted-foreground">{mailbox.display_name}</span>}
           <ProviderTag provider={mailbox.provider} />
         </div>
-        <div className="mt-0.5 font-mono text-[11px] text-faint">
+        <div className="mt-0.5 font-mono text-[12px] text-faint">
           {oauthLabel ? `${oauthLabel} · API` : `${mailbox.smtp_host}:${mailbox.smtp_port}`}
           {mailbox.last_error ? <span className="text-danger"> · {mailbox.last_error}</span> : null}
         </div>
         {actionError && (
-          <div role="alert" className="mt-0.5 text-[11px] text-danger">
+          <div role="alert" className="mt-0.5 text-[12px] text-danger">
             {actionError}
           </div>
         )}
@@ -578,7 +578,7 @@ function MailboxRow({
         <WarmupCell entry={warmup} poolIdle={poolIdle} />
       </div>
 
-      <div className="hidden w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted-foreground lg:block">
+      <div className="hidden w-16 shrink-0 text-right font-mono text-[12px] tabular-nums text-muted-foreground lg:block">
         {mailbox.daily_cap}/day
       </div>
 
@@ -693,7 +693,7 @@ function WarmupCell({ entry, poolIdle }: { entry?: WarmupMailbox; poolIdle: bool
   // incomplete pool. The page-level banner explains the fix.
   if (poolIdle) {
     return (
-      <span className="flex items-center gap-1 font-mono text-[11px] text-warm">
+      <span className="flex items-center gap-1 font-mono text-[12px] text-warm">
         <Flame className="size-3" aria-hidden="true" />
         Idle — needs 2
       </span>
@@ -702,7 +702,7 @@ function WarmupCell({ entry, poolIdle }: { entry?: WarmupMailbox; poolIdle: bool
   return (
     <div className="flex min-w-0 items-center gap-2">
       <HealthBadge state={entry.health_state} reason={entry.health_reason} />
-      <span className="flex items-center gap-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+      <span className="flex items-center gap-1 font-mono text-[12px] tabular-nums text-muted-foreground">
         <Flame className="size-3 text-warm" aria-hidden="true" />
         {entry.today_sent}/{entry.today_target}
       </span>

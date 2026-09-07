@@ -17,6 +17,10 @@ export default defineConfig({
 				replacesTitle: false,
 			},
 			favicon: '/favicon.svg',
+			// Self-hosted IBM Plex Sans + JetBrains Mono, matching the SPA so a
+			// reader moving between the app and the docs crosses no typeface
+			// boundary. See src/styles/fonts.css.
+			customCss: ['./src/styles/fonts.css'],
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/Axomble/Inroad' },
 			],

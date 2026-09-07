@@ -164,7 +164,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
               </span>
             ) : (
               <span
-                className="grid size-6 shrink-0 place-items-center rounded-full border border-border-strong font-mono text-[10px] text-faint"
+                className="grid size-6 shrink-0 place-items-center rounded-full border border-border-strong font-mono text-[11px] text-faint"
                 aria-hidden="true"
               >
                 {index + 1}

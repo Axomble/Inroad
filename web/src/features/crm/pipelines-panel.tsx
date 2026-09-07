@@ -48,7 +48,7 @@ const PipelinesList = memo(function PipelinesList({ pipelines }: { pipelines: re
           <div className="flex items-center justify-between gap-3">
             <h2 className="truncate text-sm font-semibold">{pipeline.name}</h2>
             {pipeline.is_default && (
-              <span className="rounded bg-primary/10 px-2 py-0.5 font-mono text-[10px] uppercase text-primary">
+              <span className="rounded bg-primary/10 px-2 py-0.5 font-mono text-[11px] uppercase text-primary">
                 Default
               </span>
             )}
@@ -59,7 +59,7 @@ const PipelinesList = memo(function PipelinesList({ pipelines }: { pipelines: re
                 <span className="size-2 rounded-full" style={{ backgroundColor: stage.color }} aria-hidden="true" />
                 <span className="truncate">{stage.label}</span>
                 {(stage.is_won || stage.is_lost) && (
-                  <span className="ml-auto text-[10px] uppercase text-muted-foreground">
+                  <span className="ml-auto text-[11px] uppercase text-muted-foreground">
                     {stage.is_won ? 'Won' : 'Lost'}
                   </span>
                 )}

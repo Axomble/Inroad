@@ -21,15 +21,15 @@ import {
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex gap-2 border-t border-border px-3 py-2 first:border-t-0">
-      <span className="w-28 shrink-0 text-[11px] text-muted-foreground">{label}</span>
-      <span className="min-w-0 flex-1 break-words text-[11px] font-medium text-foreground">{value}</span>
+      <span className="w-28 shrink-0 text-[12px] text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 break-words text-[12px] font-medium text-foreground">{value}</span>
     </div>
   )
 }
 
 function JsonBlock({ value }: { value: ToolArguments }) {
   return (
-    <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 font-mono text-[11px] leading-5 text-muted-foreground">
+    <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 font-mono text-[12px] leading-5 text-muted-foreground">
       {JSON.stringify(value, null, 2)}
     </pre>
   )
@@ -39,7 +39,7 @@ function ContactTable({ contacts }: { contacts: ToolArguments['contacts'] }) {
   const rows = Array.isArray(contacts) ? contacts : []
   return (
     <div className="max-h-56 overflow-auto rounded-md border border-border bg-background">
-      <table className="w-full text-left text-[11px]">
+      <table className="w-full text-left text-[12px]">
         <caption className="sr-only">Contacts that will be imported</caption>
         <thead className="sticky top-0 bg-surface text-muted-foreground">
           <tr>
@@ -196,7 +196,7 @@ export function ApprovalEditor({
         />
       </div>
       <div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           {draft.contacts.length} {draft.contacts.length === 1 ? 'row' : 'rows'} will be imported. Correct an
           address or drop a row; use “Edit as JSON” to change other columns.
         </p>
@@ -204,7 +204,7 @@ export function ApprovalEditor({
           {draft.contacts.map((row, index) => (
             <li key={row.key} className="flex items-center gap-1.5">
               <Input
-                className="h-7 min-w-0 flex-1 font-mono text-[11px]"
+                className="h-7 min-w-0 flex-1 font-mono text-[12px]"
                 value={row.email}
                 aria-label={`Email for row ${index + 1}`}
                 onChange={(event) => {
@@ -241,23 +241,23 @@ export function ApprovalEditor({
 export function ApprovalDiff({ changes, className }: { changes: ArgumentChange[]; className?: string }) {
   if (changes.length === 0) {
     return (
-      <p className={cn('text-[11px] text-muted-foreground', className)}>
+      <p className={cn('text-[12px] text-muted-foreground', className)}>
         No changes yet — approving now runs the original inputs.
       </p>
     )
   }
   return (
     <div className={cn('rounded-md border border-border bg-background', className)}>
-      <p className="border-b border-border px-3 py-1.5 text-[11px] font-medium text-foreground">
+      <p className="border-b border-border px-3 py-1.5 text-[12px] font-medium text-foreground">
         {changes.length} {changes.length === 1 ? 'change' : 'changes'} from what the assistant proposed
       </p>
       <ul>
         {changes.map((change) => (
           <li key={change.key} className="flex flex-wrap gap-2 border-t border-border px-3 py-2 first:border-t-0">
-            <span className="w-28 shrink-0 font-mono text-[10px] text-muted-foreground">{change.key}</span>
-            <span className="min-w-0 break-words text-[11px] text-danger line-through">{change.before}</span>
-            <span aria-hidden="true" className="text-[11px] text-faint">to</span>
-            <span className="min-w-0 break-words text-[11px] font-medium text-ok">{change.after}</span>
+            <span className="w-28 shrink-0 font-mono text-[11px] text-muted-foreground">{change.key}</span>
+            <span className="min-w-0 break-words text-[12px] text-danger line-through">{change.before}</span>
+            <span aria-hidden="true" className="text-[12px] text-faint">to</span>
+            <span className="min-w-0 break-words text-[12px] font-medium text-ok">{change.after}</span>
           </li>
         ))}
       </ul>

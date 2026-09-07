@@ -196,7 +196,7 @@ function ClientRow({ client, onNotice }: { client: OAuth2Client; onNotice: (n: N
           <StatusPill tone="draft" dot={false}>
             {client.client_type}
           </StatusPill>
-          <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+          <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground">
             {client.client_id}
           </code>
         </div>
@@ -205,14 +205,14 @@ function ClientRow({ client, onNotice }: { client: OAuth2Client; onNotice: (n: N
             {scopes.map((scope) => (
               <span
                 key={scope}
-                className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground"
+                className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
               >
                 {scope}
               </span>
             ))}
           </div>
         )}
-        <div className="mt-1 truncate font-mono text-[11px] text-faint">
+        <div className="mt-1 truncate font-mono text-[12px] text-faint">
           {client.redirect_uris.join(' · ')} · registered {formatDateTime(client.created_at)}
         </div>
       </div>
@@ -462,7 +462,7 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
                             />
                             <span>
                               {scope.label}
-                              <span className="block text-[11px] text-muted-foreground">{scope.description}</span>
+                              <span className="block text-[12px] text-muted-foreground">{scope.description}</span>
                             </span>
                           </label>
                         ))}
@@ -488,7 +488,7 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
                     />
                     <span>
                       Public (PKCE)
-                      <span className="block text-[11px] text-muted-foreground">
+                      <span className="block text-[12px] text-muted-foreground">
                         For SPAs and native apps that can't keep a secret. Recommended.
                       </span>
                     </span>
@@ -506,7 +506,7 @@ function RegisterAppDialog({ onClose, onCreated }: { onClose: () => void; onCrea
                     />
                     <span>
                       Confidential
-                      <span className="block text-[11px] text-muted-foreground">
+                      <span className="block text-[12px] text-muted-foreground">
                         For server-side apps. Issues a client secret, shown once.
                       </span>
                     </span>

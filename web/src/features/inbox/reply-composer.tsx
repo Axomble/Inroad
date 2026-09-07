@@ -243,7 +243,7 @@ export function ReplyComposer({ threadId, hasInboundMessage }: { threadId: strin
             Schedule
           </Button>
           {scheduleError && (
-            <p role="alert" className="text-[11px] text-danger">
+            <p role="alert" className="text-[12px] text-danger">
               {scheduleError}
             </p>
           )}

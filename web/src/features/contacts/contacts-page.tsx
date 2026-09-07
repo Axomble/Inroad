@@ -210,7 +210,7 @@ function ScopeButton({
     >
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {count != null && (
-        <span className="shrink-0 font-mono text-[11px] tabular-nums text-faint">{count.toLocaleString()}</span>
+        <span className="shrink-0 font-mono text-[12px] tabular-nums text-faint">{count.toLocaleString()}</span>
       )}
     </button>
   )
@@ -448,11 +448,11 @@ function ContactsPane({
       </div>
 
       <div className="flex items-center gap-2 border-t border-border px-4 py-2 sm:px-5">
-        <span className="font-mono text-[11px] tabular-nums text-faint">
+        <span className="font-mono text-[12px] tabular-nums text-faint">
           {page && !showError ? rangeLabel(page, pagesWalked, limit) : 'No contacts'}
         </span>
         {/* Dimming alone would leave the state invisible to a screen reader. */}
-        {busy && <span className="text-[11px] text-muted-foreground">Loading…</span>}
+        {busy && <span className="text-[12px] text-muted-foreground">Loading…</span>}
         <div className="ml-auto flex items-center gap-2">
           {/* outline, not ghost: these sit beside a text range label, and a ghost
               button with nothing to hover reads as more of that prose. Pagination

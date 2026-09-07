@@ -66,23 +66,23 @@ export function ProviderRow({
         <Icon className="size-4 shrink-0 text-foreground" />
         <span className="text-[13.5px] font-medium text-foreground">{name}</span>
         {provider.display_name.trim() && provider.display_name !== meta.title && (
-          <span className="text-[11.5px] text-faint">{meta.title}</span>
+          <span className="text-[12px] text-faint">{meta.title}</span>
         )}
         {configSummary(provider).map((value) => (
           <code
             key={value}
-            className="max-w-64 truncate rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+            className="max-w-64 truncate rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[12px] text-muted-foreground"
           >
             {value}
           </code>
         ))}
         {provider.key_prefix && (
-          <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-faint">
+          <span className="inline-flex items-center gap-1.5 font-mono text-[12px] text-faint">
             <KeyRound className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
             {provider.key_prefix}…
           </span>
         )}
-        <span className="font-mono text-[11px] text-faint">updated {relativeTime(provider.updated_at)}</span>
+        <span className="font-mono text-[12px] text-faint">updated {relativeTime(provider.updated_at)}</span>
 
         <div className="ml-auto flex items-center gap-2">
           <Button variant="outline" size="sm" aria-label={`Edit ${name}`} onClick={() => setEditing(true)}>
@@ -210,10 +210,10 @@ function ProviderModelRow({ model, onNotice }: { model: AiModel; onNotice: (n: N
   return (
     <div className="flex items-center gap-2.5 border-b border-border/60 py-1.5 last:border-b-0">
       <span className="text-[13px] text-foreground">{model.label}</span>
-      <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
+      <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
         {model.name}
       </code>
-      <span className="font-mono text-[11px] text-faint">
+      <span className="font-mono text-[12px] text-faint">
         {formatTokens(model.context_window_tokens)}
         {model.supports_reasoning ? ' · reasoning' : ''}
       </span>

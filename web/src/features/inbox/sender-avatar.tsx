@@ -34,7 +34,7 @@ export function SenderAvatar({
       aria-hidden="true"
       className={cn(
         'flex shrink-0 select-none items-center justify-center rounded-full font-semibold',
-        size === 'md' ? 'size-8 text-[11px]' : 'size-7 text-[10px]',
+        size === 'md' ? 'size-8 text-[12px]' : 'size-7 text-[11px]',
         AVATAR_PALETTE[avatarPaletteIndex(label, AVATAR_PALETTE.length)],
         className,
       )}

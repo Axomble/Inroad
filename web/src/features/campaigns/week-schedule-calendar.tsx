@@ -198,7 +198,7 @@ export function WeekScheduleCalendar({
           {AXIS_HOURS.map((hour) => (
             <span
               key={hour}
-              className="absolute right-1 -translate-y-1/2 font-mono text-[9px] text-faint"
+              className="absolute right-1 -translate-y-1/2 font-mono text-[10px] text-faint"
               style={{ top: `${(hour / 24) * 100}%` }}
             >
               {formatMinute(hour * 60)}
@@ -212,7 +212,7 @@ export function WeekScheduleCalendar({
           return (
             <div key={label} className="flex min-w-0 flex-1 flex-col">
               <div className="flex items-center justify-between gap-0.5 pb-1">
-                <span className="font-mono text-[10px] text-muted-foreground">{label}</span>
+                <span className="font-mono text-[11px] text-muted-foreground">{label}</span>
                 <span className="flex items-center gap-0.5">
                   <button
                     type="button"
@@ -282,7 +282,7 @@ export function WeekScheduleCalendar({
                       />
                       {/* The range is the accessible name AND the visible label,
                           so a keyboard user and a sighted one read the same thing. */}
-                      <span className="pointer-events-none block truncate px-1 pt-0.5 font-mono text-[9px] leading-tight">
+                      <span className="pointer-events-none block truncate px-1 pt-0.5 font-mono text-[10px] leading-tight">
                         {formatBlock(block)}
                       </span>
                       <button
@@ -303,7 +303,7 @@ export function WeekScheduleCalendar({
         })}
       </div>
 
-      <p className={cn('font-mono text-[10px]', totalMinutes === 0 ? 'text-warn' : 'text-faint')}>
+      <p className={cn('font-mono text-[11px]', totalMinutes === 0 ? 'text-warn' : 'text-faint')}>
         {totalMinutes === 0
           ? 'Nothing is open — a campaign needs at least one sending window.'
           : `${totalHours} sending ${totalHours === 1 ? 'hour' : 'hours'} a week · drag to draw, drag an edge to resize`}

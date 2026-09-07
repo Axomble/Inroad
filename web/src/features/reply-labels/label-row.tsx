@@ -46,7 +46,7 @@ export function LabelRowBody({
             </Badge>
           ))}
         </div>
-        <div className="mt-0.5 font-mono text-[11px] text-faint">{label.key}</div>
+        <div className="mt-0.5 font-mono text-[12px] text-faint">{label.key}</div>
       </div>
 
       <Button variant="outline" size="sm" aria-label={`Edit label ${label.label}`} onClick={onEdit}>

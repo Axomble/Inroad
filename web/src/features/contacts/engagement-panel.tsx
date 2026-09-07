@@ -174,7 +174,7 @@ function Metric({ label, value, sub }: { label: string; value: React.ReactNode; 
     <div className="rounded-lg border border-border bg-background p-3">
       <dt className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">{label}</dt>
       <dd className="mt-1 text-lg font-light tabular-nums text-foreground">{value}</dd>
-      {sub ? <dd className="mt-0.5 font-mono text-[11px] text-muted-foreground">{sub}</dd> : null}
+      {sub ? <dd className="mt-0.5 font-mono text-[12px] text-muted-foreground">{sub}</dd> : null}
     </div>
   )
 }

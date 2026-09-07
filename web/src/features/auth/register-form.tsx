@@ -146,7 +146,7 @@ export function RegisterForm() {
                 />
               ))}
             </div>
-            {pwScore > 0 && <span className="w-10 text-right font-mono text-[10px] text-muted-foreground">{STRENGTH_LABEL[pwScore]}</span>}
+            {pwScore > 0 && <span className="w-10 text-right font-mono text-[11px] text-muted-foreground">{STRENGTH_LABEL[pwScore]}</span>}
           </div>
           {errors.password && (
             <span role="alert" className="text-xs text-danger">
@@ -176,7 +176,7 @@ export function RegisterForm() {
           {isLoading ? 'Creating workspace…' : 'Create workspace'}
         </Button>
 
-        <p className="auth-rise text-center text-[11px] leading-relaxed text-faint" style={{ animationDelay: '340ms' }}>
+        <p className="auth-rise text-center text-[12px] leading-relaxed text-faint" style={{ animationDelay: '340ms' }}>
           By continuing you agree to the Terms of Service and Privacy Policy.
         </p>
       </form>

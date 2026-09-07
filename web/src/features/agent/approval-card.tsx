@@ -163,7 +163,7 @@ export const ApprovalCard = memo(function ApprovalCard({
       {action.status === 'pending' && (
         <div
           className={cn(
-            'mt-3 flex items-center gap-1.5 text-[11px]',
+            'mt-3 flex items-center gap-1.5 text-[12px]',
             expired ? 'text-danger' : 'text-muted-foreground',
           )}
         >
@@ -181,7 +181,7 @@ export const ApprovalCard = memo(function ApprovalCard({
             idPrefix={editId}
           />
           <ApprovalDiff changes={changes} />
-          <p className="text-[11px] text-muted-foreground">Only these edited inputs will be executed.</p>
+          <p className="text-[12px] text-muted-foreground">Only these edited inputs will be executed.</p>
         </div>
       ) : mode === 'reject' ? (
         <div className="mt-3">
