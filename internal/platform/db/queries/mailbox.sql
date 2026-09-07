@@ -57,7 +57,13 @@ SELECT id, workspace_id FROM mailboxes WHERE status = 'active';
 -- Persists the IMAP poll cursor after a poll pass, so the next pass resumes
 -- from inbox_last_seen_uid (or resyncs from scratch if inbox_uid_validity
 -- has changed underneath it — an IMAP server-side UIDVALIDITY bump).
-UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4
+--
+-- last_poll_at is stamped here too, matching SetInboxCursorString below. It was
+-- missing, so an IMAP/SMTP mailbox reported last_poll_at = NULL forever however
+-- many times it polled successfully, while Gmail and M365 mailboxes stamped it
+-- correctly. That made "never polled" indistinguishable from "polling fine" for
+-- exactly the transport with no provider dashboard to check instead.
+UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4, last_poll_at = now()
 WHERE id = $1 AND workspace_id = $2;
 
 -- name: UpdateMailboxSecret :exec
