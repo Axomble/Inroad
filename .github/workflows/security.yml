@@ -1,0 +1,90 @@
+name: Security
+
+# Supply-chain scanning, kept out of ci.yml on purpose: these jobs depend on an
+# external advisory database, so a brand-new CVE can turn them red with no code
+# change. Branch protection points at ci.yml's aggregate `ci` job, so a finding
+# here is loud but does not by itself block a merge — decide per finding.
+#
+# Runs on every PR and push to main for fast feedback, and weekly so a CVE
+# disclosed against unchanged code still surfaces.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays, 04:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Go vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25.x"
+          cache: true
+      # govulncheck reports only vulnerabilities in code paths the binary
+      # actually reaches, so a finding here is real, not a transitive-dep alert.
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  npm-audit:
+    name: npm advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      # `high` and above fail; moderates are reported but do not block, because
+      # most land in build-only tooling that never ships to a browser.
+      - name: Audit
+        working-directory: web
+        run: npm audit --audit-level=high
+
+  trivy:
+    name: Trivy filesystem scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # SARIF upload needs this; harmless on a fork where code scanning is off
+    # (the upload step is guarded below).
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy.sarif
+          exit-code: "1"
+      # Feed the findings into the Security tab when this is the canonical repo.
+      - name: Upload SARIF
+        if: always() && github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
