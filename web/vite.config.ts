@@ -34,7 +34,14 @@ export default defineConfig({
     // The target is configurable because the API is not always on localhost: in
     // the docker dev stack it answers to the service name `api`.
     proxy: {
-      '/api': apiProxyTarget,
+      // `ws: true` is load-bearing, not decorative. Vite proxies the realtime
+      // WebSocket's HTTP handshake happily but DROPS the Upgrade without it, so
+      // GET /api/v1/realtime/ws never reaches the API: the client gets a plain
+      // response, the socket closes 1006, and the connection indicator sits on
+      // "connecting" forever while every cache patch silently stops arriving.
+      // Nothing catches this but a real browser -- the e2e suite mocks /api/v1
+      // in-page and the unit tests inject a fake socket, so both stay green.
+      '/api': { target: apiProxyTarget, ws: true },
       '/oauth2': apiProxyTarget,
       // Mailbox-connect OAuth callbacks are server routes (the API owns
       // /oauth/<provider>/callback — see internal/platform/httpx/spa.go). Proxy

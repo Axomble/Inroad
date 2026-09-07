@@ -119,12 +119,11 @@ func NewHandler(hub Attacher, burner TicketBurner, sessions SessionChecker, log 
 	}
 }
 
-// Routes mounts the two endpoints. Authentication is applied by the surrounding
-// protected group (cmd/inroad mounts this in sessionOnly), so both handlers can
-// assume a verified principal — and the ws handler additionally re-derives
-// everything it trusts from the ticket rather than from that principal, because
-// a browser cannot send a bearer token on an Upgrade.
-func (h *Handler) Routes(ticketThrottle func(http.Handler) http.Handler) http.Handler {
+// TicketRoutes mounts POST /realtime/ticket. It MUST be mounted inside a
+// session-protected group (cmd/inroad puts it in sessionOnly): minting is what
+// proves the caller holds a live session, and the ticket it returns is the
+// credential the socket then presents.
+func (h *Handler) TicketRoutes(ticketThrottle func(http.Handler) http.Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		if ticketThrottle != nil {
@@ -134,7 +133,42 @@ func (h *Handler) Routes(ticketThrottle func(http.Handler) http.Handler) http.Ha
 		// CREDENTIALS (spec §7.4) — treated like loginThrottle, not like a read.
 		r.Post("/ticket", h.mintTicket)
 	})
-	r.Get("/ws", h.serveWS)
+	return r
+}
+
+// SocketRoutes mounts GET /realtime/ws, which authenticates with the signed
+// connect ticket in the query string and NOT with a bearer token.
+//
+// It must therefore be mounted OUTSIDE the RequireAuth groups. This is not a
+// weakening of the original design, it is the correction of a bug that made the
+// socket unreachable from a browser at all: `new WebSocket()` cannot set an
+// Authorization header, auth.RequireAuth reads the credential ONLY from
+// `Authorization: Bearer` (there is no cookie fallback), so every browser
+// handshake was refused with 401 before serveWS ran and no realtime event ever
+// reached a client. The connection indicator sat on "connecting"/"reconnecting"
+// forever.
+//
+// What actually authenticates the socket is unchanged and is all inside
+// serveWS, which is why moving the mount costs no security:
+//
+//   - the ticket's HMAC signature and expiry (wsticket.Parse), minted only by
+//     the session-protected endpoint above;
+//   - the session re-check, so a logout between mint and spend is refused;
+//   - the single-use nonce burn, so a replayed ticket is refused;
+//   - the Origin allowlist on the Upgrader, which is the control that actually
+//     defends against another site opening a socket — the one a WebSocket
+//     handshake does not get from the same-origin policy.
+//
+// The workspace fanned out comes from the signed ticket, never from the request,
+// so an unauthenticated caller with no ticket reaches nothing: serveWS refuses a
+// missing or bad ticket with the same opaque 401 the group used to produce.
+// The returned handler serves the socket at the ROOT of wherever it is mounted,
+// because cmd/inroad mounts it on the full "/api/v1/realtime/ws" path: the mint
+// endpoint already mounts the "/api/v1/realtime" prefix in the protected group,
+// and chi panics at startup on a duplicate Mount of the same pattern.
+func (h *Handler) SocketRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.Get("/", h.serveWS)
 	return r
 }
 
