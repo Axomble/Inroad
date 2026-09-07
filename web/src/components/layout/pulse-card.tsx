@@ -51,6 +51,8 @@ const rowClass =
 function AttentionRow({ item }: { item: PulseAttentionItem }) {
   return (
     <Link {...linkProps(item.href)} data-slot="pulse-attention-row" className={cn(rowClass, 'items-start text-[12px] text-chrome-text')}>
+      {/* items-start + mt-1: the row is now two lines, so a centred glyph would
+          float between them instead of marking the first one. */}
       <span className={cn('mt-1 shrink-0 font-mono text-[11px] leading-none', SEVERITY_TEXT[item.severity])} aria-hidden="true">
         {SEVERITY_GLYPH[item.severity]}
       </span>
@@ -63,6 +65,10 @@ function AttentionRow({ item }: { item: PulseAttentionItem }) {
           {item.reason}
         </span>
       </span>
+      {/* No trailing reason span here: main still had the OLD single-line
+          version, which rendered the reason a second time. It already appears
+          on its own truncating line above, which is the whole point of this
+          two-line layout. */}
     </Link>
   )
 }
