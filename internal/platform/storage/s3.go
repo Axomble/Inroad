@@ -1,4 +1,15 @@
-// Package storage provides an Object Storage provider seam for file/blob operations.
+// Package storage provides an object-storage seam for file/blob operations:
+// one Provider interface, a filesystem implementation (the default, see fs.go)
+// and an S3-compatible one (the opt-in, this file), selected from config by
+// FromEnv (see factory.go).
+//
+// Nothing in this codebase imports this package yet, and that is deliberate,
+// not an oversight: its first consumer is the attachments feature (parity
+// plan P2.3), which does not exist yet either. The seam is built and tested
+// ahead of that consumer so P2.3 has somewhere to plug in on day one instead
+// of inventing its own storage layer under time pressure — a recorded,
+// time-boxed exception to the repo's no-dead-code rule, not an invitation to
+// delete it for being unreferenced.
 package storage
 
 import (
