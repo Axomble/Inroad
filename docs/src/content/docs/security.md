@@ -836,6 +836,10 @@ write history that never happened.
       intra-workspace, so the adversary is the in-path or intra-tenant one
       invariant 62 says this whole invariant rests on — and the alternative was
       not a stronger signal but NO signal for every M365 participant.
+      Because the key is an inbound claim, it is also refused before it reaches
+      the database when it is not a usable identifier at all — see
+      `usableMessageID` in invariant 65, which closes the same
+      cursor-wedge denial of service on this route as on the complaint one.
       Only a genuinely ABSENT header takes the second route
       (`TestPollForgedWarmupTokenNeverFallsBackToMessageID`). That is NOT an
       access control and must not be read as one — anyone who simply omits the
@@ -1261,11 +1265,44 @@ write history that never happened.
     `Final-Recipient`, for the same reason. A report that quotes nothing, quotes
     a send we do not have, or names a recipient the send did not go to is a
     LOGGED SKIP (`inbox_poll_complaint_declined`, with a stable reason token and
-    no address in the log line), never an ingest. The forgery surface is
-    therefore "already knows a real `Message-ID` of a real send" — the documented
-    residual bar for reply-driven suppression, not a new one — and the
-    idempotency key is `arf:<send id>`, so a re-poll or a redelivered report
-    writes nothing and causes nothing.
+    no address in the log line), never an ingest. The idempotency key is
+    `arf:<send id>`, so a re-poll or a redelivered report writes nothing and
+    causes nothing.
+    **The residual, named rather than compared.** The bar for reaching this path
+    is "already knows a real `Message-ID` of a real send" — the same bar
+    reply-driven suppression has. What the bar BUYS is not the same, so it is
+    stated here directly rather than by pointing at that one. Trace `Ingest`
+    (`app/deliverability/service.go`) → `evaluateAfterIngest` →
+    `EvaluateBreaker`: a mail-borne complaint does three things a reply cannot.
+    (1) It flips the workspace's complaint rate from UNMEASURED to MEASURED — the
+    `Complained` pointer in `toInputs` is deliberately nil until a feed reports
+    (invariant 4), so the first ingested complaint permanently changes what the
+    deliverability score means. (2) It reaches the campaign circuit breaker and
+    can AUTO-PAUSE a campaign (invariant 42). (3) It is not rate-bounded: each
+    send is a distinct `arf:<send id>` key, so anyone holding N `Message-ID`s
+    from one campaign can drive the numerator N times. The corroboration is one
+    cross-check that can only ever REFUSE: `Original-Rcpt-To` is OPTIONAL in RFC
+    5965 and the check is skipped entirely when it is absent
+    (`TestPollARFWithoutAReportedRecipientStillIngestsOnTheResolvedSend`), which
+    is correct — real FBLs redact the field and refusing those reports would drop
+    genuine complaints — but it means the quoted `Message-ID` is the whole of the
+    proof on that shape. Accepted for the reason invariant 52's placement bullet
+    accepts its own: the alternative is not a stronger complaint signal but no
+    mail-borne complaint signal at all, and a dropped complaint is a compliance
+    failure.
+    **The polled mailbox is deliberately NOT pinned, and that is an asymmetry
+    with the sibling path.** `FindSendByMessageID(ctx, workspaceID, …)` is
+    workspace-pinned only, although `SendRef.MailboxID` is available and IS used
+    a few lines later on the reply path — so an ARF forger may deliver to ANY
+    connected mailbox in the workspace, while a warmup forger must hit the exact
+    mailbox the send was addressed to (`FindWarmupSendByMessageIDForRecipient`
+    makes `to_mailbox` load-bearing; invariant 52). The pin is withheld because
+    FBL reports commonly land on a designated `abuse@` mailbox rather than the
+    sending one, so requiring them to arrive at the sending mailbox would refuse
+    the majority of REAL reports. Whoever revisits this: the question to answer
+    first is whether a workspace can nominate its complaint-receiving mailboxes,
+    because that — not the send's own mailbox — is what the pin would have to be
+    against.
     `Original-Mail-From` is deliberately NOT a fallback for the complained
     recipient: per RFC 5965 it is the offending message's envelope SENDER, i.e.
     our own mailbox, so falling back to it would name the wrong party entirely.
@@ -1284,6 +1321,21 @@ write history that never happened.
     for the price of one email. Transient failures still retry, because the ingest
     is idempotent and dropping a real complaint is a compliance failure
     (`TestPollARFRejectedAsPermanentlyInvalidIsSkippedNotRetriedForever`).
+    The same denial of service is reachable through the lookup KEY rather than
+    the ingest verdict, so it is closed in one place for all four inbound
+    ingest paths: `usableMessageID` (`internal/worker/inbox/reply.go`) refuses a
+    `Message-ID` that is not printable US-ASCII or exceeds RFC 5322's 998-octet
+    line bound BEFORE it becomes a Postgres text parameter. `textproto.
+    ReadMIMEHeader` validates header KEYS only, so a raw `0xFF` or NUL in the
+    VALUE survives verbatim through the IMAP, Gmail and Graph readers, and
+    Postgres refuses such a parameter with SQLSTATE 22021 — neither
+    `pgx.ErrNoRows`/`coreapi.ErrNoMatch` nor transient, so it propagates and
+    wedges the cursor exactly as a retried permanent rejection would. RFC 5322's
+    `msg-id` is `dot-atom "@" dot-atom`, US-ASCII by definition, so the guard
+    refuses nothing legitimate; an unusable id gets the answer an absent one
+    gets. Covered by the four tests in `poll_messageid_test.go` and
+    `poll_warmupfallback_test.go` (one per ingest path), all of which model the
+    store's SQLSTATE 22021 refusal rather than letting a fake absorb it.
     A feedback report found in a SPAM/junk folder is deliberately not ingested:
     the junk pass records warmup placement only, and letting a
     spam-filter-chosen folder trigger a contact suppression is a widening that
