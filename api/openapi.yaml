@@ -3836,6 +3836,7 @@ paths:
           description: Endpoints
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointList' } } }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
     post:
       operationId: createWebhookEndpoint
       tags: [webhooks]
@@ -3857,6 +3858,7 @@ paths:
           description: Created; `secret` is present exactly this once
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' } } }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '422': { description: Invalid URL (SSRF-blocked or malformed) or unknown event type }
   /webhook-endpoints/{id}:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -3869,6 +3871,7 @@ paths:
           description: The endpoint
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpoint' } } }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
     patch:
       operationId: updateWebhookEndpoint
@@ -3886,6 +3889,7 @@ paths:
           description: Updated
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpoint' } } }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
         '422': { description: Invalid URL or unknown event type }
     delete:
@@ -3896,6 +3900,7 @@ paths:
       responses:
         '204': { description: Deleted }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
   /webhook-endpoints/{id}/rotate-secret:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -3911,6 +3916,7 @@ paths:
           description: Rotated; `secret` is the new value, shown once
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' } } }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
   /webhook-endpoints/{id}/ping:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -3928,6 +3934,7 @@ paths:
           description: Ping delivery queued
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookDelivery' } } }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
   /webhook-endpoints/{id}/deliveries:
     parameters: [{ $ref: '#/components/parameters/ID' }]
@@ -3951,6 +3958,7 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/WebhookDeliveryList' } } }
         '400': { description: The cursor is not one this server minted }
         '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
 components:
   securitySchemes:
