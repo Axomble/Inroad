@@ -13,6 +13,7 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyBlock, Page, PageBody, PageTopbar, SectionBar } from '@/components/layout/page'
 import { ScrollDialogBody, ScrollDialogContent } from '@/components/shared/scroll-dialog'
+import { useHasRole } from '@/hooks/use-has-role'
 import { useCreateWebhookEndpointMutation, useListWebhookEndpointsQuery } from './api'
 import { SecretReveal } from './secret-reveal'
 import { WebhookEndpointRow } from './webhook-endpoint-row'
@@ -37,11 +38,31 @@ import {
  * (`features/webhooks/api.ts`); this component owns only the create-dialog
  * and list-error UI state, matching `dead-letters-page.tsx` and
  * `api-keys-panel.tsx`.
+ *
+ * Admin-gated like the API-keys, connected-apps and AI panels: an endpoint
+ * streams workspace event payloads to an operator-chosen URL and carries an
+ * HMAC signing secret, so `webhook.Routes()` wraps the whole router in
+ * `RequireRole("admin")`. This mirrors that so a non-admin who deep-links here
+ * gets an honest empty state instead of a "couldn't load" banner over a 403 —
+ * the server remains the boundary.
  */
 export function WebhooksPage() {
+  const isAdmin = useHasRole('admin')
   const [creating, setCreating] = useState(false)
-  const { data, isLoading, isError, error, refetch } = useListWebhookEndpointsQuery()
+  const { data, isLoading, isError, error, refetch } = useListWebhookEndpointsQuery(undefined, { skip: !isAdmin })
   const endpoints = data?.items ?? []
+
+  if (!isAdmin) {
+    return (
+      <Page>
+        <PageTopbar eyebrow="Settings" title="Webhooks" subtitle="Outbound event notifications" />
+        <EmptyBlock
+          title="Admins only"
+          description="Ask a workspace owner or admin to register a webhook receiver for this workspace."
+        />
+      </Page>
+    )
+  }
 
   return (
     <Page>
@@ -115,8 +136,13 @@ function CreateEndpointDialog({ onClose }: { onClose: () => void }) {
           event_types: events,
         },
       }).unwrap()
-      // Local state only — never Redux/persist. The server will not return
-      // this value again, so it lives exactly as long as this dialog does.
+      // Held only while this dialog is mounted. RTK Query DOES mirror a
+      // mutation's `data` — secret included — into
+      // `state[api.reducerPath].mutations[...]`, so "never Redux" would be
+      // false; what is true is that the `api` reducer is not persisted
+      // (store/index.ts whitelists UI slices only) and this dialog unmounts on
+      // close, which drops its own mutation cache entry with it. The server
+      // will not return this value again either way.
       setSecret(result.secret)
     } catch (err) {
       setError(webhookActionMessage(err, 'create'))

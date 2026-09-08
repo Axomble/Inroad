@@ -29,17 +29,26 @@ const MEMBER_ROWS = [
   [/^security$/i, '/app/settings/security'],
   [/reply labels/i, '/app/settings/reply-labels'],
   [/custom fields/i, '/app/settings/custom-fields'],
+  // The list needs campaigns:read, which every member holds; replay and discard
+  // are refused per-row by the server.
+  [/failed tasks/i, '/app/settings/dead-letters'],
 ] as const
 
 // Each of these sits behind RequireRole("admin") on the server. Team is here
 // rather than above because every /workspaces/{id}/invites route is admin-only
 // — the old sidebar advertised it to members anyway, who reached an
 // "Admins only" wall.
+//
+// Between these two tables they now cover EVERY row in SETTINGS_NAV. Webhooks
+// and Failed tasks were in neither, so the one nav entry whose role was
+// actually wrong (webhooks, admitting any member to an event-egress surface
+// that mints an HMAC secret) was not asserted either way.
 const ADMIN_ROWS = [
   [/^team$/i, '/app/settings/team'],
   [/api keys/i, '/app/settings/api-keys'],
   [/connected apps/i, '/app/settings/oauth-apps'],
   [/^ai$/i, '/app/settings/ai'],
+  [/webhooks/i, '/app/settings/webhooks'],
 ] as const
 
 test('a member sees the screens their scopes actually allow, and none of the admin ones', () => {

@@ -15,6 +15,10 @@ beforeAll(() => {
 
 const jsonHeaders = { 'content-type': 'application/json' }
 
+// This screen is admin-gated (webhook.Routes() wraps its whole router in
+// RequireRole("admin")), so every test that expects to SEE it has to be one.
+const admin = { auth: { role: 'admin', status: 'authed' as const, activeWorkspaceId: 'w1' } }
+
 function endpoint(overrides: Partial<WebhookEndpoint> = {}): WebhookEndpoint {
   return {
     id: 'ep-1',
@@ -73,11 +77,31 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+/* ------------------------------------------------------------ permission */
+
+// An endpoint streams workspace event payloads to an operator-chosen URL and
+// carries an HMAC signing secret, which is why webhook.Routes() gates the whole
+// router on RequireRole("admin") — the same as its three neighbours in the
+// settings rail. The screen mirrors that so a member deep-linking here gets an
+// honest wall rather than a "couldn't load" banner wrapped around a 403.
+test('a member gets an admins-only state, and the list is never even requested', async () => {
+  const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
+  renderWithProviders(<WebhooksPage />, {
+    preloadedState: { auth: { role: 'member', status: 'authed', activeWorkspaceId: 'w1' } },
+  })
+
+  expect(await screen.findByText('Admins only')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /new endpoint/i })).not.toBeInTheDocument()
+  // `skip` on the query, not just a hidden list: a request the server will 403
+  // is a request worth not making.
+  expect(fetchSpy).not.toHaveBeenCalled()
+})
+
 /* -------------------------------------------------------------- the list */
 
 test('endpoints are listed with their url, events and active state', async () => {
   listItems = [endpoint()]
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
 
   expect(await screen.findByText('https://example.com/hooks/inroad')).toBeInTheDocument()
   expect(screen.getByText('Reply received')).toBeInTheDocument()
@@ -85,7 +109,7 @@ test('endpoints are listed with their url, events and active state', async () =>
 })
 
 test('an empty workspace explains what a webhook endpoint is for', async () => {
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
 
   expect(await screen.findByText('No webhook endpoints yet')).toBeInTheDocument()
   expect(screen.getByText(/register a receiver url/i)).toBeInTheDocument()
@@ -97,7 +121,7 @@ test('a failed list read is not shown as an empty, healthy list', async () => {
     vi.fn(async () => new Response(JSON.stringify({ message: 'nope' }), { status: 500, headers: jsonHeaders })),
   )
 
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
 
   expect(await screen.findByText("Couldn't load webhook endpoints")).toBeInTheDocument()
   expect(screen.queryByText('No webhook endpoints yet')).not.toBeInTheDocument()
@@ -106,7 +130,7 @@ test('a failed list read is not shown as an empty, healthy list', async () => {
 /* ------------------------------------------------------------- creating */
 
 test('creating an endpoint surfaces the one-time secret and says it cannot be shown again', async () => {
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
 
   await screen.findByText('No webhook endpoints yet')
   fireEvent.click(screen.getByRole('button', { name: /new endpoint/i }))
@@ -150,7 +174,7 @@ test('leaving every event box unchecked is a valid subscription (subscribe to al
     }),
   )
 
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
   await screen.findByText('No webhook endpoints yet')
   fireEvent.click(screen.getByRole('button', { name: /new endpoint/i }))
   fireEvent.change(screen.getByLabelText('Receiver URL'), { target: { value: 'https://example.com/hook' } })
@@ -164,7 +188,7 @@ test('a failed create shows mapped copy, never a raw status code or a bare failu
   createResponder = () =>
     new Response(JSON.stringify({ message: 'blocked' }), { status: 422, headers: jsonHeaders })
 
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
   await screen.findByText('No webhook endpoints yet')
   fireEvent.click(screen.getByRole('button', { name: /new endpoint/i }))
   fireEvent.change(screen.getByLabelText('Receiver URL'), { target: { value: 'http://169.254.169.254/' } })
@@ -180,7 +204,7 @@ test('a failed create shows mapped copy, never a raw status code or a bare failu
 })
 
 test('create is disabled until a URL is entered', async () => {
-  renderWithProviders(<WebhooksPage />)
+  renderWithProviders(<WebhooksPage />, { preloadedState: admin })
   await screen.findByText('No webhook endpoints yet')
   fireEvent.click(screen.getByRole('button', { name: /new endpoint/i }))
 

@@ -56,10 +56,11 @@ const SETTINGS_NAV: SettingsItem[] = [
   // discard need campaigns:send and are refused by the server with a 403 the row
   // renders — the same courtesy-not-authorization split the rest of this table uses.
   { label: 'Failed tasks', to: '/app/settings/dead-letters', icon: AlertTriangle },
-  // No minRole: internal/app/webhook/handler.go is mounted in the session-only
-  // router group with no RequireRole — any workspace member can register a
-  // receiver.
-  { label: 'Webhooks', to: '/app/settings/webhooks', icon: Webhook },
+  // webhook/handler.go's Routes() wraps its whole router in
+  // auth.RequireRole("admin"), matching the three credential/integration
+  // surfaces above it: an endpoint streams workspace event payloads to an
+  // operator-chosen URL and carries an HMAC signing secret.
+  { label: 'Webhooks', to: '/app/settings/webhooks', icon: Webhook, minRole: 'admin' },
 ]
 
 export function SettingsRail() {
