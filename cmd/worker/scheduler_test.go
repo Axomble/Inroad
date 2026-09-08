@@ -10,6 +10,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/jobrun"
 )
 
 // errRegistration stands in for whatever asynq would reject (a malformed cron
@@ -147,6 +148,37 @@ func TestRegisterSweepsRegistersEverySweep(t *testing.T) {
 			t.Errorf("duplicate sweep name %q; an error message could not identify it", s.name)
 		}
 		seen[s.name] = true
+	}
+}
+
+// The run ledger (internal/platform/jobrun) and this scheduler must agree on
+// every sweep's name, or "is the domain-auth sweep running" (a query against
+// scheduled_job_runs) and "does the domain-auth sweep exist" (this list) would
+// silently describe two different sets. Both sides are wired from the SAME
+// jobrun.Name* constants (see sweepRegistrars' own doc and
+// internal/worker/handlers.go's jobrun.Record wrapping), so this asserts the
+// sets actually match rather than trusting the shared constants alone to keep
+// them in sync.
+func TestRegisterSweepsNamesMatchJobrunLedgerConstants(t *testing.T) {
+	want := map[string]bool{
+		jobrun.NameEnrollments:        true,
+		jobrun.NameInboxSweep:         true,
+		jobrun.NameWarmupSweep:        true,
+		jobrun.NameMaintenanceCleanup: true,
+		jobrun.NameDomainAuthSweep:    true,
+		jobrun.NameRecipientESPSweep:  true,
+	}
+	got := map[string]bool{}
+	for _, s := range sweepRegistrars() {
+		got[s.name] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("sweepRegistrars() has %d distinct names, want %d matching jobrun's Name* constants", len(got), len(want))
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("sweepRegistrars() is missing %q, which jobrun.Record also wraps by this name in internal/worker/handlers.go", name)
+		}
 	}
 }
 

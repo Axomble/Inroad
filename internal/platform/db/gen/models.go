@@ -886,6 +886,16 @@ type ReplyLabel struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ScheduledJobRun struct {
+	ID           uuid.UUID          `json:"id"`
+	JobName      string             `json:"job_name"`
+	StartedAt    pgtype.Timestamptz `json:"started_at"`
+	FinishedAt   pgtype.Timestamptz `json:"finished_at"`
+	DurationMs   int64              `json:"duration_ms"`
+	Outcome      string             `json:"outcome"`
+	ErrorMessage string             `json:"error_message"`
+}
+
 type Send struct {
 	ID               uuid.UUID          `json:"id"`
 	WorkspaceID      uuid.UUID          `json:"workspace_id"`

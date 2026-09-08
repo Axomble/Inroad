@@ -62,6 +62,7 @@ type Metrics struct {
 	claims        *prometheus.CounterVec
 	sweepDuration *prometheus.HistogramVec
 	sweepRows     *prometheus.CounterVec
+	jobRunSeconds *prometheus.HistogramVec
 }
 
 // sweepRowBuckets bound the rows-scanned histogram-free counter's companion
@@ -71,6 +72,17 @@ type Metrics struct {
 // top out at 10s, which would collapse every genuinely pathological sweep into
 // one +Inf bucket and hide exactly the growth this metric exists to show.
 var sweepDurationBuckets = []float64{0.05, 0.25, 1, 5, 15, 60, 300, 900}
+
+// jobRunDurationBuckets bound inroad_job_run_seconds. Reuses sweepDurationBuckets'
+// range (sub-second through 900s) rather than a second bucket set: the six jobs
+// jobRunSeconds observes run on the same 5-minute-to-24-hour cadence spectrum as
+// the three sweeps sweepDuration already covers, so a run "longer than its own
+// interval" is interesting at the same scale. Kept as its own slice, not a shared
+// variable, because the two metrics measure different windows of the same job
+// (sweepDuration times only the SCAN inside a handler; jobRunSeconds times the
+// WHOLE handler jobrun.Record wraps) and are free to diverge later without one
+// edit accidentally moving both.
+var jobRunDurationBuckets = []float64{0.05, 0.25, 1, 5, 15, 60, 300, 900}
 
 // New builds a Metrics with its own registry and pre-registered collectors.
 // The Go runtime and process collectors are included unconditionally: they
@@ -105,9 +117,14 @@ func New() *Metrics {
 			Name: "inroad_sweep_rows_total",
 			Help: "Cumulative rows a reconcile sweep scanned, labeled by sweep kind. Divided by inroad_sweep_seconds' count this is rows-per-sweep — the growth curve of the known-unbounded inbox/warmup/enrollment scans.",
 		}, []string{"kind"}),
+		jobRunSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "inroad_job_run_seconds",
+			Help:    `Whole-handler wall time of a periodic reconcile job, labeled by job name (matching cmd/worker/scheduler.go's sweepRegistrars()) and outcome ("ok"|"error"). The per-label _count is the run count for that job/outcome pair, so this one histogram carries BOTH duration and outcome without a separate counter — see internal/platform/jobrun.Record, the sole emitter.`,
+			Buckets: jobRunDurationBuckets,
+		}, []string{"job", "outcome"}),
 	}
 	m.registry.MustRegister(
-		m.httpRequests, m.httpDuration, m.sends, m.claims, m.sweepDuration, m.sweepRows,
+		m.httpRequests, m.httpDuration, m.sends, m.claims, m.sweepDuration, m.sweepRows, m.jobRunSeconds,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -220,6 +237,29 @@ func (m *Metrics) SweepCompleted(kind string, rows int, elapsed time.Duration) {
 	if rows > 0 {
 		m.sweepRows.WithLabelValues(kind).Add(float64(rows))
 	}
+}
+
+// JobRunCompleted records one periodic reconcile job's whole-handler wall time
+// and outcome, labeled by job (the sweepRegistrars() name) and outcome ("ok" |
+// "error"). It is the ONLY emitter of inroad_job_run_seconds — called from
+// internal/platform/jobrun.Record, never from a handler body directly, so
+// every one of the six wrapped jobs is measured the same way regardless of
+// what the handler itself does or does not instrument.
+//
+// Deliberately separate from SweepCompleted: that metric carries a row count
+// SweepCompleted's three callers (the enrollment, inbox and warmup sweeps)
+// already have in hand, and the other three wrapped jobs (maintenance
+// cleanup, domain auth sweep, recipient esp sweep) do not report one to the
+// decorator — inventing rows=0 for them here would put fabricated data in
+// SweepCompleted's series. This metric reports only what jobrun.Record itself
+// observes: wall time and outcome, nothing it would have to guess at.
+//
+// A nil receiver is a no-op, like every other method on Metrics.
+func (m *Metrics) JobRunCompleted(job, outcome string, elapsed time.Duration) {
+	if m == nil {
+		return
+	}
+	m.jobRunSeconds.WithLabelValues(job, outcome).Observe(elapsed.Seconds())
 }
 
 // statusRecorder captures the status code the wrapped handler actually wrote,
