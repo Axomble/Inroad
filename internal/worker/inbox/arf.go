@@ -54,8 +54,13 @@ type ARFResult struct {
 }
 
 // ParseARF inspects a parsed inbox message and returns NotAFeedbackReport if it
-// isn't an RFC 5965 abuse report. hdr and contentType are the message's own
-// (outer) header/Content-Type; body is everything after the header.
+// isn't an RFC 5965 abuse report. contentType is the message's own (outer)
+// Content-Type and body is everything after the header.
+//
+// The leading mail.Header is accepted and UNUSED, so that this and ParseDSN are
+// one seam a caller can hold both halves of identically (see the report-type note
+// below for why an ARF needs no From-based fallback). Naming it _ is the point: a
+// reader should not go looking for where the header is consulted.
 //
 // It is the sibling of ParseDSN and handles exactly the case ParseDSN declines:
 // multipart/report with report-type=feedback-report, which ParseDSN refuses so
@@ -71,9 +76,7 @@ type ARFResult struct {
 // Never panics: malformed multipart bodies, missing parts, or garbage fields all
 // fall back to a best-effort (possibly empty) ARFResult. A broken report from one
 // provider must never fail a mailbox's whole poll.
-func ParseARF(hdr mail.Header, contentType string, body []byte) ARFResult {
-	_ = hdr // the seam mirrors ParseDSN; ARF needs no From-based fallback (see above)
-
+func ParseARF(_ mail.Header, contentType string, body []byte) ARFResult {
 	mediaType, params, _ := mime.ParseMediaType(contentType)
 	if !strings.EqualFold(mediaType, "multipart/report") {
 		return ARFResult{Kind: NotAFeedbackReport}

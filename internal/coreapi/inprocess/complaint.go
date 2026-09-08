@@ -51,6 +51,17 @@ func (c client) IngestComplaint(ctx context.Context, in coreapi.ComplaintInput) 
 		SendID:          &sendID,
 	})
 	if err != nil {
+		// deliverability.ErrInvalid is the service's "this input is not acceptable
+		// and never will be" — today, reachable here only via a send row with a
+		// blank contact address. It is translated to the seam's own sentinel rather
+		// than passed through, because the worker cannot import an app package to
+		// recognise it (workers reach the control plane ONLY through coreapi) and
+		// must not have to: which inputs are permanently invalid is the control
+		// plane's business, and "permanent vs transient" is the only part of that
+		// answer the caller can act on.
+		if errors.Is(err, deliverability.ErrInvalid) {
+			return fmt.Errorf("%w: %w", coreapi.ErrInvalidComplaint, err)
+		}
 		return fmt.Errorf("ingest complaint: %w", err)
 	}
 	return nil

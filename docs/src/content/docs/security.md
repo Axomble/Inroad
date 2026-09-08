@@ -805,20 +805,45 @@ write history that never happened.
       wrote a trusted bounce against a different one
       (`TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender`).
     - `placement` requires a DB-proven send→recipient binding, reached by ONE of
-      two routes and never by an inbound claim. The first is a verified signed
-      token. The second exists because Microsoft strips unknown custom headers, so
-      warmup mail to an M365 mailbox carries no token at all and was being counted
-      as no observation: `FindWarmupSendByMessageID`
+      two routes. The first is a verified signed token. The second exists because
+      Microsoft strips unknown custom headers, so warmup mail to an M365 mailbox
+      carries no token at all and was being counted as no observation at all:
+      `FindWarmupSendByMessageID`
       (`internal/coreapi/inprocess/warmupsendlookup.go`) matches the inbound
       `Message-ID` against `warmup_sends.message_id` for a `sent` row in THIS
-      workspace whose `to_mailbox` is THE POLLED MAILBOX. That is a lookup in our
-      own data rather than a claim the message carries, and the receipt INSERT
-      re-proves the same binding regardless. Only a genuinely ABSENT header may
-      take that route: a forged or wrong-workspace token is recorded as
-      `invalid_token` and never retried through it
-      (`TestPollForgedWarmupTokenNeverFallsBackToMessageID`), because a second
-      door would let an attacker whose forged send id we refuse simply omit it and
-      have us resolve a real one.
+      workspace whose `to_mailbox` is THE POLLED MAILBOX.
+      **The second route's key is an inbound claim, and this is the one place in
+      invariant 52 where that is true.** The predicate is our own data, but
+      `Message-ID` is read off unauthenticated mail — the same class of value the
+      `hard_bounce` bullet above calls fully attacker-controlled. Nothing
+      downstream narrows it: the receipt `INSERT` re-proves exactly the four facts
+      the lookup already matched, and `RecordWarmupPlacementObservation` writes
+      `attribution_trusted = true` with no CHECK behind it, unlike the two that
+      make the `invalid_token` rule structural. So the honest bar for minting a
+      placement observation is **already knowing a real `Message-ID` of a real
+      warmup send addressed to this mailbox** — the same bar invariant 65 states
+      for a mail-borne complaint.
+      The residual, named rather than implied: whoever holds such an id can
+      deliver a tokenless message carrying it to that mailbox and mint an
+      observation. Because placement is monotone-worsening (below), one delivered
+      into the mailbox's junk folder DOWNGRADES a real `inbox` sample to `spam`,
+      and placement feeds the health state machine. It is accepted, and it is
+      sized by the id: on the smtp and gmail paths a warmup send's `Message-ID` is
+      CSPRNG-generated (go-mail `SetMessageID`, 22 chars from `crypto/rand`) and
+      never leaves the workspace, so holding one means having already seen the
+      message; on m365 it is whatever Exchange assigned, which is worth noting
+      because m365 is the provider the route exists for. The pool is
+      intra-workspace, so the adversary is the in-path or intra-tenant one
+      invariant 62 says this whole invariant rests on — and the alternative was
+      not a stronger signal but NO signal for every M365 participant.
+      Only a genuinely ABSENT header takes the second route
+      (`TestPollForgedWarmupTokenNeverFallsBackToMessageID`). That is NOT an
+      access control and must not be read as one — anyone who simply omits the
+      header reaches the fallback, which is the entire point of it. It is there so
+      one message produces ONE record of itself: a present-but-invalid token is
+      recorded as `invalid_token` attack evidence, and letting the same message
+      also mint a trusted receipt would put two contradictory claims about it in
+      the trail an operator reads to tell an attack from header loss.
       A later observation of the SAME receipt may only make the placement worse
       (`inbox`/`tabbed`/`other` → `spam`), superseding the row rather than adding
       one, so one message is always one sample: a re-poll cannot inflate the
@@ -1250,6 +1275,19 @@ write history that never happened.
     or absent value are not actionable, so the default direction is never
     "suppress". A malformed report yields nothing and never fails the poll: the
     cursor it would hold back carries every other inbound signal too.
+    For the same reason, an ingest the control plane rejects as PERMANENTLY
+    invalid (`coreapi.ErrInvalidComplaint`, today reachable only via a send row
+    with a blank contact address) is a logged skip, not a retry. Retrying one
+    returns before `SetInboxCursor`, so a single unauthenticated inbound message
+    would freeze that mailbox's cursor indefinitely and stop every campaign reply,
+    bounce and warmup receipt behind it — a denial of service on the whole mailbox
+    for the price of one email. Transient failures still retry, because the ingest
+    is idempotent and dropping a real complaint is a compliance failure
+    (`TestPollARFRejectedAsPermanentlyInvalidIsSkippedNotRetriedForever`).
+    A feedback report found in a SPAM/junk folder is deliberately not ingested:
+    the junk pass records warmup placement only, and letting a
+    spam-filter-chosen folder trigger a contact suppression is a widening that
+    needs its own design pass (`scanJunkForWarmup`).
 
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**

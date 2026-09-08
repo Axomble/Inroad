@@ -3,6 +3,7 @@ package inbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/inroad/inroad/internal/coreapi"
@@ -208,9 +209,10 @@ func TestPollARFWithoutTheComplaintCapabilityDoesNotFailThePoll(t *testing.T) {
 	}
 }
 
-// An ingest FAILURE is not a reason to drop a complaint. The write is idempotent on
-// provider_event_id, so failing the poll lets asynq retry it with no risk of
-// double-counting — and a lost complaint is a compliance failure, not a lost metric.
+// A TRANSIENT ingest failure is not a reason to drop a complaint. The write is
+// idempotent on provider_event_id, so failing the poll lets asynq retry it with no
+// risk of double-counting — and a lost complaint is a compliance failure, not a
+// lost metric.
 func TestPollARFIngestErrorFailsThePollSoItRetries(t *testing.T) {
 	core := newComplaintCore()
 	core.err = errors.New("db down")
@@ -221,6 +223,23 @@ func TestPollARFIngestErrorFailsThePollSoItRetries(t *testing.T) {
 	}
 	if core.cursorSet {
 		t.Fatal("a failed complaint ingest must not advance the cursor")
+	}
+}
+
+// A PERMANENT rejection is the opposite case and must not be retried at all.
+// Retrying one is not merely useless: the poll returns before SetInboxCursor, so
+// the mailbox's cursor never advances and EVERY inbound signal for it — campaign
+// replies, bounces, warmup receipts — stops, forever, on the strength of one
+// unauthenticated inbound message. The complaint is logged and skipped instead.
+func TestPollARFRejectedAsPermanentlyInvalidIsSkippedNotRetriedForever(t *testing.T) {
+	core := newComplaintCore()
+	core.err = fmt.Errorf("email is required: %w", coreapi.ErrInvalidComplaint)
+
+	if err := runARFPoll(t, core, abuseARF); err != nil {
+		t.Fatalf("a permanently invalid complaint must not fail the poll, got %v", err)
+	}
+	if !core.cursorSet {
+		t.Fatal("the cursor must advance past a complaint the control plane will never accept")
 	}
 }
 

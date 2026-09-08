@@ -22,6 +22,19 @@ var ErrCrossTenant = errors.New("coreapi: cross-tenant access rejected")
 // workspace never sent).
 var ErrNoMatch = errors.New("coreapi: no matching send")
 
+// ErrInvalidComplaint marks a complaint the control plane will NEVER accept, as
+// opposed to one it could not accept right now. It exists so the caller can tell
+// the two apart without knowing anything about the control plane's validation
+// rules — the same job ErrNoMatch does for a lookup.
+//
+// The distinction is load-bearing at the inbox poller, which is fed by
+// unauthenticated inbound mail: a retried permanent rejection returns before
+// SetInboxCursor, so the mailbox's cursor never advances and every inbound signal
+// for it stops — campaign replies and bounces included — until someone notices.
+// A permanent rejection must therefore be a logged skip; only a transient failure
+// may retry.
+var ErrInvalidComplaint = errors.New("coreapi: complaint rejected as invalid")
+
 // CRMCaptureClient is an optional execution-plane capability. Keeping it
 // separate from Client lets inbox workers feature-detect CRM capture without
 // forcing every worker fake and future remote client to implement it.
@@ -74,6 +87,10 @@ type DeliverabilityComplaintClient interface {
 	// IngestComplaint records one complaint, idempotently on ProviderEventID: a
 	// redelivered or re-polled report writes nothing and therefore CAUSES nothing —
 	// no second suppression, no second breaker evaluation.
+	//
+	// An input the control plane will never accept is reported as
+	// ErrInvalidComplaint so the caller can skip it instead of retrying it forever;
+	// every other error is transient and worth a retry.
 	IngestComplaint(ctx context.Context, in ComplaintInput) error
 }
 
