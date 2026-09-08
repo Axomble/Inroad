@@ -10,6 +10,16 @@
 // of inventing its own storage layer under time pressure — a recorded,
 // time-boxed exception to the repo's no-dead-code rule, not an invitation to
 // delete it for being unreferenced.
+//
+// THE EXCEPTION EXPIRES. It is time-boxed to parity plan P2.3 (attachments).
+// If P2.3 ships, this package is wired and this paragraph goes away with it. If
+// P2.3 is cut or deferred past the milestone, DELETE this package — the whole
+// directory, its tests, the seven INROAD_S3_*/INROAD_STORAGE_* variables in
+// config.go and .env.example, and the aws-sdk-go-v2 dependencies it is the only
+// user of. The trigger is recorded here rather than in a sprint ledger because
+// a ledger is not re-read and a package doc is: whoever next opens this file
+// asking "why is nothing importing this" is exactly the person who needs to
+// know when the answer stops being good enough.
 package storage
 
 import (

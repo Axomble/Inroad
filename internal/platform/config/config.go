@@ -62,6 +62,13 @@ type Config struct {
 	// MinIO and some other S3-compatible servers require and AWS S3 itself
 	// does not use. Default false.
 	StorageS3ForcePathStyle bool
+	// StorageS3AllowPlaintextEndpoint explicitly opts a custom
+	// StorageS3Endpoint out of TLS. Defaults to FALSE so an absent or
+	// malformed value keeps https mandatory — a misconfiguration can never
+	// silently send SigV4-signed requests, object bodies and presigned URLs in
+	// cleartext (security Invariant 6's rule, applied to this dial). Intended
+	// solely for a MinIO on a trusted private network in development.
+	StorageS3AllowPlaintextEndpoint bool
 
 	// TrackingSecret signs open/click tracking tokens (internal/platform/track).
 	// Dedicated so rotating tracking links doesn't invalidate sessions; falls
@@ -357,6 +364,7 @@ func Load() (*Config, error) {
 	cfg.StorageS3AccessKeyID = getenv("INROAD_S3_ACCESS_KEY_ID", "")
 	cfg.StorageS3SecretAccessKey = getenv("INROAD_S3_SECRET_ACCESS_KEY", "")
 	cfg.StorageS3ForcePathStyle = getenvBool("INROAD_S3_FORCE_PATH_STYLE", false)
+	cfg.StorageS3AllowPlaintextEndpoint = getenvBool("INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT", false)
 
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)

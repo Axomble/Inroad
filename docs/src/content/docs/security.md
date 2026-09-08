@@ -72,6 +72,18 @@ or SSRF. (Not a full threat model; that's future work.)
    offered only when a system SMTP username is configured, which is orthogonal:
    omitting credentials never relaxes transport security.
 
+   The SAME rule covers the one other operator-supplied outbound host in this
+   codebase: a custom `INROAD_S3_ENDPOINT` (`platform/storage.FromEnv`) must be
+   `https://` or the binary refuses to start (`ErrInsecureEndpoint`). An
+   `http://` endpoint would put SigV4-signed requests, object bodies AND the
+   presigned GET/PUT URLs this provider hands out — the ones that leave the
+   deployment — in the clear. A missing scheme is refused rather than assumed
+   https, because assuming is how a typo becomes a silent downgrade, and the
+   opt-out (`INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT`, default false, dev-only for a
+   MinIO on a trusted private network) has to be *chosen* exactly like the two
+   above. An empty endpoint is real AWS S3, whose URL the SDK builds itself, so
+   there is nothing to check.
+
    Related: transactional email bodies carry single-use bearer credentials
    (verify/reset links, login codes), so **no driver logs a message body**. The
    console driver logs the recipient and subject only. Reading a link in

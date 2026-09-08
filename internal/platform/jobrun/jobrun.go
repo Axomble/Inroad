@@ -65,12 +65,59 @@ type Recorder interface {
 
 // Run is one completed (or panicked) execution of a periodic reconcile.
 type Run struct {
-	Name         string
-	StartedAt    time.Time
-	FinishedAt   time.Time
-	Duration     time.Duration
-	Outcome      string // OutcomeOK | OutcomeError
+	Name       string
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Duration   time.Duration
+	Outcome    string // OutcomeOK | OutcomeError
+	// ErrorMessage is the failed run's error text, capped at
+	// maxErrorMessageBytes — see capErrorMessage for what this can and cannot
+	// promise about its contents.
 	ErrorMessage string
+}
+
+// maxErrorMessageBytes caps what one run contributes to scheduled_job_runs.
+// error_message, which is an unconstrained TEXT column in a table with no
+// workspace_id and no per-tenant read path.
+const maxErrorMessageBytes = 2 << 10 // 2 KiB
+
+// truncatedErrorMarker tells an operator reading a ledger row that the text is
+// not the whole error, so a truncated message is never mistaken for a complete
+// one that simply ends oddly.
+const truncatedErrorMarker = " …[truncated]"
+
+// capErrorMessage bounds one run's stored error text.
+//
+// What this is NOT. The column's own comment used to say the value is "never
+// tenant content", and this decorator cannot promise that: it stores
+// err.Error() from six handlers it does not own, and any one of them wrapping a
+// mailbox address, a recipient or a subject line would make the claim false the
+// day it was written. What CAN be guaranteed is a bound, so that is what is
+// guaranteed — an unbounded column reachable by arbitrary error text, in a table
+// with no tenant scope, is a growth problem whichever way the content question
+// is answered.
+//
+// The cut is on a RUNE boundary. A byte slice through the middle of a
+// multi-byte rune is invalid UTF-8, which Postgres refuses outright (SQLSTATE
+// 22021) — so a naive cap would turn a long error into a FAILED ledger write,
+// which is strictly worse than the unbounded column it replaced. The START of
+// the message is kept because that is where the cause is; the tail of a deeply
+// wrapped error is the least diagnostic part of it.
+func capErrorMessage(msg string) string {
+	if len(msg) <= maxErrorMessageBytes {
+		return msg
+	}
+	limit := maxErrorMessageBytes - len(truncatedErrorMarker)
+	// range over a string yields RUNE START offsets, so end is the last one
+	// that still fits inside the budget.
+	end := 0
+	for i := range msg {
+		if i > limit {
+			break
+		}
+		end = i
+	}
+	return msg[:end] + truncatedErrorMarker
 }
 
 // Record wraps handler so every invocation times the call, records exactly
@@ -123,7 +170,7 @@ func observe(ctx context.Context, recorder Recorder, mtx *metrics.Metrics, name 
 	errMsg := ""
 	if runErr != nil {
 		outcome = OutcomeError
-		errMsg = runErr.Error()
+		errMsg = capErrorMessage(runErr.Error())
 	}
 
 	mtx.JobRunCompleted(name, outcome, duration)

@@ -44,7 +44,18 @@ CREATE TABLE scheduled_job_runs (
     outcome       TEXT NOT NULL CHECK (outcome IN ('ok', 'error')),
     -- '' for an 'ok' run; the error (or "panic: ...") message otherwise.
     -- Plain text like task_dead_letters.last_error: operator-facing
-    -- diagnostics about a background job, never tenant content.
+    -- diagnostics about a background job.
+    --
+    -- It is NOT guaranteed to be free of tenant content, and an earlier
+    -- version of this comment claiming so was wrong: the writer
+    -- (internal/platform/jobrun.Record) stores err.Error() from six handlers
+    -- it does not own, and any one of them wrapping a mailbox address or a
+    -- recipient would make that claim false. What IS guaranteed is a bound --
+    -- jobrun.capErrorMessage caps the value at 2 KiB on a rune boundary --
+    -- because an unbounded column reachable by arbitrary error text, in a
+    -- table with no workspace_id and no per-tenant read path, is a problem
+    -- whichever way the content question is answered. The 30-day retention
+    -- purge (PurgeScheduledJobRuns) is the other half.
     error_message TEXT NOT NULL DEFAULT ''
 );
 

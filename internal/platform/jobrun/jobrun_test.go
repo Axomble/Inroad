@@ -3,7 +3,9 @@ package jobrun
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hibiken/asynq"
 )
@@ -135,5 +137,66 @@ func TestRecordNilRecorderIsNoOpAndHandlerStillRuns(t *testing.T) {
 	}
 	if !ran {
 		t.Fatal("the wrapped handler did not run when recorder was nil")
+	}
+}
+
+// 6. scheduled_job_runs has no workspace_id and no CHECK on error_message
+// length, so whatever a sweep's error string happens to contain is what lands
+// in an instance-scoped table that is read by an operator, not a tenant. The
+// column comment claimed "never tenant content", which the decorator cannot
+// promise: it stores errors.Error() from six handlers it does not own, and one
+// of them wrapping a mailbox address or a recipient list would make the claim
+// false. Capping is the guarantee that can actually be kept.
+func TestRecordCapsAnUnboundedErrorMessage(t *testing.T) {
+	rec := &fakeRecorder{}
+	long := strings.Repeat("a", 10<<10)
+	handler := func(context.Context, *asynq.Task) error { return errors.New(long) }
+
+	if err := Record(rec, nil, "widget sweep", handler)(context.Background(), task()); err == nil {
+		t.Fatal("the handler's error must still be returned to asynq")
+	}
+	got := rec.calls[0].ErrorMessage
+	if len(got) > maxErrorMessageBytes {
+		t.Fatalf("ErrorMessage is %d bytes, want at most %d", len(got), maxErrorMessageBytes)
+	}
+	if !strings.HasSuffix(got, truncatedErrorMarker) {
+		t.Errorf("a capped message must say so, got the tail %q", got[max(0, len(got)-40):])
+	}
+	if !strings.HasPrefix(got, "aaaa") {
+		t.Errorf("the start of the error is the diagnostic part and must be kept, got %q", got[:20])
+	}
+}
+
+// A message at or under the cap is stored verbatim: the cap must not put a
+// truncation marker on an error that was never truncated.
+func TestRecordLeavesAShortErrorMessageAlone(t *testing.T) {
+	rec := &fakeRecorder{}
+	handler := func(context.Context, *asynq.Task) error { return errors.New("dial tcp: connection refused") }
+
+	_ = Record(rec, nil, "widget sweep", handler)(context.Background(), task())
+	if got := rec.calls[0].ErrorMessage; got != "dial tcp: connection refused" {
+		t.Fatalf("ErrorMessage = %q, want it verbatim", got)
+	}
+}
+
+// The cap cuts BYTES, so it must cut on a rune boundary. Half a multi-byte rune
+// is invalid UTF-8, which Postgres refuses outright (SQLSTATE 22021) — the cap
+// would then turn a long error into a FAILED ledger write, which is strictly
+// worse than the unbounded column it replaced.
+func TestRecordCapCutsOnARuneBoundary(t *testing.T) {
+	rec := &fakeRecorder{}
+	// Three-byte runes do not divide the cap evenly, so a naive byte slice
+	// lands mid-rune.
+	handler := func(context.Context, *asynq.Task) error {
+		return errors.New(strings.Repeat("あ", 10<<10))
+	}
+
+	_ = Record(rec, nil, "widget sweep", handler)(context.Background(), task())
+	got := rec.calls[0].ErrorMessage
+	if !utf8.ValidString(got) {
+		t.Fatalf("capped message is not valid UTF-8: %q", got)
+	}
+	if len(got) > maxErrorMessageBytes {
+		t.Fatalf("ErrorMessage is %d bytes, want at most %d", len(got), maxErrorMessageBytes)
 	}
 }
