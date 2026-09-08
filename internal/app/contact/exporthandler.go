@@ -3,6 +3,7 @@ package contact
 import (
 	"encoding/csv"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/inroad/inroad/internal/app/auth"
@@ -61,15 +62,53 @@ func (h *Handler) exportContactsCSV(w http.ResponseWriter, r *http.Request) {
 	// CSV reads to an operator as "nothing matched", where a zero-byte file
 	// reads as a failed download.
 	if err := cw.Write(plan.Header()); err != nil {
-		return // the connection is gone; nothing useful to report
-	}
-	if err := h.svc.StreamExport(r.Context(), ws, plan, func(record []string) error {
-		return cw.Write(record)
-	}); err != nil {
-		// See StreamExport's doc: headers (and possibly some rows) are already
-		// on the wire by the time this can fire, so all that is left to do is
-		// stop — not retry, not report a status that has already been sent.
+		// Nothing has been queried yet, so this can only be a dead client
+		// connection. Debug rather than error for that reason — it is not a
+		// server fault and a disconnect mid-download is ordinary — but not
+		// discarded, because "the export never produced anything" and "the
+		// client hung up" must be distinguishable.
+		slog.DebugContext(r.Context(), "contact_export_header_write_failed",
+			"workspace_id", ws, "err", err)
 		return
 	}
+
+	// rowsEmitted counts records the writer ACCEPTED, so a truncation log says
+	// how much of the file the client actually got. Incremented after the write,
+	// not before, so a failed row is not counted as delivered.
+	var rowsEmitted int
+	if err := h.svc.StreamExport(r.Context(), ws, plan, func(record []string) error {
+		if werr := cw.Write(record); werr != nil {
+			return werr
+		}
+		rowsEmitted++
+		return nil
+	}); err != nil {
+		// The status cannot change — the header row is already on the wire, so
+		// this response is committed to 200 whatever happens next (see
+		// StreamExport's doc). "Cannot report to the client" is not "must not
+		// record", though, and this is NOT the dead-connection case
+		// campaign.ResultsCSV documents: that one materialises its whole result
+		// set before writing, whereas StreamExport queries Postgres DURING the
+		// response. A pool exhaustion or statement timeout here yields a file
+		// short by an arbitrary number of contacts that is byte-for-byte
+		// indistinguishable from a complete one, and the operator's next move is
+		// to import it somewhere.
+		//
+		// Flushed first, deliberately: the rows already handed to the writer are
+		// rows the client has been told about, and dropping up to a buffer's
+		// worth of them on the way out makes the truncation worse, not more
+		// visible.
+		cw.Flush()
+		slog.ErrorContext(r.Context(), "contact_export_truncated",
+			"workspace_id", ws, "rows_emitted", rowsEmitted, "err", err)
+		return
+	}
+
 	cw.Flush()
+	// Flush is where a buffered write error finally surfaces, so a clean
+	// StreamExport does not by itself mean a complete file reached the client.
+	if err := cw.Error(); err != nil {
+		slog.ErrorContext(r.Context(), "contact_export_flush_failed",
+			"workspace_id", ws, "rows_emitted", rowsEmitted, "err", err)
+	}
 }

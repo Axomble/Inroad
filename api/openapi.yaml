@@ -1438,7 +1438,21 @@ paths:
         /contacts/import accepts, so a file this endpoint produces re-imports
         unchanged. `company` is the contact's own stored text, not the
         company a linked CRM record may resolve it to, for the same
-        round-trip reason.
+        round-trip reason. A live custom field whose key collides with a
+        built-in column name is omitted, because POST /contacts/import
+        already ignores such a column.
+
+
+        A cell whose value begins with `=`, `+`, `-`, `@`, TAB or CR is
+        prefixed with a single apostrophe, which Excel and Google Sheets read
+        as "this is text" rather than executing it as a formula. POST
+        /contacts/import removes exactly that apostrophe, so the round trip
+        above is unaffected and a value that legitimately starts with one of
+        those characters (a `+`-prefixed phone number, a negative number) is
+        preserved. If a value's own leading character is an apostrophe
+        GUARDING one of those characters, the export adds one more, so
+        re-import returns the original — the escape marker takes precedence,
+        and an apostrophe over ordinary text is left alone.
       parameters:
         - name: list
           in: query

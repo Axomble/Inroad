@@ -2,6 +2,7 @@ package contact
 
 import (
 	"context"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -15,13 +16,6 @@ import (
 // than a few hundred thousand, small enough that one page is a trivial amount
 // of memory.
 const exportPageSize = 500
-
-// exportBuiltinColumns are the CSV headers import.go recognises as the
-// contact's own columns (see builtinColumns in import.go). Export mirrors them
-// exactly, in the same order, so a file this endpoint produces re-imports
-// unchanged — the mirror-image property the caller relies on for a coherent
-// round trip.
-var exportBuiltinColumns = []string{"email", "first_name", "last_name", "company"}
 
 // ExportPlan is a validated, ready-to-stream contact export: the resolved
 // filter/sort (identical vocabulary to Search — q/sort/list — but never
@@ -42,25 +36,58 @@ type ExportPlan struct {
 // followed by the workspace's live custom-field keys in the order
 // ListFieldDefs returns them (archived first excluded, then label, then key —
 // see queries/contactfield.sql), matching the order a settings page lists them.
+//
+// The header is never formula-escaped: builtinColumns is a fixed list and a
+// custom key matches ^[a-z][a-z0-9_]{0,39}$ (migration 000052), so no header
+// cell can begin with a trigger character.
 func (p ExportPlan) Header() []string {
-	header := make([]string, 0, len(exportBuiltinColumns)+len(p.fields))
-	header = append(header, exportBuiltinColumns...)
-	for _, f := range p.fields {
+	header := make([]string, 0, len(builtinColumns)+len(p.fields))
+	header = append(header, builtinColumns...)
+	for _, f := range p.customFields() {
 		header = append(header, f.Key)
 	}
 	return header
 }
 
-// record renders one matched row in Header order.
+// customFields is the live definitions that get a column of their own: every
+// one whose key is not already a built-in header.
+//
+// A key colliding with a built-in is skipped rather than renamed, because
+// import ALREADY ignores such a column (mapCustomColumns skips
+// builtinColumns), so a column for it could only ever be write-only. Emitting
+// it would additionally break the round trip outright: the header would carry
+// "email" twice and importRows' `col[name] = i` keeps the LAST occurrence, so
+// the custom column would take over the address column and every contact would
+// re-import under whatever that field held.
+//
+// normalizeKey now reserves these names, so only a workspace that predates that
+// guard can reach this — which is exactly why the skip lives here and not only
+// there.
+func (p ExportPlan) customFields() []FieldDef {
+	out := make([]FieldDef, 0, len(p.fields))
+	for _, f := range p.fields {
+		if slices.Contains(builtinColumns, f.Key) {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// record renders one matched row in Header order, with every cell defused
+// against spreadsheet formula execution (escapeFormula).
 func (p ExportPlan) record(row SearchRow) ([]string, error) {
 	values, err := decodeStringMap(row.CustomFields)
 	if err != nil {
 		return nil, err
 	}
-	record := make([]string, 0, len(exportBuiltinColumns)+len(p.fields))
-	record = append(record, row.Email, row.FirstName, row.LastName, row.Company)
-	for _, f := range p.fields {
-		record = append(record, values[f.Key])
+	custom := p.customFields()
+	record := make([]string, 0, len(builtinColumns)+len(custom))
+	record = append(record,
+		escapeFormula(row.Email), escapeFormula(row.FirstName),
+		escapeFormula(row.LastName), escapeFormula(row.Company))
+	for _, f := range custom {
+		record = append(record, escapeFormula(values[f.Key]))
 	}
 	return record, nil
 }

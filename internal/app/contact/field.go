@@ -135,10 +135,20 @@ type FieldStore interface {
 // normalizeKey lower-cases and trims a proposed key, then holds it to the same
 // shape the database CHECK enforces, so a bad key is a 400 with a reason rather
 // than a 23514 the caller cannot read.
+//
+// It also RESERVES the CSV built-in column names. A field keyed "email" is not
+// merely useless — import already ignores such a column (mapCustomColumns) — it
+// breaks the export round trip: the header would carry "email" twice and
+// importRows' `col[name] = i` keeps the LAST occurrence, so the custom column
+// would take over the address column. Refusing it at creation is the cheap half;
+// ExportPlan.customFields covers workspaces that predate this.
 func normalizeKey(raw string) (string, error) {
 	key := strings.ToLower(strings.TrimSpace(raw))
 	if !keyRE.MatchString(key) {
 		return "", &InvalidFieldError{Key: raw, Reason: "key must start with a letter and contain only lower-case letters, digits and underscores (max 40)"}
+	}
+	if slices.Contains(builtinColumns, key) {
+		return "", &InvalidFieldError{Key: key, Reason: "key is reserved: it names one of the contact's own columns"}
 	}
 	return key, nil
 }
