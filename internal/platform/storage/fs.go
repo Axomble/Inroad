@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+// errIsDirectory is resolve()'s internal signal that a key names a directory
+// (root itself included) rather than an object. It never leaves this file:
+// each public method maps it to whatever "this is not an object" means for
+// that operation — Get/Exists treat it exactly like a missing key, Put/Delete
+// simply propagate it as the hard error it already is.
+var errIsDirectory = errors.New("storage: key names a directory, not an object")
+
 // ErrPresignNotSupported is returned by PresignGet/PresignPut on a backend
 // with no notion of a signed, directly-fetchable URL — the filesystem backend
 // today, since a local path is never itself web-reachable. It is a distinct,
@@ -100,6 +107,13 @@ func (p *FSProvider) Put(_ context.Context, key string, body io.Reader, _ int64,
 // recorded, the same reasoning PresignGet's error exists for.
 func (p *FSProvider) Get(_ context.Context, key string) (io.ReadCloser, *ObjectMetadata, error) {
 	path, err := p.resolve(key)
+	if errors.Is(err, errIsDirectory) {
+		// A directory (root included, via a "." key) was never Put, and
+		// os.Open would happily hand back a directory-typed *os.File whose
+		// Read fails later — far too late to be a useful error. Treated
+		// identically to a plain missing key.
+		return nil, nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -138,6 +152,11 @@ func (p *FSProvider) Delete(_ context.Context, key string) error {
 // Exists reports whether key names a file under root.
 func (p *FSProvider) Exists(_ context.Context, key string) (bool, error) {
 	path, err := p.resolve(key)
+	if errors.Is(err, errIsDirectory) {
+		// A directory is not an object, and Exists reports "no object here"
+		// the same way it does for a plain missing key: false, no error.
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -164,7 +183,8 @@ func (p *FSProvider) PresignPut(context.Context, string, string, time.Duration) 
 // inside root, or an error if it would not: an absolute key, a "../" that
 // climbs out (however many segments it uses — filepath.Join collapses them
 // before the containment check runs, so there is no depth this can evade at),
-// or a symlink that resolves outside root.
+// a symlink that resolves outside root, or a key that names a directory
+// (root itself included — see errIsDirectory).
 //
 // The symlink check walks up from the resolved path to the deepest ancestor
 // that currently exists and resolves symlinks from there: a fresh Put target
@@ -172,6 +192,19 @@ func (p *FSProvider) PresignPut(context.Context, string, string, time.Duration) 
 // somewhere a symlink could have been planted pointing outside root, and
 // filepath.EvalSymlinks simply fails (rather than reporting anything useful)
 // on a path whose final component is absent.
+//
+// TOCTOU note: resolve validates containment and hands back a path; every
+// caller then performs a SEPARATE os.Open/os.Remove/os.OpenFile against that
+// path afterward. A symlink swapped into place in the gap between the two
+// (root, or an ancestor already checked here, replaced by one pointing
+// outside root) could still let an operation escape — this function does not
+// close that window, and closing it portably would need OS-specific
+// primitives (Linux's openat2/RESOLVE_BENEATH; nothing equivalent exists on
+// every platform this seam runs on), which is out of scope here. It matters
+// only under a materially different threat model than "an untrusted key from
+// an API caller": it requires an attacker with concurrent WRITE access to
+// the storage root's filesystem, at which point this package is not the
+// weakest link.
 func (p *FSProvider) resolve(key string) (string, error) {
 	if key == "" {
 		return "", errors.New("storage: key must not be empty")
@@ -203,6 +236,28 @@ func (p *FSProvider) resolve(key string) (string, error) {
 	}
 	if !withinRoot(p.root, resolved) {
 		return "", fmt.Errorf("storage: key %q resolves outside the storage root", key)
+	}
+
+	// A key naming a directory is not a valid object identifier: "." collapses
+	// to root exactly (withinRoot above permits path == root — that check is
+	// about ESCAPE, not about what kind of thing the path names), and a key
+	// can just as easily land on a directory an earlier Put created only as an
+	// intermediate prefix (Put("a/b.txt") creates directory "a" as a side
+	// effect). Checked explicitly rather than left to os.Open/os.Remove:
+	// os.Open succeeds on a directory and only fails on the eventual Read,
+	// long after this call reports success, and os.Remove SUCCEEDS on an
+	// EMPTY directory — which the storage root always is on a freshly
+	// provisioned deployment — so leaving this unchecked would let a "."
+	// key delete the storage root itself.
+	//
+	// Stat, not Lstat: this must catch a key whose own leaf is a symlink
+	// TO a directory too (already proven to resolve inside root by the
+	// EvalSymlinks check above), not just a plain directory entry.
+	if joined == p.root {
+		return "", errIsDirectory
+	}
+	if info, err := os.Stat(joined); err == nil && info.IsDir() {
+		return "", errIsDirectory
 	}
 	return joined, nil
 }
