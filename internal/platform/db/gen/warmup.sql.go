@@ -406,6 +406,55 @@ func (q *Queries) FailWarmupSend(ctx context.Context, arg FailWarmupSendParams) 
 	return err
 }
 
+const findWarmupSendByMessageIDForRecipient = `-- name: FindWarmupSendByMessageIDForRecipient :one
+SELECT s.id
+FROM warmup_sends s
+WHERE s.workspace_id = $1
+  AND s.to_mailbox = $2
+  AND s.status = 'sent'
+  AND s.message_id <> ''
+  AND s.message_id IN ($3::text, '<' || $3::text || '>')
+ORDER BY s.sent_at DESC
+LIMIT 1
+`
+
+type FindWarmupSendByMessageIDForRecipientParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ToMailbox   uuid.UUID `json:"to_mailbox"`
+	MessageID   string    `json:"message_id"`
+}
+
+// The HEADER-LOSS fallback: resolve an inbound message back to the warmup send it
+// is a receipt for, when the X-Inroad-Warmup token did not survive the provider
+// (Microsoft strips unknown custom headers, so warmup mail to an M365 mailbox
+// arrives with no token at all and used to fall through to campaign
+// classification, undercounting placement for every M365 participant).
+//
+// Every predicate is load-bearing, not a filter:
+//   - workspace_id pins the tenant, as every statement here does.
+//   - to_mailbox = the POLLED mailbox. The Message-ID of an inbound message is
+//     attacker-influenceable, so a match must mean "a send WE made, addressed to
+//     THIS mailbox" — not merely "some send in this workspace". One lookup covers
+//     both directions of a warmup exchange, because the A→B receipt and the B→A
+//     engage-reply are each a row whose to_mailbox is the mailbox now polling.
+//   - status = 'sent' because message_id is only written by the sending→sent
+//     transition; a queued/failed row cannot have been received.
+//
+// The comparison ignores angle brackets on BOTH sides: RFC 5322 makes <> part of
+// the FIELD rather than of the identifier and providers are inconsistent about
+// echoing them. The caller passes it already stripped and this matches both stored
+// forms as an equality IN-list rather than by btrim()ing the column, which would
+// make idx_warmup_sends_message_id (workspace_id, message_id) unusable and turn
+// every inbound message into a scan of the workspace's whole warmup history.
+// message_id <> ” both matches that index's partial predicate and refuses the
+// column's own DEFAULT, so an empty inbound id can never match a queued row.
+func (q *Queries) FindWarmupSendByMessageIDForRecipient(ctx context.Context, arg FindWarmupSendByMessageIDForRecipientParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, findWarmupSendByMessageIDForRecipient, arg.WorkspaceID, arg.ToMailbox, arg.MessageID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getOpenWarmupThread = `-- name: GetOpenWarmupThread :one
 SELECT id, workspace_id, sender_mailbox, partner_mailbox, subject,
        root_message_id, turn, content_key, last_activity_at, created_at

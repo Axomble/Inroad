@@ -58,6 +58,52 @@ type WarmupEvidenceClient interface {
 	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (matched bool, err error)
 }
 
+// WarmupSendLookupClient is an optional inbox capability: resolve an inbound
+// message back to the warmup send it is a receipt for when the X-Inroad-Warmup
+// token DID NOT SURVIVE the provider.
+//
+// It exists because Microsoft strips unknown custom headers. A warmup message
+// delivered to an M365 mailbox therefore arrives with no token at all, records no
+// receipt, and falls through into campaign reply/bounce classification — so
+// warmup placement, and the health state machine placement feeds, are computed
+// from a partial sample for every M365 participant.
+//
+// Kept OFF Client, like the three capabilities above, so the worker fakes and a
+// future HTTP client that lack it degrade to header-only detection rather than
+// failing to compile. Degrading is safe: it is exactly today's behaviour.
+//
+// The lookup is deliberately narrow. It answers "is this specific inbound message
+// a warmup send WE made TO THIS mailbox in THIS workspace", which is a fact about
+// our own data — not a claim the message carries. That is what keeps it from
+// weakening the isolation invariant the token verification enforces: a caller may
+// attempt it ONLY when no token was present at all (see inspectWarmup), never to
+// give a forged one a second chance.
+type WarmupSendLookupClient interface {
+	// FindWarmupSendByMessageID resolves an inbound message back to a warmup send
+	// when the token header did not survive the provider. ok=false is NOT an
+	// error: it is the ordinary answer for every non-warmup message that reaches
+	// the poller, which is nearly all of them.
+	//
+	// All three of workspaceID, toMailboxID (the polled mailbox — the send must
+	// have been ADDRESSED to it) and messageID are required and pinned by the
+	// implementation. messageID is the raw RFC 5322 Message-ID field value; the
+	// implementation compares it with angle brackets ignored on BOTH sides,
+	// because RFC 5322 makes <> part of the field rather than of the identifier
+	// and providers are inconsistent about echoing them.
+	FindWarmupSendByMessageID(ctx context.Context, workspaceID, toMailboxID, messageID string) (WarmupSendRef, bool, error)
+}
+
+// WarmupSendRef is a resolved warmup send, carrying only what the receipt path
+// needs to attribute the observation: the send's own id.
+//
+// It is deliberately NOT a warmup.Payload. A Payload is the SIGNED body of a
+// receipt token, and a fallback that could assemble one would be a fallback that
+// could manufacture a token; the recovered id travels as plain data that no code
+// path can mistake for a verified claim.
+type WarmupSendRef struct {
+	WarmupSendID string
+}
+
 // ReplyLabelClient is an optional execution-plane capability (same reasoning as
 // the two above) that resolves a classified reply key to the workspace's label
 // row, so the inbox poller can dispatch on the label's ROLE FLAGS instead of a

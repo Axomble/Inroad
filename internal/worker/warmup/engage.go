@@ -12,6 +12,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // EngageHandler returns an asynq handler for warmup:engage tasks. It runs the
@@ -145,7 +146,7 @@ func sendWarmupReply(ctx context.Context, core coreapi.Client, sender Sender, re
 			FromEmail: reply.FromEmail, FromName: reply.FromName, To: reply.ToEmail,
 			Subject: reply.Subject, BodyText: reply.BodyText, BodyHTML: reply.BodyHTML,
 			InReplyTo: reply.InReplyTo, References: reply.References,
-			ExtraHeaders: map[string]string{warmupHeader: reply.Token},
+			ExtraHeaders: map[string]string{pwarmup.HeaderWarmup: reply.Token},
 		},
 	)
 	switch {
