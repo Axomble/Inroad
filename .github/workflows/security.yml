@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.25.x"
+          go-version: "1.26.x"
           cache: true
       # govulncheck reports only vulnerabilities in code paths the binary
       # actually reaches, so a finding here is real, not a transitive-dep alert.
@@ -90,9 +90,10 @@ jobs:
       #    this repo cannot even reach (`go list -deps` shows x/crypto/ssh is
       #    not in the build; govulncheck, which does reachability analysis,
       #    reports nothing). Chasing those meant bumping x/crypto to v0.56.0,
-      #    which requires go 1.26 and would have broken all five CI jobs that
-      #    pin 1.25.x. The severity filter is the thing that was broken, not
-      #    the dependency.
+      #    which requires go 1.26 -- at the time that would have broken all five
+      #    CI jobs, which pinned 1.25.x. The severity filter is the thing that
+      #    was broken, not the dependency. (The pins are 1.26.x now, so that
+      #    bump is no longer blocked; the filter reasoning above still holds.)
       - name: Scan for vulnerabilities and secrets
         uses: aquasecurity/trivy-action@v0.36.0
         with:
