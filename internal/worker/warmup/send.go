@@ -19,18 +19,13 @@ import (
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // sendKind labels every metric this handler emits — kind="warmup", the other
 // half of inroad_sends_total's kind label (sequence.AdvanceHandler emits
 // "campaign").
 const sendKind = "warmup"
-
-// warmupHeader is the custom MIME header carrying the signed receipt token
-// (spec §7). The recipient's inbox poller verifies it to recognize warmup mail;
-// it MUST be emitted on the wire, so it is set through mail.Message.ExtraHeaders,
-// which every transport serializes.
-const warmupHeader = "X-Inroad-Warmup"
 
 // Sender sends one email through the transport the job's Provider selects (same
 // contract as the campaign send path). Defined here so tests inject a fake and
@@ -134,7 +129,14 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer, mtx *metrics.
 				FromEmail: job.FromEmail, FromName: job.FromName, To: job.ToEmail,
 				Subject: job.Subject, BodyText: job.BodyText, BodyHTML: job.BodyHTML,
 				InReplyTo: job.InReplyTo, References: job.References,
-				ExtraHeaders: map[string]string{warmupHeader: job.Token},
+				// The signed receipt token (spec §7), which the recipient's inbox
+				// poller verifies to recognise warmup mail. ExtraHeaders because every
+				// transport serializes it — the header MUST reach the wire.
+				//
+				// One constant, in platform/warmup, shared with the verifier: the name
+				// was declared twice, and two spellings of it would have meant warmup
+				// mail that no poller could recognise at all.
+				ExtraHeaders: map[string]string{pwarmup.HeaderWarmup: job.Token},
 			},
 		)
 

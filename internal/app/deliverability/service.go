@@ -30,11 +30,16 @@ const (
 // PauseCampaignForBreach is the authority, this is only the early exit.
 const campaignStatusRunning = "running"
 
-// eventKindComplaint / eventKindBounce mirror the deliverability_events.kind
+// EventKindComplaint / EventKindBounce mirror the deliverability_events.kind
 // CHECK constraint and the DeliverabilityEvent schema's enum.
+//
+// Exported because the execution plane needs the same literal: a feedback report
+// that arrives as mail is ingested through this service by the in-process coreapi
+// client, and re-typing "complaint" there would be a second source of truth for a
+// value the database CHECKs.
 const (
-	eventKindComplaint = "complaint"
-	eventKindBounce    = "bounce"
+	EventKindComplaint = "complaint"
+	EventKindBounce    = "bounce"
 )
 
 // Bounce classes, mirroring the deliverability_events.bounce_class CHECK
@@ -373,8 +378,8 @@ func (s *Service) Ingest(ctx context.Context, ws uuid.UUID, in EventInput) (Inge
 	in.Kind = strings.ToLower(strings.TrimSpace(in.Kind))
 	in.Email = strings.TrimSpace(in.Email)
 	in.ProviderEventID = strings.TrimSpace(in.ProviderEventID)
-	if in.Kind != eventKindComplaint && in.Kind != eventKindBounce {
-		return IngestResult{}, fmt.Errorf("%w: kind must be %q or %q", ErrInvalid, eventKindComplaint, eventKindBounce)
+	if in.Kind != EventKindComplaint && in.Kind != EventKindBounce {
+		return IngestResult{}, fmt.Errorf("%w: kind must be %q or %q", ErrInvalid, EventKindComplaint, EventKindBounce)
 	}
 	if in.Email == "" {
 		return IngestResult{}, fmt.Errorf("%w: email is required", ErrInvalid)
@@ -395,7 +400,7 @@ func (s *Service) Ingest(ctx context.Context, ws uuid.UUID, in EventInput) (Inge
 	if !recorded {
 		return IngestResult{Duplicate: true}, nil
 	}
-	if in.Kind == eventKindComplaint {
+	if in.Kind == EventKindComplaint {
 		if err := s.store.Suppress(ctx, ws, in.Email, suppressionReasonComplaint); err != nil {
 			return IngestResult{}, fmt.Errorf("suppress complained address: %w", err)
 		}
@@ -417,7 +422,7 @@ func (s *Service) Ingest(ctx context.Context, ws uuid.UUID, in EventInput) (Inge
 // should not have to strip it, and storing anything but 'unknown' would put a
 // classification on a row no bounce rate reads.
 func resolveBounceClass(kind, class string) (string, error) {
-	if kind == eventKindComplaint {
+	if kind == EventKindComplaint {
 		return BounceClassUnknown, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(class)) {

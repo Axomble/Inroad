@@ -27,16 +27,36 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 // Routes returns this domain's HTTP surface, mounted under
 // /api/v1/webhook-endpoints.
+//
+// ADMIN-GATED, in one place for the whole router because there is no useful
+// read/write split here: the list carries no secret, but an endpoint's URL and
+// event subscription ARE the sensitive part of it, and the surface as a whole is
+// credential/integration configuration.
+//
+// It matches its three peers in the settings nav — API keys
+// (apikey.Routes), connected apps (oauthprovider.Routes) and AI
+// (aisettings.Routes) all wrap in auth.RequireRole("admin"). Webhooks was the
+// one that did not, while continuously streaming workspace event payloads to an
+// operator-chosen URL and minting an HMAC signing secret. That was tolerable
+// while the surface was API-only; the UI added in this branch made it two clicks
+// for any member.
+//
+// The routes are session-only (cmd/inroad's sessionOnly group), so no API-key or
+// OAuth consumer is affected — an OAuth grant can never reach a RequireRole
+// surface at all (oauthprovider/verifier.go).
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Get("/", h.list)
-	r.Post("/", h.create)
-	r.Get("/{id}", h.get)
-	r.Patch("/{id}", h.update)
-	r.Delete("/{id}", h.delete)
-	r.Post("/{id}/rotate-secret", h.rotateSecret)
-	r.Post("/{id}/ping", h.ping)
-	r.Get("/{id}/deliveries", h.listDeliveries)
+	r.Group(func(pr chi.Router) {
+		pr.Use(auth.RequireRole("admin"))
+		pr.Get("/", h.list)
+		pr.Post("/", h.create)
+		pr.Get("/{id}", h.get)
+		pr.Patch("/{id}", h.update)
+		pr.Delete("/{id}", h.delete)
+		pr.Post("/{id}/rotate-secret", h.rotateSecret)
+		pr.Post("/{id}/ping", h.ping)
+		pr.Get("/{id}/deliveries", h.listDeliveries)
+	})
 	return r
 }
 

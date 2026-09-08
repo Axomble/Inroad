@@ -37,11 +37,19 @@ type Cleaner interface {
 	// retention. Same reasoning as PurgeDeadLetters: append-only in practice,
 	// grows one row per (event, endpoint), and had no sweep of its own.
 	PurgeWebhookDeliveries(ctx context.Context) (deleted int64, err error)
+	// PurgeScheduledJobRuns removes scheduled_job_runs rows past their 30-day
+	// retention. Same reasoning as PurgeDeadLetters/PurgeWebhookDeliveries:
+	// append-only from internal/platform/jobrun.Record, six jobs writing a row
+	// per run (several every five minutes), and no sweep of its own until this
+	// one — see the table's migration for why it needed one from day one rather
+	// than growing unbounded first.
+	PurgeScheduledJobRuns(ctx context.Context) (deleted int64, err error)
 }
 
 // CleanupHandler purges, in order: expired security artifacts, expired
 // Idempotency-Key replay-cache rows, warmup evidence past its retention window,
-// dead workers with their mailbox assignments, and captured dead letters past
+// dead workers with their mailbox assignments, captured dead letters past
+// theirs, expired webhook deliveries, and scheduled-job-run ledger rows past
 // theirs. Returning a database error from any purge lets asynq retry; successful
 // runs log each affected count for observability.
 func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
@@ -81,6 +89,12 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired webhook deliveries purged", "rows", webhookDeliveriesDeleted)
+
+		jobRunsDeleted, err := core.PurgeScheduledJobRuns(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired scheduled job runs purged", "rows", jobRunsDeleted)
 		return nil
 	}
 }

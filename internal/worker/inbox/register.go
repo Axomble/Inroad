@@ -4,6 +4,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/jobrun"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/queue"
@@ -19,14 +20,19 @@ import (
 // follow-up when a warmup receipt is detected. sender delivers manual replies
 // queued from the unified inbox — the SAME *mail.MultiSender every other send
 // path uses. mtx records the inbox sweep's duration and mailbox count; a nil
-// mtx no-ops.
-func Register(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader, sender Mailer, enq *queue.Client, warmupSecret []byte, mtx *metrics.Metrics) {
+// mtx no-ops. recorder is the same jobrun.Recorder handlers.go resolved once
+// for all six periodic reconciles (nil when the coreapi client doesn't
+// implement it); inbox:sweep is the one task here that is a scheduled reconcile
+// (see cmd/worker/scheduler.go's sweepRegistrars()), so it alone is wrapped in
+// jobrun.Record — inbox:poll and the manual-send handlers below are per-message,
+// not scheduled, and stay unwrapped.
+func Register(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader, sender Mailer, enq *queue.Client, warmupSecret []byte, mtx *metrics.Metrics, recorder jobrun.Recorder) {
 	// New(nil): Layer 3 (the optional model) is UNWIRED — there is no AI
 	// provider yet, so a matched reply is classified by the deterministic,
 	// offline Layer 1 (headers) + Layer 2 (lexicon) only.
 	classifier := replyclassify.New(nil)
 	mux.HandleFunc(queue.TaskInboxPoll, PollHandler(core, reader, mail.NewGmailReader(), mail.NewGraphReader(), classifier, warmupSecret, enq))
-	mux.HandleFunc(queue.TaskInboxSweep, SweepHandler(core, enq, mtx))
+	mux.HandleFunc(queue.TaskInboxSweep, jobrun.Record(recorder, mtx, jobrun.NameInboxSweep, SweepHandler(core, enq, mtx)))
 	// DRAIN ONLY. Nothing enqueues an inbox:reply_send any more — every manual
 	// reply, immediate or deferred, is now an inbox_pending_replies row and the
 	// pointer task below. This registration stays for one release so tasks

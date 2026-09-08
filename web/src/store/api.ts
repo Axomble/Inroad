@@ -666,6 +666,19 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    exportContacts: build.query<
+      ExportContactsApiResponse,
+      ExportContactsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/contacts.csv`,
+        params: {
+          list: queryArg.list,
+          q: queryArg.q,
+          sort: queryArg.sort,
+        },
+      }),
+    }),
     listCustomFields: build.query<
       ListCustomFieldsApiResponse,
       ListCustomFieldsApiArg
@@ -2201,6 +2214,14 @@ export type ListContactsApiArg = {
   /** Opaque cursor from a previous page's next_cursor/prev_cursor. Omit for the first page. Must match the current sort. */
   cursor?: string;
   limit?: number;
+};
+export type ExportContactsApiResponse = unknown;
+export type ExportContactsApiArg = {
+  /** Restrict to one list. Omit for all contacts in the workspace. */
+  list?: string;
+  /** Case-insensitive substring match across email, first name, last name and company. Minimum 2 characters. */
+  q?: string;
+  sort?: ContactSort;
 };
 export type ListCustomFieldsApiResponse =
   /** status 200 The workspace's custom field definitions */ CustomFieldDef[];
@@ -4991,6 +5012,7 @@ export const {
   useDeleteListMutation,
   useImportContactsMutation,
   useListContactsQuery,
+  useExportContactsQuery,
   useListCustomFieldsQuery,
   useCreateCustomFieldMutation,
   useUpdateCustomFieldMutation,

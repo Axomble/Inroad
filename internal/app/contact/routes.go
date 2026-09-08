@@ -23,6 +23,13 @@ import (
 // workspace-level setting, not a sub-resource of any one contact, and putting
 // them under /contacts/fields would sit ambiguously beside /contacts/{id}.
 //
+// The CSV export is mounted separately too (see ExportRoutes), for a sharper
+// reason than FieldRoutes': chi's Mount matches whole path SEGMENTS, so
+// nothing registered in this router — no matter what pattern it uses — can
+// ever answer a request for /api/v1/contacts.csv. The dot is not a separator
+// chi's tree treats as one, so that path is a completely different node from
+// /api/v1/contacts and everything nested under it; it has to be its own mount.
+//
 // Mounted alongside (not under) /api/v1/lists to avoid the chi mount-prefix
 // overlap that would otherwise shadow a nested /lists/{id}/import route.
 //
@@ -49,6 +56,20 @@ func (h *Handler) Routes() http.Handler {
 		read.Get("/{id}/engagement", h.getContactEngagement)
 		read.Get("/{id}/fields", h.getContactFields)
 	})
+	return r
+}
+
+// ExportRoutes returns the CSV export surface, mounted at
+// /api/v1/contacts.csv (see the note on Routes for why it cannot live inside
+// that router).
+//
+// GET /api/v1/contacts.csv?list={id}&q=&sort=
+//
+// A read, so it takes the same contacts:read scope Routes' read group uses.
+func (h *Handler) ExportRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(auth.RequireScope(auth.ScopeContactsRead))
+	r.Get("/", h.exportContactsCSV)
 	return r
 }
 

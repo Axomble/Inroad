@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { AlertTriangle, KeyRound, ListPlus, Plug, Settings, ShieldCheck, Sparkles, Tags, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, KeyRound, ListPlus, Plug, Settings, ShieldCheck, Sparkles, Tags, Webhook, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useHasRole } from '@/hooks/use-has-role'
 import type { WorkspaceRole } from '@/lib/rbac'
@@ -56,6 +56,11 @@ const SETTINGS_NAV: SettingsItem[] = [
   // discard need campaigns:send and are refused by the server with a 403 the row
   // renders — the same courtesy-not-authorization split the rest of this table uses.
   { label: 'Failed tasks', to: '/app/settings/dead-letters', icon: AlertTriangle },
+  // webhook/handler.go's Routes() wraps its whole router in
+  // auth.RequireRole("admin"), matching the three credential/integration
+  // surfaces above it: an endpoint streams workspace event payloads to an
+  // operator-chosen URL and carries an HMAC signing secret.
+  { label: 'Webhooks', to: '/app/settings/webhooks', icon: Webhook, minRole: 'admin' },
 ]
 
 export function SettingsRail() {

@@ -16,6 +16,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/queue"
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // engageCore drives the engage handler: a programmable engage job + reply claim
@@ -138,8 +139,8 @@ func TestEngageRescueReadReplyHappyPath(t *testing.T) {
 	if snd.calls != 1 {
 		t.Fatalf("reply Send calls = %d, want 1", snd.calls)
 	}
-	if got := snd.gotMsg.ExtraHeaders[warmupHeader]; got != "reply-tok" {
-		t.Fatalf("reply %s header = %q, want reply-tok", warmupHeader, got)
+	if got := snd.gotMsg.ExtraHeaders[pwarmup.HeaderWarmup]; got != "reply-tok" {
+		t.Fatalf("reply %s header = %q, want reply-tok", pwarmup.HeaderWarmup, got)
 	}
 	if snd.gotMsg.To != "orig@x.com" || snd.gotMsg.Subject != "Re: hi" {
 		t.Fatalf("reply envelope not built from ReplySend: %+v", snd.gotMsg)

@@ -43,6 +43,33 @@ type Config struct {
 	// drop-in. An unknown value fails closed at binary startup.
 	KeyProvider string
 
+	// Blob storage (internal/platform/storage), selected by storage.FromEnv —
+	// unwired today; the first consumer is the attachments feature (P2.3).
+	// Filesystem is the default: StorageFSRoot needs no other setting to
+	// work. Setting StorageS3Bucket switches to the S3 (or S3-compatible:
+	// MinIO, R2, Wasabi) backend; region/endpoint/credentials are optional
+	// and fall back to the AWS SDK's own default credential chain (env vars,
+	// shared config, an instance/task role) when left blank, so a deployment
+	// already running on AWS with an attached role needs only the bucket name.
+	StorageFSRoot            string
+	StorageS3Bucket          string
+	StorageS3Region          string
+	StorageS3Endpoint        string
+	StorageS3AccessKeyID     string
+	StorageS3SecretAccessKey string
+	// StorageS3ForcePathStyle selects path-style addressing
+	// (https://host/bucket/key instead of https://bucket.host/key), which
+	// MinIO and some other S3-compatible servers require and AWS S3 itself
+	// does not use. Default false.
+	StorageS3ForcePathStyle bool
+	// StorageS3AllowPlaintextEndpoint explicitly opts a custom
+	// StorageS3Endpoint out of TLS. Defaults to FALSE so an absent or
+	// malformed value keeps https mandatory — a misconfiguration can never
+	// silently send SigV4-signed requests, object bodies and presigned URLs in
+	// cleartext (security Invariant 6's rule, applied to this dial). Intended
+	// solely for a MinIO on a trusted private network in development.
+	StorageS3AllowPlaintextEndpoint bool
+
 	// TrackingSecret signs open/click tracking tokens (internal/platform/track).
 	// Dedicated so rotating tracking links doesn't invalidate sessions; falls
 	// back to JWTSecret when unset, so self-hosters aren't forced to mint a
@@ -327,6 +354,18 @@ func Load() (*Config, error) {
 	cfg.MasterKey = rawKey
 
 	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
+
+	// Blob storage: filesystem needs nothing else set; INROAD_S3_BUCKET is
+	// what opts a deployment into the S3 backend (see storage.FromEnv).
+	cfg.StorageFSRoot = getenv("INROAD_STORAGE_FS_ROOT", "./data/blobs")
+	cfg.StorageS3Bucket = getenv("INROAD_S3_BUCKET", "")
+	cfg.StorageS3Region = getenv("INROAD_S3_REGION", "us-east-1")
+	cfg.StorageS3Endpoint = getenv("INROAD_S3_ENDPOINT", "")
+	cfg.StorageS3AccessKeyID = getenv("INROAD_S3_ACCESS_KEY_ID", "")
+	cfg.StorageS3SecretAccessKey = getenv("INROAD_S3_SECRET_ACCESS_KEY", "")
+	cfg.StorageS3ForcePathStyle = getenvBool("INROAD_S3_FORCE_PATH_STYLE", false)
+	cfg.StorageS3AllowPlaintextEndpoint = getenvBool("INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT", false)
+
 	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
 	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
 	cfg.WebhookAllowPrivate = getenvBool("INROAD_WEBHOOK_ALLOW_PRIVATE", false)

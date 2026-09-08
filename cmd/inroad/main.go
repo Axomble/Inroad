@@ -672,6 +672,11 @@ func run() error {
 		// sub-resource of any one contact, so they get their own mount instead
 		// of sitting at /contacts/fields, ambiguously beside /contacts/{id}.
 		{pattern: "/api/v1/custom-fields", handler: contactHandler.FieldRoutes()},
+		// The CSV export's own mount: chi's Mount matches whole path segments,
+		// so nothing registered under /api/v1/contacts can ever answer a request
+		// whose path is literally /api/v1/contacts.csv (the dot is not a
+		// separator its tree recognises) — see contact.Handler.Routes.
+		{pattern: "/api/v1/contacts.csv", handler: contactHandler.ExportRoutes()},
 		{pattern: "/api/v1/crm", handler: crmHandler.Routes()},
 		// Reply-label taxonomy CRUD + reorder. Gated on the campaign scopes
 		// inside Routes(): a label's role flags are send-automation config.

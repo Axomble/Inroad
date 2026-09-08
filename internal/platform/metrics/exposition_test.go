@@ -38,6 +38,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 	m.SendFinalized("campaign", "sent")
 	m.SendClaimed("step", metrics.ClaimOutcomeWon)
 	m.SweepCompleted("inbox", 1, time.Second)
+	m.JobRunCompleted("domain auth sweep", "ok", time.Second)
 	if err := m.RegisterPool(realPoolStat(t)); err != nil {
 		t.Fatalf("register pool: %v", err)
 	}
@@ -74,6 +75,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 		// The three that predate this work; their meaning is unchanged.
 		"inroad_http_request_seconds",
 		"inroad_http_requests_total",
+		"inroad_job_run_seconds",
 		"inroad_queue_depth",
 		"inroad_send_claims_total",
 		"inroad_sends_total",

@@ -48,18 +48,26 @@ type SearchParams struct {
 // SearchRow is one matched contact plus the two values a cursor is built from.
 // SortEmail is lower(email) straight from Postgres so the cursor key is
 // byte-identical to what idx_contacts_ws_email_id ordered by.
+//
+// Company and CustomFields exist for CSV export (export.go), not the JSON list
+// response — contactResponse deliberately never maps them. Company is the raw
+// stored text (not the CompanyName display value, which is COALESCEd against a
+// linked company): export mirrors what import writes, and import only ever
+// touches this column, never the link.
 type SearchRow struct {
-	ID          uuid.UUID
-	Email       string
-	FirstName   string
-	LastName    string
-	CompanyID   *uuid.UUID
-	CompanyName string
-	JobTitle    string
-	LinkedInURL string
-	DealCount   int64
-	CreatedAt   time.Time
-	SortEmail   string
+	ID           uuid.UUID
+	Email        string
+	FirstName    string
+	LastName     string
+	CompanyID    *uuid.UUID
+	CompanyName  string
+	JobTitle     string
+	LinkedInURL  string
+	DealCount    int64
+	CreatedAt    time.Time
+	SortEmail    string
+	Company      string
+	CustomFields []byte
 }
 
 // Store is the repository interface this domain depends on. It is defined
@@ -149,7 +157,7 @@ func (s *PgStore) Search(ctx context.Context, ws uuid.UUID, p SearchParams) ([]S
 	for rows.Next() {
 		var r SearchRow
 		if err := rows.Scan(&r.ID, &r.Email, &r.FirstName, &r.LastName, &r.CompanyID, &r.CompanyName,
-			&r.JobTitle, &r.LinkedInURL, &r.DealCount, &r.CreatedAt, &r.SortEmail); err != nil {
+			&r.JobTitle, &r.LinkedInURL, &r.DealCount, &r.CreatedAt, &r.SortEmail, &r.Company, &r.CustomFields); err != nil {
 			return nil, fmt.Errorf("scan contact: %w", err)
 		}
 		out = append(out, r)

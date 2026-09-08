@@ -17,13 +17,17 @@ pulse read-model, test depth, first-class Company.
 
 ## P0 — Foundational, cheap, do first (days each)
 
+> **✅ P0 IS COMPLETE.** All five landed in the P0 sprint (#171, merged
+> 2026-09-07), the same PR that introduced this document — which is why the
+> matrix's first pass scored them as missing. Verified against `d4f5720`.
+
 | # | Item | Effort | Why now |
 |---|---|---|---|
-| P0.1 | **Release + container-publish CI** — `release.yml` (tagged, `CHANGELOG.md`), `build-push.yml` (GHCR images for api/worker/web) | S | Prerequisite for the installer (P1.1) and for anyone running Inroad without building from source. The reference platform has both; Inroad has neither. |
-| P0.2 | **Security CI** — `govulncheck`, `npm audit` / `osv-scanner`, Trivy image scan, plus `.github/dependabot.yml` | S | Called out in the project review as the clearest supply-chain gap. The reference platform ships a dedicated security workflow. |
-| P0.3 | **Outbound webhooks** — `internal/app/webhook`: HMAC-signed (`t=…,v1=…` over `t.body`), event-filtered subscriptions, retry with backoff, SSRF guard on the target URL, delivery log | M | The single highest-leverage missing primitive. Hangs off the existing `app/events` bus. Unblocks every integration (P2.x) and matches the incumbent's event webhooks. |
-| P0.4 | **Redis in `/readyz`** + a multi-dependency probe | S | From the Redis review: `/readyz` pings Postgres only, so a Redis outage (every login 429s, every enqueue fails) reads as healthy. Grows into the instance-health dashboard (P2.7). |
-| P0.5 | **Redis connection config** — accept `redis://` / `rediss://` URL, support password/TLS, one `dialRedis()` constructor | S | From the Redis review: `INROAD_REDIS_ADDR` is address-only; managed Redis (auth/TLS) can't connect. |
+| ~~P0.1~~ ✅ | ~~**Release + container-publish CI** — `release.yml` (tagged, `CHANGELOG.md`), `build-push.yml` (GHCR images for api/worker/web)~~ **DONE** — both workflows ship, multi-arch, with `platform/version` stamped at link time, `checksums.txt`, and a Keep-a-Changelog `CHANGELOG.md` parsed for the release body. | S | Prerequisite for the installer (P1.1) and for anyone running Inroad without building from source. The reference platform has both; ~~Inroad has neither~~ Inroad now has both. |
+| ~~P0.2~~ ✅ | ~~**Security CI** — `govulncheck`, `npm audit` / `osv-scanner`, Trivy image scan, plus `.github/dependabot.yml`~~ **DONE** — `security.yml` (govulncheck reachable-symbol + `npm audit --audit-level=high` + Trivy FS for vuln/secret/misconfig) on PR, push and weekly; `dependabot.yml` covers gomod, npm, actions and the Dockerfiles. Informs rather than gates, deliberately. | S | Called out in the project review as the clearest supply-chain gap. |
+| ~~P0.3~~ ⚠️ | ~~**Outbound webhooks** — `internal/app/webhook`: HMAC-signed (`t=…,v1=…` over `t.body`), event-filtered subscriptions, retry with backoff, SSRF guard on the target URL, delivery log~~ **BACKEND DONE** — `app/webhook`, `worker/webhook/deliver.go`, `platform/webhookwire` (`sign.go` + `ssrf.go`), migration `20260907132955_webhook`, and `/webhook-endpoints` ×5 incl. `rotate-secret`, `ping`, `deliveries`. **Remaining: the UI** — there is no `features/webhooks` and no route, so an operator cannot register an endpoint without curl. Small; finish it before P2.6 leans on it. | M | The single highest-leverage missing primitive. Unblocks every integration (P2.x). |
+| ~~P0.4~~ ✅ | ~~**Redis in `/readyz`** + a multi-dependency probe~~ **DONE** — `/readyz` pings Postgres *and* Redis under a 2s budget. Still grows into P2.7. | S | A Redis outage fails every login closed at the rate limiter, yet a Postgres-only probe reported ready. |
+| ~~P0.5~~ ✅ | ~~**Redis connection config** — accept `redis://` / `rediss://` URL, support password/TLS, one `dialRedis()` constructor~~ **DONE** — `internal/platform/redisconn`. | S | `INROAD_REDIS_ADDR` was address-only; managed Redis (auth/TLS) could not connect. |
 
 ## P1 — Core value: the five features that put Inroad in the conversation
 
@@ -32,7 +36,7 @@ pulse read-model, test depth, first-class Company.
 | P1.1 | **One-command installer** — `scripts/install.sh` served from the docs site, checksummed, pulls the P0.1 images, writes a real `.env`, prints a claim link. POSIX sh, `--dry-run`, optional `--wizard` | M | The reference platform's published install script is the model (and its hard-won rules: POSIX not bash, `set -eu`, `main "$@"` last, idempotent, never regenerate a key). Biggest self-host first-impression gap. |
 | P1.2 | **Operator CLI** — `cmd/inroadctl`: create user, set password, grant admin, workspace list, instance status; talks to Postgres directly so it works when auth is broken | M | Mirrors the reference platform's operator CLI. Bake it into the api image. |
 | P1.3 | **Pre-send email verification** — `internal/app/emailverify`: a `Verifier` seam (accept-interface) with a built-in implementation (syntax → MX → SMTP RCPT probe from a configurable non-sending source → catch-all detection), cached per domain, run at CSV import and at campaign preflight | M | The incumbent bundles it; the reference platform has a dedicated verification module. Pluggable so a third-party provider can be dropped in. Cuts bounce rate before it costs reputation. |
-| P1.4 | **Complaint / FBL ingestion + deliverability event ingest API** — ARF parsing on inbound mail, `POST /deliverability/events` (idempotent, API-key scoped) for external processors (SES/SNS, Postmark) | M | Inroad parses DSNs already; this is the complaint half. Feeds the existing deliverability score + circuit breaker. |
+| P1.4 | **Complaint / FBL ingestion + deliverability event ingest API** — ~~`POST /deliverability/events` (idempotent, API-key scoped) for external processors (SES/SNS, Postmark)~~ **the ingest API already ships** and a complaint already suppresses + feeds the score and breaker. **Remaining: ARF parsing on inbound mail**, so an FBL that arrives as a message is ingested too. | ~~M~~ **S** | Downgraded: only the inbound-mail half is left. |
 | P1.5 | **Contact export** (CSV / XLSX / JSON, scoped to a filter, choose columns) + **CSV import wizard** (preview → column map → dedup strategy, XLSX support) | M | Export is S on its own and conspicuously absent. The wizard is the bigger half. |
 | P1.6 | **Audit log** — `internal/app/audit`: append-only, who/what/when, secret values never recorded, workspace-scoped read endpoint + UI | M | Security doc lists it as deferred; table stakes for teams. |
 | P1.7 | **Warmup header-loss fallback** — match an inbound warmup message on (envelope-to, provider-assigned Message-ID) when the `X-Inroad-Warmup` header was stripped (Microsoft) | S | Cheap correctness fix; without it warmup from M365 mailboxes under-counts placement. |
@@ -48,7 +52,7 @@ to recover if they lock themselves out.
 | # | Item | Effort | Notes |
 |---|---|---|---|
 | P2.1 | **Hosted lead-capture forms** — form builder (fields, pages, design), a hosted/embeddable public page, submission store, submission → contact (+ custom fields) → optional campaign enrollment | L | The reference platform runs this as a dedicated sub-app + public form server. Can start smaller: one templated form type, JSON field spec, a `formserver` route. It's how contacts get in without a CSV. |
-| P2.2 | **Blob-storage seam** — `platform/blobstore`: filesystem default, S3-compatible opt-in | M | Prerequisite for P2.3 and for storing raw message bodies. Mirrors the reference platform's encrypted-body-in-blob-store design. |
+| P2.2 | **Blob-storage seam** — ~~`platform/blobstore`:~~ `platform/storage` **already exists** with the `Provider` interface and a complete, tested S3 implementation — but **nothing imports it**, there is no filesystem implementation, and no env var reaches `platform/config`, so today it is dead code. **Remaining: the filesystem default + a from-env factory + the first caller.** | ~~M~~ **S** | Prerequisite for P2.3 and for storing raw message bodies. Either finish it here or delete it and re-add it with its first caller — leaving an unwired package contradicts the repo's own no-dead-code rule. |
 | P2.3 | **Attachments** — per-step and campaign-wide files, workspace storage quota, quota-race-safe upload, carried through the send + test-send + preview paths | M | Needs P2.2. |
 | P2.4 | **Visual automation canvas** — `internal/app/automation`: trigger (reply / bounce / unsub / meeting / form / inbound webhook / warmup-health-change / campaign-step) → IF condition → action (tag, task, deal, notify-webhooks, run-sub-automation, stop). jsonb config per node with a Go struct + validation on write and a `CHECK` on the discriminator | L | The reference platform's jsonb branching-tree config is the model. This is the big one; it unlocks P2.5, P3.2, P3.3. |
 | P2.5 | **Branch-on-behaviour + action steps + switch steps in sequences** | L | Conditional edges between steps (opened / clicked / replied ± N-day window, random split); non-email nodes. Pairs with P2.4's node model. |
@@ -60,12 +64,14 @@ to recover if they lock themselves out.
 | P2.11 | **Per-mailbox rolled human workday** — once per mailbox per local day, roll+store {start, finish, lunch, daily target, hourly ceiling} from ranges; scheduler reads the stored plan; "today's workday" shown on the mailbox | M | Inroad has windows + seeded cadence; this adds the stored-daily-plan layer so "why is nothing sending right now" has a concrete answer. Can only ever lower volume / delay. |
 | P2.12 | **Seed inbox-placement testing** — send tokenised copies to a configured set of seed mailboxes across providers, classify inbox vs spam per provider, surface as its own dashboard section + a pre-scale check | M | Reuses the warmup spam-detection path. Distinct from the warmup-derived signal Inroad already has. |
 | P2.13 | **Inbox agent** — auto-draft a reply to every classified inbound, held in the existing approval queue, off the reply hook | M | Inroad has on-demand AI drafts + the approval queue; this makes it always-on. HITL stays the default. |
-| P2.14 | **Unified inbox at scale** — folder model (6 provider folders mapped from IMAP special-use / Gmail labels / Graph well-known), scope rail (Unread / Today / Awaiting reply / Snoozed / Scheduled / per-mailbox), server-computed counts, keyset pagination, snooze + draft autosave | L | The place reviews say the incumbent "gets clunky." A chance to be better cheaply. |
+| P2.14 | **Unified inbox at scale** — ~~scope rail (Unread / Today / Awaiting reply / Snoozed / Scheduled / per-mailbox), server-computed counts, keyset pagination, snooze + draft autosave~~ **all of that shipped** (`all/unread/today/this_week/awaiting_reply/snoozed`, an unknown scope 400s, rail counts share the list's clock, `/inbox/drafts`, `/snooze`, `/schedule-reply`, `/outbox` cancel, thread labels). **Remaining: the folder model** — 6 provider folders mapped from IMAP special-use / Gmail labels / Graph well-known, plus moves. | ~~L~~ **M** | The place reviews say the incumbent "gets clunky." A chance to be better cheaply. |
 | P2.15 | **Workspace export / import** — registry-driven: every org-scoped table declared with scope / order / group / secret-key-domain / blob columns; archive out, archive in on another instance; `inroadctl workspace export\|import` | L | The reference platform's registry-driven export spec is the pattern — including the rule that a migration adding an org table isn't done until it's in the registry. |
 | P2.16 | **Account danger zone** — delayed hard-delete with a grace window and a cancel path | S | |
 | P2.17 | **Generic OIDC SSO** (+ Apple sign-in) | M | Inroad has Google + passkeys; add a standards OIDC connector. |
-| P2.18 | **DLQ replay** — a re-drive action on the failed-task queue (it's already surfaced + paged) | S | |
+| ~~P2.18~~ ✅ | ~~**DLQ replay** — a re-drive action on the failed-task queue (it's already surfaced + paged)~~ **DONE** — `POST /dead-letters/{id}/replay` plus `/discard`, wired to the settings route. | S | |
 | P2.19 | **Custom tracking domain per mailbox/campaign** — extend beyond "a verified domain overrides the host" to per-mailbox CNAME config + verification UI | M | |
+| P2.20 | **Advisor-lite: deterministic sending-posture detectors** — ~30 pure-Go, no-model checks (cap too high for the ramp, warmup off while sending, no follow-up steps, unsub header disabled, list exhaustion, narrow send window, spammy copy, SPF/DKIM drift) surfaced inline on the row they concern | M | **Added 2026-09-08.** The reference platform has since shipped this as a first-class domain, and it is the cheapest differentiation available: no LLM dependency, no new infrastructure, and `app/pulse` is already the delivery vehicle (severity-sorted, promotes the worst problem first). It fits the honest-metrics posture Inroad is already ahead on. AI narration can layer on later behind the existing seam. |
+| P2.21 | **Scheduled-job run ledger** — one table every periodic loop writes an ok/error row to (`worker/maintenance`, `domainauth`, `recipientesp`, `deliverability`, the warmup pollers), with last-run / last-error / duration surfaced in-app, and a run-now request the owning process picks up on its next tick | S–M | **Added 2026-09-08**, from the competitor's `scheduled_job_runs` (see `02-reference-platform.md` §4b). Turns "is the sweep actually running" from a log-grep into a query. Composes directly with P2.7's instance-health dashboard and is the single cheapest operability win on this list. |
 
 ## P3 — Later: AI depth, platform, adjacent products
 
@@ -99,9 +105,31 @@ to recover if they lock themselves out.
 
 ## Suggested sequencing
 
-1. **Sprint 1 (P0):** release CI, security CI, webhooks, Redis readiness + config. Ships the plumbing everything else needs.
-2. **Sprint 2–3 (P1):** installer + CLI, email verification, complaint ingestion, export/import wizard, audit log, warmup header fix, IMAP hardening. This is the "credible peer" milestone.
+1. ~~**Sprint 1 (P0):** release CI, security CI, webhooks, Redis readiness + config. Ships the plumbing everything else needs.~~ **✅ SHIPPED** in #171 (2026-09-07), less the webhook UI.
+2. **Sprint 2–3 (P1) — current sprint.** installer + CLI, email verification, ~~complaint ingestion~~ inbound ARF only, export/import wizard, audit log, warmup header fix, IMAP hardening. This is the "credible peer" milestone.
 3. **Then P2 in dependency order:** blob seam → attachments; webhooks → integrations → meetings; automation canvas → branching/action/switch steps; the rest as capacity allows.
 4. **P3 is opportunistic** — pull items forward when a user actually asks.
 
 Re-score `01-feature-matrix.md` at the end of each sprint.
+
+### The immediate list, in order (as of 2026-09-08 @ `d4f5720`)
+
+Small enough to finish before the next re-score, and each one closes a row
+rather than starting a surface:
+
+1. **Webhook UI** (S) — finishes P0.3; the backend is already paid for.
+2. **Blob seam: filesystem impl + config factory** (S) — or delete
+   `platform/storage`. Do not leave it unwired a third sprint.
+3. **Warmup header-loss fallback** (S, P1.7) — a correctness bug, not a feature:
+   warmup from Microsoft mailboxes under-counts placement today, and placement
+   drives the health state machine.
+4. **Contact export** (S, half of P1.5) — the most conspicuous single absence in
+   the CRM.
+5. **Inbound ARF parsing** (S, rest of P1.4).
+6. **Audit log** (M, P1.6) — the security doc has listed it as deferred since
+   the beginning.
+7. **Operator CLI** (M, P1.2), then **the installer** (M, P1.1) — in that order,
+   because the installer wants a working `inroadctl` to print a claim link.
+8. **Pre-send email verification** (M, P1.3) and **IMAP/SMTP hardening**
+   (M, P1.8) — the two that most change whether a stranger's first campaign
+   works.

@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/queue"
+	pwarmup "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // sendCore drives the send handler: a programmable job/claim/send outcome plus
@@ -110,8 +111,8 @@ func TestSendHappyPathSendsSetsHeaderMarksAndSchedules(t *testing.T) {
 	}
 	// The signed receipt header MUST be on the outgoing message (the poller reads
 	// it off the wire in C5).
-	if got := snd.gotMsg.ExtraHeaders[warmupHeader]; got != "tok-abc" {
-		t.Fatalf("%s header = %q, want tok-abc", warmupHeader, got)
+	if got := snd.gotMsg.ExtraHeaders[pwarmup.HeaderWarmup]; got != "tok-abc" {
+		t.Fatalf("%s header = %q, want tok-abc", pwarmup.HeaderWarmup, got)
 	}
 	if snd.gotMsg.Subject != "hi" || snd.gotMsg.To != "to@x.com" {
 		t.Fatalf("message envelope not built from job: %+v", snd.gotMsg)

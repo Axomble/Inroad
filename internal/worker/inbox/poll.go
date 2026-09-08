@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	netmail "net/mail"
 	"strings"
@@ -200,10 +201,12 @@ type warmupHook struct {
 // cursor.
 //
 // Before campaign classification, every inbound message runs the warmup
-// receipt-detection HOOK (processInbound): a verified X-Inroad-Warmup message for
-// this workspace is recorded + engaged + STOPPED, never reaching reply/bounce
-// classification (spec §9.4 isolation), so warmup traffic can never stop,
-// suppress, or bounce a real campaign enrollment. Everything else falls through
+// receipt-detection HOOK (processInbound): a warmup message for this workspace —
+// recognised by its verified X-Inroad-Warmup token, or, when the provider stripped
+// the header, by matching a warmup send we made to this mailbox (inspectWarmup) —
+// is recorded + engaged + STOPPED, never reaching reply/bounce classification
+// (spec §9.4 isolation), so warmup traffic can never stop, suppress, or bounce a
+// real campaign enrollment. Everything else falls through
 // to the SAME reply/bounce classification (processMessage) unchanged. Each path
 // also best-effort scans the provider's spam/junk folder for spam-placed warmup
 // mail (the core deliverability health signal) and persists its cursor.
@@ -401,13 +404,10 @@ func graphJunkScan(g GraphFetcher) apiJunkScan {
 	return nil
 }
 
-// detectWarmup reports whether msg is a genuine warmup message for the polled
-// mailbox's workspace. It reads the X-Inroad-Warmup header, verifies its HMAC
-// token against the warmup secret, and requires the signed payload's workspace to
-// equal workspaceID. An absent / unsigned / forged / wrong-workspace header
-// yields ok=false — NOT warmup — so the caller falls through to normal
-// reply/bounce classification UNCHANGED (spec §9.3). The header alone is never
-// trusted: the token is HMAC-verified before the message is treated as warmup.
+// warmupDetection is the verdict on whether one inbound message is warmup mail
+// for the polled mailbox's workspace. Only warmupValid is treated as warmup; every
+// other verdict falls through to normal reply/bounce classification UNCHANGED
+// (spec §9.3).
 type warmupDetection uint8
 
 const (
@@ -417,35 +417,153 @@ const (
 	warmupValid
 )
 
-func inspectWarmup(msg mail.InboundMessage, secret []byte, workspaceID string) (warmup.Payload, warmupDetection, string) {
+// inspectWarmup decides whether msg is a genuine warmup message for this
+// workspace and, if so, which warmup send it is a receipt for. It is the SINGLE
+// point where inbound mail is recognised as warmup, and the only place the
+// header-loss fallback may be reached.
+//
+// The primary signal is the X-Inroad-Warmup header: its HMAC token is verified
+// against the warmup secret and the signed payload's workspace must equal the
+// polled workspace. The header alone is never trusted.
+//
+// A message with NO header at all then gets the fallback (recoverWarmupSendID),
+// because Microsoft strips unknown custom headers and warmup mail to an M365
+// mailbox therefore arrives tokenless. That branch — and ONLY that branch — may
+// fall back. warmupInvalid (a present but forged token) and warmupWrongWorkspace
+// return their verdict immediately, for two reasons, NEITHER of which is access
+// control:
+//
+//   - One message must produce ONE record of itself. A forged token is recorded as
+//     invalid_token attack evidence, deliberately unattributed and
+//     attribution_trusted=false. Letting the same message also mint a trusted
+//     placement receipt would put two contradictory claims about it in the
+//     evidence trail, and the trail is what an operator reads to tell an attack
+//     from header loss.
+//   - This function returns one verdict, so a message that took both branches
+//     would need the caller to run both — and the junk path's caller, which
+//     switches on the verdict to decide what to record, would then have to
+//     re-derive which of the two happened.
+//
+// What it does NOT do is keep an attacker out of the fallback: the fallback is
+// gated on token == "" and nothing else, so anyone who simply omits the header
+// reaches it. That is intended, it is the only way header loss can be recovered
+// at all, and the control on it is the lookup's own key + binding
+// (recoverWarmupSendID), not the presence or absence of a token.
+//
+// The returned warmupSendID is the token payload's id, or the id of the resolved
+// warmup_sends row — never a reconstructed token. A non-nil error means the
+// fallback could not answer, NOT that the message is or is not warmup; callers
+// apply their own path's error policy to it.
+func inspectWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, msg mail.InboundMessage) (warmupSendID string, detection warmupDetection, fingerprint string, err error) {
 	token := msg.Header.Get(warmup.HeaderWarmup)
 	if token == "" {
-		return warmup.Payload{}, warmupAbsent, ""
+		sendID, err := recoverWarmupSendID(ctx, core, p, msg)
+		switch {
+		case err != nil:
+			return "", warmupAbsent, "", err
+		case sendID != "":
+			return sendID, warmupValid, "", nil
+		default:
+			return "", warmupAbsent, "", nil
+		}
 	}
 	sum := sha256.Sum256([]byte(token))
-	fingerprint := hex.EncodeToString(sum[:])
-	payload, ok := warmup.Verify(token, secret)
+	fingerprint = hex.EncodeToString(sum[:])
+	payload, ok := warmup.Verify(token, hook.secret)
 	if !ok {
-		return warmup.Payload{}, warmupInvalid, fingerprint
+		return "", warmupInvalid, fingerprint, nil
 	}
-	if payload.WorkspaceID != workspaceID {
-		return warmup.Payload{}, warmupWrongWorkspace, fingerprint
+	if payload.WorkspaceID != p.WorkspaceID {
+		return "", warmupWrongWorkspace, fingerprint, nil
 	}
-	return payload, warmupValid, fingerprint
+	return payload.WarmupSendID, warmupValid, fingerprint, nil
+}
+
+// recoverWarmupSendID resolves a tokenless inbound message back to the warmup send
+// it is a receipt for, by the Message-ID we recorded when we sent it
+// (warmup_sends.message_id, written by MarkWarmupSent). It returns "" for
+// "not a warmup message", which is the answer for nearly every message the poller
+// sees.
+//
+// What is ours and what is not: the PREDICATE is our own data — the match requires
+// a 'sent' warmup send this workspace made, addressed to THIS polled mailbox — but
+// the KEY is not. messageID comes off unauthenticated inbound mail, exactly like
+// the Original-Message-ID the warmup DSN path treats as attacker-controlled. So
+// this widens detection to "whoever can present the Message-ID of a warmup send
+// addressed to this mailbox", and does not narrow it further: the receipt INSERT
+// re-proves the same facts this lookup already matched, so it is not a second
+// check.
+//
+// That residual is accepted rather than overlooked, and it is sized by the id: a
+// warmup send's Message-ID is CSPRNG-generated on the smtp and gmail paths
+// (go-mail SetMessageID — 22 chars from crypto/rand, ~132 bits) and never leaves
+// the workspace, so presenting one means having already observed the message. On
+// m365 the id is whatever Exchange assigned, whose entropy is Microsoft's
+// business — worth knowing, since m365 is the provider this fallback exists for.
+// The exposure is one warmup placement sample for a mailbox the attacker can
+// already mail, in a pool that is intra-workspace only (see invariant 62's
+// adversary model, which invariant 52 rests on): worse than a token, better than
+// the alternative of counting M365 placement as nothing at all.
+//
+// Both directions of a warmup exchange are the same shape — the A→B receipt and
+// the B→A engage-reply are each a warmup_sends row whose to_mailbox is the mailbox
+// now polling — so one lookup covers both. In-Reply-To / References are
+// deliberately NOT walked: those carry OTHER messages' ids, so matching them would
+// widen the key from "presented this message" to "presented anything that ever
+// referenced it", for no gain.
+//
+// A core without the capability (an existing worker fake, a future HTTP coreapi
+// that has not grown the endpoint) degrades to header-only detection, which is
+// exactly today's behaviour — never a failed poll.
+func recoverWarmupSendID(ctx context.Context, core coreapi.Client, p queue.InboxPollPayload, msg mail.InboundMessage) (string, error) {
+	lookup, ok := core.(coreapi.WarmupSendLookupClient)
+	if !ok {
+		return "", nil
+	}
+	// An absent Message-ID cannot identify anything, and warmup_sends.message_id
+	// DEFAULTs to '' — so a lookup on "" would ask the database to match every
+	// queued row rather than nothing. An id carrying a byte Postgres cannot
+	// encode gets the same "not warmup" answer rather than a permanent lookup
+	// failure that would wedge this mailbox's cursor forever (usableMessageID).
+	messageID := strings.TrimSpace(msg.Header.Get("Message-ID"))
+	if !usableMessageID(messageID) {
+		return "", nil
+	}
+	ref, found, err := lookup.FindWarmupSendByMessageID(ctx, p.WorkspaceID, p.MailboxID, messageID)
+	if err != nil {
+		return "", fmt.Errorf("warmup header-loss lookup: %w", err)
+	}
+	if !found {
+		return "", nil
+	}
+	// Logged because the alternative failure mode is invisible: a fallback that has
+	// stopped resolving anything looks exactly like a fleet with no header loss, and
+	// the only symptom would be a placement sample that quietly shrinks again.
+	slog.InfoContext(ctx, "inbox_poll_warmup_recovered_by_message_id",
+		"workspace_id", p.WorkspaceID, "mailbox_id", p.MailboxID, "warmup_send_id", ref.WarmupSendID)
+	return ref.WarmupSendID, nil
 }
 
 // processInbound is the warmup receipt-detection HOOK in front of campaign
-// classification (spec §9.4 isolation). If msg is a verified warmup message for
-// this workspace it is recorded + engaged via recordWarmup and then STOPPED — it
+// classification (spec §9.4 isolation). If inspectWarmup resolves msg to a warmup
+// send in this workspace it is recorded + engaged via recordWarmup and STOPPED — it
 // never reaches reply/bounce classification, so warmup mail can never stop,
 // suppress, or bounce a campaign enrollment. It reports matched=false for warmup
 // (it is neither a reply nor a bounce — counted as skipped in the poll summary).
 // A non-warmup message falls through to processMessage unchanged. path describes
 // which folder this pass was reading and what it could observe about a tab.
 func processInbound(ctx context.Context, core coreapi.Client, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, msg mail.InboundMessage, path readingPath, replies, bounces *int) (bool, error) {
-	payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
+	warmupSendID, detection, fingerprint, err := inspectWarmup(ctx, core, hook, p, msg)
+	if err != nil {
+		// The fallback could not answer, so we do not KNOW whether this is warmup.
+		// Failing the poll leaves the cursor where it is and the retry re-examines
+		// the message — the same policy as a failed recordWarmup below, and for the
+		// same reason: classifying a possible warmup message as campaign mail is a
+		// decision we would never revisit.
+		return false, err
+	}
 	if detection == warmupValid {
-		if err := recordWarmup(ctx, core, hook, p, payload, msg, path); err != nil {
+		if err := recordWarmup(ctx, core, hook, p, warmupSendID, msg, path); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -473,19 +591,26 @@ func recordWarmupTokenFailure(ctx context.Context, core coreapi.Client, p queue.
 // recordWarmup records a detected warmup message's receipt (idempotent, spec §7)
 // and, on a genuinely new receipt (non-empty plan), enqueues its delayed
 // engagement. RecipientMailbox is the polled mailbox (p.MailboxID) — it OBSERVED
-// the message; WarmupSendID comes from the verified token payload; MessageID is
-// the received message's RFC822 Message-ID and sourceFolder the folder it was
+// the message; warmupSendID is inspectWarmup's resolved send (the verified token's
+// payload, or the warmup_sends row a tokenless message was matched to); MessageID
+// is the received message's RFC822 Message-ID and sourceFolder the folder it was
 // found in, both persisted so C5b's engager can relocate the exact message. A
 // duplicate re-poll returns an empty plan (ReceiptID ""), so no engage is
 // re-enqueued.
 //
+// It takes the send id rather than a warmup.Payload BECAUSE of the second source:
+// a Payload is the signed body of a receipt token, and a path that could build one
+// from a database row would be a path that could manufacture a token. The id is
+// the only field this function ever used.
+//
 // The sending identity is extracted here too (design §6), from the headers of a
-// message that has ALREADY passed HMAC token verification — which is what makes
-// reading headers acceptable at all in a path whose last two live findings were
-// both forged inputs. warmup.ExtractIdentity is pure and cannot fail: it returns
-// unknown verdicts and empty domains rather than an error, so nothing about the
-// identity can stop the receipt or hold back the poll cursor.
-func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, payload warmup.Payload, msg mail.InboundMessage, path readingPath) error {
+// message that has ALREADY been proven warmup — by HMAC token verification, or by
+// matching a send we ourselves made to this mailbox — which is what makes reading
+// headers acceptable at all in a path whose last two live findings were both forged
+// inputs. warmup.ExtractIdentity is pure and cannot fail: it returns unknown
+// verdicts and empty domains rather than an error, so nothing about the identity
+// can stop the receipt or hold back the poll cursor.
+func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, warmupSendID string, msg mail.InboundMessage, path readingPath) error {
 	// Whose verdicts these are is decided by hook.receiver: only an
 	// Authentication-Results header stamped by THIS mailbox's own system is
 	// believed, so the extractor is told which system that is. Everything below the
@@ -493,7 +618,7 @@ func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p q
 	identity := warmup.ExtractIdentity(msg.Header, hook.receiver)
 	plan, err := core.RecordWarmupReceipt(ctx, coreapi.WarmupReceiptInput{
 		WorkspaceID:      p.WorkspaceID,
-		WarmupSendID:     payload.WarmupSendID,
+		WarmupSendID:     warmupSendID,
 		RecipientMailbox: p.MailboxID,
 		Placement:        warmupPlacement(path, msg.PlacementCategory),
 		SourceFolder:     path.sourceFolder,
@@ -563,9 +688,28 @@ func apiJunkFolderLabel(provider string) string {
 // a junk batch. A record error stops this batch (returned via logJunkScanErr at
 // the caller is not applicable here — errors are logged inline) but never the
 // poll: the stateless rescan retries it. Non-warmup junk is skipped.
+//
+// Skipped INCLUDING feedback reports, deliberately. FBL reports are commonly
+// spam-foldered, so a spam-placed ARF is a real complaint this pass walks past and
+// does not ingest (recordInboundComplaint is reached only from processMessage, on
+// the INBOX pass). That is a KNOWN GAP, left open on purpose: this scan exists to
+// observe warmup placement and reads a folder chosen by a spam filter, and giving
+// it the power to suppress a contact — which is what ingesting a complaint does —
+// is a widening of unauthenticated-input handling that deserves its own design
+// pass, not an incidental one inside a scan whose whole contract is "best-effort,
+// never fails the poll". Whoever picks that up: the complaint path is
+// authenticated by the resolved send, not by the folder, so the change is small —
+// the question to answer first is what a spam-filter-chosen folder is allowed to
+// trigger.
 func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p queue.InboxPollPayload, msgs []mail.InboundMessage, path readingPath) {
 	for _, msg := range msgs {
-		payload, detection, fingerprint := inspectWarmup(msg, hook.secret, p.WorkspaceID)
+		warmupSendID, detection, fingerprint, err := inspectWarmup(ctx, core, hook, p, msg)
+		if err != nil {
+			// Junk-path errors never fail the poll (see this function's contract):
+			// the scan is stateless and idempotent, so the next poll asks again.
+			slog.Warn("inbox_poll_junk_warmup_lookup_failed", "mailbox_id", p.MailboxID, "err", err)
+			continue
+		}
 		if detection != warmupValid {
 			switch detection {
 			case warmupInvalid:
@@ -575,7 +719,7 @@ func scanJunkForWarmup(ctx context.Context, core coreapi.Client, hook warmupHook
 			}
 			continue // non-warmup junk is ignored — never classified
 		}
-		if err := recordWarmup(ctx, core, hook, p, payload, msg, path); err != nil {
+		if err := recordWarmup(ctx, core, hook, p, warmupSendID, msg, path); err != nil {
 			slog.Warn("inbox_poll_junk_warmup_record_failed", "mailbox_id", p.MailboxID, "err", err)
 			// keep scanning the rest of the batch; the failed one is idempotently
 			// retried on the next poll's rescan.
@@ -615,9 +759,123 @@ func logUnresolvedBounce(ctx context.Context, workspaceID, mailboxID string, d D
 		"original_message_id", d.OriginalMessageID)
 }
 
+// recordInboundComplaint records a parsed feedback report as a complaint on the
+// EXISTING ingest — the same idempotent write POST /deliverability/events feeds,
+// so the suppression, the deliverability score, the at-risk list and the campaign
+// circuit breaker all consume it with no changes and no second path.
+//
+// What the report is allowed to establish is deliberately narrow. An ARF arrives
+// as ordinary, unauthenticated mail: anyone who can email a connected mailbox can
+// deliver one, and an ingested complaint suppresses an address workspace-wide and
+// can pause a campaign (docs/security.md invariants 40, 42). So the report's own
+// Original-Rcpt-To is never the thing acted on. The Message-ID it QUOTES is
+// resolved against our own sends, and the complaint is recorded against that
+// send's contact — the same discipline the hard-bounce arm above uses, and for the
+// same reason it refuses to suppress on Final-Recipient. The forgery surface
+// shrinks to "already knows a real Message-ID of a real send", which is the
+// documented residual bar for reply-driven suppression rather than a new one.
+//
+// It returns matched=true only for a complaint actually ingested. Every refusal is
+// a logged skip, never an error: a report we cannot attribute must not hold back
+// the cursor that campaign replies and bounces also ride on. An ingest FAILURE, by
+// contrast, does propagate — the write is idempotent on provider_event_id, so a
+// retry cannot double-count, and dropping a complaint is a compliance failure.
+func recordInboundComplaint(ctx context.Context, core coreapi.Client, workspaceID, mailboxID string, a ARFResult) (bool, error) {
+	ingest, ok := core.(coreapi.DeliverabilityComplaintClient)
+	if !ok {
+		// No capability: the report is parsed and dropped, which is the behaviour
+		// before this path existed. Logged so a deployment that quietly cannot
+		// record complaints is visible.
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "capability_unavailable")
+		return false, nil
+	}
+	// A redacted original message leaves nothing but an attacker-supplied address,
+	// which is precisely what must not be acted on alone. An id we cannot use as
+	// a lookup key is declined for the same reason and one more: asking Postgres
+	// about it fails permanently and would freeze this mailbox's cursor
+	// (usableMessageID), which is exactly the outcome the ErrInvalidComplaint arm
+	// below exists to prevent.
+	originalMessageID := strings.TrimSpace(a.OriginalMessageID)
+	if !usableMessageID(originalMessageID) {
+		reason := "no_original_message_id"
+		if originalMessageID != "" {
+			reason = "unusable_original_message_id"
+		}
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, reason)
+		return false, nil
+	}
+	// A warmup send can never be resolved here: warmup mail lives in warmup_sends,
+	// which this lookup does not read, so a report quoting one falls out as
+	// no_matching_send rather than becoming a campaign complaint (spec §9.4).
+	s, err := core.FindSendByMessageID(ctx, workspaceID, originalMessageID)
+	if err != nil {
+		if errors.Is(err, coreapi.ErrNoMatch) {
+			// A forwarded report, a purged send, or a forgery quoting an id we do
+			// not have. Logged rather than dropped silently, so a parser that has
+			// stopped resolving anything is a rising count and not a reputation
+			// problem discovered weeks later.
+			logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "no_matching_send")
+			return false, nil
+		}
+		return false, err
+	}
+	// Cross-check, one direction only: the send row is the authority, and a report
+	// that names a DIFFERENT recipient than the send went to is refused rather than
+	// redirected. Case-insensitive, because the same mailbox in a different case is
+	// the same mailbox and a real complaint must not be thrown away over it.
+	if a.ComplainedRecipient != "" && !strings.EqualFold(a.ComplainedRecipient, s.ContactEmail) {
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "recipient_mismatch")
+		return false, nil
+	}
+	if err := ingest.IngestComplaint(ctx, coreapi.ComplaintInput{
+		WorkspaceID: workspaceID,
+		// OUR send's contact, never the reported address.
+		Email: s.ContactEmail,
+		// One complaint per send, forever: a re-poll or a redelivered report is a
+		// no-op. Prefixed so a mail-borne report cannot collide with a provider
+		// feed's own event ids.
+		ProviderEventID: "arf:" + s.SendID,
+		SendID:          s.SendID,
+	}); err != nil {
+		// A PERMANENT rejection is skipped, not retried. Retrying one does not merely
+		// waste a task: this function returns before SetInboxCursor, so the mailbox's
+		// cursor never advances and EVERY inbound signal for it stops — campaign
+		// replies, bounces, warmup receipts — indefinitely, on the strength of one
+		// unauthenticated inbound message. Everything else is transient and does
+		// retry, because the ingest is idempotent and losing a complaint is a
+		// compliance failure.
+		if errors.Is(err, coreapi.ErrInvalidComplaint) {
+			logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "ingest_rejected")
+			return false, nil
+		}
+		return false, fmt.Errorf("ingest inbound complaint: %w", err)
+	}
+	slog.InfoContext(ctx, "inbox_poll_complaint_ingested",
+		"workspace_id", workspaceID, "mailbox_id", mailboxID,
+		"send_id", s.SendID, "feedback_type", a.FeedbackType)
+	return true, nil
+}
+
+// logDeclinedComplaint records a feedback report that was NOT ingested, with a
+// stable reason token so the reasons can be grouped and alerted on by RATE — a
+// handful is normal, a step change is a bug.
+//
+// The complained-about address is deliberately NOT logged: it is an
+// attacker-supplied address off an unauthenticated message, and this repo's rule
+// is ids and reason tokens over message content. The feedback type is safe (a
+// small closed vocabulary) and is what distinguishes a declined complaint from a
+// report we never intended to act on.
+func logDeclinedComplaint(ctx context.Context, workspaceID, mailboxID string, a ARFResult, reason string) {
+	slog.WarnContext(ctx, "inbox_poll_complaint_declined",
+		"workspace_id", workspaceID, "mailbox_id", mailboxID,
+		"reason", reason, "feedback_type", a.FeedbackType,
+		"original_message_id", a.OriginalMessageID)
+}
+
 // processMessage classifies one fetched message and takes the corresponding
 // action. A DSN is handled first (hard bounce → MarkBounced) and never falls
-// through to the reply path. A non-DSN message that matches a send is
+// through to the reply path, then an RFC 5965 feedback report (→ a complaint on
+// the existing ingest) likewise. A non-DSN message that matches a send is
 // classified, stored in the unified inbox, and then dispatched on the
 // WORKSPACE'S REPLY LABEL for that class rather than on the class itself:
 // suppresses_contact → MarkUnsubscribed, stops_enrollment → MarkReplied,
@@ -644,8 +902,29 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 		// through to the reply-matching path below.
 		switch d.Kind {
 		case HardBounce:
+			// No usable original Message-ID: the bounce is real but
+			// unattributable. Final-Recipient names an address, but a DSN is
+			// unauthenticated and its recipient is attacker-supplied, so
+			// suppressing on it would let anyone kill an address they don't own
+			// with a forged report. Log and skip instead of guessing.
+			//
+			// Checked BEFORE both lookups, not between them: the id is a Postgres
+			// text parameter on either path, so a byte Postgres cannot encode
+			// fails the warmup lookup just as permanently as the campaign one and
+			// would wedge this mailbox's cursor forever (usableMessageID). An
+			// EMPTY id short-circuits identically to before — RecordWarmupHardBounce
+			// already refuses one — so only the unusable case changes.
+			originalMessageID := strings.TrimSpace(d.OriginalMessageID)
+			if !usableMessageID(originalMessageID) {
+				reason := "no_message_id"
+				if originalMessageID != "" {
+					reason = "unusable_message_id"
+				}
+				logUnresolvedBounce(ctx, workspaceID, mailboxID, d, reason)
+				return false, nil
+			}
 			if evidence, ok := core.(coreapi.WarmupEvidenceClient); ok {
-				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, d.OriginalMessageID, mailboxID)
+				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, originalMessageID, mailboxID)
 				if err != nil {
 					return false, err
 				}
@@ -654,16 +933,7 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 					return true, nil
 				}
 			}
-			// No returned original Message-ID: the bounce is real but
-			// unattributable. Final-Recipient names an address, but a DSN is
-			// unauthenticated and its recipient is attacker-supplied, so
-			// suppressing on it would let anyone kill an address they don't own
-			// with a forged report. Log and skip instead of guessing.
-			if strings.TrimSpace(d.OriginalMessageID) == "" {
-				logUnresolvedBounce(ctx, workspaceID, mailboxID, d, "no_message_id")
-				return false, nil
-			}
-			s, err := core.FindSendByMessageID(ctx, workspaceID, d.OriginalMessageID)
+			s, err := core.FindSendByMessageID(ctx, workspaceID, originalMessageID)
 			if err != nil {
 				if errors.Is(err, coreapi.ErrNoMatch) {
 					// Best-effort by contract: a bounce for mail this workspace
@@ -694,6 +964,13 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 				"status", d.StatusCode, "original_message_id", d.OriginalMessageID)
 			return true, nil
 		}
+	}
+
+	// The OTHER multipart/report ParseDSN declines: an RFC 5965 abuse feedback
+	// report. Handled here, after the DSN branch and before reply matching, for the
+	// same reason a DSN is — a report about a message is never itself a reply to it.
+	if a := ParseARF(msg.Header, msg.ContentType, msg.Body); a.Kind == AbuseComplaint {
+		return recordInboundComplaint(ctx, core, workspaceID, mailboxID, a)
 	}
 
 	// The standalone IsAutoReply early-skip is intentionally gone: the

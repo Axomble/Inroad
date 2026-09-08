@@ -15,10 +15,15 @@ import (
 
 const maxImportRows = 50000
 
-// builtinColumns are the header names that map to real contact columns. Any
-// other header is a custom-field candidate, so this set is also what stops a
-// workspace defining a custom field called "email" from hijacking the address
-// column.
+// builtinColumns are the header names that map to real contact columns, in the
+// order they appear. Any other header is a custom-field candidate, so this set
+// is also what stops a workspace defining a custom field called "email" from
+// hijacking the address column — on the way in (mapCustomColumns), on the way
+// out (ExportPlan.customFields) and at definition time (normalizeKey).
+//
+// ONE definition, read by both directions. Export used to keep its own
+// identical copy with a comment promising it mirrored this one, which is the
+// drift this list is supposed to prevent.
 var builtinColumns = []string{"email", "first_name", "last_name", "company"}
 
 // ImportResult summarizes the outcome of a CSV import.
@@ -214,9 +219,15 @@ func customValues(rec []string, custom []customColumn) (map[string]string, int) 
 	return values, invalid
 }
 
+// field reads one cell: trimmed, and with the export's formula escape undone.
+//
+// The un-escape lives HERE, at the single point every cell is read, so the
+// round trip holds for the built-in columns and the custom ones alike. Doing it
+// per call site is how one column would keep an apostrophe the others lost.
+// A file from another system is unaffected — see unescapeFormula.
 func field(rec []string, idx int) string {
 	if idx < 0 || idx >= len(rec) {
 		return ""
 	}
-	return strings.TrimSpace(rec[idx])
+	return unescapeFormula(strings.TrimSpace(rec[idx]))
 }

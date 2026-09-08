@@ -22,6 +22,19 @@ var ErrCrossTenant = errors.New("coreapi: cross-tenant access rejected")
 // workspace never sent).
 var ErrNoMatch = errors.New("coreapi: no matching send")
 
+// ErrInvalidComplaint marks a complaint the control plane will NEVER accept, as
+// opposed to one it could not accept right now. It exists so the caller can tell
+// the two apart without knowing anything about the control plane's validation
+// rules — the same job ErrNoMatch does for a lookup.
+//
+// The distinction is load-bearing at the inbox poller, which is fed by
+// unauthenticated inbound mail: a retried permanent rejection returns before
+// SetInboxCursor, so the mailbox's cursor never advances and every inbound signal
+// for it stops — campaign replies and bounces included — until someone notices.
+// A permanent rejection must therefore be a logged skip; only a transient failure
+// may retry.
+var ErrInvalidComplaint = errors.New("coreapi: complaint rejected as invalid")
+
 // CRMCaptureClient is an optional execution-plane capability. Keeping it
 // separate from Client lets inbox workers feature-detect CRM capture without
 // forcing every worker fake and future remote client to implement it.
@@ -56,6 +69,98 @@ type InboxCaptureClient interface {
 type WarmupEvidenceClient interface {
 	RecordWarmupTokenFailure(ctx context.Context, workspaceID, recipientMailbox, fingerprint, reasonCode string) error
 	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (matched bool, err error)
+}
+
+// DeliverabilityComplaintClient is an optional inbox capability: record one
+// complaint that arrived AS MAIL (an RFC 5965 feedback report the inbox poller
+// parsed) through the SAME idempotent ingest POST /deliverability/events feeds.
+//
+// There is deliberately no second complaint path. The score, the at-risk list, the
+// suppression and the campaign circuit breaker already consume ingested
+// complaints; a parallel writer would be a second set of rules for the same
+// evidence, and the two would drift.
+//
+// Kept off Client for the same reason as the capabilities around it: a worker fake
+// or a future HTTP client without it simply records no inbound complaint, which is
+// today's behaviour, and never fails a poll.
+type DeliverabilityComplaintClient interface {
+	// IngestComplaint records one complaint, idempotently on ProviderEventID: a
+	// redelivered or re-polled report writes nothing and therefore CAUSES nothing —
+	// no second suppression, no second breaker evaluation.
+	//
+	// An input the control plane will never accept is reported as
+	// ErrInvalidComplaint so the caller can skip it instead of retrying it forever;
+	// every other error is transient and worth a retry.
+	IngestComplaint(ctx context.Context, in ComplaintInput) error
+}
+
+// ComplaintInput is one complaint the execution plane resolved.
+//
+// Email is the address to suppress and count, and it comes from OUR OWN send row
+// — never from the report. A feedback report arrives as unauthenticated mail, so
+// every address in it is attacker-supplied, and an ingested complaint suppresses
+// workspace-wide and can pause a campaign (docs/security.md invariants 40 and 42):
+// acting on a reported address directly would let anyone able to email a connected
+// mailbox kill a contact they do not own.
+type ComplaintInput struct {
+	WorkspaceID string
+	Email       string
+	// ProviderEventID is the idempotency key. Callers namespace it (the inbox
+	// poller uses "arf:<send id>") so a mail-borne report and a provider feed
+	// cannot collide in one key space.
+	ProviderEventID string
+	// SendID is the send the complaint is about, and it is REQUIRED: it is what
+	// attributes the complaint to a campaign, and a complaint that reaches no
+	// campaign reaches no breaker. A caller that cannot resolve one must decline
+	// the report rather than ingest it unattributed — an unresolvable report is
+	// also an unverifiable one.
+	SendID string
+}
+
+// WarmupSendLookupClient is an optional inbox capability: resolve an inbound
+// message back to the warmup send it is a receipt for when the X-Inroad-Warmup
+// token DID NOT SURVIVE the provider.
+//
+// It exists because Microsoft strips unknown custom headers. A warmup message
+// delivered to an M365 mailbox therefore arrives with no token at all, records no
+// receipt, and falls through into campaign reply/bounce classification — so
+// warmup placement, and the health state machine placement feeds, are computed
+// from a partial sample for every M365 participant.
+//
+// Kept OFF Client, like the three capabilities above, so the worker fakes and a
+// future HTTP client that lack it degrade to header-only detection rather than
+// failing to compile. Degrading is safe: it is exactly today's behaviour.
+//
+// The lookup is deliberately narrow. It answers "is this specific inbound message
+// a warmup send WE made TO THIS mailbox in THIS workspace", which is a fact about
+// our own data — not a claim the message carries. That is what keeps it from
+// weakening the isolation invariant the token verification enforces: a caller may
+// attempt it ONLY when no token was present at all (see inspectWarmup), never to
+// give a forged one a second chance.
+type WarmupSendLookupClient interface {
+	// FindWarmupSendByMessageID resolves an inbound message back to a warmup send
+	// when the token header did not survive the provider. ok=false is NOT an
+	// error: it is the ordinary answer for every non-warmup message that reaches
+	// the poller, which is nearly all of them.
+	//
+	// All three of workspaceID, toMailboxID (the polled mailbox — the send must
+	// have been ADDRESSED to it) and messageID are required and pinned by the
+	// implementation. messageID is the raw RFC 5322 Message-ID field value; the
+	// implementation compares it with angle brackets ignored on BOTH sides,
+	// because RFC 5322 makes <> part of the field rather than of the identifier
+	// and providers are inconsistent about echoing them.
+	FindWarmupSendByMessageID(ctx context.Context, workspaceID, toMailboxID, messageID string) (WarmupSendRef, bool, error)
+}
+
+// WarmupSendRef is a resolved warmup send, carrying only what the receipt path
+// needs to attribute the observation: the send's own id.
+//
+// It is deliberately NOT a warmup.Payload. A Payload is the SIGNED body of a
+// receipt token, and a fallback that could assemble one would be a fallback that
+// could manufacture a token; the recovered id travels as plain data that no code
+// path can mistake for a verified claim.
+type WarmupSendRef struct {
+	WarmupSendID string
 }
 
 // ReplyLabelClient is an optional execution-plane capability (same reasoning as

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/inroad/inroad/internal/platform/jobrun"
 )
 
 func TestCleanupExpiredPurgesOnlyOutsideRetentionWindow(t *testing.T) {
@@ -227,6 +229,104 @@ func TestPurgeDeadLettersPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 	}
 	if !exists(freshA) || !exists(freshB) {
 		t.Error("a second sweep removed rows that were inside the retention window")
+	}
+}
+
+// TestRecordJobRunPersistsWhatTheDecoratorObserved proves the coreapi
+// implementation of jobrun.Recorder round-trips a run unchanged — the write
+// path internal/platform/jobrun.Record depends on, exercised here against
+// real Postgres rather than a fake.
+func TestRecordJobRunPersistsWhatTheDecoratorObserved(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+
+	started := time.Now().Add(-2 * time.Second).Truncate(time.Millisecond)
+	finished := started.Add(1500 * time.Millisecond)
+	run := jobrun.Run{
+		Name:         "domain auth sweep",
+		StartedAt:    started,
+		FinishedAt:   finished,
+		Duration:     finished.Sub(started),
+		Outcome:      jobrun.OutcomeError,
+		ErrorMessage: "dial timeout: no route to host",
+	}
+
+	if err := (client{q: q}).RecordJobRun(ctx, run); err != nil {
+		t.Fatalf("RecordJobRun: %v", err)
+	}
+
+	var gotName, gotOutcome, gotErrMsg string
+	var gotDurationMs int64
+	if err := pool.QueryRow(ctx, `
+		SELECT job_name, outcome, error_message, duration_ms
+		FROM scheduled_job_runs WHERE job_name = $1`, run.Name).
+		Scan(&gotName, &gotOutcome, &gotErrMsg, &gotDurationMs); err != nil {
+		t.Fatalf("verify row: %v", err)
+	}
+	if gotName != run.Name || gotOutcome != run.Outcome || gotErrMsg != run.ErrorMessage {
+		t.Errorf("stored (name, outcome, error) = (%q, %q, %q), want (%q, %q, %q)",
+			gotName, gotOutcome, gotErrMsg, run.Name, run.Outcome, run.ErrorMessage)
+	}
+	if gotDurationMs != run.Duration.Milliseconds() {
+		t.Errorf("stored duration_ms = %d, want %d", gotDurationMs, run.Duration.Milliseconds())
+	}
+}
+
+// task_dead_letters / webhook_deliveries reasoning (invariant 55): six jobs
+// write a row per run through jobrun.Record, several every five minutes, so
+// scheduled_job_runs needed a retention sweep from day one. Global and
+// unpinned like the other purges in this file — deployment maintenance, not
+// a tenant read (these rows carry no workspace_id at all).
+func TestPurgeScheduledJobRunsPurgesOnlyOutsideRetentionWindow(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+
+	seed := func(age string) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO scheduled_job_runs (job_name, started_at, finished_at, duration_ms, outcome, error_message)
+			VALUES ('warmup sweep', now() - $1::interval, now() - $1::interval + interval '1 second', 1000, 'ok', '')
+			RETURNING id`, age).Scan(&id); err != nil {
+			t.Fatalf("seed %s row: %v", age, err)
+		}
+		return id
+	}
+	// 29 and 31 days, either side of the 30-day retention boundary — the only
+	// values that would catch the interval being wrong by, say, a week.
+	expired, fresh := seed("31 days"), seed("29 days")
+
+	deleted, err := (client{q: q}).PurgeScheduledJobRuns(ctx)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted < 1 {
+		t.Fatalf("deleted rows = %d, want at least 1", deleted)
+	}
+
+	exists := func(id uuid.UUID) bool {
+		t.Helper()
+		var ok bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM scheduled_job_runs WHERE id = $1)`, id).
+			Scan(&ok); err != nil {
+			t.Fatalf("verify %s: %v", id, err)
+		}
+		return ok
+	}
+	if exists(expired) {
+		t.Error("31-day-old row survived the purge")
+	}
+	if !exists(fresh) {
+		t.Error("29-day-old row was removed by the purge; it is inside the retention window")
+	}
+
+	// Idempotent: the sweep runs daily, so "nothing left in window" is its
+	// steady state rather than an edge case.
+	if _, err := (client{q: q}).PurgeScheduledJobRuns(ctx); err != nil {
+		t.Fatalf("second purge: %v", err)
+	}
+	if !exists(fresh) {
+		t.Error("a second sweep removed a row that was inside the retention window")
 	}
 }
 

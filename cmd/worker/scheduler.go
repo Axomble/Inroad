@@ -7,6 +7,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/jobrun"
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
@@ -18,15 +19,20 @@ type sweepRegistrar struct {
 	register func(*asynq.Scheduler) error
 }
 
-// sweepRegistrars is every periodic reconcile the scheduler enqueues.
+// sweepRegistrars is every periodic reconcile the scheduler enqueues. Names
+// come from internal/platform/jobrun's constants, not string literals: the
+// worker wraps each of these six handlers in jobrun.Record with the SAME
+// constants (internal/worker/handlers.go), so "the run ledger's job names
+// match this registrar list" holds by compilation rather than by two people
+// independently typing six strings identically forever.
 func sweepRegistrars() []sweepRegistrar {
 	return []sweepRegistrar{
-		{"enrollments", queue.RegisterSweepEnrollments},
-		{"inbox sweep", queue.RegisterInboxSweep},
-		{"warmup sweep", queue.RegisterWarmupSweep},
-		{"maintenance cleanup", queue.RegisterMaintenanceCleanup},
-		{"domain auth sweep", queue.RegisterDomainAuthSweep},
-		{"recipient esp sweep", queue.RegisterRecipientESPSweep},
+		{jobrun.NameEnrollments, queue.RegisterSweepEnrollments},
+		{jobrun.NameInboxSweep, queue.RegisterInboxSweep},
+		{jobrun.NameWarmupSweep, queue.RegisterWarmupSweep},
+		{jobrun.NameMaintenanceCleanup, queue.RegisterMaintenanceCleanup},
+		{jobrun.NameDomainAuthSweep, queue.RegisterDomainAuthSweep},
+		{jobrun.NameRecipientESPSweep, queue.RegisterRecipientESPSweep},
 	}
 }
 

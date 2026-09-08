@@ -502,3 +502,61 @@ func TestRunSchedulerDefaultsOn(t *testing.T) {
 		})
 	}
 }
+
+// Filesystem storage needs no configuration: the FS root and S3 region get
+// their compiled defaults, and the bucket — the value storage.FromEnv
+// switches on — stays empty.
+func TestLoadStorageDefaults(t *testing.T) {
+	setRequiredSecrets(t)
+	t.Setenv("INROAD_STORAGE_FS_ROOT", "")
+	t.Setenv("INROAD_S3_BUCKET", "")
+	t.Setenv("INROAD_S3_REGION", "")
+	t.Setenv("INROAD_S3_FORCE_PATH_STYLE", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.StorageFSRoot != "./data/blobs" {
+		t.Errorf("StorageFSRoot = %q, want ./data/blobs", cfg.StorageFSRoot)
+	}
+	if cfg.StorageS3Bucket != "" {
+		t.Errorf("StorageS3Bucket = %q, want empty (filesystem backend)", cfg.StorageS3Bucket)
+	}
+	if cfg.StorageS3Region != "us-east-1" {
+		t.Errorf("StorageS3Region = %q, want us-east-1", cfg.StorageS3Region)
+	}
+	if cfg.StorageS3ForcePathStyle {
+		t.Error("StorageS3ForcePathStyle should default false")
+	}
+}
+
+func TestLoadStorageS3Overrides(t *testing.T) {
+	setRequiredSecrets(t)
+	t.Setenv("INROAD_S3_BUCKET", "attachments")
+	t.Setenv("INROAD_S3_REGION", "eu-west-1")
+	t.Setenv("INROAD_S3_ENDPOINT", "https://minio.internal:9000")
+	t.Setenv("INROAD_S3_ACCESS_KEY_ID", "AKIAEXAMPLE")
+	t.Setenv("INROAD_S3_SECRET_ACCESS_KEY", "shh")
+	t.Setenv("INROAD_S3_FORCE_PATH_STYLE", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.StorageS3Bucket != "attachments" {
+		t.Errorf("StorageS3Bucket = %q, want attachments", cfg.StorageS3Bucket)
+	}
+	if cfg.StorageS3Region != "eu-west-1" {
+		t.Errorf("StorageS3Region = %q, want eu-west-1", cfg.StorageS3Region)
+	}
+	if cfg.StorageS3Endpoint != "https://minio.internal:9000" {
+		t.Errorf("StorageS3Endpoint = %q, want the MinIO endpoint", cfg.StorageS3Endpoint)
+	}
+	if cfg.StorageS3AccessKeyID != "AKIAEXAMPLE" || cfg.StorageS3SecretAccessKey != "shh" {
+		t.Errorf("S3 credentials = %q/%q, want AKIAEXAMPLE/shh", cfg.StorageS3AccessKeyID, cfg.StorageS3SecretAccessKey)
+	}
+	if !cfg.StorageS3ForcePathStyle {
+		t.Error("StorageS3ForcePathStyle should be true")
+	}
+}

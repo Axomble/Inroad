@@ -150,6 +150,15 @@ func TestRegisterSweepsRegistersEverySweep(t *testing.T) {
 	}
 }
 
+// "Every sweep in this list is wrapped in jobrun.Record under this name" used to
+// be asserted here by comparing sweepRegistrars() to the jobrun.Name* constants.
+// That proved less than it read: BOTH sides of the comparison were the constants,
+// and the third side — internal/worker/handlers.go, where the wrapping actually
+// happens — was never touched, so deleting a jobrun.Record wrap left it green.
+// See TestEverySweepDispatchedThroughRegisterRecordsOneLedgerRow in
+// jobrunledger_test.go, which dispatches all six task types through the real
+// worker.Register and counts the rows instead.
+
 // A registration failure names the sweep that failed, so the error tells an
 // operator which periodic task is misconfigured rather than just "it failed".
 func TestRegisterSweepsNamesTheFailingSweep(t *testing.T) {

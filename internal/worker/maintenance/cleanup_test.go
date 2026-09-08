@@ -28,12 +28,15 @@ type cleanupCore struct {
 	deadLettersErr      error
 	webhooksDeleted     int64
 	webhooksErr         error
+	jobRunsDeleted      int64
+	jobRunsErr          error
 	called              bool
 	idempotencyCalled   bool
 	observationsCalled  bool
 	workersCalled       bool
 	deadLettersCalled   bool
 	webhooksCalled      bool
+	jobRunsCalled       bool
 }
 
 func (c *cleanupCore) CleanupExpired(context.Context) (int64, error) {
@@ -66,13 +69,18 @@ func (c *cleanupCore) PurgeWebhookDeliveries(context.Context) (int64, error) {
 	return c.webhooksDeleted, c.webhooksErr
 }
 
+func (c *cleanupCore) PurgeScheduledJobRuns(context.Context) (int64, error) {
+	c.jobRunsCalled = true
+	return c.jobRunsDeleted, c.jobRunsErr
+}
+
 func TestCleanupHandler(t *testing.T) {
-	// Six DISTINCT counts. The log line is the only observable this job has —
+	// Seven DISTINCT counts. The log line is the only observable this job has —
 	// nothing returns the numbers — so the assertion below is what makes the
 	// fixture values mean anything, and distinct values are what turn "a count was
 	// logged" into "the RIGHT count was logged": identical numbers would pass a
 	// handler that logged the same variable every time.
-	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2, deadLettersDeleted: 4, webhooksDeleted: 9}
+	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2, deadLettersDeleted: 4, webhooksDeleted: 9, jobRunsDeleted: 6}
 
 	restore := slog.Default()
 	var logs bytes.Buffer
@@ -100,6 +108,9 @@ func TestCleanupHandler(t *testing.T) {
 	if !core.webhooksCalled {
 		t.Fatal("PurgeWebhookDeliveries was not called")
 	}
+	if !core.jobRunsCalled {
+		t.Fatal("PurgeScheduledJobRuns was not called")
+	}
 
 	for _, want := range []struct {
 		msg  string
@@ -111,6 +122,7 @@ func TestCleanupHandler(t *testing.T) {
 		{"dead workers and their assignments purged", 2},
 		{"expired dead letters purged", 4},
 		{"expired webhook deliveries purged", 9},
+		{"expired scheduled job runs purged", 6},
 	} {
 		if got := loggedRows(t, logs.Bytes(), want.msg); got != want.rows {
 			t.Errorf("%q logged rows=%d, want %d — the count is this job's only observable",
@@ -205,5 +217,21 @@ func TestCleanupHandlerReturnsErrorForRetryOnIdempotencyPurgeFailure(t *testing.
 	}
 	if !core.called {
 		t.Fatal("CleanupExpired should still have run before the idempotency purge failed")
+	}
+}
+
+// scheduled_job_runs is the newest addition to this purge chain, run last.
+// Like the dead-letter and dead-worker purges before it, its own failure must
+// surface for retry rather than let the run ledger grow unbounded in silence
+// (invariant 55's reasoning, applied to internal/platform/jobrun's writes).
+func TestCleanupHandlerReturnsErrorOnScheduledJobRunPurgeFailure(t *testing.T) {
+	want := errors.New("db unavailable")
+	core := &cleanupCore{jobRunsErr: want}
+	err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
+	if !errors.Is(err, want) {
+		t.Fatalf("handler error = %v, want %v", err, want)
+	}
+	if !core.webhooksCalled {
+		t.Fatal("the earlier purges should still have run")
 	}
 }

@@ -26,6 +26,18 @@ type fakeStore struct {
 	countErr   error
 	lastFilter SearchFilter
 
+	// exportPages, when non-nil, scripts StreamExport's multi-page reads: each
+	// call to Search pops the next page instead of returning searchRows, so an
+	// export test can assert real pagination (a full page, then a short final
+	// one) without a database. searchCalls records every SearchParams a page
+	// was fetched with, in order — export tests use it to assert the second
+	// page's cursor was built from the first page's last row.
+	exportPages [][]SearchRow
+	// searchErrAfter, when > 0, withholds searchErr until that many Search
+	// calls have already succeeded — see Search.
+	searchErrAfter int
+	searchCalls    []SearchParams
+
 	// record holds the record-page reads; its methods live in record_test.go.
 	record recordFake
 }
@@ -39,7 +51,22 @@ func (f *fakeStore) AddToList(context.Context, uuid.UUID, uuid.UUID) error { ret
 
 func (f *fakeStore) Search(_ context.Context, _ uuid.UUID, p SearchParams) ([]SearchRow, error) {
 	f.lastSearch = p
-	return f.searchRows, f.searchErr
+	f.searchCalls = append(f.searchCalls, p)
+	err := f.searchErr
+	// searchErrAfter lets a test fail a LATER page than the first, which is the
+	// only way to reach the mid-stream truncation the export handler has to
+	// record: rows already handed to the client, then the query dies.
+	if f.searchErrAfter > 0 && len(f.searchCalls) <= f.searchErrAfter {
+		err = nil
+	}
+	if f.exportPages != nil {
+		call := len(f.searchCalls) - 1
+		if call >= len(f.exportPages) {
+			return nil, err
+		}
+		return f.exportPages[call], err
+	}
+	return f.searchRows, err
 }
 
 func (f *fakeStore) CountMatches(_ context.Context, _ uuid.UUID, filter SearchFilter, _ int) (int64, error) {
