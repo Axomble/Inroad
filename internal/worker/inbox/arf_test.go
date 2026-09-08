@@ -47,6 +47,54 @@ Hey, are we still on for tomorrow?
 --ARF1--
 `
 
+// abuseARFWithoutRecipient is abuseARF with the Original-Rcpt-To line removed —
+// RFC 5965 makes that field OPTIONAL, and several real FBLs redact it.
+//
+// It is the least-corroborated shape this package will act on: with no reported
+// recipient there is nothing to cross-check the resolved send against, so the
+// quoted Message-ID is the ONLY thing tying the report to mail we sent. Every
+// other fixture here either carries the field or has no resolvable id, which
+// left "resolvable id + no Original-Rcpt-To → ingest" exercised by nothing.
+const abuseARFWithoutRecipient = `From: FBL Sender <fbl@fbl.provider.example>
+To: abuse-reports@acme.test
+Subject: FW: Spam complaint
+Date: Sun, 8 Mar 2026 14:00:00 +0000
+Message-ID: <arf-5@fbl.provider.example>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=feedback-report;
+	boundary="ARF5"
+
+--ARF5
+Content-Type: text/plain; charset="US-ASCII"
+
+This is an email abuse report for an email message received from IP
+192.0.2.10 on Sun, 8 Mar 2026 13:59:00 +0000.
+
+--ARF5
+Content-Type: message/feedback-report
+
+Feedback-Type: abuse
+User-Agent: SomeFBL/1.0
+Version: 1
+Original-Mail-From: <bounces@acme.test>
+Arrival-Date: Sun, 8 Mar 2026 13:59:00 +0000
+Reporting-MTA: dns; mx.fbl.provider.example
+Source-IP: 192.0.2.10
+Reported-Domain: acme.test
+
+--ARF5
+Content-Type: message/rfc822
+
+From: sales@acme.test
+To: recipient@corp.example
+Subject: Quick question
+Message-ID: <orig-arf@acme.test>
+Date: Sun, 8 Mar 2026 13:58:00 +0000
+
+Hey, are we still on for tomorrow?
+--ARF5--
+`
+
 // notSpamARF is the INVERSE signal, registered by RFC 6650: a recipient rescuing
 // our mail out of their spam folder. It is a feedback report and it is not a
 // complaint.

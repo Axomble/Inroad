@@ -522,9 +522,11 @@ func recoverWarmupSendID(ctx context.Context, core coreapi.Client, p queue.Inbox
 	}
 	// An absent Message-ID cannot identify anything, and warmup_sends.message_id
 	// DEFAULTs to '' — so a lookup on "" would ask the database to match every
-	// queued row rather than nothing.
+	// queued row rather than nothing. An id carrying a byte Postgres cannot
+	// encode gets the same "not warmup" answer rather than a permanent lookup
+	// failure that would wedge this mailbox's cursor forever (usableMessageID).
 	messageID := strings.TrimSpace(msg.Header.Get("Message-ID"))
-	if messageID == "" {
+	if !usableMessageID(messageID) {
 		return "", nil
 	}
 	ref, found, err := lookup.FindWarmupSendByMessageID(ctx, p.WorkspaceID, p.MailboxID, messageID)
@@ -788,15 +790,24 @@ func recordInboundComplaint(ctx context.Context, core coreapi.Client, workspaceI
 		return false, nil
 	}
 	// A redacted original message leaves nothing but an attacker-supplied address,
-	// which is precisely what must not be acted on alone.
-	if strings.TrimSpace(a.OriginalMessageID) == "" {
-		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "no_original_message_id")
+	// which is precisely what must not be acted on alone. An id we cannot use as
+	// a lookup key is declined for the same reason and one more: asking Postgres
+	// about it fails permanently and would freeze this mailbox's cursor
+	// (usableMessageID), which is exactly the outcome the ErrInvalidComplaint arm
+	// below exists to prevent.
+	originalMessageID := strings.TrimSpace(a.OriginalMessageID)
+	if !usableMessageID(originalMessageID) {
+		reason := "no_original_message_id"
+		if originalMessageID != "" {
+			reason = "unusable_original_message_id"
+		}
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, reason)
 		return false, nil
 	}
 	// A warmup send can never be resolved here: warmup mail lives in warmup_sends,
 	// which this lookup does not read, so a report quoting one falls out as
 	// no_matching_send rather than becoming a campaign complaint (spec §9.4).
-	s, err := core.FindSendByMessageID(ctx, workspaceID, a.OriginalMessageID)
+	s, err := core.FindSendByMessageID(ctx, workspaceID, originalMessageID)
 	if err != nil {
 		if errors.Is(err, coreapi.ErrNoMatch) {
 			// A forwarded report, a purged send, or a forgery quoting an id we do
@@ -891,8 +902,29 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 		// through to the reply-matching path below.
 		switch d.Kind {
 		case HardBounce:
+			// No usable original Message-ID: the bounce is real but
+			// unattributable. Final-Recipient names an address, but a DSN is
+			// unauthenticated and its recipient is attacker-supplied, so
+			// suppressing on it would let anyone kill an address they don't own
+			// with a forged report. Log and skip instead of guessing.
+			//
+			// Checked BEFORE both lookups, not between them: the id is a Postgres
+			// text parameter on either path, so a byte Postgres cannot encode
+			// fails the warmup lookup just as permanently as the campaign one and
+			// would wedge this mailbox's cursor forever (usableMessageID). An
+			// EMPTY id short-circuits identically to before — RecordWarmupHardBounce
+			// already refuses one — so only the unusable case changes.
+			originalMessageID := strings.TrimSpace(d.OriginalMessageID)
+			if !usableMessageID(originalMessageID) {
+				reason := "no_message_id"
+				if originalMessageID != "" {
+					reason = "unusable_message_id"
+				}
+				logUnresolvedBounce(ctx, workspaceID, mailboxID, d, reason)
+				return false, nil
+			}
 			if evidence, ok := core.(coreapi.WarmupEvidenceClient); ok {
-				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, d.OriginalMessageID, mailboxID)
+				matched, err := evidence.RecordWarmupHardBounce(ctx, workspaceID, originalMessageID, mailboxID)
 				if err != nil {
 					return false, err
 				}
@@ -901,16 +933,7 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 					return true, nil
 				}
 			}
-			// No returned original Message-ID: the bounce is real but
-			// unattributable. Final-Recipient names an address, but a DSN is
-			// unauthenticated and its recipient is attacker-supplied, so
-			// suppressing on it would let anyone kill an address they don't own
-			// with a forged report. Log and skip instead of guessing.
-			if strings.TrimSpace(d.OriginalMessageID) == "" {
-				logUnresolvedBounce(ctx, workspaceID, mailboxID, d, "no_message_id")
-				return false, nil
-			}
-			s, err := core.FindSendByMessageID(ctx, workspaceID, d.OriginalMessageID)
+			s, err := core.FindSendByMessageID(ctx, workspaceID, originalMessageID)
 			if err != nil {
 				if errors.Is(err, coreapi.ErrNoMatch) {
 					// Best-effort by contract: a bounce for mail this workspace

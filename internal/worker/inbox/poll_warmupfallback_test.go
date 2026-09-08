@@ -44,9 +44,17 @@ type warmupLookupKey struct {
 // normalisation is the STORE's job (internal/coreapi/inprocess, where the
 // comparison lives and is tested), so this fake deliberately does not normalise:
 // a test here asserts what the poller passes, never what the store would match.
+//
+// It DOES model the encoding refusal above, because a fake that answered
+// "not found" for a key the real database cannot even be asked about would make
+// the wedge untestable — the exact "a test that mocks everything asserts
+// nothing" shape CONTRIBUTING.md warns about.
 func (w *warmupLookupCore) FindWarmupSendByMessageID(_ context.Context, workspaceID, toMailboxID, messageID string) (coreapi.WarmupSendRef, bool, error) {
 	k := warmupLookupKey{workspaceID, toMailboxID, messageID}
 	w.lookups = append(w.lookups, k)
+	if !encodableByPostgres(messageID) {
+		return coreapi.WarmupSendRef{}, false, errInvalidEncoding
+	}
 	if w.err != nil {
 		return coreapi.WarmupSendRef{}, false, w.err
 	}
@@ -266,6 +274,42 @@ func TestPollMessageWithNoMessageIDAttemptsNoFallbackLookup(t *testing.T) {
 	}
 	if len(core.lookups) != 0 {
 		t.Fatalf("a message with no Message-ID must not be looked up, got %+v", core.lookups)
+	}
+}
+
+// The fallback asks about EVERY tokenless inbound message, so its key is the raw
+// Message-ID of unauthenticated mail on its way into a Postgres text parameter.
+// A byte Postgres cannot encode makes that lookup fail permanently — not
+// ErrNoRows, not transient — so the poll would return before SetInboxCursor and
+// refetch the same message on every pass, forever. One email with
+// `Message-ID: <\xff@x.test>` would stop every campaign reply, bounce, complaint
+// and warmup receipt for that mailbox.
+//
+// The guard is in the poller, before the lookup: an id that is not printable
+// US-ASCII gets the same "not warmup" answer an absent one already gets.
+func TestPollNonASCIIMessageIDNeitherFailsThePollNorReachesTheLookup(t *testing.T) {
+	for name, messageID := range map[string]string{
+		"invalid utf-8": "<\xff@x.test>",
+		"nul byte":      "<\x00@x.test>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := newWarmupLookupCore(t)
+			reader := &fakeReader{
+				uidValidity: 5, uidNext: 12,
+				msgs: []mail.InboundMessage{headerlessMsg(t, 11, messageID, "<none@x>")},
+			}
+
+			if err := runWarmupPoll(t, core, reader, &spyEngageEnqueuer{}); err != nil {
+				t.Fatalf("an unusable Message-ID must not fail the poll, got %v", err)
+			}
+			if !core.cursorSet {
+				t.Fatal("the cursor must advance past a message whose id cannot be looked up; " +
+					"leaving it wedges every inbound signal for this mailbox forever")
+			}
+			if len(core.lookups) != 0 {
+				t.Fatalf("the lookup must not be attempted at all, got %+v", core.lookups)
+			}
+		})
 	}
 }
 

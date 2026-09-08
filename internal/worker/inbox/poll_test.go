@@ -78,6 +78,9 @@ type stubCore struct {
 	// lookupWorkspaces records every workspace id FindSendByMessageID was
 	// called with, so a test can prove the poll pins the tenant it was given.
 	lookupWorkspaces []string
+	// lookupIDs records every Message-ID it was asked about, so a test can
+	// prove a key the database could not accept was never presented at all.
+	lookupIDs []string
 
 	cursorSet      bool
 	cursorUID      uint32
@@ -147,6 +150,13 @@ func (f *fakeGmailReader) Fetch(_ context.Context, _, sinceHistoryID string, _ i
 
 func (s *stubCore) FindSendByMessageID(_ context.Context, workspaceID, messageID string) (coreapi.SendRef, error) {
 	s.lookupWorkspaces = append(s.lookupWorkspaces, workspaceID)
+	s.lookupIDs = append(s.lookupIDs, messageID)
+	// The real store's encoding refusal (see errInvalidEncoding): a Message-ID
+	// off unauthenticated mail is a Postgres text parameter, and a byte it
+	// cannot encode fails permanently rather than reading as no match.
+	if !encodableByPostgres(messageID) {
+		return coreapi.SendRef{}, errInvalidEncoding
+	}
 	// Mirror the real query's workspace pin: a send belonging to another
 	// workspace is not visible, so it reads as no match rather than a hit.
 	if s.sendRefWorkspace != "" && s.sendRefWorkspace != workspaceID {

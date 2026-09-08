@@ -142,6 +142,43 @@ func TestPollARFWhoseReportedRecipientDisagreesWithTheSendIngestsNothing(t *test
 	}
 }
 
+// The branch a forger would use, and the one nothing else covered: RFC 5965
+// makes Original-Rcpt-To OPTIONAL, and the cross-check above is SKIPPED entirely
+// when it is absent (`a.ComplainedRecipient != "" && ...`). So this shape has no
+// corroboration at all beyond the quoted Message-ID.
+//
+// The behaviour pinned here is that it still ingests. That is deliberate, not an
+// oversight: real FBLs do redact the field, and refusing those reports would
+// silently drop genuine complaints — a compliance failure — while buying nothing,
+// because the cross-check only ever REFUSES a report and never adds proof. The
+// whole bar for this path is therefore "already knows a real Message-ID of a real
+// send" with nothing behind it, which is what docs/security.md invariant 65 has
+// to state rather than imply. If that bar is ever raised, this test is the one
+// that must change, and its failure will say so.
+func TestPollARFWithoutAReportedRecipientStillIngestsOnTheResolvedSend(t *testing.T) {
+	// The fixture must actually BE the uncorroborated shape. Without this, a
+	// fixture that drifted back to carrying Original-Rcpt-To would make the test
+	// re-cover the already-covered branch and pass for the wrong reason.
+	if r := ParseARF(parseFixture(t, abuseARFWithoutRecipient)); r.ComplainedRecipient != "" {
+		t.Fatalf("fixture setup: ComplainedRecipient = %q, want empty", r.ComplainedRecipient)
+	}
+	core := newComplaintCore()
+
+	if err := runARFPoll(t, core, abuseARFWithoutRecipient); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.complaints) != 1 {
+		t.Fatalf("a report with no Original-Rcpt-To must still ingest against the resolved send, got %+v", core.complaints)
+	}
+	got := core.complaints[0]
+	if got.Email != "recipient@corp.example" {
+		t.Errorf("Email = %q, want the resolved send's contact — never anything the report named", got.Email)
+	}
+	if got.SendID != "snd-1" || got.ProviderEventID != "arf:snd-1" {
+		t.Errorf("SendID/ProviderEventID = %q/%q, want snd-1/arf:snd-1", got.SendID, got.ProviderEventID)
+	}
+}
+
 // The same address in a different case is the same mailbox, so a case difference
 // must not throw away a real complaint.
 func TestPollARFRecipientCrossCheckIsCaseInsensitive(t *testing.T) {
