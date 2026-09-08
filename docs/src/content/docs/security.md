@@ -804,10 +804,24 @@ write history that never happened.
       attacker-controlled; without the binding a forged DSN to any connected mailbox
       wrote a trusted bounce against a different one
       (`TestRecordWarmupHardBounceRequiresTheObservingMailboxToBeTheSender`).
-    - `placement` requires a verified signed token AND a DB-proven send→recipient
-      binding. A later observation of the SAME receipt may only make the placement
-      worse (`inbox`/`tabbed`/`other` → `spam`), superseding the row rather than
-      adding one, so one message is always one sample: a re-poll cannot inflate the
+    - `placement` requires a DB-proven send→recipient binding, reached by ONE of
+      two routes and never by an inbound claim. The first is a verified signed
+      token. The second exists because Microsoft strips unknown custom headers, so
+      warmup mail to an M365 mailbox carries no token at all and was being counted
+      as no observation: `FindWarmupSendByMessageID`
+      (`internal/coreapi/inprocess/warmupsendlookup.go`) matches the inbound
+      `Message-ID` against `warmup_sends.message_id` for a `sent` row in THIS
+      workspace whose `to_mailbox` is THE POLLED MAILBOX. That is a lookup in our
+      own data rather than a claim the message carries, and the receipt INSERT
+      re-proves the same binding regardless. Only a genuinely ABSENT header may
+      take that route: a forged or wrong-workspace token is recorded as
+      `invalid_token` and never retried through it
+      (`TestPollForgedWarmupTokenNeverFallsBackToMessageID`), because a second
+      door would let an attacker whose forged send id we refuse simply omit it and
+      have us resolve a real one.
+      A later observation of the SAME receipt may only make the placement worse
+      (`inbox`/`tabbed`/`other` → `spam`), superseding the row rather than adding
+      one, so one message is always one sample: a re-poll cannot inflate the
       evidence, and the engager's own rescue of a spam message back into the inbox
       cannot erase the evidence that the rescue was needed
       (`TestPlacementReclassificationIsMonotoneAndCountsOnce`).
