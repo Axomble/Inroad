@@ -24,10 +24,18 @@ const webhookApi = api
         invalidatesTags: [{ type: 'WebhookEndpoint', id: 'LIST' }],
       },
       // rotateWebhookEndpointSecret invalidates nothing. It changes only the
-      // secret, which is never cached (shown once, then held in component
-      // state) — every field the list actually renders (url, description,
+      // secret, and every field the list actually renders (url, description,
       // event_types, active, created_at) is untouched, so refetching the list
       // would be a round trip for zero visible change.
+      //
+      // The secret is not in the QUERY cache, but it is not "never cached"
+      // either: RTK Query mirrors every mutation's `data` into
+      // `state[api.reducerPath].mutations[...]`, so the response sits there
+      // until the caller resets it or the component holding the hook unmounts.
+      // The `api` reducer is not persisted (store/index.ts whitelists UI slices
+      // only), so this is not a live leak — but WebhookEndpointRow stays
+      // mounted for the life of the settings page and therefore calls `reset()`
+      // explicitly when the reveal is dismissed.
       listWebhookDeliveries: {
         // Scoped per endpoint id rather than one shared LIST: an operator can
         // have two endpoints' delivery logs open at once, and a shared tag

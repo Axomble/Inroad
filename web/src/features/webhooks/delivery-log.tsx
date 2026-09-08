@@ -58,13 +58,20 @@ export function DeliveryLog({ endpointId }: { endpointId: string }) {
     setRecovered(true)
   }, [staleCursor])
 
+  // Both pagers clear the recovery notice. It reports a ONE-TIME event ("we
+  // reset your position"), so leaving it up while the operator pages normally
+  // turns a true statement about the last page into a false one about this
+  // page — and it never came down at all, because nothing else ever set
+  // `recovered` back to false.
   function goNext() {
     if (nextCursor === null) return
+    setRecovered(false)
     setVisited((stack) => pushCursor(stack, cursor))
     setCursor(nextCursor)
   }
 
   function goBack() {
+    setRecovered(false)
     const { stack, cursor: previous } = popCursor(visited)
     setVisited(stack)
     setCursor(previous)
@@ -78,7 +85,15 @@ export function DeliveryLog({ endpointId }: { endpointId: string }) {
         </p>
       )}
 
-      {isLoading ? (
+      {/*
+        `staleCursor` renders as loading, not as an error. The 400 it stands for
+        is a condition this component has ALREADY decided how to handle — the
+        effect above resets to the first page and the refetch is in flight — so
+        announcing it through `role="alert"` would interrupt a screen reader
+        with a failure that is gone by the next frame. A skeleton is the honest
+        description of what is happening.
+      */}
+      {isLoading || staleCursor ? (
         <LoadingRows />
       ) : isError ? (
         <p role="alert" className="flex items-start gap-1.5 text-[12px] leading-snug text-danger">

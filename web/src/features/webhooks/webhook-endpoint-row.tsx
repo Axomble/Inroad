@@ -44,7 +44,15 @@ export function WebhookEndpointRow({ endpoint }: { endpoint: WebhookEndpoint }) 
   const [showDeliveries, setShowDeliveries] = useState(false)
 
   const [deleteEndpoint, { isLoading: deleting }] = useDeleteWebhookEndpointMutation()
-  const [rotateSecret, { isLoading: rotating }] = useRotateWebhookEndpointSecretMutation()
+  // `resetRotation` is not optional here, unlike in CreateEndpointDialog. RTK
+  // Query mirrors a mutation's `data` — including `secret` — into
+  // `state[api.reducerPath].mutations[...]`, and that dialog unmounts on close
+  // so its entry is dropped for it. THIS component stays mounted for as long as
+  // the settings page is open, so without an explicit reset the rotated secret
+  // would sit in the store indefinitely. Not a live leak (the `api` reducer is
+  // never persisted), but anything serialising store state — a devtools export,
+  // a future error-report attachment — would capture it.
+  const [rotateSecret, { isLoading: rotating, reset: resetRotation }] = useRotateWebhookEndpointSecretMutation()
   const [ping, { isLoading: pinging }] = usePingWebhookEndpointMutation()
   const busy = deleting || rotating || pinging
 
@@ -64,9 +72,9 @@ export function WebhookEndpointRow({ endpoint }: { endpoint: WebhookEndpoint }) 
     setActionError(null)
     try {
       const result = await rotateSecret({ id: endpoint.id }).unwrap()
-      // The secret lives only in this row's local state, never Redux/persist —
-      // it is unrecoverable the moment this component unmounts, which is the
-      // point (see secret-reveal.tsx).
+      // Held only while the reveal dialog is open: local state clears on
+      // dismissal and `resetRotation()` drops the mutation cache entry that
+      // also holds it (see the hook above and onDone below).
       setRotatedSecret(result.secret)
     } catch (error) {
       setConfirming(null)
@@ -200,6 +208,9 @@ export function WebhookEndpointRow({ endpoint }: { endpoint: WebhookEndpoint }) 
               onDone={() => {
                 setRotatedSecret(null)
                 setConfirming(null)
+                // Clears the mutation cache entry the secret is also mirrored
+                // into — this row does not unmount, so nothing else would.
+                resetRotation()
               }}
             />
           ) : (
