@@ -713,9 +713,103 @@ func logUnresolvedBounce(ctx context.Context, workspaceID, mailboxID string, d D
 		"original_message_id", d.OriginalMessageID)
 }
 
+// recordInboundComplaint records a parsed feedback report as a complaint on the
+// EXISTING ingest — the same idempotent write POST /deliverability/events feeds,
+// so the suppression, the deliverability score, the at-risk list and the campaign
+// circuit breaker all consume it with no changes and no second path.
+//
+// What the report is allowed to establish is deliberately narrow. An ARF arrives
+// as ordinary, unauthenticated mail: anyone who can email a connected mailbox can
+// deliver one, and an ingested complaint suppresses an address workspace-wide and
+// can pause a campaign (docs/security.md invariants 40, 42). So the report's own
+// Original-Rcpt-To is never the thing acted on. The Message-ID it QUOTES is
+// resolved against our own sends, and the complaint is recorded against that
+// send's contact — the same discipline the hard-bounce arm above uses, and for the
+// same reason it refuses to suppress on Final-Recipient. The forgery surface
+// shrinks to "already knows a real Message-ID of a real send", which is the
+// documented residual bar for reply-driven suppression rather than a new one.
+//
+// It returns matched=true only for a complaint actually ingested. Every refusal is
+// a logged skip, never an error: a report we cannot attribute must not hold back
+// the cursor that campaign replies and bounces also ride on. An ingest FAILURE, by
+// contrast, does propagate — the write is idempotent on provider_event_id, so a
+// retry cannot double-count, and dropping a complaint is a compliance failure.
+func recordInboundComplaint(ctx context.Context, core coreapi.Client, workspaceID, mailboxID string, a ARFResult) (bool, error) {
+	ingest, ok := core.(coreapi.DeliverabilityComplaintClient)
+	if !ok {
+		// No capability: the report is parsed and dropped, which is the behaviour
+		// before this path existed. Logged so a deployment that quietly cannot
+		// record complaints is visible.
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "capability_unavailable")
+		return false, nil
+	}
+	// A redacted original message leaves nothing but an attacker-supplied address,
+	// which is precisely what must not be acted on alone.
+	if strings.TrimSpace(a.OriginalMessageID) == "" {
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "no_original_message_id")
+		return false, nil
+	}
+	// A warmup send can never be resolved here: warmup mail lives in warmup_sends,
+	// which this lookup does not read, so a report quoting one falls out as
+	// no_matching_send rather than becoming a campaign complaint (spec §9.4).
+	s, err := core.FindSendByMessageID(ctx, workspaceID, a.OriginalMessageID)
+	if err != nil {
+		if errors.Is(err, coreapi.ErrNoMatch) {
+			// A forwarded report, a purged send, or a forgery quoting an id we do
+			// not have. Logged rather than dropped silently, so a parser that has
+			// stopped resolving anything is a rising count and not a reputation
+			// problem discovered weeks later.
+			logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "no_matching_send")
+			return false, nil
+		}
+		return false, err
+	}
+	// Cross-check, one direction only: the send row is the authority, and a report
+	// that names a DIFFERENT recipient than the send went to is refused rather than
+	// redirected. Case-insensitive, because the same mailbox in a different case is
+	// the same mailbox and a real complaint must not be thrown away over it.
+	if a.ComplainedRecipient != "" && !strings.EqualFold(a.ComplainedRecipient, s.ContactEmail) {
+		logDeclinedComplaint(ctx, workspaceID, mailboxID, a, "recipient_mismatch")
+		return false, nil
+	}
+	if err := ingest.IngestComplaint(ctx, coreapi.ComplaintInput{
+		WorkspaceID: workspaceID,
+		// OUR send's contact, never the reported address.
+		Email: s.ContactEmail,
+		// One complaint per send, forever: a re-poll or a redelivered report is a
+		// no-op. Prefixed so a mail-borne report cannot collide with a provider
+		// feed's own event ids.
+		ProviderEventID: "arf:" + s.SendID,
+		SendID:          s.SendID,
+	}); err != nil {
+		return false, fmt.Errorf("ingest inbound complaint: %w", err)
+	}
+	slog.InfoContext(ctx, "inbox_poll_complaint_ingested",
+		"workspace_id", workspaceID, "mailbox_id", mailboxID,
+		"send_id", s.SendID, "feedback_type", a.FeedbackType)
+	return true, nil
+}
+
+// logDeclinedComplaint records a feedback report that was NOT ingested, with a
+// stable reason token so the reasons can be grouped and alerted on by RATE — a
+// handful is normal, a step change is a bug.
+//
+// The complained-about address is deliberately NOT logged: it is an
+// attacker-supplied address off an unauthenticated message, and this repo's rule
+// is ids and reason tokens over message content. The feedback type is safe (a
+// small closed vocabulary) and is what distinguishes a declined complaint from a
+// report we never intended to act on.
+func logDeclinedComplaint(ctx context.Context, workspaceID, mailboxID string, a ARFResult, reason string) {
+	slog.WarnContext(ctx, "inbox_poll_complaint_declined",
+		"workspace_id", workspaceID, "mailbox_id", mailboxID,
+		"reason", reason, "feedback_type", a.FeedbackType,
+		"original_message_id", a.OriginalMessageID)
+}
+
 // processMessage classifies one fetched message and takes the corresponding
 // action. A DSN is handled first (hard bounce → MarkBounced) and never falls
-// through to the reply path. A non-DSN message that matches a send is
+// through to the reply path, then an RFC 5965 feedback report (→ a complaint on
+// the existing ingest) likewise. A non-DSN message that matches a send is
 // classified, stored in the unified inbox, and then dispatched on the
 // WORKSPACE'S REPLY LABEL for that class rather than on the class itself:
 // suppresses_contact → MarkUnsubscribed, stops_enrollment → MarkReplied,
@@ -792,6 +886,13 @@ func processMessage(ctx context.Context, core coreapi.Client, classifier *replyc
 				"status", d.StatusCode, "original_message_id", d.OriginalMessageID)
 			return true, nil
 		}
+	}
+
+	// The OTHER multipart/report ParseDSN declines: an RFC 5965 abuse feedback
+	// report. Handled here, after the DSN branch and before reply matching, for the
+	// same reason a DSN is — a report about a message is never itself a reply to it.
+	if a := ParseARF(msg.Header, msg.ContentType, msg.Body); a.Kind == AbuseComplaint {
+		return recordInboundComplaint(ctx, core, workspaceID, mailboxID, a)
 	}
 
 	// The standalone IsAutoReply early-skip is intentionally gone: the

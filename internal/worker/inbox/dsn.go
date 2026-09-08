@@ -1,9 +1,9 @@
-// Package inbox is the execution-plane reply & bounce detection engine.
-// dsn.go and reply.go are the pure per-message logic — parsing delivery-status
-// notifications (DSNs) and matching threading headers back to our own sent
-// mail — with no I/O of their own. poll.go and sweep.go are the asynq
-// handlers that drive them: the IMAP fetch lives behind platform/mail, the DB
-// access behind coreapi.
+// Package inbox is the execution-plane reply, bounce & complaint detection
+// engine. dsn.go, arf.go and reply.go are the pure per-message logic — parsing
+// delivery-status notifications (DSNs), parsing RFC 5965 abuse feedback reports
+// (ARFs), and matching threading headers back to our own sent mail — with no I/O
+// of their own. poll.go and sweep.go are the asynq handlers that drive them: the
+// IMAP fetch lives behind platform/mail, the DB access behind coreapi.
 package inbox
 
 import (
@@ -103,29 +103,41 @@ func ParseDSN(hdr mail.Header, contentType string, body []byte) DSNResult {
 // returned message/rfc822 or message/rfc822-headers part.
 func parseReport(boundary string, body []byte) DSNResult {
 	var result DSNResult
-
-	mr := multipart.NewReader(bytes.NewReader(body), boundary)
-	for {
-		part, err := mr.NextPart()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			break // malformed multipart body: stop, return best-effort so far
-		}
-
-		partMediaType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	walkReportParts(boundary, body, func(partMediaType string, part io.Reader) {
 		switch {
 		case strings.EqualFold(partMediaType, "message/delivery-status"):
 			readDeliveryStatus(part, &result)
 		case strings.EqualFold(partMediaType, "message/rfc822"), strings.EqualFold(partMediaType, "message/rfc822-headers"):
 			result.OriginalMessageID = readMessageID(part)
 		}
-		part.Close()
-	}
-
+	})
 	result.Kind = classifyStatus(result.StatusCode)
 	return result
+}
+
+// walkReportParts walks a multipart/report body and hands each part's parsed media
+// type, with the part itself, to visit. It is shared by the two report parsers
+// (parseReport, parseFeedbackReport) because the traversal — not what is read out
+// of it — is genuinely identical, and it is the traversal that carries the
+// fiddly parts: stop at EOF, stop at the FIRST malformed part and let the caller
+// return whatever it gathered, and close every part that was opened.
+//
+// visit takes an io.Reader rather than the *multipart.Part so a visitor cannot
+// hold onto (or close) a part whose lifetime this loop owns.
+func walkReportParts(boundary string, body []byte, visit func(mediaType string, part io.Reader)) {
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			return // malformed multipart body: stop, caller returns best-effort so far
+		}
+		mediaType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		visit(mediaType, part)
+		part.Close()
+	}
 }
 
 // readDeliveryStatus reads the per-message field group followed by the

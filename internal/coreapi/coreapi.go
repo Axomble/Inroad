@@ -58,6 +58,48 @@ type WarmupEvidenceClient interface {
 	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (matched bool, err error)
 }
 
+// DeliverabilityComplaintClient is an optional inbox capability: record one
+// complaint that arrived AS MAIL (an RFC 5965 feedback report the inbox poller
+// parsed) through the SAME idempotent ingest POST /deliverability/events feeds.
+//
+// There is deliberately no second complaint path. The score, the at-risk list, the
+// suppression and the campaign circuit breaker already consume ingested
+// complaints; a parallel writer would be a second set of rules for the same
+// evidence, and the two would drift.
+//
+// Kept off Client for the same reason as the capabilities around it: a worker fake
+// or a future HTTP client without it simply records no inbound complaint, which is
+// today's behaviour, and never fails a poll.
+type DeliverabilityComplaintClient interface {
+	// IngestComplaint records one complaint, idempotently on ProviderEventID: a
+	// redelivered or re-polled report writes nothing and therefore CAUSES nothing —
+	// no second suppression, no second breaker evaluation.
+	IngestComplaint(ctx context.Context, in ComplaintInput) error
+}
+
+// ComplaintInput is one complaint the execution plane resolved.
+//
+// Email is the address to suppress and count, and it comes from OUR OWN send row
+// — never from the report. A feedback report arrives as unauthenticated mail, so
+// every address in it is attacker-supplied, and an ingested complaint suppresses
+// workspace-wide and can pause a campaign (docs/security.md invariants 40 and 42):
+// acting on a reported address directly would let anyone able to email a connected
+// mailbox kill a contact they do not own.
+type ComplaintInput struct {
+	WorkspaceID string
+	Email       string
+	// ProviderEventID is the idempotency key. Callers namespace it (the inbox
+	// poller uses "arf:<send id>") so a mail-borne report and a provider feed
+	// cannot collide in one key space.
+	ProviderEventID string
+	// SendID is the send the complaint is about, and it is REQUIRED: it is what
+	// attributes the complaint to a campaign, and a complaint that reaches no
+	// campaign reaches no breaker. A caller that cannot resolve one must decline
+	// the report rather than ingest it unattributed — an unresolvable report is
+	// also an unverifiable one.
+	SendID string
+}
+
 // WarmupSendLookupClient is an optional inbox capability: resolve an inbound
 // message back to the warmup send it is a receipt for when the X-Inroad-Warmup
 // token DID NOT SURVIVE the provider.

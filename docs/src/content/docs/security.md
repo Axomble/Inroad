@@ -1217,6 +1217,40 @@ write history that never happened.
     reasoning invariant 55 gives: an append-only table reachable by outside input
     needs a horizon, or a single exposure becomes a permanent one.
 
+## Inbound feedback reports (ARF complaints)
+65. **A complaint that arrives as MAIL is resolved against our own send, never
+    against the address the report names.** `ParseARF`
+    (`internal/worker/inbox/arf.go`) reads an RFC 5965 feedback report, and
+    `recordInboundComplaint` (`poll.go`) routes it to the SAME idempotent ingest
+    `POST /deliverability/events` feeds — so the suppression, the score, the
+    at-risk list and the campaign breaker consume it unchanged, and there is no
+    second complaint path to drift.
+    An ARF is ordinary, unauthenticated mail: anyone able to email a connected
+    mailbox can deliver one, and an ingested complaint suppresses an address
+    workspace-wide and can pause a campaign (invariants 40 and 42) — which is
+    exactly why `deliverability:write` is withheld from OAuth grants. So the
+    report's own `Original-Rcpt-To` is NEVER the address acted on. The
+    `Message-ID` the report QUOTES is resolved with the workspace-pinned
+    `FindSendByMessageID`, and the complaint is recorded against THAT send's
+    contact — the same discipline the hard-bounce arm applies to
+    `Final-Recipient`, for the same reason. A report that quotes nothing, quotes
+    a send we do not have, or names a recipient the send did not go to is a
+    LOGGED SKIP (`inbox_poll_complaint_declined`, with a stable reason token and
+    no address in the log line), never an ingest. The forgery surface is
+    therefore "already knows a real `Message-ID` of a real send" — the documented
+    residual bar for reply-driven suppression, not a new one — and the
+    idempotency key is `arf:<send id>`, so a re-poll or a redelivered report
+    writes nothing and causes nothing.
+    `Original-Mail-From` is deliberately NOT a fallback for the complained
+    recipient: per RFC 5965 it is the offending message's envelope SENDER, i.e.
+    our own mailbox, so falling back to it would name the wrong party entirely.
+    Only `Feedback-Type: abuse|fraud` is a complaint. `not-spam` (RFC 6650) is
+    the INVERSE signal — a recipient rescuing our mail out of spam — and
+    suppressing on it would be backwards; `virus`, `other` and any unregistered
+    or absent value are not actionable, so the default direction is never
+    "suppress". A malformed report yields nothing and never fails the poll: the
+    cursor it would hold back carries every other inbound signal too.
+
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**
   (invariant 63). This is written down BEFORE the feature exists because getting
