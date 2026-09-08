@@ -1418,6 +1418,51 @@ paths:
         '401': { description: Unauthorized }
         '404': { description: List not found }
         '422': { description: "q shorter than 2 characters, unknown sort, or limit out of range" }
+  /contacts.csv:
+    get:
+      operationId: exportContacts
+      tags: [contacts]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The same filtered set as GET /contacts, streamed as CSV: one row per
+        contact, no pagination. `q`, `sort` and `list` are honoured exactly as
+        they are there; `cursor` and `limit` do not apply here — an export is
+        the whole filtered set, not one page of it. The header row is always
+        written, even for zero matching contacts, so an empty result is a
+        readable "nothing matched" file rather than a zero-byte download that
+        looks like a failure.
+
+
+        Columns are `email, first_name, last_name, company`, followed by the
+        workspace's LIVE custom-field keys — the mirror image of what POST
+        /contacts/import accepts, so a file this endpoint produces re-imports
+        unchanged. `company` is the contact's own stored text, not the
+        company a linked CRM record may resolve it to, for the same
+        round-trip reason.
+      parameters:
+        - name: list
+          in: query
+          required: false
+          description: Restrict to one list. Omit for all contacts in the workspace.
+          schema: { type: string, format: uuid }
+        - name: q
+          in: query
+          description: >-
+            Case-insensitive substring match across email, first name, last name and
+            company. Minimum 2 characters.
+          schema: { type: string, minLength: 2 }
+        - name: sort
+          in: query
+          schema: { $ref: '#/components/schemas/ContactSort' }
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema: { type: string }
+        '401': { description: Unauthorized }
+        '404': { description: List not found }
+        '422': { description: "q shorter than 2 characters, or unknown sort" }
   /custom-fields:
     get:
       operationId: listCustomFields

@@ -26,10 +26,16 @@ import (
 // searchColumns is the projection both the page query and the row scan agree
 // on. lower(email) is selected rather than lower-cased in Go so the cursor key
 // is byte-identical to the value idx_contacts_ws_email_id is built on.
+// c.company and c.custom_fields ride along on every page for one caller only
+// (CSV export, see export.go) rather than living in a second, near-identical
+// statement: the whole point of this file's comment above is that the access
+// paths already multiply badly, and a column added here costs one heap fetch
+// already paid for by the join, where a parallel exportSQL would have to
+// re-derive where/sortKey/scanDescending and could drift from this one.
 const searchColumns = `c.id, c.email, c.first_name, c.last_name, c.company_id,
 COALESCE(co.name, c.company) AS company_name, c.job_title, c.linkedin_url,
 (SELECT count(*) FROM deals d WHERE d.workspace_id=c.workspace_id AND d.primary_contact_id=c.id) AS deal_count,
-c.created_at, lower(c.email) AS sort_email`
+c.created_at, lower(c.email) AS sort_email, c.company, c.custom_fields`
 
 // sortKey is the indexed expression a sort orders by.
 func sortKey(s cursor.Sort) string {
