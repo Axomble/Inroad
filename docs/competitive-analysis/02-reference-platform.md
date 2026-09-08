@@ -1,6 +1,8 @@
 # 02 — The reference platform (direct competitor)
 
-**Source:** the reference platform's published source, `main`, read 2026-09-07.
+**Source:** the reference platform's published source, `main`, re-pulled and
+re-read 2026-09-08 (previous read: 2026-09-07 — the head moved by 76 commits in
+that single day, which is itself the most useful datum in this document).
 **License:** Apache 2.0. Porting the *approach* is fine with attribution; copying
 source verbatim needs the notice. This document describes patterns, not code to
 copy, and does not reproduce competitor-internal file paths.
@@ -18,16 +20,19 @@ everything it has is buildable — it's all in a repo that can be read.
 
 ## 1. Shape of the two codebases
 
+Counts re-measured on both trees 2026-09-08; the stale figure is struck where
+it moved.
+
 | | Inroad | Reference platform |
 |---|---|---|
-| Language spread | Go + React (one Go module) | Go + React ×3 SPAs + a BEAM realtime service + a Rust tracking service + a native iOS app |
-| Backend domains | ~33 | ~100 |
-| Services | api, worker | api, consumer, worker, tracking, forms, realtime, updater |
-| Migrations | 156 | ~130 |
-| Go test files | 353 | ~230 |
-| CI workflows | 1 | 4 (ci, image build/push, release, security) |
+| Language spread | Go + React (one Go module) | Go + React ×3 SPAs (dashboard, admin, forms) + a BEAM realtime service + a Rust tracking service + a native iOS app + a marketing site |
+| Backend domains | 33 | ~~~100~~ **89** (measured, not estimated) |
+| Services | api, worker | ~~api, consumer, worker, tracking, forms, realtime, updater~~ **10 binaries**: backend, consumer, worker, forms, tracking, realtime, updater, sandbox, migrate, seed — plus an operator CLI |
+| Migrations | ~~156~~ **158 files / 79 versions** | ~~~130~~ **135** |
+| Go test files | ~~353~~ **360** | ~~~230~~ **237** |
+| CI workflows | ~~1~~ **4** (ci, build/push, release, security) | 4 (ci, image build/push, release, security) |
 | Docs | Astro/Starlight, ~25 pages | ~70 pages (guides / fundamentals / api / self-hosting) |
-| Self-host entry | compose file + several `make` targets | one published, checksummed install script that pulls release images (no clone, no compiler), with a `--wizard` |
+| Self-host entry | compose file + several `make` targets | one published, checksummed install script that pulls release images (no clone, no compiler), with a `--wizard` — and as of 2026-09-07 a commit explicitly rewriting the guide "around what was tested" |
 | Operator tooling | `cmd/migrate`, `cmd/seed` | a first-class operator CLI that talks to the DB directly and works when login is broken |
 
 Read that as: **Inroad tests each feature harder and documents its invariants at
@@ -116,7 +121,7 @@ Grouped by how much they matter for "on par." Each has a verdict for
 
 | Feature | Verdict |
 |---|---|
-| **Outbound webhooks** (HMAC-signed, event-filtered, retried, SSRF-guarded) | **Replicate, P0.** Small, and it's the prerequisite for every integration below. Inroad already has the event bus (`app/events`) to hang it off. |
+| ~~**Outbound webhooks** (HMAC-signed, event-filtered, retried, SSRF-guarded)~~ | ~~**Replicate, P0.**~~ **✅ DONE server-side** (#171): `app/webhook` + `worker/webhook` + `platform/webhookwire`. Only the management UI is outstanding. |
 | **Pre-send email verification** (syntax → MX → SMTP RCPT → catch-all, from a non-sending IP) | **Do-better, P1.** Pluggable provider seam + a built-in SMTP-probe implementation. Cuts bounce rate before it costs reputation. |
 | **Complaint / FBL / ARF ingestion** + a deliverability event ingest API | **Replicate, P1.** Inroad parses DSNs already; add ARF parsing and an idempotent ingest endpoint for external pipelines. |
 | **Hosted lead-capture forms** (builder, embed, submission → contact → campaign) | **Replicate, P1.** A whole sub-app in the reference platform, but high-value: it's how contacts get *in* without a CSV. |
@@ -149,8 +154,8 @@ Grouped by how much they matter for "on par." Each has a verdict for
 |---|---|
 | **One-command installer** (published script, pulls release images, checksummed, wizard) | **Replicate, P1.** Biggest first-impression gap for self-hosters. |
 | **Operator CLI** (create account, set password, grant admin, instance status — direct to DB) | **Replicate, P1.** `cmd/inroadctl`. Recovery when login is broken. |
-| **Release + container-publish CI** (tagged releases, published images, `CHANGELOG`) | **Replicate, P0.** Prerequisite for the installer. |
-| **Security CI** (govulncheck, npm audit, Trivy) + Dependabot | **Replicate, P0.** Called out in the project review as the clearest supply-chain gap. |
+| ~~**Release + container-publish CI** (tagged releases, published images, `CHANGELOG`)~~ | ~~**Replicate, P0.**~~ **✅ DONE** (#171): `release.yml` + `build-push.yml` + `platform/version` + `CHANGELOG.md`. |
+| ~~**Security CI** (govulncheck, npm audit, Trivy) + Dependabot~~ | ~~**Replicate, P0.**~~ **✅ DONE** (#171): `security.yml` + `dependabot.yml`. |
 | **Admin console** (users / workers / campaigns, impersonation, platform analytics) | **Defer, P3.** Only matters for a multi-tenant hosted deployment. |
 | **Org audit trail** (who did what, secrets never recorded) | **Replicate, P1.** Security doc lists it as deferred; it's table stakes for teams. |
 | **Workspace export / import** (portable archive, move instances) | **Do-better, P2.** The reference platform's registry-driven spec (every org table declared with scope/order/group/secret-domain) is the pattern. |
@@ -178,15 +183,58 @@ Grouped by how much they matter for "on par." Each has a verdict for
   counts + today's-sends meter, severity-sorted, "promotes the worst problem
   first." The reference platform has notifications but not this single-glance "is
   everything okay" surface.
-- **Test depth.** 353 test files over ~33 domains vs ~230 over ~100. Per-feature,
-  Inroad is far better covered — the branch/empty/error cases, tenant-scoping
-  guards on every query (`4321fe9`), the "no `@/features/*` import" enforcement
-  test.
+- **Test depth.** 360 test files over 33 domains vs 237 over 89 — ~11 per domain
+  against ~2.7. Per-feature, Inroad is far better covered: the
+  branch/empty/error cases, tenant-scoping guards on every query (`4321fe9`),
+  the "no `@/features/*` import" enforcement test.
 - **Heavily documented invariants.** `docs/security.md`, the migration-numbering
   rationale, the coreapi seam contract. A new contributor can learn *why* from
   the tree.
 
 Do not regress any of these while chasing breadth.
+
+## 4b. What moved on the competitor's side between the two reads
+
+Re-pulling `main` for the 2026-09-08 pass brought 76 commits dated 2026-09-07/08
+alone. Two of them change this document's conclusions rather than its details:
+
+- **The admin console is no longer a "defer, P3" observation about someone
+  else's roadmap — its backend just landed.** Roughly forty admin endpoints in
+  one pass: mailbox sync-governor state with clear-throttle and restart-backfill,
+  in-flight send reservations, cross-workspace dead letters with replay, task
+  failures, webhook delivery health with reclaim, fleet capacity, a control-loop
+  decision log, dedicated worker bindings, operator-driven workspace export and
+  import, per-org API keys and webhooks, warmup abuse history, and signups by
+  acquisition channel. It also added a `scheduled_job_runs` table that **every**
+  backend and consumer loop now records through, with a run-now request picked up
+  within fifteen seconds.
+
+  The transferable idea is not the console. It is `scheduled_job_runs`: a single
+  table every periodic loop writes an ok/error row to, which turns "is the
+  domain-auth sweep actually running" from a log-grep into a query. Inroad has
+  ~10 such loops (`worker/maintenance`, `domainauth`, `recipientesp`,
+  `deliverability`, the warmup pollers) and no equivalent surface. It is an S-M
+  job, it composes with P2.7's instance-health dashboard, and it is worth
+  pulling forward ahead of anything in P3.
+
+- **Their self-hosting story got another pass** ("make self-hosting work end to
+  end and rewrite the guide around what was tested"), and mailbox connectivity
+  keeps absorbing real-user breakage: a third security mode for a mail server on
+  the same machine, IMAP folder identity by name rather than `UIDVALIDITY`
+  (RFC 3501 never promised uniqueness across folders), SMTP auth negotiation
+  handed the normalized host, Message-ID matching with *and* without angle
+  brackets, and an in-house SMTP verifier gaining HELO/MAIL-FROM passthrough
+  plus an optional third-party verification key.
+
+  Every one of those is a P1.8 line item, and the Message-ID bracket fix is a
+  bug Inroad can have today without knowing it. **This is the strongest evidence
+  for the P1.8 verdict below: do not derive that list from first principles when
+  it can be read off a competitor's commit log.**
+
+Read together: the operability gap is not closing on its own, and the parts of
+it that matter most to a self-hoster (does my mailbox connect, is my scheduled
+job running, can I recover without the UI) are exactly the parts Inroad has
+deferred.
 
 ## 5. The honest summary
 

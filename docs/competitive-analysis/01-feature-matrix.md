@@ -1,8 +1,15 @@
 # 01 — Feature matrix
 
-**Reconciled:** 2026-09-07 against Inroad `main` @ `a124e98`, the reference
-platform's published source (`main`), and the hosted incumbent's public 2026
-material.
+**Reconciled:** 2026-09-08 against Inroad `main` @ `d4f5720`, the reference
+platform's published source (`main` @ its 2026-09-08 head), and the hosted
+incumbent's public 2026 material.
+
+> **Previous reconciliation:** 2026-09-07 @ `a124e98`. That pass was written
+> *before* the P0 sprint (#171) merged, so it scored Inroad without the release
+> CI, security CI, outbound webhooks, Redis readiness and Redis-URL work that
+> landed in the very same PR. Rows corrected on this pass carry the stale mark
+> ~~struck out~~ next to the verified one, so what moved is visible rather than
+> silently rewritten.
 
 Columns: **Ref** = the reference platform (open-source peer). **Incmb** = the
 hosted incumbent (closed SaaS).
@@ -28,7 +35,7 @@ Inroad's own paths are cited.
 | Action steps (add/remove tag, create task/deal, unsubscribe, notify, run automation) | ❌ | ✅ | ⚠️ | Non-email nodes that perform a control-plane action then route on. |
 | Switch steps (multi-case routing; value or AI decider) | ❌ | ✅ | ⚠️ | |
 | A/B variants per step, weighted split, per-arm stats | ✅ | ✅ | ✅ | Inroad: deterministic per-enrollment assignment, per-variant send/reply counts. |
-| A/B winner analysis (confidence, auto-promote) | ⚠️ | ✅ | ✅ | Inroad measures per-variant; no automated winner call. |
+| A/B winner analysis (confidence, auto-promote) | ⚠️ | ✅ | ✅ | ~~Inroad measures per-variant; no automated winner call.~~ Inroad **does** name a winner (`campaign/results.go`: highest reply rate, floor of 200 sends on one arm, 1.25× relative margin, `WinnerNote` explaining every abstention). Still ⚠️ only because there is no auto-promote. |
 | Sender pool + rotation (round-robin / LRU / weighted) | ✅ | ✅ | ✅ | Inroad: all three, pure `platform/rotation`, per-enrollment not per-send. |
 | ESP / provider matching (Gmail→Gmail, off/prefer/strict) | ✅ | ✅ | ✅ | Inroad: `recipientesp` sweep caches recipient provider by MX; never dials on the send path. |
 | Timezone-aware send windows, per-weekday, multi-interval | ✅ | ✅ | ✅ | Inroad: IANA zone, overlaps unrepresentable via GiST exclusion constraint. |
@@ -36,7 +43,7 @@ Inroad's own paths are cited.
 | Per-mailbox human workday (randomised start/finish/lunch/hourly ceiling) | ⚠️ | ✅ | ⚠️ | Ref: per-mailbox rolled workday in the mailbox's own tz. Inroad has the window + cadence but not the rolled-workday model. |
 | Stacked limits (mailbox cap ∧ campaign daily limit ∧ ramp ∧ health) | ✅ | ✅ | ✅ | Inroad: campaign limit can only lower throughput. |
 | Campaign ramp-up (separate from warmup ramp) | ⚠️ | ✅ | ✅ | Inroad ramps the mailbox cap; no campaign-level ramp curve. |
-| Lead-flow throttle (max new leads/day, prioritise follow-ups) | ❌ | ✅ | ✅ | |
+| Lead-flow throttle (max new leads/day, prioritise follow-ups) | ~~❌~~ ✅ | ✅ | ✅ | **Was mis-scored.** `campaign/schedulehandler.go` carries `max_new_leads_per_day` alongside `daily_limit`, settable and clearable per campaign. |
 | Preflight validation (scored readiness report, no send) | ✅ | ✅ | ⚠️ | Inroad `campaign/preflight.go`: tracking domain, unsub header, window, A/B config, custom-field refs. |
 | Spintax (`{a\|b\|c}`, nested, subject+body) | ✅ | ✅ | ✅ | Inroad `platform/spintax`. |
 | Personalisation / merge fields (`{{first_name}}`, custom fields) | ✅ | ✅ | ✅ | Inroad has fields + fallbacks; both competitors add conditionals + helpers. |
@@ -50,9 +57,9 @@ Inroad's own paths are cited.
 |---|:--:|:--:|:--:|---|
 | Idempotent sends + stuck-send / stuck-enrollment sweepers | ✅ | ✅ | ✅ | Inroad: DB row-claim is the guarantee; queue dedup is defence in depth. |
 | Dead-letter queue: surface + page + inspect | ✅ | ✅ | ⚠️ | Inroad `app/deadletter` + cursor-paged UI; payloads are row pointers, never content. |
-| DLQ replay endpoint | ❌ | ⚠️ | ❌ | Inroad has visibility, no re-drive button. |
+| DLQ replay endpoint | ~~❌~~ ✅ | ⚠️ | ❌ | ~~Inroad has visibility, no re-drive button.~~ **Done** — `POST /dead-letters/{id}/replay` and `/discard`, surfaced on the settings route. Closes P2.18. |
 | Bounce detection (DSN parse, hard → suppress, soft → keep) | ✅ | ✅ | ✅ | Inroad: RFC 3462/3464. |
-| Complaint / FBL / ARF ingestion | ❌ | ✅ | ✅ | Inroad suppresses on hard bounce + unsubscribe only. |
+| Complaint / FBL / ARF ingestion | ~~❌~~ ⚠️ | ✅ | ✅ | ~~Inroad suppresses on hard bounce + unsubscribe only.~~ **Half done.** The *ingest* half ships: `POST /deliverability/events` takes complaints from an external processor, idempotent on `provider_event_id`, and a complaint suppresses and feeds the score + breaker. **Still missing:** ARF/`Feedback-Type` parsing on inbound mail — `worker/inbox/dsn.go` only mentions ARF to avoid misreading a feedback report as a bounce. So an FBL that arrives *as mail* is not ingested. |
 | One-click unsubscribe (RFC 8058, `List-Unsubscribe-Post`) | ✅ | ✅ | ✅ | |
 | Workspace suppression list, signed unsub tokens, enforced at send | ✅ | ✅ | ✅ | |
 | Open / click tracking, signed tickets, per-campaign toggle | ✅ | ✅ | ✅ | Inroad `platform/track`. |
@@ -63,7 +70,7 @@ Inroad's own paths are cited.
 | Auto-pause campaign on bounce / complaint spike (circuit breaker) | ✅ | ✅ | ✅ | Inroad `deliverability:evaluate` task, evaluated after a send finalises, never inside the send txn. |
 | Seed inbox-placement testing (tokenised copy to seed mailboxes, per-provider split) | ⚠️ | ✅ | ✅ | Inroad reports inbox-vs-spam from the warmup path only, not a dedicated seed network. |
 | Pre-send email verification (syntax → MX → SMTP RCPT → catch-all), off a non-sending IP | ❌ | ✅ | ✅ | Inroad validates syntax at import only. Ref: a dedicated verification module. Incmb: multi-step + AI scoring. |
-| Deliverability event ingest API (`POST /deliverability/events`, idempotent) | ❌ | ✅ | ✅ | For external pipelines (e.g. an SES bounce processor). |
+| Deliverability event ingest API (`POST /deliverability/events`, idempotent) | ~~❌~~ ✅ | ✅ | ✅ | **Was mis-scored** — the route exists and is idempotent on `provider_event_id`. For external pipelines (e.g. an SES bounce processor). |
 | IMAP/SMTP compatibility breadth (no-CONDSTORE, LIST-STATUS fallback, AUTH negotiation, localized folders) | ⚠️ | ✅ | ✅ | Ref has done a lot of hardening here, driven by real user tickets; Inroad's IMAP path is narrower. |
 
 ## 3. Warmup
@@ -85,10 +92,10 @@ Inroad's own paths are cited.
 |---|:--:|:--:|:--:|---|
 | Unified inbox across all mailboxes, 3-column, threaded | ✅ | ✅ | ✅ | Inroad `app/inbox` + `features/inbox`; reply goes out through the mailbox that owns the thread. |
 | Folder model (Inbox / Sent / Drafts / Archive / Spam / Trash) mapped from provider | ⚠️ | ✅ | ✅ | Inroad stores replies/bounces; Ref mirrors all six provider folders + moves. |
-| Scope views (Unread / Today / Awaiting reply / Snoozed / Scheduled / per-mailbox / per-tag) | ⚠️ | ✅ | ✅ | Inroad has a thread list + search; not the full scope rail. |
+| Scope views (Unread / Today / Awaiting reply / Snoozed / Scheduled / per-mailbox / per-tag) | ~~⚠️~~ ✅ | ✅ | ✅ | ~~Inroad has a thread list + search; not the full scope rail.~~ **Done** — `inbox/handler.go` has `all / unread / today / this_week / awaiting_reply / snoozed`, an unknown scope 400s rather than silently returning an unscoped page, and the rail counts share the clock with the list they link to. Scheduled lives on its own `/inbox/outbox` route rather than in the rail. |
 | Reply classification taxonomy (positive/negative/neutral/auto/OOO/unsub) | ✅ | ✅ | ✅ | Inroad `platform/replyclassify`: RFC 3834 headers → keyword lexicon, deterministic, no network call. |
 | User-definable reply labels + match rules + automation | ✅ | ✅ | ⚠️ | Inroad `app/replylabel`. |
-| Draft autosave, scheduled sends, undo-send window, snooze | ⚠️ | ✅ | ✅ | Inroad has deferred/cancellable pending replies (row-pointer design); no autosave/snooze UI. |
+| Draft autosave, scheduled sends, undo-send window, snooze | ~~⚠️~~ ✅ | ✅ | ✅ | ~~Inroad has deferred/cancellable pending replies (row-pointer design); no autosave/snooze UI.~~ **Done** — `/inbox/drafts`, `/inbox/threads/{id}/snooze`, `/inbox/threads/{id}/schedule-reply`, and `/inbox/outbox/{pendingId}` for cancel-before-send, plus user labels on threads. |
 | AI-drafted replies in the thread, held for approval | ✅ | ✅ | ✅ | Inroad: AI drafts in thread view, approval queue with diff preview. |
 | Inbox agent (auto-draft on every inbound, never sends) | ⚠️ | ✅ | ✅ | Inroad drafts on demand; no always-on inbox agent off the reply hook. |
 | Full-text search across message bodies within scope | ✅ | ✅ | ✅ | |
@@ -132,11 +139,11 @@ Inroad's own paths are cited.
 
 | Capability | Inroad | Ref | Incmb | Notes |
 |---|:--:|:--:|:--:|---|
-| Public REST API, OpenAPI-typed | ✅ | ✅ | ✅ | Inroad `api/openapi.yaml`, 154 paths, frontend types generated from it. |
+| Public REST API, OpenAPI-typed | ✅ | ✅ | ✅ | Inroad `api/openapi.yaml`, ~~154~~ **159** paths, frontend types generated from it. |
 | Scoped API keys (bitmask / attenuated authority) | ✅ | ✅ | ✅ | Inroad `app/apikey`: `campaigns:read` / `:write` / `:send` etc. |
 | API-key rate limiting + IP allowlist + usage analytics | ⚠️ | ✅ | ✅ | Inroad: Redis fixed-window limiter, fail-closed; no per-key IP allowlist or usage analytics. |
 | OAuth 2.x provider for third-party apps (PKCE, consent) | ✅ | ✅ | ⚠️ | Inroad `app/oauthprovider`. |
-| Outbound webhooks (HMAC-signed, event-filtered, retried, SSRF-guarded) | ❌ | ✅ | ✅ | Only inbound provider webhooks exist in Inroad today. **Highest-leverage missing integration primitive.** |
+| Outbound webhooks (HMAC-signed, event-filtered, retried, SSRF-guarded) | ~~❌~~ ⚠️ | ✅ | ✅ | ~~Only inbound provider webhooks exist in Inroad today. **Highest-leverage missing integration primitive.**~~ **Backend done in the P0 sprint** — `app/webhook` (endpoints, event filter, delivery log, cursor paging), `worker/webhook/deliver.go` (retry/backoff), `platform/webhookwire` (`sign.go` + `ssrf.go`), migration `20260907132955_webhook`, and five REST paths incl. `rotate-secret`, `ping` and `deliveries`. ⚠️ **not ✅ because there is no UI** — no `web/src/features/webhooks`, no route; the only frontend trace is the generated `store/api.ts`. Endpoint management is API-only today. |
 | Native integrations (CRM sync, chat, scheduling) | ❌ | ✅ | ✅ | e.g. HubSpot / Salesforce / Pipedrive / Slack / Calendly. |
 | iPaaS connectors (Zapier / Make / n8n) | ❌ | ✅ | ✅ | Ref ships thin Zapier + Make apps over its public API plus an n8n guide. |
 | Hosted lead-capture forms (builder, embed, submission → contact → campaign) | ❌ | ✅ | ✅ | Ref runs this as a dedicated sub-app + public form server. |
@@ -193,13 +200,13 @@ Inroad's own paths are cited.
 | One-command dev (services + migrate + seed + api + worker + web) | ✅ | ✅ | — | Both. |
 | One-command self-host install (pulls release images, no clone, wizard) | ❌ | ✅ | — | Ref: a published, checksummed install script with a `--wizard`. Inroad: compose file, several steps. |
 | Operator CLI that talks to the DB directly (works when sign-in doesn't) | ❌ | ✅ | — | Inroad has `cmd/migrate` + `cmd/seed` only. |
-| Health probes: `/healthz` + `/readyz` | ✅ | ✅ | — | Inroad: `/readyz` pings Postgres (not Redis — see the Redis review). |
+| Health probes: `/healthz` + `/readyz` | ✅ | ✅ | — | ~~Inroad: `/readyz` pings Postgres (not Redis — see the Redis review).~~ **Fixed in the P0 sprint** — `cmd/inroad/main.go` now gates readiness on Postgres **and** Redis with a 2s budget, because a Redis outage fails every sign-in closed at the rate limiter while a Postgres-only probe still reported ready. Closes P0.4. |
 | Prometheus metrics | ✅ | ✅ | — | Inroad `platform/metrics`. |
 | Instance-health dashboard / doctor command | ❌ | ✅ | — | |
 | Distributed tracing (OpenTelemetry) | ❌ | ⚠️ | — | Neither strong. |
-| CI: build + lint + test | ✅ | ✅ | — | Inroad: 1 workflow (lint, unit, integration, frontend, e2e). |
-| CI: vuln scanning (govulncheck / npm audit / Trivy / CodeQL) | ❌ | ✅ | — | Ref: a dedicated security workflow. |
-| CI: release + container publish workflow | ❌ | ✅ | — | Ref: tagged releases + published images. Inroad: none, no `CHANGELOG`. |
+| CI: build + lint + test | ✅ | ✅ | — | ~~Inroad: 1 workflow~~ Inroad now runs **4** workflows, same count as Ref: `ci.yml` (lint, unit, integration, frontend, e2e), `security.yml`, `release.yml`, `build-push.yml`. |
+| CI: vuln scanning (govulncheck / npm audit / Trivy / CodeQL) | ~~❌~~ ✅ | ✅ | — | ~~Ref: a dedicated security workflow.~~ **Done** — `.github/workflows/security.yml` runs govulncheck (reachable-symbol), `npm audit --audit-level=high`, and a Trivy FS scan (HIGH/CRITICAL; vuln + secret + misconfig) per PR, on push to main and weekly, plus `.github/dependabot.yml` for gomod/npm/actions/Docker. Deliberately *informs* rather than gates, since an external advisory DB can turn it red with no code change. Closes P0.2. |
+| CI: release + container publish workflow | ~~❌~~ ✅ | ✅ | — | ~~Ref: tagged releases + published images. Inroad: none, no `CHANGELOG`.~~ **Done** — `build-push.yml` publishes multi-arch (amd64/arm64) `ghcr.io/<owner>/inroad-{api,worker,web}` (`edge` on main; `x.y.z`/`x.y`/`latest`/`sha-…` on a `v*` tag); `release.yml` builds `inroad`/`worker`/`migrate` for linux amd64+arm64, macOS arm64 and Windows amd64 with `checksums.txt`; `platform/version` is stamped at link time and logged at startup; `CHANGELOG.md` (Keep a Changelog) is parsed for the release body. Closes P0.1. |
 | Sandbox simulator ("plays the internet": deliver / open / click / reply through real code paths) | ✅ | ✅ | — | Inroad `internal/sandbox` (persona, deliver, simulate, timeline). |
 
 ## 12. Billing (hosted-mode only — N/A for self-host)
@@ -227,16 +234,16 @@ Inroad's own paths are cited.
 | Area | Inroad vs Ref | Inroad vs Incumbent |
 |---|---|---|
 | Core sending engine | **par** (Inroad ahead on determinism/rigour) | **ahead** |
-| Deliverability tooling | behind (verification, complaints, seed net) | behind (verification, placement testing) |
+| Deliverability tooling | behind (verification, inbound ARF, seed net) | behind (verification, placement testing) |
 | Warmup | par (Ref ahead on content generation + header-loss fallback) | behind (no large shared network) |
-| Unified inbox | slightly behind (folder model, scopes) | behind |
+| Unified inbox | ~~slightly behind (folder model, scopes)~~ **par** — the scope rail, snooze, drafts, scheduled reply and thread labels all landed; only the six-folder provider mirror is outstanding | behind |
 | CRM | par (Inroad ahead: first-class Company; Ref ahead: meetings, export, facets) | **ahead** |
 | AI | behind (research, AI steps, AI variables) | behind |
-| Integrations / webhooks / forms | **well behind** | **well behind** |
+| Integrations / webhooks / forms | ~~**well behind**~~ behind — webhooks (the prerequisite) now exist server-side; forms, native integrations and iPaaS do not | **well behind** |
 | Realtime | par (different shapes) | ahead |
 | Auth / security | par (Ref ahead: SSO, risk scoring, audit, danger zone) | ahead |
 | Fleet orchestration | **well behind** | behind |
-| Admin / ops / install | behind (no admin console, audit, installer, operator CLI, release CI) | n/a |
+| Admin / ops / install | behind (no admin console, audit, installer, operator CLI) ~~, release CI~~ — **release + security CI now shipped** | n/a |
 | Lead data / DFY | n/a | **not closeable by code** |
 
 **Net:** Inroad is a credible peer of the reference platform on the engine and
@@ -244,3 +251,57 @@ the CRM, clearly behind on breadth (integrations, forms, AI depth, fleet, admin,
 install story). Against the incumbent it wins on engine, CRM, ownership and
 pricing model, and loses on the data moat and the deliverability network — the
 latter being the part no amount of code closes.
+
+---
+
+## Verified still missing (2026-09-08 @ `d4f5720`)
+
+The not-done half, stated as plainly as the done half. Each was checked against
+the tree on this pass, not carried over from the previous doc.
+
+**Nothing shipped for these — no package, no route, no config:**
+
+| Gap | Plan item | Evidence of absence |
+|---|---|---|
+| One-command self-host installer | P1.1 | `scripts/` holds only `dev-up.sh`, `dev-down.sh`, `dev.ps1` |
+| Operator CLI | P1.2 | `cmd/` is `inroad`, `worker`, `migrate`, `seed` — no `inroadctl` |
+| Pre-send email verification | P1.3 | No `app/emailverify`; every `email_verif*` hit in the tree is the auth-token flow |
+| Inbound ARF / FBL-as-mail parsing | P1.4 (half) | ARF appears once in `worker/inbox/dsn.go`, as a comment about *not* misreading it |
+| Contact export (CSV/XLSX/JSON) | P1.5 | No export path under `/contacts`; no XLSX anywhere in the Go tree |
+| Audit log | P1.6 | No `app/audit`; every `audit` hit is the agent-approval trail |
+| Warmup header-loss fallback | P1.7 | `worker/warmup` matches on the `X-Inroad-Warmup` token only — no envelope-to + assigned-Message-ID path |
+| Attachments | P2.3 | No `attachment_*` column, task or route |
+| Automation canvas · branch-on-behaviour · action/switch steps | P2.4–2.5 | No `app/automation`; sequences stay a linear list |
+| Native integrations · iPaaS · hosted forms · visitor tracking | P2.1, P2.6, P3.11 | No integration/form domain either side of the seam |
+| Meetings | P2.8 | No `meetings` record type |
+| Notifications system | P2.9 | No `app/notification`; `platform/notify` is transactional mail only |
+| Dynamic segments | P2.10 | Static `app/list` only |
+| Per-mailbox rolled human workday | P2.11 | Windows + seeded cadence, no stored daily plan |
+| Seed inbox-placement testing | P2.12 | Placement is warmup-derived; no seed-mailbox set |
+| Always-on inbox agent | P2.13 | Drafting is on-demand off the thread view |
+| Workspace export / import | P2.15 | No registry, no archive path |
+| Account danger zone | P2.16 | No delayed-delete grace window |
+| Generic OIDC / Apple sign-in | P2.17 | Google + passkeys only; no `oidc` in the tree |
+| Per-mailbox/campaign tracking domain | P2.19 | No `tracking_domain` column — a verified domain overrides the host, nothing narrower |
+| API-key IP allowlist + usage analytics | §7 | Redis fixed-window limiter only |
+| Campaign creation wizard | §1 | No wizard component; the campaign route is a tabbed detail page |
+| Faceted contact search | §5 | No facet code; substring search only |
+| CSV import wizard (preview → map → commit) | P1.5 | `app/contact/import.go` is headless |
+| Physical control/execution split · fleet assignment · admin console | P3.8–3.10 | Worker still holds a `pgxpool` |
+| Advisor-lite posture detectors | P2.20 | No detector layer; every `advisor` hit in the tree is the word "advisory" in a comment |
+| Scheduled-job run ledger | P2.21 | ~10 periodic loops, none of which records a run row |
+| Templates library (shared merge-variable catalog, content/spam score) | — | No template domain; templating is merge-token expansion inside `app/campaign` |
+| Contact-timezone sending | — | Contacts carry no timezone column; windows are campaign-tz |
+| Analytics depth (daily/hourly rollups, campaign comparison) | — | `app/reporting` is per-campaign performance only |
+
+**Started but not wired — worth a decision, not just a backlog row:**
+
+- `internal/platform/storage` defines the blob-storage `Provider` seam (P2.2)
+  with a complete S3 implementation and tests, but **nothing imports it**, there
+  is no filesystem implementation, and no `S3_*`/`STORAGE_*` env var reaches
+  `platform/config`. As it stands it is dead code by the `CLAUDE.md` rule
+  ("no dead code, unused exports"). Either finish P2.2 (add the filesystem
+  default + config factory) on the way to attachments, or delete it and re-add
+  it with its first caller.
+- Outbound webhooks have a complete backend and no UI (see §7). The capability
+  is real for an API consumer and invisible to an operator.
