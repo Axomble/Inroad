@@ -45,6 +45,7 @@ import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.
 import { Route as AppSettingsReplyLabelsRouteImport } from './routes/app.settings.reply-labels'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
 import { Route as AppSettingsTeamRouteImport } from './routes/app.settings.team'
+import { Route as AppSettingsWebhooksRouteImport } from './routes/app.settings.webhooks'
 import { Route as AuthGoogleCallbackRouteImport } from './routes/auth.google.callback'
 import { Route as AppCampaignsIdIndexRouteImport } from './routes/app.campaigns.$id.index'
 import { Route as AppCampaignsIdLeadsRouteImport } from './routes/app.campaigns.$id.leads'
@@ -232,6 +233,11 @@ const AppSettingsTeamRoute = AppSettingsTeamRouteImport.update({
   path: '/team',
   getParentRoute: () => AppSettingsRoute,
 } as any)
+const AppSettingsWebhooksRoute = AppSettingsWebhooksRouteImport.update({
+  id: '/webhooks',
+  path: '/webhooks',
+  getParentRoute: () => AppSettingsRoute,
+} as any)
 const AuthGoogleCallbackRoute = AuthGoogleCallbackRouteImport.update({
   id: '/auth/google/callback',
   path: '/auth/google/callback',
@@ -295,6 +301,7 @@ export interface FileRoutesByFullPath {
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/app/settings/webhooks': typeof AppSettingsWebhooksRoute
   '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/app/companies/': typeof AppCompaniesIndexRoute
@@ -336,6 +343,7 @@ export interface FileRoutesByTo {
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/app/settings/webhooks': typeof AppSettingsWebhooksRoute
   '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/app/campaigns': typeof AppCampaignsIndexRoute
   '/app/companies': typeof AppCompaniesIndexRoute
@@ -381,6 +389,7 @@ export interface FileRoutesById {
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
   '/app/settings/team': typeof AppSettingsTeamRoute
+  '/app/settings/webhooks': typeof AppSettingsWebhooksRoute
   '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/app/companies/': typeof AppCompaniesIndexRoute
@@ -427,6 +436,7 @@ export interface FileRouteTypes {
     | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
+    | '/app/settings/webhooks'
     | '/auth/google/callback'
     | '/app/campaigns/'
     | '/app/companies/'
@@ -468,6 +478,7 @@ export interface FileRouteTypes {
     | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
+    | '/app/settings/webhooks'
     | '/auth/google/callback'
     | '/app/campaigns'
     | '/app/companies'
@@ -512,6 +523,7 @@ export interface FileRouteTypes {
     | '/app/settings/reply-labels'
     | '/app/settings/security'
     | '/app/settings/team'
+    | '/app/settings/webhooks'
     | '/auth/google/callback'
     | '/app/campaigns/'
     | '/app/companies/'
@@ -792,6 +804,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsTeamRouteImport
       parentRoute: typeof AppSettingsRoute
     }
+    '/app/settings/webhooks': {
+      id: '/app/settings/webhooks'
+      path: '/webhooks'
+      fullPath: '/app/settings/webhooks'
+      preLoaderRoute: typeof AppSettingsWebhooksRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
     '/auth/google/callback': {
       id: '/auth/google/callback'
       path: '/auth/google/callback'
@@ -846,6 +865,7 @@ interface AppSettingsRouteChildren {
   AppSettingsReplyLabelsRoute: typeof AppSettingsReplyLabelsRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
+  AppSettingsWebhooksRoute: typeof AppSettingsWebhooksRoute
   AppSettingsIndexRoute: typeof AppSettingsIndexRoute
 }
 
@@ -858,6 +878,7 @@ const AppSettingsRouteChildren: AppSettingsRouteChildren = {
   AppSettingsReplyLabelsRoute: AppSettingsReplyLabelsRoute,
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
+  AppSettingsWebhooksRoute: AppSettingsWebhooksRoute,
   AppSettingsIndexRoute: AppSettingsIndexRoute,
 }
 
