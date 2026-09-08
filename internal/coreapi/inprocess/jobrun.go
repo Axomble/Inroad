@@ -24,3 +24,10 @@ func (c client) RecordJobRun(ctx context.Context, run jobrun.Run) error {
 		ErrorMessage: run.ErrorMessage,
 	})
 }
+
+// The BINDING half of the type-assertion pattern, as in the five siblings that
+// carry one. internal/worker/handlers.go resolves this capability with
+// `core.(jobrun.Recorder)` and treats a miss as "record nothing, run the sweep
+// anyway", so a signature drift here would make all six periodic reconciles stop
+// writing to the ledger with nothing failing anywhere.
+var _ jobrun.Recorder = client{}

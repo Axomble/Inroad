@@ -66,3 +66,10 @@ func (c client) IngestComplaint(ctx context.Context, in coreapi.ComplaintInput) 
 	}
 	return nil
 }
+
+// The BINDING half of the type-assertion pattern, as in the five siblings that
+// carry one. Without it, reshaping the interface and forgetting this file leaves
+// build, vet, the linter and every unit test green (the tests use fakes) while
+// the poller's assertion silently stops matching — and a deployment that cannot
+// record complaints is a compliance failure, not a lost metric.
+var _ coreapi.DeliverabilityComplaintClient = client{}

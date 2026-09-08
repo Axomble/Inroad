@@ -71,3 +71,11 @@ func normalizeMessageID(v string) string {
 	}
 	return strings.TrimSpace(v)
 }
+
+// The BINDING half of the type-assertion pattern (crm.go, deadletter.go,
+// inbox.go, realtime.go, replylabel.go all carry one). The poller consumes this
+// capability by asserting on it, and an assertion that stops matching is
+// invisible to build, vet, the linter and every unit test — the worker just
+// silently loses the capability, and for this one that means M365 placement
+// quietly reverting to the under-count the fallback exists to fix.
+var _ coreapi.WarmupSendLookupClient = client{}
