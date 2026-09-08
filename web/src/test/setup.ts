@@ -1,4 +1,11 @@
-import '@testing-library/jest-dom'
+// The `/vitest` entrypoint, not the bare package: the bare one re-exports
+// jest.d.ts, which augments JEST's `Assertion` interface. Vitest's matchers
+// typecheck against that only by coincidence — v5 makes `Assertion` generic in
+// two parameters, so the jest augmentation stops applying and every
+// `toBeInTheDocument` / `toHaveAttribute` call becomes TS2339 (~1400 of them).
+// This entrypoint augments `declare module 'vitest'` directly, which is the
+// module we actually assert through.
+import '@testing-library/jest-dom/vitest'
 
 // The base query in `store/empty-api.ts` reads `VITE_API_BASE_URL` and falls
 // back to the bare path `/api/v1` for the same-origin production case. Under
