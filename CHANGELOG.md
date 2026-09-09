@@ -11,6 +11,10 @@ the headings exactly `## [x.y.z] - YYYY-MM-DD`.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] - 2026-09-09
+
 ### Added
 
 - Outbound webhooks. A workspace registers HTTPS endpoints under
