@@ -313,11 +313,28 @@ type heartbeatClient interface {
 //
 // A worker heartbeats as assignable IF AND ONLY IF it runs per-message work.
 // AssignMailboxWorker picks a mailbox's owner from the `workers` table and
-// returns a "w:<worker_id>" queue name that redisbus routes jobs to directly;
-// a control-role host has no per-message handlers registered (worker.Register),
-// so a mailbox assigned to one would enqueue sends/polls/webhooks onto a queue
-// nothing consumes — they would burn their retries and land in dead-letter,
-// silently. RoleAll still heartbeats (self-host, the only worker there is).
+// returns a "w:<worker_id>" queue name that redisbus routes jobs to directly.
+// That routing reaches exactly ONE task type today: queue.EnqueueWarmupTickAt
+// is the only producer that sets bus.Job.Dest, so warmup:tick is the only task
+// an assignment redirects — sequence:advance, inbox:poll and webhook:deliver
+// go to the shared `default` queue whoever owns the mailbox.
+//
+// A control-role host registers no per-message handlers (worker.Register), but
+// it does still CONSUME "w:<its-own-id>": config.defaultWorkerQueues is
+// role-blind and hands every worker {"w:<id>", "default"}. So a mailbox
+// assigned to a control host does not go quiet — the host dequeues each
+// warmup:tick, the mux finds no handler and answers asynq.ErrHandlerNotFound,
+// and asynq retries that on the SAME queue until the attempts are exhausted
+// and the task dead-letters. Declining to heartbeat is what keeps a control
+// host out of the assigner, and that warmup mail alive.
+//
+// The gate only stops NEW assignments. A host that ran as `send` and comes back
+// as `control` keeps its existing mailbox_worker_assignments rows, and
+// GetLiveMailboxWorkerAssignment honours them for as long as its last heartbeat
+// stays inside coreapi's 15m live window — so flip a host to `control` under a
+// NEW INROAD_WORKER_ID, or clear its assignment rows at cutover.
+//
+// RoleAll still heartbeats (self-host, the only worker there is).
 func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressIP string, role worker.Role, logger *slog.Logger) {
 	if !role.RunsPerMessageWork() {
 		logger.Info("heartbeat disabled by worker role", "role", role,
