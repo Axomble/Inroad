@@ -10,6 +10,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/worker"
 )
 
 // errRegistration stands in for whatever asynq would reject (a malformed cron
@@ -62,7 +63,7 @@ func TestStartSchedulerDisabledBuildsNoScheduler(t *testing.T) {
 	var calls int
 	cfg := &config.Config{RunScheduler: false, RedisAddr: "127.0.0.1:1"}
 
-	stop, err := startSchedulerWith(cfg, captureLogger(&logs), buildSpy(&calls, newFakeScheduler()))
+	stop, err := startSchedulerWith(cfg, worker.RoleAll, captureLogger(&logs), buildSpy(&calls, newFakeScheduler()))
 	if err != nil {
 		t.Fatalf("startSchedulerWith: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestStartSchedulerEnabledBuildsOneAndSaysSo(t *testing.T) {
 	cfg := &config.Config{RunScheduler: true, RedisAddr: "127.0.0.1:1"}
 
 	sch := newFakeScheduler()
-	stop, err := startSchedulerWith(cfg, captureLogger(&logs), buildSpy(&calls, sch))
+	stop, err := startSchedulerWith(cfg, worker.RoleAll, captureLogger(&logs), buildSpy(&calls, sch))
 	if err != nil {
 		t.Fatalf("startSchedulerWith: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestStartSchedulerPropagatesBuildFailure(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := &config.Config{RunScheduler: true, RedisAddr: "127.0.0.1:1"}
 
-	stop, err := startSchedulerWith(cfg, captureLogger(&logs), func() (periodicScheduler, error) {
+	stop, err := startSchedulerWith(cfg, worker.RoleAll, captureLogger(&logs), func() (periodicScheduler, error) {
 		return nil, errRegistration
 	})
 	if !errors.Is(err, errRegistration) {
@@ -158,6 +159,49 @@ func TestRegisterSweepsRegistersEverySweep(t *testing.T) {
 // See TestEverySweepDispatchedThroughRegisterRecordsOneLedgerRow in
 // jobrunledger_test.go, which dispatches all six task types through the real
 // worker.Register and counts the rows instead.
+
+// stubScheduler is a periodicScheduler with no observable behaviour of its own,
+// for tests that only care WHETHER build was called, not what Run/Shutdown do.
+type stubScheduler struct{}
+
+func (stubScheduler) Run() error { return nil }
+func (stubScheduler) Shutdown()  {}
+
+// The role is the stronger statement. An operator who moved a host to the
+// send role must not be undone by an INROAD_RUN_SCHEDULER=true left over
+// from when that host ran everything — a send host running the scheduler
+// would re-enqueue every sweep N times over.
+func TestSendRoleNeverRunsTheSchedulerEvenIfTheFlagIsOn(t *testing.T) {
+	cfg := &config.Config{RunScheduler: true}
+	built := false
+	stop, err := startSchedulerWith(cfg, worker.RoleSend, slog.Default(), func() (periodicScheduler, error) {
+		built = true
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("startSchedulerWith: %v", err)
+	}
+	defer stop()
+	if built {
+		t.Error("send role built a scheduler; the role must gate it regardless of RunScheduler")
+	}
+}
+
+func TestControlRoleRunsTheSchedulerWhenTheFlagIsOn(t *testing.T) {
+	cfg := &config.Config{RunScheduler: true}
+	built := false
+	stop, err := startSchedulerWith(cfg, worker.RoleControl, slog.Default(), func() (periodicScheduler, error) {
+		built = true
+		return stubScheduler{}, nil
+	})
+	if err != nil {
+		t.Fatalf("startSchedulerWith: %v", err)
+	}
+	defer stop()
+	if !built {
+		t.Error("control role did not build a scheduler")
+	}
+}
 
 // A registration failure names the sweep that failed, so the error tells an
 // operator which periodic task is misconfigured rather than just "it failed".

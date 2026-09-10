@@ -64,6 +64,18 @@ func run() error {
 	}
 	logger := log.New(cfg.Env)
 
+	// Parsed here, immediately after config load and before anything connects
+	// (the pool, Redis, the keyring), so a bad INROAD_WORKER_ROLE fails fast
+	// with no DB attempt. Config carries only the raw string (see
+	// config.Config.WorkerRole) because platform must not import this package.
+	role, err := worker.ParseRole(cfg.WorkerRole)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		return err
+	}
+	logger.Info("worker role", "role", role,
+		"note", "control runs the scheduler and sweeps; send runs per-message work")
+
 	// Prometheus /metrics listener. mtx is always constructed (never nil): the
 	// campaign/warmup send handlers' finalize points record into it
 	// unconditionally below; INROAD_METRICS_ADDR only controls whether the
@@ -210,13 +222,13 @@ func run() error {
 	// when run() returns (the server stopped), so the goroutine exits cleanly.
 	hbCtx, cancelHeartbeat := context.WithCancel(context.Background())
 	defer cancelHeartbeat()
-	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, logger)
+	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, role, logger)
 
 	// Start the periodic scheduler alongside the worker, if this replica is the
 	// one that schedules. It enqueues the reconcile sweeps (enrollments, inbox,
 	// warmup, …) so work whose live task was lost (launch committed DB rows but
 	// Redis enqueue failed) gets retried without operator action.
-	stopScheduler, err := startScheduler(cfg, logger)
+	stopScheduler, err := startScheduler(cfg, role, logger)
 	if err != nil {
 		return err
 	}
@@ -243,7 +255,7 @@ func run() error {
 	// a DNS lookup dials the host's configured nameservers, never the name being
 	// looked up, so no user-supplied host is ever connected to here.
 	worker.Register(mux, worker.Deps{
-		Role:                worker.RoleAll,
+		Role:                role,
 		Core:                core,
 		Sender:              sndr,
 		Engager:             engager,
@@ -283,6 +295,14 @@ func (d deadLetterRecorder) RecordDeadLetter(ctx context.Context, in queue.DeadL
 	})
 }
 
+// heartbeatClient is the one-method slice of coreapi.Client that startHeartbeat
+// needs. It exists so a test can assert the ROLE gates registration without a
+// fake satisfying coreapi.Client's other methods (it has dozens — see the Deps
+// comment in internal/worker/handlers.go on the same tradeoff).
+type heartbeatClient interface {
+	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error
+}
+
 // startHeartbeat registers this worker immediately, then refreshes its `workers`
 // row every workerHeartbeatInterval until ctx is cancelled. The initial beat is
 // synchronous so the assigner sees the worker as live before it processes its
@@ -290,7 +310,20 @@ func (d deadLetterRecorder) RecordDeadLetter(ctx context.Context, in queue.DeadL
 // INROAD_WORKER_ID) can't own a stable queue, so it skips registration and runs
 // off the shared default queue only. Heartbeat failures are logged, not fatal:
 // a transient DB blip must not take the worker down.
-func startHeartbeat(ctx context.Context, core coreapi.Client, workerID, egressIP string, logger *slog.Logger) {
+//
+// A worker heartbeats as assignable IF AND ONLY IF it runs per-message work.
+// AssignMailboxWorker picks a mailbox's owner from the `workers` table and
+// returns a "w:<worker_id>" queue name that redisbus routes jobs to directly;
+// a control-role host has no per-message handlers registered (worker.Register),
+// so a mailbox assigned to one would enqueue sends/polls/webhooks onto a queue
+// nothing consumes — they would burn their retries and land in dead-letter,
+// silently. RoleAll still heartbeats (self-host, the only worker there is).
+func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressIP string, role worker.Role, logger *slog.Logger) {
+	if !role.RunsPerMessageWork() {
+		logger.Info("heartbeat disabled by worker role", "role", role,
+			"note", "a control-role host has no per-message handlers; the assigner must never route a mailbox to it")
+		return
+	}
 	if workerID == "" {
 		logger.Warn("worker id empty; skipping registration (serves default queue only)")
 		return

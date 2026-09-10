@@ -165,6 +165,12 @@ type Config struct {
 	// with replica count. Scaling out means setting this false on all but one.
 	RunScheduler bool
 
+	// WorkerRole is the RAW value of INROAD_WORKER_ROLE. It is parsed by cmd/worker
+	// (worker.ParseRole), not here: platform must not import internal/worker, and
+	// duplicating the valid-value list would give it two sources of truth. Empty
+	// means the default single-process topology.
+	WorkerRole string
+
 	// --- Worker identity + per-IP routing (spec §15) ---
 
 	// WorkerID is this worker's stable id (default: OS hostname). It keys the
@@ -409,6 +415,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg.RunScheduler = getenvBool("INROAD_RUN_SCHEDULER", true)
+	cfg.WorkerRole = os.Getenv("INROAD_WORKER_ROLE")
 
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
 	cfg.WorkerID = getenv("INROAD_WORKER_ID", hostname)
