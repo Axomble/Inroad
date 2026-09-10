@@ -55,6 +55,7 @@ production.
 | :--- | :--- | :--- |
 | `INROAD_WORKER_CONCURRENCY` | Number of concurrent asynq worker goroutines per worker process | `10` |
 | `INROAD_RUN_SCHEDULER` | Whether **this** worker process runs the periodic scheduler | `true` |
+| `INROAD_WORKER_ROLE` | Which half of the worker this process runs — `control`, `send`, or unset for both | unset (`all`) |
 
 The default of `10` is sized for small deployments. Every per-mailbox send and
 inbox-poll task shares this pool, so with many active mailboxes the queue backs
@@ -95,6 +96,45 @@ which replica schedules:
 level=INFO msg="scheduler enabled for this replica"  run_scheduler=true
 level=INFO msg="scheduler disabled for this replica" run_scheduler=false
 ```
+
+### Splitting control and send roles
+
+By default a worker process runs everything: the scheduler, the six periodic
+sweeps above, and every per-message handler (campaign sends, warmup ticks and
+engagement, inbox polls, manual replies, test sends, webhook deliveries). This
+is the self-host topology — one process, one trust domain, nothing to
+configure.
+
+`INROAD_WORKER_ROLE` splits that in two for deployments that want to run
+per-message work on separate hosts from the control plane:
+
+- **`control`** — the scheduler and the six periodic sweeps/purges. These scan
+  or delete across every workspace, so this role is meant to stay on trusted
+  infrastructure beside the API.
+- **`send`** — per-message work only: campaign sends, warmup ticks and
+  engagement, inbox polls, manual replies, test sends, and webhook deliveries.
+  This is the role intended for a fleet host.
+- Leave it **unset** (equivalently `all`) for the single-process default.
+
+An unrecognised value is a **startup error**, not a silent fallback to `all`
+— a typo that quietly degraded to running every sweep would leave a host an
+operator believed was send-only running work it shouldn't.
+
+A `send` role never runs the scheduler, regardless of `INROAD_RUN_SCHEDULER`:
+the role is the stronger statement, so it is not undone by a scheduler flag
+left over from when the host ran everything. Relatedly, a worker only
+heartbeats into the `workers` registry — becoming eligible for the mailbox
+assigner to route work to it — if it runs per-message work, so a `control`
+host never appears there and can never be assigned a mailbox.
+
+Splitting roles today is an operational lever, not yet a security boundary: a
+`send`-role process is *logically* restricted to per-message handlers (it
+simply never registers the cross-tenant handlers), but it still holds the
+same database connection as an `all` process, so it isn't *physically*
+prevented from reaching the rest of the schema. What the split buys now is
+independent scaling — add `send` hosts to handle more mailboxes without adding
+scheduler load, and the periodic sweeps fire once regardless of how many
+`send` hosts you run, instead of once per replica.
 
 ## Database connection budget
 
