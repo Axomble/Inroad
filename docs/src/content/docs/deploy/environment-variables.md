@@ -173,11 +173,12 @@ window — so every warmup tick for those mailboxes is routed to a host with no
 handler for it. **Give a host a new `INROAD_WORKER_ID` when you change it to
 `control`, or delete its `mailbox_worker_assignments` rows at cutover.**
 
-Splitting roles is also an operational lever, not yet a security boundary: a
-`send`-role process is *logically* restricted to per-message handlers (it
-simply never registers the cross-tenant handlers), but it still holds the
-same database connection as an `all` process, so it isn't *physically*
-prevented from reaching the rest of the schema.
+And one limit that will still hold once the split does work: it is an
+operational lever, not a security boundary. A `send`-role process is
+*logically* restricted to per-message handlers (it simply never registers the
+cross-tenant handlers), but it still holds the same database connection as an
+`all` process, so it isn't *physically* prevented from reaching the rest of the
+schema.
 
 ## Database connection budget
 
