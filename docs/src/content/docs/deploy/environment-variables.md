@@ -55,7 +55,7 @@ production.
 | :--- | :--- | :--- |
 | `INROAD_WORKER_CONCURRENCY` | Number of concurrent asynq worker goroutines per worker process | `10` |
 | `INROAD_RUN_SCHEDULER` | Whether **this** worker process runs the periodic scheduler | `true` |
-| `INROAD_WORKER_ROLE` | Which half of the worker this process runs — `control`, `send`, or unset for both | unset (`all`) |
+| `INROAD_WORKER_ROLE` | Which half of the worker this process runs — `control`, `send`, or unset for both. **Leave unset:** the split is [not operable yet](#splitting-control-and-send-roles) | unset (`all`) |
 
 The default of `10` is sized for small deployments. Every per-mailbox send and
 inbox-poll task shares this pool, so with many active mailboxes the queue backs
@@ -105,8 +105,9 @@ engagement, inbox polls, manual replies, test sends, webhook deliveries). This
 is the self-host topology — one process, one trust domain, nothing to
 configure.
 
-`INROAD_WORKER_ROLE` splits that in two for deployments that want to run
-per-message work on separate hosts from the control plane:
+`INROAD_WORKER_ROLE` splits which handlers a process registers into two halves.
+It is **groundwork, not a deployment topology you can use yet** — read the
+warning below before setting it.
 
 - **`control`** — the scheduler and the six periodic sweeps/purges. These scan
   or delete across every workspace, so this role is meant to stay on trusted
@@ -125,16 +126,58 @@ the role is the stronger statement, so it is not undone by a scheduler flag
 left over from when the host ran everything. Relatedly, a worker only
 heartbeats into the `workers` registry — becoming eligible for the mailbox
 assigner to route work to it — if it runs per-message work, so a `control`
-host never appears there and can never be assigned a mailbox.
+host never appears there and can never be assigned a *new* mailbox.
 
-Splitting roles today is an operational lever, not yet a security boundary: a
+:::caution[The two-host topology is not operable yet]
+**Do not split the roles in production.** The flag works — a `control` host
+really does register only the sweeps, and a `send` host only the per-message
+handlers — but **nothing else in the system is role-aware yet, and splitting
+today loses mail.**
+
+Two pieces are still missing:
+
+- **Both roles consume the same queues.** A worker's queue set is
+  `{"w:<worker-id>", "default"}` regardless of its role.
+- **Almost nothing is enqueued to a role-specific queue.** Only `warmup:tick`
+  is routed to a particular worker's `w:<id>` queue. `sequence:advance`,
+  `inbox:poll`, `webhook:deliver`, the manual-send tasks and every sweep all
+  land on the shared `default` queue.
+
+A queue consumer takes a task off the queue *before* anything checks which
+handler will run it. So on a split deployment every host competes for the same
+`default` queue and each one regularly wins a task it cannot run — the
+`control` host picks up an `inbox:poll` or a manual reply, a `send` host picks
+up a sweep. The host finds no handler registered for the task and fails it,
+that failure retries **on the same queue** where a wrong host can claim it
+again, and after the attempts run out the task is dead-lettered. It is never
+re-routed to the host that could have done it, and nothing about it looks like
+a misconfiguration: it presents as mail that quietly never sent.
+
+Adding more `send` hosts makes this **worse**, not better: each additional
+host raises the share of sweeps that land on a host with no sweep handler.
+
+**The supported way to scale out today is unchanged:** run N workers with the
+role unset (`all`), and set `INROAD_RUN_SCHEDULER=true` on exactly one of them
+(see [The scheduler must be a singleton](#the-scheduler-must-be-a-singleton)).
+`INROAD_WORKER_ROLE` is groundwork for a later change that makes queue
+consumption and task routing role-aware; until that lands, the flag has no
+topology to be correct in.
+:::
+
+If you do split roles in a test environment, note one more sharp edge: the
+heartbeat gate only stops a `control` host being assigned *new* mailboxes, and
+does nothing about mailboxes it already owns. A host that previously ran as
+`send` keeps its `mailbox_worker_assignments` rows, and those rows stay
+authoritative while its last heartbeat is inside the assigner's 15-minute live
+window — so every warmup tick for those mailboxes is routed to a host with no
+handler for it. **Give a host a new `INROAD_WORKER_ID` when you change it to
+`control`, or delete its `mailbox_worker_assignments` rows at cutover.**
+
+Splitting roles is also an operational lever, not yet a security boundary: a
 `send`-role process is *logically* restricted to per-message handlers (it
 simply never registers the cross-tenant handlers), but it still holds the
 same database connection as an `all` process, so it isn't *physically*
-prevented from reaching the rest of the schema. What the split buys now is
-independent scaling — add `send` hosts to handle more mailboxes without adding
-scheduler load, and the periodic sweeps fire once regardless of how many
-`send` hosts you run, instead of once per replica.
+prevented from reaching the rest of the schema.
 
 ## Database connection budget
 
