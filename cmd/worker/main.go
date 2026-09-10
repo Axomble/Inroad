@@ -242,8 +242,21 @@ func run() error {
 	// contact addresses (coreapi supplies both lists). Neither needs an SSRF vet:
 	// a DNS lookup dials the host's configured nameservers, never the name being
 	// looked up, so no user-supplied host is ever connected to here.
-	worker.Register(mux, core, sndr, engager, reader, dnsauth.NewResolver(), esp.NewResolver(),
-		enq, cfg.PublicURL, cfg.TrackingSecret, cfg.WarmupSecret, cfg.WebhookAllowPrivate, mtx)
+	worker.Register(mux, worker.Deps{
+		Role:                worker.RoleAll,
+		Core:                core,
+		Sender:              sndr,
+		Engager:             engager,
+		Reader:              reader,
+		Enqueuer:            enq,
+		Resolver:            dnsauth.NewResolver(),
+		MXResolver:          esp.NewResolver(),
+		PublicURL:           cfg.PublicURL,
+		TrackingSecret:      cfg.TrackingSecret,
+		WarmupSecret:        cfg.WarmupSecret,
+		WebhookAllowPrivate: cfg.WebhookAllowPrivate,
+		Metrics:             mtx,
+	})
 
 	logger.Info("worker starting", "version", version.String(), "redis", redisconn.Redact(cfg.RedisAddr), "concurrency", cfg.WorkerConcurrency)
 	if err := srv.Run(mux); err != nil {
