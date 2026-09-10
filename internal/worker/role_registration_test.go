@@ -35,13 +35,24 @@ var scheduledTasks = []string{
 	queue.TaskDeliverabilityEvaluate,
 }
 
-// perMessageTasks are the handlers a fleet host runs.
+// perMessageTasks are the handlers a fleet host runs. Together with
+// scheduledTasks above this is EVERY Task* constant in platform/queue: an
+// unlisted constant is a handler whose role nothing asserts, which is how the
+// drain-only inbox:reply_send below went uncovered.
 var perMessageTasks = []string{
 	queue.TaskWarmupTick,
 	queue.TaskWarmupEngage,
 	queue.TaskTestSend,
 	queue.TaskSequenceAdvance,
 	queue.TaskInboxPoll,
+	// Deprecated and drain-only — nothing enqueues it any more — but
+	// inbox.RegisterPerMessage still registers it behind ReplyCore so tasks
+	// already in Redis at cutover get delivered. That makes it per-message work
+	// like any other: a control host must not claim it, and a send host must
+	// still drain it. Delete this line with the constant, its handler and
+	// ReplyCore, not before.
+	//nolint:staticcheck // SA1019: asserting the DRAIN registration's role is the point.
+	queue.TaskInboxReplySend,
 	queue.TaskInboxPendingReplySend,
 	queue.TaskInboxPendingComposeSend,
 	queue.TaskWebhookDeliver,

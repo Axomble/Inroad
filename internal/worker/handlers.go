@@ -63,17 +63,12 @@ type Deps struct {
 	Metrics *metrics.Metrics
 }
 
-// Register attaches this role's execution-plane handlers to the mux.
+// Register attaches this role's execution-plane handlers to the mux. A zero
+// Role means everything: the predicates below normalise it (see role.go), so
+// the easiest mistake at a composition root — a Deps literal that omits Role —
+// yields today's single-process behaviour rather than a worker that registers
+// nothing.
 func Register(mux *asynq.ServeMux, d Deps) {
-	// An unset Role means everything, the same rule ParseRole applies to an
-	// unset INROAD_WORKER_ROLE. Normalised here because the predicates below are
-	// equality tests, so without this the zero value of the struct — the easiest
-	// mistake to make at a composition root — would satisfy neither, and the
-	// worker would start, report healthy, consume its queues and run nothing.
-	if d.Role == "" {
-		d.Role = RoleAll
-	}
-
 	// jobrun.Recorder is an optional coreapi capability, feature-detected the
 	// same way as maintenance.Cleaner / deliverability.Breaker /
 	// recipientesp.Core just below it: coreapi.Client already has 13 test

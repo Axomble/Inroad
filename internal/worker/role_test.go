@@ -49,6 +49,16 @@ func TestRolePredicates(t *testing.T) {
 		{RoleAll, true, true},
 		{RoleControl, true, false},
 		{RoleSend, false, true},
+		// The ZERO VALUE, which is neither RoleAll nor any parsed role: a Deps
+		// literal that omits Role, or any other struct field of type Role left
+		// unset. It must mean "everything", the same rule ParseRole applies to an
+		// unset INROAD_WORKER_ROLE. The predicates own that normalisation because
+		// they are the only place all three gates — registration, the scheduler
+		// and the heartbeat — agree by construction; when Register normalised its
+		// own copy instead, the two gates in cmd/worker did not, and a zero-value
+		// role registered every handler while scheduling nothing and never
+		// heartbeating.
+		{Role(""), true, true},
 	} {
 		if got := tc.role.RunsScheduledWork(); got != tc.scheduled {
 			t.Errorf("%q.RunsScheduledWork() = %v, want %v", tc.role, got, tc.scheduled)

@@ -46,11 +46,23 @@ func ParseRole(s string) (Role, error) {
 	}
 }
 
+// Both predicates treat the ZERO VALUE as RoleAll, the same rule ParseRole
+// applies to an unset INROAD_WORKER_ROLE. It belongs here rather than at each
+// caller because three separate gates consult these predicates — handler
+// registration (Register), the scheduler (cmd/worker.startSchedulerWith) and
+// the heartbeat (cmd/worker.startHeartbeat) — and only one of them used to
+// normalise its own copy. The other two are plain equality tests, so a
+// zero-value Role registered every handler while scheduling nothing and never
+// heartbeating: a worker that starts, reports healthy, consumes its queues and
+// silently does a third of its job. Normalising inside the predicates makes all
+// three gates agree by construction, so a future fourth gate cannot get it
+// wrong.
+
 // RunsScheduledWork reports whether this role registers the periodic sweeps and
 // purges — the handlers that scan or delete across tenants.
-func (r Role) RunsScheduledWork() bool { return r == RoleAll || r == RoleControl }
+func (r Role) RunsScheduledWork() bool { return r == "" || r == RoleAll || r == RoleControl }
 
 // RunsPerMessageWork reports whether this role registers the per-message
 // handlers: sends, warmup ticks and engagement, inbox polls, manual replies,
 // test sends and webhook deliveries.
-func (r Role) RunsPerMessageWork() bool { return r == RoleAll || r == RoleSend }
+func (r Role) RunsPerMessageWork() bool { return r == "" || r == RoleAll || r == RoleSend }
