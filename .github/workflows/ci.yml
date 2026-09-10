@@ -246,6 +246,22 @@ jobs:
       - name: Verify API contract
         working-directory: web
         run: npm run lint:api
+      # Run the generator here, not only in the image build.
+      #
+      # deploy/docker/Dockerfile.{api,web} both run `npm run gen:api` at image
+      # build time, and nothing in this workflow did — so when a typescript
+      # major broke the generator's config loader, every Images run failed while
+      # CI stayed green, for days, unnoticed. This step makes that a fast red
+      # here instead of a slow red nobody reads.
+      #
+      # The diff check is the second half: it fails when the committed
+      # src/store/api.ts no longer matches what the OpenAPI spec generates, so
+      # an endpoint added to the contract cannot silently miss its client.
+      - name: Verify generated API client is buildable and current
+        working-directory: web
+        run: |
+          npm run gen:api
+          git diff --exit-code -- src/store/api.ts
       - name: Verify frontend
         working-directory: web
         run: |
