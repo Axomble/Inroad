@@ -68,9 +68,14 @@ func run() error {
 	// (the pool, Redis, the keyring), so a bad INROAD_WORKER_ROLE fails fast
 	// with no DB attempt. Config carries only the raw string (see
 	// config.Config.WorkerRole) because platform must not import this package.
+	// Through the logger, not os.Stderr: the config.Load failure above prints raw
+	// because the logger does not exist yet, but by here it does, and log.New
+	// emits JSON to stdout. Printing the one line that explains why the worker
+	// refused to start onto a different stream in a different format is how it
+	// goes missing in whatever collects the container's logs.
 	role, err := worker.ParseRole(cfg.WorkerRole)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "config:", err)
+		logger.Error("invalid worker role", "err", err)
 		return err
 	}
 	logger.Info("worker role", "role", role,
