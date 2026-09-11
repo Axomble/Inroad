@@ -3,6 +3,7 @@ package db
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The default sizing exists so the worker does not starve on Acquire, but it is
@@ -135,5 +136,65 @@ func TestConnectDefaultsMatchTheZeroPoolSize(t *testing.T) {
 	if cfg.MaxConns != DefaultPoolMaxConns || cfg.MinConns != DefaultPoolMinConns {
 		t.Fatalf("default sizing = (%d, %d), want (%d, %d)",
 			cfg.MaxConns, cfg.MinConns, DefaultPoolMaxConns, DefaultPoolMinConns)
+	}
+}
+
+// TestPoolConfigConnectionRecyclingDefaults proves poolConfig sets an explicit
+// connection-recycling policy (MaxConnLifetime/MaxConnIdleTime/HealthCheckPeriod)
+// rather than leaving pgxpool.ParseConfig's own built-in defaults (1h/30m/1m) in
+// place unexamined — and that an operator's DSN pin on any one of the three wins,
+// exactly like the pool_max_conns/pool_min_conns precedence above.
+func TestPoolConfigConnectionRecyclingDefaults(t *testing.T) {
+	cases := []struct {
+		name                                     string
+		dsn                                      string
+		wantMaxConnLifetime, wantMaxConnIdleTime time.Duration
+		wantHealthCheckPeriod                    time.Duration
+	}{
+		{
+			name:                  "an unpinned DSN gets this package's own recycling defaults",
+			dsn:                   "postgres://u:p@h:5432/app?sslmode=disable",
+			wantMaxConnLifetime:   defaultMaxConnLifetime,
+			wantMaxConnIdleTime:   defaultMaxConnIdleTime,
+			wantHealthCheckPeriod: defaultHealthCheckPeriod,
+		},
+		{
+			name:                  "a pinned pool_max_conn_lifetime is respected",
+			dsn:                   "postgres://u:p@h:5432/app?sslmode=disable&pool_max_conn_lifetime=2h",
+			wantMaxConnLifetime:   2 * time.Hour,
+			wantMaxConnIdleTime:   defaultMaxConnIdleTime,
+			wantHealthCheckPeriod: defaultHealthCheckPeriod,
+		},
+		{
+			name:                  "a pinned pool_max_conn_idle_time is respected",
+			dsn:                   "postgres://u:p@h:5432/app?sslmode=disable&pool_max_conn_idle_time=10m",
+			wantMaxConnLifetime:   defaultMaxConnLifetime,
+			wantMaxConnIdleTime:   10 * time.Minute,
+			wantHealthCheckPeriod: defaultHealthCheckPeriod,
+		},
+		{
+			name:                  "a pinned pool_health_check_period is respected",
+			dsn:                   "postgres://u:p@h:5432/app?sslmode=disable&pool_health_check_period=30s",
+			wantMaxConnLifetime:   defaultMaxConnLifetime,
+			wantMaxConnIdleTime:   defaultMaxConnIdleTime,
+			wantHealthCheckPeriod: 30 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := poolConfig(tc.dsn, PoolSize{})
+			if err != nil {
+				t.Fatalf("poolConfig: %v", err)
+			}
+			if cfg.MaxConnLifetime != tc.wantMaxConnLifetime {
+				t.Errorf("MaxConnLifetime = %v, want %v", cfg.MaxConnLifetime, tc.wantMaxConnLifetime)
+			}
+			if cfg.MaxConnIdleTime != tc.wantMaxConnIdleTime {
+				t.Errorf("MaxConnIdleTime = %v, want %v", cfg.MaxConnIdleTime, tc.wantMaxConnIdleTime)
+			}
+			if cfg.HealthCheckPeriod != tc.wantHealthCheckPeriod {
+				t.Errorf("HealthCheckPeriod = %v, want %v", cfg.HealthCheckPeriod, tc.wantHealthCheckPeriod)
+			}
+		})
 	}
 }

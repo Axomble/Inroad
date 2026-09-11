@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +26,37 @@ const DefaultPoolMaxConns = 25
 // DefaultPoolMinConns keeps a few warm connections so a burst of advances doesn't
 // pay full connection-establishment latency from cold.
 const DefaultPoolMinConns = 4
+
+// Connection-recycling defaults, applied by poolConfig under the SAME
+// DSN-pin precedence as MaxConns/MinConns above (pinning
+// pool_max_conn_lifetime / pool_max_conn_idle_time / pool_health_check_period
+// wins outright; otherwise these apply). Without them, pgxpool.ParseConfig
+// silently falls back to its OWN built-in defaults (1h / 30m / 1m) — this
+// package makes the choice explicit instead of inheriting it.
+const (
+	// defaultMaxConnLifetime bounds how long any one connection may live
+	// before Connect recycles it. Shorter than pgxpool's own 1h default: a
+	// managed Postgres failover/failback (a new primary served at the same
+	// DNS name/IP, as RDS, Cloud SQL and Supabase all do) is picked up by
+	// every pool member within half an hour even if nothing else forces a
+	// reconnect, and a connection can't accumulate server-side session state
+	// (temp tables, GUC changes, advisory locks left by a buggy caller)
+	// indefinitely.
+	defaultMaxConnLifetime = 30 * time.Minute
+	// defaultMaxConnIdleTime closes a connection that has sat idle above
+	// MinConns (pgxpool never reaps below that floor — see checkConnsHealth).
+	// Shorter than pgxpool's own 30m default because this pool is sized for
+	// BURST load (worker sweeps, campaign sends) that is idle most of the
+	// time; a fleet of API + N worker processes each holding up to MaxConns
+	// idle server-side backends between bursts adds up on the Postgres side,
+	// where connections are the scarcer resource.
+	defaultMaxConnIdleTime = 5 * time.Minute
+	// defaultHealthCheckPeriod is how often the two bounds above are checked.
+	// Matches pgxpool's own default (1m) — kept explicit anyway so the whole
+	// recycling policy reads from this one place rather than being split
+	// between here and pgxpool's source.
+	defaultHealthCheckPeriod = time.Minute
+)
 
 // PoolSize is a caller's requested pool sizing, in practice from
 // INROAD_DB_MAX_CONNS / INROAD_DB_MIN_CONNS. A zero value means "unspecified"
@@ -72,6 +104,18 @@ func poolConfig(url string, size PoolSize) (*pgxpool.Config, error) {
 		} else if cfg.MinConns < DefaultPoolMinConns {
 			cfg.MinConns = DefaultPoolMinConns
 		}
+	}
+	// Connection recycling: same DSN-pin precedence, no caller override (unlike
+	// Max/MinConns, PoolSize carries no equivalent knob for these — an operator
+	// who wants a different value sets it in the DSN).
+	if !pinsPoolParam(url, "pool_max_conn_lifetime") {
+		cfg.MaxConnLifetime = defaultMaxConnLifetime
+	}
+	if !pinsPoolParam(url, "pool_max_conn_idle_time") {
+		cfg.MaxConnIdleTime = defaultMaxConnIdleTime
+	}
+	if !pinsPoolParam(url, "pool_health_check_period") {
+		cfg.HealthCheckPeriod = defaultHealthCheckPeriod
 	}
 	return cfg, nil
 }
