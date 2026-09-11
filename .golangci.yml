@@ -39,8 +39,35 @@ linters:
     - nolintlint      # keep //nolint directives honest (must be specific + explained)
     - predeclared     # shadowing predeclared identifiers (len, error, ...)
     - reassign        # reassigning package-level vars from other packages
+    - depguard        # execution-plane packages may not import the DB layer directly
 
   settings:
+    depguard:
+      rules:
+        # internal/worker/** (production code only — see the "!$test" exclusion)
+        # may not import internal/platform/db. Control-plane state and decrypted
+        # credentials reach the worker ONLY through internal/coreapi (the seam
+        # docs/security.md and CLAUDE.md both describe as "in-process now, HTTP
+        # later"): that is what lets coreapi grow a real network transport later
+        # without every worker package needing to change, and what keeps
+        # workspace-scoping and credential handling in one reviewed place instead
+        # of re-implemented per worker. Denying the project's db package (not
+        # pgx itself) is deliberate: internal/worker/webhook/deliver.go imports
+        # pgx directly for the pgx.ErrNoRows sentinel in an errors.Is check, which
+        # is not a query and must keep working.
+        worker-no-db:
+          files:
+            - "**/internal/worker/**"
+            - "internal/worker/**"
+            - "!$test"
+          deny:
+            - pkg: "github.com/inroad/inroad/internal/platform/db"
+              desc: >-
+                internal/worker reaches relational data only through
+                internal/coreapi, never internal/platform/db directly — that is
+                the control-plane/execution-plane boundary (see
+                docs/security.md and CLAUDE.md). Add or extend a
+                coreapi.Client method instead of importing the DB layer here.
     dupl:
       threshold: 120          # ~15+ duplicated lines before it flags
     errcheck:
