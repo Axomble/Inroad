@@ -468,10 +468,22 @@ func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 // assertions (fakeEnqueuer.queue()/fakeRegistrar.queue() in queue_test.go call
 // this directly, same package) — asynq.Option is a public Type()/Value() pair,
 // so this needs no cooperation from asynq beyond that.
+//
+// The comma-ok assertion is load-bearing, not lint appeasement: this runs on
+// the send path (via enqueue's guard), so a bare o.Value().(string) would turn
+// a routing check into a production panic at enqueue time if asynq's QueueOpt
+// value type ever changed. A QueueOpt whose value ISN'T a string is treated
+// as no usable option found — the loop keeps scanning, and if nothing else
+// matches, enqueue's guard rejects the task the same way it would an entirely
+// missing Queue option (fail the enqueue, never silently accept an
+// unusable/malformed one).
 func queueOption(opts []asynq.Option) (string, bool) {
 	for _, o := range opts {
-		if o.Type() == asynq.QueueOpt {
-			return o.Value().(string), true
+		if o.Type() != asynq.QueueOpt {
+			continue
+		}
+		if s, ok := o.Value().(string); ok {
+			return s, true
 		}
 	}
 	return "", false

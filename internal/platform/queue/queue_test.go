@@ -105,6 +105,43 @@ func TestEnqueueRefusesATaskWithNoQueueOption(t *testing.T) {
 	}
 }
 
+// malformedQueueOption implements asynq.Option and reports QueueOpt, like the
+// real asynq.Queue(...), but backs Value() with an int instead of a string —
+// standing in for a hypothetical future asynq release that changes QueueOpt's
+// value type. It exists to prove queueOption uses the comma-ok form rather
+// than a bare o.Value().(string): the latter would panic here, on the send
+// path (queueOption is called from c.enqueue), turning a routing check into a
+// production panic at enqueue time.
+type malformedQueueOption struct{}
+
+func (malformedQueueOption) String() string         { return "Queue(malformed)" }
+func (malformedQueueOption) Type() asynq.OptionType { return asynq.QueueOpt }
+func (malformedQueueOption) Value() interface{}     { return 42 }
+
+// TestQueueOptionIgnoresANonStringValueRatherThanPanicking proves queueOption
+// treats a QueueOpt whose Value() is not a string as no usable option found —
+// it keeps scanning rather than panicking, and c.enqueue then rejects the
+// task exactly as it would an entirely missing Queue option (fail the
+// enqueue, never silently accept a malformed one, never crash the process).
+func TestQueueOptionIgnoresANonStringValueRatherThanPanicking(t *testing.T) {
+	if got, ok := queueOption([]asynq.Option{malformedQueueOption{}}); ok || got != "" {
+		t.Fatalf("queueOption(malformed) = (%q, %v), want (\"\", false)", got, ok)
+	}
+
+	fake := &fakeEnqueuer{}
+	c := &Client{inner: fake}
+	err := c.enqueue(asynq.NewTask("some:malformed-queue-task", nil), malformedQueueOption{})
+	if err == nil {
+		t.Fatal("enqueue with a malformed Queue option: got nil error, want one")
+	}
+	if !strings.Contains(err.Error(), "some:malformed-queue-task") {
+		t.Errorf("error %q does not name the task type", err.Error())
+	}
+	if fake.task != nil {
+		t.Error("enqueue must reject before reaching the underlying client, not after")
+	}
+}
+
 // TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend proves affinity is
 // load-bearing: warmup reputation is per-IP, so a warming mailbox must keep
 // sending from the same worker. An unassigned tick still needs SOME queue the
