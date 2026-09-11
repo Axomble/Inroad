@@ -23,10 +23,10 @@ func (f *fakeHeartbeatClient) UpsertWorkerHeartbeat(_ context.Context, _, _ stri
 // A control-role host has no per-message handlers registered (worker.Register),
 // so if it heartbeated it would become assignable — and an assignment is what
 // routes a mailbox's warmup:tick to "w:<worker_id>" (the only task type any
-// assignment redirects; everything else rides the shared `default` queue). The
-// control host WOULD consume that queue — config.defaultWorkerQueues is
-// role-blind — and then fail handler lookup, so each tick would retry on the
-// same queue until it exhausted its attempts and dead-lettered.
+// assignment redirects; everything else rides the shared `send` queue). Per
+// worker.QueuesFor, a control role does not even consume "w:<worker_id>", so an
+// assignment to one would leave that queue undrained rather than dead-lettering
+// — which is exactly why it must never become assignable in the first place.
 func TestStartHeartbeatControlRoleNeverRegisters(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

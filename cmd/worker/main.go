@@ -252,7 +252,7 @@ func run() error {
 		logger.Warn("coreapi has no dead-letter capability; exhausted tasks will not be captured")
 	}
 
-	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues, deadLetters)
+	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, resolveWorkerQueues(cfg, role, cfg.WorkerID), deadLetters)
 	mux := queue.NewMux()
 	// The DNS resolvers for the two sweeps. The first resolves only domains
 	// derived from connected mailboxes and the second only domains derived from
@@ -281,6 +281,20 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// resolveWorkerQueues decides the queue set this process consumes. An operator
+// override (INROAD_WORKER_QUEUES, surfaced as cfg.WorkerQueues) wins ENTIRELY
+// when present — an operator who names queues means exactly those, and
+// silently appending the role's defaults would make the override useless for
+// isolating a host. Absent an override, the role decides (worker.QueuesFor):
+// this is the composition point, because platform/config must not import
+// internal/worker, so the role→queues decision cannot live in config itself.
+func resolveWorkerQueues(cfg *config.Config, role worker.Role, workerID string) []string {
+	if len(cfg.WorkerQueues) > 0 {
+		return cfg.WorkerQueues
+	}
+	return worker.QueuesFor(role, workerID)
 }
 
 // deadLetterRecorder adapts coreapi.DeadLetterClient to the transport-neutral
@@ -324,14 +338,16 @@ type heartbeatClient interface {
 // an assignment redirects — sequence:advance, inbox:poll and webhook:deliver
 // go to the shared `default` queue whoever owns the mailbox.
 //
-// A control-role host registers no per-message handlers (worker.Register), but
-// it does still CONSUME "w:<its-own-id>": config.defaultWorkerQueues is
-// role-blind and hands every worker {"w:<id>", "default"}. So a mailbox
-// assigned to a control host does not go quiet — the host dequeues each
-// warmup:tick, the mux finds no handler and answers asynq.ErrHandlerNotFound,
-// and asynq retries that on the SAME queue until the attempts are exhausted
-// and the task dead-letters. Declining to heartbeat is what keeps a control
-// host out of the assigner, and that warmup mail alive.
+// A control-role host registers no per-message handlers (worker.Register), and
+// — since resolveWorkerQueues derives consumption from worker.QueuesFor —
+// consumes no per-message queue either: QueuesFor omits "w:<id>" for a role
+// that does not run per-message work. So a mailbox STILL assigned to a control
+// host (see the stale-assignment paragraph below) goes quiet rather than
+// dead-lettering: nothing dequeues its "w:<its-own-id>" queue at all, and the
+// task just sits pending until the assignment is cleared or expires out of the
+// live window. Declining to heartbeat is what keeps a control host out of the
+// assigner for NEW assignments; the operator action described below is what's
+// needed for assignments that predate the role flip.
 //
 // The gate only stops NEW assignments. A host that ran as `send` and comes back
 // as `control` keeps its existing mailbox_worker_assignments rows, and
