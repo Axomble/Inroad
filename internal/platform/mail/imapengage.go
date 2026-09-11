@@ -126,7 +126,7 @@ func (e *NetEngager) MarkRead(ctx context.Context, t EngageTarget) error {
 			return err
 		}
 		item := imap.FormatFlagsOp(imap.AddFlags, true) // +FLAGS (silent)
-		if err := c.UidStore(set, item, []interface{}{imap.SeenFlag}, nil); err != nil {
+		if err := c.UidStore(set, item, []any{imap.SeenFlag}, nil); err != nil {
 			return fmt.Errorf("imap store seen: %w", err)
 		}
 		return nil
