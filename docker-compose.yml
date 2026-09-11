@@ -144,6 +144,75 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # --- Two-role worker split (commented out) ------------------------------
+  # INROAD_WORKER_ROLE splits the single `worker` service above into a
+  # `control` host (scheduler + periodic sweeps, stays beside the API) and one
+  # or more `send` hosts (per-message work only: sends, warmup, inbox polls,
+  # webhooks — the role intended for a fleet). Queue consumption follows the
+  # role (see docs/deploy/environment-variables.md#splitting-control-and-send-roles),
+  # so this topology is now operable. Left commented out anyway, because the
+  # single-worker service above remains the recommended default: it needs no
+  # role at all, and uncommenting this would change what a fresh
+  # `docker compose up` runs. Uncomment only once you are actually splitting
+  # the worker across hosts, and remove (or scale to 0) the `worker` service
+  # above so the same work isn't registered twice.
+  #
+  # worker-control:
+  #   build:
+  #     context: .
+  #     dockerfile: deploy/docker/Dockerfile.worker
+  #   environment:
+  #     INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+  #     INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+  #     INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+  #     INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+  #     SECRETS_FILE: /run/secrets/inroad/env
+  #     INROAD_ENV: ${INROAD_ENV:-production}
+  #     INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+  #     INROAD_WORKER_ROLE: control
+  #   volumes:
+  #     - appsecrets:/run/secrets/inroad:ro
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     migrate:
+  #       condition: service_completed_successfully
+  #
+  # worker-send:
+  #   build:
+  #     context: .
+  #     dockerfile: deploy/docker/Dockerfile.worker
+  #   environment:
+  #     INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+  #     INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+  #     INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+  #     INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+  #     SECRETS_FILE: /run/secrets/inroad/env
+  #     INROAD_ENV: ${INROAD_ENV:-production}
+  #     INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+  #     INROAD_WORKER_ROLE: send
+  #     # The worker refreshes OAuth mailbox tokens when sending, so it needs
+  #     # the same provider credentials as the api (redirect URLs are api-only).
+  #     INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+  #     INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+  #     INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+  #     INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+  #     INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
+  #   volumes:
+  #     - appsecrets:/run/secrets/inroad:ro
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     migrate:
+  #       condition: service_completed_successfully
+  # --------------------------------------------------------------------------
+
   web:
     build:
       context: .
