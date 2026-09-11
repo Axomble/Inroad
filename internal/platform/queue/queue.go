@@ -439,7 +439,21 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 // enqueue submits a task and treats an asynq TaskID conflict as success: a
 // duplicate enqueue of an already-pending task (sweeper re-enqueue racing a live
 // task) is a deliberate no-op, not an error.
+//
+// It refuses a task that carries no asynq.Queue option rather than letting
+// asynq silently file it under its own built-in "default" queue. QueueDefault
+// is consumed only transitionally (see its doc) and NOT by the control role at
+// all, so an unrouted task would drain only until that transitional
+// consumption is removed, then quietly stop — the exact role-blindness this
+// package exists to prevent. Every producer in this file already sets one
+// (TestEveryProducerTargetsARoleQueue proves it); this is the backstop for a
+// future one that forgets. Scoped to this funnel only: bus.Job.Dest and
+// redisbus.asynqOptions keep their own documented "" = shared-queue meaning,
+// which this does not touch.
 func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
+	if !hasQueueOption(opts) {
+		return fmt.Errorf("queue: enqueue %q: no asynq.Queue option set; every producer must route to a role queue", t.Type())
+	}
 	if _, err := c.inner.EnqueueContext(context.Background(), t, opts...); err != nil {
 		if errors.Is(err, asynq.ErrTaskIDConflict) {
 			return nil
@@ -447,6 +461,19 @@ func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 		return err
 	}
 	return nil
+}
+
+// hasQueueOption reports whether opts carries an asynq.Queue option. Mirrors
+// the scanning approach fakeEnqueuer.queue()/fakeRegistrar.queue() already use
+// in queue_test.go: asynq.Option is a public Type()/Value() pair, so this needs
+// no cooperation from asynq beyond that.
+func hasQueueOption(opts []asynq.Option) bool {
+	for _, o := range opts {
+		if o.Type() == asynq.QueueOpt {
+			return true
+		}
+	}
+	return false
 }
 
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.

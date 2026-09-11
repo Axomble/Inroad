@@ -76,6 +76,41 @@ func TestEveryProducerTargetsARoleQueue(t *testing.T) {
 	}
 }
 
+// TestEnqueueRefusesATaskWithNoQueueOption proves the funnel every raw-asynq
+// producer passes through (c.enqueue) rejects a task carrying no asynq.Queue
+// option, rather than letting it silently land on asynq's unconsumed
+// "default". Nothing today calls enqueue without one (see
+// TestEveryProducerTargetsARoleQueue), but nothing stopped a FUTURE producer
+// from forgetting it either — and a forgotten queue drains only while the
+// transitional default consumption survives, then quietly stops. The error
+// names the task type so the offending producer is identifiable from the
+// message alone.
+func TestEnqueueRefusesATaskWithNoQueueOption(t *testing.T) {
+	fake := &fakeEnqueuer{}
+	c := &Client{inner: fake}
+
+	err := c.enqueue(asynq.NewTask("some:unrouted-task", nil))
+	if err == nil {
+		t.Fatal("enqueue with no Queue option: got nil error, want one")
+	}
+	if !strings.Contains(err.Error(), "some:unrouted-task") {
+		t.Errorf("error %q does not name the task type", err.Error())
+	}
+	if fake.task != nil {
+		t.Error("enqueue must reject before reaching the underlying client, not after")
+	}
+
+	// A task that DOES carry a Queue option still enqueues normally.
+	fake = &fakeEnqueuer{}
+	c = &Client{inner: fake}
+	if err := c.enqueue(asynq.NewTask("some:routed-task", nil), asynq.Queue(QueueSend)); err != nil {
+		t.Fatalf("enqueue with a Queue option: %v", err)
+	}
+	if fake.task == nil {
+		t.Error("a task with a Queue option must still reach the underlying client")
+	}
+}
+
 // TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend proves affinity is
 // load-bearing: warmup reputation is per-IP, so a warming mailbox must keep
 // sending from the same worker. An unassigned tick still needs SOME queue the
