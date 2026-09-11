@@ -469,7 +469,7 @@ func warmupTickTaskID(mailboxID string, due time.Time) string {
 // dedup, Dest→Queue routing, At→ProcessAt delayed delivery. dest is always
 // derived server-side from the mailbox→worker assignment, never from client
 // input (§17.8).
-func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
+func (c *Client) EnqueueWarmupTickAt(ctx context.Context, mailboxID, workspaceID string, t time.Time, dest string) error {
 	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
@@ -483,7 +483,7 @@ func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time,
 		}
 		dest = fallback
 	}
-	return c.Publish(context.Background(), bus.Job{
+	return c.Publish(ctx, bus.Job{
 		Kind:    TaskWarmupTick,
 		Payload: b,
 		Key:     warmupTickTaskID(mailboxID, t),
@@ -510,7 +510,7 @@ func warmupEngageTaskID(receiptID string) string {
 // delivery. Engagement acts on the RECIPIENT's own mailbox, so no cross-worker
 // egress routing applies — but it is still per-message work, so it belongs on
 // the shared send queue (QueueSend), not asynq's unconsumed "default".
-func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error {
+func (c *Client) EnqueueWarmupEngageIn(ctx context.Context, receiptID, workspaceID string, d time.Duration) error {
 	b, err := json.Marshal(WarmupEngagePayload{ReceiptID: receiptID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
@@ -519,7 +519,7 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 	if err != nil {
 		return err
 	}
-	return c.Publish(context.Background(), bus.Job{
+	return c.Publish(ctx, bus.Job{
 		Kind:    TaskWarmupEngage,
 		Payload: b,
 		Key:     warmupEngageTaskID(receiptID),
@@ -551,11 +551,11 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 // lines above this one, for the accurate enumeration). Scoped to this funnel
 // only: bus.Job.Dest and redisbus.asynqOptions keep their own documented "" =
 // shared-queue meaning, which this does not touch.
-func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
+func (c *Client) enqueue(ctx context.Context, t *asynq.Task, opts ...asynq.Option) error {
 	if _, ok := queueOption(opts); !ok {
 		return fmt.Errorf("queue: enqueue %q: no asynq.Queue option set; every producer must route to a role queue", t.Type())
 	}
-	if _, err := c.inner.EnqueueContext(context.Background(), t, opts...); err != nil {
+	if _, err := c.inner.EnqueueContext(ctx, t, opts...); err != nil {
 		if errors.Is(err, asynq.ErrTaskIDConflict) {
 			return nil
 		}
@@ -570,12 +570,12 @@ func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 // disagree with the queue its original producer picked. Everything a producer
 // legitimately owns (dedup key, delay, retries, timeout, retention) stays the
 // caller's.
-func (c *Client) enqueueRouted(taskType string, payload []byte, opts ...asynq.Option) error {
+func (c *Client) enqueueRouted(ctx context.Context, taskType string, payload []byte, opts ...asynq.Option) error {
 	q, err := routeTaskType(taskType)
 	if err != nil {
 		return err
 	}
-	return c.enqueue(asynq.NewTask(taskType, payload), append(opts, asynq.Queue(q))...)
+	return c.enqueue(ctx, asynq.NewTask(taskType, payload), append(opts, asynq.Queue(q))...)
 }
 
 // queueOption returns the value of opts' asynq.Queue option and whether one
@@ -617,20 +617,20 @@ func queueOption(opts []asynq.Option) (string, bool) {
 }
 
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.
-func (c *Client) EnqueueAdvance(enrollmentID, workspaceID string) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now())
+func (c *Client) EnqueueAdvance(ctx context.Context, enrollmentID, workspaceID string) error {
+	return c.enqueueAdvance(ctx, enrollmentID, workspaceID, time.Now())
 }
 
 // EnqueueAdvanceAt enqueues a sequence:advance task to run at time t (used by
 // launch stagger and the lazy chain's next-step scheduling).
-func (c *Client) EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, t, asynq.ProcessAt(t))
+func (c *Client) EnqueueAdvanceAt(ctx context.Context, enrollmentID, workspaceID string, t time.Time) error {
+	return c.enqueueAdvance(ctx, enrollmentID, workspaceID, t, asynq.ProcessAt(t))
 }
 
 // EnqueueAdvanceIn enqueues a sequence:advance task after delay d (used by the
 // cap-exceeded backoff).
-func (c *Client) EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
+func (c *Client) EnqueueAdvanceIn(ctx context.Context, enrollmentID, workspaceID string, d time.Duration) error {
+	return c.enqueueAdvance(ctx, enrollmentID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
 }
 
 // enqueueAdvance submits a sequence:advance keyed on (enrollment, due-second) so
@@ -647,7 +647,7 @@ func (c *Client) EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Durat
 // shares a second with the one that scheduled it. The claim in AdvanceHandler
 // remains the correctness guarantee; this only cuts wasted concurrent advances.
 // due is the scheduled processing time.
-func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time, opts ...asynq.Option) error {
+func (c *Client) enqueueAdvance(ctx context.Context, enrollmentID, workspaceID string, due time.Time, opts ...asynq.Option) error {
 	b, err := json.Marshal(AdvancePayload{EnrollmentID: enrollmentID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
@@ -659,20 +659,20 @@ func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time,
 		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),
 	)
-	return c.enqueueRouted(TaskSequenceAdvance, b, opts...)
+	return c.enqueueRouted(ctx, TaskSequenceAdvance, b, opts...)
 }
 
 // EnqueueDeliverabilityEvaluate schedules a breaker evaluation for one campaign.
 // Keyed on (campaign, dedup bucket) so the many sends finalising inside one
 // window collapse to a single evaluation; a TaskID conflict is success (see
 // enqueue), so a collapsed duplicate is not an error the caller has to handle.
-func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) error {
+func (c *Client) EnqueueDeliverabilityEvaluate(ctx context.Context, campaignID, workspaceID string) error {
 	b, err := json.Marshal(DeliverabilityEvaluatePayload{CampaignID: campaignID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
 	bucket := time.Now().Add(evaluateDedupWindow).Truncate(evaluateDedupWindow)
-	return c.enqueueRouted(TaskDeliverabilityEvaluate, b,
+	return c.enqueueRouted(ctx, TaskDeliverabilityEvaluate, b,
 		asynq.TaskID(fmt.Sprintf("deliverability:%s:%d", campaignID, bucket.Unix())),
 		asynq.ProcessAt(bucket),
 		asynq.MaxRetry(sendMaxRetry),
@@ -697,14 +697,14 @@ func testSendTaskID(campaignID, stepID, mailboxID string, now time.Time) string 
 }
 
 // EnqueueTestSend enqueues a testsend:send task for immediate processing.
-func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID string) error {
+func (c *Client) EnqueueTestSend(ctx context.Context, campaignID, stepID, mailboxID, to, workspaceID string) error {
 	b, err := json.Marshal(TestSendPayload{
 		CampaignID: campaignID, StepID: stepID, MailboxID: mailboxID, To: to, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
 	}
-	return c.enqueueRouted(TaskTestSend, b,
+	return c.enqueueRouted(ctx, TaskTestSend, b,
 		asynq.TaskID(testSendTaskID(campaignID, stepID, mailboxID, time.Now())),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Retention(taskRetention),
@@ -727,14 +727,14 @@ func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID 
 // Cancellation is a DB status flip that the handler re-reads on pickup; the
 // task still fires and no-ops. See
 // migrations/000066_inbox_pending_reply.up.sql for why.
-func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error {
+func (c *Client) EnqueuePendingInboxReply(ctx context.Context, pendingID, workspaceID string, sendAfter time.Time) error {
 	b, err := json.Marshal(InboxPendingReplySendPayload{
 		PendingID: pendingID, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
 	}
-	return c.enqueueRouted(TaskInboxPendingReplySend, b,
+	return c.enqueueRouted(ctx, TaskInboxPendingReplySend, b,
 		asynq.TaskID("inboxpending:"+pendingID),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
@@ -746,14 +746,14 @@ func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAft
 // EnqueuePendingInboxCompose schedules a composed email for delivery at
 // sendAfter. See EnqueuePendingInboxReply for the ProcessAt/TaskID reasoning —
 // this is the same design over the compose table.
-func (c *Client) EnqueuePendingInboxCompose(pendingID, workspaceID string, sendAfter time.Time) error {
+func (c *Client) EnqueuePendingInboxCompose(ctx context.Context, pendingID, workspaceID string, sendAfter time.Time) error {
 	b, err := json.Marshal(InboxPendingComposeSendPayload{
 		PendingID: pendingID, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
 	}
-	return c.enqueueRouted(TaskInboxPendingComposeSend, b,
+	return c.enqueueRouted(ctx, TaskInboxPendingComposeSend, b,
 		asynq.TaskID("inboxcompose:"+pendingID),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
@@ -796,12 +796,12 @@ func inboxPollTaskID(mailboxID string, now time.Time) string {
 // Retries are deliberately bounded lower than a send's — a poll that fails is
 // re-fanned-out by the next sweep a few minutes later, so exhausting retries
 // costs one interval of latency, not a lost message.
-func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
+func (c *Client) EnqueueInboxPoll(ctx context.Context, mailboxID, workspaceID string) error {
 	b, err := json.Marshal(InboxPollPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	return c.enqueueRouted(TaskInboxPoll, b,
+	return c.enqueueRouted(ctx, TaskInboxPoll, b,
 		asynq.TaskID(inboxPollTaskID(mailboxID, time.Now())),
 		asynq.MaxRetry(pollMaxRetry),
 		asynq.Timeout(pollTimeout),
@@ -810,17 +810,17 @@ func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 }
 
 // EnqueueWebhookDeliver enqueues a webhook:deliver task for immediate processing.
-func (c *Client) EnqueueWebhookDeliver(deliveryID, workspaceID string) error {
-	return c.enqueueWebhookDeliver(deliveryID, workspaceID, time.Now())
+func (c *Client) EnqueueWebhookDeliver(ctx context.Context, deliveryID, workspaceID string) error {
+	return c.enqueueWebhookDeliver(ctx, deliveryID, workspaceID, time.Now())
 }
 
 // EnqueueWebhookDeliverIn enqueues a webhook:deliver task after delay d — the
 // handler's own backoff-retry path.
-func (c *Client) EnqueueWebhookDeliverIn(deliveryID, workspaceID string, d time.Duration) error {
-	return c.enqueueWebhookDeliver(deliveryID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
+func (c *Client) EnqueueWebhookDeliverIn(ctx context.Context, deliveryID, workspaceID string, d time.Duration) error {
+	return c.enqueueWebhookDeliver(ctx, deliveryID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
 }
 
-func (c *Client) enqueueWebhookDeliver(deliveryID, workspaceID string, due time.Time, opts ...asynq.Option) error {
+func (c *Client) enqueueWebhookDeliver(ctx context.Context, deliveryID, workspaceID string, due time.Time, opts ...asynq.Option) error {
 	b, err := json.Marshal(WebhookDeliverPayload{DeliveryID: deliveryID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
@@ -831,7 +831,7 @@ func (c *Client) enqueueWebhookDeliver(deliveryID, workspaceID string, due time.
 		asynq.Timeout(webhookDeliverTimeout),
 		asynq.Retention(taskRetention),
 	)
-	return c.enqueueRouted(TaskWebhookDeliver, b, opts...)
+	return c.enqueueRouted(ctx, TaskWebhookDeliver, b, opts...)
 }
 
 // Publish makes *Client satisfy bus.Dispatcher, so the new warmup and routing

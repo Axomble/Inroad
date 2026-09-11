@@ -22,7 +22,7 @@ import (
 // Redis, it just counts how many times it was asked to enqueue.
 type recordingTestSendEnqueuer struct{ calls int }
 
-func (e *recordingTestSendEnqueuer) EnqueueTestSend(string, string, string, string, string) error {
+func (e *recordingTestSendEnqueuer) EnqueueTestSend(context.Context, string, string, string, string, string) error {
 	e.calls++
 	return nil
 }

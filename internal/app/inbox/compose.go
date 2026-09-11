@@ -128,7 +128,7 @@ type ComposeClaimer interface {
 
 // ComposeEnqueuer hands a scheduled compose to the execution plane.
 type ComposeEnqueuer interface {
-	EnqueuePendingInboxCompose(pendingID, workspaceID string, sendAfter time.Time) error
+	EnqueuePendingInboxCompose(ctx context.Context, pendingID, workspaceID string, sendAfter time.Time) error
 }
 
 // normalizeRecipients trims, drops blanks, lowercases and de-duplicates a
@@ -320,7 +320,7 @@ func (s *Service) ScheduleCompose(
 		return PendingCompose{}, err
 	}
 	if s.composeEnq != nil {
-		if err := s.composeEnq.EnqueuePendingInboxCompose(saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
+		if err := s.composeEnq.EnqueuePendingInboxCompose(ctx, saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
 			return PendingCompose{}, fmt.Errorf("enqueue pending compose: %w", err)
 		}
 	}

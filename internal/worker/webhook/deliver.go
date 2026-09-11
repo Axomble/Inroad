@@ -53,7 +53,7 @@ type Core interface {
 
 // Enqueuer is the queue seam for the backoff re-enqueue. queue.Client satisfies it.
 type Enqueuer interface {
-	EnqueueWebhookDeliverIn(deliveryID, workspaceID string, d time.Duration) error
+	EnqueueWebhookDeliverIn(ctx context.Context, deliveryID, workspaceID string, d time.Duration) error
 }
 
 // DeliverHandler builds the webhook:deliver task handler. allowPrivate mirrors
@@ -139,7 +139,7 @@ func deliver(ctx context.Context, core Core, enq Enqueuer, client *http.Client, 
 	if err := core.MarkWebhookRetrying(ctx, job.DeliveryID, job.WorkspaceID, attempts, lastErr, respStatus, time.Now().Add(delay)); err != nil {
 		return fmt.Errorf("webhook deliver: mark retrying: %w", err)
 	}
-	if err := enq.EnqueueWebhookDeliverIn(job.DeliveryID, job.WorkspaceID, delay); err != nil {
+	if err := enq.EnqueueWebhookDeliverIn(ctx, job.DeliveryID, job.WorkspaceID, delay); err != nil {
 		return fmt.Errorf("webhook deliver: re-enqueue: %w", err)
 	}
 	return nil

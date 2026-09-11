@@ -39,7 +39,7 @@ type fakeTestSendEnqueuer struct {
 	err   error
 }
 
-func (f *fakeTestSendEnqueuer) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID string) error {
+func (f *fakeTestSendEnqueuer) EnqueueTestSend(_ context.Context, campaignID, stepID, mailboxID, to, workspaceID string) error {
 	f.calls = append(f.calls, testSendCall{campaignID, stepID, mailboxID, to, workspaceID})
 	return f.err
 }
@@ -369,7 +369,7 @@ func TestTestSendAllowsAnUnsuppressedRecipient(t *testing.T) {
 // noopEnqueuer satisfies campaign.Enqueuer; testSend never calls Launch.
 type noopEnqueuer struct{}
 
-func (noopEnqueuer) EnqueueAdvanceAt(string, string, time.Time) error { return nil }
+func (noopEnqueuer) EnqueueAdvanceAt(context.Context, string, string, time.Time) error { return nil }
 
 // serveTestSend runs one request through the REAL auth middleware and the
 // campaign router's own chi mux (mounted under /campaigns exactly as cmd/inroad

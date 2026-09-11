@@ -220,7 +220,7 @@ type pendingEnqueueCall struct {
 	sendAfter   time.Time
 }
 
-func (r *recordingPendingEnqueuer) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error {
+func (r *recordingPendingEnqueuer) EnqueuePendingInboxReply(_ context.Context, pendingID, workspaceID string, sendAfter time.Time) error {
 	if r.err != nil {
 		return r.err
 	}

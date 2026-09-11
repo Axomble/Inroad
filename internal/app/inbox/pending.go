@@ -145,7 +145,7 @@ type PendingReplyStore interface {
 // ids and an instant, never the body. The row is the single source of truth for
 // what to send, so the task is only a pointer to it — see queueReply.
 type PendingReplyEnqueuer interface {
-	EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error
+	EnqueuePendingInboxReply(ctx context.Context, pendingID, workspaceID string, sendAfter time.Time) error
 }
 
 // CreatePendingReplyInput carries one reply to schedule.
@@ -284,7 +284,7 @@ func (s *Service) queueReply(
 	// the row self-healing and is the obvious next increment — it does not exist
 	// yet, so this must not pretend the row is safe on its own.
 	if s.pendingEnq != nil {
-		if err := s.pendingEnq.EnqueuePendingInboxReply(saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
+		if err := s.pendingEnq.EnqueuePendingInboxReply(ctx, saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
 			// The row exists but nothing will ever claim it. Marked failed
 			// before returning, so the outbox tells the truth: leaving it
 			// `scheduled` would show the operator a reply that looks in flight,

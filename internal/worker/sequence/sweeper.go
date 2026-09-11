@@ -45,7 +45,7 @@ func SweepHandler(core coreapi.Client, enq Enqueuer, mtx *metrics.Metrics) func(
 		var failures int
 		for _, r := range rows {
 			// Re-enqueue immediately; the enrollment is already past due.
-			if err := enq.EnqueueAdvanceIn(r.EnrollmentID, r.WorkspaceID, 0); err != nil {
+			if err := enq.EnqueueAdvanceIn(ctx, r.EnrollmentID, r.WorkspaceID, 0); err != nil {
 				failures++
 			}
 		}

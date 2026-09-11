@@ -138,15 +138,15 @@ type fakeEnq struct {
 	evaluateErr error
 }
 
-func (f *fakeEnq) EnqueueAdvanceAt(_, _ string, t time.Time) error {
+func (f *fakeEnq) EnqueueAdvanceAt(_ context.Context, _, _ string, t time.Time) error {
 	f.atCalled, f.at = true, t
 	return nil
 }
-func (f *fakeEnq) EnqueueAdvanceIn(_, _ string, d time.Duration) error {
+func (f *fakeEnq) EnqueueAdvanceIn(_ context.Context, _, _ string, d time.Duration) error {
 	f.inCalled, f.in = true, d
 	return f.inErr
 }
-func (f *fakeEnq) EnqueueDeliverabilityEvaluate(campaignID, _ string) error {
+func (f *fakeEnq) EnqueueDeliverabilityEvaluate(_ context.Context, campaignID, _ string) error {
 	if f.evaluateErr != nil {
 		return f.evaluateErr
 	}

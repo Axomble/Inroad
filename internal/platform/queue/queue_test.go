@@ -44,17 +44,25 @@ func TestEveryProducerTargetsARoleQueue(t *testing.T) {
 		call func(c *Client) error
 		want string
 	}{
-		{"warmup engage", func(c *Client) error { return c.EnqueueWarmupEngageIn("r1", "ws1", time.Minute) }, QueueSend},
-		{"advance", func(c *Client) error { return c.EnqueueAdvance("e1", "ws1") }, QueueSend},
-		{"advance at", func(c *Client) error { return c.EnqueueAdvanceAt("e1", "ws1", time.Now()) }, QueueSend},
-		{"advance in", func(c *Client) error { return c.EnqueueAdvanceIn("e1", "ws1", time.Minute) }, QueueSend},
-		{"test send", func(c *Client) error { return c.EnqueueTestSend("c1", "s1", "m1", "to@x.test", "ws1") }, QueueSend},
-		{"pending reply", func(c *Client) error { return c.EnqueuePendingInboxReply("p1", "ws1", time.Now()) }, QueueSend},
-		{"pending compose", func(c *Client) error { return c.EnqueuePendingInboxCompose("p1", "ws1", time.Now()) }, QueueSend},
-		{"inbox poll", func(c *Client) error { return c.EnqueueInboxPoll("m1", "ws1") }, QueueSend},
-		{"webhook deliver", func(c *Client) error { return c.EnqueueWebhookDeliver("d1", "ws1") }, QueueSend},
-		{"webhook deliver in", func(c *Client) error { return c.EnqueueWebhookDeliverIn("d1", "ws1", time.Minute) }, QueueSend},
-		{"deliverability evaluate", func(c *Client) error { return c.EnqueueDeliverabilityEvaluate("c1", "ws1") }, QueueControl},
+		{"warmup engage", func(c *Client) error { return c.EnqueueWarmupEngageIn(context.Background(), "r1", "ws1", time.Minute) }, QueueSend},
+		{"advance", func(c *Client) error { return c.EnqueueAdvance(context.Background(), "e1", "ws1") }, QueueSend},
+		{"advance at", func(c *Client) error { return c.EnqueueAdvanceAt(context.Background(), "e1", "ws1", time.Now()) }, QueueSend},
+		{"advance in", func(c *Client) error { return c.EnqueueAdvanceIn(context.Background(), "e1", "ws1", time.Minute) }, QueueSend},
+		{"test send", func(c *Client) error {
+			return c.EnqueueTestSend(context.Background(), "c1", "s1", "m1", "to@x.test", "ws1")
+		}, QueueSend},
+		{"pending reply", func(c *Client) error {
+			return c.EnqueuePendingInboxReply(context.Background(), "p1", "ws1", time.Now())
+		}, QueueSend},
+		{"pending compose", func(c *Client) error {
+			return c.EnqueuePendingInboxCompose(context.Background(), "p1", "ws1", time.Now())
+		}, QueueSend},
+		{"inbox poll", func(c *Client) error { return c.EnqueueInboxPoll(context.Background(), "m1", "ws1") }, QueueSend},
+		{"webhook deliver", func(c *Client) error { return c.EnqueueWebhookDeliver(context.Background(), "d1", "ws1") }, QueueSend},
+		{"webhook deliver in", func(c *Client) error {
+			return c.EnqueueWebhookDeliverIn(context.Background(), "d1", "ws1", time.Minute)
+		}, QueueSend},
+		{"deliverability evaluate", func(c *Client) error { return c.EnqueueDeliverabilityEvaluate(context.Background(), "c1", "ws1") }, QueueControl},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeEnqueuer{}
@@ -122,7 +130,7 @@ func TestEnqueueRefusesATaskWithNoQueueOption(t *testing.T) {
 	fake := &fakeEnqueuer{}
 	c := &Client{inner: fake}
 
-	err := c.enqueue(asynq.NewTask("some:unrouted-task", nil))
+	err := c.enqueue(context.Background(), asynq.NewTask("some:unrouted-task", nil))
 	if err == nil {
 		t.Fatal("enqueue with no Queue option: got nil error, want one")
 	}
@@ -136,7 +144,7 @@ func TestEnqueueRefusesATaskWithNoQueueOption(t *testing.T) {
 	// A task that DOES carry a Queue option still enqueues normally.
 	fake = &fakeEnqueuer{}
 	c = &Client{inner: fake}
-	if err := c.enqueue(asynq.NewTask("some:routed-task", nil), asynq.Queue(QueueSend)); err != nil {
+	if err := c.enqueue(context.Background(), asynq.NewTask("some:routed-task", nil), asynq.Queue(QueueSend)); err != nil {
 		t.Fatalf("enqueue with a Queue option: %v", err)
 	}
 	if fake.task == nil {
@@ -182,7 +190,7 @@ func TestQueueOptionIgnoresANonStringValueRatherThanPanicking(t *testing.T) {
 
 	fake := &fakeEnqueuer{}
 	c := &Client{inner: fake}
-	err := c.enqueue(asynq.NewTask("some:malformed-queue-task", nil), malformedQueueOption{})
+	err := c.enqueue(context.Background(), asynq.NewTask("some:malformed-queue-task", nil), malformedQueueOption{})
 	if err == nil {
 		t.Fatal("enqueue with a malformed Queue option: got nil error, want one")
 	}
@@ -203,14 +211,14 @@ func TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend(t *testing.T) {
 	fake := &fakeEnqueuer{}
 	c := &Client{inner: fake}
 
-	if err := c.EnqueueWarmupTickAt("m1", "ws1", time.Now(), WorkerQueue("abc")); err != nil {
+	if err := c.EnqueueWarmupTickAt(context.Background(), "m1", "ws1", time.Now(), WorkerQueue("abc")); err != nil {
 		t.Fatalf("with dest: %v", err)
 	}
 	if got, ok := fake.queue(); !ok || got != WorkerQueue("abc") {
 		t.Errorf("dest = %q (present=%v), want the affinity queue", got, ok)
 	}
 
-	if err := c.EnqueueWarmupTickAt("m1", "ws1", time.Now(), ""); err != nil {
+	if err := c.EnqueueWarmupTickAt(context.Background(), "m1", "ws1", time.Now(), ""); err != nil {
 		t.Fatalf("no dest: %v", err)
 	}
 	if got, ok := fake.queue(); !ok || got != QueueSend {

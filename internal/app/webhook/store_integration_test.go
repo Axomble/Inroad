@@ -48,7 +48,7 @@ func testKeyring(t *testing.T, pool *pgxpool.Pool) *crypto.Keyring {
 
 type noopEnq struct{}
 
-func (noopEnq) EnqueueWebhookDeliver(string, string) error { return nil }
+func (noopEnq) EnqueueWebhookDeliver(context.Context, string, string) error { return nil }
 
 func newSvc(t *testing.T, pool *pgxpool.Pool) *webhook.Service {
 	t.Helper()

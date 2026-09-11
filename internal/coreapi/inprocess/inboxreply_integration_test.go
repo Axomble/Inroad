@@ -146,7 +146,7 @@ type recordingPendingEnqueuer struct {
 	sendAfters []time.Time
 }
 
-func (r *recordingPendingEnqueuer) EnqueuePendingInboxReply(pendingID, _ string, sendAfter time.Time) error {
+func (r *recordingPendingEnqueuer) EnqueuePendingInboxReply(_ context.Context, pendingID, _ string, sendAfter time.Time) error {
 	r.pendingIDs = append(r.pendingIDs, pendingID)
 	r.sendAfters = append(r.sendAfters, sendAfter)
 	return nil

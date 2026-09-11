@@ -50,7 +50,7 @@ type GraphFetcher interface {
 // handler depends on the interface so the receipt-detection hook is unit-testable
 // with a spy that records the enqueue without touching Redis.
 type WarmupEngageEnqueuer interface {
-	EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error
+	EnqueueWarmupEngageIn(ctx context.Context, receiptID, workspaceID string, d time.Duration) error
 }
 
 // imapJunkScanner is the OPTIONAL junk-folder capability of an IMAP InboxReader:
@@ -644,7 +644,7 @@ func recordWarmup(ctx context.Context, core coreapi.Client, hook warmupHook, p q
 	if plan.ReceiptID == "" {
 		return nil // duplicate receipt (re-poll) — already engaged/queued
 	}
-	return hook.enq.EnqueueWarmupEngageIn(plan.ReceiptID, p.WorkspaceID, plan.EngageAfter)
+	return hook.enq.EnqueueWarmupEngageIn(ctx, plan.ReceiptID, p.WorkspaceID, plan.EngageAfter)
 }
 
 // scanIMAPJunk best-effort scans the IMAP junk folder for spam-placed warmup mail

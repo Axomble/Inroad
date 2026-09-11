@@ -260,7 +260,7 @@ type selectiveEnqueuer struct {
 	enqueued []string
 }
 
-func (s *selectiveEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, _ time.Time) error {
+func (s *selectiveEnqueuer) EnqueueAdvanceAt(_ context.Context, enrollmentID, _ string, _ time.Time) error {
 	if s.fail[enrollmentID] {
 		return errors.New("redis unavailable")
 	}
@@ -275,7 +275,7 @@ type fakeEnqueuer struct {
 	at map[string]time.Time
 }
 
-func (f *fakeEnqueuer) EnqueueAdvanceAt(enrollmentID, _ string, t time.Time) error {
+func (f *fakeEnqueuer) EnqueueAdvanceAt(_ context.Context, enrollmentID, _ string, t time.Time) error {
 	f.enqueued = append(f.enqueued, enrollmentID)
 	if f.at == nil {
 		f.at = map[string]time.Time{}

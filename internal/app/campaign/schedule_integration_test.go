@@ -358,4 +358,4 @@ func (alwaysOKChecker) ListExists(context.Context, uuid.UUID, uuid.UUID) (bool, 
 
 type noopEnqueuer struct{}
 
-func (noopEnqueuer) EnqueueAdvanceAt(string, string, time.Time) error { return nil }
+func (noopEnqueuer) EnqueueAdvanceAt(context.Context, string, string, time.Time) error { return nil }

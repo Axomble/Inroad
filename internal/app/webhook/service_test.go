@@ -121,7 +121,7 @@ type fakeEnqueuer struct {
 	failErr error
 }
 
-func (f *fakeEnqueuer) EnqueueWebhookDeliver(string, string) error {
+func (f *fakeEnqueuer) EnqueueWebhookDeliver(context.Context, string, string) error {
 	f.calls++
 	return f.failErr
 }

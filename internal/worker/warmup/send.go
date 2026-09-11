@@ -37,7 +37,7 @@ type Sender interface {
 // Enqueuer schedules a warmup:tick at a time, routed to a worker queue.
 // Satisfied by *queue.Client.
 type Enqueuer interface {
-	EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error
+	EnqueueWarmupTickAt(ctx context.Context, mailboxID, workspaceID string, t time.Time, dest string) error
 }
 
 // SendHandler returns an asynq handler for warmup:tick tasks. It owns one warmup
@@ -90,7 +90,7 @@ func SendHandler(core coreapi.Client, sender Sender, enq Enqueuer, mtx *metrics.
 			if err != nil {
 				return err
 			}
-			return enq.EnqueueWarmupTickAt(p.MailboxID, p.WorkspaceID, due, dest)
+			return enq.EnqueueWarmupTickAt(ctx, p.MailboxID, p.WorkspaceID, due, dest)
 		}
 
 		// Claim-before-send: the warmup_sends row is the delivery claim.

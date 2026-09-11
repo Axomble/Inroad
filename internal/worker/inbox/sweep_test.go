@@ -15,7 +15,7 @@ type fakeEnqueuer struct {
 	enqueued []string
 }
 
-func (f *fakeEnqueuer) EnqueueInboxPoll(mailboxID, _ string) error {
+func (f *fakeEnqueuer) EnqueueInboxPoll(_ context.Context, mailboxID, _ string) error {
 	if f.fail[mailboxID] {
 		return errors.New("boom")
 	}

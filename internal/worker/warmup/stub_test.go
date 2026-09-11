@@ -112,7 +112,7 @@ type fakeEnq struct {
 	failOn string
 }
 
-func (f *fakeEnq) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
+func (f *fakeEnq) EnqueueWarmupTickAt(_ context.Context, mailboxID, workspaceID string, t time.Time, dest string) error {
 	f.calls = append(f.calls, tickCall{mailboxID, workspaceID, dest, t})
 	if f.failOn != "" && mailboxID != f.failOn {
 		return nil

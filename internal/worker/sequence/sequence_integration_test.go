@@ -70,9 +70,15 @@ type itEnq struct {
 func newITEnq() *itEnq {
 	return &itEnq{at: map[string]time.Time{}, in: map[string]time.Duration{}}
 }
-func (e *itEnq) EnqueueAdvanceAt(id, _ string, t time.Time) error     { e.at[id] = t; return nil }
-func (e *itEnq) EnqueueAdvanceIn(id, _ string, d time.Duration) error { e.in[id] = d; return nil }
-func (e *itEnq) EnqueueDeliverabilityEvaluate(id, _ string) error {
+func (e *itEnq) EnqueueAdvanceAt(_ context.Context, id, _ string, t time.Time) error {
+	e.at[id] = t
+	return nil
+}
+func (e *itEnq) EnqueueAdvanceIn(_ context.Context, id, _ string, d time.Duration) error {
+	e.in[id] = d
+	return nil
+}
+func (e *itEnq) EnqueueDeliverabilityEvaluate(_ context.Context, id, _ string) error {
 	e.evaluated = append(e.evaluated, id)
 	return nil
 }

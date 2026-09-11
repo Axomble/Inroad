@@ -33,7 +33,7 @@ var (
 // workspaceID travels alongside enrollmentID so the worker can pin workspace_id
 // in its DB WHERE clauses (defense in depth on top of the UUID enrollmentID).
 type Enqueuer interface {
-	EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error
+	EnqueueAdvanceAt(ctx context.Context, enrollmentID, workspaceID string, t time.Time) error
 }
 
 // Service implements campaign use cases. It depends on the Store and
@@ -486,7 +486,7 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 		// enrollment, so the scheduled task and the enrollment's due cursor are
 		// identical by construction. A failed enqueue is non-fatal — the
 		// enrollment sweeper reconciles it next tick.
-		if err := enq.EnqueueAdvanceAt(e.ID.String(), ws.String(), due[e.ID]); err != nil {
+		if err := enq.EnqueueAdvanceAt(ctx, e.ID.String(), ws.String(), due[e.ID]); err != nil {
 			res.FailedEnqueueCount++
 			continue
 		}

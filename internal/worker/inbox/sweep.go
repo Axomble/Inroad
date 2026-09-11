@@ -17,7 +17,7 @@ const sweepKind = "inbox"
 
 // Enqueuer schedules an inbox:poll task. Satisfied by *queue.Client.
 type Enqueuer interface {
-	EnqueueInboxPoll(mailboxID, workspaceID string) error
+	EnqueueInboxPoll(ctx context.Context, mailboxID, workspaceID string) error
 }
 
 // SweepHandler returns an asynq handler for inbox:sweep tasks: it fans out
@@ -40,7 +40,7 @@ func SweepHandler(core coreapi.Client, enq Enqueuer, mtx *metrics.Metrics) func(
 		mtx.SweepCompleted(sweepKind, len(mailboxes), time.Since(started))
 		var failures int
 		for _, m := range mailboxes {
-			if err := enq.EnqueueInboxPoll(m.ID, m.WorkspaceID); err != nil {
+			if err := enq.EnqueueInboxPoll(ctx, m.ID, m.WorkspaceID); err != nil {
 				failures++
 			}
 		}
