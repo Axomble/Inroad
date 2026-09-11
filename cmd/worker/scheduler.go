@@ -9,6 +9,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/jobrun"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/worker"
 )
 
 // sweepRegistrar names one periodic reconcile so a registration failure can say
@@ -66,8 +67,8 @@ func registerSweepList(sch *asynq.Scheduler, sweeps []sweepRegistrar) error {
 //
 // The returned stop func is always non-nil, so the caller can defer it
 // unconditionally.
-func startScheduler(cfg *config.Config, logger *slog.Logger) (stop func(), err error) {
-	return startSchedulerWith(cfg, logger, func() (periodicScheduler, error) {
+func startScheduler(cfg *config.Config, role worker.Role, logger *slog.Logger) (stop func(), err error) {
+	return startSchedulerWith(cfg, role, logger, func() (periodicScheduler, error) {
 		sch := queue.NewScheduler(cfg.RedisAddr, logger)
 		if err := registerSweeps(sch); err != nil {
 			return nil, err
@@ -85,7 +86,15 @@ type periodicScheduler interface {
 	Shutdown()
 }
 
-func startSchedulerWith(cfg *config.Config, logger *slog.Logger, build func() (periodicScheduler, error)) (stop func(), err error) {
+func startSchedulerWith(cfg *config.Config, role worker.Role, logger *slog.Logger, build func() (periodicScheduler, error)) (stop func(), err error) {
+	if !role.RunsScheduledWork() {
+		// The role is the stronger statement: it must not be undone by a stale
+		// INROAD_RUN_SCHEDULER=true left over from when this host ran everything,
+		// or a send host would re-enqueue every sweep once per send host.
+		logger.Info("scheduler disabled by worker role", "role", role,
+			"note", "a send-role host never schedules; the control role does")
+		return func() {}, nil
+	}
 	if !cfg.RunScheduler {
 		// Logged at INFO, not DEBUG: "does this replica schedule?" is the first
 		// question when a sweep stops running, and it must be answerable from

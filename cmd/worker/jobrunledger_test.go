@@ -120,7 +120,7 @@ func TestEverySweepDispatchedThroughRegisterRecordsOneLedgerRow(t *testing.T) {
 	// nil senders/readers/resolvers/enqueuer: a sweep with nothing due reaches
 	// none of them, and a nil dereference here would mean a reconcile did more
 	// than scan-and-count. jobrun.Record re-panics, so it would fail loudly.
-	worker.Register(mux, core, nil, nil, nil, nil, nil, nil, "https://app.test", nil, nil, false, nil)
+	worker.Register(mux, worker.Deps{Role: worker.RoleAll, Core: core, PublicURL: "https://app.test"})
 
 	for taskType, wantName := range scheduledSweeps {
 		t.Run(taskType, func(t *testing.T) {

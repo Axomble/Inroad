@@ -13,6 +13,7 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
@@ -26,6 +27,45 @@ import (
 )
 
 var registerMasterKey = bytes.Repeat([]byte{9}, 32)
+
+// registerHMACSecret stands in for the tracking and warmup secrets. Both are
+// HMAC keys, and no handler exercised here signs anything, so one value serves.
+var registerHMACSecret = []byte("0123456789abcdef0123456789abcdef")
+
+// registrationPool migrates and opens the integration database, closing the
+// pool when the test ends.
+func registrationPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	if err := db.Migrate(dbtest.DSN(t)); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	pool, err := db.Connect(context.Background(), dbtest.DSN(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// registrationCore builds the REAL in-process coreapi client over pool — the
+// same construction cmd/worker/main.go performs. Registration is wired by type
+// assertion for the capabilities deliberately absent from coreapi.Client, and
+// only the real client proves the assertions still match: every fake in the
+// repo satisfies the narrow interfaces whether Register wires them or not.
+func registrationCore(t *testing.T, pool *pgxpool.Pool) coreapi.Client {
+	t.Helper()
+	kp, err := crypto.NewLocalKeyProvider(registerMasterKey)
+	if err != nil {
+		t.Fatalf("key provider: %v", err)
+	}
+	legacy, err := crypto.NewSealer(registerMasterKey)
+	if err != nil {
+		t.Fatalf("legacy sealer: %v", err)
+	}
+	return inprocess.New(pool, crypto.NewKeyring(kp, keys.NewPgDEKStore(gen.New(pool)), legacy),
+		registerHMACSecret, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{},
+		registerHMACSecret, warmup.NewStaticLibrary())
+}
 
 // Register wires handlers onto the mux by TYPE ASSERTION for the capabilities that
 // are deliberately absent from coreapi.Client (maintenance.Cleaner, and the
@@ -41,28 +81,9 @@ var registerMasterKey = bytes.Repeat([]byte{9}, 32)
 // routing without needing Redis.
 func TestRegisterWiresTheDeliverabilityBreaker(t *testing.T) {
 	ctx := context.Background()
-	if err := db.Migrate(dbtest.DSN(t)); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	pool, err := db.Connect(ctx, dbtest.DSN(t))
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer pool.Close()
+	pool := registrationPool(t)
 	q := gen.New(pool)
-
-	kp, err := crypto.NewLocalKeyProvider(registerMasterKey)
-	if err != nil {
-		t.Fatalf("key provider: %v", err)
-	}
-	legacy, err := crypto.NewSealer(registerMasterKey)
-	if err != nil {
-		t.Fatalf("legacy sealer: %v", err)
-	}
-	secret := []byte("0123456789abcdef0123456789abcdef")
-	core := inprocess.New(pool, crypto.NewKeyring(kp, keys.NewPgDEKStore(q), legacy),
-		secret, "https://app.test", mail.GoogleOAuth{}, mail.MicrosoftOAuth{},
-		secret, warmup.NewStaticLibrary())
+	core := registrationCore(t, pool)
 
 	// A campaign that has breached: 10% bounce over the minimum sample.
 	ws, campaignID := seedBreachingCampaign(t, ctx, pool, q)
@@ -70,7 +91,14 @@ func TestRegisterWiresTheDeliverabilityBreaker(t *testing.T) {
 	// The real registration. If the breaker's type assertion stops matching, no
 	// handler is registered and ProcessTask returns "handler not found".
 	mux := queue.NewMux()
-	Register(mux, core, &mail.MultiSender{}, nil, nil, nil, nil, nil, "https://app.test", secret, secret, false, nil)
+	Register(mux, Deps{
+		Role:           RoleAll,
+		Core:           core,
+		Sender:         &mail.MultiSender{},
+		PublicURL:      "https://app.test",
+		TrackingSecret: registerHMACSecret,
+		WarmupSecret:   registerHMACSecret,
+	})
 
 	payload, err := json.Marshal(queue.DeliverabilityEvaluatePayload{
 		CampaignID: campaignID.String(), WorkspaceID: ws.String(),
