@@ -762,8 +762,10 @@ type SendRef struct {
 
 // SenderTransport is one resolved mailbox's send identity plus its decrypted
 // credential, for a control-plane-triggered ad hoc send with no existing
-// sends/enrollment row (currently: the testsend:send task only). Mirrors the
-// transport fields on StepSendJob/WarmupSendJob rather than embedding
+// sends/enrollment row (currently: the testsend:send task, and
+// internal/worker/inbox's manual reply/compose sends — inbox:pending_reply_send,
+// inbox:pending_compose_send, and the legacy drain-only inbox:reply_send).
+// Mirrors the transport fields on StepSendJob/WarmupSendJob rather than embedding
 // platform/mail's OutboundJob, so this package stays free of that dependency
 // like every other job type here; the worker maps it onto mail.OutboundJob.
 //
