@@ -27,4 +27,9 @@ type DeadLetterInput struct {
 	Payload      []byte
 	LastError    string
 	AttemptCount int
+	// Queue is the asynq queue the task was claimed from, "" when the execution
+	// plane could not tell. The control plane stores it so a replay can return
+	// the task to the queue it ran on — which, for a warmup tick, is the worker
+	// and therefore the IP the mailbox was warming from.
+	Queue string
 }

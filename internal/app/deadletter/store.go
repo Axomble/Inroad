@@ -71,15 +71,23 @@ func NewPgStore(q *gen.Queries) *PgStore { return &PgStore{q: q} }
 
 var _ Store = (*PgStore)(nil)
 
+// Insert maps an unknown queue ("" — the execution plane could not tell) to a
+// NULL column rather than to an empty string. The column's CHECK rejects the
+// empty string outright, so "we do not know where this ran" has exactly one
+// representation and an insert can never fail over a diagnostic field.
 func (s *PgStore) Insert(ctx context.Context, in Capture, status string) (gen.TaskDeadLetter, error) {
-	return s.q.InsertTaskDeadLetter(ctx, gen.InsertTaskDeadLetterParams{
+	params := gen.InsertTaskDeadLetterParams{
 		WorkspaceID:  in.WorkspaceID,
 		TaskType:     in.TaskType,
 		Payload:      in.Payload,
 		LastError:    in.LastError,
 		AttemptCount: in.AttemptCount,
 		Status:       status,
-	})
+	}
+	if in.Queue != "" {
+		params.Queue = &in.Queue
+	}
+	return s.q.InsertTaskDeadLetter(ctx, params)
 }
 
 func (s *PgStore) List(ctx context.Context, ws uuid.UUID, q ListQuery) ([]gen.TaskDeadLetter, error) {

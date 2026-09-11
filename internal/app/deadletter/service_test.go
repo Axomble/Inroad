@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/queue"
 )
 
 // fakeStore is an in-memory Store that reproduces the ONE behaviour the service
@@ -208,23 +209,17 @@ func (f *fakeStore) status(id uuid.UUID) string {
 // which is the property that matters more than any other here.
 type fakeEnqueuer struct {
 	mu    sync.Mutex
-	calls []enqueueCall
+	calls []queue.ReplayJob
 	err   error
 }
 
-type enqueueCall struct {
-	taskType string
-	payload  []byte
-	key      string
-}
-
-func (f *fakeEnqueuer) EnqueueReplay(_ context.Context, taskType string, payload []byte, key string) error {
+func (f *fakeEnqueuer) EnqueueReplay(_ context.Context, job queue.ReplayJob) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
-	f.calls = append(f.calls, enqueueCall{taskType: taskType, payload: payload, key: key})
+	f.calls = append(f.calls, job)
 	return nil
 }
 
@@ -281,14 +276,14 @@ func TestReplayEnqueuesTheOriginalPayloadAndMarksTheRow(t *testing.T) {
 		t.Fatalf("enqueued %d times, want exactly 1", enq.count())
 	}
 	call := enq.calls[0]
-	if call.taskType != "sequence:advance" {
-		t.Errorf("task type = %q, want sequence:advance", call.taskType)
+	if call.TaskType != "sequence:advance" {
+		t.Errorf("task type = %q, want sequence:advance", call.TaskType)
 	}
-	if string(call.payload) != string(row.Payload) {
-		t.Errorf("payload = %s, want the original %s", call.payload, row.Payload)
+	if string(call.Payload) != string(row.Payload) {
+		t.Errorf("payload = %s, want the original %s", call.Payload, row.Payload)
 	}
-	if call.key != replayKey(row.ID) {
-		t.Errorf("key = %q, want %q", call.key, replayKey(row.ID))
+	if call.Key != replayKey(row.ID) {
+		t.Errorf("key = %q, want %q", call.Key, replayKey(row.ID))
 	}
 }
 
@@ -909,3 +904,45 @@ func TestReplayKeyIsStablePerRow(t *testing.T) {
 		keys[key] = id
 	}
 }
+
+// The queue the task died on travels with the replay, unchanged. This domain
+// does not decide what it means — queue.replayQueue does — but it is the only
+// place that HAS it, so dropping it here would silently discard a warming
+// mailbox's IP affinity during recovery.
+//
+// The nil case is a row captured before the queue column existed, which must
+// degrade to "" (the queue package then reconstructs the route from the task
+// type) rather than failing a replay that used to work.
+func TestReplayForwardsTheCapturedQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		captured *string
+		want     string
+	}{
+		{"an affinity queue", ptr("w:worker-a"), "w:worker-a"},
+		{"a role queue", ptr("control"), "control"},
+		{"a row captured before the column existed", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			enq := &fakeEnqueuer{}
+			ws := uuid.New()
+			row := store.seed(gen.TaskDeadLetter{
+				WorkspaceID: ws, TaskType: "warmup:tick",
+				Payload: payloadFor(t, ws), Status: StatusPending, Queue: tc.captured,
+			})
+
+			if _, err := NewService(store, enq).Replay(context.Background(), ws, row.ID); err != nil {
+				t.Fatalf("Replay: %v", err)
+			}
+			if enq.count() != 1 {
+				t.Fatalf("enqueued %d times, want 1", enq.count())
+			}
+			if got := enq.calls[0].Queue; got != tc.want {
+				t.Errorf("replayed onto queue %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }

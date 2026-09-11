@@ -26,8 +26,14 @@
 -- would be replayable, and replaying it delivers a blank message to a real
 -- contact. The service is the only caller and it never takes the value from a
 -- request.
-INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
-VALUES (@workspace_id, @task_type, @payload, @last_error, @attempt_count, @status)
+--
+-- @queue is the asynq queue the task was RUNNING on when it died (nullable:
+-- see migration 20260911101701). It is read back by replay, which re-enqueues
+-- onto it rather than onto whatever the task type routes to today — the only
+-- way a replayed warmup:tick returns to the same worker, and therefore the same
+-- IP, it was warming from.
+INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status, queue)
+VALUES (@workspace_id, @task_type, @payload, @last_error, @attempt_count, @status, sqlc.narg(queue))
 RETURNING *;
 
 -- name: ListTaskDeadLetters :many

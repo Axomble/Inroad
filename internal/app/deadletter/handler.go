@@ -53,6 +53,12 @@ type deadLetterResponse struct {
 	Status       string          `json:"status"`
 	CreatedAt    string          `json:"created_at"`
 	ReplayedAt   *string         `json:"replayed_at"`
+	// Queue names the worker queue the task was claimed from, and is null for a
+	// row captured before that was recorded. It is triage information the
+	// operator cannot get anywhere else — "this sweep died on a send host" is
+	// otherwise invisible — and it is deployment topology, not tenant data, so
+	// it names a queue and never a host or an address.
+	Queue *string `json:"queue"`
 }
 
 // toResponse is the ONE place a stored row becomes bytes on the wire — list,
@@ -70,6 +76,7 @@ func toResponse(d gen.TaskDeadLetter) deadLetterResponse {
 		AttemptCount: d.AttemptCount,
 		Status:       d.Status,
 		CreatedAt:    d.CreatedAt.Time.UTC().Format(time.RFC3339),
+		Queue:        d.Queue,
 	}
 	if d.ReplayedAt.Valid {
 		replayed := d.ReplayedAt.Time.UTC().Format(time.RFC3339)

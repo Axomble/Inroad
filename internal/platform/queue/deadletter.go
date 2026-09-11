@@ -99,6 +99,17 @@ type DeadLetter struct {
 	Payload      []byte
 	LastError    string
 	AttemptCount int
+	// Queue is the asynq queue this task was CLAIMED FROM, so a replay can put
+	// it back where it actually ran rather than where its type is routed today.
+	// It is the only record of that fact: for warmup:tick the queue names the
+	// worker (and therefore the IP) the mailbox was warming from, and that id
+	// appears nowhere in the payload.
+	//
+	// Empty when asynq did not populate the context (the same conservative
+	// "this was not a real processed task" case the retry counters have), which
+	// replay treats exactly as it treats a row captured before the column
+	// existed.
+	Queue string
 }
 
 // DeadLetterErrorHandler returns an asynq.ErrorHandler that records a task in
@@ -132,13 +143,20 @@ func DeadLetterErrorHandler(recorder DeadLetterRecorder, logger *slog.Logger) as
 		if !terminal {
 			return
 		}
-		recordTerminalFailure(ctx, recorder, logger, task, taskErr, retried+1, maxRetry)
+		// The queue is read HERE, next to the retry counters, because this is
+		// the only place it exists: asynq puts it on the context it hands its
+		// ErrorHandler and nowhere on the task. A context without it (ok=false)
+		// yields "", which capture stores as "unknown" rather than inventing a
+		// queue name.
+		queueName, _ := asynq.GetQueueName(ctx)
+		recordTerminalFailure(ctx, recorder, logger, task, taskErr, queueName, retried+1, maxRetry)
 	})
 }
 
 // recordTerminalFailure is the capture itself: decide whether this failure can
-// be stored, then store it. attempts is the retries already made plus the one
-// that just failed.
+// be stored, then store it. queueName is the queue the task was claimed from
+// ("" when asynq did not say) and attempts is the retries already made plus the
+// one that just failed.
 //
 // Split from the handler above for the same reason isLastAttempt is split from
 // isTerminalFailure: asynq populates the retry counters through an internal
@@ -152,6 +170,7 @@ func recordTerminalFailure(
 	logger *slog.Logger,
 	task *asynq.Task,
 	taskErr error,
+	queueName string,
 	attempts, maxRetry int,
 ) {
 	if IsLegacyContentBearingTaskType(task.Type()) {
@@ -186,6 +205,7 @@ func recordTerminalFailure(
 		Payload:      task.Payload(),
 		LastError:    errorMessage(taskErr),
 		AttemptCount: attempts,
+		Queue:        queueName,
 	}
 	if err := recorder.RecordDeadLetter(ctx, in); err != nil {
 		logger.ErrorContext(ctx, "failed to record dead letter",
@@ -307,28 +327,17 @@ func errorMessage(err error) string {
 // route through the typed helpers above (which would rebuild the payload and
 // could drift from what was captured).
 //
-// THE QUEUE COMES FROM taskQueues, and it has to come from somewhere. This is
-// the one producer that does not know what it is enqueuing, so it is the one
-// that had no typed helper to read a queue off — and so it set none, and asynq
-// filed every replay under its own built-in "default". The control role does
-// not consume "default", so a replayed sweep or deliverability:evaluate could
-// only be claimed by a send host, which has no handler for it and dead-letters
-// it again; and because ClaimReplay is one-shot (a second replay is 409), that
-// burns the row's only recovery attempt. An unroutable task type therefore
-// fails loudly here rather than landing somewhere quiet — the claim is
-// compensated back to 'pending' by deadletter.Service.Replay, so the operator
-// keeps the row and the error names the type.
+// THE QUEUE HAS TO COME FROM SOMEWHERE, and this is the one producer that does
+// not know what it is enqueuing — so it is the one that had no typed helper to
+// read a queue off, and so it set none and asynq filed every replay under its
+// own built-in "default". The control role does not consume "default", so a
+// replayed sweep or deliverability:evaluate could only be claimed by a send
+// host, which has no handler for it and dead-letters it again; and because
+// ClaimReplay is one-shot (a second replay is 409), that burns the row's only
+// recovery attempt. See replayQueue for where the queue comes from now, and
+// what fails loudly when it cannot be determined at all.
 //
-// FOLLOW-UP, deliberately not done here: capture asynq.GetQueueName(ctx) in
-// DeadLetterErrorHandler onto the dead-letter row and replay to THAT. It is
-// strictly more faithful — it replays where the task actually ran rather than
-// where its type is routed today — and it is the only way to restore
-// warmup:tick's "w:<id>" affinity, which this lookup discards (a replayed tick
-// lands on the shared send queue, so a warming mailbox can come back on a
-// different IP, and warmup reputation is per-IP). It needs a migration and a
-// field on the read model.
-//
-// key becomes the asynq TaskID, and Publish (redisbus) treats a TaskID conflict
+// Key becomes the asynq TaskID, and Publish (redisbus) treats a TaskID conflict
 // as success just as c.enqueue does: a duplicate replay of the same row that
 // reaches this far collapses to one task rather than erroring. That is the
 // SECOND line of defense only — the row claim in deadletter.Service.Replay is
@@ -339,18 +348,69 @@ func errorMessage(err error) string {
 // deserves the same attempts the original had, and a replay that exhausts them
 // again simply dead-letters again, which is the correct outcome — the operator
 // learns the task is not merely unlucky.
-func (c *Client) EnqueueReplay(ctx context.Context, taskType string, payload []byte, key string) error {
-	dest, err := routeTaskType(taskType)
+func (c *Client) EnqueueReplay(ctx context.Context, j ReplayJob) error {
+	dest, err := replayQueue(j.TaskType, j.Queue)
 	if err != nil {
 		return err
 	}
 	return c.Publish(ctx, bus.Job{
-		Kind:    taskType,
-		Payload: payload,
-		Key:     key,
+		Kind:    j.TaskType,
+		Payload: j.Payload,
+		Key:     j.Key,
 		Dest:    dest,
 	}, bus.Options{
 		MaxRetry: sendMaxRetry,
 		Timeout:  sendTimeout,
 	})
+}
+
+// ReplayJob is one captured dead letter on its way back to the queue. A struct
+// rather than four positional arguments because three of them are strings and
+// transposing task type, queue and dedup key would be silent — the replay would
+// enqueue, and land wrong.
+type ReplayJob struct {
+	// TaskType and Payload are replayed VERBATIM. A replay must re-run the
+	// original work, not a reinterpretation of it.
+	TaskType string
+	Payload  []byte
+	// Queue is the queue the task was captured from, or "" for a row captured
+	// before that was recorded. See replayQueue.
+	Queue string
+	// Key is the caller's deterministic dedup key (asynq TaskID).
+	Key string
+}
+
+// replayQueue decides where a replayed task goes. The captured queue wins,
+// because it is what actually happened: the task type gives the ROLE queue,
+// which is right for everything except the case that matters most — warmup:tick
+// is routed to its mailbox's "w:<id>" affinity queue so a warming mailbox keeps
+// egressing from one IP, and reconstructing from the type alone would move a
+// mailbox mid-warmup during recovery. The lookup is the reconstruction for rows
+// captured before the queue was recorded (migration 20260911101701).
+//
+// QueueDefault is the one captured value NOT honoured. It is drain-only and its
+// consumption is being removed in the release after this one, so replaying onto
+// it re-creates exactly the silent no-op this path was fixed to stop — just a
+// release later, and on a row whose single recovery attempt is already spent.
+// Such a row was per-message work by definition (control never consumes
+// default), and the lookup routes it where that work runs now.
+//
+// Neither available is a refusal, not a guess: an unknown task type with no
+// captured queue fails the enqueue and names itself. deadletter.Service.Replay
+// compensates the claim back to 'pending' on that error, so the operator keeps
+// the row.
+//
+// KNOWN LIMIT: a captured "w:<id>" whose worker no longer exists is a queue
+// nothing consumes, and this cannot tell (queue names are not liveness). The
+// task then sits rather than running. That is bounded to warmup:tick, the only
+// type routed to an affinity queue, and warmup:sweep re-enqueues a tick for
+// every due participant every five minutes — so the mailbox keeps warming, on
+// its current worker, whether or not the replayed tick lands. Preferring the
+// generic send queue instead would lose the IP affinity on EVERY replay to
+// avoid a stall the sweep already covers.
+func replayQueue(taskType, captured string) (string, error) {
+	if captured != "" && captured != QueueDefault {
+		return captured, nil
+	}
+	return routeTaskType(taskType)
 }

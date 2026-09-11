@@ -4871,6 +4871,8 @@ export type TaskDeadLetter = {
   created_at: string;
   /** When it was replayed; null in every other state. */
   replayed_at: string | null;
+  /** The worker queue the task was claimed from when it died — "send", "control", a per-worker "w:<id>" affinity queue, or "default" for a task predating role-scoped queues. Triage information: a periodic sweep that died on a send queue was claimed by a host with no handler for it. Replay returns the task to this queue. Null for a row captured before the queue was recorded; those are replayed onto the queue their task type routes to today. */
+  queue: string | null;
 };
 export type TaskDeadLetterList = {
   items: TaskDeadLetter[];

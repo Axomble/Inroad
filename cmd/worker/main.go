@@ -311,6 +311,7 @@ func (d deadLetterRecorder) RecordDeadLetter(ctx context.Context, in queue.DeadL
 		Payload:      in.Payload,
 		LastError:    in.LastError,
 		AttemptCount: in.AttemptCount,
+		Queue:        in.Queue,
 	})
 }
 

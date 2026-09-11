@@ -100,18 +100,27 @@ type Capture struct {
 	Payload      []byte
 	LastError    string
 	AttemptCount int32
+	// Queue is the asynq queue the task was claimed from, "" when the execution
+	// plane could not tell (and for every row captured before the column
+	// existed). Stored as NULL in that case rather than as an empty string, so
+	// "we do not know" has one representation — see Replay for what it costs.
+	Queue string
 }
 
 // Enqueuer is the queue seam this domain replays through — one method, defined
 // here by the consumer. internal/platform/queue.Client satisfies it; a test
 // injects a fake and needs no Redis.
 //
-// key is a deterministic dedup identifier derived from the dead-letter row (see
+// The job's Key is a deterministic dedup identifier derived from the row (see
 // replayKey). It is defense in depth BEHIND the row claim, not the primary
 // guard: the claim is what makes replay exactly-once even across a queue that
 // has forgotten the key.
+//
+// queue.ReplayJob is the platform type rather than one of this domain's own:
+// the fields are the stored row handed back unchanged, and the queue package is
+// the only place that can decide what they mean for routing.
 type Enqueuer interface {
-	EnqueueReplay(ctx context.Context, taskType string, payload []byte, key string) error
+	EnqueueReplay(ctx context.Context, job queue.ReplayJob) error
 }
 
 // Service holds this domain's business rules. It depends on the Store
@@ -319,7 +328,21 @@ func (s *Service) Replay(ctx context.Context, ws, id uuid.UUID) (gen.TaskDeadLet
 		return gen.TaskDeadLetter{}, err
 	}
 
-	if err := s.enq.EnqueueReplay(ctx, row.TaskType, row.Payload, replayKey(row.ID)); err != nil {
+	// The captured queue travels with the job. It is the row's record of where
+	// the task actually ran, and the queue package decides what to do with it
+	// (queue.replayQueue): honoured when present, reconstructed from the task
+	// type when the row predates the column. A nil Queue is exactly that
+	// "predates the column" case, which is why it degrades to "" rather than
+	// failing the replay.
+	job := queue.ReplayJob{
+		TaskType: row.TaskType,
+		Payload:  row.Payload,
+		Key:      replayKey(row.ID),
+	}
+	if row.Queue != nil {
+		job.Queue = *row.Queue
+	}
+	if err := s.enq.EnqueueReplay(ctx, job); err != nil {
 		s.releaseClaim(ctx, row)
 		return gen.TaskDeadLetter{}, fmt.Errorf("deadletter: enqueue replay: %w", err)
 	}
