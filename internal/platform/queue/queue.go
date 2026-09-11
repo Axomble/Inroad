@@ -344,9 +344,22 @@ func asynqConnOpt(redisAddr string) asynq.RedisConnOpt {
 	}
 }
 
+// enqueuer is the raw asynq capability Client needs: submit a task with
+// options, and close the connection NewClient opened. It embeds
+// redisbus.Enqueuer — the same minimal seam redisbus.Dispatcher already
+// depends on — rather than requiring the concrete *asynq.Client, so a test can
+// inject a fake and read back exactly which asynq.Option (including
+// asynq.Queue) a producer asked for without a live Redis: asynq.Option is a
+// public Type()/Value() pair, not an opaque callback only a real client could
+// execute (see redisbus_test.go's optByType for the established pattern).
+type enqueuer interface {
+	redisbus.Enqueuer
+	Close() error
+}
+
 // Client enqueues tasks onto Redis.
 type Client struct {
-	inner *asynq.Client
+	inner enqueuer
 }
 
 func NewClient(redisAddr string) *Client {
@@ -365,15 +378,19 @@ func warmupTickTaskID(mailboxID string, due time.Time) string {
 
 // EnqueueWarmupTickAt schedules a warmup:tick for one mailbox at time t, routed
 // to dest (the from-mailbox's assigned worker queue, spec §15 — so a mailbox's
-// warmup and campaign mail egress from one IP; "" = shared default queue). It
-// goes through the transport seam (bus.Dispatcher): Key→TaskID dedup,
-// Dest→Queue routing, At→ProcessAt delayed delivery. dest is always derived
-// server-side from the mailbox→worker assignment, never from client input
-// (§17.8).
+// warmup and campaign mail egress from one IP; "" = no assignment yet, so it
+// falls back to the shared send queue rather than asynq's unconsumed
+// "default"). It goes through the transport seam (bus.Dispatcher): Key→TaskID
+// dedup, Dest→Queue routing, At→ProcessAt delayed delivery. dest is always
+// derived server-side from the mailbox→worker assignment, never from client
+// input (§17.8).
 func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
 	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
+	}
+	if dest == "" {
+		dest = QueueSend
 	}
 	return c.Publish(context.Background(), bus.Job{
 		Kind:    TaskWarmupTick,
@@ -400,7 +417,8 @@ func warmupEngageTaskID(receiptID string) string {
 // (the humanized engage dwell from the receipt's plan). It goes through the
 // transport seam (bus.Dispatcher): Key→TaskID dedup, In→ProcessIn delayed
 // delivery. Engagement acts on the RECIPIENT's own mailbox, so no cross-worker
-// egress routing applies — it uses the shared default queue (Dest "").
+// egress routing applies — but it is still per-message work, so it belongs on
+// the shared send queue (QueueSend), not asynq's unconsumed "default".
 func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error {
 	b, err := json.Marshal(WarmupEngagePayload{ReceiptID: receiptID, WorkspaceID: workspaceID})
 	if err != nil {
@@ -410,6 +428,7 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 		Kind:    TaskWarmupEngage,
 		Payload: b,
 		Key:     warmupEngageTaskID(receiptID),
+		Dest:    QueueSend,
 	}, bus.Options{
 		In:       d,
 		MaxRetry: sendMaxRetry,
@@ -421,7 +440,7 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 // duplicate enqueue of an already-pending task (sweeper re-enqueue racing a live
 // task) is a deliberate no-op, not an error.
 func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
-	if _, err := c.inner.Enqueue(t, opts...); err != nil {
+	if _, err := c.inner.EnqueueContext(context.Background(), t, opts...); err != nil {
 		if errors.Is(err, asynq.ErrTaskIDConflict) {
 			return nil
 		}
@@ -469,6 +488,7 @@ func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time,
 	taskID := fmt.Sprintf("advance:%s:%d", enrollmentID, due.Unix())
 	opts = append(opts,
 		asynq.TaskID(taskID),
+		asynq.Queue(QueueSend),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),
@@ -488,6 +508,7 @@ func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) e
 	bucket := time.Now().Add(evaluateDedupWindow).Truncate(evaluateDedupWindow)
 	return c.enqueue(asynq.NewTask(TaskDeliverabilityEvaluate, b),
 		asynq.TaskID(fmt.Sprintf("deliverability:%s:%d", campaignID, bucket.Unix())),
+		asynq.Queue(QueueControl),
 		asynq.ProcessAt(bucket),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Timeout(sendTimeout),
@@ -520,6 +541,7 @@ func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID 
 	}
 	return c.enqueue(asynq.NewTask(TaskTestSend, b),
 		asynq.TaskID(testSendTaskID(campaignID, stepID, mailboxID, time.Now())),
+		asynq.Queue(QueueSend),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Retention(taskRetention),
 	)
@@ -550,6 +572,7 @@ func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAft
 	}
 	return c.enqueue(asynq.NewTask(TaskInboxPendingReplySend, b),
 		asynq.TaskID("inboxpending:"+pendingID),
+		asynq.Queue(QueueSend),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Timeout(sendTimeout),
@@ -569,6 +592,7 @@ func (c *Client) EnqueuePendingInboxCompose(pendingID, workspaceID string, sendA
 	}
 	return c.enqueue(asynq.NewTask(TaskInboxPendingComposeSend, b),
 		asynq.TaskID("inboxcompose:"+pendingID),
+		asynq.Queue(QueueSend),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Timeout(sendTimeout),
@@ -617,6 +641,7 @@ func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 	}
 	return c.enqueue(asynq.NewTask(TaskInboxPoll, b),
 		asynq.TaskID(inboxPollTaskID(mailboxID, time.Now())),
+		asynq.Queue(QueueSend),
 		asynq.MaxRetry(pollMaxRetry),
 		asynq.Timeout(pollTimeout),
 		asynq.Retention(taskRetention),
@@ -641,6 +666,7 @@ func (c *Client) enqueueWebhookDeliver(deliveryID, workspaceID string, due time.
 	}
 	opts = append(opts,
 		asynq.TaskID(webhookDeliverTaskID(deliveryID, due)),
+		asynq.Queue(QueueSend),
 		asynq.MaxRetry(webhookMaxRetry),
 		asynq.Timeout(webhookDeliverTimeout),
 		asynq.Retention(taskRetention),
@@ -728,32 +754,42 @@ func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
 	)
 }
 
+// registerControlSweep is the shared shape behind every periodic registration
+// below: every sweep is control-plane work — a fan-out or a cross-tenant scan —
+// so every sweep lands on QueueControl, never on the send role. Split out so
+// (a) cronspec and task type are the only thing that differs per sweep, and
+// (b) the routing decision is testable without a live Redis: sch only needs to
+// satisfy redisbus.Registrar — the same seam redisbus.Scheduler already
+// depends on — which *asynq.Scheduler already does, and Register merely stores
+// the cron entry (it does not touch Redis until the entry fires), so a fake
+// registrar can assert on the options without one.
+func registerControlSweep(sch redisbus.Registrar, cronspec, taskType string) error {
+	_, err := sch.Register(cronspec, asynq.NewTask(taskType, nil), asynq.Timeout(sweepTimeout), asynq.Queue(QueueControl))
+	return err
+}
+
 // RegisterSweepEnrollments registers the periodic due-enrollment reconcile.
 // Runs every 5 minutes to match the enrollment sweeper's "> 5 minutes" window.
 func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskSweepEnrollments, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 5m", TaskSweepEnrollments)
 }
 
 // RegisterInboxSweep registers the periodic inbox:sweep. Runs every
 // inboxSweepInterval to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every "+inboxSweepInterval.String(), asynq.NewTask(TaskInboxSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every "+inboxSweepInterval.String(), TaskInboxSweep)
 }
 
 // RegisterWarmupSweep registers the periodic warmup:sweep. Runs every 5 minutes
 // to fan out a warmup:tick for every due participant and recompute health.
 func RegisterWarmupSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 5m", TaskWarmupSweep)
 }
 
 // RegisterMaintenanceCleanup registers the low-frequency retention pass. The
 // handler is idempotent, so scheduler restarts and retries are safe.
 func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 24h", asynq.NewTask(TaskMaintenanceCleanup, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 24h", TaskMaintenanceCleanup)
 }
 
 // RegisterDomainAuthSweep registers the periodic domain-authentication sweep.
@@ -762,8 +798,7 @@ func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
 // soon a domain whose lookup failed is retried, while the window is what stops
 // it from re-resolving the same records twelve times a day.
 func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 1h", asynq.NewTask(TaskDomainAuthSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 1h", TaskDomainAuthSweep)
 }
 
 // RegisterRecipientESPSweep registers the periodic recipient-domain ESP sweep.
@@ -778,8 +813,7 @@ func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
 // write is an idempotent upsert and eviction is a range delete, so two ticks
 // racing over the same domain converge on the same row.
 func RegisterRecipientESPSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskRecipientESPSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 5m", TaskRecipientESPSweep)
 }
 
 // asynqLogger adapts *slog.Logger to asynq.Logger.

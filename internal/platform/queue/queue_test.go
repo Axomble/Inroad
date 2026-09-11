@@ -1,11 +1,166 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
+
+// fakeEnqueuer is a Redis-free stand-in for Client.inner. It records the task
+// and options a producer asked for, mirroring the fakeEnqueuer/optByType
+// pattern already established in redisbus_test.go — asynq.Option is a public
+// Type()/Value() pair, so a fake can assert on it directly without executing a
+// real enqueue.
+type fakeEnqueuer struct {
+	task *asynq.Task
+	opts []asynq.Option
+}
+
+func (f *fakeEnqueuer) EnqueueContext(_ context.Context, t *asynq.Task, opts ...asynq.Option) (*asynq.TaskInfo, error) {
+	f.task = t
+	f.opts = opts
+	return &asynq.TaskInfo{}, nil
+}
+
+func (f *fakeEnqueuer) Close() error { return nil }
+
+// queue returns the asynq.Queue option's value from the last EnqueueContext
+// call, and whether one was present at all.
+func (f *fakeEnqueuer) queue() (string, bool) {
+	for _, o := range f.opts {
+		if o.Type() == asynq.QueueOpt {
+			return o.Value().(string), true
+		}
+	}
+	return "", false
+}
+
+// TestEveryProducerTargetsARoleQueue proves every non-affinity enqueue helper
+// sets an explicit queue. A task with no queue lands on asynq's "default",
+// which after the role split nothing new should use — and which the control
+// role deliberately does not consume. A missed Queue option here is a task
+// that only drains while the transitional default consumption survives.
+func TestEveryProducerTargetsARoleQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(c *Client) error
+		want string
+	}{
+		{"warmup engage", func(c *Client) error { return c.EnqueueWarmupEngageIn("r1", "ws1", time.Minute) }, QueueSend},
+		{"advance", func(c *Client) error { return c.EnqueueAdvance("e1", "ws1") }, QueueSend},
+		{"advance at", func(c *Client) error { return c.EnqueueAdvanceAt("e1", "ws1", time.Now()) }, QueueSend},
+		{"advance in", func(c *Client) error { return c.EnqueueAdvanceIn("e1", "ws1", time.Minute) }, QueueSend},
+		{"test send", func(c *Client) error { return c.EnqueueTestSend("c1", "s1", "m1", "to@x.test", "ws1") }, QueueSend},
+		{"pending reply", func(c *Client) error { return c.EnqueuePendingInboxReply("p1", "ws1", time.Now()) }, QueueSend},
+		{"pending compose", func(c *Client) error { return c.EnqueuePendingInboxCompose("p1", "ws1", time.Now()) }, QueueSend},
+		{"inbox poll", func(c *Client) error { return c.EnqueueInboxPoll("m1", "ws1") }, QueueSend},
+		{"webhook deliver", func(c *Client) error { return c.EnqueueWebhookDeliver("d1", "ws1") }, QueueSend},
+		{"webhook deliver in", func(c *Client) error { return c.EnqueueWebhookDeliverIn("d1", "ws1", time.Minute) }, QueueSend},
+		{"deliverability evaluate", func(c *Client) error { return c.EnqueueDeliverabilityEvaluate("c1", "ws1") }, QueueControl},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeEnqueuer{}
+			c := &Client{inner: fake}
+			if err := tc.call(c); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			got, ok := fake.queue()
+			if !ok || got != tc.want {
+				t.Errorf("%s enqueued to %q (present=%v), want %q", tc.name, got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend proves affinity is
+// load-bearing: warmup reputation is per-IP, so a warming mailbox must keep
+// sending from the same worker. An unassigned tick still needs SOME queue the
+// send role actually drains, so it falls back to QueueSend rather than the
+// unconsumed "default".
+func TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend(t *testing.T) {
+	fake := &fakeEnqueuer{}
+	c := &Client{inner: fake}
+
+	if err := c.EnqueueWarmupTickAt("m1", "ws1", time.Now(), WorkerQueue("abc")); err != nil {
+		t.Fatalf("with dest: %v", err)
+	}
+	if got, ok := fake.queue(); !ok || got != WorkerQueue("abc") {
+		t.Errorf("dest = %q (present=%v), want the affinity queue", got, ok)
+	}
+
+	if err := c.EnqueueWarmupTickAt("m1", "ws1", time.Now(), ""); err != nil {
+		t.Fatalf("no dest: %v", err)
+	}
+	if got, ok := fake.queue(); !ok || got != QueueSend {
+		t.Errorf("unassigned tick went to %q (present=%v), want %q — default is not consumed by control and is transitional", got, ok, QueueSend)
+	}
+}
+
+// fakeRegistrar records what a scheduler registration asked for. Register on a
+// real *asynq.Scheduler only stores a cron entry locally — it does not touch
+// Redis until the entry fires — but there is no way to read that entry back
+// out from outside the asynq package, so exercising the routing decision needs
+// this seam instead.
+type fakeRegistrar struct {
+	cronspec string
+	task     *asynq.Task
+	opts     []asynq.Option
+}
+
+func (f *fakeRegistrar) Register(cronspec string, task *asynq.Task, opts ...asynq.Option) (string, error) {
+	f.cronspec = cronspec
+	f.task = task
+	f.opts = opts
+	return "entry-1", nil
+}
+
+func (f *fakeRegistrar) queue() (string, bool) {
+	for _, o := range f.opts {
+		if o.Type() == asynq.QueueOpt {
+			return o.Value().(string), true
+		}
+	}
+	return "", false
+}
+
+// TestEveryControlSweepTargetsControlQueue proves every periodic reconcile —
+// fan-outs and cross-tenant scans — registers on QueueControl, so a send-role
+// host (which does not consume it, per internal/worker/queues.go) can never
+// claim one and silently stop sending behind it.
+func TestEveryControlSweepTargetsControlQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cronspec string
+		taskType string
+	}{
+		{"sweep enrollments", "@every 5m", TaskSweepEnrollments},
+		{"inbox sweep", "@every " + inboxSweepInterval.String(), TaskInboxSweep},
+		{"warmup sweep", "@every 5m", TaskWarmupSweep},
+		{"maintenance cleanup", "@every 24h", TaskMaintenanceCleanup},
+		{"domain auth sweep", "@every 1h", TaskDomainAuthSweep},
+		{"recipient esp sweep", "@every 5m", TaskRecipientESPSweep},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeRegistrar{}
+			if err := registerControlSweep(fake, tc.cronspec, tc.taskType); err != nil {
+				t.Fatalf("registerControlSweep: %v", err)
+			}
+			if fake.cronspec != tc.cronspec {
+				t.Errorf("cronspec = %q, want %q", fake.cronspec, tc.cronspec)
+			}
+			if fake.task.Type() != tc.taskType {
+				t.Errorf("task type = %q, want %q", fake.task.Type(), tc.taskType)
+			}
+			if got, ok := fake.queue(); !ok || got != QueueControl {
+				t.Errorf("queue = %q (present=%v), want %q", got, ok, QueueControl)
+			}
+		})
+	}
+}
 
 func TestWarmupTickPayloadRoundTrip(t *testing.T) {
 	p := WarmupTickPayload{MailboxID: "mb-123", WorkspaceID: "ws-1"}
