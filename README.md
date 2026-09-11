@@ -106,13 +106,15 @@ Inroad splits into a **control plane** that owns all state and an **execution pl
 outbound network I/O. They meet at exactly one interface, `coreapi.Client`.
 
 **The split is logical, not physical — read that literally.** Worker packages reach relational data
-only through `coreapi`, enforced by convention and review. There is no import-restriction lint rule
-and no architecture test: nothing mechanical fails if a worker package imports `platform/db`. And
-the worker *process* still opens its own `pgxpool`, builds its own `crypto.Keyring` from
-`INROAD_MASTER_KEY`, and calls `coreapi` as an in-process function, not over the network. So a
-compromised worker host is not yet contained by anything except the code it is running. Giving
-`coreapi` an HTTP transport so the split becomes physical is planned, not built — the seam was
-designed for it ("in-process now, HTTP later"). Nothing below claims otherwise.
+only through `coreapi`, and that is enforced mechanically now: a `depguard` rule in `.golangci.yml`
+fails `golangci-lint run` (and therefore CI) if a non-test file under `internal/worker/` imports
+`internal/platform/db`. That closes one specific mistake, not the underlying gap: the worker
+*process* still opens its own `pgxpool`, builds its own `crypto.Keyring` from `INROAD_MASTER_KEY`,
+and calls `coreapi` as an in-process function, not over the network. So a compromised worker host
+is not contained by any network or process boundary — only by the code it is running, which the
+lint rule now checks at build time but cannot enforce at runtime. Giving `coreapi` an HTTP transport
+so the split becomes physical is planned, not built — the seam was designed for it ("in-process now,
+HTTP later"). Nothing below claims otherwise.
 
 ### Zoomed out — the pieces and what moves between them
 
