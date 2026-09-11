@@ -15,7 +15,7 @@ weigh what it gives up — see [Architecture Principles](/architecture-principle
 
 - **Control Plane (`cmd/inroad`):** Hosts the HTTP REST API server, identity/authentication services, workspace configurations, webhooks, and database management. It directly manages PostgreSQL and Redis.
 - **Execution Plane (`cmd/worker`):** Contains background engines responsible for sending campaign emails, inbox polling, deliverability evaluation, and mailbox warmup.
-- **CoreAPI Boundary (`internal/coreapi`):** The execution worker **never accesses PostgreSQL directly**. It reaches relational data and unseals encrypted mailbox credentials strictly through `internal/coreapi` (in-process now, HTTP/gRPC remote transport later).
+- **CoreAPI Boundary (`internal/coreapi`):** The worker *packages* reach relational data and unseal encrypted mailbox credentials only through `internal/coreapi` — one seam, so the execution plane can move to its own host without touching worker code. Read that as a code-level discipline, not a process-level guarantee: it is held by convention and review (there is no import-restriction lint rule and no architecture test), and the worker *process* still opens its own `pgxpool` and builds its own `crypto.Keyring` from `INROAD_MASTER_KEY` at its composition root (`cmd/worker/main.go`), with `coreapi` resolving to an in-process function call rather than a network hop. The boundary becomes a real one — a worker host that cannot read the tenant database even if it is compromised — when `coreapi` gains its remote transport (HTTP/gRPC) and the worker gives up its pool and its keyring. That is designed, not built.
 
 ## System Monorepo Layout
 

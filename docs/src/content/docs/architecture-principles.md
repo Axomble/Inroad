@@ -91,12 +91,27 @@ challenge the reasoning rather than guess at it.
 
 ## Backend
 
-### B1. The plane boundary is absolute
+### B1. The plane boundary is absolute in the code, not yet in the deployment
 
-The worker reaches relational data and decrypted credentials **only** through
-`internal/coreapi` — never Postgres directly. This is what lets the execution
-plane move to a separate host, or a remote transport, without touching worker
-code.
+Worker *packages* reach relational data and decrypted credentials **only** through
+`internal/coreapi` — no `platform/db` import anywhere under `internal/worker/`.
+Hold that line without exception: it is what lets the execution plane move to a
+separate host, or a remote transport, without touching worker code.
+
+But be exact about what it currently buys. The rule is held by convention and
+review — there is no `depguard` entry, no import-restriction linter, and no
+architecture test that fails if someone breaks it. And the worker *process* is
+not isolated from the data at all: `cmd/worker` opens its own `pgxpool` and
+builds the same `crypto.Keyring` as `cmd/inroad` (both call `keys.BuildKeyring`,
+both are handed `INROAD_MASTER_KEY`), so a worker host can unwrap any
+workspace's DEK regardless of what its packages import. `coreapi` is an
+in-process function call today.
+
+So this principle is about *changeability* — keeping one seam so the split stays
+possible — and not yet about *containment*. It becomes a containment boundary
+when `coreapi` gains a remote transport and the worker drops its pool and its
+keyring; until then, nothing in the deployment stops a compromised worker from
+reading the tenant database, and no document should suggest otherwise.
 
 **No transaction spans the seam.** The send path claims in a transaction, commits,
 *then* does SMTP (`stepsendjob.go:493-536`). The residual window — SMTP succeeds,
