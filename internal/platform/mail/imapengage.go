@@ -66,7 +66,7 @@ func imapCfg(t EngageTarget) IMAPConfig {
 // SourceFolder can never break out into a raw command. The client is always logged
 // out. Shared by MarkRead and Rescue so both go through one vetted dial path.
 func (e *NetEngager) withFolder(ctx context.Context, cfg IMAPConfig, folder string, fn func(c *client.Client) error) error {
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, e.AllowPrivate)
+	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedIMAPPorts, e.AllowPrivate)
 	if err != nil {
 		return err
 	}

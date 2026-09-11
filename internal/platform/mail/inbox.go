@@ -39,7 +39,7 @@ func NewNetInboxReader(allowPrivate bool) *NetInboxReader {
 // status. Shared by Fetch and CurrentState so both go through one vetted
 // dial path.
 func (r *NetInboxReader) selectInboxReadOnly(ctx context.Context, cfg IMAPConfig) (*client.Client, *imap.MailboxStatus, error) {
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
+	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
 	if err != nil {
 		return nil, nil, err
 	}

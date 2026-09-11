@@ -12,7 +12,7 @@ import (
 
 func TestSendRejectsLoopbackHost(t *testing.T) {
 	s := &NetSender{Timeout: time.Second}
-	_, err := s.Send(SMTPConfig{Host: "127.0.0.1", Port: 587, Username: "u", Password: "p"},
+	_, err := s.Send(t.Context(), SMTPConfig{Host: "127.0.0.1", Port: 587, Username: "u", Password: "p"},
 		Message{FromEmail: "a@x.com", To: "b@y.com", Subject: "hi", BodyText: "hello"})
 	if !errors.Is(err, ErrHostNotPermitted) {
 		t.Fatalf("expected ErrHostNotPermitted, got %v", err)

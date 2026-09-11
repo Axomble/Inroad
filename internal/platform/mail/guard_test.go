@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 // TestVetAddrRejectsMixedAnswerSet guards against a partial-block bypass: a
@@ -39,7 +40,7 @@ func TestVetAddrReturnsVettedIP(t *testing.T) {
 	defer restore()
 
 	// With a broken resolver the vet must fail closed.
-	if _, err := vetAddr("example.invalid", 587, allowedSMTPPorts, true); err == nil {
+	if _, err := vetAddr(context.Background(), "example.invalid", 587, allowedSMTPPorts, true); err == nil {
 		t.Fatal("expected resolver error, got nil")
 	}
 }
@@ -49,15 +50,15 @@ func TestVetAddrReturnsVettedIP(t *testing.T) {
 // literals). Confirms the port allowlist and IP policy both fire.
 func TestVetAddrLiteralIPPath(t *testing.T) {
 	// Loopback literal is always rejected.
-	if _, err := vetAddr("127.0.0.1", 587, allowedSMTPPorts, true); !errors.Is(err, ErrHostNotPermitted) {
+	if _, err := vetAddr(context.Background(), "127.0.0.1", 587, allowedSMTPPorts, true); !errors.Is(err, ErrHostNotPermitted) {
 		t.Fatalf("expected ErrHostNotPermitted for 127.0.0.1, got %v", err)
 	}
 	// Disallowed port fails before resolution.
-	if _, err := vetAddr("8.8.8.8", 6379, allowedSMTPPorts, true); err == nil {
+	if _, err := vetAddr(context.Background(), "8.8.8.8", 6379, allowedSMTPPorts, true); err == nil {
 		t.Fatal("expected port-not-permitted error")
 	}
 	// Public IP on an allowed port passes.
-	addr, err := vetAddr("8.8.8.8", 587, allowedSMTPPorts, false)
+	addr, err := vetAddr(context.Background(), "8.8.8.8", 587, allowedSMTPPorts, false)
 	if err != nil {
 		t.Fatalf("expected 8.8.8.8:587 to vet ok, got %v", err)
 	}
@@ -109,5 +110,51 @@ func TestClassifyHostResolverFailureFailsClosed(t *testing.T) {
 	defer restore()
 	if _, err := ClassifyHost(context.Background(), "example.invalid"); err == nil {
 		t.Fatal("expected resolver error, got nil")
+	}
+}
+
+// TestVetAddrBoundsHangingResolver proves vetAddr never blocks its caller
+// indefinitely on a resolver that never answers. The fake resolver's Dial
+// blocks until ITS ctx is cancelled — the ctx vetAddr derives internally via
+// dnsLookupTimeout, since the caller here (context.Background()) supplies no
+// deadline of its own. A regression back to context.Background() inside
+// vetAddr would make that inner ctx never cancel, so Dial would block forever
+// and this test would hang past go test's own -timeout instead of failing
+// cleanly — which is why the assertion also runs under a bounded watchdog
+// rather than calling vetAddr inline.
+func TestVetAddrBoundsHangingResolver(t *testing.T) {
+	restore := setResolver(&net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	defer restore()
+
+	type result struct {
+		err error
+		dur time.Duration
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := vetAddr(context.Background(), "example.invalid", 587, allowedSMTPPorts, true)
+		done <- result{err: err, dur: time.Since(start)}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatal("expected a deadline/resolve error, got nil")
+		}
+		if !errors.Is(r.err, context.DeadlineExceeded) {
+			t.Fatalf("expected an error wrapping context.DeadlineExceeded, got %v", r.err)
+		}
+		if r.dur > dnsLookupTimeout+5*time.Second {
+			t.Fatalf("vetAddr took %v, want bounded near dnsLookupTimeout=%v", r.dur, dnsLookupTimeout)
+		}
+	case <-time.After(dnsLookupTimeout + 10*time.Second):
+		t.Fatal("vetAddr hung well past dnsLookupTimeout — the hanging-resolver regression this test guards against")
 	}
 }
