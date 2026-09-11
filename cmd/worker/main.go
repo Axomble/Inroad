@@ -98,7 +98,12 @@ func run() error {
 	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
 	var metricsWG sync.WaitGroup
 	if cfg.MetricsAddr != "" {
-		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		// httpx.MetricsMux additionally mounts /debug/pprof/* when
+		// INROAD_PPROF_ENABLED is set (default off) — this fleet's own
+		// diagnostic path for a goroutine leak or heap growth on a remote
+		// worker, without a debugger attached. Still only on this
+		// operator-only listener, never a public port.
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, httpx.MetricsMux(mtx.Handler(), cfg.PprofEnabled))
 		metricsWG.Add(1)
 		go func() {
 			defer metricsWG.Done()
@@ -106,7 +111,7 @@ func run() error {
 				logger.Error("metrics server error", "err", err)
 			}
 		}()
-		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr, "pprof", cfg.PprofEnabled)
 	}
 	defer func() {
 		cancelMetrics()

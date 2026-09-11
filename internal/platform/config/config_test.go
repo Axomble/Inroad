@@ -320,6 +320,41 @@ func TestLoadMetricsAddrOverride(t *testing.T) {
 	}
 }
 
+// TestLoadPprofEnabledDefaultsToFalse proves pprof stays off by default, even
+// when the metrics listener itself is enabled — it is a separate, more
+// sensitive disclosure (goroutine stacks, heap/CPU profiles) and gets its own
+// opt-in rather than riding along with INROAD_METRICS_ADDR.
+func TestLoadPprofEnabledDefaultsToFalse(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("INROAD_METRICS_ADDR", ":9091")
+	t.Setenv("INROAD_PPROF_ENABLED", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.PprofEnabled {
+		t.Fatal("PprofEnabled = true, want false by default")
+	}
+}
+
+// TestLoadPprofEnabledOverride proves an explicit INROAD_PPROF_ENABLED=true
+// is honored.
+func TestLoadPprofEnabledOverride(t *testing.T) {
+	t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef")
+	t.Setenv("INROAD_MASTER_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("INROAD_PPROF_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.PprofEnabled {
+		t.Fatal("PprofEnabled = false, want true")
+	}
+}
+
 // TestGoogleSignInCredentialsFallBackToMailboxClient pins the one-client-configures-
 // both behavior. A self-hoster registering a single Google OAuth client must get
 // working sign-in AND mailbox connect; an operator who wants them separate (so a

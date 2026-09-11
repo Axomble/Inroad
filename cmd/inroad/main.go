@@ -120,7 +120,10 @@ func run() error {
 	metricsCtx, cancelMetrics := context.WithCancel(ctx)
 	var metricsWG sync.WaitGroup
 	if cfg.MetricsAddr != "" {
-		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		// httpx.MetricsMux additionally mounts /debug/pprof/* when
+		// INROAD_PPROF_ENABLED is set (default off) — still only on this
+		// operator-only listener, never the public API router.
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, httpx.MetricsMux(mtx.Handler(), cfg.PprofEnabled))
 		metricsWG.Add(1)
 		go func() {
 			defer metricsWG.Done()
@@ -128,7 +131,7 @@ func run() error {
 				logger.Error("metrics server error", "err", err)
 			}
 		}()
-		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr, "pprof", cfg.PprofEnabled)
 	}
 	defer func() {
 		cancelMetrics()

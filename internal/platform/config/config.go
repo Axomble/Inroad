@@ -38,6 +38,17 @@ type Config struct {
 	// it raises no auth question.
 	MetricsAddr string
 
+	// PprofEnabled mounts net/http/pprof's /debug/pprof/* endpoints on the SAME
+	// dedicated metrics listener above (never the public API router — see
+	// httpx.MetricsMux) — the diagnostic path for a goroutine leak or heap
+	// growth on a remote worker, where attaching a debugger isn't an option.
+	// Default false and gated behind its own flag, not folded into
+	// MetricsAddr!="" : an operator who points a Prometheus scraper at
+	// MetricsAddr from a wider network than "just this host" has not thereby
+	// opted into exposing goroutine stacks and CPU/heap profiles too — those
+	// are a strictly more sensitive disclosure than a counter value.
+	PprofEnabled bool
+
 	// KeyProvider selects the KEK backend that wraps per-workspace DEKs.
 	// "local" (default) wraps under INROAD_MASTER_KEY; a cloud KMS is a future
 	// drop-in. An unknown value fails closed at binary startup.
@@ -299,6 +310,7 @@ func Load() (*Config, error) {
 		RedisAddr:   getenv("INROAD_REDIS_ADDR", "localhost:6379"),
 	}
 	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
+	cfg.PprofEnabled = getenvBool("INROAD_PPROF_ENABLED", false)
 
 	// INROAD_REDIS_ADDR is either a bare host:port or a redis:// / rediss:// URL
 	// (auth, db, TLS). Reject a malformed URL here, at the boundary, so it fails
