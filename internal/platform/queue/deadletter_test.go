@@ -383,3 +383,63 @@ func mustPayload(t *testing.T, ws string) []byte {
 	}
 	return b
 }
+
+// TestEnqueueReplayRoutesToARoleQueue is the regression test for a replay that
+// landed on asynq's "default" queue.
+//
+// EnqueueReplay is the one producer that does not know what it is enqueuing —
+// it hands back whatever was captured — and it used to set no queue at all.
+// Every other producer routes, so the funnel guard never saw this one, and the
+// control role does not consume "default": a replayed sweep or
+// deliverability:evaluate could only be claimed by a send host, which has no
+// handler for it and dead-letters it again. That is the exact failure this
+// package's role queues exist to prevent, reproduced in the one API an
+// operator uses to recover from it — and unrecoverably, because the replay
+// claim is one-shot.
+func TestEnqueueReplayRoutesToARoleQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		taskType string
+		want     string
+	}{
+		{"per-message work", TaskInboxPoll, QueueSend},
+		{"a deferred manual reply", TaskInboxPendingReplySend, QueueSend},
+		{"the campaign breaker", TaskDeliverabilityEvaluate, QueueControl},
+		{"a periodic reconcile", TaskSweepEnrollments, QueueControl},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeEnqueuer{}
+			c := &Client{inner: fake}
+			if err := c.EnqueueReplay(context.Background(), tc.taskType, mustPayload(t, uuid.NewString()), "replay:1"); err != nil {
+				t.Fatalf("EnqueueReplay: %v", err)
+			}
+			if got, ok := fake.queue(); !ok || got != tc.want {
+				t.Errorf("replayed %s to %q (present=%v), want %q", tc.taskType, got, ok, tc.want)
+			}
+			if fake.task == nil || fake.task.Type() != tc.taskType {
+				t.Errorf("replay must re-enqueue the captured task type verbatim, got %v", fake.task)
+			}
+		})
+	}
+}
+
+// A task type with no route is refused rather than enqueued, for the same
+// reason c.enqueue refuses a task with no Queue option: landing on "default" is
+// a task that runs only while the transitional drain survives, and a replay
+// that no-ops has burned the row's single recovery attempt. The error names the
+// type, because an arbitrary one is exactly what this path can be handed.
+func TestEnqueueReplayRefusesAnUnroutableTaskType(t *testing.T) {
+	fake := &fakeEnqueuer{}
+	c := &Client{inner: fake}
+
+	err := c.EnqueueReplay(context.Background(), "some:unknown-task", mustPayload(t, uuid.NewString()), "replay:1")
+	if err == nil {
+		t.Fatal("replay of an unroutable task type: got nil error, want one")
+	}
+	if !strings.Contains(err.Error(), "some:unknown-task") {
+		t.Errorf("error %q does not name the task type", err.Error())
+	}
+	if fake.task != nil {
+		t.Error("an unroutable replay must be refused before it reaches the queue, not after")
+	}
+}

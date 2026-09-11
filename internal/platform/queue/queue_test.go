@@ -70,6 +70,45 @@ func TestEveryProducerTargetsARoleQueue(t *testing.T) {
 	}
 }
 
+// TestQueueForTaskTypeIsTheOneRoutingTable proves the lookup answers for every
+// task type a producer can enqueue, and refuses everything else.
+//
+// The refusals are the point. An unmapped type must come back not-ok rather
+// than "" — "" means asynq's own "default" queue downstream, which is the
+// silent misroute the table exists to prevent — and inbox:reply_send must stay
+// out of it: nothing enqueues that type any more and Replay refuses it by task
+// type, so a mapping would assert a route nothing may take.
+func TestQueueForTaskTypeIsTheOneRoutingTable(t *testing.T) {
+	for taskType, want := range map[string]string{
+		TaskWarmupTick:              QueueSend,
+		TaskWarmupEngage:            QueueSend,
+		TaskSequenceAdvance:         QueueSend,
+		TaskInboxPoll:               QueueSend,
+		TaskInboxPendingReplySend:   QueueSend,
+		TaskInboxPendingComposeSend: QueueSend,
+		TaskTestSend:                QueueSend,
+		TaskWebhookDeliver:          QueueSend,
+		TaskWarmupSweep:             QueueControl,
+		TaskInboxSweep:              QueueControl,
+		TaskSweepEnrollments:        QueueControl,
+		TaskMaintenanceCleanup:      QueueControl,
+		TaskDomainAuthSweep:         QueueControl,
+		TaskRecipientESPSweep:       QueueControl,
+		TaskDeliverabilityEvaluate:  QueueControl,
+	} {
+		got, ok := queueForTaskType(taskType)
+		if !ok || got != want {
+			t.Errorf("queueForTaskType(%q) = (%q, %v), want (%q, true)", taskType, got, ok, want)
+		}
+	}
+
+	for _, taskType := range []string{"", "some:unknown-task", TaskInboxReplySend} {
+		if got, ok := queueForTaskType(taskType); ok {
+			t.Errorf("queueForTaskType(%q) = (%q, true), want not routable", taskType, got)
+		}
+	}
+}
+
 // TestEnqueueRefusesATaskWithNoQueueOption proves the funnel every raw-asynq
 // producer passes through (c.enqueue) rejects a task carrying no asynq.Queue
 // option, rather than letting it silently land on asynq's unconsumed

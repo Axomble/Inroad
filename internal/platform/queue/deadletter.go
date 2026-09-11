@@ -307,21 +307,48 @@ func errorMessage(err error) string {
 // route through the typed helpers above (which would rebuild the payload and
 // could drift from what was captured).
 //
-// key becomes the asynq TaskID, and c.enqueue already treats a TaskID conflict
-// as success: a duplicate replay of the same row that reaches this far collapses
-// to one task rather than erroring. That is the SECOND line of defense only —
-// the row claim in deadletter.Service.Replay is the durable one, because asynq
-// reserves a task id for its retention window and no longer.
+// THE QUEUE COMES FROM taskQueues, and it has to come from somewhere. This is
+// the one producer that does not know what it is enqueuing, so it is the one
+// that had no typed helper to read a queue off — and so it set none, and asynq
+// filed every replay under its own built-in "default". The control role does
+// not consume "default", so a replayed sweep or deliverability:evaluate could
+// only be claimed by a send host, which has no handler for it and dead-letters
+// it again; and because ClaimReplay is one-shot (a second replay is 409), that
+// burns the row's only recovery attempt. An unroutable task type therefore
+// fails loudly here rather than landing somewhere quiet — the claim is
+// compensated back to 'pending' by deadletter.Service.Replay, so the operator
+// keeps the row and the error names the type.
+//
+// FOLLOW-UP, deliberately not done here: capture asynq.GetQueueName(ctx) in
+// DeadLetterErrorHandler onto the dead-letter row and replay to THAT. It is
+// strictly more faithful — it replays where the task actually ran rather than
+// where its type is routed today — and it is the only way to restore
+// warmup:tick's "w:<id>" affinity, which this lookup discards (a replayed tick
+// lands on the shared send queue, so a warming mailbox can come back on a
+// different IP, and warmup reputation is per-IP). It needs a migration and a
+// field on the read model.
+//
+// key becomes the asynq TaskID, and Publish (redisbus) treats a TaskID conflict
+// as success just as c.enqueue does: a duplicate replay of the same row that
+// reaches this far collapses to one task rather than erroring. That is the
+// SECOND line of defense only — the row claim in deadletter.Service.Replay is
+// the durable one, because asynq reserves a task id for its retention window
+// and no longer.
 //
 // Retries and timeout match a send's (sendMaxRetry/sendTimeout): a replayed task
 // deserves the same attempts the original had, and a replay that exhausts them
 // again simply dead-letters again, which is the correct outcome — the operator
 // learns the task is not merely unlucky.
 func (c *Client) EnqueueReplay(ctx context.Context, taskType string, payload []byte, key string) error {
+	dest, err := routeTaskType(taskType)
+	if err != nil {
+		return err
+	}
 	return c.Publish(ctx, bus.Job{
 		Kind:    taskType,
 		Payload: payload,
 		Key:     key,
+		Dest:    dest,
 	}, bus.Options{
 		MaxRetry: sendMaxRetry,
 		Timeout:  sendTimeout,
