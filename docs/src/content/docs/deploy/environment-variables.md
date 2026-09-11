@@ -140,24 +140,33 @@ consumes exactly the queues the handlers it registers can service:
 | `send` | `w:<worker-id>` (its own affinity queue, if assigned), `send`, `default` |
 | `all` (unset — the default, and every install predating this split) | `w:<worker-id>` (if assigned), `send`, `control`, `default` |
 
-`default` is asynq's built-in queue. Nothing new is enqueued there — it is
-consumed **transitionally**, by `send` and `all` only, purely to drain any
-task that was already sitting in Redis from before an upgrade to this
-version. `control` deliberately never consumes it: everything a control host
+`default` is asynq's built-in queue. Nothing new is enqueued there — every
+producer routes by task type, including the dead-letter replay path. It is
+consumed **transitionally**, by `send` and `all` only, and it does two things:
+it drains any task already sitting in Redis from before the upgrade, and it is
+what makes a rolling upgrade to this version lossless, because an upgraded
+worker consumes both what this version produces and what the previous one
+produced. `control` deliberately never consumes it: everything a control host
 could run is routed to `control` by construction, so a task on `default` is
 per-message work by definition, and a control host claiming it is exactly the
-failure this split exists to prevent. `default` needs no configuration; it
-stops mattering on its own once no deployment can still be holding a
-pre-upgrade backlog.
+failure this split exists to prevent.
+
+`default` needs no configuration, and it is **drain-only: it is removed in the
+release after this one.** The signal that it has finished its job is one you can
+watch rather than estimate — `inroad_queue_depth{queue="default"}` is scraped
+per queue, and it must read `0` in every state and stay there across a window
+wider than the longest delay a task can carry (a reply can be scheduled days
+out).
 
 `INROAD_WORKER_QUEUES` still overrides all of this entirely — set it and the
-role's default queue set is ignored outright, not merged with it. And a
-producer that forgets to route a task to a queue now fails loudly at enqueue
-time instead of landing silently on `default`, so a future task type can't
-repeat the mistake this section used to warn about.
+role's default queue set is ignored outright, not merged with it. And a producer
+cannot forget to route a task any more: the queue is derived from the task type
+by a single table, and a type that has no entry in it fails the enqueue loudly
+instead of landing silently on `default`, so a future task type can't repeat the
+mistake this section used to warn about.
 
-If you do split roles, two sharp edges survive this fix and you should know
-about both.
+If you do split roles, there is one sharp edge that survives this fix, and one
+ordering rule to follow. Know both before you set the variable.
 
 **First, a stale mailbox assignment now fails quieter, not louder, and that
 makes the fix below more load-bearing than it looks.** The heartbeat gate only
@@ -176,15 +185,37 @@ a host a new `INROAD_WORKER_ID` when you change it to `control`, or delete its
 before this slice, but it is now the only thing standing between a role change
 and a silently-stalled mailbox rather than a merely-annoying one.
 
-**Second, expect to see one dead-letter per stale sweep during the upgrade
-window, and that is not a symptom.** A periodic-sweep task enqueued to
-`default` before you upgrade can be claimed by a `send` host once the new
-binary is running, and a `send` host has no handler for a sweep, so it
-dead-letters — once. This is harmless: every sweep is a reconcile, not a
-deadline, and the next scheduled tick (run by whichever host schedules) covers
-the same ground regardless of the one that got dead-lettered. If a sweep task
-type shows up in the dead-letter table only in the window right after this
-upgrade, that is why.
+**Second, upgrade the fleet first and split the roles afterwards — these are two
+windows, not one.** This version changes both what a producer writes to and what
+a consumer reads, so a fleet that is half-upgraded *and* half-split has work
+sitting on queues nobody is reading. In order:
+
+1. Roll this version out to every process — API and workers — leaving
+   `INROAD_WORKER_ROLE` exactly as it already is (unset, i.e. `all`, for any
+   deployment that has not split). A rolling `all` → `all` upgrade is clean at
+   any mix ratio: an upgraded `all` worker consumes every queue either version
+   produces (`w:<id>`, `send`, `control`, `default`), and an un-upgraded one
+   only produces onto `default` and `w:<id>`, which the upgraded ones consume
+   too. Work an already-upgraded producer puts on `send`/`control` waits in
+   Redis until the first upgraded worker is up — delayed, never lost.
+2. Watch `inroad_queue_depth{queue="default"}` fall to zero and stay there. That
+   is the pre-upgrade backlog draining.
+3. *Then*, as a separate change, set `INROAD_WORKER_ROLE` on each host.
+
+Splitting *during* the version rollout is what to avoid, and both directions
+fail silently rather than loudly:
+
+- **Send-first.** The un-upgraded control host keeps registering its sweeps bare,
+  onto `default` — continuously, not as a bounded backlog — and upgraded `send`
+  hosts consume `default`, so they claim them. A sweep on a send host has no
+  handler, so it dead-letters; the next tick is claimed the same way, so the
+  reconciles **stall rather than self-heal**. Meanwhile `deliverability:evaluate`
+  is now produced onto `control`, which the old control host does not consume, so
+  the campaign circuit breaker quietly stops evaluating for the whole window.
+- **Control-first.** The upgraded control host fans out onto `send` and `w:<id>`,
+  which an un-upgraded `send` host does not consume. Nothing is lost — those
+  tasks sit in Redis until a `send` host is upgraded — but **sending stops
+  meanwhile, with no error anywhere**.
 
 And one limit holds regardless of whether the queues route correctly: it is
 an operational lever, not a security boundary. A `send`-role process is

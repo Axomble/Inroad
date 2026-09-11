@@ -70,10 +70,30 @@ const (
 	// QueueControl carries the periodic reconciles, the purges and the campaign
 	// breaker — everything that scans or deletes across tenants.
 	QueueControl = "control"
-	// QueueDefault is asynq's built-in queue. NOTHING is enqueued here any more;
-	// it is consumed transitionally so tasks queued before the role split
-	// upgrade still drain. Removable once no deployment can still hold a
-	// pre-upgrade backlog.
+	// QueueDefault is asynq's built-in queue. NOTHING is enqueued here any more:
+	// every producer routes by task type through taskQueues, including the
+	// dead-letter replay that used to land here. It is consumed transitionally
+	// by the send and all roles (never by control), which is what makes a
+	// rolling upgrade to this version lossless — an upgraded worker drains both
+	// what this version produces and what the previous one left on "default".
+	//
+	// DRAIN ONLY, and removed in the release after this one — together with the
+	// QueuesFor branch that consumes it. The deadline is paired with a signal
+	// that says the queue has drained, rather than with a judgement call about
+	// whether some deployment might still hold a backlog (which the person
+	// deleting the code cannot check): inroad_queue_depth{queue="default"} —
+	// scraped per queue by internal/platform/metrics/queue.go — must read 0 in
+	// every state and stay there across a window wider than the longest delay a
+	// task can carry, on every deployment being upgraded.
+	//
+	// Deliberately NOT marked Deprecated in the godoc sense: every use of this
+	// constant today (QueuesFor, and the tests pinning what each role consumes)
+	// is the drain working as intended, and marking it would flag four correct
+	// call sites as mistakes in exchange for saying nothing this comment does
+	// not. The same distinction is drawn at the other drain site, internal/
+	// worker/inbox.RegisterPerMessage: the deprecated identifier there is the
+	// TASK TYPE nothing may enqueue, and its one remaining use carries an
+	// explained //nolint because it IS the drain.
 	QueueDefault = "default"
 )
 

@@ -24,7 +24,13 @@ func QueuesFor(role Role, workerID string) []string {
 	}
 	// Transitional drain, and deliberately NOT for the control role: a control
 	// host that consumes default can claim the per-message backlog it has no
-	// handler for, which is the exact failure this slice removes.
+	// handler for, which is the exact failure this slice removes. It is also
+	// what lets a fleet be upgraded to this version BEFORE its roles are split,
+	// which is the ordering the deploy docs prescribe.
+	//
+	// Removed in the release after this one, once
+	// inroad_queue_depth{queue="default"} has been 0 and stayed there — see
+	// queue.QueueDefault for the full check.
 	if role.RunsPerMessageWork() {
 		qs = append(qs, queue.QueueDefault)
 	}
