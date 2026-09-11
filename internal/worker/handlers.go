@@ -90,9 +90,16 @@ func Register(mux *asynq.ServeMux, d Deps) {
 }
 
 // registerScheduled wires the six periodic reconciles and the campaign breaker.
-// These scan or delete ACROSS TENANTS, which is why they are control-role only:
-// a sending host must not be able to enumerate every workspace's due
+// These scan or delete ACROSS TENANTS, so they are registered on the control
+// role only: a send host runs no handler that enumerates every workspace's due
 // enrollments (fleet design §1.2).
+//
+// That is a statement about HANDLERS, not about containment. A send-role
+// process holds the same pgxpool as any other, so it is not physically
+// prevented from reaching the rest of the schema — the role decides what work
+// it is asked to do, and the queue split decides what it can claim. The
+// boundary that does not depend on either is the tenant pin on every query
+// (docs/security.md invariant 4).
 func registerScheduled(mux *asynq.ServeMux, d Deps, recorder jobrun.Recorder) {
 	if cleaner, ok := d.Core.(maintenance.Cleaner); ok {
 		mux.HandleFunc(queue.TaskMaintenanceCleanup, jobrun.Record(recorder, d.Metrics, jobrun.NameMaintenanceCleanup, maintenance.CleanupHandler(cleaner)))

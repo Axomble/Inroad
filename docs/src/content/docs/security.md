@@ -255,8 +255,9 @@ limit / abuse control here is tracked in the Deferred list below.
     net_tester}.go`, proven by `TestSendSourceBindDoesNotBypassSSRF` /
     `TestInboxSourceBindDoesNotBypassSSRF`).
 23. **A job's routing destination is derived server-side, never from the client.**
-    The target queue (`w:<worker_id>` or the shared default `""`) comes from the
-    persisted `mailbox_worker_assignments` row via `AssignMailboxWorker`
+    The target queue (`w:<worker_id>`, or the shared `send` queue when the
+    mailbox has no live assignment) comes from the persisted
+    `mailbox_worker_assignments` row via `AssignMailboxWorker`
     (`internal/coreapi/inprocess/workerrouting.go`), computed from the worker
     registry — no request field influences which worker/IP a mailbox's mail
     egresses through, so a caller can't pin or divert traffic.
