@@ -12,7 +12,7 @@
     "test:e2e": "playwright test",
     "lint:api": "redocly lint ../api/openapi.yaml --config ../redocly.yaml",
     "preview": "vite preview",
-    "gen:api": "rtk-query-codegen-openapi openapi-codegen.cts"
+    "gen:api": "rtk-query-codegen-openapi openapi-codegen.cjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
