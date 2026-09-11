@@ -57,6 +57,31 @@ const (
 	sweepTimeout = 10 * time.Minute
 )
 
+// Queue names. A task's queue decides WHICH WORKER ROLE can claim it, which is
+// load-bearing rather than cosmetic: asynq dequeues a task before consulting
+// the mux, so a host that consumes a queue it has no handler for claims the
+// task, fails handler lookup, and burns its retries into the dead-letter table.
+// Routing per-message work and control-plane work to separate queues is what
+// stops a control host from silently eating sends.
+const (
+	// QueueSend carries per-message work: sends, warmup ticks and engagement,
+	// inbox polls, manual replies, test sends, webhook deliveries.
+	QueueSend = "send"
+	// QueueControl carries the periodic reconciles, the purges and the campaign
+	// breaker — everything that scans or deletes across tenants.
+	QueueControl = "control"
+	// QueueDefault is asynq's built-in queue. NOTHING is enqueued here any more;
+	// it is consumed transitionally so tasks queued before the role split
+	// upgrade still drain. Removable once no deployment can still hold a
+	// pre-upgrade backlog.
+	QueueDefault = "default"
+)
+
+// WorkerQueue names one worker's private affinity queue. warmup:tick is routed
+// here so a warming mailbox keeps sending from the same IP — warmup reputation
+// is per-IP, so moving a mailbox mid-warmup damages the thing being built.
+func WorkerQueue(workerID string) string { return "w:" + workerID }
+
 const TaskWarmupTick = "warmup:tick"
 
 // WarmupTickPayload is the body of a warmup:tick task. WorkspaceID travels
