@@ -326,17 +326,23 @@ type heartbeatClient interface {
 // row every workerHeartbeatInterval until ctx is cancelled. The initial beat is
 // synchronous so the assigner sees the worker as live before it processes its
 // first task. A worker with an empty id (hostname lookup failed AND no
-// INROAD_WORKER_ID) can't own a stable queue, so it skips registration and runs
-// off the shared default queue only. Heartbeat failures are logged, not fatal:
-// a transient DB blip must not take the worker down.
+// INROAD_WORKER_ID) can't own a stable "w:<id>" affinity queue, so it skips
+// registration and consumes only its ROLE's other shared queues
+// (worker.QueuesFor with workerID "" omits just the affinity entry — QueueSend
+// and QueueDefault stay, plus QueueControl too for RoleAll). Heartbeat
+// failures are logged, not fatal: a transient DB blip must not take the worker
+// down.
 //
 // A worker heartbeats as assignable IF AND ONLY IF it runs per-message work.
 // AssignMailboxWorker picks a mailbox's owner from the `workers` table and
 // returns a "w:<worker_id>" queue name that redisbus routes jobs to directly.
-// That routing reaches exactly ONE task type today: queue.EnqueueWarmupTickAt
-// is the only producer that sets bus.Job.Dest, so warmup:tick is the only task
-// an assignment redirects — sequence:advance, inbox:poll and webhook:deliver
-// go to the shared `default` queue whoever owns the mailbox.
+// Two producers set bus.Job.Dest — queue.EnqueueWarmupTickAt (the from-mailbox's
+// affinity queue) and queue.EnqueueWarmupEngageIn (a fixed QueueSend, no
+// per-mailbox routing) — but only the FIRST is actually redirected by an
+// assignment, since the second's Dest never varies with one. warmup:tick is
+// therefore the only task an assignment changes the destination of;
+// sequence:advance, inbox:poll and webhook:deliver always go to the shared
+// QueueSend, whoever owns the mailbox.
 //
 // A control-role host registers no per-message handlers (worker.Register), and
 // — since resolveWorkerQueues derives consumption from worker.QueuesFor —
@@ -363,7 +369,7 @@ func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressI
 		return
 	}
 	if workerID == "" {
-		logger.Warn("worker id empty; skipping registration (serves default queue only)")
+		logger.Warn("worker id empty; skipping registration (no per-IP affinity queue; still serves the role's shared queues)")
 		return
 	}
 	beat := func() {

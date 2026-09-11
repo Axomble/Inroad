@@ -29,15 +29,9 @@ func (f *fakeEnqueuer) EnqueueContext(_ context.Context, t *asynq.Task, opts ...
 func (f *fakeEnqueuer) Close() error { return nil }
 
 // queue returns the asynq.Queue option's value from the last EnqueueContext
-// call, and whether one was present at all.
-func (f *fakeEnqueuer) queue() (string, bool) {
-	for _, o := range f.opts {
-		if o.Type() == asynq.QueueOpt {
-			return o.Value().(string), true
-		}
-	}
-	return "", false
-}
+// call, and whether one was present at all. Delegates to queueOption, the same
+// scan production code's enqueue guard uses.
+func (f *fakeEnqueuer) queue() (string, bool) { return queueOption(f.opts) }
 
 // TestEveryProducerTargetsARoleQueue proves every non-affinity enqueue helper
 // sets an explicit queue. A task with no queue lands on asynq's "default",
@@ -153,14 +147,9 @@ func (f *fakeRegistrar) Register(cronspec string, task *asynq.Task, opts ...asyn
 	return "entry-1", nil
 }
 
-func (f *fakeRegistrar) queue() (string, bool) {
-	for _, o := range f.opts {
-		if o.Type() == asynq.QueueOpt {
-			return o.Value().(string), true
-		}
-	}
-	return "", false
-}
+// queue delegates to queueOption, the same scan fakeEnqueuer.queue() and
+// production code's enqueue guard use.
+func (f *fakeRegistrar) queue() (string, bool) { return queueOption(f.opts) }
 
 // TestEveryControlSweepTargetsControlQueue proves every periodic reconcile —
 // fan-outs and cross-tenant scans — registers on QueueControl, so a send-role

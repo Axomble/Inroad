@@ -451,7 +451,7 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 // redisbus.asynqOptions keep their own documented "" = shared-queue meaning,
 // which this does not touch.
 func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
-	if !hasQueueOption(opts) {
+	if _, ok := queueOption(opts); !ok {
 		return fmt.Errorf("queue: enqueue %q: no asynq.Queue option set; every producer must route to a role queue", t.Type())
 	}
 	if _, err := c.inner.EnqueueContext(context.Background(), t, opts...); err != nil {
@@ -463,17 +463,18 @@ func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 	return nil
 }
 
-// hasQueueOption reports whether opts carries an asynq.Queue option. Mirrors
-// the scanning approach fakeEnqueuer.queue()/fakeRegistrar.queue() already use
-// in queue_test.go: asynq.Option is a public Type()/Value() pair, so this needs
-// no cooperation from asynq beyond that.
-func hasQueueOption(opts []asynq.Option) bool {
+// queueOption returns the value of opts' asynq.Queue option and whether one
+// was present. The one scan behind both enqueue's guard and the test fakes'
+// assertions (fakeEnqueuer.queue()/fakeRegistrar.queue() in queue_test.go call
+// this directly, same package) — asynq.Option is a public Type()/Value() pair,
+// so this needs no cooperation from asynq beyond that.
+func queueOption(opts []asynq.Option) (string, bool) {
 	for _, o := range opts {
 		if o.Type() == asynq.QueueOpt {
-			return true
+			return o.Value().(string), true
 		}
 	}
-	return false
+	return "", false
 }
 
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.
@@ -719,10 +720,13 @@ var _ bus.Dispatcher = (*Client)(nil)
 func (c *Client) Close() error { return c.inner.Close() }
 
 // NewServer builds an asynq processing server. Concurrency defaults to 10
-// when concurrency <= 0. queues is the ordered set of queues to consume (spec
-// §15: a worker serves its own per-IP "w:<id>" queue plus "default"); an empty
-// list leaves asynq on its built-in {"default":1}. The provided *slog.Logger is
-// adapted to asynq's Logger interface so worker log lines flow through the same
+// when concurrency <= 0. queues is the ordered set of queues to consume —
+// callers derive it per worker ROLE (cmd/worker.resolveWorkerQueues /
+// internal/worker.QueuesFor: control consumes only QueueControl; send
+// consumes its own per-IP "w:<id>" queue plus QueueSend and the transitional
+// QueueDefault), not a fixed pair every role shares; an empty list leaves
+// asynq on its built-in {"default":1}. The provided *slog.Logger is adapted to
+// asynq's Logger interface so worker log lines flow through the same
 // structured sink as the rest of the app.
 //
 // recorder receives tasks that have exhausted their retries
