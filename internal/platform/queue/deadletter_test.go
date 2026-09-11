@@ -206,7 +206,7 @@ func TestTerminalFailureOfTheLegacyReplySendIsNotCaptured(t *testing.T) {
 		}
 
 		recordTerminalFailure(context.Background(), rec, logger,
-			asynq.NewTask(TaskInboxReplySend, payload), errors.New("smtp: connection refused"), 6, sendMaxRetry)
+			asynq.NewTask(TaskInboxReplySend, payload), errors.New("smtp: connection refused"), QueueSend, 6, sendMaxRetry)
 
 		if len(rec.calls) != 0 {
 			t.Fatalf("recorded %d dead letters for inbox:reply_send, want 0 — the payload is "+
@@ -240,7 +240,7 @@ func TestTerminalFailureOfTheLegacyReplySendIsNotCaptured(t *testing.T) {
 				t.Fatalf("marshal %s: %v", taskType, err)
 			}
 			recordTerminalFailure(context.Background(), rec, quietLogger(),
-				asynq.NewTask(taskType, b), errors.New("dial timeout"), 6, sendMaxRetry)
+				asynq.NewTask(taskType, b), errors.New("dial timeout"), QueueSend, 6, sendMaxRetry)
 			if len(rec.calls) != 1 {
 				t.Errorf("%s: recorded %d dead letters, want 1 — the suppression must be "+
 					"targeted, not a hole in capture", taskType, len(rec.calls))
@@ -325,7 +325,7 @@ func TestCapturedLastErrorIsBoundedAndStaysValidUTF8(t *testing.T) {
 		t.Helper()
 		rec := &fakeRecorder{}
 		recordTerminalFailure(context.Background(), rec, quietLogger(),
-			asynq.NewTask(TaskSequenceAdvance, mustPayload(t, ws)), taskErr, 6, sendMaxRetry)
+			asynq.NewTask(TaskSequenceAdvance, mustPayload(t, ws)), taskErr, QueueSend, 6, sendMaxRetry)
 		if len(rec.calls) != 1 {
 			t.Fatalf("recorded %d dead letters, want 1", len(rec.calls))
 		}
@@ -382,4 +382,122 @@ func mustPayload(t *testing.T, ws string) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+// TestEnqueueReplayRoutesToARoleQueue is the regression test for a replay that
+// landed on asynq's "default" queue.
+//
+// EnqueueReplay is the one producer that does not know what it is enqueuing —
+// it hands back whatever was captured — and it used to set no queue at all.
+// Every other producer routes, so the funnel guard never saw this one, and the
+// control role does not consume "default": a replayed deliverability:evaluate
+// (the only control-plane type a dead-letter row can name — a periodic sweep
+// is never captured, since workspaceFromPayload rejects its empty payload)
+// could only be claimed by a send host, which has no handler for it and
+// dead-letters it again. That is the exact failure this package's role queues
+// exist to prevent, reproduced in the one API an operator uses to recover from
+// it — and unrecoverably, because the replay claim is one-shot.
+func TestEnqueueReplayRoutesToARoleQueue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		job  ReplayJob
+		want string
+	}{
+		// The captured queue wins: it is where the task ACTUALLY ran, and for a
+		// warmup tick it names the worker — and therefore the IP — the mailbox
+		// was warming from. Losing that during recovery is the worst moment to
+		// move a warming mailbox.
+		{"an affinity queue survives recovery", ReplayJob{TaskType: TaskWarmupTick, Queue: WorkerQueue("worker-a")}, WorkerQueue("worker-a")},
+		{"a captured role queue is replayed onto as-is", ReplayJob{TaskType: TaskInboxPoll, Queue: QueueControl}, QueueControl},
+		// No captured queue: a row written before the queue column existed.
+		// The task type's own route is the reconstruction.
+		{"per-message work", ReplayJob{TaskType: TaskInboxPoll}, QueueSend},
+		{"a deferred manual reply", ReplayJob{TaskType: TaskInboxPendingReplySend}, QueueSend},
+		{"the campaign breaker", ReplayJob{TaskType: TaskDeliverabilityEvaluate}, QueueControl},
+		{"a periodic reconcile", ReplayJob{TaskType: TaskSweepEnrollments}, QueueControl},
+		// "default" is drain-only and its consumption is being removed, so a
+		// row captured off it must NOT be replayed back onto it — that is the
+		// silent no-op this whole fix exists to remove, just one release later.
+		{"the deprecated default is never replayed onto", ReplayJob{TaskType: TaskInboxPendingReplySend, Queue: QueueDefault}, QueueSend},
+		// An arbitrary type is exactly what this path can be handed, and a
+		// captured queue answers for it even though the lookup cannot.
+		{"an unmapped type still replays where it ran", ReplayJob{TaskType: "some:unknown-task", Queue: QueueSend}, QueueSend},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeEnqueuer{}
+			c := &Client{inner: fake}
+			job := tc.job
+			job.Payload = mustPayload(t, uuid.NewString())
+			job.Key = "replay:1"
+			if err := c.EnqueueReplay(context.Background(), job); err != nil {
+				t.Fatalf("EnqueueReplay: %v", err)
+			}
+			if got, ok := fake.queue(); !ok || got != tc.want {
+				t.Errorf("replayed %s to %q (present=%v), want %q", job.TaskType, got, ok, tc.want)
+			}
+			if fake.task == nil || fake.task.Type() != job.TaskType {
+				t.Errorf("replay must re-enqueue the captured task type verbatim, got %v", fake.task)
+			}
+		})
+	}
+}
+
+// A task type with no route is refused rather than enqueued, for the same
+// reason c.enqueue refuses a task with no Queue option: landing on "default" is
+// a task that runs only while the transitional drain survives, and a replay
+// that no-ops has burned the row's single recovery attempt. The error names the
+// type, because an arbitrary one is exactly what this path can be handed.
+func TestEnqueueReplayRefusesAnUnroutableTaskType(t *testing.T) {
+	fake := &fakeEnqueuer{}
+	c := &Client{inner: fake}
+
+	err := c.EnqueueReplay(context.Background(), ReplayJob{
+		TaskType: "some:unknown-task",
+		Payload:  mustPayload(t, uuid.NewString()),
+		Key:      "replay:1",
+	})
+	if err == nil {
+		t.Fatal("replay of an unroutable task type: got nil error, want one")
+	}
+	if !strings.Contains(err.Error(), "some:unknown-task") {
+		t.Errorf("error %q does not name the task type", err.Error())
+	}
+	if fake.task != nil {
+		t.Error("an unroutable replay must be refused before it reaches the queue, not after")
+	}
+}
+
+// The queue a task died on is recorded, because nothing else on the row can
+// reconstruct it. The task type gives the ROLE queue, which is right for
+// everything except the one case where it matters most: warmup:tick is routed
+// to its mailbox's "w:<id>" affinity queue so a warming mailbox keeps egressing
+// from one IP, and that id appears nowhere in the payload.
+//
+// The empty case is a real one, not a defensive branch: asynq populates the
+// queue name through an internal context package this module cannot import, so
+// a synthetic context (and any pre-upgrade worker) yields none — and replay
+// then falls back to the task type's route.
+func TestCaptureRecordsTheQueueTheTaskRanOn(t *testing.T) {
+	ws := uuid.New().String()
+	for _, tc := range []struct {
+		name  string
+		queue string
+	}{
+		{"an affinity queue", WorkerQueue("worker-a")},
+		{"a role queue", QueueSend},
+		{"no queue on the context", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			recordTerminalFailure(context.Background(), rec, quietLogger(),
+				asynq.NewTask(TaskWarmupTick, mustPayload(t, ws)), errors.New("smtp: timeout"), tc.queue, 6, sendMaxRetry)
+
+			if len(rec.calls) != 1 {
+				t.Fatalf("recorded %d dead letters, want 1", len(rec.calls))
+			}
+			if rec.calls[0].Queue != tc.queue {
+				t.Errorf("captured queue = %q, want %q", rec.calls[0].Queue, tc.queue)
+			}
+		})
+	}
 }

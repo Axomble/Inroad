@@ -98,7 +98,12 @@ func run() error {
 	metricsCtx, cancelMetrics := context.WithCancel(context.Background())
 	var metricsWG sync.WaitGroup
 	if cfg.MetricsAddr != "" {
-		metricsSrv := httpx.NewServer(cfg.MetricsAddr, mtx.Handler())
+		// httpx.MetricsMux additionally mounts /debug/pprof/* when
+		// INROAD_PPROF_ENABLED is set (default off) — this fleet's own
+		// diagnostic path for a goroutine leak or heap growth on a remote
+		// worker, without a debugger attached. Still only on this
+		// operator-only listener, never a public port.
+		metricsSrv := httpx.NewServer(cfg.MetricsAddr, httpx.MetricsMux(mtx.Handler(), cfg.PprofEnabled))
 		metricsWG.Add(1)
 		go func() {
 			defer metricsWG.Done()
@@ -106,7 +111,7 @@ func run() error {
 				logger.Error("metrics server error", "err", err)
 			}
 		}()
-		logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+		logger.Info("metrics listening", "addr", cfg.MetricsAddr, "pprof", cfg.PprofEnabled)
 	}
 	defer func() {
 		cancelMetrics()
@@ -252,7 +257,7 @@ func run() error {
 		logger.Warn("coreapi has no dead-letter capability; exhausted tasks will not be captured")
 	}
 
-	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, cfg.WorkerQueues, deadLetters)
+	srv := queue.NewServer(cfg.RedisAddr, logger, cfg.WorkerConcurrency, resolveWorkerQueues(cfg, role, cfg.WorkerID), deadLetters)
 	mux := queue.NewMux()
 	// The DNS resolvers for the two sweeps. The first resolves only domains
 	// derived from connected mailboxes and the second only domains derived from
@@ -283,6 +288,20 @@ func run() error {
 	return nil
 }
 
+// resolveWorkerQueues decides the queue set this process consumes. An operator
+// override (INROAD_WORKER_QUEUES, surfaced as cfg.WorkerQueues) wins ENTIRELY
+// when present — an operator who names queues means exactly those, and
+// silently appending the role's defaults would make the override useless for
+// isolating a host. Absent an override, the role decides (worker.QueuesFor):
+// this is the composition point, because platform/config must not import
+// internal/worker, so the role→queues decision cannot live in config itself.
+func resolveWorkerQueues(cfg *config.Config, role worker.Role, workerID string) []string {
+	if len(cfg.WorkerQueues) > 0 {
+		return cfg.WorkerQueues
+	}
+	return worker.QueuesFor(role, workerID)
+}
+
 // deadLetterRecorder adapts coreapi.DeadLetterClient to the transport-neutral
 // queue.DeadLetterRecorder seam. It exists because platform/queue must not
 // import coreapi (platform/* never depends on the control⇄execution seam), so
@@ -297,6 +316,7 @@ func (d deadLetterRecorder) RecordDeadLetter(ctx context.Context, in queue.DeadL
 		Payload:      in.Payload,
 		LastError:    in.LastError,
 		AttemptCount: in.AttemptCount,
+		Queue:        in.Queue,
 	})
 }
 
@@ -312,26 +332,34 @@ type heartbeatClient interface {
 // row every workerHeartbeatInterval until ctx is cancelled. The initial beat is
 // synchronous so the assigner sees the worker as live before it processes its
 // first task. A worker with an empty id (hostname lookup failed AND no
-// INROAD_WORKER_ID) can't own a stable queue, so it skips registration and runs
-// off the shared default queue only. Heartbeat failures are logged, not fatal:
-// a transient DB blip must not take the worker down.
+// INROAD_WORKER_ID) can't own a stable "w:<id>" affinity queue, so it skips
+// registration and consumes only its ROLE's other shared queues
+// (worker.QueuesFor with workerID "" omits just the affinity entry — QueueSend
+// and QueueDefault stay, plus QueueControl too for RoleAll). Heartbeat
+// failures are logged, not fatal: a transient DB blip must not take the worker
+// down.
 //
 // A worker heartbeats as assignable IF AND ONLY IF it runs per-message work.
 // AssignMailboxWorker picks a mailbox's owner from the `workers` table and
 // returns a "w:<worker_id>" queue name that redisbus routes jobs to directly.
-// That routing reaches exactly ONE task type today: queue.EnqueueWarmupTickAt
-// is the only producer that sets bus.Job.Dest, so warmup:tick is the only task
-// an assignment redirects — sequence:advance, inbox:poll and webhook:deliver
-// go to the shared `default` queue whoever owns the mailbox.
+// Two producers set bus.Job.Dest — queue.EnqueueWarmupTickAt (the from-mailbox's
+// affinity queue) and queue.EnqueueWarmupEngageIn (a fixed QueueSend, no
+// per-mailbox routing) — but only the FIRST is actually redirected by an
+// assignment, since the second's Dest never varies with one. warmup:tick is
+// therefore the only task an assignment changes the destination of;
+// sequence:advance, inbox:poll and webhook:deliver always go to the shared
+// QueueSend, whoever owns the mailbox.
 //
-// A control-role host registers no per-message handlers (worker.Register), but
-// it does still CONSUME "w:<its-own-id>": config.defaultWorkerQueues is
-// role-blind and hands every worker {"w:<id>", "default"}. So a mailbox
-// assigned to a control host does not go quiet — the host dequeues each
-// warmup:tick, the mux finds no handler and answers asynq.ErrHandlerNotFound,
-// and asynq retries that on the SAME queue until the attempts are exhausted
-// and the task dead-letters. Declining to heartbeat is what keeps a control
-// host out of the assigner, and that warmup mail alive.
+// A control-role host registers no per-message handlers (worker.Register), and
+// — since resolveWorkerQueues derives consumption from worker.QueuesFor —
+// consumes no per-message queue either: QueuesFor omits "w:<id>" for a role
+// that does not run per-message work. So a mailbox STILL assigned to a control
+// host (see the stale-assignment paragraph below) goes quiet rather than
+// dead-lettering: nothing dequeues its "w:<its-own-id>" queue at all, and the
+// task just sits pending until the assignment is cleared or expires out of the
+// live window. Declining to heartbeat is what keeps a control host out of the
+// assigner for NEW assignments; the operator action described below is what's
+// needed for assignments that predate the role flip.
 //
 // The gate only stops NEW assignments. A host that ran as `send` and comes back
 // as `control` keeps its existing mailbox_worker_assignments rows, and
@@ -347,7 +375,7 @@ func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressI
 		return
 	}
 	if workerID == "" {
-		logger.Warn("worker id empty; skipping registration (serves default queue only)")
+		logger.Warn("worker id empty; skipping registration (no per-IP affinity queue; still serves the role's shared queues)")
 		return
 	}
 	beat := func() {

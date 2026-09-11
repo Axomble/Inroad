@@ -32,6 +32,7 @@ func (c client) RecordDeadLetter(ctx context.Context, in coreapi.DeadLetterInput
 		Payload:      in.Payload,
 		LastError:    in.LastError,
 		AttemptCount: clampAttemptCount(in.AttemptCount),
+		Queue:        in.Queue,
 	})
 	return err
 }

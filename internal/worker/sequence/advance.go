@@ -38,13 +38,13 @@ type Sender interface {
 // Enqueuer schedules the next advance and the post-send breaker evaluation.
 // Satisfied by *queue.Client.
 type Enqueuer interface {
-	EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error
-	EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error
+	EnqueueAdvanceAt(ctx context.Context, enrollmentID, workspaceID string, t time.Time) error
+	EnqueueAdvanceIn(ctx context.Context, enrollmentID, workspaceID string, d time.Duration) error
 	// EnqueueDeliverabilityEvaluate asks the control plane to re-score this
 	// campaign's circuit breaker. Deliberately a task rather than an inline call:
 	// the evaluation must read COMMITTED state and sit outside the send path
 	// entirely, so a scoring bug cannot fail a delivery (invariant 5).
-	EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) error
+	EnqueueDeliverabilityEvaluate(ctx context.Context, campaignID, workspaceID string) error
 }
 
 // capBackoff is how long to wait before retrying an enrollment blocked by the
@@ -236,7 +236,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 					"enrollment_id", p.EnrollmentID, "deferrals", n,
 					"effective_cap", job.EffectiveDailyCap, "sent_today", job.SentToday)
 			}
-			return enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID,
+			return enq.EnqueueAdvanceIn(ctx, p.EnrollmentID, p.WorkspaceID,
 				nextAttemptIn(job.Schedule, p.EnrollmentID, true, false, time.Now()))
 		}
 		// Blocked by something that is NOT this mailbox's own cap: the campaign has
@@ -275,7 +275,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			// this wait was never actually scheduled, so incrementing first
 			// would double-count once asynq redelivers and re-evaluates the
 			// same still-blocked condition.
-			if err := enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now())); err != nil {
+			if err := enq.EnqueueAdvanceIn(ctx, p.EnrollmentID, p.WorkspaceID, blockedBackoff(job, time.Now())); err != nil {
 				return err
 			}
 			// result=deferred: a self-clearing wait, not an error.
@@ -313,7 +313,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// recover-forward.
 		schedule := func(adv coreapi.Advance) error {
 			if !adv.Completed {
-				return enq.EnqueueAdvanceAt(p.EnrollmentID, p.WorkspaceID, adv.NextDueAt)
+				return enq.EnqueueAdvanceAt(ctx, p.EnrollmentID, p.WorkspaceID, adv.NextDueAt)
 			}
 			return nil
 		}
@@ -331,7 +331,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// campaign enqueues another evaluation anyway. The enqueue itself dedups
 		// per-campaign, so a 10,000-contact launch does not become 10,000 evaluations.
 		evaluateBreaker := func() {
-			if err := enq.EnqueueDeliverabilityEvaluate(job.CampaignID, p.WorkspaceID); err != nil {
+			if err := enq.EnqueueDeliverabilityEvaluate(ctx, job.CampaignID, p.WorkspaceID); err != nil {
 				slog.WarnContext(ctx, "deliverability_evaluate_enqueue_failed",
 					"campaign_id", job.CampaignID, "err", err)
 			}
@@ -373,7 +373,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			if now := time.Now(); job.NotYetDue(now) {
 				delay = max(delay, notDueBackoff(job, now))
 			}
-			if err := enq.EnqueueAdvanceIn(p.EnrollmentID, p.WorkspaceID, delay); err != nil {
+			if err := enq.EnqueueAdvanceIn(ctx, p.EnrollmentID, p.WorkspaceID, delay); err != nil {
 				return err
 			}
 			mtx.SendFinalized(sendKind, "deferred")

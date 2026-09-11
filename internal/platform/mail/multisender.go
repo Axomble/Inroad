@@ -36,8 +36,11 @@ func NewMultiSender(smtp *NetSender, gmail *GmailSender, graph *GraphSender) *Mu
 	return &MultiSender{smtp: smtp, gmail: gmail, graph: graph}
 }
 
-// Send picks the transport by Provider. SMTP ignores ctx (the underlying client
-// has its own dial/send timeout); the Gmail and Graph API legs honor it.
+// Send picks the transport by Provider. All three legs honor ctx, but not to
+// the same depth: the Gmail and Graph API legs are context-aware end to end,
+// while the SMTP leg (NetSender.Send) only bounds its SSRF-vetting DNS lookup
+// on ctx — the underlying gomail dial/send still runs to its own configured
+// timeout, since gomail's DialAndSend has no context-aware entry point.
 // Anything other than an API provider takes the SMTP path, so an empty Provider
 // stays byte-for-byte the old behavior.
 func (m *MultiSender) Send(ctx context.Context, tj OutboundJob, msg Message) (string, error) {
@@ -47,7 +50,7 @@ func (m *MultiSender) Send(ctx context.Context, tj OutboundJob, msg Message) (st
 	case "m365":
 		return m.graph.Send(ctx, tj.AccessToken, msg)
 	default:
-		return m.smtp.Send(SMTPConfig{
+		return m.smtp.Send(ctx, SMTPConfig{
 			Host: tj.Host, Port: tj.Port, Username: tj.Username, Password: tj.Password,
 			AllowPlaintext: tj.AllowPlaintext,
 		}, msg)

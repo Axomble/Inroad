@@ -54,7 +54,7 @@ func TestSendSourceBindDoesNotBypassSSRF(t *testing.T) {
 		{"cloud metadata", "169.254.169.254"},
 	}
 	for _, tc := range blocked {
-		if _, err := s.Send(SMTPConfig{Host: tc.host, Port: 587}, msg); !errors.Is(err, ErrHostNotPermitted) {
+		if _, err := s.Send(t.Context(), SMTPConfig{Host: tc.host, Port: 587}, msg); !errors.Is(err, ErrHostNotPermitted) {
 			t.Fatalf("%s destination must stay blocked with a source bind set, got err=%v", tc.name, err)
 		}
 	}

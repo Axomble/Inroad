@@ -102,6 +102,53 @@ func TestInsertRoundTrip(t *testing.T) {
 	}
 }
 
+// The queue a task died on round-trips, and an UNKNOWN one is NULL rather than
+// the empty string. Both halves matter: the affinity queue ("w:<id>") is the
+// only record of which worker — and therefore which IP — a warming mailbox was
+// sending from, and the column's CHECK rejects the empty string outright, so a
+// store that wrote "" for "we do not know" would fail the insert and lose the
+// capture entirely at the moment it matters most.
+func TestInsertRecordsTheCapturedQueue(t *testing.T) {
+	pool, store := setup(t)
+	ws := mintWorkspace(t, pool)
+
+	insert := func(t *testing.T, q string) gen.TaskDeadLetter {
+		t.Helper()
+		payload, err := json.Marshal(map[string]string{
+			"mailbox_id":   uuid.NewString(),
+			"workspace_id": ws.String(),
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		row, err := store.Insert(context.Background(), Capture{
+			WorkspaceID: ws, TaskType: "warmup:tick", Payload: payload,
+			LastError: "smtp: timeout", AttemptCount: 5, Queue: q,
+		}, StatusPending)
+		if err != nil {
+			t.Fatalf("Insert(queue=%q): %v", q, err)
+		}
+		return row
+	}
+
+	withQueue := insert(t, "w:worker-a")
+	if withQueue.Queue == nil || *withQueue.Queue != "w:worker-a" {
+		t.Errorf("queue = %v, want w:worker-a", withQueue.Queue)
+	}
+	// And it survives the read the replay path actually uses.
+	got, ok, err := store.Get(context.Background(), ws, withQueue.ID)
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.Queue == nil || *got.Queue != "w:worker-a" {
+		t.Errorf("re-read queue = %v, want w:worker-a", got.Queue)
+	}
+
+	if unknown := insert(t, ""); unknown.Queue != nil {
+		t.Errorf("queue = %v for an unknown queue, want NULL", *unknown.Queue)
+	}
+}
+
 // THE test this file exists for: N goroutines claiming the same row against real
 // Postgres must produce exactly one winner. If the status='pending' predicate
 // did not serialise, this is where it would show.

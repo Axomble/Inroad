@@ -38,6 +38,17 @@ type Config struct {
 	// it raises no auth question.
 	MetricsAddr string
 
+	// PprofEnabled mounts net/http/pprof's /debug/pprof/* endpoints on the SAME
+	// dedicated metrics listener above (never the public API router — see
+	// httpx.MetricsMux) — the diagnostic path for a goroutine leak or heap
+	// growth on a remote worker, where attaching a debugger isn't an option.
+	// Default false and gated behind its own flag, not folded into
+	// MetricsAddr!="" : an operator who points a Prometheus scraper at
+	// MetricsAddr from a wider network than "just this host" has not thereby
+	// opted into exposing goroutine stacks and CPU/heap profiles too — those
+	// are a strictly more sensitive disclosure than a counter value.
+	PprofEnabled bool
+
 	// KeyProvider selects the KEK backend that wraps per-workspace DEKs.
 	// "local" (default) wraps under INROAD_MASTER_KEY; a cloud KMS is a future
 	// drop-in. An unknown value fails closed at binary startup.
@@ -180,9 +191,12 @@ type Config struct {
 	// (net.Dialer.LocalAddr). Empty = OS default route (single-node dev). It sets
 	// the SOURCE address only and never relaxes the SSRF destination vet.
 	WorkerEgressIP string
-	// WorkerQueues is the ordered set of asynq queues this worker consumes;
-	// default {"w:<WorkerID>", "default"} so it serves its own per-IP queue plus
-	// the shared default.
+	// WorkerQueues is the operator's explicit override of the asynq queues this
+	// worker consumes (INROAD_WORKER_QUEUES), parsed as a trimmed CSV. Empty
+	// means no override was given: cmd/worker then derives the set from the
+	// worker's ROLE (worker.QueuesFor) rather than from a role-blind default
+	// here — this package must not import internal/worker, so the decision
+	// cannot live in this package.
 	WorkerQueues []string
 
 	// LogLevel is one of debug/info/warn/error. When empty, the logger
@@ -296,6 +310,7 @@ func Load() (*Config, error) {
 		RedisAddr:   getenv("INROAD_REDIS_ADDR", "localhost:6379"),
 	}
 	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
+	cfg.PprofEnabled = getenvBool("INROAD_PPROF_ENABLED", false)
 
 	// INROAD_REDIS_ADDR is either a bare host:port or a redis:// / rediss:// URL
 	// (auth, db, TLS). Reject a malformed URL here, at the boundary, so it fails
@@ -420,15 +435,15 @@ func Load() (*Config, error) {
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
 	cfg.WorkerID = getenv("INROAD_WORKER_ID", hostname)
 	cfg.WorkerEgressIP = getenv("INROAD_WORKER_EGRESS_IP", "")
+	// Left empty when unset, deliberately: the role-based default lives in
+	// worker.QueuesFor (cmd/worker composes it), not here — see the
+	// WorkerQueues field doc.
 	if raw := os.Getenv("INROAD_WORKER_QUEUES"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
 			if s = strings.TrimSpace(s); s != "" {
 				cfg.WorkerQueues = append(cfg.WorkerQueues, s)
 			}
 		}
-	}
-	if len(cfg.WorkerQueues) == 0 {
-		cfg.WorkerQueues = defaultWorkerQueues(cfg.WorkerID)
 	}
 	cfg.LogLevel = strings.ToLower(getenv("INROAD_LOG_LEVEL", ""))
 	if raw := os.Getenv("INROAD_TRUSTED_PROXIES"); raw != "" {
@@ -518,17 +533,6 @@ func webauthnDefaults(publicURL string) (rpID, rpOrigin string) {
 		return "", ""
 	}
 	return u.Hostname(), u.Scheme + "://" + u.Host
-}
-
-// defaultWorkerQueues is the queue set a worker consumes when INROAD_WORKER_QUEUES
-// is unset: its own dedicated per-IP queue plus the shared default. An empty
-// workerID (hostname lookup failed AND no override) collapses to just the shared
-// default, so the worker still processes unrouted traffic.
-func defaultWorkerQueues(workerID string) []string {
-	if workerID == "" {
-		return []string{"default"}
-	}
-	return []string{"w:" + workerID, "default"}
 }
 
 func getenvInt(key string, fallback int) int {

@@ -16,7 +16,7 @@ const claimTaskDeadLetterReplay = `-- name: ClaimTaskDeadLetterReplay :one
 UPDATE task_dead_letters
 SET status = 'replayed', replayed_at = now()
 WHERE workspace_id = $1 AND id = $2 AND status = 'pending'
-RETURNING id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at
+RETURNING id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at, queue
 `
 
 type ClaimTaskDeadLetterReplayParams struct {
@@ -55,6 +55,7 @@ func (q *Queries) ClaimTaskDeadLetterReplay(ctx context.Context, arg ClaimTaskDe
 		&i.Status,
 		&i.CreatedAt,
 		&i.ReplayedAt,
+		&i.Queue,
 	)
 	return i, err
 }
@@ -82,7 +83,7 @@ func (q *Queries) DiscardTaskDeadLetter(ctx context.Context, arg DiscardTaskDead
 }
 
 const getTaskDeadLetter = `-- name: GetTaskDeadLetter :one
-SELECT id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at FROM task_dead_letters
+SELECT id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at, queue FROM task_dead_letters
 WHERE workspace_id = $1 AND id = $2
 `
 
@@ -104,15 +105,16 @@ func (q *Queries) GetTaskDeadLetter(ctx context.Context, arg GetTaskDeadLetterPa
 		&i.Status,
 		&i.CreatedAt,
 		&i.ReplayedAt,
+		&i.Queue,
 	)
 	return i, err
 }
 
 const insertTaskDeadLetter = `-- name: InsertTaskDeadLetter :one
 
-INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at
+INSERT INTO task_dead_letters (workspace_id, task_type, payload, last_error, attempt_count, status, queue)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at, queue
 `
 
 type InsertTaskDeadLetterParams struct {
@@ -122,6 +124,7 @@ type InsertTaskDeadLetterParams struct {
 	LastError    string    `json:"last_error"`
 	AttemptCount int32     `json:"attempt_count"`
 	Status       string    `json:"status"`
+	Queue        *string   `json:"queue"`
 }
 
 // Dead-letter capture and replay (migration 000069). Every tenant-facing
@@ -150,6 +153,12 @@ type InsertTaskDeadLetterParams struct {
 // would be replayable, and replaying it delivers a blank message to a real
 // contact. The service is the only caller and it never takes the value from a
 // request.
+//
+// @queue is the asynq queue the task was RUNNING on when it died (nullable:
+// see migration 20260911101701). It is read back by replay, which re-enqueues
+// onto it rather than onto whatever the task type routes to today — the only
+// way a replayed warmup:tick returns to the same worker, and therefore the same
+// IP, it was warming from.
 func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLetterParams) (TaskDeadLetter, error) {
 	row := q.db.QueryRow(ctx, insertTaskDeadLetter,
 		arg.WorkspaceID,
@@ -158,6 +167,7 @@ func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLe
 		arg.LastError,
 		arg.AttemptCount,
 		arg.Status,
+		arg.Queue,
 	)
 	var i TaskDeadLetter
 	err := row.Scan(
@@ -170,12 +180,13 @@ func (q *Queries) InsertTaskDeadLetter(ctx context.Context, arg InsertTaskDeadLe
 		&i.Status,
 		&i.CreatedAt,
 		&i.ReplayedAt,
+		&i.Queue,
 	)
 	return i, err
 }
 
 const listTaskDeadLetters = `-- name: ListTaskDeadLetters :many
-SELECT id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at FROM task_dead_letters
+SELECT id, workspace_id, task_type, payload, last_error, attempt_count, status, created_at, replayed_at, queue FROM task_dead_letters
 WHERE workspace_id = $1
   AND ($2::text = '' OR status = $2::text)
   AND ($3::bool = false
@@ -243,6 +254,7 @@ func (q *Queries) ListTaskDeadLetters(ctx context.Context, arg ListTaskDeadLette
 			&i.Status,
 			&i.CreatedAt,
 			&i.ReplayedAt,
+			&i.Queue,
 		); err != nil {
 			return nil, err
 		}

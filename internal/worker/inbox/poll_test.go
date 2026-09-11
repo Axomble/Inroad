@@ -289,7 +289,9 @@ func runGraphPoll(t *testing.T, core coreapi.Client, graph GraphFetcher) error {
 // recording spy instead (see poll_warmup_test.go).
 type noopEngageEnqueuer struct{}
 
-func (noopEngageEnqueuer) EnqueueWarmupEngageIn(string, string, time.Duration) error { return nil }
+func (noopEngageEnqueuer) EnqueueWarmupEngageIn(context.Context, string, string, time.Duration) error {
+	return nil
+}
 
 func TestPollFirstPollBaselinesWithoutFetching(t *testing.T) {
 	// job.UIDValidity == 0 means this mailbox has never been polled: baseline

@@ -59,7 +59,7 @@ type fakeEnq struct {
 	calls      int32
 }
 
-func (f *fakeEnq) EnqueueWebhookDeliverIn(deliveryID, _ string, d time.Duration) error {
+func (f *fakeEnq) EnqueueWebhookDeliverIn(_ context.Context, deliveryID, _ string, d time.Duration) error {
 	atomic.AddInt32(&f.calls, 1)
 	f.deliveryID, f.delay = deliveryID, d
 	return nil

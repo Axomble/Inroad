@@ -37,9 +37,10 @@ type QueueInspector interface {
 // value.
 //
 // The only label is the queue NAME. Queue names in this deployment are
-// bounded: "default" plus one "w:<worker-id>" per worker replica (queue.go's
-// per-IP routing), so the series count tracks replica count, not tenant count.
-// No workspace/campaign/mailbox label appears here (spec §7 — unbounded
+// bounded: the three fixed ones ("send", "control", and the transitional
+// "default"), plus one "w:<worker-id>" per worker replica (queue.go's per-IP
+// routing), so the series count tracks replica count, not tenant count. No
+// workspace/campaign/mailbox label appears here (spec §7 — unbounded
 // cardinality).
 type queueCollector struct {
 	inspector QueueInspector

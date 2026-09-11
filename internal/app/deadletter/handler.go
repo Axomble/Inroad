@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,6 +14,7 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
+	"github.com/inroad/inroad/internal/platform/queue"
 )
 
 // Handler exposes dead-letter triage over HTTP. Authentication is applied by the
@@ -53,6 +55,42 @@ type deadLetterResponse struct {
 	Status       string          `json:"status"`
 	CreatedAt    string          `json:"created_at"`
 	ReplayedAt   *string         `json:"replayed_at"`
+	// Queue names the worker queue the task was claimed from, and is null for a
+	// row captured before that was recorded. It is triage information the
+	// operator cannot get anywhere else — "this sweep died on a send host" is
+	// otherwise invisible.
+	//
+	// A ROLE queue ("send", "control", the legacy "default") passes through
+	// as captured: that is deployment topology, not tenant data. A per-worker
+	// AFFINITY queue does not — see redactQueue.
+	Queue *string `json:"queue"`
+}
+
+// workerQueueLabel replaces every per-worker affinity queue's value in an API
+// response. queue.WorkerQueue's suffix is a worker id, and INROAD_WORKER_ID
+// defaults to the OS hostname (config.WorkerID) — i.e. the container/pod
+// hostname in the common deployment. GET /dead-letters is gated on
+// campaigns:read, which is OAuth-grantable, so a delegated third-party client
+// could otherwise enumerate fleet hostnames through this field. The triage
+// value that survives — "this task was pinned to a worker, not a shared
+// queue" — is exactly what an operator needs; the identifier is not.
+const workerQueueLabel = "worker"
+
+// redactQueue maps a captured queue value to what this API is allowed to
+// return. A nil row (captured before the column existed) stays nil. Anything
+// else is checked against queue.WorkerQueue's own prefix — deriving the
+// prefix from the function that builds it, rather than repeating the "w:"
+// literal here, is the fix for the exact drift this branch already had to
+// correct once (see queue.go's enqueue doc and inprocess/workerrouting.go).
+func redactQueue(q *string) *string {
+	if q == nil {
+		return nil
+	}
+	out := *q
+	if strings.HasPrefix(out, queue.WorkerQueue("")) {
+		out = workerQueueLabel
+	}
+	return &out
 }
 
 // toResponse is the ONE place a stored row becomes bytes on the wire — list,
@@ -70,6 +108,7 @@ func toResponse(d gen.TaskDeadLetter) deadLetterResponse {
 		AttemptCount: d.AttemptCount,
 		Status:       d.Status,
 		CreatedAt:    d.CreatedAt.Time.UTC().Format(time.RFC3339),
+		Queue:        redactQueue(d.Queue),
 	}
 	if d.ReplayedAt.Valid {
 		replayed := d.ReplayedAt.Time.UTC().Format(time.RFC3339)

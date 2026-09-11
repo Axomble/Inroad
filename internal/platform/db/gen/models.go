@@ -1024,6 +1024,7 @@ type TaskDeadLetter struct {
 	Status       string             `json:"status"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	ReplayedAt   pgtype.Timestamptz `json:"replayed_at"`
+	Queue        *string            `json:"queue"`
 }
 
 type TaskTarget struct {

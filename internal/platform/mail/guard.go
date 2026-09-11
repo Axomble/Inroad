@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 )
 
 // ErrHostNotPermitted is returned when a mailbox host resolves to an address
@@ -29,6 +30,16 @@ func setResolver(r *net.Resolver) func() {
 	return func() { resolver = prev }
 }
 
+// dnsLookupTimeout bounds the SSRF-vetting DNS lookup in vetAddr. It is
+// derived from the caller's ctx (context.WithTimeout keeps the earlier of the
+// two deadlines), so a caller with its own tighter deadline is never
+// loosened; this only imposes a ceiling when the caller has none. 5s is
+// generous slack for a slow-but-healthy resolver while still being a small
+// fraction of the surrounding dial timeouts (15-30s in this package) — a
+// lookup that hasn't answered by then is indistinguishable from a hung one,
+// and failing fast beats blocking a send/poll worker indefinitely.
+const dnsLookupTimeout = 5 * time.Second
+
 // vetAddr enforces the mail-port allowlist, resolves host, rejects
 // dangerous/internal targets, and returns an ip:port string to dial. Dialing
 // the resolved IP directly (callers keep the hostname as the TLS ServerName)
@@ -37,11 +48,17 @@ func setResolver(r *net.Resolver) func() {
 // Every resolved IP is checked: a single disallowed record in the answer set
 // fails the whole vet. The returned ip:port is the first *allowed* IP; the
 // caller should dial exactly that address (never re-resolve the hostname).
-func vetAddr(host string, port int, allowedPorts map[int]bool, allowPrivate bool) (string, error) {
+//
+// The lookup is bounded by dnsLookupTimeout regardless of ctx, so a hanging
+// or slow resolver can never block the caller indefinitely (see
+// dnsLookupTimeout for why 5s).
+func vetAddr(ctx context.Context, host string, port int, allowedPorts map[int]bool, allowPrivate bool) (string, error) {
 	if !allowedPorts[port] {
 		return "", fmt.Errorf("port %d not permitted for this protocol", port)
 	}
-	ips, err := resolver.LookupIPAddr(context.Background(), host)
+	lookupCtx, cancel := context.WithTimeout(ctx, dnsLookupTimeout)
+	defer cancel()
+	ips, err := resolver.LookupIPAddr(lookupCtx, host)
 	if err != nil {
 		return "", fmt.Errorf("resolve host: %w", err)
 	}

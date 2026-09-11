@@ -36,7 +36,7 @@ const defaultIMAPTimeout = 30 * time.Second
 // uses implicit TLS, every other port requires STARTTLS — cleartext auth is
 // permitted ONLY when cfg.AllowPlaintext is explicitly set.
 func (t *NetTester) TestSMTP(ctx context.Context, cfg SMTPConfig) error {
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, t.AllowPrivate)
+	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedSMTPPorts, t.AllowPrivate)
 	if err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func (t *NetTester) TestSMTP(ctx context.Context, cfg SMTPConfig) error {
 // TestIMAP dials the IMAP server, negotiates TLS, and logs in, then logs out.
 // Port 143 upgrades via STARTTLS; other ports use implicit TLS.
 func (t *NetTester) TestIMAP(ctx context.Context, cfg IMAPConfig) error {
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, t.AllowPrivate)
+	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedIMAPPorts, t.AllowPrivate)
 	if err != nil {
 		return err
 	}

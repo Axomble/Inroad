@@ -60,8 +60,12 @@ func NewNetSender(allowPrivate bool) *NetSender {
 // preserved only as the TLS SNI / AUTH server name. This closes the
 // DNS-rebinding window between validation and connection: the underlying
 // gomail client never re-resolves the hostname.
-func (s *NetSender) Send(cfg SMTPConfig, msg Message) (string, error) {
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedSMTPPorts, s.AllowPrivate)
+//
+// ctx bounds the SSRF-vetting DNS lookup only (see vetAddr/dnsLookupTimeout);
+// the dial and send below still run under gomail's own WithTimeout, since
+// gomail's DialAndSend has no context-aware entry point to hand ctx to.
+func (s *NetSender) Send(ctx context.Context, cfg SMTPConfig, msg Message) (string, error) {
+	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedSMTPPorts, s.AllowPrivate)
 	if err != nil {
 		return "", err
 	}

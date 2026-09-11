@@ -57,6 +57,116 @@ const (
 	sweepTimeout = 10 * time.Minute
 )
 
+// Queue names. A task's queue decides WHICH WORKER ROLE can claim it, which is
+// load-bearing rather than cosmetic: asynq dequeues a task before consulting
+// the mux, so a host that consumes a queue it has no handler for claims the
+// task, fails handler lookup, and burns its retries into the dead-letter table.
+// Routing per-message work and control-plane work to separate queues is what
+// stops a control host from silently eating sends.
+const (
+	// QueueSend carries per-message work: sends, warmup ticks and engagement,
+	// inbox polls, manual replies, test sends, webhook deliveries.
+	QueueSend = "send"
+	// QueueControl carries the periodic reconciles, the purges and the campaign
+	// breaker — everything that scans or deletes across tenants.
+	QueueControl = "control"
+	// QueueDefault is asynq's built-in queue. NOTHING is enqueued here any more:
+	// every producer routes by task type through taskQueues, including the
+	// dead-letter replay that used to land here. It is consumed transitionally
+	// by the send and all roles (never by control), which is what makes a
+	// rolling upgrade to this version lossless — an upgraded worker drains both
+	// what this version produces and what the previous one left on "default".
+	//
+	// DRAIN ONLY, and removed in the release after this one — together with the
+	// QueuesFor branch that consumes it. The deadline is paired with a signal
+	// that says the queue has drained, rather than with a judgement call about
+	// whether some deployment might still hold a backlog (which the person
+	// deleting the code cannot check): inroad_queue_depth{queue="default"} —
+	// scraped per queue by internal/platform/metrics/queue.go — must read 0 in
+	// every state and stay there across a window wider than the longest delay a
+	// task can carry, on every deployment being upgraded.
+	//
+	// Deliberately NOT marked Deprecated in the godoc sense: every use of this
+	// constant today (QueuesFor, and the tests pinning what each role consumes)
+	// is the drain working as intended, and marking it would flag four correct
+	// call sites as mistakes in exchange for saying nothing this comment does
+	// not. The same distinction is drawn at the other drain site, internal/
+	// worker/inbox.RegisterPerMessage: the deprecated identifier there is the
+	// TASK TYPE nothing may enqueue, and its one remaining use carries an
+	// explained //nolint because it IS the drain.
+	QueueDefault = "default"
+)
+
+// WorkerQueue names one worker's private affinity queue. warmup:tick is routed
+// here so a warming mailbox keeps sending from the same IP — warmup reputation
+// is per-IP, so moving a mailbox mid-warmup damages the thing being built.
+func WorkerQueue(workerID string) string { return "w:" + workerID }
+
+// taskQueues is the single source of truth for which role queue a task type
+// belongs on. Every producer reads it — the typed helpers through
+// enqueueRouted, the periodic sweeps through registerControlSweep, the two
+// bus-seam helpers through routeTaskType — and so does the dead-letter replay.
+//
+// It is a TABLE rather than a constant repeated at each producer because
+// replay cannot repeat one: EnqueueReplay re-enqueues a captured task type
+// verbatim and has no typed helper to read a queue off, so before this existed
+// it set no queue at all and asynq filed the task under its own "default",
+// which the control role never consumes. Routing modelled as data on the
+// consuming side (internal/worker.QueuesFor) and as twelve literals on the
+// producing side is what left that one producer with nothing to consult.
+//
+// inbox:reply_send is deliberately absent. Nothing enqueues it (drain-only —
+// see TaskInboxReplySend) and deadletter.Service.Replay refuses it by task type
+// before it could reach this table, so a mapping here would only assert a route
+// nothing may take.
+var taskQueues = map[string]string{
+	// Per-message work. warmup:tick's entry is its FALLBACK: a mailbox with a
+	// worker assignment overrides it with that worker's affinity queue, which
+	// is what keeps a warming mailbox on one IP (see EnqueueWarmupTickAt).
+	TaskWarmupTick:              QueueSend,
+	TaskWarmupEngage:            QueueSend,
+	TaskSequenceAdvance:         QueueSend,
+	TaskInboxPoll:               QueueSend,
+	TaskInboxPendingReplySend:   QueueSend,
+	TaskInboxPendingComposeSend: QueueSend,
+	TaskTestSend:                QueueSend,
+	TaskWebhookDeliver:          QueueSend,
+
+	// Control-plane work: the periodic reconciles and purges, plus the campaign
+	// breaker — which is a cross-campaign decision, not one message's delivery,
+	// and is registered by the control role (internal/worker/handlers.go).
+	TaskWarmupSweep:            QueueControl,
+	TaskInboxSweep:             QueueControl,
+	TaskSweepEnrollments:       QueueControl,
+	TaskMaintenanceCleanup:     QueueControl,
+	TaskDomainAuthSweep:        QueueControl,
+	TaskRecipientESPSweep:      QueueControl,
+	TaskDeliverabilityEvaluate: QueueControl,
+}
+
+// queueForTaskType reports the role queue a task type belongs on, and whether
+// it is routable at all. Comma-ok rather than a "" fallback on purpose: ""
+// means "asynq's built-in default queue" everywhere downstream (bus.Job.Dest,
+// redisbus.asynqOptions), which is precisely the silent misroute this table
+// exists to prevent.
+func queueForTaskType(taskType string) (string, bool) {
+	q, ok := taskQueues[taskType]
+	return q, ok
+}
+
+// routeTaskType is queueForTaskType in the form the producers want: the queue,
+// or one error message written once. An unroutable task type fails the enqueue
+// rather than landing somewhere quiet — the same fail-loud rule as enqueue's
+// guard, and the rule that matters most where an ARBITRARY task type enters the
+// system (EnqueueReplay hands back whatever was captured).
+func routeTaskType(taskType string) (string, error) {
+	q, ok := queueForTaskType(taskType)
+	if !ok {
+		return "", fmt.Errorf("queue: task type %q has no role queue; add it to taskQueues", taskType)
+	}
+	return q, nil
+}
+
 const TaskWarmupTick = "warmup:tick"
 
 // WarmupTickPayload is the body of a warmup:tick task. WorkspaceID travels
@@ -319,9 +429,22 @@ func asynqConnOpt(redisAddr string) asynq.RedisConnOpt {
 	}
 }
 
+// enqueuer is the raw asynq capability Client needs: submit a task with
+// options, and close the connection NewClient opened. It embeds
+// redisbus.Enqueuer — the same minimal seam redisbus.Dispatcher already
+// depends on — rather than requiring the concrete *asynq.Client, so a test can
+// inject a fake and read back exactly which asynq.Option (including
+// asynq.Queue) a producer asked for without a live Redis: asynq.Option is a
+// public Type()/Value() pair, not an opaque callback only a real client could
+// execute (see redisbus_test.go's optByType for the established pattern).
+type enqueuer interface {
+	redisbus.Enqueuer
+	Close() error
+}
+
 // Client enqueues tasks onto Redis.
 type Client struct {
-	inner *asynq.Client
+	inner enqueuer
 }
 
 func NewClient(redisAddr string) *Client {
@@ -340,17 +463,27 @@ func warmupTickTaskID(mailboxID string, due time.Time) string {
 
 // EnqueueWarmupTickAt schedules a warmup:tick for one mailbox at time t, routed
 // to dest (the from-mailbox's assigned worker queue, spec §15 — so a mailbox's
-// warmup and campaign mail egress from one IP; "" = shared default queue). It
-// goes through the transport seam (bus.Dispatcher): Key→TaskID dedup,
-// Dest→Queue routing, At→ProcessAt delayed delivery. dest is always derived
-// server-side from the mailbox→worker assignment, never from client input
-// (§17.8).
-func (c *Client) EnqueueWarmupTickAt(mailboxID, workspaceID string, t time.Time, dest string) error {
+// warmup and campaign mail egress from one IP; "" = no assignment yet, so it
+// falls back to the shared send queue rather than asynq's unconsumed
+// "default"). It goes through the transport seam (bus.Dispatcher): Key→TaskID
+// dedup, Dest→Queue routing, At→ProcessAt delayed delivery. dest is always
+// derived server-side from the mailbox→worker assignment, never from client
+// input (§17.8).
+func (c *Client) EnqueueWarmupTickAt(ctx context.Context, mailboxID, workspaceID string, t time.Time, dest string) error {
 	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	return c.Publish(context.Background(), bus.Job{
+	if dest == "" {
+		// No assignment yet, so there is no IP to stay on: fall back to the
+		// task type's own role queue rather than asynq's unconsumed "default".
+		fallback, err := routeTaskType(TaskWarmupTick)
+		if err != nil {
+			return err
+		}
+		dest = fallback
+	}
+	return c.Publish(ctx, bus.Job{
 		Kind:    TaskWarmupTick,
 		Payload: b,
 		Key:     warmupTickTaskID(mailboxID, t),
@@ -375,16 +508,22 @@ func warmupEngageTaskID(receiptID string) string {
 // (the humanized engage dwell from the receipt's plan). It goes through the
 // transport seam (bus.Dispatcher): Key→TaskID dedup, In→ProcessIn delayed
 // delivery. Engagement acts on the RECIPIENT's own mailbox, so no cross-worker
-// egress routing applies — it uses the shared default queue (Dest "").
-func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error {
+// egress routing applies — but it is still per-message work, so it belongs on
+// the shared send queue (QueueSend), not asynq's unconsumed "default".
+func (c *Client) EnqueueWarmupEngageIn(ctx context.Context, receiptID, workspaceID string, d time.Duration) error {
 	b, err := json.Marshal(WarmupEngagePayload{ReceiptID: receiptID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	return c.Publish(context.Background(), bus.Job{
+	dest, err := routeTaskType(TaskWarmupEngage)
+	if err != nil {
+		return err
+	}
+	return c.Publish(ctx, bus.Job{
 		Kind:    TaskWarmupEngage,
 		Payload: b,
 		Key:     warmupEngageTaskID(receiptID),
+		Dest:    dest,
 	}, bus.Options{
 		In:       d,
 		MaxRetry: sendMaxRetry,
@@ -395,8 +534,28 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 // enqueue submits a task and treats an asynq TaskID conflict as success: a
 // duplicate enqueue of an already-pending task (sweeper re-enqueue racing a live
 // task) is a deliberate no-op, not an error.
-func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
-	if _, err := c.inner.Enqueue(t, opts...); err != nil {
+//
+// It refuses a task that carries no asynq.Queue option rather than letting
+// asynq silently file it under its own built-in "default" queue. QueueDefault
+// is consumed only transitionally (see its doc) and NOT by the control role at
+// all, so an unrouted task would drain only until that transitional
+// consumption is removed, then quietly stop — the exact role-blindness this
+// package exists to prevent. Every producer that reaches this reaches it
+// through enqueueRouted, which derives the option from taskQueues; this is the
+// backstop for a future one that calls enqueue directly.
+//
+// NOT every producer reaches this. EnqueueWarmupTickAt, EnqueueWarmupEngageIn
+// and EnqueueReplay are bus-seam producers: they go through Publish ->
+// redisbus.Dispatcher, which has no equivalent guard, and are routed by
+// routeTaskType at their own call sites instead (see taskQueues' doc, 437
+// lines above this one, for the accurate enumeration). Scoped to this funnel
+// only: bus.Job.Dest and redisbus.asynqOptions keep their own documented "" =
+// shared-queue meaning, which this does not touch.
+func (c *Client) enqueue(ctx context.Context, t *asynq.Task, opts ...asynq.Option) error {
+	if _, ok := queueOption(opts); !ok {
+		return fmt.Errorf("queue: enqueue %q: no asynq.Queue option set; every producer must route to a role queue", t.Type())
+	}
+	if _, err := c.inner.EnqueueContext(ctx, t, opts...); err != nil {
 		if errors.Is(err, asynq.ErrTaskIDConflict) {
 			return nil
 		}
@@ -405,21 +564,73 @@ func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 	return nil
 }
 
+// enqueueRouted submits a task routed BY ITS TYPE: the queue comes from
+// taskQueues rather than from the caller, so a producer cannot pick the wrong
+// one — or forget one — and the queue a REPLAY of that type picks can never
+// disagree with the queue its original producer picked. Everything a producer
+// legitimately owns (dedup key, delay, retries, timeout, retention) stays the
+// caller's.
+func (c *Client) enqueueRouted(ctx context.Context, taskType string, payload []byte, opts ...asynq.Option) error {
+	q, err := routeTaskType(taskType)
+	if err != nil {
+		return err
+	}
+	return c.enqueue(ctx, asynq.NewTask(taskType, payload), append(opts, asynq.Queue(q))...)
+}
+
+// queueOption returns the value of opts' asynq.Queue option and whether one
+// was present. The one scan behind both enqueue's guard and the test fakes'
+// assertions (fakeEnqueuer.queue()/fakeRegistrar.queue() in queue_test.go call
+// this directly, same package) — asynq.Option is a public Type()/Value() pair,
+// so this needs no cooperation from asynq beyond that.
+//
+// It returns the LAST matching option, not the first, because that is what
+// asynq itself does: composeOptions type-switches over opts in order and
+// OVERWRITES res.queue on every queueOption it sees (asynq@v0.26.0/
+// client.go:255-264), so the option that survives to be enqueued on is
+// whichever one came last in the slice. Returning the first match here would
+// make this guard inspect a queue the task does not actually go to the moment
+// any caller ever passed two — today nothing does (enqueueRouted appends the
+// routed queue last and no producer passes its own), but the guard and the
+// runtime must never be able to disagree about which one wins.
+//
+// The comma-ok assertion is load-bearing, not lint appeasement: this runs on
+// the send path (via enqueue's guard), so a bare o.Value().(string) would turn
+// a routing check into a production panic at enqueue time if asynq's QueueOpt
+// value type ever changed. A QueueOpt whose value ISN'T a string does not
+// overwrite a previously found result — it is treated as no usable option at
+// this position, exactly as asynq's own type switch would silently not match
+// a value of the wrong concrete type — and if nothing else matches, enqueue's
+// guard rejects the task the same way it would an entirely missing Queue
+// option (fail the enqueue, never silently accept an unusable/malformed one).
+func queueOption(opts []asynq.Option) (string, bool) {
+	result, found := "", false
+	for _, o := range opts {
+		if o.Type() != asynq.QueueOpt {
+			continue
+		}
+		if s, ok := o.Value().(string); ok {
+			result, found = s, true
+		}
+	}
+	return result, found
+}
+
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.
-func (c *Client) EnqueueAdvance(enrollmentID, workspaceID string) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now())
+func (c *Client) EnqueueAdvance(ctx context.Context, enrollmentID, workspaceID string) error {
+	return c.enqueueAdvance(ctx, enrollmentID, workspaceID, time.Now())
 }
 
 // EnqueueAdvanceAt enqueues a sequence:advance task to run at time t (used by
 // launch stagger and the lazy chain's next-step scheduling).
-func (c *Client) EnqueueAdvanceAt(enrollmentID, workspaceID string, t time.Time) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, t, asynq.ProcessAt(t))
+func (c *Client) EnqueueAdvanceAt(ctx context.Context, enrollmentID, workspaceID string, t time.Time) error {
+	return c.enqueueAdvance(ctx, enrollmentID, workspaceID, t, asynq.ProcessAt(t))
 }
 
 // EnqueueAdvanceIn enqueues a sequence:advance task after delay d (used by the
 // cap-exceeded backoff).
-func (c *Client) EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Duration) error {
-	return c.enqueueAdvance(enrollmentID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
+func (c *Client) EnqueueAdvanceIn(ctx context.Context, enrollmentID, workspaceID string, d time.Duration) error {
+	return c.enqueueAdvance(ctx, enrollmentID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
 }
 
 // enqueueAdvance submits a sequence:advance keyed on (enrollment, due-second) so
@@ -436,7 +647,7 @@ func (c *Client) EnqueueAdvanceIn(enrollmentID, workspaceID string, d time.Durat
 // shares a second with the one that scheduled it. The claim in AdvanceHandler
 // remains the correctness guarantee; this only cuts wasted concurrent advances.
 // due is the scheduled processing time.
-func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time, opts ...asynq.Option) error {
+func (c *Client) enqueueAdvance(ctx context.Context, enrollmentID, workspaceID string, due time.Time, opts ...asynq.Option) error {
 	b, err := json.Marshal(AdvancePayload{EnrollmentID: enrollmentID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
@@ -448,20 +659,20 @@ func (c *Client) enqueueAdvance(enrollmentID, workspaceID string, due time.Time,
 		asynq.Timeout(sendTimeout),
 		asynq.Retention(taskRetention),
 	)
-	return c.enqueue(asynq.NewTask(TaskSequenceAdvance, b), opts...)
+	return c.enqueueRouted(ctx, TaskSequenceAdvance, b, opts...)
 }
 
 // EnqueueDeliverabilityEvaluate schedules a breaker evaluation for one campaign.
 // Keyed on (campaign, dedup bucket) so the many sends finalising inside one
 // window collapse to a single evaluation; a TaskID conflict is success (see
 // enqueue), so a collapsed duplicate is not an error the caller has to handle.
-func (c *Client) EnqueueDeliverabilityEvaluate(campaignID, workspaceID string) error {
+func (c *Client) EnqueueDeliverabilityEvaluate(ctx context.Context, campaignID, workspaceID string) error {
 	b, err := json.Marshal(DeliverabilityEvaluatePayload{CampaignID: campaignID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
 	bucket := time.Now().Add(evaluateDedupWindow).Truncate(evaluateDedupWindow)
-	return c.enqueue(asynq.NewTask(TaskDeliverabilityEvaluate, b),
+	return c.enqueueRouted(ctx, TaskDeliverabilityEvaluate, b,
 		asynq.TaskID(fmt.Sprintf("deliverability:%s:%d", campaignID, bucket.Unix())),
 		asynq.ProcessAt(bucket),
 		asynq.MaxRetry(sendMaxRetry),
@@ -486,14 +697,14 @@ func testSendTaskID(campaignID, stepID, mailboxID string, now time.Time) string 
 }
 
 // EnqueueTestSend enqueues a testsend:send task for immediate processing.
-func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID string) error {
+func (c *Client) EnqueueTestSend(ctx context.Context, campaignID, stepID, mailboxID, to, workspaceID string) error {
 	b, err := json.Marshal(TestSendPayload{
 		CampaignID: campaignID, StepID: stepID, MailboxID: mailboxID, To: to, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
 	}
-	return c.enqueue(asynq.NewTask(TaskTestSend, b),
+	return c.enqueueRouted(ctx, TaskTestSend, b,
 		asynq.TaskID(testSendTaskID(campaignID, stepID, mailboxID, time.Now())),
 		asynq.MaxRetry(sendMaxRetry),
 		asynq.Retention(taskRetention),
@@ -516,14 +727,14 @@ func (c *Client) EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID 
 // Cancellation is a DB status flip that the handler re-reads on pickup; the
 // task still fires and no-ops. See
 // migrations/000066_inbox_pending_reply.up.sql for why.
-func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAfter time.Time) error {
+func (c *Client) EnqueuePendingInboxReply(ctx context.Context, pendingID, workspaceID string, sendAfter time.Time) error {
 	b, err := json.Marshal(InboxPendingReplySendPayload{
 		PendingID: pendingID, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
 	}
-	return c.enqueue(asynq.NewTask(TaskInboxPendingReplySend, b),
+	return c.enqueueRouted(ctx, TaskInboxPendingReplySend, b,
 		asynq.TaskID("inboxpending:"+pendingID),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
@@ -535,14 +746,14 @@ func (c *Client) EnqueuePendingInboxReply(pendingID, workspaceID string, sendAft
 // EnqueuePendingInboxCompose schedules a composed email for delivery at
 // sendAfter. See EnqueuePendingInboxReply for the ProcessAt/TaskID reasoning —
 // this is the same design over the compose table.
-func (c *Client) EnqueuePendingInboxCompose(pendingID, workspaceID string, sendAfter time.Time) error {
+func (c *Client) EnqueuePendingInboxCompose(ctx context.Context, pendingID, workspaceID string, sendAfter time.Time) error {
 	b, err := json.Marshal(InboxPendingComposeSendPayload{
 		PendingID: pendingID, WorkspaceID: workspaceID,
 	})
 	if err != nil {
 		return err
 	}
-	return c.enqueue(asynq.NewTask(TaskInboxPendingComposeSend, b),
+	return c.enqueueRouted(ctx, TaskInboxPendingComposeSend, b,
 		asynq.TaskID("inboxcompose:"+pendingID),
 		asynq.ProcessAt(sendAfter),
 		asynq.MaxRetry(sendMaxRetry),
@@ -585,12 +796,12 @@ func inboxPollTaskID(mailboxID string, now time.Time) string {
 // Retries are deliberately bounded lower than a send's — a poll that fails is
 // re-fanned-out by the next sweep a few minutes later, so exhausting retries
 // costs one interval of latency, not a lost message.
-func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
+func (c *Client) EnqueueInboxPoll(ctx context.Context, mailboxID, workspaceID string) error {
 	b, err := json.Marshal(InboxPollPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	return c.enqueue(asynq.NewTask(TaskInboxPoll, b),
+	return c.enqueueRouted(ctx, TaskInboxPoll, b,
 		asynq.TaskID(inboxPollTaskID(mailboxID, time.Now())),
 		asynq.MaxRetry(pollMaxRetry),
 		asynq.Timeout(pollTimeout),
@@ -599,17 +810,17 @@ func (c *Client) EnqueueInboxPoll(mailboxID, workspaceID string) error {
 }
 
 // EnqueueWebhookDeliver enqueues a webhook:deliver task for immediate processing.
-func (c *Client) EnqueueWebhookDeliver(deliveryID, workspaceID string) error {
-	return c.enqueueWebhookDeliver(deliveryID, workspaceID, time.Now())
+func (c *Client) EnqueueWebhookDeliver(ctx context.Context, deliveryID, workspaceID string) error {
+	return c.enqueueWebhookDeliver(ctx, deliveryID, workspaceID, time.Now())
 }
 
 // EnqueueWebhookDeliverIn enqueues a webhook:deliver task after delay d — the
 // handler's own backoff-retry path.
-func (c *Client) EnqueueWebhookDeliverIn(deliveryID, workspaceID string, d time.Duration) error {
-	return c.enqueueWebhookDeliver(deliveryID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
+func (c *Client) EnqueueWebhookDeliverIn(ctx context.Context, deliveryID, workspaceID string, d time.Duration) error {
+	return c.enqueueWebhookDeliver(ctx, deliveryID, workspaceID, time.Now().Add(d), asynq.ProcessIn(d))
 }
 
-func (c *Client) enqueueWebhookDeliver(deliveryID, workspaceID string, due time.Time, opts ...asynq.Option) error {
+func (c *Client) enqueueWebhookDeliver(ctx context.Context, deliveryID, workspaceID string, due time.Time, opts ...asynq.Option) error {
 	b, err := json.Marshal(WebhookDeliverPayload{DeliveryID: deliveryID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
@@ -620,7 +831,7 @@ func (c *Client) enqueueWebhookDeliver(deliveryID, workspaceID string, due time.
 		asynq.Timeout(webhookDeliverTimeout),
 		asynq.Retention(taskRetention),
 	)
-	return c.enqueue(asynq.NewTask(TaskWebhookDeliver, b), opts...)
+	return c.enqueueRouted(ctx, TaskWebhookDeliver, b, opts...)
 }
 
 // Publish makes *Client satisfy bus.Dispatcher, so the new warmup and routing
@@ -641,10 +852,13 @@ var _ bus.Dispatcher = (*Client)(nil)
 func (c *Client) Close() error { return c.inner.Close() }
 
 // NewServer builds an asynq processing server. Concurrency defaults to 10
-// when concurrency <= 0. queues is the ordered set of queues to consume (spec
-// §15: a worker serves its own per-IP "w:<id>" queue plus "default"); an empty
-// list leaves asynq on its built-in {"default":1}. The provided *slog.Logger is
-// adapted to asynq's Logger interface so worker log lines flow through the same
+// when concurrency <= 0. queues is the ordered set of queues to consume —
+// callers derive it per worker ROLE (cmd/worker.resolveWorkerQueues /
+// internal/worker.QueuesFor: control consumes only QueueControl; send
+// consumes its own per-IP "w:<id>" queue plus QueueSend and the transitional
+// QueueDefault), not a fixed pair every role shares; an empty list leaves
+// asynq on its built-in {"default":1}. The provided *slog.Logger is adapted to
+// asynq's Logger interface so worker log lines flow through the same
 // structured sink as the rest of the app.
 //
 // recorder receives tasks that have exhausted their retries
@@ -703,32 +917,50 @@ func NewScheduler(redisAddr string, logger *slog.Logger) *asynq.Scheduler {
 	)
 }
 
+// registerControlSweep is the shared shape behind every periodic registration
+// below: every sweep is control-plane work — a fan-out or a cross-tenant scan —
+// so every sweep lands on QueueControl, never on the send role. The queue comes
+// from taskQueues like every other producer's rather than being named here, so
+// a sweep's scheduled route and a replay of that same sweep cannot disagree.
+// Split out so (a) cronspec and task type are the only thing that differs per
+// sweep, and (b) the routing decision is testable without a live Redis: sch
+// only needs to satisfy redisbus.Registrar — the same seam redisbus.Scheduler
+// already depends on — which *asynq.Scheduler already does, and Register merely
+// stores the cron entry (it does not touch Redis until the entry fires), so a
+// fake registrar can assert on the options without one.
+func registerControlSweep(sch redisbus.Registrar, cronspec, taskType string) error {
+	q, err := routeTaskType(taskType)
+	if err != nil {
+		return err
+	}
+	if _, err := sch.Register(cronspec, asynq.NewTask(taskType, nil), asynq.Timeout(sweepTimeout), asynq.Queue(q)); err != nil {
+		return err
+	}
+	return nil
+}
+
 // RegisterSweepEnrollments registers the periodic due-enrollment reconcile.
 // Runs every 5 minutes to match the enrollment sweeper's "> 5 minutes" window.
 func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskSweepEnrollments, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 5m", TaskSweepEnrollments)
 }
 
 // RegisterInboxSweep registers the periodic inbox:sweep. Runs every
 // inboxSweepInterval to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every "+inboxSweepInterval.String(), asynq.NewTask(TaskInboxSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every "+inboxSweepInterval.String(), TaskInboxSweep)
 }
 
 // RegisterWarmupSweep registers the periodic warmup:sweep. Runs every 5 minutes
 // to fan out a warmup:tick for every due participant and recompute health.
 func RegisterWarmupSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskWarmupSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 5m", TaskWarmupSweep)
 }
 
 // RegisterMaintenanceCleanup registers the low-frequency retention pass. The
 // handler is idempotent, so scheduler restarts and retries are safe.
 func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 24h", asynq.NewTask(TaskMaintenanceCleanup, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 24h", TaskMaintenanceCleanup)
 }
 
 // RegisterDomainAuthSweep registers the periodic domain-authentication sweep.
@@ -737,8 +969,7 @@ func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
 // soon a domain whose lookup failed is retried, while the window is what stops
 // it from re-resolving the same records twelve times a day.
 func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 1h", asynq.NewTask(TaskDomainAuthSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 1h", TaskDomainAuthSweep)
 }
 
 // RegisterRecipientESPSweep registers the periodic recipient-domain ESP sweep.
@@ -753,8 +984,7 @@ func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
 // write is an idempotent upsert and eviction is a range delete, so two ticks
 // racing over the same domain converge on the same row.
 func RegisterRecipientESPSweep(sch *asynq.Scheduler) error {
-	_, err := sch.Register("@every 5m", asynq.NewTask(TaskRecipientESPSweep, nil), asynq.Timeout(sweepTimeout))
-	return err
+	return registerControlSweep(sch, "@every 5m", TaskRecipientESPSweep)
 }
 
 // asynqLogger adapts *slog.Logger to asynq.Logger.

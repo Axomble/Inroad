@@ -1,0 +1,28 @@
+-- Record WHICH QUEUE a dead-lettered task was running on, so a replay can put
+-- it back where it actually ran.
+--
+-- WHY: since the role split, a task's queue decides which worker ROLE can claim
+-- it, and for warmup:tick it decides which WORKER — the "w:<id>" affinity queue
+-- is what keeps a warming mailbox egressing from one IP, because warmup
+-- reputation is per-IP. Replay re-enqueues a captured task type verbatim and had
+-- no way to know either fact, so it could at best reconstruct the route from the
+-- task type (queue.taskQueues), which is right for a role queue and WRONG for an
+-- affinity one: a replayed tick would come back on whichever send host claimed
+-- it, moving a mailbox mid-warmup during recovery — the moment that property
+-- matters most.
+--
+-- The queue is not derivable after the fact from anything else on the row, so it
+-- has to be captured at the terminal failure (asynq.GetQueueName on the context
+-- asynq hands its ErrorHandler) and stored.
+--
+-- NULLABLE, and the NULL is meaningful: every row captured before this column
+-- existed has one, and replay falls back to the task-type lookup for those. An
+-- empty string would be the same statement in a form the reader has to guess at,
+-- so the CHECK forbids it — "unknown" has exactly one representation.
+--
+-- No index: this column is never a filter or a sort key. It is read only as part
+-- of a row already located by (workspace_id, id) or listed by the existing
+-- (workspace_id, status, created_at DESC) index, and an index on a low-cardinality
+-- column nothing searches by is write cost for nothing.
+ALTER TABLE task_dead_letters
+    ADD COLUMN queue TEXT CHECK (queue IS NULL OR queue <> '');

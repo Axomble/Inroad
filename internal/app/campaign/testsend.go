@@ -63,7 +63,7 @@ type RateLimiter interface {
 // testsend:send task; internal/worker/testsend resolves the transport
 // (through the SAME coreapi credential path every real send uses) and sends.
 type TestSendEnqueuer interface {
-	EnqueueTestSend(campaignID, stepID, mailboxID, to, workspaceID string) error
+	EnqueueTestSend(ctx context.Context, campaignID, stepID, mailboxID, to, workspaceID string) error
 }
 
 // TestSend validates a test-send request (campaign/step ownership, rate
@@ -99,7 +99,7 @@ func (s *Service) TestSend(ctx context.Context, ws, campaignID, stepID uuid.UUID
 	if s.testSendEnq == nil {
 		return errors.New("campaign: test-send is not configured")
 	}
-	return s.testSendEnq.EnqueueTestSend(campaignID.String(), stepID.String(), sender.MailboxID.String(), to, ws.String())
+	return s.testSendEnq.EnqueueTestSend(ctx, campaignID.String(), stepID.String(), sender.MailboxID.String(), to, ws.String())
 }
 
 // checkRecipientNotSuppressed rejects a test-send to an address the

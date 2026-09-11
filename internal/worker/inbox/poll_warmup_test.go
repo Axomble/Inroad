@@ -77,7 +77,7 @@ type engageCall struct {
 	delay       time.Duration
 }
 
-func (s *spyEngageEnqueuer) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Duration) error {
+func (s *spyEngageEnqueuer) EnqueueWarmupEngageIn(_ context.Context, receiptID, workspaceID string, d time.Duration) error {
 	s.calls = append(s.calls, engageCall{receiptID, workspaceID, d})
 	return s.err
 }

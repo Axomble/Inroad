@@ -74,7 +74,7 @@ const (
 // method, defined here by the consumer. internal/platform/queue.Client
 // satisfies it; a unit test injects a fake and needs no Redis.
 type Enqueuer interface {
-	EnqueueWebhookDeliver(deliveryID, workspaceID string) error
+	EnqueueWebhookDeliver(ctx context.Context, deliveryID, workspaceID string) error
 }
 
 // Service holds this domain's business rules. It depends on the Store interface,
@@ -346,7 +346,7 @@ func (s *Service) enqueueDelivery(ctx context.Context, ep gen.WebhookEndpoint, e
 	if err != nil {
 		return gen.WebhookDelivery{}, fmt.Errorf("webhook: create delivery: %w", err)
 	}
-	if err := s.enq.EnqueueWebhookDeliver(id.String(), ep.WorkspaceID.String()); err != nil {
+	if err := s.enq.EnqueueWebhookDeliver(ctx, id.String(), ep.WorkspaceID.String()); err != nil {
 		// The row exists and is 'pending' with next_attempt_at=now(); a reconcile
 		// sweep (or a manual replay) can still pick it up. Surface the error so a
 		// synchronous caller (Ping) reports it.

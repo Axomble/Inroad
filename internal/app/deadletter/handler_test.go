@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +115,65 @@ func TestHandlerReplayOfAMalformedPayloadIs422(t *testing.T) {
 	}
 	if enq.count() != 0 {
 		t.Errorf("enqueued %d times, want 0", enq.count())
+	}
+}
+
+// redactQueue must hide a per-worker affinity queue's id behind the constant
+// label, and must pass a role queue (or a legacy "default"/nil) through
+// unchanged — this is the ONE place a worker id (which config.WorkerID
+// defaults to the OS hostname) could otherwise reach an OAuth-grantable scope.
+func TestRedactQueueHidesWorkerAffinityQueues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   *string
+		want *string
+	}{
+		{"a worker affinity queue", ptr("w:worker-a"), ptr(workerQueueLabel)},
+		{"another worker's affinity queue", ptr("w:pod-7f3c9"), ptr(workerQueueLabel)},
+		{"the send role queue", ptr("send"), ptr("send")},
+		{"the control role queue", ptr("control"), ptr("control")},
+		{"the legacy default queue", ptr("default"), ptr("default")},
+		{"a row captured before the column existed", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactQueue(tc.in)
+			switch {
+			case tc.want == nil:
+				if got != nil {
+					t.Fatalf("redactQueue(%v) = %v, want nil", tc.in, *got)
+				}
+			case got == nil:
+				t.Fatalf("redactQueue(%v) = nil, want %q", tc.in, *tc.want)
+			case *got != *tc.want:
+				t.Fatalf("redactQueue(%q) = %q, want %q", *tc.in, *got, *tc.want)
+			}
+		})
+	}
+}
+
+// The redaction is exercised end to end through GET /{id} too: a worker id
+// must never reach the wire, not just the helper that redacts it.
+func TestHandlerGetRedactsAWorkerAffinityQueue(t *testing.T) {
+	store, _, svc, ws, _ := seedPending(t)
+	h := NewHandler(svc)
+	row := store.seed(gen.TaskDeadLetter{
+		WorkspaceID: ws, TaskType: "warmup:tick",
+		Payload: payloadFor(t, ws), Status: StatusPending, Queue: ptr("w:ip-fleet-node-03"),
+	})
+
+	w := request(t, h, http.MethodGet, "/"+row.ID.String(), ws)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), "ip-fleet-node-03") {
+		t.Fatalf("response leaked the worker id: %s", w.Body.String())
+	}
+	var got deadLetterResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Queue == nil || *got.Queue != workerQueueLabel {
+		t.Fatalf("queue = %v, want %q", got.Queue, workerQueueLabel)
 	}
 }
 

@@ -20,6 +20,7 @@ function letter(overrides: Partial<TaskDeadLetter> = {}): TaskDeadLetter {
     status: 'pending',
     created_at: new Date(Date.now() - 3_600_000).toISOString(),
     replayed_at: null,
+    queue: null,
     ...overrides,
   }
 }

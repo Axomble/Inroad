@@ -12,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/queue"
 )
 
 // workerLiveWindow is how recently a worker must have heartbeated to be eligible
@@ -19,11 +20,6 @@ import (
 // (5m in cmd/worker); a 15m window tolerates a couple of missed ticks before its
 // mailboxes become eligible for a fresh assignment.
 const workerLiveWindow = 15 * time.Minute
-
-// workerQueuePrefix names a worker's dedicated queue: a mailbox assigned to
-// worker W routes to / is consumed from "w:W". An empty worker id maps to the
-// shared default queue ("").
-const workerQueuePrefix = "w:"
 
 // UpsertWorkerHeartbeat refreshes this worker's row in the global registry. See
 // the coreapi.Client interface doc. `workers` is infra state, not tenant data,
@@ -115,11 +111,17 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 	return queueForWorker(assigned), nil
 }
 
-// queueForWorker maps a worker_id to its queue name. An empty worker_id (never
-// persisted, but belt-and-braces) maps to the shared default queue.
+// queueForWorker maps a worker_id to its dedicated affinity queue
+// (queue.WorkerQueue). An empty worker_id (never persisted, but
+// belt-and-braces) is returned unchanged as "" — the sentinel AssignMailboxWorker
+// also uses for "no live worker was found" — rather than this package
+// resolving it to a queue itself. What an unassigned mailbox falls back to is
+// the CALLER's decision (queue.Client.EnqueueWarmupTickAt currently falls
+// back to the send role queue): this package has no opinion on role queues
+// and must not bake in what "" happens to mean downstream today.
 func queueForWorker(workerID string) string {
 	if workerID == "" {
 		return ""
 	}
-	return workerQueuePrefix + workerID
+	return queue.WorkerQueue(workerID)
 }

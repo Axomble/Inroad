@@ -52,7 +52,7 @@ func SweepHandler(core coreapi.Client, enq Enqueuer, mtx *metrics.Metrics) func(
 				failures++
 				continue
 			}
-			if err := enq.EnqueueWarmupTickAt(mb.ID, mb.WorkspaceID, now, dest); err != nil {
+			if err := enq.EnqueueWarmupTickAt(ctx, mb.ID, mb.WorkspaceID, now, dest); err != nil {
 				failures++
 			}
 		}

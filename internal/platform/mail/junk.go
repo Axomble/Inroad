@@ -88,7 +88,7 @@ func (r *NetInboxReader) FetchJunk(ctx context.Context, cfg IMAPConfig, maxN int
 		return nil, "", fmt.Errorf("mail: FetchJunk requires maxN > 0, got %d", maxN)
 	}
 
-	addr, err := vetAddr(cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
+	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedIMAPPorts, r.AllowPrivate)
 	if err != nil {
 		return nil, "", err
 	}
