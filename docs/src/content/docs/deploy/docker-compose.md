@@ -42,6 +42,82 @@ See the [environment variables reference](/deploy/environment-variables/) for th
 
 > **Caution:** a `.env` written for native development typically points `INROAD_DATABASE_URL` at a host port (e.g. `localhost:5433`). Compose passes it into the containers, where `localhost` is the container itself — leave it unset (or blank) when running the compose stack so the in-network `postgres:5432` default applies.
 
+## Splitting the worker into control and send roles
+
+The manifest ships **one** `worker` service, and that stays the recommended
+default: it needs no role at all, and it is what a fresh `docker compose up`
+runs. If you are splitting the worker across hosts, `INROAD_WORKER_ROLE` divides
+it into a `control` host (scheduler plus the periodic sweeps, beside the API) and
+one or more `send` hosts (per-message work only — sends, warmup, inbox polls,
+webhooks). Queue consumption follows the role, so the topology is operable; read
+[splitting control and send roles](/deploy/environment-variables/#splitting-control-and-send-roles)
+first, because the *order* you roll it out in matters and one of the wrong orders
+fails silently.
+
+Add these to your own compose file and remove the stock `worker` service (or
+scale it to 0), so the same work is not registered twice:
+
+```yaml
+  worker-control:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+      SECRETS_FILE: /run/secrets/inroad/env
+      INROAD_ENV: ${INROAD_ENV:-production}
+      INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+      INROAD_WORKER_ROLE: control
+    volumes:
+      - appsecrets:/run/secrets/inroad:ro
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  worker-send:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
+      SECRETS_FILE: /run/secrets/inroad/env
+      INROAD_ENV: ${INROAD_ENV:-production}
+      INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+      INROAD_WORKER_ROLE: send
+      # Pin the id. It defaults to the container hostname, which changes on every
+      # recreate — and a warmup tick already routed to the old w:<id> queue then
+      # sits on a queue nothing consumes, with no dead-letter row to show for it.
+      INROAD_WORKER_ID: send-1
+      # The worker refreshes OAuth mailbox tokens when sending, so it needs the
+      # same provider credentials as the api (redirect URLs are api-only).
+      INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+      INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+      INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+      INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+      INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
+    volumes:
+      - appsecrets:/run/secrets/inroad:ro
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+```
+
+For more than one send host, copy `worker-send` and give each copy its own
+`INROAD_WORKER_ID` — do **not** `--scale` a single service past one replica.
+Every replica would inherit the same pinned id, share one `w:<id>` affinity
+queue and one row in the worker registry, which is precisely the per-IP
+guarantee that queue exists to provide.
+
 ## Local Development
 
 Development does not use the production manifest. The dev stack lives at `docker-compose.dev.yml` and bind-mounts the source tree:
