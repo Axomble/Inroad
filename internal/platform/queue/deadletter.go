@@ -146,8 +146,8 @@ func DeadLetterErrorHandler(recorder DeadLetterRecorder, logger *slog.Logger) as
 		// The queue is read HERE, next to the retry counters, because this is
 		// the only place it exists: asynq puts it on the context it hands its
 		// ErrorHandler and nowhere on the task. A context without it (ok=false)
-		// yields "", which capture stores as "unknown" rather than inventing a
-		// queue name.
+		// yields "", which the store layer persists as NULL (PgStore.Insert) —
+		// "we do not know where this ran" rather than an invented queue name.
 		queueName, _ := asynq.GetQueueName(ctx)
 		recordTerminalFailure(ctx, recorder, logger, task, taskErr, queueName, retried+1, maxRetry)
 	})
@@ -331,11 +331,15 @@ func errorMessage(err error) string {
 // not know what it is enqueuing — so it is the one that had no typed helper to
 // read a queue off, and so it set none and asynq filed every replay under its
 // own built-in "default". The control role does not consume "default", so a
-// replayed sweep or deliverability:evaluate could only be claimed by a send
-// host, which has no handler for it and dead-letters it again; and because
+// replayed deliverability:evaluate could only be claimed by a send host,
+// which has no handler for it and dead-letters it again; and because
 // ClaimReplay is one-shot (a second replay is 409), that burns the row's only
-// recovery attempt. See replayQueue for where the queue comes from now, and
-// what fails loudly when it cannot be determined at all.
+// recovery attempt. (A periodic sweep can never reach this path at all:
+// workspaceFromPayload rejects the empty payload every sweep carries, so
+// nothing captures one in the first place — deliverability:evaluate is the
+// only control-plane type a dead-letter row can actually name.) See
+// replayQueue for where the queue comes from now, and what fails loudly when
+// it cannot be determined at all.
 //
 // Key becomes the asynq TaskID, and Publish (redisbus) treats a TaskID conflict
 // as success just as c.enqueue does: a duplicate replay of the same row that

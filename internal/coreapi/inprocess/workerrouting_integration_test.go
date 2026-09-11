@@ -17,6 +17,7 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/queue"
 )
 
 // These integration tests exercise the worker-routing assigner (migration
@@ -126,7 +127,9 @@ func resetRouting(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 }
 
 // TestAssignMailboxWorkerNoLiveWorkerFallback: with no live heartbeat the
-// assigner returns "" (shared default queue) and persists nothing, so a real
+// assigner returns "" (no assignment; the caller decides the fallback — today
+// that is queue.Client.EnqueueWarmupTickAt falling back to the send role
+// queue, not any queue this package names) and persists nothing, so a real
 // worker can claim the mailbox once it comes online (single-node dev).
 func TestAssignMailboxWorkerNoLiveWorkerFallback(t *testing.T) {
 	ctx := context.Background()
@@ -530,7 +533,7 @@ func TestConcurrentAssignMailboxWorkerConvergesOnOneQueue(t *testing.T) {
 	}
 	// The single stored row is the value every caller was handed.
 	worker, exists := storedAssignment(t, ctx, pool, mb, ws.ID)
-	if !exists || workerQueuePrefix+worker != got[0] {
+	if !exists || queue.WorkerQueue(worker) != got[0] {
 		t.Fatalf("stored worker %q (exists=%t) disagrees with the resolved queue %q", worker, exists, got[0])
 	}
 }
@@ -593,16 +596,17 @@ func TestConcurrentReassignmentOfStrandedMailboxConverges(t *testing.T) {
 		t.Fatalf("converged queue = %q, want a live replacement worker", got[0])
 	}
 	worker, exists := storedAssignment(t, ctx, pool, mb, ws.ID)
-	if !exists || workerQueuePrefix+worker != got[0] {
+	if !exists || queue.WorkerQueue(worker) != got[0] {
 		t.Fatalf("stored worker %q (exists=%t) disagrees with the resolved queue %q", worker, exists, got[0])
 	}
 }
 
 // TestAssignMailboxWorkerNoLiveWorkerKeepsStaleRowAndReturnsDefault: the whole
 // fleet is down (or mid-restart) and a stale assignment exists. The assigner must
-// return "" (shared default queue) and write NOTHING — in particular it must not
-// "fix" the row by deleting it, since the send hot path is the wrong place to
-// mutate routing state, and it must not return the dead worker's queue.
+// return "" (no assignment — see queueForWorker's doc for what that sentinel
+// means today) and write NOTHING — in particular it must not "fix" the row by
+// deleting it, since the send hot path is the wrong place to mutate routing
+// state, and it must not return the dead worker's queue.
 //
 // The stale row surviving is deliberate: step 1's liveness join already ignores
 // it, and reaping it is PurgeDeadWorkers' job.

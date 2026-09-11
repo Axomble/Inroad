@@ -390,12 +390,13 @@ func mustPayload(t *testing.T, ws string) []byte {
 // EnqueueReplay is the one producer that does not know what it is enqueuing —
 // it hands back whatever was captured — and it used to set no queue at all.
 // Every other producer routes, so the funnel guard never saw this one, and the
-// control role does not consume "default": a replayed sweep or
-// deliverability:evaluate could only be claimed by a send host, which has no
-// handler for it and dead-letters it again. That is the exact failure this
-// package's role queues exist to prevent, reproduced in the one API an
-// operator uses to recover from it — and unrecoverably, because the replay
-// claim is one-shot.
+// control role does not consume "default": a replayed deliverability:evaluate
+// (the only control-plane type a dead-letter row can name — a periodic sweep
+// is never captured, since workspaceFromPayload rejects its empty payload)
+// could only be claimed by a send host, which has no handler for it and
+// dead-letters it again. That is the exact failure this package's role queues
+// exist to prevent, reproduced in the one API an operator uses to recover from
+// it — and unrecoverably, because the replay claim is one-shot.
 func TestEnqueueReplayRoutesToARoleQueue(t *testing.T) {
 	for _, tc := range []struct {
 		name string

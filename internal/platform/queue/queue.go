@@ -540,11 +540,17 @@ func (c *Client) EnqueueWarmupEngageIn(receiptID, workspaceID string, d time.Dur
 // is consumed only transitionally (see its doc) and NOT by the control role at
 // all, so an unrouted task would drain only until that transitional
 // consumption is removed, then quietly stop — the exact role-blindness this
-// package exists to prevent. Every producer reaches this through enqueueRouted,
-// which derives the option from taskQueues; this is the backstop for a future
-// one that calls enqueue directly. Scoped to this funnel only: bus.Job.Dest and
-// redisbus.asynqOptions keep their own documented "" = shared-queue meaning,
-// which this does not touch.
+// package exists to prevent. Every producer that reaches this reaches it
+// through enqueueRouted, which derives the option from taskQueues; this is the
+// backstop for a future one that calls enqueue directly.
+//
+// NOT every producer reaches this. EnqueueWarmupTickAt, EnqueueWarmupEngageIn
+// and EnqueueReplay are bus-seam producers: they go through Publish ->
+// redisbus.Dispatcher, which has no equivalent guard, and are routed by
+// routeTaskType at their own call sites instead (see taskQueues' doc, 437
+// lines above this one, for the accurate enumeration). Scoped to this funnel
+// only: bus.Job.Dest and redisbus.asynqOptions keep their own documented "" =
+// shared-queue meaning, which this does not touch.
 func (c *Client) enqueue(t *asynq.Task, opts ...asynq.Option) error {
 	if _, ok := queueOption(opts); !ok {
 		return fmt.Errorf("queue: enqueue %q: no asynq.Queue option set; every producer must route to a role queue", t.Type())
@@ -578,24 +584,36 @@ func (c *Client) enqueueRouted(taskType string, payload []byte, opts ...asynq.Op
 // this directly, same package) — asynq.Option is a public Type()/Value() pair,
 // so this needs no cooperation from asynq beyond that.
 //
+// It returns the LAST matching option, not the first, because that is what
+// asynq itself does: composeOptions type-switches over opts in order and
+// OVERWRITES res.queue on every queueOption it sees (asynq@v0.26.0/
+// client.go:255-264), so the option that survives to be enqueued on is
+// whichever one came last in the slice. Returning the first match here would
+// make this guard inspect a queue the task does not actually go to the moment
+// any caller ever passed two — today nothing does (enqueueRouted appends the
+// routed queue last and no producer passes its own), but the guard and the
+// runtime must never be able to disagree about which one wins.
+//
 // The comma-ok assertion is load-bearing, not lint appeasement: this runs on
 // the send path (via enqueue's guard), so a bare o.Value().(string) would turn
 // a routing check into a production panic at enqueue time if asynq's QueueOpt
-// value type ever changed. A QueueOpt whose value ISN'T a string is treated
-// as no usable option found — the loop keeps scanning, and if nothing else
-// matches, enqueue's guard rejects the task the same way it would an entirely
-// missing Queue option (fail the enqueue, never silently accept an
-// unusable/malformed one).
+// value type ever changed. A QueueOpt whose value ISN'T a string does not
+// overwrite a previously found result — it is treated as no usable option at
+// this position, exactly as asynq's own type switch would silently not match
+// a value of the wrong concrete type — and if nothing else matches, enqueue's
+// guard rejects the task the same way it would an entirely missing Queue
+// option (fail the enqueue, never silently accept an unusable/malformed one).
 func queueOption(opts []asynq.Option) (string, bool) {
+	result, found := "", false
 	for _, o := range opts {
 		if o.Type() != asynq.QueueOpt {
 			continue
 		}
 		if s, ok := o.Value().(string); ok {
-			return s, true
+			result, found = s, true
 		}
 	}
-	return "", false
+	return result, found
 }
 
 // EnqueueAdvance enqueues a sequence:advance task for immediate processing.

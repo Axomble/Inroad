@@ -144,6 +144,19 @@ func TestEnqueueRefusesATaskWithNoQueueOption(t *testing.T) {
 	}
 }
 
+// TestQueueOptionReturnsTheLastMatch proves queueOption agrees with asynq's
+// own composeOptions, which type-switches over opts in order and overwrites
+// res.queue on every asynq.Queue it sees (asynq@v0.26.0/client.go:255-264) —
+// so the LAST one in the slice is the one the task actually enqueues on. A
+// guard that inspected the first would be checking a queue the runtime does
+// not use the moment two were ever passed.
+func TestQueueOptionReturnsTheLastMatch(t *testing.T) {
+	got, ok := queueOption([]asynq.Option{asynq.Queue(QueueControl), asynq.Queue(QueueSend)})
+	if !ok || got != QueueSend {
+		t.Fatalf("queueOption(control, send) = (%q, %v), want (%q, true)", got, ok, QueueSend)
+	}
+}
+
 // malformedQueueOption implements asynq.Option and reports QueueOpt, like the
 // real asynq.Queue(...), but backs Value() with an int instead of a string —
 // standing in for a hypothetical future asynq release that changes QueueOpt's
