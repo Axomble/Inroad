@@ -89,6 +89,7 @@ type RegisterInput struct {
 // here so that flow's data needs read as one list of their own.
 type storeIface interface {
 	googleStoreIface
+	operatorStoreIface
 
 	RegisterTx(ctx context.Context, arg RegisterTxParams) (RegisterTxResult, error)
 	GetUserByEmail(ctx context.Context, email string) (gen.User, error)

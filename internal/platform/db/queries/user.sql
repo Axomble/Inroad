@@ -7,6 +7,12 @@ SELECT * FROM users WHERE email = $1;
 -- name: GetUserByID :one
 SELECT * FROM users WHERE id = $1;
 
+-- name: ListUsers :many
+-- Every user, newest first. Operator-only listing (`inroadctl users`) — there
+-- is no tenant-facing endpoint that enumerates every user, and this one
+-- deliberately does.
+SELECT * FROM users ORDER BY created_at DESC;
+
 -- name: SetEmailVerified :exec
 UPDATE users SET email_verified_at = now() WHERE id = $1;
 

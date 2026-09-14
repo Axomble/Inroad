@@ -75,3 +75,35 @@ func (q *Queries) GetWorkspace(ctx context.Context, id uuid.UUID) (Workspace, er
 	)
 	return i, err
 }
+
+const listWorkspaces = `-- name: ListWorkspaces :many
+SELECT id, name, created_at, onboarding_completed_at FROM workspaces ORDER BY created_at DESC
+`
+
+// Every workspace, newest first. Operator-only listing (`inroadctl workspaces`)
+// — there is no tenant-facing endpoint that enumerates every workspace, and
+// this one deliberately does.
+func (q *Queries) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := q.db.Query(ctx, listWorkspaces)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Workspace
+	for rows.Next() {
+		var i Workspace
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.OnboardingCompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

@@ -63,6 +63,25 @@ func MigrateTo(url string, version uint) (err error) {
 	return nil
 }
 
+// Version reports the schema's current migration version and whether it was
+// left dirty by a previous failed migration (`inroadctl status`). An instance
+// with no migrations ever applied is reported as version 0, dirty false,
+// error nil — golang-migrate's own ErrNilVersion for that case is a
+// library-specific sentinel a caller three packages away has no reason to
+// know about, so it is translated here rather than propagated.
+func Version(url string) (version uint, dirty bool, err error) {
+	m, err := newMigrator(url)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { err = errors.Join(err, closeMigrator(m)) }()
+	version, dirty, err = m.Version()
+	if errors.Is(err, migrate.ErrNilVersion) {
+		return 0, false, nil
+	}
+	return version, dirty, err
+}
+
 func newMigrator(url string) (*migrate.Migrate, error) {
 	src, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {

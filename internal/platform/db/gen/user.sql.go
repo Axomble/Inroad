@@ -114,6 +114,39 @@ func (q *Queries) GetUserIdentity(ctx context.Context, arg GetUserIdentityParams
 	return i, err
 }
 
+const listUsers = `-- name: ListUsers :many
+SELECT id, email, password_hash, email_verified_at, created_at FROM users ORDER BY created_at DESC
+`
+
+// Every user, newest first. Operator-only listing (`inroadctl users`) — there
+// is no tenant-facing endpoint that enumerates every user, and this one
+// deliberately does.
+func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := q.db.Query(ctx, listUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.PasswordHash,
+			&i.EmailVerifiedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setEmailVerified = `-- name: SetEmailVerified :exec
 UPDATE users SET email_verified_at = now() WHERE id = $1
 `
