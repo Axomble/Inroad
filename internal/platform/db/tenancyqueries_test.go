@@ -87,10 +87,14 @@ const tenantColumn = "workspace_id"
 //	(c) DEPLOYMENT MAINTENANCE — a retention purge or crash-recovery sweep that operates
 //	    on age/liveness alone, returns only a count, and is invoked by the deployment
 //	    rather than by a tenant request. There is no tenant to scope to.
-//	(d) CROSS-TENANT FAN-OUT — a sweeper that deliberately reads across all workspaces
-//	    and RETURNS workspace_id so that each downstream unit of work is per-workspace.
-//	    These are the dangerous-looking ones: the pin exists, it just lives one step
-//	    later. Each entry names where.
+//	(d) CROSS-TENANT FAN-OUT — either a sweeper that deliberately reads across all
+//	    workspaces and RETURNS workspace_id so each downstream unit of work is
+//	    per-workspace (the pin exists, it just lives one step later), OR a query
+//	    over GLOBAL INFRASTRUCTURE (the worker fleet registry, migration 000017)
+//	    that answers a fleet-wide question — least-loaded, idle, pure-band — and
+//	    returns only a worker_id, with no workspace_id in the row at all: there is
+//	    no per-workspace answer to fan out to, because the worker fleet is not
+//	    tenant data. Each entry names which shape it is.
 var tenancyExceptions = map[string]string{
 	// (a) unguessable-secret lookup — the workspace is the result, not the filter.
 	"apikey.sql:GetApiKeyByPrefix":                  "verify path: resolves the workspace FROM the globally-unique key prefix; there is no authenticated workspace yet to filter by.",
@@ -137,9 +141,10 @@ var tenancyExceptions = map[string]string{
 	"agentchat.sql:ResetStuckAgentMessages":             "companion to FailStuckAgentRuns; marks messages abandoned by a crashed process terminal.",
 
 	// (d) cross-tenant fan-out — returns workspace_id so downstream work is per-workspace.
-	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet; assignment counts are fleet-wide by design, and it returns only a worker_id.",
-	"worker_routing.sql:PickLeastLoadedWorkerForBand": "risk-band segregation (fleet F5): finds a LIVE worker already carrying this band, fleet-wide like PickLeastLoadedWorker — a mailbox's band is tenant-derived, but placement balances across every tenant's mailboxes on the same worker, and it returns only a worker_id.",
-	"worker_routing.sql:PickIdleLiveWorker":           "risk-band segregation (fleet F5) promotion path: finds a LIVE worker carrying no assignments AT ALL, fleet-wide for the same reason as PickLeastLoadedWorker — idleness is a property of the worker, not of one tenant's slice of it — and it returns only a worker_id.",
+	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet — infrastructure, not tenant data (migration 000017); assignment counts are fleet-wide by design.",
+	"worker_routing.sql:PickPureWorkerForBand":        "risk-band segregation (fleet F5) tier 1: finds a LIVE worker that is purely one risk band already, fleet-wide like PickLeastLoadedWorker — a mailbox's band is tenant-derived, but the worker it may join is a fleet-wide infrastructure question, not a per-tenant one.",
+	"worker_routing.sql:PickIdleLiveWorker":           "risk-band segregation (fleet F5) tier 2 (promotion path): finds a LIVE worker carrying no assignments at all, fleet-wide for the same reason as PickLeastLoadedWorker — idleness is a property of the worker, not of one tenant's slice of it.",
+	"worker_routing.sql:PickMixedWorker":              "risk-band segregation (fleet F5) tier 3 (last-resort convergence path): finds a LIVE worker that already carries more than one band, fleet-wide for the same reason as the other worker picks — which workers exist and what they carry is infrastructure state, not a tenant's.",
 	"enrollment.sql:ListDueEnrollments":               "sweeper fan-out: selects due enrollments across all workspaces and RETURNS workspace_id so each enrollment is then advanced workspace-scoped. The pin lives one step later, in the per-enrollment job.",
 	"mailbox.sql:ListActiveMailboxes":                 "poller fan-out: returns (id, workspace_id) for every active mailbox so each poll then runs workspace-scoped via GetMailbox.",
 	"warmup.sql:ListDueWarmupMailboxes":               "warmup sweep fan-out: returns (mailbox, workspace) pairs, and per-mailbox gating (NextWarmupDue, GetWarmupSendJob) is workspace-pinned.",
@@ -459,7 +464,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 48
+	const known = 49
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

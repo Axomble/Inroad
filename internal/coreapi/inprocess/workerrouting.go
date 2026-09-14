@@ -62,10 +62,31 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", err
 	}
 
+	// How many workers are live at all decides whether segregation applies —
+	// needed here (before the idempotent check below) rather than only at pick
+	// time, because it also decides whether a MIXED incumbent worker is worth
+	// leaving. Self-host (and any fleet mid-restart down to one node) has no
+	// SECOND worker to segregate onto — there is no choice to make, so
+	// refusing (or even re-evaluating) would serve no purpose, only cost an
+	// extra round trip on every call. liveCount==0 also takes the self-host
+	// branch below: PickLeastLoadedWorker's own no-live-worker path is
+	// unaffected by band logic either way.
+	liveCount, err := c.q.CountLiveWorkers(ctx, liveSince)
+	if err != nil {
+		return "", fmt.Errorf("coreapi: count live workers: %w", err)
+	}
+
 	// 1. Idempotent: an existing assignment to a LIVE worker in the SAME band
 	//    wins unchanged (workspace-pinned, so a foreign workspace_id matches zero
 	//    rows and falls through to a fresh assignment scoped to ITS own
-	//    workspace).
+	//    workspace) — PROVIDED that worker is not currently mixed, or there is
+	//    no better place for it anyway (liveCount <= 1). A mailbox parked on an
+	//    already-mixed worker (fix-round-1, Important 2's tier-3 fallback) must
+	//    keep re-evaluating on every call even though ITS OWN band never
+	//    changed, so it can migrate off lazily once a pure or idle worker opens
+	//    up — otherwise "the fleet converges toward purity over time" would be
+	//    false: nothing would ever move a mailbox that landed on a mixed worker
+	//    once, and it would sit there forever.
 	//
 	//    Liveness is checked here, not just when first assigning. An assignment
 	//    whose worker stopped heartbeating routes to a queue no process consumes,
@@ -78,11 +99,13 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 	})
 	switch {
 	case err == nil:
-		if existing.Band == band {
+		if existing.Band == band && (liveCount <= 1 || !existing.WorkerMixed) {
 			return queueForWorker(existing.WorkerID), nil
 		}
-		// Band mismatch: the row is stale evidence of a decision that no longer
-		// holds. Fall through exactly like a dead-worker row does — pick again.
+		// Band mismatch, or a mixed incumbent worth leaving: the row is stale
+		// evidence of a decision that no longer holds (or no longer holds the
+		// best answer). Fall through exactly like a dead-worker row does —
+		// pick again.
 	case errors.Is(err, pgx.ErrNoRows):
 		// No assignment, or one pinned to a worker that has gone silent — both
 		// fall through to pick a live worker. Liveness expiry used to be
@@ -110,68 +133,38 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", fmt.Errorf("coreapi: load assignment: %w", err)
 	}
 
-	// 2. How many workers are live at all decides whether segregation applies.
-	//    Self-host (and any fleet mid-restart down to one node) has no SECOND
-	//    worker to segregate onto — there is no choice to make, so refusing would
-	//    only mean refusing to send at all, which this feature must never do.
-	//    liveCount==0 also takes this branch: PickLeastLoadedWorker's own
-	//    no-live-worker path below is unaffected by band logic either way.
-	liveCount, err := c.q.CountLiveWorkers(ctx, liveSince)
-	if err != nil {
-		return "", fmt.Errorf("coreapi: count live workers: %w", err)
+	// 2. Self-host bypass: at most one live worker means there is no placement
+	//    CHOICE to make, so segregation does not apply at all — the exact
+	//    pre-F5 pick-and-persist, byte for byte, for the single-worker
+	//    topology (a single-worker fleet must never refuse to send because of
+	//    a band it has no second IP to isolate onto).
+	if liveCount <= 1 {
+		workerID, err := c.q.PickLeastLoadedWorker(ctx, liveSince)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// No live worker at all (single-node dev, or the whole fleet
+			// mid-restart): shared default queue, no persist — so a real
+			// worker can claim this mailbox once it comes online. A stale
+			// row from a dead worker is left in place rather than deleted
+			// here: this path runs on the send hot path, the row is already
+			// ignored by step 1's liveness join, and persistAssignment
+			// overwrites it as soon as a live worker exists. Reaping it is
+			// the maintenance job's business, not the sender's.
+			return "", nil
+		case err != nil:
+			return "", fmt.Errorf("coreapi: pick least-loaded worker: %w", err)
+		}
+		return c.persistAssignment(ctx, mbID, wsID, workerID, band, liveSince)
 	}
 
-	// 3. Pick a worker. At most one live worker: the unsegregated legacy pick
-	//    (self-host bypass, step 2's comment). Otherwise: band-matched or
-	//    idle-promoted only — never off-band.
-	var workerID string
-	if liveCount <= 1 {
-		workerID, err = c.q.PickLeastLoadedWorker(ctx, liveSince)
-	} else {
-		workerID, err = c.pickBandedWorker(ctx, band, liveSince)
-	}
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// No live worker at all (single-node dev, or the whole fleet
-		// mid-restart): shared default queue, no persist — so a real worker can
-		// claim this mailbox once it comes online. Any stale row from a dead
-		// worker is left in place rather than deleted here: this path runs on
-		// the send hot path, the row is already being ignored by step 1's
-		// liveness join, and step 4 overwrites it as soon as a live worker
-		// exists. Reaping it is the maintenance job's business, not the
-		// sender's.
-		return "", nil
-	case errors.Is(err, coreapi.ErrNoBandCapacity):
-		slog.Warn("worker assignment refused: no capacity in mailbox's risk band",
+	// 3. Segregated placement across the multi-worker fleet (requirements 2-4).
+	queueName, err := c.assignBandedWorker(ctx, mbID, wsID, band, liveSince)
+	if errors.Is(err, coreapi.ErrNoBandCapacity) {
+		slog.WarnContext(ctx, "worker assignment refused: no capacity in mailbox's risk band",
 			"mailbox_id", mailboxID, "workspace_id", workspaceID, "band", band, "live_workers", liveCount)
 		return "", coreapi.ErrNoBandCapacity
-	case err != nil:
-		return "", fmt.Errorf("coreapi: pick worker: %w", err)
 	}
-
-	// 4. Persist the assignment. The INSERT ... SELECT writes a row ONLY when the
-	//    mailbox belongs to wsID (self-enforcing tenancy, defense in depth on top of
-	//    the SendJob resolver's own pin), so a mismatched pair inserts zero rows and
-	//    RETURNING yields ErrNoRows here — distinct from step 3's no-live-worker
-	//    ErrNoRows, which was on the pick and returned "" WITHOUT reaching this
-	//    insert. On conflict the row is kept for a LIVE, SAME-BAND incumbent (so
-	//    both racers in a concurrent first-send agree) and handed to workerID
-	//    otherwise — the incumbent has gone silent, OR its band no longer matches
-	//    (the migration path requirement 4 needs). liveSince makes that decision
-	//    inside the statement, keeping it atomic against another worker
-	//    reassigning the same mailbox.
-	assigned, err := c.q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
-		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, Band: band, LiveSince: liveSince,
-	})
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// Zero rows inserted: the mailbox does not belong to wsID. Fail closed —
-		// never persist a foreign-workspace routing row.
-		return "", coreapi.ErrCrossTenant
-	case err != nil:
-		return "", fmt.Errorf("coreapi: persist assignment: %w", err)
-	}
-	return queueForWorker(assigned), nil
+	return queueName, err
 }
 
 // mailboxRiskBand derives the mailbox's CURRENT risk band from its warmup
@@ -191,36 +184,139 @@ func (c client) mailboxRiskBand(ctx context.Context, mbID, wsID uuid.UUID) (stri
 	return warmup.RiskBandForLane(p.Lane), nil
 }
 
-// pickBandedWorker is step 2's multi-worker branch: strict segregation
-// (requirement 2), with the idle-worker promotion path (requirement 3).
+// assignBandedWorker resolves AND persists a placement across three tiers,
+// returning the final queue name. It owns its own persist step for every
+// tier (rather than returning a worker_id for a shared generic insert)
+// because tier 2's pick-then-persist must be atomic under claimIdleWorker's
+// advisory lock (fix-round-1, Important 1) — splitting persistence out to a
+// step that runs AFTER this function returns would reopen the exact race the
+// lock exists to close, by letting the insert happen outside the locked
+// transaction.
 //
-// It prefers a live worker that ALREADY carries this band; failing that, a
-// live worker carrying NOTHING may be promoted into it. Only when NEITHER
-// exists does it refuse with ErrNoBandCapacity — never falling back to a
-// worker in the OTHER band, which is the one thing this function exists to
-// prevent.
-func (c client) pickBandedWorker(ctx context.Context, band string, liveSince pgtype.Timestamptz) (string, error) {
-	workerID, err := c.q.PickLeastLoadedWorkerForBand(ctx, gen.PickLeastLoadedWorkerForBandParams{
-		LiveSince: liveSince, Band: band,
-	})
+// Tier 1 prefers a worker that is ALREADY PURELY this mailbox's band — never
+// a worker that merely carries SOME of this band (fix-round-1, Important 2:
+// see PickPureWorkerForBand's doc for why that distinction is the whole
+// fix). Tier 2 promotes a genuinely idle worker. Tier 3, last resort, adds to
+// an already-mixed worker rather than refusing outright — refusing when the
+// ENTIRE fleet is already mixed (the realistic state of a real fleet on this
+// feature's first deploy) would stop sending altogether, which is worse than
+// an imperfectly segregated placement that keeps draining toward purity
+// (requirement 4 / step 1's WorkerMixed re-check migrates it off lazily).
+// Only when none of the three has room does it refuse with
+// ErrNoBandCapacity — never falling back to a worker PURELY in the OTHER
+// band, which is the one thing this function exists to prevent.
+func (c client) assignBandedWorker(ctx context.Context, mbID, wsID uuid.UUID, band string, liveSince pgtype.Timestamptz) (string, error) {
+	workerID, err := c.q.PickPureWorkerForBand(ctx, gen.PickPureWorkerForBandParams{LiveSince: liveSince, Band: band})
 	switch {
 	case err == nil:
-		return workerID, nil
+		return c.persistAssignment(ctx, mbID, wsID, workerID, band, liveSince)
 	case errors.Is(err, pgx.ErrNoRows):
-		// No worker already in this band — try to promote an idle one.
+		// No worker is purely this band yet — try to promote an idle one.
 	default:
-		return "", fmt.Errorf("coreapi: pick least-loaded worker for band: %w", err)
+		return "", fmt.Errorf("coreapi: pick pure worker for band: %w", err)
 	}
 
-	workerID, err = c.q.PickIdleLiveWorker(ctx, liveSince)
+	queueName, err := c.claimIdleWorker(ctx, mbID, wsID, band, liveSince)
 	switch {
 	case err == nil:
-		return workerID, nil
+		return queueName, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// No idle worker either — the last resort: an already-mixed one.
+	default:
+		return "", err
+	}
+
+	workerID, err = c.q.PickMixedWorker(ctx, liveSince)
+	switch {
+	case err == nil:
+		slog.WarnContext(ctx, "worker assignment landed on an already-mixed worker; it migrates off once a pure or idle worker is available",
+			"mailbox_id", mbID, "workspace_id", wsID, "band", band, "worker_id", workerID)
+		return c.persistAssignment(ctx, mbID, wsID, workerID, band, liveSince)
 	case errors.Is(err, pgx.ErrNoRows):
 		return "", coreapi.ErrNoBandCapacity
 	default:
-		return "", fmt.Errorf("coreapi: pick idle worker: %w", err)
+		return "", fmt.Errorf("coreapi: pick mixed worker: %w", err)
 	}
+}
+
+// claimIdleWorker is tier 2: atomically claim a genuinely idle live worker
+// into `band` inside one transaction, closing the TOCTOU race two DIFFERENT
+// mailboxes of DIFFERENT bands would otherwise hit racing to promote the SAME
+// idle worker (fix-round-1, Important 1 — ON CONFLICT on
+// mailbox_worker_assignments cannot catch this, because the two racing
+// INSERTs are for different mailbox_ids and so never conflict with each
+// other; proven by TestAssignMailboxWorkerIdlePromotionRaceNeverMixesAWorker,
+// which fails when the pick and the insert run as two separate,
+// non-transactional statements).
+//
+// A pgx.ErrNoRows return means "no idle worker right now" — from either the
+// pick itself, or (belt-and-braces) a cross-tenant insert would be mapped to
+// coreapi.ErrCrossTenant instead, which is NOT pgx.ErrNoRows, so the caller's
+// errors.Is check correctly treats it as a hard error rather than silently
+// falling through to tier 3.
+func (c client) claimIdleWorker(ctx context.Context, mbID, wsID uuid.UUID, band string, liveSince pgtype.Timestamptz) (string, error) {
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("coreapi: begin idle-promotion tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+	qtx := c.q.WithTx(tx)
+
+	// Serializes ONLY this promotion decision across concurrent callers — see
+	// LockWorkerPromotion's doc for why tiers 1 and 3 need no lock at all.
+	// Auto-released at commit/rollback (the transaction-scoped form), never
+	// stranded on a pooled connection reused for something else.
+	if err := qtx.LockWorkerPromotion(ctx); err != nil {
+		return "", fmt.Errorf("coreapi: lock worker promotion: %w", err)
+	}
+
+	workerID, err := qtx.PickIdleLiveWorker(ctx, liveSince)
+	if err != nil {
+		return "", err
+	}
+
+	assigned, err := qtx.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, Band: band, LiveSince: liveSince,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", coreapi.ErrCrossTenant
+	case err != nil:
+		return "", fmt.Errorf("coreapi: persist idle-promotion assignment: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("coreapi: commit idle-promotion: %w", err)
+	}
+	return queueForWorker(assigned), nil
+}
+
+// persistAssignment is the non-transactional upsert shared by the self-host
+// path, tier 1 and tier 3 — none of which are contested by a concurrent
+// DIFFERENT mailbox (distinct mailbox_ids always insert distinct rows), so
+// none of them need claimIdleWorker's transaction or lock. The INSERT ...
+// SELECT writes a row ONLY when the mailbox belongs to wsID (self-enforcing
+// tenancy, defense in depth on top of the SendJob resolver's own pin), so a
+// mismatched pair inserts zero rows and RETURNING yields ErrNoRows here. On
+// conflict the row is kept for a LIVE, SAME-BAND incumbent (so both racers in
+// a concurrent first-send for the SAME mailbox agree) and handed to workerID
+// otherwise — the incumbent has gone silent, OR its band no longer matches
+// (the migration path requirement 4 needs). liveSince makes that decision
+// inside the statement, keeping it atomic against another caller reassigning
+// the same mailbox.
+func (c client) persistAssignment(ctx context.Context, mbID, wsID uuid.UUID, workerID, band string, liveSince pgtype.Timestamptz) (string, error) {
+	assigned, err := c.q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, Band: band, LiveSince: liveSince,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Zero rows inserted: the mailbox does not belong to wsID. Fail closed —
+		// never persist a foreign-workspace routing row.
+		return "", coreapi.ErrCrossTenant
+	case err != nil:
+		return "", fmt.Errorf("coreapi: persist assignment: %w", err)
+	}
+	return queueForWorker(assigned), nil
 }
 
 // queueForWorker maps a worker_id to its dedicated affinity queue

@@ -28,7 +28,8 @@ func (q *Queries) CountLiveWorkers(ctx context.Context, liveSince pgtype.Timesta
 }
 
 const getLiveMailboxWorkerAssignment = `-- name: GetLiveMailboxWorkerAssignment :one
-SELECT a.worker_id, a.band
+SELECT a.worker_id, a.band,
+       (SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2 WHERE a2.worker_id = a.worker_id) > 1 AS worker_mixed
 FROM mailbox_worker_assignments a
 JOIN workers w ON w.worker_id = a.worker_id
 WHERE a.mailbox_id = $1
@@ -43,8 +44,9 @@ type GetLiveMailboxWorkerAssignmentParams struct {
 }
 
 type GetLiveMailboxWorkerAssignmentRow struct {
-	WorkerID string `json:"worker_id"`
-	Band     string `json:"band"`
+	WorkerID    string `json:"worker_id"`
+	Band        string `json:"band"`
+	WorkerMixed bool   `json:"worker_mixed"`
 }
 
 // Existing assignment for a mailbox, but ONLY if the assigned worker is still
@@ -63,10 +65,19 @@ type GetLiveMailboxWorkerAssignmentRow struct {
 // compare it against the mailbox's CURRENT computed band without a second
 // query: a mismatch (the mailbox's warmup lane moved since this row was
 // written) is treated exactly like a dead worker — fall through and reassign.
+//
+// worker_mixed reports whether the ASSIGNED WORKER currently carries more than
+// one band (fix-round-1, Important 2's convergence design). It is what lets
+// the caller's idempotent fast path distinguish "stable, leave it" from "this
+// mailbox is parked on a legacy/last-resort mixed worker, and should keep
+// checking whether a pure or idle worker has since become available" — without
+// it, a mailbox landed on a mixed worker via the tier-3 fallback would never
+// re-evaluate and would sit there forever even after capacity opened up,
+// because its OWN band never changes.
 func (q *Queries) GetLiveMailboxWorkerAssignment(ctx context.Context, arg GetLiveMailboxWorkerAssignmentParams) (GetLiveMailboxWorkerAssignmentRow, error) {
 	row := q.db.QueryRow(ctx, getLiveMailboxWorkerAssignment, arg.MailboxID, arg.WorkspaceID, arg.LiveSince)
 	var i GetLiveMailboxWorkerAssignmentRow
-	err := row.Scan(&i.WorkerID, &i.Band)
+	err := row.Scan(&i.WorkerID, &i.Band, &i.WorkerMixed)
 	return i, err
 }
 
@@ -80,6 +91,10 @@ DO UPDATE SET worker_id = CASE
         WHERE w.worker_id = mailbox_worker_assignments.worker_id
           AND w.last_seen_at >= $5::timestamptz
     ) AND mailbox_worker_assignments.band = EXCLUDED.band
+    AND (
+        SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2
+        WHERE a2.worker_id = mailbox_worker_assignments.worker_id
+    ) <= 1
     THEN mailbox_worker_assignments.worker_id
     ELSE EXCLUDED.worker_id
 END,
@@ -89,6 +104,10 @@ band = CASE
         WHERE w.worker_id = mailbox_worker_assignments.worker_id
           AND w.last_seen_at >= $5::timestamptz
     ) AND mailbox_worker_assignments.band = EXCLUDED.band
+    AND (
+        SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2
+        WHERE a2.worker_id = mailbox_worker_assignments.worker_id
+    ) <= 1
     THEN mailbox_worker_assignments.band
     ELSE EXCLUDED.band
 END,
@@ -98,6 +117,10 @@ assigned_at = CASE
         WHERE w.worker_id = mailbox_worker_assignments.worker_id
           AND w.last_seen_at >= $5::timestamptz
     ) AND mailbox_worker_assignments.band = EXCLUDED.band
+    AND (
+        SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2
+        WHERE a2.worker_id = mailbox_worker_assignments.worker_id
+    ) <= 1
     THEN mailbox_worker_assignments.assigned_at
     ELSE now()
 END
@@ -119,9 +142,9 @@ type InsertMailboxWorkerAssignmentParams struct {
 // rejection.
 //
 // On a mailbox_id conflict the row is claimed for the incoming (worker, band)
-// ONLY if the incumbent is BOTH live AND already in the same band as the
-// incoming write; otherwise the incumbent is replaced. That single rule serves
-// three callers:
+// ONLY if the incumbent is LIVE, already in the same band as the incoming
+// write, AND NOT CURRENTLY MIXED; otherwise the incumbent is replaced. That
+// single rule serves four callers:
 //
 //   - concurrent first-send race — both racers computed the SAME target band for
 //     this mailbox (it hasn't changed mid-race), so whichever inserted first
@@ -138,11 +161,22 @@ type InsertMailboxWorkerAssignmentParams struct {
 //     band (requirement 4): AssignMailboxWorker recomputes and compares the
 //     band on every call, so the very next warmup tick after a lane change
 //     picks this branch.
+//   - a mailbox is parked on an already-mixed worker, its OWN band hasn't
+//     changed, but the caller found a pure or idle worker to move it to
+//     (fix-round-1, Important 2's convergence design). Without the "not
+//     mixed" clause, the incumbent's band matching EXCLUDED.band alone would
+//     keep the row on the mixed worker forever — the caller's whole tiered
+//     re-pick would be silently discarded here, because band-match was the
+//     ONLY signal this statement used to check before that fix. The mixed
+//     check is evaluated against mailbox_worker_assignments.worker_id (the
+//     row's CURRENT, not-yet-updated worker) so it reads the incumbent's
+//     population INCLUDING this row's own not-yet-moved band, matching
+//     GetLiveMailboxWorkerAssignment's worker_mixed flag exactly.
 //
 // Keeping this as one atomic upsert (rather than a DELETE + INSERT in the
 // caller) means two workers reassigning the same stranded mailbox converge: the
-// first takes it, the second sees a live, same-band incumbent and adopts that
-// answer.
+// first takes it, the second sees a live, same-band, non-mixed incumbent and
+// adopts that answer.
 func (q *Queries) InsertMailboxWorkerAssignment(ctx context.Context, arg InsertMailboxWorkerAssignmentParams) (string, error) {
 	row := q.db.QueryRow(ctx, insertMailboxWorkerAssignment,
 		arg.MailboxID,
@@ -154,6 +188,34 @@ func (q *Queries) InsertMailboxWorkerAssignment(ctx context.Context, arg InsertM
 	var worker_id string
 	err := row.Scan(&worker_id)
 	return worker_id, err
+}
+
+const lockWorkerPromotion = `-- name: LockWorkerPromotion :exec
+SELECT pg_advisory_xact_lock(hashtext('inroad:worker_idle_promotion'))
+`
+
+// A single global advisory lock, held for the transaction (auto-released at
+// COMMIT or ROLLBACK — never the session-scoped form, which could strand the
+// lock on a pooled connection reused for something else after a crash)
+// serializing ONLY the tier-2 idle-promotion decision (fix-round-1,
+// Important 1).
+//
+// Scoped narrowly on purpose. Tier 1 (PickPureWorkerForBand) and tier 3
+// (PickMixedWorker) need NO lock: concentrating another mailbox onto an
+// ALREADY-committed-band or already-mixed worker always inserts a DISTINCT
+// row (mailbox_id is the assignment's primary key), so two concurrent
+// inserts for different mailboxes never conflict — the race exists only
+// because ADOPTING an idle worker changes what "pure" means for that worker
+// for every future placement, and only one band may win that decision.
+//
+// One fixed key rather than one per band or per worker: the lock is held only
+// across a single SELECT + INSERT (microseconds), and it is only ever
+// CONTENDED while a band has zero committed workers — i.e. during a fleet's
+// initial ramp-up, not steady-state operation, where tier 1 already satisfies
+// every placement without ever reaching this lock at all.
+func (q *Queries) LockWorkerPromotion(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockWorkerPromotion)
+	return err
 }
 
 const mailboxWorkerAssignmentExists = `-- name: MailboxWorkerAssignmentExists :one
@@ -196,13 +258,21 @@ ORDER BY w.worker_id ASC
 LIMIT 1
 `
 
-// A live worker carrying NO assignments at all (any band). This is the
-// promotion path (requirement 3): only a genuinely idle worker may be adopted
-// into a band — never one already carrying another band's mailboxes, which
-// PickLeastLoadedWorkerForBand's EXISTS clause on the SAME band already
-// excludes it from matching, but this query additionally excludes an off-band
-// worker with EXISTING load from being mistaken for idle. Deterministic
-// worker_id tie-break, matching the other picks.
+// Tier 2 (requirement 3's promotion path). A live worker carrying NO
+// assignments at all (any band) — only a genuinely idle worker may be
+// adopted into a band, never one already carrying another band's mailboxes.
+// Deterministic worker_id tie-break, matching the other picks.
+//
+// MUST be called inside the SAME transaction as the LockWorkerPromotion
+// advisory lock immediately before it, and the InsertMailboxWorkerAssignment
+// that follows it (see coreapi/inprocess.client.claimIdleWorker). Without the
+// lock, two DIFFERENT mailboxes of DIFFERENT bands racing to place
+// concurrently can BOTH see the same worker as idle (neither has inserted
+// yet) and both succeed — mixing a worker the promotion path exists to keep
+// pure (fix-round-1, Important 1; TestAssignMailboxWorkerIdlePromotionRaceNeverMixesAWorker
+// proves it against the unlocked version first). ON CONFLICT on
+// mailbox_worker_assignments cannot catch this: the two racing INSERTs are
+// for DIFFERENT mailbox_ids, so they never conflict with each other.
 func (q *Queries) PickIdleLiveWorker(ctx context.Context, liveSince pgtype.Timestamptz) (string, error) {
 	row := q.db.QueryRow(ctx, pickIdleLiveWorker, liveSince)
 	var worker_id string
@@ -235,7 +305,43 @@ func (q *Queries) PickLeastLoadedWorker(ctx context.Context, liveSince pgtype.Ti
 	return worker_id, err
 }
 
-const pickLeastLoadedWorkerForBand = `-- name: PickLeastLoadedWorkerForBand :one
+const pickMixedWorker = `-- name: PickMixedWorker :one
+SELECT w.worker_id
+FROM workers w
+WHERE w.last_seen_at >= $1::timestamptz
+  AND (
+      SELECT count(DISTINCT a.band) FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
+  ) > 1
+ORDER BY (
+    SELECT count(*) FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
+) ASC, w.worker_id ASC
+LIMIT 1
+`
+
+// Tier 3 (fix-round-1, Important 2's convergence design; last resort). The
+// least-loaded LIVE worker that is ALREADY mixed — carries more than one
+// band today, from before this feature existed or from the lane-derived
+// migration-day reality PickPureWorkerForBand's doc describes. Placing one
+// more mailbox here is never a NEW contamination — the worker was already
+// impure — and refusing when this is the only capacity left would stop a
+// real, already-mixed fleet from sending at all on its very first deploy,
+// which is a worse failure than an imperfectly segregated placement.
+//
+// This is not a permanent home: every mailbox landed here still migrates off
+// lazily on its own NEXT AssignMailboxWorker call once a pure or idle worker
+// becomes available — GetLiveMailboxWorkerAssignment's worker_mixed flag is
+// what makes the caller keep re-evaluating a mailbox parked here instead of
+// treating it as stable forever, the same way a lane change does (requirement
+// 4) — so a fleet converges toward purity over time. The CALLER logs every
+// use of this tier so an operator can watch that convergence happen.
+func (q *Queries) PickMixedWorker(ctx context.Context, liveSince pgtype.Timestamptz) (string, error) {
+	row := q.db.QueryRow(ctx, pickMixedWorker, liveSince)
+	var worker_id string
+	err := row.Scan(&worker_id)
+	return worker_id, err
+}
+
+const pickPureWorkerForBand = `-- name: PickPureWorkerForBand :one
 SELECT w.worker_id
 FROM workers w
 WHERE w.last_seen_at >= $1::timestamptz
@@ -243,23 +349,40 @@ WHERE w.last_seen_at >= $1::timestamptz
       SELECT 1 FROM mailbox_worker_assignments a
       WHERE a.worker_id = w.worker_id AND a.band = $2::text
   )
+  AND NOT EXISTS (
+      SELECT 1 FROM mailbox_worker_assignments a
+      WHERE a.worker_id = w.worker_id AND a.band <> $2::text
+  )
 ORDER BY (
     SELECT count(*) FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
 ) ASC, w.worker_id ASC
 LIMIT 1
 `
 
-type PickLeastLoadedWorkerForBandParams struct {
+type PickPureWorkerForBandParams struct {
 	LiveSince pgtype.Timestamptz `json:"live_since"`
 	Band      string             `json:"band"`
 }
 
-// The least-loaded LIVE worker that ALREADY carries at least one live assignment
-// in this band. Requirement 2 (strict segregation): if this returns no row, the
-// caller tries PickIdleLiveWorker next and refuses only if THAT also finds
-// nothing — never falls back to an off-band worker.
-func (q *Queries) PickLeastLoadedWorkerForBand(ctx context.Context, arg PickLeastLoadedWorkerForBandParams) (string, error) {
-	row := q.db.QueryRow(ctx, pickLeastLoadedWorkerForBand, arg.LiveSince, arg.Band)
+// Tier 1 (fix-round-1, Important 2). The least-loaded LIVE worker that is
+// PURELY this band — EVERY assignment it currently carries shares `band`,
+// never a worker that merely carries SOME of this band alongside others.
+//
+// The original round-1 query (`... EXISTS (a.band = @band)`, no exclusion of
+// other bands) proved only "carries at least one row of this band", which a
+// MIXED worker satisfies for BOTH bands simultaneously. On a real fleet —
+// where placement was band-blind before this feature, and a brand-new
+// warmup_participants row defaults to lane='probation' (migration
+// 000055:12), which RiskBandForLane maps to degraded — essentially every
+// worker already carries a mix on migration day, so that query treated every
+// worker as a valid pick for every band: idle promotion (and therefore
+// ErrNoBandCapacity, the strictness guarantee) effectively never fired. Never
+// widening a pure worker's population with the WRONG band is what "never
+// newly mix a worker that is currently pure" means in practice — this tier
+// is the only one placement may pick from for FREE (see PickMixedWorker for
+// the last-resort tier that costs a warning log).
+func (q *Queries) PickPureWorkerForBand(ctx context.Context, arg PickPureWorkerForBandParams) (string, error) {
+	row := q.db.QueryRow(ctx, pickPureWorkerForBand, arg.LiveSince, arg.Band)
 	var worker_id string
 	err := row.Scan(&worker_id)
 	return worker_id, err

@@ -37,12 +37,15 @@ var ErrInvalidComplaint = errors.New("coreapi: complaint rejected as invalid")
 
 // ErrNoBandCapacity is returned by AssignMailboxWorker when the mailbox's risk
 // band (fleet F5, derived from its warmup lane) has no live worker to place it
-// on: no worker already carries that band, AND no idle worker (carrying
-// nothing) is available to adopt into it. This is strict segregation refusing a
-// placement rather than co-locating risky traffic with clean — a refusal is
-// visible (the caller's retry/backoff surfaces it, and a warmup send's terminal
-// retry reaches task_dead_letters) and recoverable (add fleet capacity, or wait
-// for the offending mailbox's lane to recover); a silent co-location is neither.
+// on, having tried all three placement tiers in order: no worker is PURELY
+// that band already, no worker is genuinely idle to promote into it, and — the
+// last resort (fix-round-1) — no worker is even already mixed (carrying more
+// than one band) to add one more mailbox to. This is strict segregation
+// refusing a placement rather than co-locating risky traffic onto a worker
+// that was previously CLEAN of it — a refusal is visible (the caller's
+// retry/backoff surfaces it, and a warmup send's terminal retry reaches
+// task_dead_letters) and recoverable (add fleet capacity, or wait for the
+// offending mailbox's lane to recover); a silent co-location is neither.
 //
 // It is NEVER returned when the live fleet has at most one worker: with no
 // second worker to segregate onto there is no placement choice to make, so
@@ -390,20 +393,34 @@ type Client interface {
 	// client input (invariant §17.8).
 	//
 	// Risk-band segregation (fleet F5). A mailbox's band (warmup.RiskBandForLane
-	// of its CURRENT lane — one source of truth, no parallel health concept) must
-	// match the band of every OTHER mailbox already on its worker: a degraded
-	// mailbox may never land on a worker currently carrying healthy traffic, and
-	// vice versa. Placement prefers a live worker already in the matching band;
-	// failing that, it may PROMOTE a genuinely idle live worker (carrying
-	// nothing) into that band; failing THAT, it returns ErrNoBandCapacity — a
-	// typed, explicit refusal rather than a silent co-location — UNLESS the live
-	// fleet has at most one worker, in which case there is no placement choice to
-	// make and segregation does not apply at all (self-host, RoleAll's one
-	// worker, must never be stopped from sending by this). A mailbox whose band
-	// changes (its lane moved) is migrated on its NEXT call to this method, not
-	// mid-flight — every warmup tick calls this again via the lazy chain, so a
-	// degrading mailbox moves off a healthy worker within one tick of the lane
-	// change, never thrashed by a mid-send reassignment.
+	// of its CURRENT lane — one source of truth, no parallel health concept)
+	// decides which worker it may join, through three tiers in order (fix-round-1):
+	//
+	//  1. A worker that is PURELY this band already (every mailbox on it shares
+	//     the band) — never one that merely carries SOME of this band, which
+	//     would perpetuate a pre-existing mix rather than avoid one.
+	//  2. Failing that, a genuinely idle live worker (carrying nothing) may be
+	//     PROMOTED into the band — claimed atomically, so two different
+	//     mailboxes of different bands can never both adopt the same idle
+	//     worker.
+	//  3. Failing that too, an already-mixed worker (legacy state, or the
+	//     reality of a fleet on this feature's first deploy) may take one more
+	//     mailbox of any band — logged, since it is a last resort, never a new
+	//     contamination of something that was pure. A mailbox landed here
+	//     re-evaluates on every later call (even with an unchanged band) and
+	//     migrates off lazily once a pure or idle worker opens up, so the fleet
+	//     converges toward purity over time instead of staying mixed forever.
+	//
+	// Only when none of the three has room does it return ErrNoBandCapacity — a
+	// typed, explicit refusal rather than a silent co-location of a pure
+	// worker — UNLESS the live fleet has at most one worker, in which case there
+	// is no placement choice to make and segregation does not apply at all
+	// (self-host, RoleAll's one worker, must never be stopped from sending by
+	// this). A mailbox whose band changes (its lane moved) is migrated on its
+	// NEXT call to this method, not mid-flight — every warmup tick calls this
+	// again via the lazy chain, so a degrading mailbox moves off a healthy
+	// worker within one tick of the lane change, never thrashed by a mid-send
+	// reassignment.
 	AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (queueName string, err error)
 
 	// --- Warmup send path (warmup:tick; spec §4/§6) ---
