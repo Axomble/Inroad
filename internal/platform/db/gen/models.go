@@ -681,6 +681,7 @@ type MailboxWorkerAssignment struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	WorkerID    string             `json:"worker_id"`
 	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+	Band        string             `json:"band"`
 }
 
 type Note struct {

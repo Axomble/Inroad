@@ -18,6 +18,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // These integration tests exercise the worker-routing assigner (migration
@@ -157,8 +158,9 @@ func TestAssignMailboxWorkerNoLiveWorkerFallback(t *testing.T) {
 }
 
 // TestAssignMailboxWorkerLeastLoadedAndIdempotent: the assigner picks the
-// least-loaded live worker, then returns that same assignment on every
-// subsequent call (idempotent), even after the load balance changes.
+// least-loaded live worker ALREADY IN the mailbox's risk band, then returns
+// that same assignment on every subsequent call (idempotent), even after the
+// load balance changes.
 func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
@@ -170,24 +172,31 @@ func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 		t.Fatalf("workspace: %v", err)
 	}
 
-	// Two live workers. "aaa" sorts first, so it would win a zero-zero tie — we
-	// pre-load it so "bbb" is strictly least-loaded and the pick can't be the
-	// accidental tie-break winner.
+	// Two live workers.
 	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1"); err != nil {
 		t.Fatalf("heartbeat aaa: %v", err)
 	}
 	if err := c.UpsertWorkerHeartbeat(ctx, "bbb", "203.0.113.2"); err != nil {
 		t.Fatalf("heartbeat bbb: %v", err)
 	}
-	// Load "aaa" with two existing assignments (real mailboxes for the FK).
-	for i := 0; i < 2; i++ {
-		load := createRoutingMailbox(t, ctx, q, ws.ID)
-		if _, err := q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
-			MailboxID: load, WorkspaceID: ws.ID, WorkerID: "aaa", LiveSince: liveSinceNow(),
-		}); err != nil {
-			t.Fatalf("preload aaa: %v", err)
+	// Both already carry the SAME band ("healthy" — mb below has no
+	// warmup_participants row either, so it is healthy too): risk-band
+	// segregation (fleet F5) prefers a worker ALREADY in the matching band over
+	// promoting an untouched one, so both must already be band-committed for
+	// "least loaded" to be the thing under test here, rather than idle
+	// promotion. "aaa" carries strictly more load than "bbb".
+	preload := func(worker string, n int) {
+		for i := 0; i < n; i++ {
+			load := createRoutingMailbox(t, ctx, q, ws.ID)
+			if _, err := q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+				MailboxID: load, WorkspaceID: ws.ID, WorkerID: worker, Band: warmup.RiskBandHealthy, LiveSince: liveSinceNow(),
+			}); err != nil {
+				t.Fatalf("preload %s: %v", worker, err)
+			}
 		}
 	}
+	preload("aaa", 2)
+	preload("bbb", 1)
 
 	mb := createRoutingMailbox(t, ctx, q, ws.ID)
 	got, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String())

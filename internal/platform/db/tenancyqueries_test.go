@@ -138,6 +138,8 @@ var tenancyExceptions = map[string]string{
 
 	// (d) cross-tenant fan-out — returns workspace_id so downstream work is per-workspace.
 	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet; assignment counts are fleet-wide by design, and it returns only a worker_id.",
+	"worker_routing.sql:PickLeastLoadedWorkerForBand": "risk-band segregation (fleet F5): finds a LIVE worker already carrying this band, fleet-wide like PickLeastLoadedWorker — a mailbox's band is tenant-derived, but placement balances across every tenant's mailboxes on the same worker, and it returns only a worker_id.",
+	"worker_routing.sql:PickIdleLiveWorker":           "risk-band segregation (fleet F5) promotion path: finds a LIVE worker carrying no assignments AT ALL, fleet-wide for the same reason as PickLeastLoadedWorker — idleness is a property of the worker, not of one tenant's slice of it — and it returns only a worker_id.",
 	"enrollment.sql:ListDueEnrollments":               "sweeper fan-out: selects due enrollments across all workspaces and RETURNS workspace_id so each enrollment is then advanced workspace-scoped. The pin lives one step later, in the per-enrollment job.",
 	"mailbox.sql:ListActiveMailboxes":                 "poller fan-out: returns (id, workspace_id) for every active mailbox so each poll then runs workspace-scoped via GetMailbox.",
 	"warmup.sql:ListDueWarmupMailboxes":               "warmup sweep fan-out: returns (mailbox, workspace) pairs, and per-mailbox gating (NextWarmupDue, GetWarmupSendJob) is workspace-pinned.",
@@ -457,7 +459,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 46
+	const known = 48
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

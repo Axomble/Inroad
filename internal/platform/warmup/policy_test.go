@@ -726,3 +726,31 @@ func TestEveryLeaseRefusalNamesItself(t *testing.T) {
 		}
 	}
 }
+
+// RiskBandForLane is the single source of truth fleet worker placement (F5)
+// reads: only a fully-vetted healthy lane may share an egress IP with the
+// healthy pool, everything else is degraded for placement even when it may
+// still send warmup traffic, and not participating in warmup at all costs a
+// mailbox nothing (mirrors laneWithholdsNewLeads's "" exemption).
+func TestRiskBandForLane(t *testing.T) {
+	cases := []struct {
+		lane string
+		want string
+	}{
+		{"", RiskBandHealthy},
+		{LaneHealthy, RiskBandHealthy},
+		{LaneProbation, RiskBandDegraded},
+		{LaneWatch, RiskBandDegraded},
+		{LaneRecovery, RiskBandDegraded},
+		{LaneQuarantine, RiskBandDegraded},
+		{LaneBlocked, RiskBandDegraded},
+		{LanePendingAuth, RiskBandDegraded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.lane, func(t *testing.T) {
+			if got := RiskBandForLane(tc.lane); got != tc.want {
+				t.Fatalf("RiskBandForLane(%q) = %q, want %q", tc.lane, got, tc.want)
+			}
+		})
+	}
+}
