@@ -17,6 +17,8 @@ import (
 
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
+	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
@@ -31,6 +33,15 @@ import (
 // c.q / c.pool, so no keyring/oauth wiring is needed here.
 func routingClient(pool *pgxpool.Pool, q *gen.Queries) client {
 	return client{pool: pool, q: q}
+}
+
+// routingClientWithMetrics is routingClient plus a real *metrics.Metrics, for
+// the tests that assert on inroad_worker_assignment_stale_total below — every
+// other test in this file uses the metrics-less constructor above because a
+// nil *metrics.Metrics is valid and a no-op (see metrics.Metrics' doc), and
+// most of these assertions have nothing to do with observability.
+func routingClientWithMetrics(pool *pgxpool.Pool, q *gen.Queries, mtx *metrics.Metrics) client {
+	return client{pool: pool, q: q, mtx: mtx}
 }
 
 func createRoutingMailbox(t *testing.T, ctx context.Context, q *gen.Queries, ws uuid.UUID) uuid.UUID {
@@ -173,10 +184,10 @@ func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 	}
 
 	// Two live workers.
-	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat aaa: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "bbb", "203.0.113.2"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "bbb", "203.0.113.2", "hostname"); err != nil {
 		t.Fatalf("heartbeat bbb: %v", err)
 	}
 	// Both already carry the SAME band ("healthy" — mb below has no
@@ -237,7 +248,7 @@ func TestAssignMailboxWorkerWorkspacePinning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreign workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 
@@ -283,7 +294,7 @@ func TestAssignMailboxWorkerWriteTenancy(t *testing.T) {
 	}
 	// A live worker so PickLeastLoadedWorker returns a row and control reaches the
 	// self-enforcing insert (otherwise the no-live-worker branch short-circuits).
-	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, owner.ID)
@@ -323,7 +334,7 @@ func TestAssignMailboxWorkerKeepsLiveIncumbent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "aaa", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat aaa: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, ws.ID)
@@ -339,7 +350,7 @@ func TestAssignMailboxWorkerKeepsLiveIncumbent(t *testing.T) {
 
 	// A brand-new, completely unloaded worker joins. "aaa" is now the MORE loaded
 	// of the two, so a resolve that re-picked would move the mailbox to "bbb".
-	if err := c.UpsertWorkerHeartbeat(ctx, "bbb", "203.0.113.2"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "bbb", "203.0.113.2", "hostname"); err != nil {
 		t.Fatalf("heartbeat bbb: %v", err)
 	}
 	for i := range 3 {
@@ -386,7 +397,7 @@ func TestAssignMailboxWorkerReassignsAwayFromDeadWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "old-node", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "old-node", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat old-node: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, ws.ID)
@@ -403,7 +414,7 @@ func TestAssignMailboxWorkerReassignsAwayFromDeadWorker(t *testing.T) {
 	// The deploy: old-node's heartbeat stops (aged just past the live window, the
 	// boundary case) and new-node comes up under a different id.
 	killWorker(t, ctx, pool, "old-node", workerLiveWindow+time.Minute)
-	if err := c.UpsertWorkerHeartbeat(ctx, "new-node", "203.0.113.2"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "new-node", "203.0.113.2", "hostname"); err != nil {
 		t.Fatalf("heartbeat new-node: %v", err)
 	}
 
@@ -451,6 +462,96 @@ func TestAssignMailboxWorkerReassignsAwayFromDeadWorker(t *testing.T) {
 	}
 }
 
+// TestAssignMailboxWorkerStaleReassignmentIncrementsObservabilityMetric is the
+// F3 observability requirement: liveness expiry used to be visible only as a
+// side effect (the mailbox silently moved), never as a signal an operator
+// could graph or alert on. This proves the SAME dead-worker scenario as
+// TestAssignMailboxWorkerReassignsAwayFromDeadWorker now also increments
+// inroad_worker_assignment_stale_total by exactly one.
+func TestAssignMailboxWorkerStaleReassignmentIncrementsObservabilityMetric(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	mtx := metrics.New()
+	c := routingClientWithMetrics(pool, q, mtx)
+	resetRouting(t, ctx, pool)
+
+	ws, err := q.CreateWorkspace(ctx, "Routing stale-metric "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if err := c.UpsertWorkerHeartbeat(ctx, "stale-metric-old", "203.0.113.1", "hostname"); err != nil {
+		t.Fatalf("heartbeat old: %v", err)
+	}
+	mb := createRoutingMailbox(t, ctx, q, ws.ID)
+	if _, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String()); err != nil {
+		t.Fatalf("initial assign: %v", err)
+	}
+
+	// Before the incumbent goes stale, the counter must still read zero — the
+	// live-incumbent path (step 1's fast return) never touches it.
+	if s := metricstest.FindMetric(metricstest.Scrape(t, mtx), "inroad_worker_assignment_stale_total", nil); s != nil && s.GetCounter().GetValue() != 0 {
+		t.Fatalf("stale counter = %v before any staleness, want 0 or absent", s.GetCounter().GetValue())
+	}
+
+	killWorker(t, ctx, pool, "stale-metric-old", workerLiveWindow+time.Minute)
+	if err := c.UpsertWorkerHeartbeat(ctx, "stale-metric-new", "203.0.113.2", "hostname"); err != nil {
+		t.Fatalf("heartbeat new: %v", err)
+	}
+
+	if _, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String()); err != nil {
+		t.Fatalf("reassign: %v", err)
+	}
+
+	sample := metricstest.FindMetric(metricstest.Scrape(t, mtx), "inroad_worker_assignment_stale_total", nil)
+	if sample == nil {
+		t.Fatal("inroad_worker_assignment_stale_total was never recorded")
+	}
+	if got := sample.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("inroad_worker_assignment_stale_total = %v, want 1", got)
+	}
+
+	// A second resolve against the NOW-live incumbent must not double-count —
+	// the metric fires only when GetLiveMailboxWorkerAssignment actually misses.
+	if _, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String()); err != nil {
+		t.Fatalf("re-resolve: %v", err)
+	}
+	sample = metricstest.FindMetric(metricstest.Scrape(t, mtx), "inroad_worker_assignment_stale_total", nil)
+	if got := sample.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("inroad_worker_assignment_stale_total after a stable re-resolve = %v, want still 1", got)
+	}
+}
+
+// TestAssignMailboxWorkerFreshAssignmentDoesNotIncrementStaleMetric proves the
+// counter distinguishes "never assigned" from "stale": a mailbox's FIRST-EVER
+// assignment also reaches GetLiveMailboxWorkerAssignment's pgx.ErrNoRows
+// branch, but MailboxWorkerAssignmentExists correctly reports nothing to find,
+// so a fleet steadily onboarding new mailboxes does not manufacture a rising
+// "stale" rate out of ordinary growth.
+func TestAssignMailboxWorkerFreshAssignmentDoesNotIncrementStaleMetric(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	mtx := metrics.New()
+	c := routingClientWithMetrics(pool, q, mtx)
+	resetRouting(t, ctx, pool)
+
+	ws, err := q.CreateWorkspace(ctx, "Routing fresh-metric "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	if err := c.UpsertWorkerHeartbeat(ctx, "fresh-metric-node", "203.0.113.1", "hostname"); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	mb := createRoutingMailbox(t, ctx, q, ws.ID)
+
+	if _, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String()); err != nil {
+		t.Fatalf("first-ever assign: %v", err)
+	}
+
+	if s := metricstest.FindMetric(metricstest.Scrape(t, mtx), "inroad_worker_assignment_stale_total", nil); s != nil && s.GetCounter().GetValue() != 0 {
+		t.Fatalf("inroad_worker_assignment_stale_total = %v after a first-ever assignment, want 0 or absent", s.GetCounter().GetValue())
+	}
+}
+
 // TestAssignMailboxWorkerWithinLiveWindowIsNotReassigned guards the other side of
 // the boundary: a worker that has merely MISSED a heartbeat tick (5m interval, 15m
 // window) is still live, so its mailboxes stay put. Without this, the reassignment
@@ -465,7 +566,7 @@ func TestAssignMailboxWorkerWithinLiveWindowIsNotReassigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "lagging", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "lagging", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat lagging: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, ws.ID)
@@ -475,7 +576,7 @@ func TestAssignMailboxWorkerWithinLiveWindowIsNotReassigned(t *testing.T) {
 
 	// Two missed ticks — inside the window by a minute — while a rival is fresh.
 	killWorker(t, ctx, pool, "lagging", workerLiveWindow-time.Minute)
-	if err := c.UpsertWorkerHeartbeat(ctx, "fresh", "203.0.113.2"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "fresh", "203.0.113.2", "hostname"); err != nil {
 		t.Fatalf("heartbeat fresh: %v", err)
 	}
 
@@ -508,7 +609,7 @@ func TestConcurrentAssignMailboxWorkerConvergesOnOneQueue(t *testing.T) {
 		t.Fatalf("workspace: %v", err)
 	}
 	for _, w := range []string{"race-a", "race-b"} {
-		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.9"); err != nil {
+		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.9", "hostname"); err != nil {
 			t.Fatalf("heartbeat %s: %v", w, err)
 		}
 	}
@@ -562,7 +663,7 @@ func TestConcurrentReassignmentOfStrandedMailboxConverges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "gone", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "gone", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat gone: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, ws.ID)
@@ -571,7 +672,7 @@ func TestConcurrentReassignmentOfStrandedMailboxConverges(t *testing.T) {
 	}
 	killWorker(t, ctx, pool, "gone", workerLiveWindow+time.Hour)
 	for _, w := range []string{"repl-a", "repl-b"} {
-		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.9"); err != nil {
+		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.9", "hostname"); err != nil {
 			t.Fatalf("heartbeat %s: %v", w, err)
 		}
 	}
@@ -629,7 +730,7 @@ func TestAssignMailboxWorkerNoLiveWorkerKeepsStaleRowAndReturnsDefault(t *testin
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "only-node", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "only-node", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, ws.ID)
@@ -655,7 +756,7 @@ func TestAssignMailboxWorkerNoLiveWorkerKeepsStaleRowAndReturnsDefault(t *testin
 
 	// Once a live worker returns, the very next resolve moves the mailbox onto it —
 	// no manual intervention, and no dependence on the purge having run.
-	if err := c.UpsertWorkerHeartbeat(ctx, "back-up", "203.0.113.2"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "back-up", "203.0.113.2", "hostname"); err != nil {
 		t.Fatalf("heartbeat back-up: %v", err)
 	}
 	if again, err := c.AssignMailboxWorker(ctx, mb.String(), ws.ID.String()); err != nil || again != "w:back-up" {
@@ -682,7 +783,7 @@ func TestAssignMailboxWorkerCrossTenantOverStaleRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreign workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "owner-node", "203.0.113.1"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "owner-node", "203.0.113.1", "hostname"); err != nil {
 		t.Fatalf("heartbeat owner-node: %v", err)
 	}
 	mb := createRoutingMailbox(t, ctx, q, owner.ID)
@@ -692,7 +793,7 @@ func TestAssignMailboxWorkerCrossTenantOverStaleRow(t *testing.T) {
 	// Strand the row so the DO UPDATE branch's "incumbent is dead, hand it over"
 	// path is the one a foreign caller would trigger.
 	killWorker(t, ctx, pool, "owner-node", workerLiveWindow+time.Hour)
-	if err := c.UpsertWorkerHeartbeat(ctx, "attacker-node", "203.0.113.66"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "attacker-node", "203.0.113.66", "hostname"); err != nil {
 		t.Fatalf("heartbeat attacker-node: %v", err)
 	}
 

@@ -26,11 +26,11 @@ const workerLiveWindow = 15 * time.Minute
 // UpsertWorkerHeartbeat refreshes this worker's row in the global registry. See
 // the coreapi.Client interface doc. `workers` is infra state, not tenant data,
 // so there is no workspace pin here.
-func (c client) UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error {
+func (c client) UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP, idFamily string) error {
 	if workerID == "" {
 		return fmt.Errorf("coreapi: worker id required for heartbeat")
 	}
-	if err := c.q.UpsertWorker(ctx, gen.UpsertWorkerParams{WorkerID: workerID, EgressIp: egressIP}); err != nil {
+	if err := c.q.UpsertWorker(ctx, gen.UpsertWorkerParams{WorkerID: workerID, EgressIp: egressIP, IDFamily: idFamily}); err != nil {
 		return fmt.Errorf("coreapi: worker heartbeat: %w", err)
 	}
 	return nil
@@ -85,7 +85,27 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		// holds. Fall through exactly like a dead-worker row does — pick again.
 	case errors.Is(err, pgx.ErrNoRows):
 		// No assignment, or one pinned to a worker that has gone silent — both
-		// fall through to pick a live worker.
+		// fall through to pick a live worker. Liveness expiry used to be
+		// completely silent here: a dead worker's assignment and "never
+		// assigned at all" produced the identical ErrNoRows, so an operator
+		// had no way to see the reassignment happening. Distinguish the two
+		// with the cheap existence check below, purely for observability —
+		// its own failure must never block the send path this runs on, so it
+		// is logged and swallowed, not propagated.
+		if stale, existsErr := c.q.MailboxWorkerAssignmentExists(ctx, gen.MailboxWorkerAssignmentExistsParams{
+			MailboxID: mbID, WorkspaceID: wsID,
+		}); existsErr != nil {
+			slog.WarnContext(ctx, "worker assignment staleness check failed", "mailbox_id", mailboxID, "err", existsErr)
+		} else if stale {
+			// Reported here, before step 2 even runs, deliberately: whether a
+			// live replacement is actually available yet is a SEPARATE fact
+			// (step 3 below still falls back to "" with nothing live), and
+			// this message must stay true either way — it only claims the
+			// incumbent went stale, not that a new one was found.
+			c.mtx.WorkerAssignmentStale()
+			slog.WarnContext(ctx, "stale worker assignment: incumbent worker fell out of the live window",
+				"mailbox_id", mailboxID, "workspace_id", workspaceID)
+		}
 	default:
 		return "", fmt.Errorf("coreapi: load assignment: %w", err)
 	}

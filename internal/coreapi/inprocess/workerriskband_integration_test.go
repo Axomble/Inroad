@@ -56,10 +56,10 @@ func TestAssignMailboxWorkerSegregatesByRiskBand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "seg-a", "203.0.113.10"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "seg-a", "203.0.113.10", "hostname"); err != nil {
 		t.Fatalf("heartbeat seg-a: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "seg-b", "203.0.113.11"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "seg-b", "203.0.113.11", "hostname"); err != nil {
 		t.Fatalf("heartbeat seg-b: %v", err)
 	}
 
@@ -106,10 +106,10 @@ func TestAssignMailboxWorkerPromotionNeverTakesAnAlreadyCommittedWorker(t *testi
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "p-a", "203.0.113.20"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "p-a", "203.0.113.20", "hostname"); err != nil {
 		t.Fatalf("heartbeat p-a: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "p-c", "203.0.113.22"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "p-c", "203.0.113.22", "hostname"); err != nil {
 		t.Fatalf("heartbeat p-c: %v", err)
 	}
 
@@ -152,10 +152,10 @@ func TestAssignMailboxWorkerRefusesWhenBandCapacityIsExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "r-a", "203.0.113.30"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "r-a", "203.0.113.30", "hostname"); err != nil {
 		t.Fatalf("heartbeat r-a: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "r-b", "203.0.113.31"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "r-b", "203.0.113.31", "hostname"); err != nil {
 		t.Fatalf("heartbeat r-b: %v", err)
 	}
 
@@ -204,7 +204,7 @@ func TestAssignMailboxWorkerSelfHostBypassIgnoresBand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "solo", "203.0.113.40"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "solo", "203.0.113.40", "hostname"); err != nil {
 		t.Fatalf("heartbeat solo: %v", err)
 	}
 
@@ -240,10 +240,10 @@ func TestAssignMailboxWorkerMigratesOnLaneDegradation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "m-a", "203.0.113.50"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "m-a", "203.0.113.50", "hostname"); err != nil {
 		t.Fatalf("heartbeat m-a: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "m-b", "203.0.113.51"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "m-b", "203.0.113.51", "hostname"); err != nil {
 		t.Fatalf("heartbeat m-b: %v", err)
 	}
 
@@ -319,10 +319,10 @@ func TestMailboxRiskBandDefaultsHealthyWithNoParticipant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workspace: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "np-a", "203.0.113.60"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "np-a", "203.0.113.60", "hostname"); err != nil {
 		t.Fatalf("heartbeat np-a: %v", err)
 	}
-	if err := c.UpsertWorkerHeartbeat(ctx, "np-b", "203.0.113.61"); err != nil {
+	if err := c.UpsertWorkerHeartbeat(ctx, "np-b", "203.0.113.61", "hostname"); err != nil {
 		t.Fatalf("heartbeat np-b: %v", err)
 	}
 

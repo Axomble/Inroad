@@ -1307,6 +1307,7 @@ type Worker struct {
 	WorkerID   string             `json:"worker_id"`
 	EgressIp   string             `json:"egress_ip"`
 	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+	IDFamily   string             `json:"id_family"`
 }
 
 type Workspace struct {

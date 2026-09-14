@@ -156,6 +156,35 @@ func (q *Queries) InsertMailboxWorkerAssignment(ctx context.Context, arg InsertM
 	return worker_id, err
 }
 
+const mailboxWorkerAssignmentExists = `-- name: MailboxWorkerAssignmentExists :one
+SELECT EXISTS (
+    SELECT 1 FROM mailbox_worker_assignments
+    WHERE mailbox_id = $1 AND workspace_id = $2
+) AS assignment_exists
+`
+
+type MailboxWorkerAssignmentExistsParams struct {
+	MailboxID   uuid.UUID `json:"mailbox_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Observability only, and deliberately called from ONE branch:
+// AssignMailboxWorker's "no live assignment" path, after
+// GetLiveMailboxWorkerAssignment has already returned pgx.ErrNoRows and
+// before picking a replacement worker. At that point ErrNoRows is ambiguous
+// between "never assigned" (the common first-send case, nothing worth
+// reporting) and "assigned, but the incumbent fell out of the live window"
+// (liveness expiry — previously silent; see the F3 spec's observability
+// requirement). This query resolves that ambiguity with a second, cheap,
+// index-backed lookup that ignores liveness entirely — by the time it runs,
+// the caller already knows the row, if any, is not live.
+func (q *Queries) MailboxWorkerAssignmentExists(ctx context.Context, arg MailboxWorkerAssignmentExistsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, mailboxWorkerAssignmentExists, arg.MailboxID, arg.WorkspaceID)
+	var assignment_exists bool
+	err := row.Scan(&assignment_exists)
+	return assignment_exists, err
+}
+
 const pickIdleLiveWorker = `-- name: PickIdleLiveWorker :one
 SELECT w.worker_id
 FROM workers w
@@ -237,20 +266,25 @@ func (q *Queries) PickLeastLoadedWorkerForBand(ctx context.Context, arg PickLeas
 }
 
 const upsertWorker = `-- name: UpsertWorker :exec
-INSERT INTO workers (worker_id, egress_ip, last_seen_at)
-VALUES ($1, $2, now())
+INSERT INTO workers (worker_id, egress_ip, id_family, last_seen_at)
+VALUES ($1, $2, $3, now())
 ON CONFLICT (worker_id)
-DO UPDATE SET egress_ip = EXCLUDED.egress_ip, last_seen_at = now()
+DO UPDATE SET egress_ip = EXCLUDED.egress_ip, id_family = EXCLUDED.id_family, last_seen_at = now()
 `
 
 type UpsertWorkerParams struct {
 	WorkerID string `json:"worker_id"`
 	EgressIp string `json:"egress_ip"`
+	IDFamily string `json:"id_family"`
 }
 
 // Heartbeat: register or refresh this worker's row. egress_ip is recorded for
-// observability; last_seen_at drives the live-worker window in the assigner.
+// observability; id_family records which identity source produced worker_id
+// (ipv4 | ipv6 | hostname | override — see internal/platform/workerid), so a
+// NAT'd/hostname-derived worker is diagnosable from an IP-derived one without
+// cross-referencing logs; last_seen_at drives the live-worker window in the
+// assigner.
 func (q *Queries) UpsertWorker(ctx context.Context, arg UpsertWorkerParams) error {
-	_, err := q.db.Exec(ctx, upsertWorker, arg.WorkerID, arg.EgressIp)
+	_, err := q.db.Exec(ctx, upsertWorker, arg.WorkerID, arg.EgressIp, arg.IDFamily)
 	return err
 }

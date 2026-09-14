@@ -12,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/redisconn"
+	"github.com/inroad/inroad/internal/platform/workerid"
 )
 
 // Pool-sizing defaults. Aliased from db so the numbers have ONE home (the
@@ -182,11 +183,25 @@ type Config struct {
 	// means the default single-process topology.
 	WorkerRole string
 
-	// --- Worker identity + per-IP routing (spec §15) ---
+	// --- Worker identity + per-IP routing (spec §15, F3) ---
 
-	// WorkerID is this worker's stable id (default: OS hostname). It keys the
-	// `workers` heartbeat row and names the worker's dedicated queue ("w:<id>").
+	// WorkerID is this worker's stable id. It keys the `workers` heartbeat row
+	// and names the worker's dedicated queue ("w:<id>"). Resolution order:
+	//   1. INROAD_WORKER_ID, if set — an explicit operator pin always wins.
+	//   2. RoleAll (the single-process self-host topology, and the default for
+	//      an unset INROAD_WORKER_ROLE): the OS hostname, EXACTLY the
+	//      behaviour before per-IP identity existed. See the RoleAll case in
+	//      Load for why it deliberately does not get the derived id.
+	//   3. Any other role (control/send, the fleet topology): derived from the
+	//      host's public IP via workerid.Default — see WorkerIDFamily.
 	WorkerID string
+	// WorkerIDFamily records WHICH of the three sources above produced
+	// WorkerID ("override" | "hostname" | "ipv4" | "ipv6" — see
+	// workerid.Family), so the `workers` row an operator inspects shows
+	// whether a worker's identity is IP-derived, hostname-derived because no
+	// public address was found (NAT, no egress, CI), or explicitly pinned,
+	// rather than leaving that indistinguishable from the id string alone.
+	WorkerIDFamily string
 	// WorkerEgressIP is the optional source IP outbound SMTP/IMAP dials bind to
 	// (net.Dialer.LocalAddr). Empty = OS default route (single-node dev). It sets
 	// the SOURCE address only and never relaxes the SSRF destination vet.
@@ -433,7 +448,31 @@ func Load() (*Config, error) {
 	cfg.WorkerRole = os.Getenv("INROAD_WORKER_ROLE")
 
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
-	cfg.WorkerID = getenv("INROAD_WORKER_ID", hostname)
+	switch {
+	case os.Getenv("INROAD_WORKER_ID") != "":
+		// Explicit override always wins: operators pin it (the deploy docs
+		// tell them to) and tests need determinism.
+		cfg.WorkerID = os.Getenv("INROAD_WORKER_ID")
+		cfg.WorkerIDFamily = string(workerid.FamilyOverride)
+	case workerRoleIsAllOrUnset(cfg.WorkerRole):
+		// RoleAll keeps hostname-derived identity EXACTLY as it was before
+		// per-IP identity existed. Deriving from the public IP here instead
+		// would change the id every self-host worker registers under on the
+		// FIRST restart after this shipped, stranding its existing
+		// mailbox_worker_assignments rows for up to the 15-minute liveness
+		// window (coreapi's workerLiveWindow) — a real, if one-time, send
+		// stall — for a topology that runs a single process and gains
+		// nothing from per-IP identity (there is only one IP to have). An
+		// operator who wants IP-derived identity anyway can run
+		// INROAD_WORKER_ROLE=send (the fleet per-message role) or pin
+		// INROAD_WORKER_ID explicitly.
+		cfg.WorkerID = hostname
+		cfg.WorkerIDFamily = string(workerid.FamilyHostname)
+	default:
+		id, family := workerid.Default(hostname)
+		cfg.WorkerID = id
+		cfg.WorkerIDFamily = string(family)
+	}
 	cfg.WorkerEgressIP = getenv("INROAD_WORKER_EGRESS_IP", "")
 	// Left empty when unset, deliberately: the role-based default lives in
 	// worker.QueuesFor (cmd/worker composes it), not here — see the
@@ -533,6 +572,25 @@ func webauthnDefaults(publicURL string) (rpID, rpOrigin string) {
 		return "", ""
 	}
 	return u.Hostname(), u.Scheme + "://" + u.Host
+}
+
+// workerRoleIsAllOrUnset reports whether the raw (unparsed) INROAD_WORKER_ROLE
+// value names the RoleAll topology, or is empty (which worker.ParseRole also
+// treats as RoleAll). It duplicates only the "is it all" half of ParseRole's
+// switch — never the full valid-role list, which stays owned by
+// worker.ParseRole (see the WorkerRole field doc: this package must not
+// import internal/worker). An unrecognised value is classified as NOT RoleAll
+// here; cmd/worker's own ParseRole will refuse to start on a genuine typo
+// before the worker ever heartbeats, so misclassifying an invalid string has
+// no user-visible effect beyond which of two harmless defaults WorkerID takes
+// in a process that is about to fail to start anyway.
+func workerRoleIsAllOrUnset(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "all":
+		return true
+	default:
+		return false
+	}
 }
 
 func getenvInt(key string, fallback int) int {
