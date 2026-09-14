@@ -125,3 +125,37 @@ func (q *Queries) TouchMemberLastSeen(ctx context.Context, arg TouchMemberLastSe
 	_, err := q.db.Exec(ctx, touchMemberLastSeen, arg.WorkspaceID, arg.UserID)
 	return err
 }
+
+const upsertMemberRole = `-- name: UpsertMemberRole :one
+INSERT INTO workspace_members (workspace_id, user_id, role)
+VALUES ($1, $2, $3)
+ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role
+RETURNING id, workspace_id, user_id, role, created_at, last_seen_at
+`
+
+type UpsertMemberRoleParams struct {
+	WorkspaceID uuid.UUID  `json:"workspace_id"`
+	UserID      uuid.UUID  `json:"user_id"`
+	Role        MemberRole `json:"role"`
+}
+
+// Add the user to the workspace at role, or update their existing role if
+// they are already a member — the primitive `inroadctl grant-role` uses to
+// restore a lost owner, whichever way the access was lost (dropped from the
+// workspace entirely, or merely demoted). workspace_id/user_id are both FKs;
+// a foreign id fails the INSERT with 23503 rather than silently doing nothing,
+// which the caller checks for up front (GetWorkspace/GetUserByEmail) so it can
+// report which one was unknown.
+func (q *Queries) UpsertMemberRole(ctx context.Context, arg UpsertMemberRoleParams) (WorkspaceMember, error) {
+	row := q.db.QueryRow(ctx, upsertMemberRole, arg.WorkspaceID, arg.UserID, arg.Role)
+	var i WorkspaceMember
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Role,
+		&i.CreatedAt,
+		&i.LastSeenAt,
+	)
+	return i, err
+}

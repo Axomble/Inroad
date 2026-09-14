@@ -26,12 +26,19 @@ ENV LDFLAGS="-s -w \
   -X github.com/inroad/inroad/internal/platform/version.Date=${DATE}"
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="${LDFLAGS}" -o /out/inroad ./cmd/inroad
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+# inroadctl talks to Postgres directly (never through the API it ships beside),
+# so it stays usable for account recovery even when inroad itself won't start.
+# Baked into THIS image (parity plan P1.2) rather than shipped separately, so
+# `docker compose exec api inroadctl ...` works on every self-hosted install
+# with no extra download.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/inroadctl ./cmd/inroadctl
 
 # --- runtime ---
 FROM alpine:3.24
 RUN adduser -D -u 10001 inroad
 COPY --from=build /out/inroad /usr/local/bin/inroad
 COPY --from=build /out/migrate /usr/local/bin/migrate
+COPY --from=build /out/inroadctl /usr/local/bin/inroadctl
 COPY --from=web /web/dist /srv/web
 COPY deploy/docker/load-secrets.sh /usr/local/bin/load-secrets.sh
 COPY deploy/docker/api-entrypoint.sh /usr/local/bin/api-entrypoint

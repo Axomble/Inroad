@@ -51,3 +51,25 @@ func TestMigrateReleasesItsConnection(t *testing.T) {
 		t.Errorf("%d connections still open after %d Migrate calls, want 0", leaked, migrations)
 	}
 }
+
+// TestVersionReportsCurrentSchemaVersion confirms Version (`inroadctl
+// status`'s migration-version probe) returns a real, non-dirty version once
+// the schema is migrated — proving it reads the ACTUAL applied version rather
+// than, say, the highest embedded migration file.
+func TestVersionReportsCurrentSchemaVersion(t *testing.T) {
+	dsn := dbtest.DSN(t)
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	version, dirty, err := db.Version(dsn)
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if dirty {
+		t.Fatal("expected a freshly migrated schema to be clean, got dirty=true")
+	}
+	if version == 0 {
+		t.Fatal("expected a non-zero version after migrating, got 0")
+	}
+}

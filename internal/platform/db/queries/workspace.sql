@@ -4,6 +4,12 @@ INSERT INTO workspaces (name) VALUES ($1) RETURNING *;
 -- name: GetWorkspace :one
 SELECT * FROM workspaces WHERE id = $1;
 
+-- name: ListWorkspaces :many
+-- Every workspace, newest first. Operator-only listing (`inroadctl workspaces`)
+-- — there is no tenant-facing endpoint that enumerates every workspace, and
+-- this one deliberately does.
+SELECT * FROM workspaces ORDER BY created_at DESC;
+
 -- name: CompleteWorkspaceOnboarding :one
 -- Set the workspace's real name and stamp onboarding complete. ONE statement, so
 -- the rename and the stamp are inherently atomic -- there is no window in which a
