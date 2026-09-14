@@ -64,17 +64,17 @@ func TestAPIErrorMessageOmitsAnyBody(t *testing.T) {
 // A Gmail API failure arrives as *googleapi.Error, which the library has
 // already parsed. Converting it keeps the status AND the machine reason token,
 // so a 403 quota refusal is distinguishable from a 403 denial.
-func TestAPIErrorFromGoogleKeepsStatusAndReason(t *testing.T) {
+func TestGmailSendErrorKeepsStatusAndReason(t *testing.T) {
 	gerr := &googleapi.Error{
 		Code:    403,
 		Message: "User-rate limit exceeded.",
 		Errors:  []googleapi.ErrorItem{{Reason: "userRateLimitExceeded", Message: "User-rate limit exceeded."}},
 	}
-	converted := apiErrorFrom("gmail", "send", gerr)
+	converted := gmailSendError(gerr)
 
 	var target *APIError
 	if !errors.As(converted, &target) {
-		t.Fatalf("apiErrorFrom did not produce an *APIError: %v", converted)
+		t.Fatalf("gmailSendError did not produce an *APIError: %v", converted)
 	}
 	if target.Status != 403 {
 		t.Errorf("status = %d, want 403", target.Status)
@@ -86,11 +86,11 @@ func TestAPIErrorFromGoogleKeepsStatusAndReason(t *testing.T) {
 
 // A googleapi.Error with no Errors items still carries a status worth keeping —
 // a 429 typically has no reason item at all.
-func TestAPIErrorFromGoogleWithoutReasonItems(t *testing.T) {
-	converted := apiErrorFrom("gmail", "send", &googleapi.Error{Code: 429, Message: "Too Many Requests"})
+func TestGmailSendErrorWithoutReasonItems(t *testing.T) {
+	converted := gmailSendError(&googleapi.Error{Code: 429, Message: "Too Many Requests"})
 	var target *APIError
 	if !errors.As(converted, &target) {
-		t.Fatalf("apiErrorFrom did not produce an *APIError: %v", converted)
+		t.Fatalf("gmailSendError did not produce an *APIError: %v", converted)
 	}
 	if target.Status != 429 || target.Reason != "" {
 		t.Errorf("got status=%d reason=%q, want 429 and an empty reason", target.Status, target.Reason)
@@ -100,16 +100,16 @@ func TestAPIErrorFromGoogleWithoutReasonItems(t *testing.T) {
 // Anything that is not a provider HTTP reply must pass through UNCHANGED. A
 // dial failure is not an API status, and inventing a zero status for it would
 // make a network outage read as a provider verdict.
-func TestAPIErrorFromPassesThroughNonHTTPErrors(t *testing.T) {
+func TestGmailSendErrorPassesThroughNonHTTPErrors(t *testing.T) {
 	cause := errors.New("dial tcp: i/o timeout")
-	if got := apiErrorFrom("gmail", "send", cause); !errors.Is(got, cause) {
-		t.Fatalf("apiErrorFrom rewrote a non-HTTP error: %v", got)
+	if got := gmailSendError(cause); !errors.Is(got, cause) {
+		t.Fatalf("gmailSendError rewrote a non-HTTP error: %v", got)
 	}
 	var target *APIError
-	if errors.As(apiErrorFrom("gmail", "send", cause), &target) {
+	if errors.As(gmailSendError(cause), &target) {
 		t.Fatal("a dial failure was turned into an *APIError")
 	}
-	if got := apiErrorFrom("gmail", "send", nil); got != nil {
-		t.Fatalf("apiErrorFrom(nil) = %v, want nil", got)
+	if got := gmailSendError(nil); got != nil {
+		t.Fatalf("gmailSendError(nil) = %v, want nil", got)
 	}
 }

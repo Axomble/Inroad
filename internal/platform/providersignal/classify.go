@@ -23,8 +23,8 @@ import (
 //     interface here, every branch under it would be permanently untestable
 //     (CONTRIBUTING.md's second "tests that assert nothing" shape);
 //   - it is satisfied structurally, so a go-mail upgrade that renames either
-//     method is caught by smtpreply_test.go's assertion rather than by silently
-//     falling through to ReasonOther in production.
+//     method is caught by seam_test.go's compile-time assertion rather than by
+//     silently falling through to ReasonOther in production.
 //
 // *net/textproto.Error does NOT satisfy it (it carries fields, not methods) and
 // is handled separately below.

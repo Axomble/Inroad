@@ -30,6 +30,10 @@ type cleanupCore struct {
 	webhooksErr         error
 	jobRunsDeleted      int64
 	jobRunsErr          error
+	signalsDeleted      int64
+	signalsErr          error
+	decisionsDeleted    int64
+	decisionsErr        error
 	called              bool
 	idempotencyCalled   bool
 	observationsCalled  bool
@@ -37,6 +41,8 @@ type cleanupCore struct {
 	deadLettersCalled   bool
 	webhooksCalled      bool
 	jobRunsCalled       bool
+	signalsCalled       bool
+	decisionsCalled     bool
 }
 
 func (c *cleanupCore) CleanupExpired(context.Context) (int64, error) {
@@ -74,13 +80,27 @@ func (c *cleanupCore) PurgeScheduledJobRuns(context.Context) (int64, error) {
 	return c.jobRunsDeleted, c.jobRunsErr
 }
 
+func (c *cleanupCore) PurgeWorkerProviderSignals(context.Context) (int64, error) {
+	c.signalsCalled = true
+	return c.signalsDeleted, c.signalsErr
+}
+
+func (c *cleanupCore) PurgeFleetDecisions(context.Context) (int64, error) {
+	c.decisionsCalled = true
+	return c.decisionsDeleted, c.decisionsErr
+}
+
 func TestCleanupHandler(t *testing.T) {
-	// Seven DISTINCT counts. The log line is the only observable this job has —
+	// Nine DISTINCT counts. The log line is the only observable this job has —
 	// nothing returns the numbers — so the assertion below is what makes the
 	// fixture values mean anything, and distinct values are what turn "a count was
 	// logged" into "the RIGHT count was logged": identical numbers would pass a
 	// handler that logged the same variable every time.
-	core := &cleanupCore{deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2, deadLettersDeleted: 4, webhooksDeleted: 9, jobRunsDeleted: 6}
+	core := &cleanupCore{
+		deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2,
+		deadLettersDeleted: 4, webhooksDeleted: 9, jobRunsDeleted: 6,
+		signalsDeleted: 11, decisionsDeleted: 5,
+	}
 
 	restore := slog.Default()
 	var logs bytes.Buffer
@@ -111,6 +131,12 @@ func TestCleanupHandler(t *testing.T) {
 	if !core.jobRunsCalled {
 		t.Fatal("PurgeScheduledJobRuns was not called")
 	}
+	if !core.signalsCalled {
+		t.Fatal("PurgeWorkerProviderSignals was not called")
+	}
+	if !core.decisionsCalled {
+		t.Fatal("PurgeFleetDecisions was not called")
+	}
 
 	for _, want := range []struct {
 		msg  string
@@ -123,6 +149,8 @@ func TestCleanupHandler(t *testing.T) {
 		{"expired dead letters purged", 4},
 		{"expired webhook deliveries purged", 9},
 		{"expired scheduled job runs purged", 6},
+		{"expired worker provider signals purged", 11},
+		{"expired fleet decisions purged", 5},
 	} {
 		if got := loggedRows(t, logs.Bytes(), want.msg); got != want.rows {
 			t.Errorf("%q logged rows=%d, want %d — the count is this job's only observable",
@@ -234,4 +262,36 @@ func TestCleanupHandlerReturnsErrorOnScheduledJobRunPurgeFailure(t *testing.T) {
 	if !core.webhooksCalled {
 		t.Fatal("the earlier purges should still have run")
 	}
+}
+
+// Both fleet tables are written on a timer by every live worker and read by
+// nothing that deletes, so a purge that silently stopped running would be
+// invisible until the tables were a problem — invariant 55's reasoning, applied
+// to the newest two. Each failure has to surface for retry.
+func TestCleanupHandlerReturnsErrorOnFleetPurgeFailure(t *testing.T) {
+	t.Run("provider signals", func(t *testing.T) {
+		want := errors.New("db unavailable")
+		core := &cleanupCore{signalsErr: want}
+		err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
+		if !errors.Is(err, want) {
+			t.Fatalf("handler error = %v, want %v", err, want)
+		}
+		if !core.jobRunsCalled {
+			t.Fatal("the earlier purges should still have run")
+		}
+		if core.decisionsCalled {
+			t.Fatal("PurgeFleetDecisions must not run when the signal purge already failed")
+		}
+	})
+	t.Run("fleet decisions", func(t *testing.T) {
+		want := errors.New("db unavailable")
+		core := &cleanupCore{decisionsErr: want}
+		err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
+		if !errors.Is(err, want) {
+			t.Fatalf("handler error = %v, want %v", err, want)
+		}
+		if !core.signalsCalled {
+			t.Fatal("the earlier purges should still have run")
+		}
+	})
 }

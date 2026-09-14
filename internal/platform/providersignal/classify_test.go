@@ -19,7 +19,7 @@ import (
 // through a consumer-defined interface rather than the concrete type is what
 // makes this branch reachable at all (see CONTRIBUTING.md, "a concrete
 // dependency that tests satisfy with nil makes every branch behind it
-// unreachable"). smtpreply_test.go asserts the real type still satisfies it.
+// unreachable"). seam_test.go asserts the real type still satisfies it.
 type fakeSMTPReply struct {
 	code     int
 	enhanced string

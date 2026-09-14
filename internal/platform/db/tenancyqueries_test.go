@@ -137,6 +137,7 @@ var tenancyExceptions = map[string]string{
 	"warmup.sql:PurgeWarmupObservations":                "retention sweep over append-only warmup evidence, by age alone, returning a count (design §4.6).",
 	"deadletter.sql:PurgeTaskDeadLetters":               "retention sweep over captured retry-exhausted tasks, by age alone, returning a count. Same shape and same reasoning as PurgeWarmupObservations: the table is append-only in practice and had no sweep at all.",
 	"webhook.sql:PurgeWebhookDeliveries":                "retention sweep over the outbound-webhook delivery log, by age alone, returning a count. Same shape and reasoning as PurgeTaskDeadLetters: one row per (event, endpoint), append-only from the app, and no sweep of its own.",
+	"fleet.sql:PurgeFleetDecisions":                     "retention sweep over the append-only fleet decision log, by age alone, returning a count. The table carries workspace_id because a decision naming a mailbox is tenant data, but the 90-day purge is deployment maintenance across every tenant — scoping it would leave any workspace the sweep did not name growing forever.",
 	"agentchat.sql:FailStuckAgentRuns":                  "crash recovery at API startup: a run still 'running' at boot belongs to a process that is gone. Deployment-scoped repair, not a tenant read.",
 	"agentchat.sql:ResetStuckAgentMessages":             "companion to FailStuckAgentRuns; marks messages abandoned by a crashed process terminal.",
 

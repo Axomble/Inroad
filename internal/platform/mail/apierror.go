@@ -53,14 +53,18 @@ func (e *APIError) Unwrap() error { return e.Err }
 func (e *APIError) HTTPStatus() int        { return e.Status }
 func (e *APIError) ProviderReason() string { return e.Reason }
 
-// apiErrorFrom converts a Google API client failure into an *APIError, keeping
-// the status and the first machine reason item the library parsed.
+// gmailSendError converts a Gmail API send failure into an *APIError, keeping
+// the status and the first machine reason item the client library parsed.
+//
+// The Graph leg has no equivalent: it speaks raw HTTP here and builds its
+// *APIError directly at each status check, with an empty Reason because Graph's
+// error body is deliberately never read (see the APIError doc).
 //
 // Anything that is NOT an HTTP reply passes through unchanged — a dial timeout
 // is not a provider verdict, and giving it a zero status would make a network
-// outage read as one. nil passes through as nil so callers can wrap
+// outage read as one. nil passes through as nil so the caller can wrap
 // unconditionally.
-func apiErrorFrom(provider, op string, err error) error {
+func gmailSendError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -72,5 +76,5 @@ func apiErrorFrom(provider, op string, err error) error {
 	if len(gerr.Errors) > 0 {
 		reason = gerr.Errors[0].Reason
 	}
-	return &APIError{Provider: provider, Op: op, Status: gerr.Code, Reason: reason, Err: err}
+	return &APIError{Provider: "gmail", Op: "send", Status: gerr.Code, Reason: reason, Err: err}
 }
