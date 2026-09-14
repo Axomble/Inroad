@@ -51,8 +51,9 @@ relational data it needs (the per-org decrypted DEK, the Message-ID map) over th
 control plane's internal HTTP API with a bearer token.
 
 Inroad has the *seam* — `internal/coreapi` — but the worker runs in-process with
-a `pgxpool`. The split is logical, enforced by convention and a lint rule, not by
-the network.
+a `pgxpool`, and builds its own keyring from `INROAD_MASTER_KEY`. The split is
+logical, enforced by convention and review — not by a lint rule, and not by the
+network.
 
 **What the physical split buys:** a worker host that gets popped can't dump the
 tenant database. For a product whose workers deliberately run on cheap untrusted
