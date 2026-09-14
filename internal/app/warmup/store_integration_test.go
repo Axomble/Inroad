@@ -253,17 +253,23 @@ func TestStatsReads(t *testing.T) {
 // seedTransition inserts one transition row directly. The evaluator is the only
 // production writer and lives in coreapi, so the store's READ is what this file
 // exercises; the insert mirrors the columns that writer sets.
+//
+// mailbox_email included, and derived from the mailboxes row exactly as that
+// writer derives it: the trail is read back BY ADDRESS, so a fixture that names
+// the mailbox but not the address writes rows no read can see.
 func seedTransition(t *testing.T, f fixture, ws, mailbox uuid.UUID, toLane string, ago time.Duration) {
 	t.Helper()
 	if _, err := f.pool.Exec(f.ctx,
 		`INSERT INTO warmup_state_transitions (
-		     workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+		     workspace_id, mailbox_id, mailbox_email, from_state, to_state, reason_code, reason,
 		     from_lane, to_lane, lane_reason_code, lane_reason,
 		     placement_samples, spam_rate, bounce_samples, bounce_rate,
 		     complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
-		 VALUES ($1, $2, 'healthy', 'watch', 'spam_watch', 'spam placement rate above the watch threshold',
-		         'healthy', $3, 'lane_watch', 'moved to watch',
-		         40, 0.2, 200, 0.01, 1000, 0.0002, 0, 'warmup-phase1-v1', now() - $4::interval)`,
+		 SELECT m.workspace_id, m.id, lower(btrim(m.email)),
+		        'healthy', 'watch', 'spam_watch', 'spam placement rate above the watch threshold',
+		        'healthy', $3, 'lane_watch', 'moved to watch',
+		        40, 0.2, 200, 0.01, 1000, 0.0002, 0, 'warmup-phase1-v1', now() - $4::interval
+		   FROM mailboxes m WHERE m.id = $2 AND m.workspace_id = $1`,
 		ws, mailbox, toLane, ago.String(),
 	); err != nil {
 		t.Fatalf("seed transition: %v", err)
@@ -349,12 +355,14 @@ func seedTransitionWithPopulation(t *testing.T, f fixture, ws, mailbox uuid.UUID
 	t.Helper()
 	if _, err := f.pool.Exec(f.ctx,
 		`INSERT INTO warmup_state_transitions (
-		     workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+		     workspace_id, mailbox_id, mailbox_email, from_state, to_state, reason_code, reason,
 		     placement_samples, spam_rate, bounce_population, bounce_samples, bounce_rate,
 		     complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
-		 VALUES ($1, $2, 'healthy', 'throttled', 'campaign_bounce_throttle',
-		         'campaign hard-bounce rate above the throttle threshold',
-		         40, 0.02, $3, 200, 0.066, 1000, 0.0002, 0, 'warmup-phase1-v1', now() - $4::interval)`,
+		 SELECT m.workspace_id, m.id, lower(btrim(m.email)),
+		        'healthy', 'throttled', 'campaign_bounce_throttle',
+		        'campaign hard-bounce rate above the throttle threshold',
+		        40, 0.02, $3, 200, 0.066, 1000, 0.0002, 0, 'warmup-phase1-v1', now() - $4::interval
+		   FROM mailboxes m WHERE m.id = $2 AND m.workspace_id = $1`,
 		ws, mailbox, population, ago.String(),
 	); err != nil {
 		t.Fatalf("seed transition: %v", err)

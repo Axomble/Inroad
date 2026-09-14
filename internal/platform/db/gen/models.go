@@ -1245,6 +1245,7 @@ type WarmupStateTransition struct {
 	LaneReasonCode   *string            `json:"lane_reason_code"`
 	LaneReason       *string            `json:"lane_reason"`
 	BouncePopulation *string            `json:"bounce_population"`
+	MailboxEmail     string             `json:"mailbox_email"`
 }
 
 type WarmupThread struct {
