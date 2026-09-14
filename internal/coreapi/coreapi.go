@@ -35,6 +35,21 @@ var ErrNoMatch = errors.New("coreapi: no matching send")
 // may retry.
 var ErrInvalidComplaint = errors.New("coreapi: complaint rejected as invalid")
 
+// ErrNoBandCapacity is returned by AssignMailboxWorker when the mailbox's risk
+// band (fleet F5, derived from its warmup lane) has no live worker to place it
+// on: no worker already carries that band, AND no idle worker (carrying
+// nothing) is available to adopt into it. This is strict segregation refusing a
+// placement rather than co-locating risky traffic with clean — a refusal is
+// visible (the caller's retry/backoff surfaces it, and a warmup send's terminal
+// retry reaches task_dead_letters) and recoverable (add fleet capacity, or wait
+// for the offending mailbox's lane to recover); a silent co-location is neither.
+//
+// It is NEVER returned when the live fleet has at most one worker: with no
+// second worker to segregate onto there is no placement choice to make, so
+// the inprocess AssignMailboxWorker skips band matching entirely rather than
+// stopping self-host from sending (see that function's own doc for the rule).
+var ErrNoBandCapacity = errors.New("coreapi: no worker available in mailbox's risk band")
+
 // CRMCaptureClient is an optional execution-plane capability. Keeping it
 // separate from Client lets inbox workers feature-detect CRM capture without
 // forcing every worker fake and future remote client to implement it.
@@ -359,14 +374,32 @@ type Client interface {
 	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error
 	// AssignMailboxWorker resolves the destination queue for a mailbox's outbound
 	// traffic, pinning it to ONE worker's egress IP (the deliverability win). It
-	// is idempotent: an existing assignment is returned unchanged. A first
-	// assignment picks the least-loaded worker with a live heartbeat and persists
-	// it. When NO worker has a live heartbeat (single-node dev), it returns ""
-	// (the shared default queue) WITHOUT persisting, so everything still runs on
-	// one process and a real worker can claim the mailbox once it comes online.
-	// workspace-pinned — mailbox_worker_assignments is tenant data. The returned
-	// queueName is "w:<worker_id>" or "" for the default queue; it is derived
-	// server-side from the assignment, never from client input (invariant §17.8).
+	// is idempotent: an existing assignment is returned unchanged, PROVIDED the
+	// mailbox's risk band still matches what the row was assigned under (see
+	// below). A first assignment picks the least-loaded worker with a live
+	// heartbeat and persists it. When NO worker has a live heartbeat (single-node
+	// dev), it returns "" (the shared default queue) WITHOUT persisting, so
+	// everything still runs on one process and a real worker can claim the
+	// mailbox once it comes online. workspace-pinned — mailbox_worker_assignments
+	// is tenant data. The returned queueName is "w:<worker_id>" or "" for the
+	// default queue; it is derived server-side from the assignment, never from
+	// client input (invariant §17.8).
+	//
+	// Risk-band segregation (fleet F5). A mailbox's band (warmup.RiskBandForLane
+	// of its CURRENT lane — one source of truth, no parallel health concept) must
+	// match the band of every OTHER mailbox already on its worker: a degraded
+	// mailbox may never land on a worker currently carrying healthy traffic, and
+	// vice versa. Placement prefers a live worker already in the matching band;
+	// failing that, it may PROMOTE a genuinely idle live worker (carrying
+	// nothing) into that band; failing THAT, it returns ErrNoBandCapacity — a
+	// typed, explicit refusal rather than a silent co-location — UNLESS the live
+	// fleet has at most one worker, in which case there is no placement choice to
+	// make and segregation does not apply at all (self-host, RoleAll's one
+	// worker, must never be stopped from sending by this). A mailbox whose band
+	// changes (its lane moved) is migrated on its NEXT call to this method, not
+	// mid-flight — every warmup tick calls this again via the lazy chain, so a
+	// degrading mailbox moves off a healthy worker within one tick of the lane
+	// change, never thrashed by a mid-send reassignment.
 	AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (queueName string, err error)
 
 	// --- Warmup send path (warmup:tick; spec §4/§6) ---

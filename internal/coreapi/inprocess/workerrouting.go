@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/queue"
+	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
 // workerLiveWindow is how recently a worker must have heartbeated to be eligible
@@ -35,7 +37,8 @@ func (c client) UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP st
 }
 
 // AssignMailboxWorker resolves (and, on first sight, persists) the destination
-// queue for a mailbox. See the coreapi.Client interface doc for the contract.
+// queue for a mailbox, enforcing risk-band segregation (fleet F5). See the
+// coreapi.Client interface doc for the full contract.
 func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (string, error) {
 	mbID, err := uuid.Parse(mailboxID)
 	if err != nil {
@@ -48,9 +51,21 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 
 	liveSince := pgtype.Timestamptz{Time: time.Now().Add(-workerLiveWindow), Valid: true}
 
-	// 1. Idempotent: an existing assignment to a LIVE worker wins unchanged
-	//    (workspace-pinned, so a foreign workspace_id matches zero rows and falls
-	//    through to a fresh assignment scoped to ITS own workspace).
+	// Computed FIRST, before the idempotent read below, because that read has to
+	// compare the row's STORED band against the mailbox's CURRENT one — a
+	// mismatch (the lane moved since the row was written) must be treated like a
+	// dead worker and fall through to reassignment, which is how requirement 4
+	// ("a band change must move the mailbox") is satisfied: every call recomputes
+	// and compares, so the very next call after a lane change reassigns.
+	band, err := c.mailboxRiskBand(ctx, mbID, wsID)
+	if err != nil {
+		return "", err
+	}
+
+	// 1. Idempotent: an existing assignment to a LIVE worker in the SAME band
+	//    wins unchanged (workspace-pinned, so a foreign workspace_id matches zero
+	//    rows and falls through to a fresh assignment scoped to ITS own
+	//    workspace).
 	//
 	//    Liveness is checked here, not just when first assigning. An assignment
 	//    whose worker stopped heartbeating routes to a queue no process consumes,
@@ -63,7 +78,11 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 	})
 	switch {
 	case err == nil:
-		return queueForWorker(existing), nil
+		if existing.Band == band {
+			return queueForWorker(existing.WorkerID), nil
+		}
+		// Band mismatch: the row is stale evidence of a decision that no longer
+		// holds. Fall through exactly like a dead-worker row does — pick again.
 	case errors.Is(err, pgx.ErrNoRows):
 		// No assignment, or one pinned to a worker that has gone silent — both
 		// fall through to pick a live worker.
@@ -71,34 +90,58 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", fmt.Errorf("coreapi: load assignment: %w", err)
 	}
 
-	// 2. Pick the least-loaded LIVE worker (heartbeat within the live window).
-	workerID, err := c.q.PickLeastLoadedWorker(ctx, liveSince)
+	// 2. How many workers are live at all decides whether segregation applies.
+	//    Self-host (and any fleet mid-restart down to one node) has no SECOND
+	//    worker to segregate onto — there is no choice to make, so refusing would
+	//    only mean refusing to send at all, which this feature must never do.
+	//    liveCount==0 also takes this branch: PickLeastLoadedWorker's own
+	//    no-live-worker path below is unaffected by band logic either way.
+	liveCount, err := c.q.CountLiveWorkers(ctx, liveSince)
+	if err != nil {
+		return "", fmt.Errorf("coreapi: count live workers: %w", err)
+	}
+
+	// 3. Pick a worker. At most one live worker: the unsegregated legacy pick
+	//    (self-host bypass, step 2's comment). Otherwise: band-matched or
+	//    idle-promoted only — never off-band.
+	var workerID string
+	if liveCount <= 1 {
+		workerID, err = c.q.PickLeastLoadedWorker(ctx, liveSince)
+	} else {
+		workerID, err = c.pickBandedWorker(ctx, band, liveSince)
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		// 3. No live worker (single-node dev, or the whole fleet mid-restart):
-		//    shared default queue, no persist — so a real worker can claim this
-		//    mailbox once it comes online. Any stale row from a dead worker is
-		//    left in place rather than deleted here: this path runs on the send
-		//    hot path, the row is already being ignored by step 1's liveness
-		//    join, and step 4 overwrites it as soon as a live worker exists.
-		//    Reaping it is the maintenance job's business, not the sender's.
+		// No live worker at all (single-node dev, or the whole fleet
+		// mid-restart): shared default queue, no persist — so a real worker can
+		// claim this mailbox once it comes online. Any stale row from a dead
+		// worker is left in place rather than deleted here: this path runs on
+		// the send hot path, the row is already being ignored by step 1's
+		// liveness join, and step 4 overwrites it as soon as a live worker
+		// exists. Reaping it is the maintenance job's business, not the
+		// sender's.
 		return "", nil
+	case errors.Is(err, coreapi.ErrNoBandCapacity):
+		slog.Warn("worker assignment refused: no capacity in mailbox's risk band",
+			"mailbox_id", mailboxID, "workspace_id", workspaceID, "band", band, "live_workers", liveCount)
+		return "", coreapi.ErrNoBandCapacity
 	case err != nil:
-		return "", fmt.Errorf("coreapi: pick least-loaded worker: %w", err)
+		return "", fmt.Errorf("coreapi: pick worker: %w", err)
 	}
 
 	// 4. Persist the assignment. The INSERT ... SELECT writes a row ONLY when the
 	//    mailbox belongs to wsID (self-enforcing tenancy, defense in depth on top of
 	//    the SendJob resolver's own pin), so a mismatched pair inserts zero rows and
 	//    RETURNING yields ErrNoRows here — distinct from step 3's no-live-worker
-	//    ErrNoRows, which was on PickLeastLoadedWorker and returned "" WITHOUT
-	//    reaching this insert. On conflict the row is kept for a LIVE incumbent
-	//    (so both racers in a concurrent first-send agree) and handed to workerID
-	//    when the incumbent has gone silent (so a stranded mailbox actually moves).
-	//    liveSince makes that decision inside the statement, keeping it atomic
-	//    against another worker reassigning the same mailbox.
+	//    ErrNoRows, which was on the pick and returned "" WITHOUT reaching this
+	//    insert. On conflict the row is kept for a LIVE, SAME-BAND incumbent (so
+	//    both racers in a concurrent first-send agree) and handed to workerID
+	//    otherwise — the incumbent has gone silent, OR its band no longer matches
+	//    (the migration path requirement 4 needs). liveSince makes that decision
+	//    inside the statement, keeping it atomic against another worker
+	//    reassigning the same mailbox.
 	assigned, err := c.q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
-		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, LiveSince: liveSince,
+		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, Band: band, LiveSince: liveSince,
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -109,6 +152,55 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", fmt.Errorf("coreapi: persist assignment: %w", err)
 	}
 	return queueForWorker(assigned), nil
+}
+
+// mailboxRiskBand derives the mailbox's CURRENT risk band from its warmup
+// lane — the one source of truth (warmup.RiskBandForLane), never a parallel
+// health concept computed here. A mailbox with no warmup_participants row is
+// not enrolled in warmup at all and is treated as healthy (RiskBandForLane's
+// "" case): opting out of warmup cannot cost a mailbox placement alongside the
+// healthy pool any more than it costs it new campaign leads.
+func (c client) mailboxRiskBand(ctx context.Context, mbID, wsID uuid.UUID) (string, error) {
+	p, err := c.q.GetWarmupParticipant(ctx, gen.GetWarmupParticipantParams{MailboxID: mbID, WorkspaceID: wsID})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return warmup.RiskBandForLane(""), nil
+	case err != nil:
+		return "", fmt.Errorf("coreapi: load warmup participant for risk band: %w", err)
+	}
+	return warmup.RiskBandForLane(p.Lane), nil
+}
+
+// pickBandedWorker is step 2's multi-worker branch: strict segregation
+// (requirement 2), with the idle-worker promotion path (requirement 3).
+//
+// It prefers a live worker that ALREADY carries this band; failing that, a
+// live worker carrying NOTHING may be promoted into it. Only when NEITHER
+// exists does it refuse with ErrNoBandCapacity — never falling back to a
+// worker in the OTHER band, which is the one thing this function exists to
+// prevent.
+func (c client) pickBandedWorker(ctx context.Context, band string, liveSince pgtype.Timestamptz) (string, error) {
+	workerID, err := c.q.PickLeastLoadedWorkerForBand(ctx, gen.PickLeastLoadedWorkerForBandParams{
+		LiveSince: liveSince, Band: band,
+	})
+	switch {
+	case err == nil:
+		return workerID, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// No worker already in this band — try to promote an idle one.
+	default:
+		return "", fmt.Errorf("coreapi: pick least-loaded worker for band: %w", err)
+	}
+
+	workerID, err = c.q.PickIdleLiveWorker(ctx, liveSince)
+	switch {
+	case err == nil:
+		return workerID, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", coreapi.ErrNoBandCapacity
+	default:
+		return "", fmt.Errorf("coreapi: pick idle worker: %w", err)
+	}
 }
 
 // queueForWorker maps a worker_id to its dedicated affinity queue

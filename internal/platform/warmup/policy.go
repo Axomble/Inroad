@@ -542,6 +542,42 @@ func LanesCompatible(sender, recipient string) bool {
 	return LaneMaySend(s) && LaneMaySend(r) && s == r
 }
 
+// Risk bands for worker/egress-IP placement (fleet segregation, spec F5). A
+// band is COARSER than a lane on purpose: LanesCompatible pairs a warmup
+// PARTNER from the exact same lane, but IP placement only needs two buckets —
+// "may share an egress IP with the fully-vetted, proven-clean pool" and "may
+// not" — because the cost this exists to bound is co-locating ANY unproven or
+// degrading traffic with healthy traffic, not matching lane-for-lane.
+const (
+	RiskBandHealthy  = "healthy"
+	RiskBandDegraded = "degraded"
+)
+
+// RiskBandForLane derives a worker-placement risk band from a warmup lane —
+// the ONE source of truth the health state machine already computes. It never
+// invents a parallel health concept: everything it knows comes from `lane`.
+//
+// Only LaneHealthy is fully vetted. Every other lane is `degraded` for
+// placement purposes, including probation and recovery (unproven — a
+// brand-new mailbox has not yet earned the healthy pool's shared reputation
+// any more than a degrading one has kept it) and watch (an early bad signal),
+// even though several of those lanes may still SEND (LaneMaySend). Sealed
+// lanes (pending_auth/quarantine/blocked) are degraded too, though in
+// practice they never reach a placement call: nothing in those lanes may
+// send at all, so no caller has a mailbox to place.
+//
+// An empty lane means the mailbox is not a warmup participant at all (opted
+// out, or never enrolled) and is treated as healthy — the same "opting out
+// of warmup cannot cost a mailbox anything" rule laneWithholdsNewLeads
+// applies to campaign eligibility. A pure campaign-only mailbox has no risk
+// evidence for this axis to act on.
+func RiskBandForLane(lane string) string {
+	if lane == "" || lane == LaneHealthy {
+		return RiskBandHealthy
+	}
+	return RiskBandDegraded
+}
+
 // promotionAlarmed reports whether any evidence arm looks bad enough to withhold
 // promotion, INDEPENDENTLY of whether it met the minimum sample for escalation.
 //
