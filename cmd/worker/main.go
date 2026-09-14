@@ -80,6 +80,16 @@ func run() error {
 	}
 	logger.Info("worker role", "role", role,
 		"note", "control runs the scheduler and sweeps; send runs per-message work")
+	// Which of the three WorkerID sources fired (see config.Config.WorkerID's
+	// doc): "override" (INROAD_WORKER_ID pinned), "hostname" (RoleAll, or no
+	// public IP found on a fleet host — NAT/no-egress/CI), or "ipv4"/"ipv6"
+	// (derived from the host's public address). Logged unconditionally at
+	// INFO, not only on the no-public-IP fallback, because an operator
+	// diagnosing "why is this mailbox not moving with the box" needs the
+	// SAME id/family pair the `workers` row records (see UpsertWorker) in one
+	// place, and every path is equally worth a line, not just the surprising
+	// one.
+	logger.Info("worker identity", "worker_id", cfg.WorkerID, "id_family", cfg.WorkerIDFamily)
 
 	// Prometheus /metrics listener. mtx is always constructed (never nil): the
 	// campaign/warmup send handlers' finalize points record into it
@@ -232,7 +242,7 @@ func run() error {
 	// when run() returns (the server stopped), so the goroutine exits cleanly.
 	hbCtx, cancelHeartbeat := context.WithCancel(context.Background())
 	defer cancelHeartbeat()
-	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, role, logger)
+	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, cfg.WorkerIDFamily, role, logger)
 
 	// Start the periodic scheduler alongside the worker, if this replica is the
 	// one that schedules. It enqueues the reconcile sweeps (enrollments, inbox,
@@ -325,7 +335,7 @@ func (d deadLetterRecorder) RecordDeadLetter(ctx context.Context, in queue.DeadL
 // fake satisfying coreapi.Client's other methods (it has dozens — see the Deps
 // comment in internal/worker/handlers.go on the same tradeoff).
 type heartbeatClient interface {
-	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error
+	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP, idFamily string) error
 }
 
 // startHeartbeat registers this worker immediately, then refreshes its `workers`
@@ -368,7 +378,7 @@ type heartbeatClient interface {
 // NEW INROAD_WORKER_ID, or clear its assignment rows at cutover.
 //
 // RoleAll still heartbeats (self-host, the only worker there is).
-func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressIP string, role worker.Role, logger *slog.Logger) {
+func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressIP, idFamily string, role worker.Role, logger *slog.Logger) {
 	if !role.RunsPerMessageWork() {
 		logger.Info("heartbeat disabled by worker role", "role", role,
 			"note", "a control-role host has no per-message handlers; the assigner must never route a mailbox to it")
@@ -379,7 +389,7 @@ func startHeartbeat(ctx context.Context, core heartbeatClient, workerID, egressI
 		return
 	}
 	beat := func() {
-		if err := core.UpsertWorkerHeartbeat(ctx, workerID, egressIP); err != nil {
+		if err := core.UpsertWorkerHeartbeat(ctx, workerID, egressIP, idFamily); err != nil {
 			logger.Error("worker heartbeat failed", "worker_id", workerID, "err", err)
 		}
 	}

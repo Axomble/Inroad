@@ -55,14 +55,15 @@ const (
 // Metrics holds one process's Prometheus registry and every collector it
 // exposes.
 type Metrics struct {
-	registry      *prometheus.Registry
-	httpRequests  *prometheus.CounterVec
-	httpDuration  *prometheus.HistogramVec
-	sends         *prometheus.CounterVec
-	claims        *prometheus.CounterVec
-	sweepDuration *prometheus.HistogramVec
-	sweepRows     *prometheus.CounterVec
-	jobRunSeconds *prometheus.HistogramVec
+	registry              *prometheus.Registry
+	httpRequests          *prometheus.CounterVec
+	httpDuration          *prometheus.HistogramVec
+	sends                 *prometheus.CounterVec
+	claims                *prometheus.CounterVec
+	sweepDuration         *prometheus.HistogramVec
+	sweepRows             *prometheus.CounterVec
+	jobRunSeconds         *prometheus.HistogramVec
+	workerAssignmentStale prometheus.Counter
 }
 
 // sweepRowBuckets bound the rows-scanned histogram-free counter's companion
@@ -122,9 +123,14 @@ func New() *Metrics {
 			Help:    `Whole-handler wall time of a periodic reconcile job, labeled by job name (matching cmd/worker/scheduler.go's sweepRegistrars()) and outcome ("ok"|"error"). The per-label _count is the run count for that job/outcome pair, so this one histogram carries BOTH duration and outcome without a separate counter — see internal/platform/jobrun.Record, the sole emitter.`,
 			Buckets: jobRunDurationBuckets,
 		}, []string{"job", "outcome"}),
+		workerAssignmentStale: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "inroad_worker_assignment_stale_total",
+			Help: "Count of times AssignMailboxWorker found an existing mailbox_worker_assignments row whose worker had fallen out of the live window and reassigned it. Liveness expiry used to be a silent log line only; a rising rate here means a fleet host is dying without a graceful stop, or the live window is too narrow for the fleet's actual heartbeat jitter.",
+		}),
 	}
 	m.registry.MustRegister(
 		m.httpRequests, m.httpDuration, m.sends, m.claims, m.sweepDuration, m.sweepRows, m.jobRunSeconds,
+		m.workerAssignmentStale,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -260,6 +266,33 @@ func (m *Metrics) JobRunCompleted(job, outcome string, elapsed time.Duration) {
 		return
 	}
 	m.jobRunSeconds.WithLabelValues(job, outcome).Observe(elapsed.Seconds())
+}
+
+// WorkerAssignmentStale increments inroad_worker_assignment_stale_total.
+// Called from AssignMailboxWorker (internal/coreapi/inprocess/workerrouting.go)
+// exactly when it finds a mailbox_worker_assignments row whose worker has
+// fallen out of coreapi's 15-minute live window and reassigns the mailbox to
+// a live one — the deploy-safety reassignment path (spec invariant 24).
+//
+// This used to be observable only as a structured log line naming the
+// mailbox; that is still emitted alongside this call, but a log line is not
+// something a dashboard or an alert rule can threshold on. A rising rate here
+// is the symptom to graph: it means a fleet host is dying without a graceful
+// stop, or the live window is narrower than the fleet's real heartbeat
+// jitter.
+//
+// No labels: the mailbox and worker ids that would distinguish one
+// occurrence from another belong in the log line (which already carries
+// them), not in a Prometheus series — an unbounded label value here would be
+// the unbounded-cardinality mistake httpMiddleware's route-pattern comment
+// warns about, applied to ids instead of URLs.
+//
+// A nil receiver is a no-op, like every other method on Metrics.
+func (m *Metrics) WorkerAssignmentStale() {
+	if m == nil {
+		return
+	}
+	m.workerAssignmentStale.Inc()
 }
 
 // statusRecorder captures the status code the wrapped handler actually wrote,

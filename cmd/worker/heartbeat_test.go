@@ -15,7 +15,7 @@ type fakeHeartbeatClient struct {
 	calls int
 }
 
-func (f *fakeHeartbeatClient) UpsertWorkerHeartbeat(_ context.Context, _, _ string) error {
+func (f *fakeHeartbeatClient) UpsertWorkerHeartbeat(_ context.Context, _, _, _ string) error {
 	f.calls++
 	return nil
 }
@@ -32,7 +32,7 @@ func TestStartHeartbeatControlRoleNeverRegisters(t *testing.T) {
 	defer cancel()
 
 	core := &fakeHeartbeatClient{}
-	startHeartbeat(ctx, core, "worker-1", "", worker.RoleControl, slog.Default())
+	startHeartbeat(ctx, core, "worker-1", "", "hostname", worker.RoleControl, slog.Default())
 
 	if core.calls != 0 {
 		t.Errorf("control role called UpsertWorkerHeartbeat %d times, want 0: a control host must never become assignable", core.calls)
@@ -46,7 +46,7 @@ func TestStartHeartbeatAllRoleRegisters(t *testing.T) {
 	defer cancel()
 
 	core := &fakeHeartbeatClient{}
-	startHeartbeat(ctx, core, "worker-1", "", worker.RoleAll, slog.Default())
+	startHeartbeat(ctx, core, "worker-1", "", "hostname", worker.RoleAll, slog.Default())
 
 	if core.calls != 1 {
 		t.Errorf("all role called UpsertWorkerHeartbeat %d times on start, want 1", core.calls)
@@ -60,7 +60,7 @@ func TestStartHeartbeatSendRoleRegisters(t *testing.T) {
 	defer cancel()
 
 	core := &fakeHeartbeatClient{}
-	startHeartbeat(ctx, core, "worker-1", "", worker.RoleSend, slog.Default())
+	startHeartbeat(ctx, core, "worker-1", "", "hostname", worker.RoleSend, slog.Default())
 
 	if core.calls != 1 {
 		t.Errorf("send role called UpsertWorkerHeartbeat %d times on start, want 1", core.calls)

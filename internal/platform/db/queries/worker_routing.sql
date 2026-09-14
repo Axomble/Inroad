@@ -1,10 +1,14 @@
 -- name: UpsertWorker :exec
 -- Heartbeat: register or refresh this worker's row. egress_ip is recorded for
--- observability; last_seen_at drives the live-worker window in the assigner.
-INSERT INTO workers (worker_id, egress_ip, last_seen_at)
-VALUES ($1, $2, now())
+-- observability; id_family records which identity source produced worker_id
+-- (ipv4 | ipv6 | hostname | override — see internal/platform/workerid), so a
+-- NAT'd/hostname-derived worker is diagnosable from an IP-derived one without
+-- cross-referencing logs; last_seen_at drives the live-worker window in the
+-- assigner.
+INSERT INTO workers (worker_id, egress_ip, id_family, last_seen_at)
+VALUES ($1, $2, $3, now())
 ON CONFLICT (worker_id)
-DO UPDATE SET egress_ip = EXCLUDED.egress_ip, last_seen_at = now();
+DO UPDATE SET egress_ip = EXCLUDED.egress_ip, id_family = EXCLUDED.id_family, last_seen_at = now();
 
 -- name: GetLiveMailboxWorkerAssignment :one
 -- Existing assignment for a mailbox, but ONLY if the assigned worker is still
@@ -151,3 +155,19 @@ assigned_at = CASE
     ELSE now()
 END
 RETURNING worker_id;
+
+-- name: MailboxWorkerAssignmentExists :one
+-- Observability only, and deliberately called from ONE branch:
+-- AssignMailboxWorker's "no live assignment" path, after
+-- GetLiveMailboxWorkerAssignment has already returned pgx.ErrNoRows and
+-- before picking a replacement worker. At that point ErrNoRows is ambiguous
+-- between "never assigned" (the common first-send case, nothing worth
+-- reporting) and "assigned, but the incumbent fell out of the live window"
+-- (liveness expiry — previously silent; see the F3 spec's observability
+-- requirement). This query resolves that ambiguity with a second, cheap,
+-- index-backed lookup that ignores liveness entirely — by the time it runs,
+-- the caller already knows the row, if any, is not live.
+SELECT EXISTS (
+    SELECT 1 FROM mailbox_worker_assignments
+    WHERE mailbox_id = $1 AND workspace_id = $2
+) AS assignment_exists;

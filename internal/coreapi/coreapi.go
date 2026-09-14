@@ -367,11 +367,15 @@ type Client interface {
 	// --- Worker routing (per-IP egress; spec §15) ---
 
 	// UpsertWorkerHeartbeat refreshes this worker's row in the GLOBAL `workers`
-	// registry (worker_id, egress_ip, last_seen_at=now()) on each heartbeat tick,
-	// so AssignMailboxWorker can tell which workers are live. `workers` is global
-	// infrastructure state, NOT tenant data — no workspace pin (security
-	// invariant §17.9).
-	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error
+	// registry (worker_id, egress_ip, id_family, last_seen_at=now()) on each
+	// heartbeat tick, so AssignMailboxWorker can tell which workers are live.
+	// idFamily is which identity source produced workerID ("ipv4" | "ipv6" |
+	// "hostname" | "override" — see internal/platform/workerid.Family),
+	// recorded so an operator inspecting `workers` can tell a NAT'd or
+	// hostname-derived worker from an IP-derived one without
+	// cross-referencing logs. `workers` is global infrastructure state, NOT
+	// tenant data — no workspace pin (security invariant §17.9).
+	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP, idFamily string) error
 	// AssignMailboxWorker resolves the destination queue for a mailbox's outbound
 	// traffic, pinning it to ONE worker's egress IP (the deliverability win). It
 	// is idempotent: an existing assignment is returned unchanged, PROVIDED the

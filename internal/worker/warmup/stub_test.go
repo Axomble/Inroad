@@ -59,8 +59,8 @@ func (stubCore) MarkUnsubscribed(context.Context, string, string, string) error 
 func (stubCore) RecordReplyClass(context.Context, string, string, string, string, float64) error {
 	return nil
 }
-func (stubCore) MarkBounced(context.Context, string, string, string, bool) error { return nil }
-func (stubCore) UpsertWorkerHeartbeat(context.Context, string, string) error     { return nil }
+func (stubCore) MarkBounced(context.Context, string, string, string, bool) error     { return nil }
+func (stubCore) UpsertWorkerHeartbeat(context.Context, string, string, string) error { return nil }
 func (stubCore) AssignMailboxWorker(context.Context, string, string) (string, error) {
 	return "", nil
 }

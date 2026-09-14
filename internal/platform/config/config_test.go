@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inroad/inroad/internal/platform/workerid"
 )
 
 func TestLoadDefaultsAndOverrides(t *testing.T) {
@@ -262,6 +264,96 @@ func TestWorkerQueuesEmptyWhenUnset(t *testing.T) {
 	}
 	if len(cfg.WorkerQueues) != 0 {
 		t.Fatalf("WorkerQueues = %v, want empty (no role-blind default)", cfg.WorkerQueues)
+	}
+}
+
+// TestWorkerIDOverrideWinsRegardlessOfRole proves INROAD_WORKER_ID beats every
+// derivation path, including the fleet roles that would otherwise derive from
+// the public IP — operators pin it (the deploy docs tell them to), and tests
+// need determinism (F3 requirement 1).
+func TestWorkerIDOverrideWinsRegardlessOfRole(t *testing.T) {
+	for _, role := range []string{"", "all", "control", "send"} {
+		t.Run("role="+role, func(t *testing.T) {
+			setRequiredSecrets(t)
+			t.Setenv("INROAD_WORKER_ID", "pinned-id")
+			t.Setenv("INROAD_WORKER_ROLE", role)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.WorkerID != "pinned-id" {
+				t.Fatalf("WorkerID = %q, want pinned-id", cfg.WorkerID)
+			}
+			if cfg.WorkerIDFamily != string(workerid.FamilyOverride) {
+				t.Fatalf("WorkerIDFamily = %q, want %q", cfg.WorkerIDFamily, workerid.FamilyOverride)
+			}
+		})
+	}
+}
+
+// TestWorkerIDRoleAllKeepsHostnameDefault proves RoleAll — the self-host
+// topology, and the default for an unset INROAD_WORKER_ROLE — NEVER derives
+// from the public IP, matching this project's behaviour before per-IP
+// identity existed exactly, bit for bit. This is the hard constraint from the
+// F3 spec: deriving a different id for a self-host worker's default would
+// strand its existing mailbox_worker_assignments rows for the 15-minute
+// liveness window (coreapi's workerLiveWindow) on the very first restart
+// after the change shipped.
+func TestWorkerIDRoleAllKeepsHostnameDefault(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Skipf("os.Hostname unavailable in this environment: %v", err)
+	}
+	for _, role := range []string{"", "all", "ALL", "  All  "} {
+		t.Run("role="+role, func(t *testing.T) {
+			setRequiredSecrets(t)
+			t.Setenv("INROAD_WORKER_ID", "")
+			t.Setenv("INROAD_WORKER_ROLE", role)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.WorkerID != hostname {
+				t.Fatalf("WorkerID = %q, want the OS hostname %q for RoleAll", cfg.WorkerID, hostname)
+			}
+			if cfg.WorkerIDFamily != string(workerid.FamilyHostname) {
+				t.Fatalf("WorkerIDFamily = %q, want %q", cfg.WorkerIDFamily, workerid.FamilyHostname)
+			}
+		})
+	}
+}
+
+// TestWorkerIDDerivedForFleetRoles proves a non-RoleAll worker (control or
+// send — the fleet topology) computes its default id and family by calling
+// workerid.Default, rather than config re-deriving its own copy of that
+// logic inline. The actual VALUE is whatever this test machine's interfaces
+// produce; workerid's own package tests pin the derivation algorithm itself
+// against fabricated interface lists (workerid_test.go) — this test only
+// proves config.Load is wired to call it, by asserting it agrees with a
+// direct call to the same function.
+func TestWorkerIDDerivedForFleetRoles(t *testing.T) {
+	hostname, _ := os.Hostname()
+	wantID, wantFamily := workerid.Default(hostname)
+
+	for _, role := range []string{"control", "send"} {
+		t.Run("role="+role, func(t *testing.T) {
+			setRequiredSecrets(t)
+			t.Setenv("INROAD_WORKER_ID", "")
+			t.Setenv("INROAD_WORKER_ROLE", role)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if cfg.WorkerID != wantID {
+				t.Fatalf("WorkerID = %q, want %q (workerid.Default)", cfg.WorkerID, wantID)
+			}
+			if cfg.WorkerIDFamily != string(wantFamily) {
+				t.Fatalf("WorkerIDFamily = %q, want %q", cfg.WorkerIDFamily, wantFamily)
+			}
+		})
 	}
 }
 
