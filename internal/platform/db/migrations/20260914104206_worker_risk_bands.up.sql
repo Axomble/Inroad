@@ -31,8 +31,9 @@ WHERE p.mailbox_id = a.mailbox_id
   AND p.workspace_id = a.workspace_id
   AND p.lane <> 'healthy';
 
--- Serves PickLeastLoadedWorkerForBand's per-worker "does this worker already
--- carry this band" EXISTS check. The pre-existing plain worker_id index still
--- serves the load COUNT(*) subquery and PickIdleLiveWorker's NOT EXISTS.
+-- Serves the per-worker band lookups added in fix-round-1: PickPureWorkerForBand's
+-- EXISTS(band = X)/NOT EXISTS(band <> X) pair and PickMixedWorker's
+-- COUNT(DISTINCT band). The pre-existing plain worker_id index still serves the
+-- load COUNT(*) subquery shared by every pick and PickIdleLiveWorker's NOT EXISTS.
 CREATE INDEX mailbox_worker_assignments_worker_band
     ON mailbox_worker_assignments (worker_id, band);
