@@ -221,5 +221,14 @@ func (c client) openMailboxSecret(ctx context.Context, ws, mailboxID uuid.UUID, 
 	if err != nil {
 		return nil, nil, err
 	}
+	// The answer must be about the mailbox we asked about. A remote opener reads
+	// the row itself, so a provider it reports that disagrees with the row this
+	// caller already read means the two are not looking at the same mailbox (or
+	// it changed under us mid-job) — and dialing SMTP with an access token, or
+	// Gmail with a password, is not a failure mode worth discovering at the
+	// provider. Refuse instead.
+	if sec.Provider != provider {
+		return nil, nil, fmt.Errorf("credential opener answered for provider %q, mailbox %s is %q", sec.Provider, mailboxID, provider)
+	}
 	return sec.AccessToken, sec.SMTPPassword, nil
 }

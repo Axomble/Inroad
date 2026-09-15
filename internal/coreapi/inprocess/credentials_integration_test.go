@@ -182,6 +182,53 @@ func TestTheBrokerWillNotOpenACrossTenantMailbox(t *testing.T) {
 	}
 }
 
+// The webhook endpoint's HMAC signing secret is the OTHER thing the worker used
+// to need a keyring for (GetWebhookDeliveryJob). It brokers too, and — the part
+// worth asserting — the broker IGNORES the cached ciphertext the caller passes
+// and re-reads the row itself, so a worker cannot name the blob to open.
+func TestAWebhookEndpointSecretBrokersAndIgnoresTheCallersCiphertext(t *testing.T) {
+	f := setupBroker(t)
+	sealer, err := itKeyring(t, f.q).SealerFor(f.ctx, f.ws)
+	if err != nil {
+		t.Fatalf("sealer: %v", err)
+	}
+	sealed, err := sealer.Seal([]byte("the-signing-secret"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	ep, err := f.q.CreateWebhookEndpoint(f.ctx, gen.CreateWebhookEndpointParams{
+		WorkspaceID: f.ws, Url: "https://receiver.test/hook", Description: "it",
+		SecretCiphertext: []byte(sealed), EventTypes: []string{"reply.received"}, Active: true,
+	})
+	if err != nil {
+		t.Fatalf("endpoint: %v", err)
+	}
+
+	// A DIFFERENT workspace's ciphertext handed in as the "cache". If the broker
+	// honoured it, this would either open the wrong secret or fail — either way
+	// the worker would be choosing what gets decrypted.
+	foreign, err := f.q.CreateWorkspace(f.ctx, "Broker IT hook "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("foreign workspace: %v", err)
+	}
+	foreignSealer, err := itKeyring(t, f.q).SealerFor(f.ctx, foreign.ID)
+	if err != nil {
+		t.Fatalf("foreign sealer: %v", err)
+	}
+	decoy, err := foreignSealer.Seal([]byte("not-this-one"))
+	if err != nil {
+		t.Fatalf("seal decoy: %v", err)
+	}
+
+	got, err := f.remote.OpenWebhookEndpointSecret(f.ctx, f.ws, ep.ID, []byte(decoy))
+	if err != nil {
+		t.Fatalf("OpenWebhookEndpointSecret: %v", err)
+	}
+	if string(got) != "the-signing-secret" {
+		t.Fatalf("secret = %q, want the-signing-secret", got)
+	}
+}
+
 // Belt and braces on the sealer itself: a field ciphertext is AAD-bound to its
 // workspace (docs/security.md invariant 15), so even a broker that somehow read
 // the right row under the wrong workspace could not decrypt it.
