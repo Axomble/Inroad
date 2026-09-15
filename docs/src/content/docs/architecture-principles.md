@@ -98,20 +98,28 @@ Worker *packages* reach relational data and decrypted credentials **only** throu
 Hold that line without exception: it is what lets the execution plane move to a
 separate host, or a remote transport, without touching worker code.
 
-But be exact about what it currently buys. The rule is held by convention and
-review — there is no `depguard` entry, no import-restriction linter, and no
-architecture test that fails if someone breaks it. And the worker *process* is
-not isolated from the data at all: `cmd/worker` opens its own `pgxpool` and
-builds the same `crypto.Keyring` as `cmd/inroad` (both call `keys.BuildKeyring`,
-both are handed `INROAD_MASTER_KEY`), so a worker host can unwrap any
-workspace's DEK regardless of what its packages import. `coreapi` is an
-in-process function call today.
+But be exact about what it currently buys. The *import* rule is enforced
+mechanically: the `worker-no-db` `depguard` rule in `.golangci.yml` fails
+`golangci-lint run` (and therefore CI) if a non-test file under
+`internal/worker/` imports `internal/platform/db`. The *process* boundary is
+still partial — `cmd/worker` opens its own `pgxpool` and `coreapi` is an
+in-process function call today, so a worker host reads the tenant database
+regardless of what its packages import.
+
+One half of containment *is* real now, and only for one role. A `role=send`
+worker builds no `crypto.Keyring` at all: `cmd/worker.resolveCredentialMode`
+never reaches `keys.BuildKeyring` for that role, refuses to start if it is given
+`INROAD_MASTER_KEY`, and obtains each credential from the control plane over an
+authenticated channel (`internal/platform/credbroker`). So a send host can read
+`secret_ciphertext` and cannot decrypt it. `role=all` — the single-process
+self-host topology — keeps its local keyring and is unchanged.
 
 So this principle is about *changeability* — keeping one seam so the split stays
-possible — and not yet about *containment*. It becomes a containment boundary
-when `coreapi` gains a remote transport and the worker drops its pool and its
-keyring; until then, nothing in the deployment stops a compromised worker from
-reading the tenant database, and no document should suggest otherwise.
+possible — plus exactly one containment property (the key), and not yet about
+containment of the data. It becomes a full containment boundary when `coreapi`
+gains a remote transport and the worker drops its pool; until then, nothing in
+the deployment stops a compromised worker from *reading* the tenant database,
+and no document should suggest otherwise.
 
 **No transaction spans the seam.** The send path claims in a transaction, commits,
 *then* does SMTP (`stepsendjob.go:493-536`). The residual window — SMTP succeeds,

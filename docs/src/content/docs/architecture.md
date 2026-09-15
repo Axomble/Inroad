@@ -17,6 +17,200 @@ weigh what it gives up — see [Architecture Principles](/architecture-principle
 - **Execution Plane (`cmd/worker`):** Contains background engines responsible for sending campaign emails, inbox polling, deliverability evaluation, and mailbox warmup.
 - **CoreAPI Boundary (`internal/coreapi`):** The worker *packages* reach relational data and unseal encrypted mailbox credentials only through `internal/coreapi` — one seam, so the execution plane can move to its own host without touching worker code. That much is enforced mechanically: a `depguard` rule in `.golangci.yml` fails the build if a non-test file under `internal/worker/` imports `internal/platform/db`. The *process* boundary is still partial. The worker opens its own `pgxpool` and resolves `coreapi` to an in-process function call rather than a network hop, so a compromised worker host still reads the tenant database. What it no longer holds is the KEY: a `role=send` worker builds no `crypto.Keyring`, refuses to start if it is given `INROAD_MASTER_KEY`, and obtains each mailbox credential from the control plane over an authenticated channel (`internal/platform/credbroker`) — so the ciphertext it can read, it cannot decrypt. The single-process self-host topology (`role=all`) keeps its local keyring and is unchanged. The boundary becomes a full one — a worker host that cannot read the tenant database at all — when `coreapi` gains its remote transport (HTTP/gRPC) and the worker gives up its pool. That part is designed, not built.
 
+## The Sending Fleet
+
+A `role=send` worker is a *sending identity*, not just a unit of throughput. This
+section describes how mailboxes are placed onto workers, how that placement is
+measured, and when it is revisited.
+
+### The asymmetry the whole design rests on
+
+**Inroad never delivers to a recipient's MX.** Every send authenticates to the
+*customer's own* provider — their SMTP relay, the Gmail API, or Microsoft Graph —
+and that provider delivers from its own outbound pool. `NetSender.Send` dials
+`mailboxes.smtp_host`; the Gmail and Graph legs hit fixed provider hosts. The one
+place a recipient domain's MX is resolved, `esp.LookupMX`, only *classifies* the
+domain — [invariant 46](/security/) states the resolved host is never dialed.
+
+Two consequences, and every other decision here follows from them:
+
+- A worker's egress IP is **invisible to recipient-side spam filtering**.
+  Recipient-side reputation — bounces, complaints, inbox-vs-spam placement — cannot
+  transfer between mailboxes that share a worker, because the recipient never
+  observed the worker.
+- That same IP is **highly visible to the mailbox provider**, which sees it on
+  every send and every poll. Providers challenge sign-ins, throttle and rate-limit
+  *per source address* (`454 4.7.0`, `421 4.7.28`). That is the real per-IP risk.
+
+So IP **stability** per mailbox beats IP **diversity**. Moving a mailbox to a
+different worker discards trust that accrued per `(mailbox, IP)` pair at the
+provider, which is why a migration is priced as a cost rather than a win.
+
+### Provider signals (`platform/providersignal`, `worker/fleetsignal`)
+
+Each worker classifies what the provider said — at the capture point, where the
+reply is still in hand, never in SQL — into a closed vocabulary: `ok`,
+`auth_failed`, `rate_limited`, `throttled`, `blocked`, `rejected`, `unreachable`,
+`other`, keyed by transport leg (`smtp`/`gmail`/`m365`) and operation
+(`send`/`poll`). Counts accumulate in memory as **window deltas**, never running
+totals, and flush to `worker_provider_signals` every 5 minutes. A delta means
+aggregation is a plain `SUM` over a time range, and a worker restart costs at most
+one partial window rather than corrupting a cumulative series. The key space is
+bounded by construction at 48 entries, so a hostile or novel provider response
+cannot grow it.
+
+Telemetry never fails a send: `Observe` does one map write under a mutex, and a
+failed flush discards its window rather than restoring counts that may already
+have landed.
+
+### Placement by score (`platform/fleetscore`)
+
+Placement resolves a mailbox's destination queue through
+`coreapi/inprocess.AssignMailboxWorker`, in four steps:
+
+1. **Incumbency.** An existing assignment to a *live* worker wins unchanged, and
+   nothing else is read or computed. This is control flow, not a weight —
+   expressed as a weight the rule would be an arbitrarily large number nothing
+   could outvote. Liveness is still checked every resolve (15-minute window
+   against a 5-minute heartbeat), because an assignment to a worker that stopped
+   heartbeating routes to a queue nothing consumes.
+2. **The mailbox's facts** — its provider leg and its warmup lane, mapped to a
+   risk band through `warmup.RiskBandForLane`.
+3. **Self-host bypass.** At most one live worker means there is no placement
+   *choice*, so neither the band nor the score nor the health gate applies.
+4. **Score** every live worker and take the best.
+
+Scoring replaced an earlier tiered **filter** (pure-band match → idle promotion →
+already-mixed → refuse), because filters compose multiplicatively: every added
+constraint is another gate, and conjoined gates eventually admit nothing — so the
+fleet refused placements exactly when it was fullest. A term added to a sum can
+only shift a preference.
+
+**Health is the only hard gate.** A worker is excluded only when every recent
+verdict from *this mailbox's provider* was a refusal to talk to it and nothing has
+completed since. A worker with no signals is **new, not unhealthy**. Exceeding the
+load target produces a heavily degraded score, never ineligibility — a capacity
+number is a guess, and refusing on a guess refuses when you are busiest.
+
+The additive terms, each normalised to `[0,1]` so the weights are comparable:
+
+| Term | Weight | What it prices |
+| :--- | ---: | :--- |
+| Headroom | +10 | Spare capacity — the packing term |
+| Overload | −60 | Projected load past `TargetLoad` (40), on a ramp |
+| Blast radius | −8 | Concentrating one workspace on one worker |
+| Provider crowding | −6 | Piling one provider's mailboxes onto one egress IP |
+| Band conflict | −2 | Co-locating risk bands |
+
+The **ordering** is the design. Overload exceeds every other term combined, so no
+mix of preferences can stack another mailbox onto an over-target worker while an
+under-target one exists. Band conflict is deliberately weakest: it is the only
+term whose causal story does not reach a worker's egress IP, since a band is
+derived entirely from recipient-side signals.
+
+Mailboxes are weighted by what they actually consume — an SMTP+IMAP mailbox costs
+`1`, a Gmail/Graph mailbox `0.35`, because the latter has no persistent IMAP leg.
+Counting both as "1 mailbox" overprices an all-Gmail worker by roughly 3× and
+drives placement away from the workers with the most room. Ties resolve on worker
+id ascending, so two callers racing the same first send converge on one worker
+instead of splitting a mailbox's mail across two egress IPs.
+
+An empty ranking is the one refusal placement can produce, and it means what it
+says: nothing in the live fleet can serve this mailbox's provider right now.
+
+### Rotation (`platform/fleetrotate`)
+
+Placement treats a live incumbent as unconditional, which leaves exactly one hole:
+a worker whose IP the provider has blocked keeps every mailbox already on it, and
+each keeps failing forever because nothing re-asks the question. Rotation is the
+separate urgency gate that closes it — a `fleet:rotate` task on the `control`
+queue every 5 minutes.
+
+It is deliberately an **exception**, not a tidying pass. A gate that fires easily
+undoes the stability placement exists to provide, and a fleet that churns away
+weeks of accrued reputation is worse off than one that never rotates. So every
+number is a brake:
+
+| Tier | Trigger | Bypasses brakes? |
+| :--- | :--- | :--- |
+| `unreachable` | Worker stopped heartbeating — its affinity queue has no consumer, so tasks neither run nor fail nor alert | Yes |
+| `unhealthy` | The provider has been refusing this worker, nothing completed since | Yes |
+| `balance` | Nothing is wrong; another worker merely scores better | No |
+| `none` | Leave it alone | — |
+
+- **Residency floor**, 12 hours, paid only by `balance`. The evidence an
+  opportunistic move rests on is at most one hour old, so a shorter floor would let
+  a mailbox move on evidence generated while it sat somewhere else.
+- **Margin**, 10, which the destination must *beat*, never tie. That is exactly
+  `HeadroomWeight`, and the identity is the point: the packing term spans its whole
+  range in 10, so **imbalance alone cannot move a mailbox**. It also exceeds every
+  soft penalty individually.
+- **Caps**, 20 moves per tick and 5 per destination. The per-destination cap
+  matters more than it looks: destination scores are measured, then acted on, and
+  the send path is placing mailboxes concurrently that the tick cannot see, so the
+  emptiest worker in the picture is one several callers may be converging on.
+
+Health has **one** definition and rotation reuses `fleetscore`'s
+`Eligible` unchanged — two disagreeing definitions would let a worker be too sick
+to receive new mailboxes and well enough to keep the ones it has, which is the
+original bug with the sign flipped. The incumbent is scored *vacated* (with the
+mailbox taken off it), so staying and moving are comparable; without that the
+incumbent is charged for the mailbox twice and every comparison leans toward
+moving.
+
+### The decision log (`platform/fleetdecision`)
+
+An assignment row records the answer and never the reasoning, so a mailbox that
+moved, one that was refused a placement, and one nothing ever considered were
+indistinguishable afterwards. The append-only `fleet_decisions` log records every
+`assign` / `rotate` / `quarantine` / `refused`, with an actor (`auto:<kind>` or
+`operator:<user id>`).
+
+Its one hard rule is enforced by construction: **an entry must not print a score
+comparison it did not make.** `Reason` has no exported field and can only be built
+through `Chose`, `ChoseUncontested` or `Forced`; only the first renders a
+comparison, and it degrades to `ChoseUncontested` rather than inventing a
+runner-up at `0.00`. A forced decision renders its cause and nothing numeric,
+because nothing numeric was computed — otherwise an operator tunes a threshold
+against a number nothing produced.
+
+### Worker identity (`platform/workerid`)
+
+A fleet worker's id is derived from its host's **public IP**, not its hostname:
+reputation is per-IP, so a reinstalled host keeps its IP and should keep its
+affinity, while a host with a new IP is genuinely a new sender and must not
+inherit the old one's assignments. A container hostname changes on
+`--force-recreate`, silently stranding the affinity queue keyed on it — a failure
+this project has already hit.
+
+The id is a UUIDv5 in the fixed RFC 4122 DNS namespace, so a provisioning script
+on another host, in another language, computes the same id from the same IP. The
+`workers` row records which source produced it (`ipv4`, `ipv6`, `hostname` for a
+NAT'd host with no public address, or `override` for a pinned
+`INROAD_WORKER_ID`), so an operator can tell them apart without reading logs.
+`role=all` deliberately keeps the hostname, exactly as before per-IP identity
+existed.
+
+### The operator view
+
+`GET /fleet/workers`, `GET /fleet/mailboxes/{id}/decisions` and `GET /fleet/jobs`
+back the console's **Settings → Fleet** page. All three are admin-session-only:
+mounted in the session-only group *and* wrapped in `RequireRole("admin")`, so an
+API key or OAuth token is rejected twice over. The worker read is not a fleet
+census — it inner-joins through the caller's own assignments, so a worker carrying
+none of that workspace's mailboxes does not appear and the deployment's size is
+not discoverable. See [invariant 24](/security/) for why worker ids are shown
+rather than redacted, and [invariant 70](/security/) for the one field withheld
+outright.
+
+### What is designed, not built
+
+Per-mailbox credential scoping. Every `send` worker consumes the shared `send`
+queue and may legitimately be handed any mailbox's job — only `warmup:tick` is
+routed by assignment — so the credential broker must answer for any mailbox the
+token names. Scoping needs per-mailbox routing first. Worker identity, which that
+scoping also needs, does now exist.
+
 ## System Monorepo Layout
 
 ```
