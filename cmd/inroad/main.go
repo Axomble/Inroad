@@ -39,6 +39,7 @@ import (
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/emailotp"
 	"github.com/inroad/inroad/internal/app/events"
+	"github.com/inroad/inroad/internal/app/fleet"
 	"github.com/inroad/inroad/internal/app/idempotency"
 	"github.com/inroad/inroad/internal/app/identity"
 	"github.com/inroad/inroad/internal/app/inbox"
@@ -456,6 +457,10 @@ func run() error {
 	deliverabilitySvc := deliverability.NewService(deliverability.NewPgStore(pool))
 	deliverabilityHandler := deliverability.NewHandler(deliverabilitySvc)
 	pulseSvc := pulse.NewService(pulse.NewPgStore(queries))
+	// The fleet operator view: read-only over the worker registry, the provider
+	// signal counters, the placement decision log and the scheduled-job ledger.
+	// It owns no table and writes nothing.
+	fleetSvc := fleet.NewService(fleet.NewPgStore(queries))
 	// Cross-campaign performance. Its own domain rather than a campaign
 	// endpoint: it answers a workspace-level question (which campaign is
 	// working) from one query across every campaign, where campaign.Service
@@ -786,6 +791,16 @@ func run() error {
 		// endpoint carries an HMAC signing secret and is integration
 		// infrastructure, not part of the api-key/OAuth data contract.
 		{pattern: "/api/v1/webhook-endpoints", handler: webhook.NewHandler(webhookSvc).Routes()},
+		// The fleet operator view. Session-only AND admin-gated inside Routes(),
+		// and both halves are load-bearing: it returns worker ids and egress IPs
+		// for the workers this workspace's mail leaves from, which no delegated
+		// OAuth client or API key may ever read (fleet.Handler.Routes carries the
+		// full argument, and security.md invariant 24 describes the narrowing).
+		// Mounted on its own prefix rather than under /mailboxes, because that
+		// mount lives in the data plane under an OAuth-grantable read scope —
+		// hanging the per-mailbox decision log there would expose worker ids to
+		// exactly the caller the gate excludes.
+		{pattern: "/api/v1/fleet", handler: fleet.NewHandler(fleetSvc).Routes()},
 		// The realtime socket, for the same reason as agentchat above: it acts on
 		// behalf of a human session, so an `inrd_` key or an OAuth client cannot
 		// open one. The workspace it fans out comes from the signed connect ticket,

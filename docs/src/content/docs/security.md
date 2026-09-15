@@ -271,15 +271,54 @@ limit / abuse control here is tracked in the Deferred list below.
     mismatched (mailbox, workspace) pair yields zero source rows from the
     `INSERT … SELECT`, so it never reaches the conflict clause at all. The
     `workers` heartbeat registry is global infrastructure state — it holds no
-    tenant rows and is never returned on a tenant-facing API, and neither is
-    `worker_provider_signals`, which records how a provider is treating one
-    egress IP. Scored placement (fleet F4) reads both fleet-wide on purpose:
-    `ListPlacementCandidates` answers "what is each worker carrying", which is a
-    question about infrastructure and has no per-tenant answer. It returns only
-    worker ids and counts — never a mailbox, an address or any tenant row — and
-    the single `workspace_id`-filtered aggregate in it measures the CALLING
-    workspace's own footprint, so it is a per-tenant number computed for that
-    tenant rather than a pin that could be forgotten.
+    tenant rows, and neither does `worker_provider_signals`, which records how a
+    provider is treating one egress IP. Scored placement (fleet F4) reads both
+    fleet-wide on purpose: `ListPlacementCandidates` answers "what is each worker
+    carrying", which is a question about infrastructure and has no per-tenant
+    answer. It returns only worker ids and counts — never a mailbox, an address
+    or any tenant row — and the single `workspace_id`-filtered aggregate in it
+    measures the CALLING workspace's own footprint, so it is a per-tenant number
+    computed for that tenant rather than a pin that could be forgotten.
+
+    **Neither is reachable by a machine credential.** Both are readable on
+    exactly one surface, `internal/app/fleet` (`/api/v1/fleet`), which is mounted
+    in `cmd/inroad`'s SESSION-ONLY group and additionally wraps its whole router
+    in `auth.RequireRole("admin")`. Those are two independent barriers: the group
+    rejects an `inrd_` API key or an `inoa_` OAuth token at authentication, and
+    RequireRole rejects them again on role, because both machine verifiers assign
+    an EMPTY role by construction and an empty role ranks below every gate.
+    `TestNoScopeGrantReachesTheFleetSurface` drives a principal holding every
+    scope in `auth.AllScopes` through the real router and asserts 403.
+
+    This narrows an earlier, stricter reading of this invariant ("never returned
+    on a tenant-facing API"), and the narrowing is deliberate rather than
+    incidental. A worker id CANNOT be withheld from the placement decision log:
+    `fleetdecision.Chose` renders "chose w-1 (score 0.82) over w-2 (score 0.31)",
+    and serving that prose unaltered is the whole point of the decision endpoint
+    (the constructors exist so a forced decision never claims a comparison nobody
+    computed — reformatting the text is how that guarantee is lost). Stripping a
+    `worker_id` field while printing worker ids inside a sentence would be
+    redaction theatre.
+
+    What the surface withholds instead is more than the identifier: it is not a
+    fleet census. `ListWorkspaceFleetWorkers` INNER JOINs through the caller's own
+    `mailbox_worker_assignments`, so a worker carrying none of that workspace's
+    mailboxes does not appear and the deployment's size is not discoverable;
+    every count returned is that workspace's own footprint, never fleet-wide
+    occupancy. `RollupWorkspaceFleetProviderSignals` is scoped to the same worker
+    set by a subquery inside the statement. The counters it returns are
+    shared-fate aggregates — they include events other tenants' mailboxes on the
+    same worker caused — which is the fact being reported rather than a leak
+    around one: the provider's verdict is about the address, nothing per-tenant
+    is recoverable from a sum, and the UI says so on screen.
+
+    The redaction on `GET /dead-letters` (`deadletter.workerQueueLabel`, which
+    collapses a per-worker queue to the literal `"worker"`) is NOT superseded by
+    any of this and must stay. That route is gated on `campaigns:read`, which IS
+    OAuth-grantable, so a delegated third-party client could otherwise enumerate
+    fleet hostnames. The gate is what differs between the two surfaces, not the
+    sensitivity of the field. See also invariant 70 for the one field the fleet
+    read surface withholds outright.
 
 ## Warm-up engine
 25. **Warm-up mail is strictly isolated from campaign reply/bounce handling.** The
@@ -1441,6 +1480,32 @@ write history that never happened.
 
     Treat a `send` host as able to reach any mailbox in the installation while it
     is running, and restrict the broker listener to the fleet network.
+
+## Fleet operator read surface
+70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`
+    has no `workspace_id` and cannot honestly have one — a periodic reconcile runs
+    once per deployment, not once per tenant — while `error_message` stores
+    `err.Error()` from six handlers the ledger does not own, any of which may have
+    wrapped a mailbox address or a recipient. The table's own migration
+    (`20260908123022`) says exactly that; an earlier version of that comment
+    claiming the column is "never tenant content" was wrong and was corrected.
+    Serving the text on a workspace-scoped endpoint would therefore let one
+    workspace's admin read an error produced while sweeping another's mailbox — a
+    cross-tenant read arriving through a diagnostics field.
+
+    So the read path does not carry it, twice over: `ListScheduledJobHealth`
+    (`queries/jobrun.sql`) does not select the column, and `fleet`'s
+    `scheduledJobResponse` has no field for it, so the text cannot reach a
+    response even if the query were changed.
+    `TestScheduledJobResponseWithholdsTheErrorTextButReportsTheFailure` fails if a
+    field named `error_message` or `last_error` ever appears in that payload.
+
+    Withholding the message costs an operator the CAUSE and nothing else: the
+    failure itself is fully reported (`last_outcome`, `last_failure_at`,
+    `failures_in_window` paired with `runs_in_window`), and the text is in the
+    deployment's own logs, where whoever runs the deployment already has it. The
+    UI says so where a reader looks for the message, rather than leaving the
+    screen appearing to hide something.
 
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**

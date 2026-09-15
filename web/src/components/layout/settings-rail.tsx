@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { AlertTriangle, KeyRound, ListPlus, Plug, Settings, ShieldCheck, Sparkles, Tags, Webhook, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, KeyRound, ListPlus, Plug, Server, Settings, ShieldCheck, Sparkles, Tags, Webhook, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useHasRole } from '@/hooks/use-has-role'
 import type { WorkspaceRole } from '@/lib/rbac'
@@ -61,6 +61,11 @@ const SETTINGS_NAV: SettingsItem[] = [
   // surfaces above it: an endpoint streams workspace event payloads to an
   // operator-chosen URL and carries an HMAC signing secret.
   { label: 'Webhooks', to: '/app/settings/webhooks', icon: Webhook, minRole: 'admin' },
+  // fleet/routes.go wraps its whole router in auth.RequireRole("admin") AND
+  // cmd/inroad mounts it session-only: the surface returns worker ids and
+  // egress IPs, which are deployment infrastructure no delegated credential may
+  // read. Admin here, like the four rows above it.
+  { label: 'Fleet', to: '/app/settings/fleet', icon: Server, minRole: 'admin' },
 ]
 
 export function SettingsRail() {
