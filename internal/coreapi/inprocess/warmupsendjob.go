@@ -265,28 +265,15 @@ func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID str
 		WorkspaceID: ws.String(), WarmupSendID: sendID.String(), FromMailbox: mbID.String(),
 	}, c.warmupSecret)
 
-	// Decrypt the FROM mailbox transport via the SAME keyring/sealer path
+	// Open the FROM mailbox transport via the SAME credential opener
 	// GetStepSendJob uses: API providers refresh a short-lived access token; smtp
 	// unseals the stored password. Both are []byte, zeroized by the worker. This
 	// block creates NO rows — it must run BEFORE InsertWarmupThread so a transient
 	// decrypt failure leaves zero rows behind (no orphan thread that a retried tick
 	// would re-insert on top of), matching GetStepSendJob's zero-rows-on-failure.
-	var accessToken, password []byte
-	if b.Provider == "gmail" || b.Provider == "m365" {
-		at, aerr := c.oauthAccessToken(ctx, b.Provider, mbID, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
-		if aerr != nil {
-			return coreapi.WarmupSendJob{}, aerr
-		}
-		accessToken = []byte(at)
-	} else {
-		sealer, serr := c.keyring.SealerFor(ctx, ws)
-		if serr != nil {
-			return coreapi.WarmupSendJob{}, serr
-		}
-		password, err = sealer.Open(b.SecretCiphertext)
-		if err != nil {
-			return coreapi.WarmupSendJob{}, err
-		}
+	accessToken, password, err := c.openMailboxSecret(ctx, ws, mbID, b.Provider, b.SecretCiphertext)
+	if err != nil {
+		return coreapi.WarmupSendJob{}, err
 	}
 
 	// Thread insert LAST: the final fallible, row-creating step before the job is

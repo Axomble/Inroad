@@ -105,16 +105,24 @@ Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md). `ma
 Inroad splits into a **control plane** that owns all state and an **execution plane** that owns all
 outbound network I/O. They meet at exactly one interface, `coreapi.Client`.
 
-**The split is logical, not physical — read that literally.** Worker packages reach relational data
-only through `coreapi`, and that is enforced mechanically now: a `depguard` rule in `.golangci.yml`
-fails `golangci-lint run` (and therefore CI) if a non-test file under `internal/worker/` imports
-`internal/platform/db`. That closes one specific mistake, not the underlying gap: the worker
-*process* still opens its own `pgxpool`, builds its own `crypto.Keyring` from `INROAD_MASTER_KEY`,
-and calls `coreapi` as an in-process function, not over the network. So a compromised worker host
-is not contained by any network or process boundary — only by the code it is running, which the
-lint rule now checks at build time but cannot enforce at runtime. Giving `coreapi` an HTTP transport
-so the split becomes physical is planned, not built — the seam was designed for it ("in-process now,
-HTTP later"). Nothing below claims otherwise.
+**The split is mostly logical, not physical — read that literally.** Worker packages reach
+relational data only through `coreapi`, and that is enforced mechanically: a `depguard` rule in
+`.golangci.yml` fails `golangci-lint run` (and therefore CI) if a non-test file under
+`internal/worker/` imports `internal/platform/db`. That closes one specific mistake, not the
+underlying gap: the worker *process* still opens its own `pgxpool` and calls `coreapi` as an
+in-process function, not over the network. Giving `coreapi` a full HTTP transport so the split
+becomes physical is planned, not built — the seam was designed for it ("in-process now, HTTP
+later"). Nothing below claims otherwise.
+
+**One piece of it IS physical now: the encryption key.** A `role=send` worker — the role meant for
+a fleet host — holds no `INROAD_MASTER_KEY` and refuses to start if it is given one. It asks the
+control plane to open each mailbox credential over an authenticated channel
+(`internal/platform/credbroker`), so a stolen worker disk or environment file decrypts nothing.
+The honest limit: while that worker is *running* it can still ask for any mailbox, because every
+`send` worker consumes the shared `send` queue and may legitimately be handed any mailbox's job —
+per-mailbox scoping needs per-mailbox routing first. What moved is the offline, permanent,
+un-revocable capability, not the live one. The single-process self-host topology is unaffected and
+keeps its local keyring.
 
 ### Zoomed out — the pieces and what moves between them
 
@@ -159,7 +167,7 @@ decision rather than one message's delivery. Routing is one table — `queueForT
 ### Zoomed in — one campaign step, end to end
 
 ```
-  [control role]      [redis]             ┃ [send role] — one process, its own pgxpool and keyring
+  [control role]      [redis]             ┃ [send role] — one process, its own pgxpool, NO keyring
         │                │                ┃
   sweep finds a          │                ┃
   due enrollment         │                ┃
@@ -169,10 +177,11 @@ decision rather than one message's delivery. Routing is one table — `queueForT
         │                │                ┃        guarantee; queue dedup is defence in depth)
         │                │                ┃  │
         │                │                ┃  ▼
-        │                │                ┃ coreapi.GetStepSendJob — an in-process function call.
-        │                │                ┃ It unwraps the workspace DEK and refreshes the OAuth
-        │                │                ┃ token right here, with this process's own keyring and
-        │                │                ┃ pool. No control process participates.
+        │                │                ┃ coreapi.GetStepSendJob — an in-process function call
+        │                │                ┃ against this process's own pool — EXCEPT the credential:
+        │                │                ┃ unwrapping the DEK and refreshing the OAuth token is one
+        │                │                ┃ authenticated call back to the control plane, which is
+        │                │                ┃ the only place the key lives (role=all keeps it local).
         │                │                ┃  │
         │                │                ┃  ▼
         │                │                ┃ send ─────▶ provider (SMTP · Gmail API · MS Graph)
@@ -198,16 +207,19 @@ Three properties worth knowing because they shape everything else:
 - **Determinism.** `platform/cadence` computes a send instant as a seeded hash of stable ids, so a
   retry recomputes the identical time. Placement, scheduling and A/B assignment are computed, not
   coordinated — which is why there is no central assignment service to keep consistent.
-- **Credentials are envelope-encrypted — and that is cryptography, not containment.** Every stored
-  secret is sealed under a per-workspace DEK behind a `KeyProvider` seam, and the send path holds a
-  decrypted transport only for the one send, zeroizing it after use. The part worth stating plainly:
-  the worker is *not* cut off from the wrapping key. `cmd/worker` builds the same `crypto.Keyring`
-  as `cmd/inroad` — both call `keys.BuildKeyring` — both compose files pass `INROAD_MASTER_KEY` to
-  the worker exactly as to the API, and the worker has its own pool. A worker host, `role=send`
-  included, can therefore unwrap any workspace's DEK and read any stored SMTP password or OAuth
-  refresh token. Short-lived credentials are a discipline the code keeps, not a boundary the
-  deployment enforces; it becomes a boundary when `coreapi` gains an HTTP transport and the worker
-  gives up its pool and its keyring.
+- **Credentials are envelope-encrypted, and a fleet host no longer holds the wrapping key.** Every
+  stored secret is sealed under a per-workspace DEK behind a `KeyProvider` seam, and the send path
+  holds a decrypted transport only for the one send, zeroizing it after use. A `role=send` worker
+  builds no `crypto.Keyring` at all and refuses to start if it is given `INROAD_MASTER_KEY`; it
+  asks the control plane to open each credential, one mailbox at a time
+  (`internal/platform/credbroker`). A stolen worker disk or environment file therefore decrypts
+  nothing, and revoking a fleet's access is rotating one token rather than re-encrypting every DEK.
+  The limit worth stating just as plainly: while that worker is *running* it can still ask for any
+  mailbox — every `send` worker consumes the shared `send` queue and may legitimately be handed any
+  mailbox's job — and it still holds its own pool, so it reads every workspace's rows even though it
+  can no longer decrypt them. What moved is the offline, permanent capability; per-mailbox scoping
+  needs per-mailbox routing, and losing the pool needs `coreapi` to grow a full HTTP transport.
+  `role=all` (self-host) keeps its local keyring and is unchanged.
 - **Send windows are unrepresentable-if-overlapping** via a GiST exclusion constraint — an illegal
   state made impossible at the schema rather than validated in application code.
 

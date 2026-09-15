@@ -18,6 +18,12 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
+// ErrNoMasterKey reports that INROAD_MASTER_KEY is unset, so no keyring can be
+// built. For cmd/inroad that is fatal — the control plane owns the key. For
+// cmd/worker it is the EXPECTED state on a fleet host, which obtains credentials
+// through internal/platform/credbroker instead.
+var ErrNoMasterKey = errors.New("INROAD_MASTER_KEY is not set")
+
 // BuildKeyring assembles the two-level key hierarchy from config: it selects the
 // KeyProvider (KEK) by cfg.KeyProvider — only "local" is implemented today, and
 // an unknown value fails closed with an error rather than silently degrading —
@@ -25,9 +31,18 @@ import (
 // legacy master-key Sealer that opens pre-DEK v1 blobs (which re-seal to v2 on
 // the next write). Both binary composition roots (cmd/inroad, cmd/worker) call
 // this so the fail-closed guard lives in exactly one place.
+//
+// An ABSENT master key is ErrNoMasterKey — a named sentinel rather than
+// crypto's "master key must be 32 bytes, got 0", because since credential
+// brokering exists "no key" is a legitimate state for one caller (a fleet
+// worker) and a startup failure for every other, and those two need to be told
+// apart by something more robust than an error string.
 func BuildKeyring(cfg *config.Config, q *gen.Queries) (*crypto.Keyring, error) {
 	if cfg.KeyProvider != "local" {
 		return nil, fmt.Errorf("unsupported INROAD_KEY_PROVIDER %q (only \"local\" is implemented)", cfg.KeyProvider)
+	}
+	if len(cfg.MasterKey) == 0 {
+		return nil, ErrNoMasterKey
 	}
 	kp, err := crypto.NewLocalKeyProvider(cfg.MasterKey)
 	if err != nil {

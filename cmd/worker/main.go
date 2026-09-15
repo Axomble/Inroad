@@ -26,7 +26,6 @@ import (
 	"github.com/inroad/inroad/internal/platform/dnsauth"
 	"github.com/inroad/inroad/internal/platform/esp"
 	"github.com/inroad/inroad/internal/platform/httpx"
-	"github.com/inroad/inroad/internal/platform/keys"
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
@@ -158,15 +157,22 @@ func run() error {
 		return err
 	}
 
-	// Build the per-workspace Keyring at the worker's composition root. The
-	// DEKStore is the sqlc-backed adapter over the pool; the worker engine
-	// packages never see it — they reach data only through coreapi, which holds
-	// the Keyring. keys.BuildKeyring owns the fail-closed provider guard.
-	keyring, err := keys.BuildKeyring(cfg, gen.New(pool))
+	// Decide where this worker's decrypted credentials come from, and build it.
+	// A fleet (role=send) host gets a credbroker.HTTPOpener and NO keyring, so
+	// INROAD_MASTER_KEY is neither needed nor accepted here; the single-process
+	// self-host topology (RoleAll) still builds the keyring exactly as before.
+	// resolveCredentialMode owns the whole decision and refuses the unsafe
+	// combinations — see cmd/worker/credentials.go.
+	creds, err := buildCredentialWiring(cfg, role, gen.New(pool), logger)
 	if err != nil {
-		logger.Error("keyring init failed", "err", err)
+		logger.Error("credential source unusable", "err", err)
 		return err
 	}
+	// nil in every mode but credentialsLocal. inprocess.New treats a nil keyring
+	// as "cannot open secrets locally" and fails closed unless the broker option
+	// below supplies an opener; webhook.NewService likewise refuses to MINT a
+	// secret without one (a path the worker never takes — it only dispatches).
+	keyring := creds.keyring
 
 	// The worker package depends only on coreapi.Client; the DB-backed
 	// implementation is wired here at the composition root.
@@ -201,7 +207,7 @@ func run() error {
 	webhookEmitter := webhook.NewServiceEmitter(
 		webhook.NewService(webhook.NewPgStore(gen.New(pool)), keyring, enq, cfg.WebhookAllowPrivate))
 
-	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(),
+	coreOpts := []inprocess.Option{
 		// The claim-before-send outcome counter (won/reclaimed/lost/…) is
 		// emitted from inside the claim, which is the only place every outcome
 		// is already distinguished.
@@ -211,7 +217,13 @@ func run() error {
 		// slice is that an inbound reply reaches an open tab without one.
 		inprocess.WithRealtime(realtimeHub),
 		// Enables outbound webhook fan-out for the three catalog events.
-		inprocess.WithWebhooks(webhookEmitter))
+		inprocess.WithWebhooks(webhookEmitter),
+	}
+	// Empty unless this worker brokers. When present it REPLACES the (nil)
+	// keyring-backed opener, so every credential this process needs is opened
+	// by the control plane and none of them by this host.
+	coreOpts = append(coreOpts, creds.coreOptions()...)
+	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(), coreOpts...)
 
 	// Resolve the optional worker egress IP once. When set, outbound SMTP/IMAP
 	// dials bind their SOURCE address to it (spec §15) so a mailbox's mail

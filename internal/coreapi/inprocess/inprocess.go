@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/oauth2"
 
 	"github.com/inroad/inroad/internal/app/deliverability"
 	"github.com/inroad/inroad/internal/app/enrollment"
@@ -17,6 +16,7 @@ import (
 	"github.com/inroad/inroad/internal/app/inbox"
 	"github.com/inroad/inroad/internal/app/webhook"
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -26,19 +26,18 @@ import (
 )
 
 type client struct {
-	pool      *pgxpool.Pool
-	q         *gen.Queries
-	keyring   *crypto.Keyring
+	pool *pgxpool.Pool
+	q    *gen.Queries
+	// creds opens stored secrets. It is the ONLY route from this client to a
+	// decrypted credential — the client itself holds no key. In the control
+	// plane (and in the single-process self-host worker) it is the
+	// keyring-backed localOpener; in a fleet worker it is credbroker's HTTP
+	// client, so that process never sees INROAD_MASTER_KEY at all. See
+	// internal/platform/credbroker for why that boundary exists and what it
+	// does and does not buy.
+	creds     credbroker.Opener
 	jwtSecret []byte
 	publicURL string
-	// googleOAuth is the app's Google OAuth client config. Used to refresh a
-	// gmail mailbox's access token at job-build time (see oauthAccessToken). Zero
-	// value = disabled: gmail jobs then fail cleanly.
-	googleOAuth mail.GoogleOAuth
-	// msOAuth is the app's Microsoft (Azure AD) OAuth client config. Used to
-	// refresh an m365 mailbox's access token at job-build time (see
-	// oauthAccessToken). Zero value = disabled: m365 jobs then fail cleanly.
-	msOAuth mail.MicrosoftOAuth
 	// enroll owns the enrollment state machine (advance/complete/stop). The
 	// control plane composes the domain service here so the MarkStep* coreapi
 	// methods delegate the transition to a single, unit-tested place.
@@ -129,6 +128,27 @@ func WithWebhooks(e webhook.Emitter) Option {
 	return func(c *client) { c.webhookEmitter = e }
 }
 
+// WithCredentialBroker replaces the keyring-backed credential opener with
+// another credbroker.Opener — in practice credbroker's HTTP client, pointed at
+// the control plane.
+//
+// This is what lets a fleet worker run with NO master key: pass a nil keyring
+// to New and this option, and the process holds nothing that can unwrap a
+// workspace DEK. It is an Option rather than a positional parameter because
+// every other caller (cmd/inroad, cmd/seed, every test, and the self-host
+// RoleAll worker) wants the local opener and should not have to say so.
+//
+// Passing nil is a no-op, NOT a way to disable credentials: silently dropping
+// a broker that was meant to be wired would leave the process opening secrets
+// with a local keyring it was supposed to have given up.
+func WithCredentialBroker(o credbroker.Opener) Option {
+	return func(c *client) {
+		if o != nil {
+			c.creds = o
+		}
+	}
+}
+
 // New returns the in-process coreapi client backed by the given connection
 // pool. The pool backs the pool-bound *gen.Queries for reads and lets
 // MarkStepSent run the record+advance writes in one transaction. The keyring
@@ -141,12 +161,16 @@ func WithWebhooks(e webhook.Emitter) Option {
 // warmupContent is the injected warmup content library (both used only by the
 // warmup send path). opts carry the optional cross-cutting wiring (see
 // WithMetrics); omitting them all yields the same client as before.
+//
+// A NIL keyring is legal and means "this process cannot open secrets itself":
+// every credential path then fails closed with credbroker.ErrNotConfigured
+// unless WithCredentialBroker supplies a remote opener. That is the fleet
+// worker's configuration — see internal/platform/credbroker.
 func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicURL string, googleOAuth mail.GoogleOAuth, msOAuth mail.MicrosoftOAuth, warmupSecret []byte, warmupContent warmup.ContentGenerator, opts ...Option) coreapi.Client {
 	q := gen.New(pool)
 	c := client{
-		pool: pool, q: q, keyring: keyring, jwtSecret: jwtSecret, publicURL: publicURL,
-		googleOAuth:   googleOAuth,
-		msOAuth:       msOAuth,
+		pool: pool, q: q, jwtSecret: jwtSecret, publicURL: publicURL,
+		creds:         NewCredentialOpener(q, keyring, googleOAuth, msOAuth),
 		enroll:        enrollment.NewService(enrollment.NewPgStore(q)),
 		breaker:       deliverability.NewService(deliverability.NewPgStore(pool)),
 		warmupSecret:  warmupSecret,
@@ -183,23 +207,6 @@ func newInboxService(pool *pgxpool.Pool) *inbox.Service {
 		inbox.WithComposeStore(store),
 		inbox.WithPendingReplyStore(store),
 	)
-}
-
-// oauthConfigFor returns the provider's oauth2 config for a token refresh, or
-// nil when that API provider is not configured (so oauthAccessToken fails
-// cleanly). Non-API providers (smtp) have no config and never reach here.
-func (c client) oauthConfigFor(provider string) *oauth2.Config {
-	switch provider {
-	case "gmail":
-		if c.googleOAuth.Enabled() {
-			return c.googleOAuth.Config()
-		}
-	case "m365":
-		if c.msOAuth.Enabled() {
-			return c.msOAuth.Config()
-		}
-	}
-	return nil
 }
 
 func (c client) MailboxExists(ctx context.Context, id string) (bool, error) {

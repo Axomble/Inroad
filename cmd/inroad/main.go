@@ -58,9 +58,11 @@ import (
 	"github.com/inroad/inroad/internal/app/twofa"
 	"github.com/inroad/inroad/internal/app/warmup"
 	"github.com/inroad/inroad/internal/app/webhook"
+	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/platform/ai"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -232,6 +234,48 @@ func run() error {
 		RedirectURL:  cfg.MSRedirectURL,
 		Tenant:       cfg.MSTenant,
 	}
+	// Fleet credential broker. This is what lets a role=send worker run with NO
+	// INROAD_MASTER_KEY: it asks here, over an authenticated channel, and the
+	// unsealing happens in this process where the key already lives.
+	//
+	// A SEPARATE listener from HTTPAddr, never a mount on the API router — the
+	// same rule /metrics follows (httpx.MetricsMux) and for a sharper reason:
+	// these responses ARE credentials. Off unless an operator sets
+	// INROAD_FLEET_BROKER_ADDR, so a self-hosted install serves no such route.
+	// Bind it to an address only the fleet's network can reach.
+	//
+	// Cancel-THEN-wait on shutdown, like the metrics listener above: a bare
+	// cancel lets run() return before the listener finishes its own graceful
+	// Shutdown.
+	brokerCtx, cancelBroker := context.WithCancel(ctx)
+	var brokerWG sync.WaitGroup
+	defer func() {
+		cancelBroker()
+		brokerWG.Wait()
+	}()
+	if cfg.FleetBrokerAddr != "" {
+		brokerHandler, err := credbroker.NewHandler(
+			// The SAME opener the in-process job builds use, so a brokered
+			// credential and a locally-opened one are produced by identical code
+			// rather than two implementations that can drift.
+			inprocess.NewCredentialOpener(queries, keyring, googleOAuth, msOAuth),
+			cfg.FleetBrokerToken, logger)
+		if err != nil {
+			logger.Error("credential broker init failed", "err", err)
+			return err
+		}
+		brokerSrv := httpx.NewServer(cfg.FleetBrokerAddr, brokerHandler)
+		brokerWG.Add(1)
+		go func() {
+			defer brokerWG.Done()
+			if err := httpx.Run(brokerCtx, brokerSrv); err != nil {
+				logger.Error("credential broker server error", "err", err)
+			}
+		}()
+		logger.Info("credential broker listening", "addr", cfg.FleetBrokerAddr,
+			"note", "serves decrypted mailbox credentials to fleet workers; restrict this address to the fleet network")
+	}
+
 	// Warmup control-plane. Its per-mailbox routes (/mailboxes/{id}/warmup)
 	// register as a sub-router under the mailbox mount; its workspace-level
 	// overview mounts at /api/v1/warmup below.
