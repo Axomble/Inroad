@@ -97,9 +97,25 @@ const (
 	QueueDefault = "default"
 )
 
-// WorkerQueue names one worker's private affinity queue. warmup:tick is routed
-// here so a warming mailbox keeps sending from the same IP — warmup reputation
-// is per-IP, so moving a mailbox mid-warmup damages the thing being built.
+// WorkerQueue names one worker's private affinity queue. Per-mailbox work is
+// routed here so that a mailbox keeps authenticating to its provider from one
+// egress IP.
+//
+// The IP is what the PROVIDER sees on every authentication, and providers
+// challenge sign-ins, throttle (454 4.7.0) and rate-limit (421 4.7.28) per
+// source address. It is NOT what the recipient sees: Inroad never delivers to a
+// recipient's MX — every send authenticates to the customer's own provider,
+// which delivers from its own pool (docs/security.md invariant 46) — so
+// recipient-side reputation cannot transfer between mailboxes sharing a worker.
+// See internal/platform/providersignal's package doc, which is where that
+// asymmetry is measured.
+//
+// An earlier version of this comment said affinity existed because "warmup
+// reputation is per-IP". That premise was retired by the fleet design's
+// 2026-09-14 revision (and by fleetscore's rule 3): warmup lanes are built
+// entirely from recipient-side signals, which the worker's IP is invisible to.
+// The routing survived the premise because the real reason — provider-side
+// sign-in risk — applies to every authentication, not just a warmup one.
 func WorkerQueue(workerID string) string { return "w:" + workerID }
 
 // taskQueues is the single source of truth for which role queue a task type
@@ -120,9 +136,11 @@ func WorkerQueue(workerID string) string { return "w:" + workerID }
 // before it could reach this table, so a mapping here would only assert a route
 // nothing may take.
 var taskQueues = map[string]string{
-	// Per-message work. warmup:tick's entry is its FALLBACK: a mailbox with a
-	// worker assignment overrides it with that worker's affinity queue, which
-	// is what keeps a warming mailbox on one IP (see EnqueueWarmupTickAt).
+	// Per-message work. For the two AFFINITY-routed types — warmup:tick and
+	// inbox:poll, the two whose payload names a mailbox — the entry here is the
+	// FALLBACK: a mailbox with a worker assignment overrides it with that
+	// worker's affinity queue, which is what keeps the mailbox authenticating
+	// to its provider from one IP (see affinityQueue).
 	TaskWarmupTick:              QueueSend,
 	TaskWarmupEngage:            QueueSend,
 	TaskSequenceAdvance:         QueueSend,
@@ -166,6 +184,32 @@ func routeTaskType(taskType string) (string, error) {
 		return "", fmt.Errorf("queue: task type %q has no role queue; add it to taskQueues", taskType)
 	}
 	return q, nil
+}
+
+// affinityQueue is the routing rule for PER-MAILBOX work, written once: the
+// queue of the worker the mailbox is assigned to, or — with no assignment, so
+// no IP to stay on — the task type's own role queue.
+//
+// dest is always the server-side result of coreapi.AssignMailboxWorker, never
+// client input (invariant §17.8); "" is that function's sentinel for NO LIVE
+// WORKER AT ALL — a single-node dev stack with no worker registered, or a fleet
+// mid-restart — not for "not placed yet", since placement persists an
+// assignment on first sight and hands back its queue. A self-host RoleAll
+// install therefore takes the affinity queue like any other topology once its
+// one worker has heartbeated, and the fallback here is what carries it (and
+// every pre-fleet installation) until then.
+//
+// It exists as a function rather than as an `if dest == ""` at each producer
+// because there are two producers and they submit through different funnels —
+// warmup:tick through the bus seam (Publish), inbox:poll through
+// enqueueAffinity, which is what keeps its asynq.Retention that bus.Options
+// cannot express. Two funnels are tolerable; two answers to "which queue does
+// this mailbox's work go to" are not.
+func affinityQueue(taskType, dest string) (string, error) {
+	if dest != "" {
+		return dest, nil
+	}
+	return routeTaskType(taskType)
 }
 
 const TaskWarmupTick = "warmup:tick"
@@ -473,25 +517,20 @@ func warmupTickTaskID(mailboxID string, due time.Time) string {
 
 // EnqueueWarmupTickAt schedules a warmup:tick for one mailbox at time t, routed
 // to dest (the from-mailbox's assigned worker queue, spec §15 — so a mailbox's
-// warmup and campaign mail egress from one IP; "" = no assignment yet, so it
-// falls back to the shared send queue rather than asynq's unconsumed
-// "default"). It goes through the transport seam (bus.Dispatcher): Key→TaskID
-// dedup, Dest→Queue routing, At→ProcessAt delayed delivery. dest is always
-// derived server-side from the mailbox→worker assignment, never from client
-// input (§17.8).
+// warmup and campaign mail egress from one IP; "" = no assignment yet, so
+// affinityQueue falls back to the shared send queue rather than asynq's
+// unconsumed "default"). It goes through the transport seam (bus.Dispatcher):
+// Key→TaskID dedup, Dest→Queue routing, At→ProcessAt delayed delivery. dest is
+// always derived server-side from the mailbox→worker assignment, never from
+// client input (§17.8).
 func (c *Client) EnqueueWarmupTickAt(ctx context.Context, mailboxID, workspaceID string, t time.Time, dest string) error {
 	b, err := json.Marshal(WarmupTickPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	if dest == "" {
-		// No assignment yet, so there is no IP to stay on: fall back to the
-		// task type's own role queue rather than asynq's unconsumed "default".
-		fallback, err := routeTaskType(TaskWarmupTick)
-		if err != nil {
-			return err
-		}
-		dest = fallback
+	dest, err = affinityQueue(TaskWarmupTick, dest)
+	if err != nil {
+		return err
 	}
 	return c.Publish(ctx, bus.Job{
 		Kind:    TaskWarmupTick,
@@ -551,16 +590,18 @@ func (c *Client) EnqueueWarmupEngageIn(ctx context.Context, receiptID, workspace
 // all, so an unrouted task would drain only until that transitional
 // consumption is removed, then quietly stop — the exact role-blindness this
 // package exists to prevent. Every producer that reaches this reaches it
-// through enqueueRouted, which derives the option from taskQueues; this is the
+// through enqueueAffinity (directly, or via enqueueRouted, which is that
+// function with no dest), which derives the option from taskQueues; this is the
 // backstop for a future one that calls enqueue directly.
 //
 // NOT every producer reaches this. EnqueueWarmupTickAt, EnqueueWarmupEngageIn
 // and EnqueueReplay are bus-seam producers: they go through Publish ->
-// redisbus.Dispatcher, which has no equivalent guard, and are routed by
-// routeTaskType at their own call sites instead (see taskQueues' doc, 437
-// lines above this one, for the accurate enumeration). Scoped to this funnel
-// only: bus.Job.Dest and redisbus.asynqOptions keep their own documented "" =
-// shared-queue meaning, which this does not touch.
+// redisbus.Dispatcher, which has no equivalent guard, and resolve their own
+// queue at their own call sites instead — affinityQueue for the warmup tick,
+// routeTaskType for the other two (see taskQueues' doc for the accurate
+// enumeration). Scoped to this funnel only: bus.Job.Dest and
+// redisbus.asynqOptions keep their own documented "" = shared-queue meaning,
+// which this does not touch.
 func (c *Client) enqueue(ctx context.Context, t *asynq.Task, opts ...asynq.Option) error {
 	if _, ok := queueOption(opts); !ok {
 		return fmt.Errorf("queue: enqueue %q: no asynq.Queue option set; every producer must route to a role queue", t.Type())
@@ -581,7 +622,17 @@ func (c *Client) enqueue(ctx context.Context, t *asynq.Task, opts ...asynq.Optio
 // legitimately owns (dedup key, delay, retries, timeout, retention) stays the
 // caller's.
 func (c *Client) enqueueRouted(ctx context.Context, taskType string, payload []byte, opts ...asynq.Option) error {
-	q, err := routeTaskType(taskType)
+	return c.enqueueAffinity(ctx, taskType, "", payload, opts...)
+}
+
+// enqueueAffinity is enqueueRouted for a task that MAY be pinned to one worker:
+// dest wins when the caller resolved an assignment, and the task type's own
+// role queue is the fallback (affinityQueue). It is a separate entry point
+// rather than a wider enqueueRouted so that the dozen producers with no
+// per-mailbox routing cannot pass a queue at all — routing by type stays the
+// default, and overriding it stays a deliberate act with a name.
+func (c *Client) enqueueAffinity(ctx context.Context, taskType, dest string, payload []byte, opts ...asynq.Option) error {
+	q, err := affinityQueue(taskType, dest)
 	if err != nil {
 		return err
 	}
@@ -783,7 +834,21 @@ func inboxPollTaskID(mailboxID string, now time.Time) string {
 
 // EnqueueInboxPoll enqueues an inbox:poll task for immediate processing, keyed
 // on (mailbox, sweep-interval bucket) so concurrent fan-outs for the same
-// mailbox in the same interval collapse to one poll.
+// mailbox in the same interval collapse to one poll, and routed to dest — the
+// polled mailbox's assigned worker queue, so the mailbox authenticates to its
+// provider from one egress IP ("" = no assignment, so affinityQueue falls back
+// to the shared send queue rather than asynq's unconsumed "default"). dest is
+// derived server-side from the mailbox→worker assignment, never from client
+// input (§17.8).
+//
+// Affinity applies here for the SAME reason it applies to warmup:tick, and with
+// more force. A poll is a provider authentication — an IMAP LOGIN, or an
+// OAuth-bearing call to the fixed Gmail/Graph host — and it happens once per
+// mailbox per inboxSweepInterval, which is roughly an order of magnitude more
+// often than that mailbox's campaign sends. Left on the shared queue it was the
+// largest source of novel-source-IP sign-ins in the system, which is precisely
+// what provokes the sign-in challenges and per-IP throttles the fleet exists to
+// avoid. Nothing about the RECIPIENT is involved: see WorkerQueue.
 //
 // Every worker process runs its own scheduler, so inbox:sweep fires once per
 // replica per interval. Without a TaskID that meant N replicas each opening a
@@ -806,12 +871,12 @@ func inboxPollTaskID(mailboxID string, now time.Time) string {
 // Retries are deliberately bounded lower than a send's — a poll that fails is
 // re-fanned-out by the next sweep a few minutes later, so exhausting retries
 // costs one interval of latency, not a lost message.
-func (c *Client) EnqueueInboxPoll(ctx context.Context, mailboxID, workspaceID string) error {
+func (c *Client) EnqueueInboxPoll(ctx context.Context, mailboxID, workspaceID, dest string) error {
 	b, err := json.Marshal(InboxPollPayload{MailboxID: mailboxID, WorkspaceID: workspaceID})
 	if err != nil {
 		return err
 	}
-	return c.enqueueRouted(ctx, TaskInboxPoll, b,
+	return c.enqueueAffinity(ctx, TaskInboxPoll, dest, b,
 		asynq.TaskID(inboxPollTaskID(mailboxID, time.Now())),
 		asynq.MaxRetry(pollMaxRetry),
 		asynq.Timeout(pollTimeout),

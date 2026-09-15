@@ -386,11 +386,12 @@ type ReplayJob struct {
 
 // replayQueue decides where a replayed task goes. The captured queue wins,
 // because it is what actually happened: the task type gives the ROLE queue,
-// which is right for everything except the case that matters most — warmup:tick
-// is routed to its mailbox's "w:<id>" affinity queue so a warming mailbox keeps
-// egressing from one IP, and reconstructing from the type alone would move a
-// mailbox mid-warmup during recovery. The lookup is the reconstruction for rows
-// captured before the queue was recorded (migration 20260911101701).
+// which is right for everything except the case that matters most — the two
+// per-mailbox types (warmup:tick, inbox:poll) are routed to their mailbox's
+// "w:<id>" affinity queue so the mailbox keeps authenticating to its provider
+// from one IP, and reconstructing from the type alone would move a mailbox to
+// another egress address during recovery. The lookup is the reconstruction for
+// rows captured before the queue was recorded (migration 20260911101701).
 //
 // QueueDefault is the one captured value NOT honoured. It is drain-only and its
 // consumption is being removed in the release after this one, so replaying onto
@@ -406,12 +407,15 @@ type ReplayJob struct {
 //
 // KNOWN LIMIT: a captured "w:<id>" whose worker no longer exists is a queue
 // nothing consumes, and this cannot tell (queue names are not liveness). The
-// task then sits rather than running. That is bounded to warmup:tick, the only
-// type routed to an affinity queue, and warmup:sweep re-enqueues a tick for
-// every due participant every five minutes — so the mailbox keeps warming, on
-// its current worker, whether or not the replayed tick lands. Preferring the
+// task then sits rather than running. That is bounded to the two types routed
+// to an affinity queue, and each has a control-role sweep that re-creates its
+// work from the database rather than from queue state: warmup:sweep enqueues a
+// tick for every due participant every five minutes, inbox:sweep a poll for
+// every active mailbox every three. Both resolve the destination afresh, so the
+// replacement lands on a LIVE worker — the mailbox keeps warming and keeps
+// being polled whether or not the replayed task ever runs. Preferring the
 // generic send queue instead would lose the IP affinity on EVERY replay to
-// avoid a stall the sweep already covers.
+// avoid a stall the sweeps already cover.
 func replayQueue(taskType, captured string) (string, error) {
 	if captured != "" && captured != QueueDefault {
 		return captured, nil
