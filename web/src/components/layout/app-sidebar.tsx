@@ -31,12 +31,23 @@ import { useNavCounts } from './use-nav-counts'
  * the Astro/Starlight site under docs/, not an SPA page.
  */
 type NavItem = { label: string; icon: LucideIcon } & (
-  | { to: string; href?: never }
-  | { href: string; to?: never }
+  | {
+      to: string
+      href?: never
+      /**
+       * Highlight this row only on its exact path. TanStack matches a `to`
+       * against route *prefixes* by default, which is right for a section row
+       * (Campaigns stays lit on a campaign's detail page) and wrong for
+       * `/app` — the prefix of every screen in the app, so Overview rendered
+       * as active everywhere and two rows always looked selected at once.
+       */
+      exact?: boolean
+    }
+  | { href: string; to?: never; exact?: never }
 )
 
 const PRIMARY: NavItem[] = [
-  { label: 'Overview', to: '/app', icon: LayoutDashboard },
+  { label: 'Overview', to: '/app', icon: LayoutDashboard, exact: true },
   { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
   { label: 'Inbox', to: '/app/inbox', icon: Inbox },
   { label: 'Contacts', to: '/app/contacts', icon: Users },
@@ -90,6 +101,7 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
     <Link
       to={item.to}
       className={rowClass}
+      activeOptions={{ exact: item.exact ?? false }}
       activeProps={{ className: 'bg-chrome-hover font-medium text-chrome-text shadow-[inset_0_0_0_1px_var(--chrome-border)] before:absolute before:left-0 before:h-4 before:w-0.5 before:rounded-full before:bg-primary' }}
     >
       {content}

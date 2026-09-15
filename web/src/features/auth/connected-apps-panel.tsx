@@ -62,7 +62,7 @@ export function ConnectedAppsPanel() {
       <PageTopbar
         eyebrow="Workspace"
         title="Connected apps"
-        subtitle="OAuth 2.1 apps authorized to access this workspace"
+        subtitle="Apps you've allowed to access this workspace"
         actions={
           <Button variant="primary" size="sm" disabled={isLoading || isError} onClick={() => setRegistering(true)}>
             <Plus className="size-4" />

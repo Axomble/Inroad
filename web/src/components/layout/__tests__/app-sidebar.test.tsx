@@ -5,10 +5,24 @@ import { config } from '@/lib/config'
 import { AppSidebar } from '../app-sidebar'
 
 // The sidebar renders router <Link>s; stub them to plain anchors so we can
-// assert on the rendered nav without a real router.
+// assert on the rendered nav without a real router. `activeOptions` is surfaced
+// as a data attribute rather than dropped: whether a row matches its path
+// exactly or by prefix decides which row lights up, so it is behavior worth
+// pinning (see the exact-matching test below).
 vi.mock('@tanstack/react-router', () => ({
-  Link: ({ to, children, activeProps: _activeProps, ...props }: { to: string; children: React.ReactNode; activeProps?: unknown }) => (
-    <a href={to} {...props}>
+  Link: ({
+    to,
+    children,
+    activeProps: _activeProps,
+    activeOptions,
+    ...props
+  }: {
+    to: string
+    children: React.ReactNode
+    activeProps?: unknown
+    activeOptions?: { exact?: boolean }
+  }) => (
+    <a href={to} data-active-exact={String(activeOptions?.exact ?? false)} {...props}>
       {children}
     </a>
   ),
@@ -40,6 +54,19 @@ test('the daily screens are flat, top-level rows', () => {
   expect(screen.getByRole('link', { name: /warmup/i })).toHaveAttribute('href', '/app/warmup')
   expect(screen.getByRole('link', { name: /reports/i })).toHaveAttribute('href', '/app/reports')
   expect(screen.getByRole('link', { name: /^settings$/i })).toHaveAttribute('href', '/app/settings')
+})
+
+// `/app` is the prefix of every screen in the app, so with TanStack's default
+// prefix matching the Overview row lit up on Campaigns, Deals, Settings —
+// everywhere — and two rows always looked selected at once. Section rows must
+// keep prefix matching, though: Campaigns stays lit on a campaign's detail page.
+test('Overview highlights only on its own page; section rows still match their subpages', () => {
+  renderWithProviders(<AppSidebar />, authed)
+
+  expect(screen.getByRole('link', { name: /overview/i })).toHaveAttribute('data-active-exact', 'true')
+  for (const row of [/campaigns/i, /inbox/i, /contacts/i, /mailboxes/i, /warmup/i, /reports/i, /^settings$/i]) {
+    expect(screen.getByRole('link', { name: row })).toHaveAttribute('data-active-exact', 'false')
+  }
 })
 
 test('no group eyebrows: the old five-section nav does not come back', () => {

@@ -49,7 +49,7 @@ export function CustomFieldsPanel() {
       <PageTopbar
         eyebrow="Workspace"
         title="Custom fields"
-        subtitle="Extra contact data you can import, edit, and personalize sequences with"
+        subtitle="Extra details about your contacts that you can use in your emails"
         actions={
           <Button variant="primary" size="sm" disabled={isLoading || isError} onClick={() => setCreating(true)}>
             <Plus className="size-4" />

@@ -316,7 +316,7 @@ export function InboxPage() {
 
   return (
     <Page>
-      <PageTopbar eyebrow="Inbox" subtitle="Read + triage replies across every connected mailbox" />
+      <PageTopbar eyebrow="Inbox" subtitle="Every reply from all your mailboxes, in one place" />
 
       <CommandBar
         onCompose={() => setComposing(true)}

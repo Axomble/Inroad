@@ -55,10 +55,10 @@ export function WebhooksPage() {
   if (!isAdmin) {
     return (
       <Page>
-        <PageTopbar eyebrow="Settings" title="Webhooks" subtitle="Outbound event notifications" />
+        <PageTopbar eyebrow="Settings" title="Webhooks" subtitle="Tell your other tools when something happens in Inroad" />
         <EmptyBlock
           title="Admins only"
-          description="Ask a workspace owner or admin to register a webhook receiver for this workspace."
+          description="Ask a workspace owner or admin to set up a webhook for this workspace."
         />
       </Page>
     )
@@ -69,7 +69,7 @@ export function WebhooksPage() {
       <PageTopbar
         eyebrow="Settings"
         title="Webhooks"
-        subtitle="Outbound event notifications"
+        subtitle="Tell your other tools when something happens in Inroad"
         actions={
           <Button variant="primary" size="sm" disabled={isLoading || isError} onClick={() => setCreating(true)}>
             <Plus className="size-4" />
