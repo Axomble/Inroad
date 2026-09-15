@@ -340,6 +340,7 @@ resource "aws_db_instance" "postgres" {
   vpc_security_group_ids = [aws_security_group.rds.id]
   storage_encrypted      = true
   kms_key_id             = aws_kms_key.main.arn
+  multi_az               = true
   skip_final_snapshot    = true
   tags                   = local.common_tags
 }
@@ -352,17 +353,19 @@ resource "aws_elasticache_subnet_group" "main" {
 }
 
 resource "aws_elasticache_replication_group" "redis" {
-  replication_group_id = "${local.name_prefix}-redis"
-  description          = "Redis replication group for ${local.name_prefix}"
-  node_type            = "cache.t4g.micro"
-  num_cache_clusters   = 1
-  port                 = 6379
-  subnet_group_name    = aws_elasticache_subnet_group.main.name
-  security_group_ids   = [aws_security_group.redis.id]
+  replication_group_id       = "${local.name_prefix}-redis"
+  description                = "Redis replication group for ${local.name_prefix}"
+  node_type                  = "cache.t4g.micro"
+  num_cache_clusters         = 2
+  automatic_failover_enabled = true
+  multi_az_enabled           = true
+  port                       = 6379
+  subnet_group_name          = aws_elasticache_subnet_group.main.name
+  security_group_ids         = [aws_security_group.redis.id]
   at_rest_encryption_enabled = true
   transit_encryption_enabled = false
-  kms_key_id            = aws_kms_key.main.arn
-  tags                 = local.common_tags
+  kms_key_id                 = aws_kms_key.main.arn
+  tags                       = local.common_tags
 }
 
 # --- S3 Storage Bucket ---
