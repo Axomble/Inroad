@@ -25,16 +25,37 @@ graph TD
 ### DNS Record Requirements
 
 1. **SPF (Sender Policy Framework)**:
-   - Validates that Inroad worker egress IPs or authorized relay hostnames are listed in the domain's TXT record.
-   - Example: `v=spf1 include:mail.inroad.io include:_spf.google.com ~all`
+   - Checks that a `v=spf1` record is **published** at the domain apex. The check
+     tests presence, not contents — it does not evaluate mechanisms or verify that
+     any particular host is authorised.
+   - The record must authorise whoever actually delivers your mail: your mailbox
+     provider's outbound pool. Inroad worker egress IPs never belong in it, because
+     Inroad authenticates to your provider rather than delivering to recipients
+     itself.
+   - Example: `v=spf1 include:_spf.google.com ~all`
 2. **DKIM (DomainKeys Identified Mail)**:
-   - Verifies the cryptographic public key published at selector `inroad._domainkey.yourdomain.com`.
-   - Outbound emails are signed with matching private keys to guarantee header and body integrity.
+   - Probes a set of common selectors and reports whichever answers first.
+   - **Advisory only — DKIM never decides the verdict.** Selectors are not
+     discoverable from DNS, so "not found" means only "none of the probed selectors
+     matched". Failing a domain on that would tell an operator whose mail is
+     correctly signed on an unusual selector that they are broken.
 3. **DMARC (Domain-based Message Authentication, Reporting, and Conformance)**:
    - Checks for valid `_dmarc.yourdomain.com` record.
    - Validates policy configuration (`p=none`, `p=quarantine`, or `p=reject`).
 
-Domains failing SPF or DKIM checks are flagged with a `warning` or `failing` status and cannot be attached to active campaigns until resolved.
+A domain passes when **SPF and DMARC are both published**. A lookup that fails for
+any reason other than NXDOMAIN is reported as `unknown`, never `failing` — "could
+not check" rendered as "misconfigured" sends people editing DNS that was already
+correct.
+
+:::caution[The domain check is advisory and never blocks a campaign]
+Nothing on the send path reads `sending_domains`. A `failing` domain does not stop
+a campaign from being created, attached or run — an advisory that turns out to be
+wrong must not be able to halt sending. What a failing check does withhold is
+**warmup** traffic, which is Inroad's own mail: the mailbox enters the
+`pending_auth` lane, which warns at campaign preflight rather than blocking it and
+contributes no capacity reduction. See [invariant 39](/security/).
+:::
 
 ---
 

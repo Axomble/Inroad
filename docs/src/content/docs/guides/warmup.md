@@ -3,7 +3,21 @@ title: Automated Mailbox Warmup Engine
 description: Peer-to-peer workspace-isolated warmup pool, HMAC header verification, spam folder rescue, and health state machine.
 ---
 
-Mailbox warmup is an automated process that builds domain and IP sending reputation by exchanging human-like emails between mailboxes, monitoring placement, and automatically rescuing messages that land in Spam or Junk folders.
+Mailbox warmup is an automated process that builds **domain and mailbox** sending reputation by exchanging human-like emails between mailboxes, monitoring placement, and automatically rescuing messages that land in Spam or Junk folders.
+
+:::note[Warmup does not build IP reputation, and cannot]
+Inroad never delivers to a recipient's MX. Every send authenticates to the
+*customer's own* provider — their SMTP relay, the Gmail API, or Microsoft Graph —
+and that provider delivers from its own outbound pool. The recipient therefore
+never observes an Inroad worker's egress IP, so no amount of warmup can build
+recipient-facing reputation for it.
+
+What warmup does build is reputation for the **sending domain and the mailbox
+identity**, which is what recipient-side filtering actually judges. The worker's
+egress IP matters elsewhere — it is what the *provider* sees on every
+authentication — and that risk is measured separately by the fleet's provider
+signals. See [The Sending Fleet](/architecture/#the-sending-fleet).
+:::
 
 Inroad features a native, peer-to-peer, workspace-isolated warmup engine (`internal/app/warmup` and `internal/worker/warmup`).
 

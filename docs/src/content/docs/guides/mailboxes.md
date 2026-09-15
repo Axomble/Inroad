@@ -98,7 +98,14 @@ Before activating a mailbox, Inroad executes a multi-step pre-flight check (`net
 
 ### Per-IP Worker Egress Routing (`INROAD_WORKER_EGRESS_IP`)
 
-For high-volume senders, dedicated IP reputation is crucial. Inroad worker processes support per-worker network interface binding (`internal/platform/mail` and `internal/platform/config`):
+A worker's egress IP is what the mailbox **provider** sees when Inroad
+authenticates to it — on every send and every poll. Providers challenge sign-ins,
+throttle and rate-limit per source address, so a stable, uncrowded egress address
+per mailbox is what this buys. It is *not* recipient-facing reputation: Inroad
+never delivers to a recipient's MX, so the recipient never observes this address
+(see [The Sending Fleet](/architecture/#the-sending-fleet)).
+
+Inroad worker processes support per-worker network interface binding (`internal/platform/mail` and `internal/platform/config`):
 
 ```bash
 # Environment variable for worker node 1
@@ -110,8 +117,14 @@ INROAD_WORKER_EGRESS_IP=192.0.2.11
 
 When `INROAD_WORKER_EGRESS_IP` is configured:
 
-- Outbound TCP sockets dial from the specified local network IP interface.
-- Mailbox-to-worker affinity rules (`worker_routing` database table) allow routing specific mailboxes to dedicated worker nodes with matching egress IP addresses.
+- Outbound TCP sockets dial from the specified local network IP interface. It sets
+  the **source** address only, and never relaxes the SSRF destination vet — see
+  [invariant 22](/security/).
+- Mailboxes are pinned to workers by the `mailbox_worker_assignments` table, which
+  the fleet's placement scoring writes. An existing assignment to a live worker is
+  never revisited by the send path, so a mailbox keeps its egress identity; moving
+  one is rotation's decision alone. The `workers` heartbeat registry and
+  `worker_provider_signals` are the two other fleet tables.
 
 ---
 
