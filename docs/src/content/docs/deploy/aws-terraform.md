@@ -42,7 +42,11 @@ It is not, by itself, a multi-IP sending fleet.
 - **In-Memory Cache:** Amazon ElastiCache for Redis cluster.
 - **Container Compute:** AWS ECS Fargate Task Definitions & Services for API (`cmd/inroad`) and Worker (`cmd/worker`).
 - **Load Balancing:** AWS Application Load Balancer (ALB) with HTTPS listener and `/healthz` health checks.
-- **Encryption & Key Management:** AWS KMS Key for DEK envelope encryption (`aws-kms` provider).
+- **Encryption & Key Management:** An AWS KMS key encrypts RDS, ElastiCache and S3
+  **at rest**. It does *not* wrap Inroad's per-workspace DEKs: `INROAD_KEY_PROVIDER`
+  accepts only `local` today and refuses to start on any other value, so the
+  application's envelope encryption still derives its KEK from `INROAD_MASTER_KEY`.
+  A `KMSKeyProvider` exists behind the same seam but is not yet selectable.
 - **Object Storage:** Amazon S3 bucket for assets, mail attachments, and exports.
 
 ## Terraform Deployment

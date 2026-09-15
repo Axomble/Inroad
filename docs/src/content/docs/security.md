@@ -266,7 +266,9 @@ limit / abuse control here is tracked in the Deferred list below.
     is assigned/read only within its own workspace. The assignment is idempotent
     while its worker stays live (`ON CONFLICT` keeps a single race winner); an
     assignment whose worker stopped heartbeating is treated as absent and
-    reassigned, so "the pin never moves" is NOT a guarantee to rely on. What does
+    reassigned, and the rotation tick (`RotateMailboxWorkerAssignment`,
+    invariant 71) moves one deliberately — so "the pin never moves" is NOT a
+    guarantee to rely on. What does
     not move is the tenant: `DO UPDATE` never writes `workspace_id`, and a
     mismatched (mailbox, workspace) pair yields zero source rows from the
     `INSERT … SELECT`, so it never reaches the conflict clause at all. The
@@ -1506,6 +1508,36 @@ write history that never happened.
     deployment's own logs, where whoever runs the deployment already has it. The
     UI says so where a reader looks for the message, rather than leaving the
     screen appearing to hide something.
+
+## Fleet rotation
+71. **A rotation moves a mailbox between workers; it can never move it between
+    tenants, and it never writes a decision it did not make.**
+    `RotateMailboxWorkerAssignment` is pinned to `(mailbox_id, workspace_id)` and
+    additionally to the worker the decision was made FROM. It writes only
+    `worker_id`, `band` and `assigned_at` — never `workspace_id` — so invariant 4
+    holds and invariant 24's "the tenant does not move" is unchanged by the one
+    path that deliberately moves the pin.
+
+    The third predicate is a concurrency guard, not decoration. Between the scan
+    and the write the send path may have re-placed the mailbox itself; a blind
+    `UPDATE` would then undo a placement made on fresher facts. A mismatch matches
+    zero rows, the caller skips the mailbox, and — this is the load-bearing part —
+    **nothing is logged**. A decision-log entry saying a mailbox moved from a
+    worker it had already left would be a lie in the one table an operator trusts
+    to explain where mail is coming from.
+
+    Rotation reuses `fleetscore.Candidate.Eligible` as its definition of health
+    rather than introducing a second one. Two disagreeing definitions would let a
+    worker be too sick to receive new mailboxes and well enough to keep the ones it
+    has — the original bug with the sign flipped. The decision log entry is built
+    through `fleetdecision`'s constructors like every other, so a FORCED move (an
+    unreachable or blocked incumbent) renders its cause and nothing numeric: no
+    score comparison is printed, because none was computed.
+
+    The tick is fleet-scoped infrastructure work, not tenant work, and reads the
+    whole fleet on purpose (invariant 24). It is reachable only from the `control`
+    role's scheduler — there is no API surface that triggers a rotation, so no
+    caller can steer a mailbox onto a worker of their choosing.
 
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**
