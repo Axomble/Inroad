@@ -15,6 +15,48 @@ pulse read-model, test depth, first-class Company.
 
 ---
 
+## Reconciled against the tree — 2026-09-15 @ `3d0273e`
+
+Every item below was checked against the actual package, route and migration
+trees rather than against this document's own wording. That distinction
+mattered: searching for a plan item's phrasing finds nothing when the code
+shipped under a different name, which is how six completed items kept reading as
+outstanding. **The plan was stale in both directions, and nearly sent work to
+rebuild code that already ships.**
+
+**Marked outstanding, actually done:** P0.3 (the webhooks UI exists, with a
+route and four test files), P1.1 (installer), P1.2 (operator CLI), P1.4 (ARF
+parsing), P1.7 (warmup header-loss fallback).
+
+**Described wrongly:** P2.2 — the filesystem implementation and the from-env
+factory both ship; only the first caller is missing. P2.21 — the write side is
+wired at six call sites, but there is no read query, so it is a write-only
+ledger. P2.7 — `inroadctl status` already covers the CLI half.
+
+**Undocumented epic.** Nine commits (`3346b93`…`3d0273e`) built a multi-IP
+sending fleet: control/send worker roles with role-scoped queues, worker
+identity derived from the host's public IP, risk-band placement, an append-only
+fleet decision log, and per-worker provider-signal collection. P3.9 asks for
+much of this and still reads as blocked on P3.8. It is not — it was built
+without waiting for the literal HTTP split, which remains outstanding.
+
+**Confirmed dead code**, per this repo's own no-dead-code rule:
+`ListFleetDecisionsForMailbox` (`internal/platform/db/gen/fleet.sql.go`) has no
+production caller — only an integration test. Either give it the operator-facing
+reader it was written for, or delete it.
+
+One earlier claim of mine was wrong and is retracted: `internal/platform/jobrun`
+is **not** dead. There is no `jobrun.Loop`; the API is `jobrun.Record`, and it
+has six production call sites. The name came from a peer system, not from ours.
+
+Two items remain uncertain and are deliberately not marked: **P3.6** (whether
+`platform/warmup/content.go` implements the full generation pipeline or just
+predates it) and **P2.19**'s baseline claim that a verified domain already
+overrides the host — nothing in `internal/worker/sequence/advance.go`
+corroborates it.
+
+---
+
 ## P0 — Foundational, cheap, do first (days each)
 
 > **✅ P0 IS COMPLETE.** All five landed in the P0 sprint (#171, merged
@@ -25,7 +67,7 @@ pulse read-model, test depth, first-class Company.
 |---|---|---|---|
 | ~~P0.1~~ ✅ | ~~**Release + container-publish CI** — `release.yml` (tagged, `CHANGELOG.md`), `build-push.yml` (GHCR images for api/worker/web)~~ **DONE** — both workflows ship, multi-arch, with `platform/version` stamped at link time, `checksums.txt`, and a Keep-a-Changelog `CHANGELOG.md` parsed for the release body. | S | Prerequisite for the installer (P1.1) and for anyone running Inroad without building from source. The reference platform has both; ~~Inroad has neither~~ Inroad now has both. |
 | ~~P0.2~~ ✅ | ~~**Security CI** — `govulncheck`, `npm audit` / `osv-scanner`, Trivy image scan, plus `.github/dependabot.yml`~~ **DONE** — `security.yml` (govulncheck reachable-symbol + `npm audit --audit-level=high` + Trivy FS for vuln/secret/misconfig) on PR, push and weekly; `dependabot.yml` covers gomod, npm, actions and the Dockerfiles. Informs rather than gates, deliberately. | S | Called out in the project review as the clearest supply-chain gap. |
-| ~~P0.3~~ ⚠️ | ~~**Outbound webhooks** — `internal/app/webhook`: HMAC-signed (`t=…,v1=…` over `t.body`), event-filtered subscriptions, retry with backoff, SSRF guard on the target URL, delivery log~~ **BACKEND DONE** — `app/webhook`, `worker/webhook/deliver.go`, `platform/webhookwire` (`sign.go` + `ssrf.go`), migration `20260907132955_webhook`, and `/webhook-endpoints` ×5 incl. `rotate-secret`, `ping`, `deliveries`. **Remaining: the UI** — there is no `features/webhooks` and no route, so an operator cannot register an endpoint without curl. Small; finish it before P2.6 leans on it. | M | The single highest-leverage missing primitive. Unblocks every integration (P2.x). |
+| ~~P0.3~~ ⚠️ | ~~**Outbound webhooks** — `internal/app/webhook`: HMAC-signed (`t=…,v1=…` over `t.body`), event-filtered subscriptions, retry with backoff, SSRF guard on the target URL, delivery log~~ **BACKEND DONE** — `app/webhook`, `worker/webhook/deliver.go`, `platform/webhookwire` (`sign.go` + `ssrf.go`), migration `20260907132955_webhook`, and `/webhook-endpoints` ×5 incl. `rotate-secret`, `ping`, `deliveries`. ~~**Remaining: the UI**~~ **DONE 2026-09-15** — `web/src/features/webhooks/` ships `webhooks-page.tsx`, `webhook-endpoint-row.tsx`, `delivery-log.tsx`, `secret-reveal.tsx` and `webhook-copy.ts` with four test files, routed at `web/src/routes/app.settings.webhooks.tsx`. **P0.3 is fully done**; the ⚠️ above is stale. | M | The single highest-leverage missing primitive. Unblocks every integration (P2.x). |
 | ~~P0.4~~ ✅ | ~~**Redis in `/readyz`** + a multi-dependency probe~~ **DONE** — `/readyz` pings Postgres *and* Redis under a 2s budget. Still grows into P2.7. | S | A Redis outage fails every login closed at the rate limiter, yet a Postgres-only probe reported ready. |
 | ~~P0.5~~ ✅ | ~~**Redis connection config** — accept `redis://` / `rediss://` URL, support password/TLS, one `dialRedis()` constructor~~ **DONE** — `internal/platform/redisconn`. | S | `INROAD_REDIS_ADDR` was address-only; managed Redis (auth/TLS) could not connect. |
 
@@ -33,13 +75,13 @@ pulse read-model, test depth, first-class Company.
 
 | # | Item | Effort | Notes |
 |---|---|---|---|
-| P1.1 | **One-command installer** — `scripts/install.sh` served from the docs site, checksummed, pulls the P0.1 images, writes a real `.env`, prints a claim link. POSIX sh, `--dry-run`, optional `--wizard` | M | The reference platform's published install script is the model (and its hard-won rules: POSIX not bash, `set -eu`, `main "$@"` last, idempotent, never regenerate a key). Biggest self-host first-impression gap. |
-| P1.2 | **Operator CLI** — `cmd/inroadctl`: create user, set password, grant admin, workspace list, instance status; talks to Postgres directly so it works when auth is broken | M | Mirrors the reference platform's operator CLI. Bake it into the api image. |
+| ~~P1.1~~ ✅ | ~~**One-command installer** — `scripts/install.sh` served from the docs site, checksummed, pulls the P0.1 images, writes a real `.env`, prints a claim link. POSIX sh, `--dry-run`, optional `--wizard` | M | The reference platform's published install script is the model (and its hard-won rules: POSIX not bash, `set -eu`, `main "$@"` last, idempotent, never regenerate a key). Biggest self-host first-impression gap.~~ **DONE 2026-09-15** — `scripts/install.sh` (POSIX `sh`, `set -eu`, `main "$@"` last, idempotent `.env`, `--dry-run`, `--dir`), `deploy/docker/docker-compose.prod.yml`, referenced from the deploy docs. Two deliberate deviations: no `--wizard`, and it prints an `inroadctl create-user` command rather than a claim link. **Blocked in practice until the GHCR packages are made public** — a real `curl | sh` currently fails `unauthorized` on image pull. |
+| ~~P1.2~~ ✅ | ~~**Operator CLI** — `cmd/inroadctl`: create user, set password, grant admin, workspace list, instance status; talks to Postgres directly so it works when auth is broken | M | Mirrors the reference platform's operator CLI. Bake it into the api image.~~ **DONE 2026-09-15** — `cmd/inroadctl/` with `create-user`, `set-password` (stdin or hidden prompt, never argv), `grant-role`, `workspaces`, `users`, `status`; baked into `Dockerfile.api`. `status` also covers much of P2.7's CLI half: Postgres reachability, migration version + dirty flag, live-worker count, Redis. |
 | P1.3 | **Pre-send email verification** — `internal/app/emailverify`: a `Verifier` seam (accept-interface) with a built-in implementation (syntax → MX → SMTP RCPT probe from a configurable non-sending source → catch-all detection), cached per domain, run at CSV import and at campaign preflight | M | The incumbent bundles it; the reference platform has a dedicated verification module. Pluggable so a third-party provider can be dropped in. Cuts bounce rate before it costs reputation. |
-| P1.4 | **Complaint / FBL ingestion + deliverability event ingest API** — ~~`POST /deliverability/events` (idempotent, API-key scoped) for external processors (SES/SNS, Postmark)~~ **the ingest API already ships** and a complaint already suppresses + feeds the score and breaker. **Remaining: ARF parsing on inbound mail**, so an FBL that arrives as a message is ingested too. | ~~M~~ **S** | Downgraded: only the inbound-mail half is left. |
+| P1.4 | **Complaint / FBL ingestion + deliverability event ingest API** — ~~`POST /deliverability/events` (idempotent, API-key scoped) for external processors (SES/SNS, Postmark)~~ **the ingest API already ships** and a complaint already suppresses + feeds the score and breaker. ~~**Remaining: ARF parsing on inbound mail**~~ **DONE** — `internal/worker/inbox/arf.go` implements RFC 5965 `ParseARF`, with unit, integration and poll-path tests. **P1.4 is fully done.** | ~~M~~ **S** | Downgraded: only the inbound-mail half is left. |
 | P1.5 | **Contact export** (CSV / XLSX / JSON, scoped to a filter, choose columns) + **CSV import wizard** (preview → column map → dedup strategy, XLSX support) | M | Export is S on its own and conspicuously absent. The wizard is the bigger half. |
 | P1.6 | **Audit log** — `internal/app/audit`: append-only, who/what/when, secret values never recorded, workspace-scoped read endpoint + UI | M | Security doc lists it as deferred; table stakes for teams. |
-| P1.7 | **Warmup header-loss fallback** — match an inbound warmup message on (envelope-to, provider-assigned Message-ID) when the `X-Inroad-Warmup` header was stripped (Microsoft) | S | Cheap correctness fix; without it warmup from M365 mailboxes under-counts placement. |
+| ~~P1.7~~ ✅ | ~~**Warmup header-loss fallback** — match an inbound warmup message on (envelope-to, provider-assigned Message-ID) when the `X-Inroad-Warmup` header was stripped (Microsoft) | S | Cheap correctness fix; without it warmup from M365 mailboxes under-counts placement.~~ **DONE** — `internal/worker/inbox/poll.go`'s `recoverWarmupSendID`, with `poll_warmupfallback_test.go`. |
 | P1.8 | **IMAP/SMTP compatibility hardening** — AUTH method negotiation (CRAM-MD5 → LOGIN → PLAIN), no-CONDSTORE via per-folder UIDNEXT, STATUS fallback when no LIST-STATUS, localized special-use folder names, EHLO with the real sender domain, per-response deadlines, widening backoff on an unreachable server without deactivating the mailbox | M | Each sub-item is a mailbox that otherwise silently fails. The reference platform learned these from real user tickets — copy the list. |
 
 **Exit criterion for P1:** a stranger can `curl | sh` an install, connect a
@@ -52,7 +94,7 @@ to recover if they lock themselves out.
 | # | Item | Effort | Notes |
 |---|---|---|---|
 | P2.1 | **Hosted lead-capture forms** — form builder (fields, pages, design), a hosted/embeddable public page, submission store, submission → contact (+ custom fields) → optional campaign enrollment | L | The reference platform runs this as a dedicated sub-app + public form server. Can start smaller: one templated form type, JSON field spec, a `formserver` route. It's how contacts get in without a CSV. |
-| P2.2 | **Blob-storage seam** — ~~`platform/blobstore`:~~ `platform/storage` **already exists** with the `Provider` interface and a complete, tested S3 implementation — but **nothing imports it**, there is no filesystem implementation, and no env var reaches `platform/config`, so today it is dead code. **Remaining: the filesystem default + a from-env factory + the first caller.** | ~~M~~ **S** | Prerequisite for P2.3 and for storing raw message bodies. Either finish it here or delete it and re-add it with its first caller — leaving an unwired package contradicts the repo's own no-dead-code rule. |
+| P2.2 | **Blob-storage seam** — ~~`platform/blobstore`:~~ `platform/storage` **already exists** with the `Provider` interface and a complete, tested S3 implementation — but **nothing imports it**, there is no filesystem implementation, and no env var reaches `platform/config`, so today it is dead code. ~~**Remaining: the filesystem default + a from-env factory + the first caller.**~~ **CORRECTED 2026-09-15** — `fs.go` (271 lines, path-traversal guarded), `factory.go`'s `FromEnv`, and every `INROAD_STORAGE_FS_ROOT`/`INROAD_S3_*` config var all ship. **Only the first caller is missing**, and `config.go:58` says so itself. This is the highest leverage-per-effort item on the list: it is what unblocks P2.3. | ~~M~~ **S** | Prerequisite for P2.3 and for storing raw message bodies. Either finish it here or delete it and re-add it with its first caller — leaving an unwired package contradicts the repo's own no-dead-code rule. |
 | P2.3 | **Attachments** — per-step and campaign-wide files, workspace storage quota, quota-race-safe upload, carried through the send + test-send + preview paths | M | Needs P2.2. |
 | P2.4 | **Visual automation canvas** — `internal/app/automation`: trigger (reply / bounce / unsub / meeting / form / inbound webhook / warmup-health-change / campaign-step) → IF condition → action (tag, task, deal, notify-webhooks, run-sub-automation, stop). jsonb config per node with a Go struct + validation on write and a `CHECK` on the discriminator | L | The reference platform's jsonb branching-tree config is the model. This is the big one; it unlocks P2.5, P3.2, P3.3. |
 | P2.5 | **Branch-on-behaviour + action steps + switch steps in sequences** | L | Conditional edges between steps (opened / clicked / replied ± N-day window, random split); non-email nodes. Pairs with P2.4's node model. |
@@ -71,7 +113,9 @@ to recover if they lock themselves out.
 | ~~P2.18~~ ✅ | ~~**DLQ replay** — a re-drive action on the failed-task queue (it's already surfaced + paged)~~ **DONE** — `POST /dead-letters/{id}/replay` plus `/discard`, wired to the settings route. | S | |
 | P2.19 | **Custom tracking domain per mailbox/campaign** — extend beyond "a verified domain overrides the host" to per-mailbox CNAME config + verification UI | M | |
 | P2.20 | **Advisor-lite: deterministic sending-posture detectors** — ~30 pure-Go, no-model checks (cap too high for the ramp, warmup off while sending, no follow-up steps, unsub header disabled, list exhaustion, narrow send window, spammy copy, SPF/DKIM drift) surfaced inline on the row they concern | M | **Added 2026-09-08.** The reference platform has since shipped this as a first-class domain, and it is the cheapest differentiation available: no LLM dependency, no new infrastructure, and `app/pulse` is already the delivery vehicle (severity-sorted, promotes the worst problem first). It fits the honest-metrics posture Inroad is already ahead on. AI narration can layer on later behind the existing seam. |
-| P2.21 | **Scheduled-job run ledger** — one table every periodic loop writes an ok/error row to (`worker/maintenance`, `domainauth`, `recipientesp`, `deliverability`, the warmup pollers), with last-run / last-error / duration surfaced in-app, and a run-now request the owning process picks up on its next tick | S–M | **Added 2026-09-08**, from the competitor's `scheduled_job_runs` (see `02-reference-platform.md` §4b). Turns "is the sweep actually running" from a log-grep into a query. Composes directly with P2.7's instance-health dashboard and is the single cheapest operability win on this list. |
+| P2.21 ◐ | **Scheduled-job run ledger** — **WRITE SIDE DONE 2026-09-15**, read side missing — one table every periodic loop writes an ok/error row to (`worker/maintenance`, `domainauth`, `recipientesp`, `deliverability`, the warmup pollers), with last-run / last-error / duration surfaced in-app, and a run-now request the owning process picks up on its next tick | S–M | **Added 2026-09-08**, from the competitor's `scheduled_job_runs` (see `02-reference-platform.md` §4b). Turns "is the sweep actually running" from a log-grep into a query. Composes directly with P2.7's instance-health dashboard and is the single cheapest operability win on this list. **Reconciled 2026-09-15:** `internal/platform/jobrun`'s `Record` decorator is wired at six real call sites (`internal/worker/handlers.go`, `internal/worker/inbox/register.go`), writing to `scheduled_job_runs` via migration `20260908123022`. **But the queries are `InsertScheduledJobRun` and `PurgeScheduledJobRuns` only — there is no List/read query at all**, so nothing surfaces last-run/last-error/duration and the run-now request does not exist. It is a write-only ledger. Remaining: a read query plus one endpoint or CLI command. |
+| P2.22 | **Warmup containment must key on the address, not the mailbox row** — deleting a mailbox and re-adding the same address launders its containment history. `mailboxes.id` is `gen_random_uuid()`, so a re-added address gets a **new** id, while `warmup_state_transitions` (the thing that carries containment across a re-entry) is keyed on `mailbox_id`. The old transitions are orphaned and the address returns to `probation` — quarantine and blocked included. Re-key the carry-forward lookup on `(workspace_id, email)`, which already has a unique index (`mailboxes_workspace_email_key`) and is the real stable identity | S–M | **Added 2026-09-14, corrected same day.** The first version of this entry claimed disable→re-enable erased the penalty. **It does not** — `UpsertWarmupParticipant` deliberately reads the last sealed lane out of `warmup_state_transitions`, which has no FK to `mailboxes` precisely so it survives the participant `DELETE`, and carries `quarantine`/`blocked` forward. That path is correctly handled and well commented. Only the **mailbox-deletion** path is open, because it changes the key rather than removing the row. Narrower than first written, still a real laundering route, and cheap to close. |
+| P2.23 | **Seed inbox-placement testing** — send tokenized copies of a real template through a real sender to a panel of controlled seed mailboxes, then classify Inbox / Spam / Promotions from the synced folder flags, surfaced per campaign and per mailbox | M–L | **Added 2026-09-14.** Measures the outcome customers actually buy; bounce and complaint rates only proxy it. Doubles as a placement-quality signal no competitor-independent source gives us. Capture Gmail's `CATEGORY_*` tab labels explicitly — without them a Promotions-tab message reads as "inbox" and the feature quietly overstates itself. Name the package `inboxtest`, never `placement`: fleet placement already owns that word. |
 
 ## P3 — Later: AI depth, platform, adjacent products
 
