@@ -41,3 +41,25 @@ worker pod. Both are covered in detail in
   `false` on every worker pod except one. The simplest shape is a second
   single-replica worker Deployment with the flag on, and the scaled Deployment
   with it off.
+
+:::caution[Scaling `deployment-worker.yaml` does not diversify sending IPs]
+A cluster's CNI typically NATs every pod through a small, fixed set of node or
+cluster egress IPs, and pods get rescheduled onto different nodes across
+deploys and autoscaling events. Raising `replicas` here buys throughput on
+whatever IP identity already exists — it does not give Inroad's fleet
+placement (provider crowding, blast-radius scoring, per-worker egress IP
+affinity) anything new to spread mailboxes across, and a pod that gets
+rescheduled mid-warmup changes the client address a mailbox's provider sees
+for no reason, which costs sign-in trust rather than building it.
+
+This chart is a solid fit for the **control plane** — API pods, and a
+`INROAD_WORKER_ROLE=control` worker pod for the scheduler and sweeps. For the
+sending fleet, prefer individually-addressed hosts outside the cluster: run
+`INROAD_WORKER_ROLE=send` on a plain VPS per desired sending identity, with
+`INROAD_WORKER_EGRESS_IP` set to that host's own address, pointed at this
+cluster's Postgres/Redis. See
+[Splitting control and send roles](/deploy/environment-variables/#splitting-control-and-send-roles),
+the mailbox guide's [per-worker egress IP routing](/guides/mailboxes/), and
+[Hosting Costs](/deploy/hosting-costs/) for what that actually costs across a
+few providers.
+:::
