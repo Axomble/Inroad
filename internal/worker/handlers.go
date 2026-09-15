@@ -2,6 +2,8 @@
 package worker
 
 import (
+	"context"
+
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
@@ -22,6 +24,18 @@ import (
 	webhookworker "github.com/inroad/inroad/internal/worker/webhook"
 )
 
+// Sender is the send seam the per-message handlers consume. It is an INTERFACE
+// rather than *mail.MultiSender so the composition root can hand Register a
+// decorated sender — today, the one that classifies each provider's answer into
+// the per-worker fleet signal counters (internal/worker/fleetsignal). Every
+// handler below already depends on its own structurally identical interface
+// (sequence.Sender, warmup.Sender, testsend.Mailer, inbox.Mailer), so this
+// widening changes nothing for them; it only stops this struct from being the
+// one place that pins the concrete type.
+type Sender interface {
+	Send(ctx context.Context, tj mail.OutboundJob, msg mail.Message) (messageID string, err error)
+}
+
 // Deps is everything Register wires onto the mux. It is a struct rather than a
 // parameter list because the list had already reached thirteen and the role
 // would have made it fourteen; the repo's own rule is an options struct past
@@ -32,7 +46,7 @@ type Deps struct {
 	Role Role
 
 	Core     coreapi.Client
-	Sender   *mail.MultiSender
+	Sender   Sender
 	Engager  mail.Engager
 	Reader   mail.InboxReader
 	Enqueuer *queue.Client

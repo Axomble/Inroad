@@ -59,7 +59,12 @@ func transmitGmail(ctx context.Context, accessToken string, raw []byte) error {
 	}
 	enc := base64.URLEncoding.EncodeToString(raw)
 	if _, err := srv.Users.Messages.Send("me", &gmail.Message{Raw: enc}).Context(ctx).Do(); err != nil {
-		return fmt.Errorf("gmail: send: %w", err)
+		// gmailSendError keeps the HTTP status and Google's machine reason token as
+		// data when this was a provider reply, so the fleet's per-worker signal
+		// collector can tell a 429 rate limit from a 400 malformed request without
+		// reading the message. A dial failure is not an API reply and passes
+		// through unchanged.
+		return fmt.Errorf("gmail: send: %w", gmailSendError(err))
 	}
 	return nil
 }

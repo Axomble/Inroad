@@ -30,18 +30,32 @@ import (
 	"github.com/inroad/inroad/internal/platform/log"
 	"github.com/inroad/inroad/internal/platform/mail"
 	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/providersignal"
 	"github.com/inroad/inroad/internal/platform/queue"
 	platformrealtime "github.com/inroad/inroad/internal/platform/realtime"
 	"github.com/inroad/inroad/internal/platform/redisconn"
 	"github.com/inroad/inroad/internal/platform/version"
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
+	"github.com/inroad/inroad/internal/worker/fleetsignal"
 )
 
 // workerHeartbeatInterval is how often a worker refreshes its `workers` row. It
 // matches the assigner's live-worker window (coreapi workerLiveWindow, 15m) with
 // comfortable headroom so a couple of missed ticks don't drop it from routing.
 const workerHeartbeatInterval = 5 * time.Minute
+
+// workerSignalFlushInterval is how often a worker reports the provider verdicts
+// it accumulated in memory (internal/worker/fleetsignal). Deliberately the same
+// cadence as the heartbeat: a worker reports its LIVENESS and its STANDING WITH
+// PROVIDERS on one clock, so an operator reading `workers` and
+// `worker_provider_signals` side by side sees two series sampled alike.
+//
+// It is also what a crash costs. Counters live in memory until a flush, so an
+// unclean stop loses at most this much — which is the accepted trade (losing a
+// window of counts, never a send), and the reason for the graceful final flush
+// in Flusher.Run.
+const workerSignalFlushInterval = 5 * time.Minute
 
 func main() {
 	if err := run(); err != nil {
@@ -207,14 +221,35 @@ func run() error {
 		logger.Error("invalid worker egress ip", "err", err)
 		return err
 	}
+	// Per-worker provider signals. Every send and every poll authenticates to a
+	// mailbox PROVIDER from this host's egress IP, and the provider throttles,
+	// challenges and rate-limits per source address — the one per-IP risk that
+	// recipient-side reputation (warmup lanes) cannot see, because Inroad never
+	// dials a recipient's MX at all. The collector accumulates classified
+	// verdicts in memory; the flusher below reports the deltas through coreapi.
+	signals := providersignal.NewCollector(time.Now)
+
 	// MultiSender dispatches SMTP vs Gmail vs Graph on the job's Provider; the
 	// SMTP leg keeps the SSRF-vetted NetSender, the Gmail leg uses the fixed
 	// Google host, and the m365 leg uses the fixed Microsoft Graph host.
+	//
+	// Wrapped in the signal-capturing decorator HERE, at the composition root, so
+	// all five send paths (sequence:advance, warmup:tick, warmup:engage's reply,
+	// testsend:send, and the inbox package's manual reply/compose sends) are
+	// observed by one wrapper. It returns each send's result untouched — a
+	// telemetry decorator that could alter a send's outcome would be a delivery
+	// bug waiting to happen.
 	smtpSender := mail.NewNetSender(cfg.MailAllowPrivateHosts)
 	smtpSender.LocalAddr = egressAddr
-	sndr := mail.NewMultiSender(smtpSender, mail.NewGmailSender(), mail.NewGraphSender())
-	reader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
-	reader.LocalAddr = egressAddr
+	sndr := fleetsignal.NewSender(
+		mail.NewMultiSender(smtpSender, mail.NewGmailSender(), mail.NewGraphSender()), signals)
+	// The IMAP reader is wrapped for the same reason: a poll is an
+	// authentication from this IP on every tick. LocalAddr is set on the concrete
+	// reader BEFORE wrapping — the decorator forwards calls, it does not forward
+	// field assignments.
+	netReader := mail.NewNetInboxReader(cfg.MailAllowPrivateHosts)
+	netReader.LocalAddr = egressAddr
+	reader := fleetsignal.NewInboxReader(netReader, signals)
 	// Engager runs recipient-side warmup engagement (mark-read/rescue). The IMAP leg
 	// dials through the SAME SSRF-vetted, source-IP-bound path as the reader; the
 	// Gmail leg uses the fixed Google host; m365 is a documented clean skip.
@@ -243,6 +278,39 @@ func run() error {
 	hbCtx, cancelHeartbeat := context.WithCancel(context.Background())
 	defer cancelHeartbeat()
 	startHeartbeat(hbCtx, core, cfg.WorkerID, cfg.WorkerEgressIP, cfg.WorkerIDFamily, role, logger)
+
+	// Report the provider verdicts collected above. Wired by type assertion for
+	// the same reason as the dead-letter recorder below and the capabilities in
+	// worker.Register: the capability is consumed through a one-method seam
+	// rather than by widening coreapi.Client and its many fakes. A core without
+	// it collects signals that are never reported — degraded observability, never
+	// a failed send.
+	//
+	// The shutdown is a cancel-THEN-WAIT like the metrics listener above, and for
+	// a sharper reason: Flusher.Run performs a FINAL flush after its context is
+	// cancelled, so returning from run() without waiting would race that write
+	// against pool.Close() and lose the last window on every clean stop.
+	//
+	// No role gate. A control-role worker registers no per-message handlers, so
+	// it sends and polls nothing, so its windows are empty and Flush writes
+	// nothing — the gate would be a second statement of a fact the data already
+	// makes true.
+	if sigClient, ok := core.(coreapi.ProviderSignalClient); ok {
+		flusher := fleetsignal.NewFlusher(sigClient, signals, cfg.WorkerID)
+		signalCtx, cancelSignals := context.WithCancel(context.Background())
+		var signalWG sync.WaitGroup
+		signalWG.Add(1)
+		go func() {
+			defer signalWG.Done()
+			flusher.Run(signalCtx, workerSignalFlushInterval)
+		}()
+		defer func() {
+			cancelSignals()
+			signalWG.Wait()
+		}()
+	} else {
+		logger.Warn("coreapi has no provider-signal capability; per-worker provider signals will not be recorded")
+	}
 
 	// Start the periodic scheduler alongside the worker, if this replica is the
 	// one that schedules. It enqueues the reconcile sweeps (enrollments, inbox,

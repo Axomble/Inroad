@@ -106,7 +106,11 @@ func createGraphDraft(ctx context.Context, accessToken string, rawB64 []byte) (s
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("graph: draft: unexpected status %d", resp.StatusCode)
+		// The status travels as DATA (see APIError) so the fleet's signal
+		// collector can classify a 429 throttle without parsing this sentence.
+		// Reason stays empty: Graph's error body is deliberately never read, and
+		// that rule is what keeps an echoed bearer token out of logs.
+		return "", "", &APIError{Provider: "m365", Op: "draft", Status: resp.StatusCode}
 	}
 	var body struct {
 		ID                string `json:"id"`
@@ -142,7 +146,8 @@ func sendGraphDraft(ctx context.Context, accessToken, id string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("graph: send: unexpected status %d", resp.StatusCode)
+		// Status as data, body never read — same reasoning as createGraphDraft.
+		return &APIError{Provider: "m365", Op: "send", Status: resp.StatusCode}
 	}
 	return nil
 }

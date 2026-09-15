@@ -518,6 +518,17 @@ type Event struct {
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 }
 
+type FleetDecision struct {
+	ID          uuid.UUID          `json:"id"`
+	Kind        string             `json:"kind"`
+	WorkerID    *string            `json:"worker_id"`
+	MailboxID   pgtype.UUID        `json:"mailbox_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Reason      string             `json:"reason"`
+	TriggeredBy string             `json:"triggered_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type IdempotencyKey struct {
 	WorkspaceID  uuid.UUID          `json:"workspace_id"`
 	Key          string             `json:"key"`
@@ -1308,6 +1319,17 @@ type Worker struct {
 	EgressIp   string             `json:"egress_ip"`
 	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
 	IDFamily   string             `json:"id_family"`
+}
+
+type WorkerProviderSignal struct {
+	ID          int64              `json:"id"`
+	WorkerID    string             `json:"worker_id"`
+	Provider    string             `json:"provider"`
+	Operation   string             `json:"operation"`
+	Reason      string             `json:"reason"`
+	Events      int64              `json:"events"`
+	WindowStart pgtype.Timestamptz `json:"window_start"`
+	WindowEnd   pgtype.Timestamptz `json:"window_end"`
 }
 
 type Workspace struct {

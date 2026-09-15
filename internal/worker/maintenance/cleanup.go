@@ -44,14 +44,27 @@ type Cleaner interface {
 	// one — see the table's migration for why it needed one from day one rather
 	// than growing unbounded first.
 	PurgeScheduledJobRuns(ctx context.Context) (deleted int64, err error)
+	// PurgeWorkerProviderSignals removes per-worker provider signal windows past
+	// their 30-day retention. Same reasoning as PurgeScheduledJobRuns: every live
+	// worker writes rows on a timer (one flush every five minutes) and nothing in
+	// the application deletes them, so the table needed a sweep from the day it
+	// existed rather than after it had grown. 30 days rather than 90 because a
+	// window delta answers "how is this egress IP being treated right now".
+	PurgeWorkerProviderSignals(ctx context.Context) (deleted int64, err error)
+	// PurgeFleetDecisions removes fleet decision-log rows past their 90-day
+	// retention. Wider than the signals above because a decision records
+	// something that HAPPENED to a mailbox, and "when did this move, and why"
+	// outlives the counters that informed it.
+	PurgeFleetDecisions(ctx context.Context) (deleted int64, err error)
 }
 
 // CleanupHandler purges, in order: expired security artifacts, expired
 // Idempotency-Key replay-cache rows, warmup evidence past its retention window,
 // dead workers with their mailbox assignments, captured dead letters past
-// theirs, expired webhook deliveries, and scheduled-job-run ledger rows past
-// theirs. Returning a database error from any purge lets asynq retry; successful
-// runs log each affected count for observability.
+// theirs, expired webhook deliveries, scheduled-job-run ledger rows past theirs,
+// per-worker provider signal windows, and fleet decision-log rows. Returning a
+// database error from any purge lets asynq retry; successful runs log each
+// affected count for observability.
 func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 	return func(ctx context.Context, _ *asynq.Task) error {
 		deleted, err := core.CleanupExpired(ctx)
@@ -95,6 +108,18 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired scheduled job runs purged", "rows", jobRunsDeleted)
+
+		signalsDeleted, err := core.PurgeWorkerProviderSignals(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired worker provider signals purged", "rows", signalsDeleted)
+
+		decisionsDeleted, err := core.PurgeFleetDecisions(ctx)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "expired fleet decisions purged", "rows", decisionsDeleted)
 		return nil
 	}
 }
