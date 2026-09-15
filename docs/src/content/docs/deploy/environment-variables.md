@@ -69,9 +69,9 @@ plus headroom for the periodic sweepers and HTTP handlers — see
 
 ### The scheduler must be a singleton
 
-The worker binary also runs the asynq **scheduler**, which enqueues the periodic
-reconcile sweeps (enrollments, inbox, warmup, domain auth, recipient ESP,
-maintenance cleanup).
+The worker binary also runs the asynq **scheduler**, which enqueues the seven
+periodic reconcile sweeps (enrollments, inbox, warmup, domain auth, recipient ESP,
+maintenance cleanup, and the fleet rotation pass).
 
 asynq elects no leader. Every worker process with `INROAD_RUN_SCHEDULER=true`
 registers every periodic task independently, so **N replicas fire each sweep N
@@ -99,7 +99,7 @@ level=INFO msg="scheduler disabled for this replica" run_scheduler=false
 
 ### Splitting control and send roles
 
-By default a worker process runs everything: the scheduler, the six periodic
+By default a worker process runs everything: the scheduler, the seven periodic
 sweeps above, and every per-message handler (campaign sends, warmup ticks and
 engagement, inbox polls, manual replies, test sends, webhook deliveries). This
 is the self-host topology — one process, one trust domain, nothing to
@@ -110,7 +110,7 @@ halves, **and which queues it consumes follows the same split** — that second
 half used to be missing, which is why this section used to warn you off using
 it. It doesn't any more; the topology below is operable.
 
-- **`control`** — the scheduler and the six periodic sweeps/purges. These scan
+- **`control`** — the scheduler and the seven periodic sweeps/purges. These scan
   or delete across every workspace, so this role is meant to stay on trusted
   infrastructure beside the API.
 - **`send`** — per-message work only: campaign sends, warmup ticks and
@@ -268,11 +268,82 @@ short-lived access token for one API call.
 
 **It does not yet shrink what a LIVE compromised worker can reach.** Every
 `send` worker consumes the shared `send` queue and may legitimately be handed a
-job for any mailbox, so the broker has to answer for any mailbox the token names.
-Scoping a worker to only the mailboxes actually routed to it needs per-worker
-identity *and* per-mailbox routing; neither exists yet. Treat a `send` host as
-able to reach any mailbox in the installation while it is running, and firewall
-the broker listener accordingly.
+job for any mailbox — only `warmup:tick` is routed by assignment — so the broker
+has to answer for any mailbox the token names. Scoping a worker to only the
+mailboxes actually routed to it needs per-worker identity *and* per-mailbox
+routing; identity now exists (see [Worker identity](#worker-identity-and-egress-ip)
+below), per-mailbox routing does not. The token is also shared across the fleet,
+so the broker cannot tell which host is asking and revoking one revokes all.
+Treat a `send` host as able to reach any mailbox in the installation while it is
+running, and firewall the broker listener accordingly.
+
+### Worker identity and egress IP
+
+These two variables are what make a `send` host a distinct *sending identity*
+rather than just more throughput. Neither is needed for the single-process
+self-host default.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_WORKER_EGRESS_IP` | Source address outbound SMTP/IMAP dials bind to (`net.Dialer.LocalAddr`). Set it to the host's own public address on a multi-IP fleet. Sets the **source** only — it never relaxes the SSRF destination vet | unset (OS default route) |
+| `INROAD_WORKER_ID` | Pins this worker's id explicitly, overriding derivation. It keys the `workers` heartbeat row and names the worker's affinity queue `w:<id>` | unset (derived) |
+
+**Identity is derived from the host's public IP, not its hostname.** Reputation is
+per-IP: a host that is reinstalled keeps its IP and should keep its mailbox
+affinity, while a host that gets a new IP is genuinely a new sender and must not
+inherit the old one's assignments. A container hostname, by contrast, changes on
+`--force-recreate` and silently strands the affinity queue keyed on it.
+
+Resolution order:
+
+1. `INROAD_WORKER_ID`, if set — an explicit operator pin always wins.
+2. `role=all` (the self-host default): the OS hostname, exactly as before per-IP
+   identity existed.
+3. Any other role (`control`/`send`): a UUIDv5 of the host's first globally
+   routable address, IPv4 preferred, in the fixed RFC 4122 DNS namespace
+   `6ba7b810-9dad-11d1-80b4-00c04fd430c8`.
+
+Because the namespace and algorithm are standard, a provisioning script can compute
+the same id independently:
+
+```bash
+uuidgen --sha1 --namespace 6ba7b810-9dad-11d1-80b4-00c04fd430c8 --name 192.0.2.10
+```
+
+A host behind NAT with no public address on any interface falls back to the
+hostname rather than failing to start — a self-hoster behind NAT still has to be
+able to run Inroad. The `workers` row records which source was used (`ipv4`,
+`ipv6`, `hostname`, `override`) so you can tell a NAT'd worker from an IP-derived
+one without cross-referencing logs.
+
+:::caution[Changing a host's role or IP strands its old assignments]
+`mailbox_worker_assignments` rows survive a role change, and they stay
+authoritative while the host's last heartbeat is inside the 15-minute live window.
+A host switched to `control` no longer consumes `w:<id>`, so warmup ticks routed
+to it sit on a queue nothing reads — no error, no retry, no dead-letter row. Give
+the host a new `INROAD_WORKER_ID` at cutover, or delete its assignment rows.
+Rotation's `unreachable` tier will eventually move those mailboxes once the host
+falls out of the live window, but only if another live worker exists.
+:::
+
+### Watching the fleet
+
+Fleet placement, rotation and provider signals are all visible in the console under
+**Settings → Fleet** (`/app/settings/fleet`), which is **admin-session-only** — an
+API key or OAuth token cannot reach it. It shows each worker carrying your
+mailboxes, the provider verdicts recorded against it, the periodic job ledger, and
+the per-mailbox decision log explaining why a mailbox sits where it does.
+
+The decision log is the thing to read first when a mailbox is not sending: it
+records every `assign`, `rotate` and `refused` with the reason. A `refused` entry
+means every live worker has recently been blocked or unreachable for that mailbox's
+provider — add fleet capacity or wait for the block to clear.
+
+Rotation runs on the `control` queue every 5 minutes and is deliberately reluctant:
+it moves a mailbox only when the worker it is on is unreachable or the provider is
+refusing it, or (rarely) when a destination beats the incumbent by a wide margin
+after 12 hours of residency. At most 20 moves per tick, 5 per destination. A fleet
+with one live worker never rotates at all.
 
 ## Database connection budget
 
