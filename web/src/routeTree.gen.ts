@@ -41,6 +41,7 @@ import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
 import { Route as AppSettingsCustomFieldsRouteImport } from './routes/app.settings.custom-fields'
 import { Route as AppSettingsDeadLettersRouteImport } from './routes/app.settings.dead-letters'
+import { Route as AppSettingsFleetRouteImport } from './routes/app.settings.fleet'
 import { Route as AppSettingsOauthAppsRouteImport } from './routes/app.settings.oauth-apps'
 import { Route as AppSettingsReplyLabelsRouteImport } from './routes/app.settings.reply-labels'
 import { Route as AppSettingsSecurityRouteImport } from './routes/app.settings.security'
@@ -213,6 +214,11 @@ const AppSettingsDeadLettersRoute = AppSettingsDeadLettersRouteImport.update({
   path: '/dead-letters',
   getParentRoute: () => AppSettingsRoute,
 } as any)
+const AppSettingsFleetRoute = AppSettingsFleetRouteImport.update({
+  id: '/fleet',
+  path: '/fleet',
+  getParentRoute: () => AppSettingsRoute,
+} as any)
 const AppSettingsOauthAppsRoute = AppSettingsOauthAppsRouteImport.update({
   id: '/oauth-apps',
   path: '/oauth-apps',
@@ -297,6 +303,7 @@ export interface FileRoutesByFullPath {
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/dead-letters': typeof AppSettingsDeadLettersRoute
+  '/app/settings/fleet': typeof AppSettingsFleetRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -339,6 +346,7 @@ export interface FileRoutesByTo {
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/dead-letters': typeof AppSettingsDeadLettersRoute
+  '/app/settings/fleet': typeof AppSettingsFleetRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -385,6 +393,7 @@ export interface FileRoutesById {
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
   '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/dead-letters': typeof AppSettingsDeadLettersRoute
+  '/app/settings/fleet': typeof AppSettingsFleetRoute
   '/app/settings/oauth-apps': typeof AppSettingsOauthAppsRoute
   '/app/settings/reply-labels': typeof AppSettingsReplyLabelsRoute
   '/app/settings/security': typeof AppSettingsSecurityRoute
@@ -432,6 +441,7 @@ export interface FileRouteTypes {
     | '/app/settings/api-keys'
     | '/app/settings/custom-fields'
     | '/app/settings/dead-letters'
+    | '/app/settings/fleet'
     | '/app/settings/oauth-apps'
     | '/app/settings/reply-labels'
     | '/app/settings/security'
@@ -474,6 +484,7 @@ export interface FileRouteTypes {
     | '/app/settings/api-keys'
     | '/app/settings/custom-fields'
     | '/app/settings/dead-letters'
+    | '/app/settings/fleet'
     | '/app/settings/oauth-apps'
     | '/app/settings/reply-labels'
     | '/app/settings/security'
@@ -519,6 +530,7 @@ export interface FileRouteTypes {
     | '/app/settings/api-keys'
     | '/app/settings/custom-fields'
     | '/app/settings/dead-letters'
+    | '/app/settings/fleet'
     | '/app/settings/oauth-apps'
     | '/app/settings/reply-labels'
     | '/app/settings/security'
@@ -776,6 +788,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsDeadLettersRouteImport
       parentRoute: typeof AppSettingsRoute
     }
+    '/app/settings/fleet': {
+      id: '/app/settings/fleet'
+      path: '/fleet'
+      fullPath: '/app/settings/fleet'
+      preLoaderRoute: typeof AppSettingsFleetRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
     '/app/settings/oauth-apps': {
       id: '/app/settings/oauth-apps'
       path: '/oauth-apps'
@@ -861,6 +880,7 @@ interface AppSettingsRouteChildren {
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
   AppSettingsCustomFieldsRoute: typeof AppSettingsCustomFieldsRoute
   AppSettingsDeadLettersRoute: typeof AppSettingsDeadLettersRoute
+  AppSettingsFleetRoute: typeof AppSettingsFleetRoute
   AppSettingsOauthAppsRoute: typeof AppSettingsOauthAppsRoute
   AppSettingsReplyLabelsRoute: typeof AppSettingsReplyLabelsRoute
   AppSettingsSecurityRoute: typeof AppSettingsSecurityRoute
@@ -874,6 +894,7 @@ const AppSettingsRouteChildren: AppSettingsRouteChildren = {
   AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
   AppSettingsCustomFieldsRoute: AppSettingsCustomFieldsRoute,
   AppSettingsDeadLettersRoute: AppSettingsDeadLettersRoute,
+  AppSettingsFleetRoute: AppSettingsFleetRoute,
   AppSettingsOauthAppsRoute: AppSettingsOauthAppsRoute,
   AppSettingsReplyLabelsRoute: AppSettingsReplyLabelsRoute,
   AppSettingsSecurityRoute: AppSettingsSecurityRoute,

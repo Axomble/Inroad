@@ -101,6 +101,86 @@ func (q *Queries) ListFleetDecisionsForMailbox(ctx context.Context, arg ListFlee
 	return items, nil
 }
 
+const listWorkspaceFleetWorkers = `-- name: ListWorkspaceFleetWorkers :many
+SELECT
+    w.worker_id,
+    w.egress_ip,
+    w.id_family,
+    w.last_seen_at,
+    count(a.mailbox_id)::bigint AS workspace_mailboxes,
+    count(a.mailbox_id) FILTER (WHERE a.band = 'degraded')::bigint AS degraded_mailboxes,
+    min(a.assigned_at)::timestamptz AS first_assigned_at
+FROM workers w
+JOIN mailbox_worker_assignments a
+  ON a.worker_id = w.worker_id
+ AND a.workspace_id = $1::uuid
+GROUP BY w.worker_id, w.egress_ip, w.id_family, w.last_seen_at
+ORDER BY w.worker_id ASC
+`
+
+type ListWorkspaceFleetWorkersRow struct {
+	WorkerID           string             `json:"worker_id"`
+	EgressIp           string             `json:"egress_ip"`
+	IDFamily           string             `json:"id_family"`
+	LastSeenAt         pgtype.Timestamptz `json:"last_seen_at"`
+	WorkspaceMailboxes int64              `json:"workspace_mailboxes"`
+	DegradedMailboxes  int64              `json:"degraded_mailboxes"`
+	FirstAssignedAt    pgtype.Timestamptz `json:"first_assigned_at"`
+}
+
+// The operator's fleet list: every worker THIS WORKSPACE has a mailbox pinned
+// to, with the registry facts that make a bad one visible.
+//
+// WORKSPACE-PINNED THROUGH THE ASSIGNMENT, and that is the whole shape of the
+// query rather than a filter bolted on. `workers` is global infrastructure
+// (migration 000017's trust-domain split) and enumerating it would tell one
+// tenant how large another's deployment is; joining THROUGH
+// mailbox_worker_assignments answers the narrower, honest question -- "which
+// egress IPs does MY mail leave from" -- and a workspace with no assignments
+// gets an empty list rather than a fleet census.
+//
+// It is an inner JOIN for that reason: a worker carrying none of this
+// workspace's mailboxes cannot affect this workspace's sending, and returning it
+// anyway would be the census this shape exists to avoid.
+//
+// The counts are this workspace's own footprint on each worker, never the
+// fleet-wide occupancy ListPlacementCandidates scores on: an operator needs to
+// know how much of THEIR mail sits behind one IP, and how much of that is
+// degraded traffic, and neither question has a cross-tenant answer they are
+// entitled to.
+//
+// Liveness is deliberately NOT computed here. last_seen_at is returned raw and
+// the caller applies the heartbeat window, so the "is it live" rule lives in one
+// Go constant next to the reasoning for its value rather than as a parameter
+// every call site could pass differently.
+func (q *Queries) ListWorkspaceFleetWorkers(ctx context.Context, workspaceID uuid.UUID) ([]ListWorkspaceFleetWorkersRow, error) {
+	rows, err := q.db.Query(ctx, listWorkspaceFleetWorkers, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWorkspaceFleetWorkersRow
+	for rows.Next() {
+		var i ListWorkspaceFleetWorkersRow
+		if err := rows.Scan(
+			&i.WorkerID,
+			&i.EgressIp,
+			&i.IDFamily,
+			&i.LastSeenAt,
+			&i.WorkspaceMailboxes,
+			&i.DegradedMailboxes,
+			&i.FirstAssignedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const purgeFleetDecisions = `-- name: PurgeFleetDecisions :one
 WITH deleted_decisions AS (
     DELETE FROM fleet_decisions
@@ -219,4 +299,107 @@ func (q *Queries) RecordWorkerProviderSignals(ctx context.Context, arg RecordWor
 		arg.WindowEnd,
 	)
 	return err
+}
+
+const rollupWorkspaceFleetProviderSignals = `-- name: RollupWorkspaceFleetProviderSignals :many
+SELECT
+    s.worker_id,
+    s.provider,
+    s.operation,
+    sum(s.events)::bigint AS attempts,
+    coalesce(sum(s.events) FILTER (WHERE s.reason = 'ok'), 0)::bigint AS successes,
+    coalesce(sum(s.events) FILTER (WHERE s.reason = 'auth_failed'), 0)::bigint AS auth_failures,
+    coalesce(sum(s.events) FILTER (WHERE s.reason IN ('rate_limited', 'throttled')), 0)::bigint AS throttled,
+    coalesce(sum(s.events) FILTER (WHERE s.reason IN ('blocked', 'unreachable')), 0)::bigint AS blocked,
+    coalesce(sum(s.events) FILTER (WHERE s.reason = 'rejected'), 0)::bigint AS rejected
+FROM worker_provider_signals s
+WHERE s.window_end >= $1::timestamptz
+  AND s.worker_id IN (
+      SELECT a.worker_id
+      FROM mailbox_worker_assignments a
+      WHERE a.workspace_id = $2::uuid
+  )
+GROUP BY s.worker_id, s.provider, s.operation
+ORDER BY s.worker_id ASC, s.provider ASC, s.operation ASC
+`
+
+type RollupWorkspaceFleetProviderSignalsParams struct {
+	SignalsSince pgtype.Timestamptz `json:"signals_since"`
+	WorkspaceID  uuid.UUID          `json:"workspace_id"`
+}
+
+type RollupWorkspaceFleetProviderSignalsRow struct {
+	WorkerID     string `json:"worker_id"`
+	Provider     string `json:"provider"`
+	Operation    string `json:"operation"`
+	Attempts     int64  `json:"attempts"`
+	Successes    int64  `json:"successes"`
+	AuthFailures int64  `json:"auth_failures"`
+	Throttled    int64  `json:"throttled"`
+	Blocked      int64  `json:"blocked"`
+	Rejected     int64  `json:"rejected"`
+}
+
+// What the PROVIDERS have been telling each of this workspace's workers lately,
+// rolled up per (worker, provider, operation).
+//
+// SCOPED TO THE SAME WORKER SET as ListWorkspaceFleetWorkers, by the same
+// subquery rather than by an id array passed in from Go: a caller that forgot to
+// narrow such an array would read the whole fleet's counters, and a predicate
+// that is part of the statement cannot be forgotten.
+//
+// WHAT THESE COUNTERS ARE, AND ARE NOT. worker_provider_signals carries no
+// workspace_id and honestly cannot (migration 20260914150140): several
+// workspaces' mailboxes share one worker, and a provider's verdict is about the
+// EGRESS IP, not about whose mail happened to trigger it. So a row here is a
+// shared-fate aggregate -- it includes events other tenants' mailboxes on the
+// same worker caused -- and that is the fact the operator needs rather than a
+// leak around one: the risk being measured is shared by construction, which is
+// why the table is per-worker at all. Nothing per-tenant is recoverable from a
+// sum, and no mailbox, address or tenant row is returned.
+//
+// THE GROUPINGS ARE THE POINT. attempts and successes are returned together
+// because a success count alone cannot tell a healthy worker from an idle one,
+// and an attempt count alone cannot tell a busy worker from a failing one.
+// auth_failures is its OWN column rather than folded into a "soft failures"
+// bucket: it is the provider-side signal that predicts an IP being challenged,
+// and it is why this table was collected at all.
+//
+// rejected is returned but kept out of every per-IP bucket, because
+// providersignal's own doc is explicit that a permanent non-security 5xx is
+// about the RECIPIENT (dead address, oversized message) and must never be read
+// as evidence against the worker. It is here so attempts reconcile, not to be
+// scored.
+//
+// attempts is the total across every reason INCLUDING 'other', so the five
+// classified columns can never silently fail to account for the whole: whatever
+// attempts exceeds their sum by is exactly the unclassified remainder.
+func (q *Queries) RollupWorkspaceFleetProviderSignals(ctx context.Context, arg RollupWorkspaceFleetProviderSignalsParams) ([]RollupWorkspaceFleetProviderSignalsRow, error) {
+	rows, err := q.db.Query(ctx, rollupWorkspaceFleetProviderSignals, arg.SignalsSince, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RollupWorkspaceFleetProviderSignalsRow
+	for rows.Next() {
+		var i RollupWorkspaceFleetProviderSignalsRow
+		if err := rows.Scan(
+			&i.WorkerID,
+			&i.Provider,
+			&i.Operation,
+			&i.Attempts,
+			&i.Successes,
+			&i.AuthFailures,
+			&i.Throttled,
+			&i.Blocked,
+			&i.Rejected,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

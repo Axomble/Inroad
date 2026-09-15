@@ -158,8 +158,8 @@ A queue is not decoration: asynq claims a task **before** consulting the handler
 that consumes a queue it cannot serve takes the task and fails it. `control` therefore consumes only
 `control` — that single omission is what stops a control host eating sends.
 
-`control` is a *role* queue, not a "scheduled work" queue. Six of its seven task types are the
-periodic reconciles the scheduler fires; the seventh, `deliverability:evaluate`, is enqueued by the
+`control` is a *role* queue, not a "scheduled work" queue. Seven of its eight task types are the
+periodic reconciles the scheduler fires; the eighth, `deliverability:evaluate`, is enqueued by the
 **send** role after each finalised send, because re-scoring a campaign's breaker is a cross-campaign
 decision rather than one message's delivery. Routing is one table — `queueForTaskType` in
 `internal/platform/queue`.

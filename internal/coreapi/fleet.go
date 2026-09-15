@@ -88,3 +88,30 @@ type FleetDecisionRecorder interface {
 	// mailbox that stopped sending.
 	RecordFleetDecision(ctx context.Context, e fleetdecision.Entry) error
 }
+
+// FleetRotator is an optional control-plane capability: running one pass of the
+// rotation gate, which decides whether any ALREADY PLACED mailbox should move to
+// a different worker. Kept off Client for the same reason as the two capability
+// interfaces above.
+//
+// It is the counterpart to AssignMailboxWorker's incumbency rule, not a
+// competitor to it. That rule keeps a mailbox on its live worker
+// unconditionally, because IP trust accrues per (mailbox, IP) pair at the
+// provider and moving discards it — which leaves a worker the provider has
+// blocked holding every mailbox already assigned to it, each of them failing.
+// Rotation is the ONLY thing that moves those, and it is deliberately hard to
+// satisfy (internal/platform/fleetrotate holds the tiers, the residency floor,
+// the score margin and the per-tick caps).
+type FleetRotator interface {
+	// RotateMailboxWorkers runs one tick and reports how many mailboxes it
+	// actually moved.
+	//
+	// It is idempotent in the only sense that matters for a periodic reconcile:
+	// two ticks in a row over an unchanged fleet move nothing the second time,
+	// because a move resets the residency clock the non-urgent tier is gated on
+	// and because an urgent mailbox has, by then, already left. A fleet with at
+	// most one live worker is a no-op and not an error — self-host has nowhere
+	// to rotate to, and saying so as a failure would turn every tick into an
+	// alert.
+	RotateMailboxWorkers(ctx context.Context) (moved int64, err error)
+}

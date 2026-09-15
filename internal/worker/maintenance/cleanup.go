@@ -39,7 +39,7 @@ type Cleaner interface {
 	PurgeWebhookDeliveries(ctx context.Context) (deleted int64, err error)
 	// PurgeScheduledJobRuns removes scheduled_job_runs rows past their 30-day
 	// retention. Same reasoning as PurgeDeadLetters/PurgeWebhookDeliveries:
-	// append-only from internal/platform/jobrun.Record, six jobs writing a row
+	// append-only from internal/platform/jobrun.Record, seven jobs writing a row
 	// per run (several every five minutes), and no sweep of its own until this
 	// one — see the table's migration for why it needed one from day one rather
 	// than growing unbounded first.

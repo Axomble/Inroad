@@ -1832,6 +1832,39 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    listFleetWorkers: build.query<
+      ListFleetWorkersApiResponse,
+      ListFleetWorkersApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/fleet/workers`,
+        params: {
+          window_hours: queryArg.windowHours,
+        },
+      }),
+    }),
+    listFleetDecisions: build.query<
+      ListFleetDecisionsApiResponse,
+      ListFleetDecisionsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/fleet/mailboxes/${queryArg.id}/decisions`,
+        params: {
+          limit: queryArg.limit,
+        },
+      }),
+    }),
+    listScheduledJobs: build.query<
+      ListScheduledJobsApiResponse,
+      ListScheduledJobsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/fleet/jobs`,
+        params: {
+          window_hours: queryArg.windowHours,
+        },
+      }),
+    }),
   }),
   overrideExisting: false,
 });
@@ -2945,6 +2978,25 @@ export type ListWebhookDeliveriesApiArg = {
   limit?: number;
   /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
   cursor?: string;
+};
+export type ListFleetWorkersApiResponse =
+  /** status 200 The workers this workspace's mail egresses from */ FleetWorkerList;
+export type ListFleetWorkersApiArg = {
+  /** How far back to aggregate, in whole hours. Defaults to 24, raised to a floor of 1 and capped at 720 — past 30 days both underlying tables have been purged, so a wider window returns the same rows while scanning more. CLAMPED, never rejected: the response echoes the window actually used in `window_hours`, so label a column from that rather than from what you asked for. */
+  windowHours?: number;
+};
+export type ListFleetDecisionsApiResponse =
+  /** status 200 The mailbox's placement history */ FleetDecisionList;
+export type ListFleetDecisionsApiArg = {
+  id: string;
+  /** How many entries to return. Defaults to 50, capped at 200. */
+  limit?: number;
+};
+export type ListScheduledJobsApiResponse =
+  /** status 200 Scheduled job health */ ScheduledJobList;
+export type ListScheduledJobsApiArg = {
+  /** How far back to aggregate, in whole hours. Defaults to 24, raised to a floor of 1 and capped at 720 — past 30 days both underlying tables have been purged, so a wider window returns the same rows while scanning more. CLAMPED, never rejected: the response echoes the window actually used in `window_hours`, so label a column from that rather than from what you asked for. */
+  windowHours?: number;
 };
 export type Membership = {
   workspace_id: string;
@@ -4931,6 +4983,87 @@ export type WebhookDeliveryList = {
   /** Cursor for the next page; null on the last page. Opaque — round-trip it untouched. */
   next_cursor: string | null;
 };
+export type FleetProviderSignals = {
+  /** Which transport leg ran. A worker one provider has blocked can be a perfectly good home for another provider's mailboxes, which is why these are never pooled. */
+  provider: "smtp" | "gmail" | "m365";
+  /** What the leg was doing. Kept separate because an auth failure while polling and one while sending are different problems. */
+  operation: "send" | "poll";
+  /** Every classified outcome on this leg, INCLUDING ones with no field of their own. Pair it with `successes`: a success count alone cannot tell a healthy worker from an idle one. */
+  attempts: number;
+  /** Outcomes the provider accepted. */
+  successes: number;
+  /** The provider REFUSED THE CREDENTIAL from this address. This is the first-class number on this object: it is the provider-side signal that predicts an egress IP being challenged or throttled, and it is why these counters are collected at all. Show it, do not bury it. */
+  auth_failures: number;
+  /** The provider slowed this address down (rate limited or throttled). Read it beside auth_failures — together they are the picture of a provider losing patience with an IP. */
+  throttled: number;
+  /** The provider would not talk to this address at all (blocked or unreachable). The hard end of the same axis as `throttled`. */
+  blocked: number;
+  /** Permanent non-security rejections — a dead recipient address, an oversized message. ABOUT THE RECIPIENT, NOT THE WORKER: it is here so `attempts` reconciles, and it must never be read as evidence against an IP. */
+  rejected: number;
+};
+export type FleetWorker = {
+  /** The worker's identity in the fleet registry, and the id a placement decision's reason names. Match against it to join this list to /fleet/mailboxes/{id}/decisions. Treat it as an opaque label: see id_family for how much it is worth. */
+  worker_id: string;
+  /** The source address this worker's mail leaves from, as the worker last reported it. This is the address a mailbox provider sees, builds trust against, and challenges sign-ins from. Empty string when the worker could not determine it. */
+  egress_ip: string;
+  /** How worker_id was derived. It qualifies the id rather than decorating it: a "hostname"-derived id changes when the container is replaced, so a decision naming one is a weaker historical record than one naming an IP-derived id. */
+  id_family: "ipv4" | "ipv6" | "hostname" | "override";
+  /** The worker's last heartbeat. Served beside `live` rather than replaced by it — the boolean is what you scan, this is what you need when the boolean surprises you. */
+  last_seen_at: string;
+  /** Whether the heartbeat is recent enough (15 minutes) that the placement path still considers this worker eligible. False means mail pinned here is being reassigned, or is not moving. */
+  live: boolean;
+  /** How many of THIS workspace's mailboxes are pinned to this worker — your footprint on the IP, not the worker's total occupancy. How many other tenants share it is not reported. */
+  mailbox_count: number;
+  /** How many of those were placed in the 'degraded' risk band. Read it against mailbox_count: three of four is a different worker from three of three hundred. */
+  degraded_mailbox_count: number;
+  /** The oldest of this workspace's pins to the worker — how long your mail has been egressing from that address, which is what a provider's trust accrues against. */
+  first_assigned_at: string;
+  /** One entry per (provider, operation) leg that recorded anything in the window. EMPTY MEANS THE WORKER REPORTED NOTHING, which is a different fact from reporting only failures — do not render it as a row of zeroes without saying so. */
+  signals: FleetProviderSignals[];
+};
+export type FleetWorkerList = {
+  workers: FleetWorker[];
+  /** The window the signal counts below were actually aggregated over, after clamping. Label your column from this, not from what you requested. */
+  window_hours: number;
+};
+export type FleetDecision = {
+  id: string;
+  /** assign — the mailbox was placed on a worker. rotate — it was moved. quarantine — a worker was taken out of service. refused — a placement was DECLINED, which was previously invisible. */
+  kind: "assign" | "rotate" | "quarantine" | "refused";
+  /** The worker the decision named, or null when it named none — a refusal has no destination, and saying so is more honest than naming the worker that was rejected. */
+  worker_id: string | null;
+  /** Prose explaining the decision, written to be acted on.
+    RENDER IT AS WRITTEN. These strings are constructed so that a decision which involved no scoring never prints a score comparison — a forced placement has no runner-up, and rendering it against a 0.00 nobody computed would make the log lie. Parsing them into fields, or laying them out in a table with score columns, imposes a structure they deliberately do not have and reintroduces exactly that claim. */
+  reason: string;
+  /** Who decided — "auto:assign" | "auto:rotate" | "auto:quarantine" | "operator:<user id>". An open vocabulary: new automated actors add new values, so do not switch exhaustively on it. */
+  triggered_by: string;
+  created_at: string;
+};
+export type FleetDecisionList = {
+  decisions: FleetDecision[];
+};
+export type ScheduledJob = {
+  /** The sweep's name as its registrar declares it ("domain auth sweep"), not an asynq task type. An open vocabulary — a new sweep adds a new name. */
+  job_name: string;
+  /** When the most recent run began — REGARDLESS of the window. A job whose last run predates the window still appears, with that old timestamp, because "this sweep stopped four days ago" is the single most important thing this list can tell you. */
+  last_started_at: string;
+  last_finished_at: string;
+  /** How long the most recent run took, measured by the runner against one monotonic clock reading rather than derived from the two timestamps above. */
+  last_duration_ms: number;
+  /** How the most recent run ended. "error" covers both a returned error and a recovered panic. */
+  last_outcome: "ok" | "error";
+  /** Runs inside the window. Pair it with failures_in_window — two failures means something different out of two runs than out of two hundred. Zero means the job did not run in the window at all. */
+  runs_in_window: number;
+  /** Runs inside the window that ended in error. */
+  failures_in_window: number;
+  /** When the most recent failure inside the window started, or null if there was none. This is the closest this response comes to an error report, and it is a timestamp rather than a message on purpose: the stored text may carry another tenant's data and the table has no workspace to scope it by. Correlate it against the deployment's logs. */
+  last_failure_at: string | null;
+};
+export type ScheduledJobList = {
+  jobs: ScheduledJob[];
+  /** The window the run and failure counts were aggregated over, after clamping. */
+  window_hours: number;
+};
 export const {
   useAuthRegisterMutation,
   useAuthLoginMutation,
@@ -5150,4 +5283,7 @@ export const {
   useRotateWebhookEndpointSecretMutation,
   usePingWebhookEndpointMutation,
   useListWebhookDeliveriesQuery,
+  useListFleetWorkersQuery,
+  useListFleetDecisionsQuery,
+  useListScheduledJobsQuery,
 } = injectedRtkApi;

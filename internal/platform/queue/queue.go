@@ -141,6 +141,7 @@ var taskQueues = map[string]string{
 	TaskMaintenanceCleanup:     QueueControl,
 	TaskDomainAuthSweep:        QueueControl,
 	TaskRecipientESPSweep:      QueueControl,
+	TaskFleetRotate:            QueueControl,
 	TaskDeliverabilityEvaluate: QueueControl,
 }
 
@@ -206,6 +207,15 @@ const TaskMaintenanceCleanup = "maintenance:cleanup"
 // TaskDomainAuthSweep re-checks the SPF/DKIM/DMARC records of every sending
 // domain whose last completed check is older than the staleness window.
 const TaskDomainAuthSweep = "domainauth:sweep"
+
+// TaskFleetRotate is the periodic pass of the rotation gate: the ONLY thing
+// that moves an already-placed mailbox off its worker. Placement keeps a live
+// incumbent unconditionally, so without this a worker whose IP the provider has
+// blocked holds every mailbox assigned to it and each of them keeps failing.
+//
+// Cross-tenant by nature — it scans assignments across every workspace — so it
+// is control-role work like every other reconcile above.
+const TaskFleetRotate = "fleet:rotate"
 
 // TaskRecipientESPSweep classifies recipient domains by MX (Google/Microsoft/
 // other) and evicts expired rows from that cache. It exists so ESP-matched
@@ -985,6 +995,24 @@ func RegisterDomainAuthSweep(sch *asynq.Scheduler) error {
 // racing over the same domain converge on the same row.
 func RegisterRecipientESPSweep(sch *asynq.Scheduler) error {
 	return registerControlSweep(sch, "@every 5m", TaskRecipientESPSweep)
+}
+
+// RegisterFleetRotate registers the periodic rotation pass.
+//
+// Every 5 minutes, which is the rate at which the evidence it reads can change:
+// a worker flushes its accumulated provider verdicts every 5m (cmd/worker's
+// workerSignalFlushInterval), so a provider that starts refusing an egress IP
+// becomes visible one flush later and is acted on one tick after that. Ticking
+// faster would re-read a picture that had not moved; slower would leave mailboxes
+// failing on a blocked address for no reason.
+//
+// A tick is cheap when there is nothing to do and bounded when there is: a fleet
+// with at most one live worker costs one COUNT and stops, and every other tick
+// scans a fixed number of assignments and moves at most fleetrotate.Policy's
+// budget. Overlapping ticks are harmless — every move is guarded on the worker
+// it was decided from, so the loser of a race matches zero rows.
+func RegisterFleetRotate(sch *asynq.Scheduler) error {
+	return registerControlSweep(sch, "@every 5m", TaskFleetRotate)
 }
 
 // asynqLogger adapts *slog.Logger to asynq.Logger.

@@ -43,3 +43,66 @@ WITH deleted AS (
     RETURNING 1
 )
 SELECT count(*)::bigint AS deleted_rows FROM deleted;
+
+-- name: ListScheduledJobHealth :many
+-- "Are the sweeps actually running?" -- the read this ledger was written for and
+-- did not have. Until this query the table had an Insert and a Purge and nothing
+-- else: six jobs recording a row per run, and the only way to read one back was
+-- psql. That is the gap, and it is why the migration's own comment says the read
+-- surface still had to be built.
+--
+-- ONE ROW PER JOB, not one row per run. An operator asking this question wants
+-- the six-line answer "here is each sweep and when it last ran", not a firehose
+-- of every tick; a run-level list would be thousands of rows a day and would
+-- bury the one sweep that stopped. DISTINCT ON (job_name) with a matching
+-- ORDER BY is Postgres's own idiom for that and rides idx_scheduled_job_runs_
+-- started's ordering rather than sorting a window function's output.
+--
+-- NO error_message COLUMN, deliberately, and this is the one field a reader will
+-- look for. The column holds err.Error() from six handlers this table does not
+-- own; the migration's own comment says in as many words that it is NOT
+-- guaranteed to be free of tenant content, and scheduled_job_runs has no
+-- workspace_id to scope a read by. Serving that text on a workspace-scoped
+-- endpoint would mean one tenant's admin could read an error string produced
+-- while sweeping another tenant's mailbox. What an operator actually needs from
+-- this screen -- is it running, is it failing, since when, how often -- is fully
+-- answered by the outcome and the two failure columns below; the text itself
+-- stays in the logs, where it is already reachable by whoever runs the
+-- deployment.
+--
+-- last_failure_at and failures_in_window are scoped to @runs_since while the
+-- latest run is NOT, and the asymmetry is the point: "when did this sweep last
+-- run at all" must still answer for a job that stopped running before the
+-- window opened -- which is precisely the failure this table exists to make
+-- visible -- whereas "how often is it failing" is meaningless without a period.
+--
+-- Instance-scoped like every other statement in this file (see the header): a
+-- periodic reconcile runs once per deployment, so there is no workspace_id here
+-- to pin and none that could honestly be added.
+WITH latest AS (
+    SELECT DISTINCT ON (job_name)
+        job_name, started_at, finished_at, duration_ms, outcome
+    FROM scheduled_job_runs
+    ORDER BY job_name, started_at DESC
+), windowed AS (
+    SELECT
+        job_name,
+        count(*)::bigint AS runs,
+        count(*) FILTER (WHERE outcome = 'error')::bigint AS failures,
+        max(started_at) FILTER (WHERE outcome = 'error') AS last_failure_at
+    FROM scheduled_job_runs
+    WHERE started_at >= @runs_since::timestamptz
+    GROUP BY job_name
+)
+SELECT
+    l.job_name,
+    l.started_at::timestamptz AS last_started_at,
+    l.finished_at::timestamptz AS last_finished_at,
+    l.duration_ms::bigint AS last_duration_ms,
+    l.outcome::text AS last_outcome,
+    coalesce(w.runs, 0)::bigint AS runs_in_window,
+    coalesce(w.failures, 0)::bigint AS failures_in_window,
+    w.last_failure_at::timestamptz AS last_failure_at
+FROM latest l
+LEFT JOIN windowed w ON w.job_name = l.job_name
+ORDER BY l.job_name ASC;

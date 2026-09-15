@@ -3960,6 +3960,104 @@ paths:
         '401': { description: Unauthorized }
         '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
+  /fleet/workers:
+    get:
+      operationId: listFleetWorkers
+      tags: [fleet]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workers this workspace's outbound mail egresses from, with how the
+        mailbox providers have been treating each of them.
+
+        Every send authenticates to the customer's own provider, and that
+        provider sees the worker's egress IP on every authentication and every
+        send — throttling it, challenging sign-ins from it, rate-limiting it.
+        This is the read over that: which IPs carry your mail, whether each
+        worker is still alive, and what its providers have said lately.
+
+        SCOPED TO YOUR OWN WORKERS. The list joins through this workspace's own
+        mailbox assignments, so a worker carrying none of your mailboxes is
+        absent and the response is never a census of the deployment. The counts
+        are your footprint on each worker, not its fleet-wide occupancy.
+
+        ADMIN SESSION ONLY. It returns worker ids and egress IPs, which are
+        deployment infrastructure; no API key and no OAuth grant can reach it.
+      parameters:
+        - $ref: '#/components/parameters/FleetWindowHours'
+      responses:
+        '200':
+          description: The workers this workspace's mail egresses from
+          content: { application/json: { schema: { $ref: '#/components/schemas/FleetWorkerList' } } }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+  /fleet/mailboxes/{id}/decisions:
+    parameters: [{ $ref: '#/components/parameters/ID' }]
+    get:
+      operationId: listFleetDecisions
+      tags: [fleet]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        "Why is this mailbox on this worker?" — the automated placement
+        decisions recorded for one mailbox, newest first.
+
+        An assignment row records the ANSWER and never the reasoning, so
+        without this a mailbox that moved, one that was refused a placement,
+        and one nothing ever considered are indistinguishable. Each entry
+        carries prose written to be acted on.
+
+        AN EMPTY LIST IS A REAL ANSWER, not a not-found: a mailbox that has
+        never sent has never resolved a queue and so has no decisions. A
+        mailbox belonging to another workspace returns the same empty list,
+        which is intended — this endpoint is not an existence oracle.
+
+        ADMIN SESSION ONLY, for the same reason as /fleet/workers: a decision's
+        reason names the workers it chose between.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: How many entries to return. Defaults to 50, capped at 200.
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: The mailbox's placement history
+          content: { application/json: { schema: { $ref: '#/components/schemas/FleetDecisionList' } } }
+        '400': { description: The path id is not a UUID }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
+  /fleet/jobs:
+    get:
+      operationId: listScheduledJobs
+      tags: [fleet]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        "Are the periodic sweeps actually running?" — one row per scheduled
+        job, carrying its most recent run and how it has fared over a window.
+
+        A sweep that silently stops running is otherwise invisible: a
+        Prometheus counter does not survive a scrape gap, and only half the
+        sweeps emit one. The most recent run is reported whether or not it
+        falls inside the window, precisely so a job that stopped days ago
+        appears with an old timestamp rather than vanishing from the list.
+
+        THERE IS NO ERROR TEXT IN THIS RESPONSE, deliberately. The stored
+        message is err.Error() from handlers the ledger does not own and is not
+        guaranteed to be free of tenant content, and the table carries no
+        workspace to scope a read by — so serving it here could hand one
+        workspace an error produced while sweeping another's mailbox. The
+        failure itself is fully reported (last_outcome, last_failure_at,
+        failures_in_window); the text stays in the deployment's logs.
+
+        Instance-scoped data behind a workspace-admin gate: a periodic
+        reconcile runs once per deployment, not once per tenant.
+      parameters:
+        - $ref: '#/components/parameters/FleetWindowHours'
+      responses:
+        '200':
+          description: Scheduled job health
+          content: { application/json: { schema: { $ref: '#/components/schemas/ScheduledJobList' } } }
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
 components:
   securitySchemes:
     bearerAuth:
@@ -3986,6 +4084,18 @@ components:
         Opaque keyset cursor taken from the previous page's next_cursor.
         Round-trip it untouched; never construct one.
       schema: { type: string }
+    FleetWindowHours:
+      name: window_hours
+      in: query
+      required: false
+      description: >-
+        How far back to aggregate, in whole hours. Defaults to 24, raised to a
+        floor of 1 and capped at 720 — past 30 days both underlying tables have
+        been purged, so a wider window returns the same rows while scanning
+        more. CLAMPED, never rejected: the response echoes the window actually
+        used in `window_hours`, so label a column from that rather than from
+        what you asked for.
+      schema: { type: integer, minimum: 1, maximum: 720 }
     CaptchaToken:
       name: X-Captcha-Token
       in: header
@@ -7385,3 +7495,261 @@ components:
       required: [unread]
       properties:
         unread: { type: boolean }
+    FleetWorkerList:
+      type: object
+      required: [workers, window_hours]
+      properties:
+        workers: { type: array, items: { $ref: '#/components/schemas/FleetWorker' } }
+        window_hours:
+          type: integer
+          description: >-
+            The window the signal counts below were actually aggregated over,
+            after clamping. Label your column from this, not from what you
+            requested.
+    FleetWorker:
+      type: object
+      required:
+        [worker_id, egress_ip, id_family, last_seen_at, live, mailbox_count,
+         degraded_mailbox_count, first_assigned_at, signals]
+      properties:
+        worker_id:
+          type: string
+          description: >-
+            The worker's identity in the fleet registry, and the id a placement
+            decision's reason names. Match against it to join this list to
+            /fleet/mailboxes/{id}/decisions. Treat it as an opaque label: see
+            id_family for how much it is worth.
+          example: w-10-1-4-27
+        egress_ip:
+          type: string
+          description: >-
+            The source address this worker's mail leaves from, as the worker
+            last reported it. This is the address a mailbox provider sees,
+            builds trust against, and challenges sign-ins from. Empty string
+            when the worker could not determine it.
+          example: 203.0.113.7
+        id_family:
+          type: string
+          enum: [ipv4, ipv6, hostname, override]
+          description: >-
+            How worker_id was derived. It qualifies the id rather than
+            decorating it: a "hostname"-derived id changes when the container
+            is replaced, so a decision naming one is a weaker historical record
+            than one naming an IP-derived id.
+        last_seen_at:
+          type: string
+          format: date-time
+          description: >-
+            The worker's last heartbeat. Served beside `live` rather than
+            replaced by it — the boolean is what you scan, this is what you
+            need when the boolean surprises you.
+        live:
+          type: boolean
+          description: >-
+            Whether the heartbeat is recent enough (15 minutes) that the
+            placement path still considers this worker eligible. False means
+            mail pinned here is being reassigned, or is not moving.
+        mailbox_count:
+          type: integer
+          description: >-
+            How many of THIS workspace's mailboxes are pinned to this worker —
+            your footprint on the IP, not the worker's total occupancy. How
+            many other tenants share it is not reported.
+        degraded_mailbox_count:
+          type: integer
+          description: >-
+            How many of those were placed in the 'degraded' risk band. Read it
+            against mailbox_count: three of four is a different worker from
+            three of three hundred.
+        first_assigned_at:
+          type: string
+          format: date-time
+          description: >-
+            The oldest of this workspace's pins to the worker — how long your
+            mail has been egressing from that address, which is what a
+            provider's trust accrues against.
+        signals:
+          type: array
+          items: { $ref: '#/components/schemas/FleetProviderSignals' }
+          description: >-
+            One entry per (provider, operation) leg that recorded anything in
+            the window. EMPTY MEANS THE WORKER REPORTED NOTHING, which is a
+            different fact from reporting only failures — do not render it as a
+            row of zeroes without saying so.
+    FleetProviderSignals:
+      type: object
+      required:
+        [provider, operation, attempts, successes, auth_failures, throttled,
+         blocked, rejected]
+      description: >-
+        What one mailbox provider told this worker on one kind of operation,
+        over the window.
+
+        SHARED FATE, NOT YOUR TRAFFIC ALONE. These counters are per egress IP,
+        and several workspaces' mailboxes can share a worker, so the numbers
+        include events other tenants' mailboxes caused. That is the fact being
+        reported rather than a leak around one: the provider's verdict is about
+        the address, which is exactly why this risk is worth showing you.
+        Nothing per-tenant is recoverable from a sum, and no mailbox or address
+        appears here.
+
+        Every field is a RAW COUNT. Compute rates client-side from the pairs
+        below and show them beside the counts, not instead of them.
+      properties:
+        provider:
+          type: string
+          enum: [smtp, gmail, m365]
+          description: >-
+            Which transport leg ran. A worker one provider has blocked can be a
+            perfectly good home for another provider's mailboxes, which is why
+            these are never pooled.
+        operation:
+          type: string
+          enum: [send, poll]
+          description: >-
+            What the leg was doing. Kept separate because an auth failure while
+            polling and one while sending are different problems.
+        attempts:
+          type: integer
+          description: >-
+            Every classified outcome on this leg, INCLUDING ones with no field
+            of their own. Pair it with `successes`: a success count alone
+            cannot tell a healthy worker from an idle one.
+        successes:
+          type: integer
+          description: Outcomes the provider accepted.
+        auth_failures:
+          type: integer
+          description: >-
+            The provider REFUSED THE CREDENTIAL from this address. This is the
+            first-class number on this object: it is the provider-side signal
+            that predicts an egress IP being challenged or throttled, and it is
+            why these counters are collected at all. Show it, do not bury it.
+        throttled:
+          type: integer
+          description: >-
+            The provider slowed this address down (rate limited or throttled).
+            Read it beside auth_failures — together they are the picture of a
+            provider losing patience with an IP.
+        blocked:
+          type: integer
+          description: >-
+            The provider would not talk to this address at all (blocked or
+            unreachable). The hard end of the same axis as `throttled`.
+        rejected:
+          type: integer
+          description: >-
+            Permanent non-security rejections — a dead recipient address, an
+            oversized message. ABOUT THE RECIPIENT, NOT THE WORKER: it is here
+            so `attempts` reconciles, and it must never be read as evidence
+            against an IP.
+    FleetDecisionList:
+      type: object
+      required: [decisions]
+      properties:
+        decisions: { type: array, items: { $ref: '#/components/schemas/FleetDecision' } }
+    FleetDecision:
+      type: object
+      required: [id, kind, worker_id, reason, triggered_by, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [assign, rotate, quarantine, refused]
+          description: >-
+            assign — the mailbox was placed on a worker. rotate — it was moved.
+            quarantine — a worker was taken out of service. refused — a
+            placement was DECLINED, which was previously invisible.
+        worker_id:
+          type: string
+          nullable: true
+          description: >-
+            The worker the decision named, or null when it named none — a
+            refusal has no destination, and saying so is more honest than
+            naming the worker that was rejected.
+        reason:
+          type: string
+          description: >-
+            Prose explaining the decision, written to be acted on.
+
+            RENDER IT AS WRITTEN. These strings are constructed so that a
+            decision which involved no scoring never prints a score comparison
+            — a forced placement has no runner-up, and rendering it against a
+            0.00 nobody computed would make the log lie. Parsing them into
+            fields, or laying them out in a table with score columns, imposes a
+            structure they deliberately do not have and reintroduces exactly
+            that claim.
+          example: chose w-10-1-4-27 (score 0.82) over w-10-1-4-31 (score 0.31), 4 candidates considered
+        triggered_by:
+          type: string
+          description: >-
+            Who decided — "auto:assign" | "auto:rotate" | "auto:quarantine" |
+            "operator:<user id>". An open vocabulary: new automated actors add
+            new values, so do not switch exhaustively on it.
+          example: auto:assign
+        created_at: { type: string, format: date-time }
+    ScheduledJobList:
+      type: object
+      required: [jobs, window_hours]
+      properties:
+        jobs: { type: array, items: { $ref: '#/components/schemas/ScheduledJob' } }
+        window_hours:
+          type: integer
+          description: The window the run and failure counts were aggregated over, after clamping.
+    ScheduledJob:
+      type: object
+      required:
+        [job_name, last_started_at, last_finished_at, last_duration_ms,
+         last_outcome, runs_in_window, failures_in_window, last_failure_at]
+      description: >-
+        One periodic sweep's health. There is deliberately no error-text field —
+        see the operation description for why.
+      properties:
+        job_name:
+          type: string
+          description: >-
+            The sweep's name as its registrar declares it ("domain auth sweep"),
+            not an asynq task type. An open vocabulary — a new sweep adds a new
+            name.
+          example: domain auth sweep
+        last_started_at:
+          type: string
+          format: date-time
+          description: >-
+            When the most recent run began — REGARDLESS of the window. A job
+            whose last run predates the window still appears, with that old
+            timestamp, because "this sweep stopped four days ago" is the single
+            most important thing this list can tell you.
+        last_finished_at: { type: string, format: date-time }
+        last_duration_ms:
+          type: integer
+          description: >-
+            How long the most recent run took, measured by the runner against
+            one monotonic clock reading rather than derived from the two
+            timestamps above.
+        last_outcome:
+          type: string
+          enum: [ok, error]
+          description: >-
+            How the most recent run ended. "error" covers both a returned error
+            and a recovered panic.
+        runs_in_window:
+          type: integer
+          description: >-
+            Runs inside the window. Pair it with failures_in_window — two
+            failures means something different out of two runs than out of two
+            hundred. Zero means the job did not run in the window at all.
+        failures_in_window:
+          type: integer
+          description: Runs inside the window that ended in error.
+        last_failure_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the most recent failure inside the window started, or null if
+            there was none. This is the closest this response comes to an error
+            report, and it is a timestamp rather than a message on purpose: the
+            stored text may carry another tenant's data and the table has no
+            workspace to scope it by. Correlate it against the deployment's
+            logs.

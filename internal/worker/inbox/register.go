@@ -16,7 +16,7 @@ import (
 // enumerates mailboxes across every workspace, so it belongs to the control
 // role only (see internal/worker/role.go). mtx records the inbox sweep's
 // duration and mailbox count; a nil mtx no-ops. recorder is the same
-// jobrun.Recorder handlers.go resolved once for all six periodic reconciles
+// jobrun.Recorder handlers.go resolved once for all seven periodic reconciles
 // (nil when the coreapi client doesn't implement it); inbox:sweep is the one
 // task in this package that is a scheduled reconcile (see
 // cmd/worker/scheduler.go's sweepRegistrars()), so it alone is wrapped in
