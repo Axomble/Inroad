@@ -165,15 +165,12 @@ The genuinely unbuilt piece; today an operator hand-configures every fleet
 host's env vars. `inroadctl` (F7) already has the right shape — one file
 per subcommand (`cmd/inroadctl/*.go`) — so add `fleet join-token` there:
 issues a node id + a token scoped per Stage 0's model. Backend serves
-`GET /join.sh`, embedded so it always matches that backend's own version —
-this is a concrete, working reference pattern, not aspirational: Warmbly's
-`fleet_nodes.go` + join script (`deploy/split-cloud/` in that repo, cloned
-locally at `/home/user/warmbly/warmbly` this session) does exactly this and
-ships today. Referenced as precedent, not copied — Inroad's join response
-renders `worker.env` from `INROAD_WORKER_ROLE=send`, the coreapi backend
-URL/token, the credbroker URL/token, and `INROAD_WORKER_EGRESS_IP` pinned
-to the host's own address; installs a systemd unit; a timer pulls an
-updated image the way F7's install path already knows how to.
+`GET /join.sh`, embedded so it always matches that backend's own version.
+Inroad's join response renders `worker.env` from `INROAD_WORKER_ROLE=send`,
+the coreapi backend URL/token, the credbroker URL/token, and
+`INROAD_WORKER_EGRESS_IP` pinned to the host's own address; installs a
+systemd unit; a timer pulls an updated image the way F7's install path
+already knows how to.
 
 ### Stage 5 (S) — close the loop on documentation
 
