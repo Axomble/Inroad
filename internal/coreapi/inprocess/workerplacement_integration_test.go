@@ -571,9 +571,14 @@ func TestAssignMailboxWorkerKeepsALiveIncumbentAfterItsLaneDegrades(t *testing.T
 		t.Fatalf("read assigned_at: %v", err)
 	}
 
-	// m-b is seeded into the degraded band, so a band-matching re-pick has an
-	// obviously "better" destination to move to. It must not be taken.
-	seedAssignments(t, ctx, q, ws.ID, "m-b", warmup.RiskBandDegraded, "smtp", 3)
+	// Now make staying look as bad as it possibly can. m-a is loaded far past
+	// its target and carries only the OTHER band; m-b is nearly empty and
+	// carries the band the mailbox is about to move into. A re-pick would choose
+	// m-b on every single term — headroom, blast radius, crowding and band
+	// agreement — so if this mailbox stays, it stays because incumbency
+	// outranks all of them, not because the score happened to agree.
+	seedAssignments(t, ctx, q, ws.ID, "m-a", warmup.RiskBandHealthy, "smtp", 20)
+	seedAssignments(t, ctx, q, ws.ID, "m-b", warmup.RiskBandDegraded, "smtp", 2)
 
 	if _, err := pool.Exec(ctx,
 		`UPDATE warmup_participants SET lane = $3 WHERE workspace_id = $1 AND mailbox_id = $2`,
