@@ -270,9 +270,24 @@ short-lived access token for one API call.
 `send` worker consumes the shared `send` queue and may legitimately be handed a
 job for any mailbox, so the broker has to answer for any mailbox the token names.
 Scoping a worker to only the mailboxes actually routed to it needs per-worker
-identity *and* per-mailbox routing; neither exists yet. Treat a `send` host as
-able to reach any mailbox in the installation while it is running, and firewall
-the broker listener accordingly.
+identity *and* per-mailbox routing — both now exist (the fleet's worker
+identity and scored placement), the broker just doesn't use them yet to narrow
+a token's reach. Treat a `send` host as able to reach any mailbox in the
+installation while it is running, and firewall the broker listener
+accordingly.
+
+**And it doesn't cover the other database connection either.** The line above
+— "it still holds the same database connection as an `all` process" — is the
+bigger of the two remaining gaps: `INROAD_DATABASE_URL` still needs to be a
+real, credentialed Postgres connection string on a `send` host today, for
+everything on the send path that isn't "open a secret" (job data, claims,
+cursor advances, worker routing). Brokering removed the encryption key; it
+never touched the pool. Both gaps — the token-scoping one above and this one
+— are tracked with a staged build-out in
+[`docs/competitive-analysis/05-coreapi-http-transport-plan.md`](https://github.com/Axomble/Inroad/blob/main/docs/competitive-analysis/05-coreapi-http-transport-plan.md)
+for anyone deciding whether a `send` host can be infrastructure you don't
+fully trust yet. Today, treat it as infrastructure you trust with your
+database, not just with one mailbox's credential.
 
 ## Database connection budget
 

@@ -287,7 +287,7 @@ the tree on this pass, not carried over from the previous doc.
 | Campaign creation wizard | §1 | No wizard component; the campaign route is a tabbed detail page |
 | Faceted contact search | §5 | No facet code; substring search only |
 | CSV import wizard (preview → map → commit) | P1.5 | `app/contact/import.go` is headless |
-| Physical control/execution split · fleet assignment · admin console | P3.8–3.10 | Worker still holds a `pgxpool` |
+| Physical control/execution split · fleet assignment · admin console | P3.8–3.10 | Credential brokering done (F2); worker still holds a `pgxpool` for job data — see [`05-coreapi-http-transport-plan.md`](05-coreapi-http-transport-plan.md) |
 | Advisor-lite posture detectors | P2.20 | No detector layer; every `advisor` hit in the tree is the word "advisory" in a comment |
 | Scheduled-job run ledger | P2.21 | ~10 periodic loops, none of which records a run row |
 | Templates library (shared merge-variable catalog, content/spam score) | — | No template domain; templating is merge-token expansion inside `app/campaign` |
