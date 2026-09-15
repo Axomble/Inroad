@@ -12,6 +12,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/jobrun"
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker"
+	"github.com/inroad/inroad/internal/worker/fleet"
 	"github.com/inroad/inroad/internal/worker/maintenance"
 	"github.com/inroad/inroad/internal/worker/recipientesp"
 )
@@ -27,6 +28,7 @@ var scheduledSweeps = map[string]string{
 	queue.TaskMaintenanceCleanup: jobrun.NameMaintenanceCleanup,
 	queue.TaskDomainAuthSweep:    jobrun.NameDomainAuthSweep,
 	queue.TaskRecipientESPSweep:  jobrun.NameRecipientESPSweep,
+	queue.TaskFleetRotate:        jobrun.NameFleetRotate,
 }
 
 // recordingCore is the coreapi client worker.Register wires the sweeps over.
@@ -35,11 +37,11 @@ var scheduledSweeps = map[string]string{
 // uses) so the 35 methods no sweep calls cost no boilerplate — and would panic
 // loudly if one were reached, which is the assertion: a periodic reconcile
 // should do nothing here but be counted. The methods that ARE overridden are
-// exactly the six sweeps' entry points, each answering "nothing due", plus the
-// two capability interfaces Register resolves by type assertion
-// (maintenance.Cleaner, recipientesp.Core) — without those the handlers are
-// never registered at all and ProcessTask would report "handler not found",
-// which is itself a failure this test should catch.
+// exactly the sweeps' entry points, each answering "nothing due", plus the
+// three capability interfaces Register resolves by type assertion
+// (maintenance.Cleaner, recipientesp.Core, fleet.Rotator) — without those the
+// handlers are never registered at all and ProcessTask would report "handler not
+// found", which is itself a failure this test should catch.
 type recordingCore struct {
 	coreapi.Client
 	runs []jobrun.Run
@@ -52,7 +54,7 @@ func (c *recordingCore) RecordJobRun(_ context.Context, run jobrun.Run) error {
 	return nil
 }
 
-// --- the six sweeps' entry points, all answering "nothing due" ---
+// --- the scheduled sweeps' entry points, all answering "nothing due" ---
 
 func (c *recordingCore) ListDueEnrollments(context.Context) ([]coreapi.DueEnrollment, error) {
 	return nil, nil
@@ -94,11 +96,16 @@ func (c *recordingCore) RecordRecipientDomainESP(context.Context, coreapi.Recipi
 	return nil
 }
 
+// --- fleet.Rotator (resolved by type assertion in Register) ---
+
+func (c *recordingCore) RotateMailboxWorkers(context.Context) (int64, error) { return 0, nil }
+
 var (
 	_ coreapi.Client      = (*recordingCore)(nil)
 	_ jobrun.Recorder     = (*recordingCore)(nil)
 	_ maintenance.Cleaner = (*recordingCore)(nil)
 	_ recipientesp.Core   = (*recordingCore)(nil)
+	_ fleet.Rotator       = (*recordingCore)(nil)
 )
 
 // Every periodic reconcile must land exactly one row in the run ledger, under
@@ -109,7 +116,7 @@ var (
 // comparison are the constants, and the THIRD side — internal/worker/handlers.go,
 // where the jobrun.Record wrapping actually happens — was never touched. Deleting
 // a wrap left it green. So this drives the real thing: the real Register builds
-// the mux, and each of the six task types is dispatched through it. asynq's
+// the mux, and each of the scheduled task types is dispatched through it. asynq's
 // ServeMux is itself an asynq.Handler, so ProcessTask exercises registration and
 // routing with no Redis.
 //
@@ -153,8 +160,8 @@ func TestEverySweepDispatchedThroughRegisterRecordsOneLedgerRow(t *testing.T) {
 	}
 }
 
-// The two vocabularies must describe the same six sweeps. Kept alongside the
-// dispatch test above rather than folded into it: this one fails when a seventh
+// The two vocabularies must describe the same set of sweeps. Kept alongside the
+// dispatch test above rather than folded into it: this one fails when another
 // sweep is scheduled but not added to scheduledSweeps, which would otherwise
 // leave the new sweep's wrapping unasserted while everything stayed green.
 func TestScheduledSweepsCoverEveryRegistrar(t *testing.T) {

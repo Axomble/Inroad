@@ -23,12 +23,13 @@ import (
 	"github.com/inroad/inroad/internal/platform/queue"
 )
 
-// scheduledTasks are the six periodic reconciles plus the breaker: control-role
+// scheduledTasks are the periodic reconciles plus the breaker: control-role
 // only. Keep in sync with cmd/worker/scheduler.go sweepRegistrars().
 var scheduledTasks = []string{
 	queue.TaskMaintenanceCleanup,
 	queue.TaskDomainAuthSweep,
 	queue.TaskRecipientESPSweep,
+	queue.TaskFleetRotate,
 	queue.TaskWarmupSweep,
 	queue.TaskSweepEnrollments,
 	queue.TaskInboxSweep,

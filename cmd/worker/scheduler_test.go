@@ -157,7 +157,7 @@ func TestRegisterSweepsRegistersEverySweep(t *testing.T) {
 // and the third side — internal/worker/handlers.go, where the wrapping actually
 // happens — was never touched, so deleting a jobrun.Record wrap left it green.
 // See TestEverySweepDispatchedThroughRegisterRecordsOneLedgerRow in
-// jobrunledger_test.go, which dispatches all six task types through the real
+// jobrunledger_test.go, which dispatches every scheduled task type through the real
 // worker.Register and counts the rows instead.
 
 // stubScheduler is a periodicScheduler with no observable behaviour of its own,

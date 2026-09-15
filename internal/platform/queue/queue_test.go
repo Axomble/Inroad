@@ -264,6 +264,7 @@ func TestEveryControlSweepTargetsControlQueue(t *testing.T) {
 		{"maintenance cleanup", "@every 24h", TaskMaintenanceCleanup},
 		{"domain auth sweep", "@every 1h", TaskDomainAuthSweep},
 		{"recipient esp sweep", "@every 5m", TaskRecipientESPSweep},
+		{"fleet rotate", "@every 5m", TaskFleetRotate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeRegistrar{}
