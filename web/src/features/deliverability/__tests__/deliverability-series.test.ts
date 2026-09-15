@@ -34,9 +34,9 @@ describe('seriesPanels', () => {
     const complaints = panel(WEEK, 'complaint_rate')
     expect(complaints.measured).toBe(false)
     expect(complaints.points.every((p) => p.value === null)).toBe(true)
-    expect(complaints.summary).toBe('Not measured in this window.')
-    expect(complaints.notMeasured).toContain('No complaint feed is connected')
-    expect(complaints.notMeasured).toContain('not a run of clean days')
+    expect(complaints.summary).toBe('No data yet in this period.')
+    expect(complaints.notMeasured).toContain("Complaint reports aren't connected")
+    expect(complaints.notMeasured).toContain("doesn't mean there were none")
   })
 
   test('a signal present on any day is measured, and an absent day stays null', () => {
@@ -73,14 +73,14 @@ describe('seriesPanels', () => {
     const delivered = panel(WEEK, 'delivered')
     expect(delivered.measured).toBe(true)
     expect(delivered.peak).toBe(250)
-    expect(delivered.summary).toBe('630 delivered in this window · peak 250 in a day')
+    expect(delivered.summary).toBe('630 delivered in this period · peak 250 in a day')
   })
 
   test('a window with no delivery at all is not measured rather than a flat zero line', () => {
     const series = [day({ date: '2026-08-19', delivered: 0, bounced: 0 }), day({ date: '2026-08-20', delivered: 0, bounced: 0 })]
     const delivered = panel(series, 'delivered')
     expect(delivered.measured).toBe(false)
-    expect(delivered.notMeasured).toContain('No delivery has been recorded')
+    expect(delivered.notMeasured).toContain('Nothing has been sent in this period')
   })
 
   test('an empty series yields panels that all read as not measured', () => {
@@ -94,7 +94,7 @@ describe('panelValueLabel', () => {
     const bounce = panel(WEEK, 'bounce_rate')
     expect(panelValueLabel(delivered, { date: '2026-08-19', value: 1250 })).toBe('1,250')
     expect(panelValueLabel(bounce, { date: '2026-08-19', value: 9.2 })).toBe('9.2%')
-    expect(panelValueLabel(bounce, { date: '2026-08-19', value: null })).toBe('Not measured')
+    expect(panelValueLabel(bounce, { date: '2026-08-19', value: null })).toBe('No data')
   })
 })
 

@@ -170,7 +170,7 @@ test('a pool of one narrates progress instead of a bare unchecked step', async (
 
   const row = stepRow(/start warmup/i)
   expect(row).toHaveTextContent('To do:')
-  expect(row).toHaveTextContent(/1 mailbox warming — enroll a second/i)
+  expect(row).toHaveTextContent(/1 mailbox warming up — add a second/i)
 })
 
 test('the panel unmounts when every step derives complete, regardless of dismissal state', async () => {

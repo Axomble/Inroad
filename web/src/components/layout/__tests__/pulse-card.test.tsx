@@ -77,7 +77,7 @@ test('attention rows render worst-first (danger > warn > info), each linking to 
   const rows = Array.from(document.querySelectorAll('[data-slot="pulse-attention-row"]'))
   expect(rows).toHaveLength(3)
   expect(rows[0]).toHaveTextContent(/mailboxes need attention/i)
-  expect(rows[1]).toHaveTextContent(/senders gated/i)
+  expect(rows[1]).toHaveTextContent(/senders slowed down/i)
   expect(rows[2]).toHaveTextContent(/daily cap near/i)
   // Reason + destination ride along; the query string is split into `search`,
   // so the anchor carries the path.
@@ -104,9 +104,9 @@ test('every server attention kind renders its operator label, not the fallback',
   renderWithProviders(<PulseCard />, { preloadedState: authed })
 
   expect(await screen.findByText(/mailboxes need attention/i)).toBeInTheDocument()
-  expect(screen.getByText(/senders gated/i)).toBeInTheDocument()
-  expect(screen.getByText(/domain failing DMARC/i)).toBeInTheDocument()
-  expect(screen.getByText(/sending pool near daily cap/i)).toBeInTheDocument()
+  expect(screen.getByText(/senders slowed down/i)).toBeInTheDocument()
+  expect(screen.getByText(/domain needs a DNS fix/i)).toBeInTheDocument()
+  expect(screen.getByText(/sender group near its daily limit/i)).toBeInTheDocument()
   // None fell through to the humanized `kind.replace` fallback.
   expect(screen.queryByText(/dmarc failing/i)).not.toBeInTheDocument()
   expect(screen.queryByText(/cap consumed/i)).not.toBeInTheDocument()
@@ -120,7 +120,7 @@ test.each([
   [{ quarantine: 2, at_risk: 3, watch: 4, unknown: 5, probation: 6 }, '2 withheld'],
   [{ quarantine: 0, at_risk: 3, watch: 4, unknown: 5, probation: 6 }, '3 at risk'],
   [{ quarantine: 0, at_risk: 0, watch: 4, unknown: 5, probation: 6 }, '4 on watch'],
-  [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 5, probation: 6 }, '5 need evidence'],
+  [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 5, probation: 6 }, '5 too new to judge'],
   [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 0, probation: 6 }, '6 proving'],
   [{ quarantine: 0, at_risk: 0, watch: 0, unknown: 0, probation: 0 }, 'all healthy'],
 ])('the warmup line reports %o as "%s"', async (counts, expected) => {

@@ -54,7 +54,7 @@ export function WarmupObserversPanel({
       className="border-b border-border bg-surface/40 px-4 py-3 sm:px-5"
     >
       <h2 id={headingId} className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-        Spam reporting outliers
+        Spam complaints
       </h2>
 
       {reading.kind === 'flagged' ? (

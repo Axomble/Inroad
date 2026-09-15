@@ -17,10 +17,10 @@ import { useSetWarmupSentinelMutation } from './api'
 function designationErrorMessage(error: unknown, next: boolean): string {
   const status = httpStatus(error)
   if (status === 404) {
-    return 'This mailbox is no longer a warmup participant, so there is nothing to designate — refresh the page.'
+    return 'This mailbox is no longer part of warmup, so there is nothing to change — refresh the page.'
   }
-  if (status === 403) return "You don't have access to change this workspace's warmup pool."
-  const verb = next ? 'designate this mailbox as a sentinel' : 'stop using this mailbox as a sentinel'
+  if (status === 403) return "You don't have access to change this workspace's warmup setup."
+  const verb = next ? 'make this mailbox a reference' : 'stop using this mailbox as a reference'
   return `Couldn't ${verb}. Nothing changed — try again.`
 }
 
@@ -83,10 +83,10 @@ export function WarmupSentinelToggle({
             setAsking((open) => !open)
           }}
           aria-expanded={asking}
-          aria-label={next ? `Designate as sentinel for ${email}` : `Stop using as sentinel for ${email}`}
+          aria-label={next ? `Make reference mailbox for ${email}` : `Reference mailbox for ${email}`}
         >
           <ShieldCheck className="size-3.5" />
-          {isSentinel ? 'Sentinel' : 'Make sentinel'}
+          {isSentinel ? 'Reference mailbox' : 'Make reference'}
         </Button>
         {isSentinel && (
           <span data-slot="sentinel-mark-detail" className="max-w-prose text-[11px] leading-snug text-faint">

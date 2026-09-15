@@ -226,7 +226,7 @@ test('a single warming mailbox says warming waits for a second mailbox', async (
     await screen.findByText(/warming starts once a second mailbox is connected and warming too/i),
   ).toBeInTheDocument()
   // The row agrees, instead of showing a ramp counter frozen at 0/13.
-  expect(await screen.findByText(/idle — needs 2/i)).toBeInTheDocument()
+  expect(await screen.findByText(/waiting — needs 2/i)).toBeInTheDocument()
 })
 
 test('a pool of two says nothing — warmup is actually exchanging mail', async () => {
@@ -246,7 +246,7 @@ test('a pool of two says nothing — warmup is actually exchanging mail', async 
 
   await screen.findByText('second@gmail.com')
   expect(screen.queryByText(/warming starts once a second mailbox/i)).not.toBeInTheDocument()
-  expect(screen.queryByText(/idle — needs 2/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/waiting — needs 2/i)).not.toBeInTheDocument()
 })
 
 test('a mailbox that is not warming can be started from its own row', async () => {

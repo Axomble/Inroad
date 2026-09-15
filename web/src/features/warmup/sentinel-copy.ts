@@ -107,20 +107,20 @@ export interface DesignationPrompt {
  * operator might decline and an explainer that omits it is a recruitment pitch.
  */
 export const SENTINELS_NONE =
-  'No sentinel is designated in this pool, which is the ordinary arrangement — most installations never designate one, and warmup works exactly as it does now without them. What one would add: every mailbox may currently exchange warmup mail only within its own lane, so a mailbox on watch is measured only by other mailboxes that are themselves degrading, and a shared cause moves both sides of that comparison at once. A sentinel is a mailbox you control end to end and are willing to expose to every lane, which gives the comparison a fixed point. It is not free: a sentinel receives warmup mail from degrading members that the rest of the pool is shielded from, which is why it is a designation and not a default.'
+  'No reference mailbox is set, which is the ordinary arrangement — most workspaces never set one, and warmup works exactly as it does now without it. What one would add: mailboxes normally exchange warmup mail only with others in the same shape, so a struggling mailbox is measured only by other struggling mailboxes — and if something affects them all at once, the numbers can look steady while nothing about them is. A reference is a mailbox you control end to end and are willing to expose to every group, which gives those measurements a dependable fixed point. It is not free: a reference receives warmup mail from struggling mailboxes that the rest of your mailboxes are shielded from, which is why it is a choice and not a default.'
 
 /**
  * The label-not-penalty rule in the operator's own view, once above the rows
  * rather than on each of them — repeated per mailbox it becomes chrome to skip.
  */
 export const SENTINEL_CONFIDENCE_GATES_NOTHING =
-  'Evidence confidence is a label, never a penalty. Peer-only evidence is not discounted anywhere: no threshold is raised against it, no sample floor moves, and no promotion is withheld for it. Discounting it would be a threshold change with nothing calibrated behind it — nobody has yet measured what a sentinel observation is worth next to a peer one here, and every earlier guess at a threshold in this subsystem had to be walked back. The label changes what to read into a steady number, not what the engine does with it.'
+  '"Measured by" is a label, never a penalty. Numbers measured only by a mailbox\'s own partners are not discounted anywhere: no threshold is raised against them, no promotion is withheld for them. Discounting them would be a rule change with nothing calibrated behind it. The label changes what to read into a steady number, not what warmup does with it.'
 
 /** How a designated mailbox is marked on its own card. */
-export const SENTINEL_MARK = 'Sentinel'
+export const SENTINEL_MARK = 'Reference'
 
 export const SENTINEL_MARK_DETAIL =
-  'Exposed to every lane on purpose, so degrading mailboxes have something dependable to be measured against. A flag, not a lane: its own health state and lane are unaffected by the designation, and it can degrade like any other participant.'
+  'This mailbox exchanges warmup mail with every group on purpose, so struggling mailboxes have something dependable to be measured against. A role, not a status: its own health is unaffected, and it can struggle and recover like any other mailbox.'
 
 /* --------------------------------------------------------------- the pool */
 
@@ -153,17 +153,17 @@ const NOT_ENFORCED = 'Nothing is enforced and no pairing is refused'
  */
 function oversizedNote(sentinels: number, pool: number, share: number | undefined): string {
   if (pool === 1 && sentinels === 1) {
-    return `This pool is one sentinel and nothing else. It is ${advisedShare(share)} by definition, and it is also measuring nothing: a sentinel exists to give other mailboxes a fixed point to be compared against, and there are no other mailboxes. ${NOT_ENFORCED} — there is simply nothing here to pair it with yet.`
+    return `Your only warming mailbox is a reference and there is nothing else. That is ${advisedShare(share)} by definition, and it is also measuring nothing: a reference exists to give other mailboxes a fixed point to be compared against, and there are no other mailboxes. ${NOT_ENFORCED} — there is simply nothing here to pair it with yet.`
   }
   if (sentinels === pool) {
-    return `Every mailbox in this pool is a sentinel, so every measurement here is one sentinel measuring another and no ordinary participant is left for the references to be a reference for. ${NOT_ENFORCED} — but the arrangement is now measuring itself rather than the pool.`
+    return `Every mailbox in warmup is a reference, so every measurement here is one reference measuring another and no ordinary mailbox is left for them to be a reference for. ${NOT_ENFORCED} — but the setup is now measuring itself rather than your mailboxes.`
   }
-  return `${sentinels} of ${mailboxes(pool)} in this pool are sentinels, ${advisedShare(share)}. ${NOT_ENFORCED} — this is a note about the shape of the pool, not a rule anything acts on. Past that share the sentinels stop being a measurement of the pool and become most of the network it is measured against: they exchange mail with each other, and what is left to be measured is the minority.`
+  return `${sentinels} of your ${mailboxes(pool)} are references, ${advisedShare(share)}. ${NOT_ENFORCED} — this is a note about the shape of the setup, not a rule anything acts on. Past that share the references stop being a measurement of your mailboxes and become most of the network they are measured against: they mostly mail each other, and what is left to be measured is the minority.`
 }
 
 function designatedSummary(sentinels: number, pool: number): string {
-  const subject = sentinels === 1 ? 'is designated as a sentinel' : 'are designated as sentinels'
-  return `${sentinels} of ${mailboxes(pool)} in this pool ${subject}: exposed to every lane on purpose, so a degrading mailbox has something dependable to be measured against. Each keeps its own health state and its own lane, and can degrade, be contained and recover like any other participant.`
+  const subject = sentinels === 1 ? 'is set as a reference' : 'are set as references'
+  return `${sentinels} of ${mailboxes(pool)} ${subject}: they exchange warmup mail with every group on purpose, so a struggling mailbox has something dependable to be measured against. Each keeps its own health status, and can struggle and recover like any other mailbox.`
 }
 
 /**
@@ -209,16 +209,16 @@ export function sentinelPoolReading({ count, oversized, share, pool }: SentinelP
  * ending.
  */
 const CHANGES_NOTHING =
-  'A label on the evidence and not a score: no threshold moves, nothing is promoted sooner or held back for it, and the rates beside it are counted exactly as they would be either way.'
+  'A label on the numbers and not a score: no threshold moves, nothing is promoted sooner or held back for it, and the rates beside it are counted exactly as they would be either way.'
 
-const PEER_ONLY_DETAIL = `Every placement observation behind these rates came from this mailbox's own lane-mates. That is not bad evidence — it is what a healthy pool mostly produces — but it is not independent: when a mailbox is measured only by mailboxes in the same lane, a shared cause moves both sides of the comparison at once, and the reading looks steady while nothing about it is. It matters most exactly where it is hardest to see, on a mailbox already on watch or in recovery. ${CHANGES_NOTHING}`
+const PEER_ONLY_DETAIL = `Every check behind these rates came from this mailbox's own warmup partners in the same group. That is not bad evidence — it is what a healthy setup mostly produces — but it is not independent: when a mailbox is measured only by partners in the same group, a shared cause moves both sides of the comparison at once, and the reading looks steady while nothing about it is. It matters most exactly where it is hardest to see, on a mailbox already being watched or recovering. ${CHANGES_NOTHING}`
 
 function corroboratedDetail(observations: number | undefined): string {
   const opening =
     observations !== undefined && observations > 0
-      ? `${observations} of the placement observations behind these rates were filed by a sentinel`
-      : 'At least one of the placement observations behind these rates was filed by a sentinel'
-  return `${opening} — a mailbox exposed to every lane on purpose — so the reading has a fixed point behind it and not only this mailbox's own lane-mates. ${CHANGES_NOTHING}`
+      ? `${observations} of the checks behind these rates came from a reference mailbox`
+      : 'At least one of the checks behind these rates came from a reference mailbox'
+  return `${opening} — a mailbox that exchanges warmup mail with every group on purpose — so the reading has a fixed point behind it and not only this mailbox's own partners. ${CHANGES_NOTHING}`
 }
 
 /**
@@ -231,8 +231,8 @@ function corroboratedDetail(observations: number | undefined): string {
  */
 function unrecognisedConfidence(raw: string): ConfidenceReading {
   return {
-    label: `${raw} — a confidence this build does not know`,
-    detail: `The server labelled this mailbox's evidence "${raw}". This build has no reading for that label, so it is named as it arrived rather than folded into peer-only or sentinel-corroborated. ${CHANGES_NOTHING}`,
+    label: `${raw} — a label this build does not know`,
+    detail: `The server labelled this mailbox's numbers "${raw}". This build has no reading for that label, so it is named as it arrived rather than folded into partners-only or reference-backed. ${CHANGES_NOTHING}`,
     corroborated: false,
   }
 }
@@ -253,10 +253,10 @@ export function confidenceReading(
   if (confidence === undefined) return null
   switch (confidence) {
     case 'peer_only':
-      return { label: 'Peer-only', detail: PEER_ONLY_DETAIL, corroborated: false }
+      return { label: 'its warmup partners only', detail: PEER_ONLY_DETAIL, corroborated: false }
     case 'sentinel_corroborated':
       return {
-        label: 'Sentinel-corroborated',
+        label: 'partners + a reference mailbox',
         detail: corroboratedDetail(sentinelObservations),
         corroborated: true,
       }
@@ -284,14 +284,14 @@ export function confidenceReading(
 export function designationPrompt(email: string, next: boolean): DesignationPrompt {
   if (next) {
     return {
-      title: `Designate ${email} as a sentinel?`,
-      body: 'A sentinel may exchange warmup mail with every lane, not just its own. This mailbox will receive warmup mail from members that are degrading — mail the rest of the pool is shielded from — and that is the cost of giving those members something dependable to be measured against. Containment still comes first: a quarantined or blocked mailbox is withheld from the pool, and a sentinel does not reach into it. Nothing about this mailbox changes otherwise; it keeps its own health state and its own lane, and you can stop using it as a sentinel at any time.',
-      confirm: 'Designate as sentinel',
+      title: `Make ${email} a reference mailbox?`,
+      body: 'A reference exchanges warmup mail with every group, not just its own. This mailbox will receive warmup mail from mailboxes that are struggling — mail the rest of your mailboxes are shielded from — and that is the cost of giving those mailboxes something dependable to be measured against. Safety still comes first: a mailbox that is blocked or paused for safety stays out of warmup entirely, and a reference does not reach into it. Nothing else about this mailbox changes; it keeps its own health status, and you can stop using it as a reference at any time.',
+      confirm: 'Make reference mailbox',
     }
   }
   return {
-    title: `Stop using ${email} as a sentinel?`,
-    body: 'It goes back to exchanging warmup mail only within its own lane, and stops receiving mail from degrading members. Placement evidence already gathered through it is not removed — the mailboxes it corroborated keep every observation — but corroboration is counted against who is a sentinel now, so those readings become peer-only unless another sentinel is designated.',
-    confirm: 'Stop using as sentinel',
+    title: `Stop using ${email} as a reference?`,
+    body: 'It goes back to exchanging warmup mail only within its own group, and stops receiving mail from struggling mailboxes. Results already gathered through it are not thrown out — the mailboxes it backed keep every check — but from now on those readings count as coming from partners only, unless another reference mailbox is set.',
+    confirm: 'Stop using as reference',
   }
 }

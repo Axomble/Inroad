@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, CircleAlert, Flame, Mail, Rocket, Send, ShieldCheck, Users } from 'lucide-react'
+import { ArrowRight, CircleAlert, Flame, Rocket, Send, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { StatusPill, StatusDot, type StatusTone } from '@/components/shared/status-pill'
@@ -31,9 +31,9 @@ const severityDot: Record<PulseSeverity, string> = {
 /**
  * Overview, on the same Volt vocabulary as every list page: full-bleed bands
  * separated by hairlines (StatStrip, SectionBar), no floating cards, no soft
- * shadows. The one deliberate exception is the spotlight band — the inverted
- * hero panel is this page's signature and uses the --spotlight family, dark in
- * both themes — and even it sits edge-to-edge under the topbar.
+ * shadows. The old spotlight hero band is gone on purpose — a dark inverted
+ * panel announcing "your command center" pushed the actual numbers below the
+ * fold and set an ops-console tone this product no longer leads with.
  */
 export function OverviewPage() {
   const name = useAppSelector((state) => state.auth.userName)
@@ -60,52 +60,24 @@ export function OverviewPage() {
 
   return (
     <Page>
+      {/* The greeting lives here now. The old page opened on an inverted
+          "command center" hero band — a full-width dark panel with shortcut
+          buttons — before showing a single number. One warm line in the topbar
+          says hello; the page's job is the numbers below it. */}
       <PageTopbar
         eyebrow="Overview"
-        subtitle="Your sending operation at a glance"
+        subtitle={firstName ? `Good to see you, ${firstName} — here's how your outreach is going` : "Here's how your outreach is going"}
         actions={
           <Button asChild variant="primary" size="sm">
             <Link to="/app/campaigns">
               <Rocket className="size-4" />
-              Build campaign
+              New campaign
             </Link>
           </Button>
         }
       />
       <PageBody>
         <SetupChecklist />
-
-        {/* Spotlight, not chrome: this band inverts against the page in both
-            themes (--spotlight family). Edge-to-edge like every other band —
-            the inversion is the emphasis, so it needs no card or shadow. */}
-        <section className="relative overflow-hidden border-b border-spotlight-border bg-spotlight px-5 py-6 text-spotlight-text sm:px-7">
-          <div className="absolute right-0 top-0 h-56 w-56 rounded-full bg-primary/10 blur-3xl" aria-hidden="true" />
-          <div className="relative flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-spotlight-border bg-spotlight-surface px-2.5 py-1 font-mono text-[9px] uppercase tracking-[0.16em] text-spotlight-muted">
-                <span className="relative flex size-1.5">
-                  <span className="live-ping absolute inline-flex size-full rounded-full bg-primary opacity-70" />
-                  <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
-                </span>
-                Live workspace
-              </div>
-              <h1 className="max-w-2xl text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">
-                {firstName ? `Good to see you, ${firstName}.` : 'Your outreach command center.'}
-              </h1>
-              <p className="mt-2 max-w-xl text-sm leading-6 text-spotlight-muted">
-                Protect sender reputation, keep capacity visible, and move the right campaign forward.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button asChild variant="outline" size="sm" className="border-spotlight-border text-spotlight-text hover:bg-spotlight-hover">
-                <Link to="/app/mailboxes"><Mail />Mailboxes</Link>
-              </Button>
-              <Button asChild variant="outline" size="sm" className="border-spotlight-border text-spotlight-text hover:bg-spotlight-hover">
-                <Link to="/app/contacts"><Users />Contacts</Link>
-              </Button>
-            </div>
-          </div>
-        </section>
 
         {hasQueryError && (
           <div className="flex items-center gap-2 border-b border-danger/30 bg-danger/10 px-5 py-2.5 text-xs text-danger">
@@ -122,26 +94,26 @@ export function OverviewPage() {
             sub={pulse ? `${pulse.mailboxes.total} connected` : '—'}
           />
           <Stat
-            label="Daily capacity"
+            label="Daily send limit"
             value={stat(pulse?.sending.daily_cap)}
             sub={pulse ? `${pulse.sending.sent_today.toLocaleString()} sent today` : '—'}
           />
           <Stat
-            label="Live campaigns"
+            label="Active campaigns"
             value={stat(pulse?.campaigns.running)}
-            sub={pulse ? `${pulse.campaigns.draft} drafts ready to refine` : '—'}
+            sub={pulse ? `${pulse.campaigns.draft} ${pulse.campaigns.draft === 1 ? 'draft' : 'drafts'} waiting` : '—'}
           />
           <Stat
-            label="Warmup healthy"
+            label="Healthy senders"
             value={stat(pulse?.warmup.healthy)}
             dot={<StatusDot tone="warming" />}
-            sub={pulse ? `${pulse.warmup.pool} enrolled` : '—'}
+            sub={pulse ? `${pulse.warmup.pool} warming up` : '—'}
           />
         </StatStrip>
 
         <div className="grid border-b border-border xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
           <section className="min-w-0 border-b border-border xl:border-b-0 xl:border-r">
-            <SectionBar label="Work in motion">
+            <SectionBar label="Your campaigns">
               <Link to="/app/campaigns" className="flex items-center gap-1 text-xs font-medium text-accent-ink">
                 View all <ArrowRight className="size-3.5" />
               </Link>
@@ -152,9 +124,9 @@ export function OverviewPage() {
               <EmptyBlock
                 className="py-12"
                 title="No campaigns yet"
-                description="Connect a sender and import a contact list, then create your first sequence."
+                description="Connect a mailbox, add some contacts, and write your first email — we'll walk you through it."
                 action={
-                  // The topbar's "Build campaign" already spends this page's one
+                  // The topbar's "New campaign" already spends this page's one
                   // primary button.
                   <Button asChild variant="secondary" size="sm">
                     <Link to="/app/campaigns"><Send className="size-4" />Create campaign</Link>

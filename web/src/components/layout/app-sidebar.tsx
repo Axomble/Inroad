@@ -1,5 +1,6 @@
+import { useId, useState } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Building2, ChartNoAxesColumn, CircleCheckBig, CircleDollarSign, Inbox, SendHorizontal, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
+import { Building2, ChartNoAxesColumn, ChevronRight, CircleCheckBig, CircleDollarSign, Inbox, SendHorizontal, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { config } from '@/lib/config'
 import { Button } from '@/components/ui/button'
@@ -10,17 +11,19 @@ import { useNavCounts } from './use-nav-counts'
 /**
  * Primary navigation.
  *
- * Only routes that actually exist ship here — placeholder rows with invented
- * counts belong to the design-spec era and would 404 in the real router. Add
- * rows back as the features they navigate to actually land.
+ * One flat list of the screens a founder or marketer lives in, ordered by the
+ * daily loop — check in, run campaigns, answer replies, manage the people and
+ * the senders behind them — with Settings last. Everything else stays fully
+ * reachable behind one collapsed "More" row.
  *
- * Grouped, per `docs/frontend-design.md` §4: sections encode the two things this
- * product does — keep mailboxes healthy enough to send (SENDING), then run
- * outreach through them (OUTREACH) — with workspace administration last. The
- * order is the operator's actual workflow, so the nav doubles as a sequence.
+ * The previous nav showed all fourteen rows in five labeled groups at once;
+ * user feedback was that the whole product surface shouting simultaneously
+ * reads as overwhelming. Peer tools in this space keep the rail to a handful
+ * of flat items, and that is the model here. No route was removed — the
+ * secondary rows only moved behind a disclosure.
  *
  * Counts come from `useNavCounts` and are all real; a nav row with nothing
- * truthful to show simply has no count (see that hook for why Contacts doesn't).
+ * truthful to show simply has no count (see that hook for why some rows don't).
  */
 /**
  * A row is either an in-app route (`to`) or an external link (`href`, opens a
@@ -32,72 +35,26 @@ type NavItem = { label: string; icon: LucideIcon } & (
   | { href: string; to?: never }
 )
 
-interface NavGroup {
-  /** Omitted for the first group so the nav doesn't open with a label. */
-  label?: string
-  items: NavItem[]
-}
+const PRIMARY: NavItem[] = [
+  { label: 'Overview', to: '/app', icon: LayoutDashboard },
+  { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
+  { label: 'Inbox', to: '/app/inbox', icon: Inbox },
+  { label: 'Contacts', to: '/app/contacts', icon: Users },
+  { label: 'Mailboxes', to: '/app/mailboxes', icon: Mail },
+  { label: 'Warmup', to: '/app/warmup', icon: Flame },
+  { label: 'Reports', to: '/app/reports', icon: ChartNoAxesColumn },
+  { label: 'Settings', to: '/app/settings', icon: Settings },
+]
 
-const NAV: NavGroup[] = [
-  {
-    items: [
-      { label: 'Overview', to: '/app', icon: LayoutDashboard },
-      { label: 'Approvals', to: '/app/approvals', icon: CircleCheckBig },
-      { label: 'Inbox', to: '/app/inbox', icon: Inbox },
-      // Beside the Inbox rather than under Sending: the outbox is where a
-      // reply you just wrote waits, so it belongs with the surface you wrote it
-      // from, not with campaign configuration.
-      { label: 'Outbox', to: '/app/outbox', icon: SendHorizontal },
-    ],
-  },
-  {
-    label: 'Sending',
-    items: [
-      { label: 'Mailboxes', to: '/app/mailboxes', icon: Mail },
-      { label: 'Warmup', to: '/app/warmup', icon: Flame },
-      // Sits with the sending mailboxes rather than under Outreach: the score is
-      // about the health of what sends, not about any one campaign.
-      { label: 'Deliverability', to: '/app/deliverability', icon: Gauge },
-    ],
-  },
-  {
-    label: 'Outreach',
-    items: [
-      // Campaigns is outbound sequencing, not a CRM record type — it stays here
-      // even though the people it mails are CRM contacts.
-      { label: 'Campaigns', to: '/app/campaigns', icon: Megaphone },
-      // Sits under Outreach, not Sending: it ranks campaigns by the replies
-      // they produced, where Deliverability is about the health of what sends.
-      { label: 'Reports', to: '/app/reports', icon: ChartNoAxesColumn },
-    ],
-  },
-  {
-    // The three CRM record types, in the order a deal is built: a person, the
-    // account they belong to, the opportunity that comes out of it. Each appears
-    // exactly once — the old nav listed Deals twice (its own row plus a "CRM"
-    // row whose page opened on a deals tab) and left Contacts outside the CRM
-    // it is part of.
-    label: 'CRM',
-    items: [
-      { label: 'Contacts', to: '/app/contacts', icon: Users },
-      { label: 'Companies', to: '/app/companies', icon: Building2 },
-      { label: 'Deals', to: '/app/deals', icon: CircleDollarSign },
-    ],
-  },
-  {
-    // Seven settings screens used to sit here as seven top-level rows, giving
-    // workspace administration more of the primary nav than Inbox, Campaigns
-    // and the whole CRM combined. They now live behind one row, on the
-    // settings rail (`components/layout/settings-rail.tsx`) — which is also
-    // where the next settings screen goes, instead of here.
-    label: 'Workspace',
-    items: [
-      { label: 'Settings', to: '/app/settings', icon: Settings },
-      // Stays top-level: it documents the API and MCP server for people
-      // integrating with Inroad, which is not workspace administration.
-      { label: 'Docs & MCP', href: config.docsUrl, icon: BookOpen },
-    ],
-  },
+// The quieter screens: review queues, sending health detail, the rest of the
+// CRM, and the external docs. All still one click away — just not shouting.
+const MORE: NavItem[] = [
+  { label: 'Approvals', to: '/app/approvals', icon: CircleCheckBig },
+  { label: 'Outbox', to: '/app/outbox', icon: SendHorizontal },
+  { label: 'Deliverability', to: '/app/deliverability', icon: Gauge },
+  { label: 'Companies', to: '/app/companies', icon: Building2 },
+  { label: 'Deals', to: '/app/deals', icon: CircleDollarSign },
+  { label: 'Docs & MCP', href: config.docsUrl, icon: BookOpen },
 ]
 
 const noop = () => undefined
@@ -140,8 +97,18 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
   )
 }
 
+/** Routes that live behind the "More" disclosure — used to open it on load
+ * when the current page is one of them, so the active row is never hidden. */
+const MORE_ROUTES = MORE.flatMap((item) => (item.to !== undefined ? [item.to] : []))
+
 export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void }) {
   const counts = useNavCounts()
+  const [moreOpen, setMoreOpen] = useState(() =>
+    MORE_ROUTES.some((route) => window.location.pathname.startsWith(route)),
+  )
+  // The shell mounts the sidebar twice (desktop rail + mobile drawer), so the
+  // disclosure target id must be unique per instance.
+  const moreId = useId()
 
   // overflow-x-hidden: a row that fails to truncate must clip, never hand the
   // whole rail a horizontal scrollbar (overflow-y alone makes overflow-x auto).
@@ -161,26 +128,32 @@ export function AppSidebar({ onOpenAgent = noop }: { onOpenAgent?: () => void })
         <span>Agent</span>
         <kbd className="ml-auto rounded border border-chrome/30 px-1.5 py-0.5 font-mono text-[10px] text-chrome/70">@</kbd>
       </Button>
-      <nav aria-label="Primary" className="flex flex-col gap-5">
-        {NAV.map((group, index) => {
-          return (
-            <div key={group.label ?? index} className="flex flex-col gap-0.5">
-              {group.label && (
-                <div className="px-2.5 pb-1 font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-chrome-muted/70">
-                  {group.label}
-                </div>
-              )}
-              {group.items.map((item) => (
-                // Counts are keyed by route; external rows (href) have none.
-                <NavRow
-                  key={item.to ?? item.href}
-                  item={item}
-                  count={item.to !== undefined ? counts[item.to] : undefined}
-                />
-              ))}
-            </div>
-          )
-        })}
+      <nav aria-label="Primary" className="flex flex-col gap-0.5">
+        {PRIMARY.map((item) => (
+          <NavRow key={item.to ?? item.href} item={item} count={item.to !== undefined ? counts[item.to] : undefined} />
+        ))}
+
+        <button
+          type="button"
+          onClick={() => setMoreOpen((open) => !open)}
+          aria-expanded={moreOpen}
+          aria-controls={moreId}
+          className="group mt-2 flex h-9 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-chrome-muted transition-colors hover:bg-chrome-hover hover:text-chrome-text"
+        >
+          <ChevronRight
+            className={cn('size-4 shrink-0 transition-transform', moreOpen && 'rotate-90')}
+            strokeWidth={1.75}
+            aria-hidden="true"
+          />
+          <span>More</span>
+        </button>
+        {moreOpen && (
+          <div id={moreId} className="flex flex-col gap-0.5">
+            {MORE.map((item) => (
+              <NavRow key={item.to ?? item.href} item={item} count={item.to !== undefined ? counts[item.to] : undefined} />
+            ))}
+          </div>
+        )}
       </nav>
       <SidebarFooter />
     </div>

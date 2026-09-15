@@ -29,7 +29,7 @@ export function DeliverabilityPage() {
       <PageTopbar
         eyebrow="Deliverability"
         title="Deliverability"
-        subtitle="Bounces and spam placement are the live inputs"
+        subtitle="How likely your emails are to land in the inbox"
       />
 
       {isLoading ? (
@@ -47,8 +47,8 @@ export function DeliverabilityPage() {
         <PageBody>
           <ScorePanel score={data.score} />
 
-          <section aria-label="Per-day signals" className="border-b border-border">
-            <SectionBar label="Per-day signals" count={`${data.series.length} days`} />
+          <section aria-label="Day by day" className="border-b border-border">
+            <SectionBar label="Day by day" count={`${data.series.length} days`} />
             <Suspense
               fallback={
                 <div className="grid gap-4 px-4 py-4 md:grid-cols-2 sm:px-5">

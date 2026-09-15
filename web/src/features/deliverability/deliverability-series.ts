@@ -43,12 +43,12 @@ export interface SeriesPanel {
 }
 
 const NOT_MEASURED: Record<PanelKey, string> = {
-  delivered: 'No delivery has been recorded in this window.',
-  bounce_rate: 'Nothing was delivered in this window, so there is no bounce rate to plot.',
+  delivered: 'Nothing has been sent in this period.',
+  bounce_rate: "Nothing has been sent in this period, so there's no bounce rate to show.",
   complaint_rate:
-    'No complaint feed is connected, so complaints were never measured — this is not a run of clean days.',
+    "Complaint reports aren't connected yet, so complaints couldn't be seen — this doesn't mean there were none.",
   spam_rate:
-    'No warmup receipts landed in this window, so spam placement was never observed — this is not a run of clean days.',
+    "No warmup emails landed in this period, so we couldn't see where your mail is landing — this doesn't mean it all reached the inbox.",
 }
 
 /** A day's rate as a percentage, or `null` when the divisor is missing. */
@@ -71,8 +71,8 @@ function countPanel(series: DeliverabilityPoint[]): SeriesPanel {
     peak,
     peakLabel: peak.toLocaleString(),
     summary: measured
-      ? `${total.toLocaleString()} delivered in this window · peak ${peak.toLocaleString()} in a day`
-      : 'Nothing delivered in this window.',
+      ? `${total.toLocaleString()} delivered in this period · peak ${peak.toLocaleString()} in a day`
+      : 'Nothing sent in this period.',
     ...(measured ? {} : { notMeasured: NOT_MEASURED.delivered }),
   }
 }
@@ -103,7 +103,7 @@ function ratePanel(
     summary:
       measured && worst
         ? `Worst day ${formatPct(worst.value)} on ${shortDate(worst.date, now)}`
-        : 'Not measured in this window.',
+        : 'No data yet in this period.',
     ...(measured ? {} : { notMeasured: NOT_MEASURED[key] }),
   }
 }
@@ -140,7 +140,7 @@ export function seriesPanels(series: DeliverabilityPoint[], now: number = Date.n
 
 /** A panel's value for one day, formatted for its unit — used by hover and the table. */
 export function panelValueLabel(panel: SeriesPanel, point: PanelPoint): string {
-  if (point.value === null) return 'Not measured'
+  if (point.value === null) return 'No data'
   return panel.form === 'count' ? point.value.toLocaleString() : formatPct(point.value)
 }
 

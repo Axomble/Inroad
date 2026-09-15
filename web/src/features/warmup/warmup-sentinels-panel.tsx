@@ -53,7 +53,7 @@ export function WarmupSentinelsPanel({ count, oversized, share, pool }: Sentinel
       className="border-b border-border bg-surface/40 px-4 py-3 sm:px-5"
     >
       <h2 id={headingId} className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-        Measurement sentinels
+        Reference mailboxes
       </h2>
 
       {reading.kind === 'none' ? (

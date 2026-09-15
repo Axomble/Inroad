@@ -66,7 +66,7 @@ export default function WarmupTransitionsPanel({ mailboxId }: { mailboxId: strin
       )}
 
       {!history.isLoading && !history.isError && transitions.length === 0 && (
-        <MutedEmpty text="Nothing has happened yet. Every automated change to this mailbox's reputation or pool lane is recorded here with the evidence behind it, and a mailbox that has just joined the pool has nothing to show." />
+        <MutedEmpty text="Nothing has happened yet. Every automated change to this mailbox's reputation or warmup status is recorded here with the numbers behind it, and a mailbox that has only just started warming up has nothing to show." />
       )}
 
       {transitions.length > 0 && (

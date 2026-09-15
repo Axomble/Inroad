@@ -212,8 +212,8 @@ export function MailboxesPage() {
         <BannerShell tone="warn">
           <Flame className="size-4 shrink-0 text-warm" aria-hidden="true" />
           <span className="min-w-0 flex-1">
-            Warmup is on, but idle: warmup mail is exchanged between your own mailboxes, so warming starts once a
-            second mailbox is connected and warming too.
+            Warmup is on but waiting: warmup works by sending mail between your own mailboxes, so warming starts once
+            a second mailbox is connected and warming too.
           </span>
         </BannerShell>
       )}
@@ -230,7 +230,7 @@ export function MailboxesPage() {
           label="Paused"
           value={listError ? '\u2014' : count('paused')}
           dot={<StatusDot tone="paused" />}
-          sub="resumable"
+          sub="ready to resume"
         />
         <Stat
           label="Error"
@@ -282,7 +282,7 @@ export function MailboxesPage() {
         <PageBody>
           <EmptyBlock
             title="Couldn't load mailboxes"
-            description={`Your mailbox data is safe, but the server couldn't return it${httpStatus(listError) ? ` (${httpStatus(listError)})` : ''}. Check the connection and try again.`}
+            description={`Your mailboxes are safe, but we couldn't load them right now${httpStatus(listError) ? ` (${httpStatus(listError)})` : ''}. Check your connection and try again.`}
             action={
               <Button variant="secondary" size="sm" onClick={() => void refetch()}>
                 Try again
@@ -294,7 +294,7 @@ export function MailboxesPage() {
         <PageBody>
           <EmptyBlock
             title="No mailboxes connected"
-            description="Connect a Gmail or Microsoft 365 account in one click, or an SMTP/IMAP mailbox with credentials, to start sending and warming. Credentials are encrypted at rest and verified before saving."
+            description="Connect a Gmail or Microsoft 365 account in one click, or any other mailbox with its SMTP/IMAP details, to start sending and warming up. Your login details are encrypted and tested before they're saved."
             action={
               <ConnectMenu
                 startingGmail={startingGmail}
@@ -624,7 +624,7 @@ function MailboxRow({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this mailbox?</AlertDialogTitle>
             <AlertDialogDescription>
-              {mailbox.email} will be disconnected. Any in-flight sends from this mailbox will fail.
+              {mailbox.email} will be disconnected. Any emails still being sent from it will fail.
               This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -695,7 +695,7 @@ function WarmupCell({ entry, poolIdle }: { entry?: WarmupMailbox; poolIdle: bool
     return (
       <span className="flex items-center gap-1 font-mono text-[12px] text-warm">
         <Flame className="size-3" aria-hidden="true" />
-        Idle — needs 2
+        Waiting — needs 2
       </span>
     )
   }

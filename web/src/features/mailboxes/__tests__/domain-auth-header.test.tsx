@@ -108,13 +108,13 @@ describe('DomainAuthHeader', () => {
     renderWithProviders(<Harness mailboxes={mailboxesOn('acme.com')} />)
 
     expect(await screen.findByText('acme.com')).toBeInTheDocument()
-    expect(await screen.findByText('Authenticated')).toBeInTheDocument()
+    expect(await screen.findByText('Looks good')).toBeInTheDocument()
     expect(screen.getByText(/3 mailboxes · Checked 1 hour ago/)).toBeInTheDocument()
     // The compact record tokens, not the full sentences: those stay collapsed.
-    expect(screen.getByText('SPF ok')).toBeInTheDocument()
-    expect(screen.getByText('DKIM ok')).toBeInTheDocument()
-    expect(screen.getByText('DMARC ok')).toBeInTheDocument()
-    expect(screen.queryByText(/Published at the domain apex/)).not.toBeInTheDocument()
+    expect(screen.getByText('SPF passing')).toBeInTheDocument()
+    expect(screen.getByText('DKIM passing')).toBeInTheDocument()
+    expect(screen.getByText('DMARC passing')).toBeInTheDocument()
+    expect(screen.queryByText(/Your record: v=spf1/)).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -124,7 +124,7 @@ describe('DomainAuthHeader', () => {
     await showRecords('acme.com')
 
     expect(screen.getByText('Enforcing (p=reject).')).toBeInTheDocument()
-    expect(screen.getByText(/Published at the domain apex: v=spf1/)).toBeInTheDocument()
+    expect(screen.getByText(/Your record: v=spf1/)).toBeInTheDocument()
     expect(screen.getByText(/signing key is published at google\._domainkey\.acme\.com/)).toBeInTheDocument()
     // And it closes again, so a long-lived page doesn't accumulate open blocks.
     fireEvent.click(screen.getByRole('button', { name: 'Hide DNS records for acme.com' }))
@@ -136,15 +136,15 @@ describe('DomainAuthHeader', () => {
     renderWithProviders(<Harness mailboxes={mailboxesOn('startup.io')} />)
 
     expect(await screen.findByText('startup.io')).toBeInTheDocument()
-    expect(await screen.findByText('Action needed')).toBeInTheDocument()
-    expect(screen.getByText('SPF missing')).toBeInTheDocument()
-    expect(screen.getByText('DMARC missing')).toBeInTheDocument()
+    expect(await screen.findByText('Needs a fix')).toBeInTheDocument()
+    expect(screen.getByText('SPF needs a fix')).toBeInTheDocument()
+    expect(screen.getByText('DMARC needs a fix')).toBeInTheDocument()
 
     await showRecords('startup.io')
     expect(
-      screen.getByText(/Add an SPF TXT record at the apex and a DMARC TXT record at _dmarc\.startup\.io/),
+      screen.getByText(/Add an SPF record and a DMARC record in your DNS settings/),
     ).toBeInTheDocument()
-    expect(screen.getByText(/starting v=spf1/)).toBeInTheDocument()
+    expect(screen.getByText(/starts with v=spf1/)).toBeInTheDocument()
     expect(screen.getByText(/_dmarc\.startup\.io starting v=DMARC1; p=none/)).toBeInTheDocument()
   })
 
@@ -152,22 +152,22 @@ describe('DomainAuthHeader', () => {
     stubDomains({ pages: [[{ ...PASSING, dkim: { found: false } }]] })
     renderWithProviders(<Harness mailboxes={mailboxesOn('acme.com')} />)
 
-    expect(await screen.findByText('DKIM no signal')).toBeInTheDocument()
-    // The domain is still authenticated, and nothing about DKIM is a failure.
-    expect(screen.getByText('Authenticated')).toBeInTheDocument()
+    expect(await screen.findByText('DKIM not detected')).toBeInTheDocument()
+    // The domain still looks good, and nothing about DKIM is a failure.
+    expect(screen.getByText('Looks good')).toBeInTheDocument()
     expect(screen.queryByText(/DKIM.*missing/i)).not.toBeInTheDocument()
 
     await showRecords('acme.com')
-    expect(screen.getByText(/selectors can't be discovered from DNS/)).not.toHaveClass('text-danger')
+    expect(screen.getByText(/most common DKIM setups/)).not.toHaveClass('text-danger')
   })
 
   test('DMARC p=none reads as monitoring, not as protection', async () => {
     stubDomains({ pages: [[{ ...PASSING, dmarc: { found: true, policy: 'none' } }]] })
     renderWithProviders(<Harness mailboxes={mailboxesOn('acme.com')} />)
 
-    expect(await screen.findByText('DMARC monitor')).toBeInTheDocument()
+    expect(await screen.findByText('DMARC report only')).toBeInTheDocument()
     await showRecords('acme.com')
-    expect(screen.getByText(/DMARC is monitoring only/)).toBeInTheDocument()
+    expect(screen.getByText(/DMARC is in report-only mode/)).toBeInTheDocument()
     expect(screen.getByText(/only collects reports/)).toBeInTheDocument()
     expect(screen.queryByText(/Enforcing/)).not.toBeInTheDocument()
   })
@@ -179,11 +179,11 @@ describe('DomainAuthHeader', () => {
     // The heading names the domain from the mailbox list immediately; the
     // verdict arrives with the domains query.
     expect(await screen.findByText('newco.dev')).toBeInTheDocument()
-    expect(await screen.findByText('Not checked')).toBeInTheDocument()
-    expect(screen.getByText(/3 mailboxes · Never checked/)).toBeInTheDocument()
-    expect(screen.getByText('SPF unchecked')).toBeInTheDocument()
-    expect(screen.getByText('DMARC unchecked')).toBeInTheDocument()
-    expect(screen.queryByText('Action needed')).not.toBeInTheDocument()
+    expect(await screen.findByText('Not checked yet')).toBeInTheDocument()
+    expect(screen.getByText(/3 mailboxes · Not checked yet/)).toBeInTheDocument()
+    expect(screen.getByText('SPF not checked')).toBeInTheDocument()
+    expect(screen.getByText('DMARC not checked')).toBeInTheDocument()
+    expect(screen.queryByText('Needs a fix')).not.toBeInTheDocument()
     // "couldn't check" is not an error state on the page.
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
@@ -200,8 +200,8 @@ describe('DomainAuthHeader', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Recheck DNS for startup.io' }))
 
-    await waitFor(() => expect(screen.getByText('Authenticated')).toBeInTheDocument())
-    expect(screen.queryByText('Action needed')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Looks good')).toBeInTheDocument())
+    expect(screen.queryByText('Needs a fix')).not.toBeInTheDocument()
     const checkCalls = fetchMock.mock.calls
       .map((c) => c[0] as Request)
       .filter((req) => req.url.includes('/check'))
@@ -220,7 +220,7 @@ describe('DomainAuthHeader', () => {
     expect(alert).toHaveTextContent(/Couldn't check acme\.com: resolver timeout/)
     expect(alert).toHaveTextContent(/records are unaffected/)
     // The heading keeps its previous verdict: a failed check is not a downgrade.
-    expect(screen.getByText('Authenticated')).toBeInTheDocument()
+    expect(screen.getByText('Looks good')).toBeInTheDocument()
   })
 
   test('a domain with no verdict yet still heads its mailboxes, with no recheck to offer', async () => {
@@ -240,7 +240,7 @@ describe('DomainAuthHeader', () => {
     renderWithProviders(<Harness mailboxes={mailboxesOn('acme.com')} />)
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent("Couldn't load domain authentication (500)")
-    expect(alert).toHaveTextContent(/says nothing about your DNS/)
+    expect(alert).toHaveTextContent("Couldn't load the domain checks (500)")
+    expect(alert).toHaveTextContent(/doesn't mean anything is wrong with your domains/)
   })
 })

@@ -306,7 +306,7 @@ test('the panel says it gates nothing, and gives the calibration reason', async 
   renderWithProviders(<WarmupRoutesPanel mailboxId="mb-1" />)
 
   await screen.findByRole('table')
-  expect(panelText()).toMatch(/no threshold, lane or promotion decision reads any of it/i)
+  expect(panelText()).toMatch(/nothing is paused, slowed or promoted/i)
   expect(panelText()).toMatch(/nobody has yet seen what a normal per-route rate looks like/i)
 })
 
