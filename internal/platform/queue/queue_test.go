@@ -38,6 +38,13 @@ func (f *fakeEnqueuer) queue() (string, bool) { return queueOption(f.opts) }
 // which after the role split nothing new should use — and which the control
 // role deliberately does not consume. A missed Queue option here is a task
 // that only drains while the transitional default consumption survives.
+//
+// The two AFFINITY helpers — EnqueueWarmupTickAt and EnqueueInboxPoll — are
+// absent because their queue depends on a dest argument this table has no
+// column for. Each has its own test covering both of its routes (the assigned
+// worker's queue, and the same role-queue fallback this table asserts):
+// TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend and
+// TestInboxPollKeepsItsPerWorkerAffinityAndFallsBackToSend.
 func TestEveryProducerTargetsARoleQueue(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -57,7 +64,6 @@ func TestEveryProducerTargetsARoleQueue(t *testing.T) {
 		{"pending compose", func(c *Client) error {
 			return c.EnqueuePendingInboxCompose(context.Background(), "p1", "ws1", time.Now())
 		}, QueueSend},
-		{"inbox poll", func(c *Client) error { return c.EnqueueInboxPoll(context.Background(), "m1", "ws1") }, QueueSend},
 		{"webhook deliver", func(c *Client) error { return c.EnqueueWebhookDeliver(context.Background(), "d1", "ws1") }, QueueSend},
 		{"webhook deliver in", func(c *Client) error {
 			return c.EnqueueWebhookDeliverIn(context.Background(), "d1", "ws1", time.Minute)
@@ -224,6 +230,75 @@ func TestWarmupTickKeepsItsPerWorkerAffinityAndFallsBackToSend(t *testing.T) {
 	if got, ok := fake.queue(); !ok || got != QueueSend {
 		t.Errorf("unassigned tick went to %q (present=%v), want %q — default is not consumed by control and is transitional", got, ok, QueueSend)
 	}
+}
+
+// TestInboxPollKeepsItsPerWorkerAffinityAndFallsBackToSend is the warmup:tick
+// assertion above, for the OTHER task whose payload names a mailbox.
+//
+// A poll is a provider AUTHENTICATION — IMAP LOGIN, or an OAuth-bearing call to
+// the Gmail/Graph host — from whichever worker dequeues it, and providers
+// challenge and throttle per source address (see internal/platform/
+// providersignal's package doc: "it authenticates from that address on every
+// send and every poll"). Polling one mailbox from an arbitrary worker every
+// three minutes is therefore the largest source of novel-IP sign-ins in the
+// system, which is what this routes away.
+//
+// The fallback half matters just as much: a mailbox with no assignment has no
+// IP to stay on, so it must land on the send role's own queue and never on
+// asynq's "default", which the control role does not consume and which is
+// transitional.
+func TestInboxPollKeepsItsPerWorkerAffinityAndFallsBackToSend(t *testing.T) {
+	fake := &fakeEnqueuer{}
+	c := &Client{inner: fake}
+
+	if err := c.EnqueueInboxPoll(context.Background(), "m1", "ws1", WorkerQueue("abc")); err != nil {
+		t.Fatalf("with dest: %v", err)
+	}
+	if got, ok := fake.queue(); !ok || got != WorkerQueue("abc") {
+		t.Errorf("dest = %q (present=%v), want the affinity queue", got, ok)
+	}
+
+	if err := c.EnqueueInboxPoll(context.Background(), "m1", "ws1", ""); err != nil {
+		t.Fatalf("no dest: %v", err)
+	}
+	if got, ok := fake.queue(); !ok || got != QueueSend {
+		t.Errorf("unassigned poll went to %q (present=%v), want %q — default is not consumed by control and is transitional", got, ok, QueueSend)
+	}
+}
+
+// TestInboxPollKeepsItsDedupKeyAcrossBothRoutes proves affinity routing did not
+// cost the poll its per-(mailbox, sweep-interval) TaskID. The dedup is what
+// stops N worker replicas — each running its own scheduler — opening N IMAP
+// connections per mailbox per interval, and it has to hold whichever queue the
+// task lands on.
+func TestInboxPollKeepsItsDedupKeyAcrossBothRoutes(t *testing.T) {
+	for _, dest := range []string{WorkerQueue("abc"), ""} {
+		fake := &fakeEnqueuer{}
+		c := &Client{inner: fake}
+		if err := c.EnqueueInboxPoll(context.Background(), "m1", "ws1", dest); err != nil {
+			t.Fatalf("dest %q: %v", dest, err)
+		}
+		want := inboxPollTaskID("m1", time.Now())
+		got, ok := taskIDOption(fake.opts)
+		if !ok || got != want {
+			t.Errorf("dest %q: task id = %q (present=%v), want %q", dest, got, ok, want)
+		}
+	}
+}
+
+// taskIDOption reads back the asynq.TaskID option a producer asked for, the
+// same way queueOption reads back asynq.Queue.
+func taskIDOption(opts []asynq.Option) (string, bool) {
+	result, found := "", false
+	for _, o := range opts {
+		if o.Type() != asynq.TaskIDOpt {
+			continue
+		}
+		if s, ok := o.Value().(string); ok {
+			result, found = s, true
+		}
+	}
+	return result, found
 }
 
 // fakeRegistrar records what a scheduler registration asked for. Register on a

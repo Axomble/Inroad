@@ -1466,10 +1466,13 @@ write history that never happened.
     It does NOT shrink what a LIVE compromised `send` worker can reach. Two
     reasons, both structural and both still true:
     - Every `send` worker consumes the SHARED `send` queue and may legitimately
-      be handed a job for any mailbox (`sequence:advance`, `inbox:poll` and
-      `webhook:deliver` are never routed by assignment — only `warmup:tick` is),
-      so the broker must answer for any mailbox the token names. Scoping needs
-      per-mailbox routing first.
+      be handed a job for any mailbox, so the broker must answer for any mailbox
+      the token names. Only the two task types whose payload NAMES a mailbox are
+      routed by assignment (`warmup:tick`, `inbox:poll`); `sequence:advance` — a
+      campaign send, and the highest-value credential in the set — is keyed on an
+      enrollment whose mailbox is not resolved until the job is hydrated, so it
+      stays on the shared queue and any worker may be handed it. Scoping the
+      broker needs per-mailbox routing for THAT path first.
     - The token is shared across the fleet, so the broker cannot tell which host
       is asking; revoking one revokes all. Per-worker identity is only useful
       once the point above is fixed.

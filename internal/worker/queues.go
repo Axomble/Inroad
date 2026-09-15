@@ -11,8 +11,9 @@ import "github.com/inroad/inroad/internal/platform/queue"
 func QueuesFor(role Role, workerID string) []string {
 	var qs []string
 	// The affinity queue first, so a busy shared queue cannot starve the
-	// warmup ticks routed here. Omitted without a worker id: "w:" is a queue
-	// nothing enqueues to, and consuming it would only skew the weights.
+	// per-mailbox work routed here (warmup ticks and inbox polls). Omitted
+	// without a worker id: "w:" is a queue nothing enqueues to, and consuming
+	// it would only skew the weights.
 	if role.RunsPerMessageWork() && workerID != "" {
 		qs = append(qs, queue.WorkerQueue(workerID))
 	}
