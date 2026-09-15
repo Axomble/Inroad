@@ -19,7 +19,7 @@ export function ApprovalsPage() {
 
   return (
     <Page>
-      <PageTopbar eyebrow="Assistant" title="Approvals" subtitle="Review consequential actions before the assistant can continue" actions={
+      <PageTopbar eyebrow="Assistant" title="Approvals" subtitle="Your assistant asks before doing anything that matters" actions={
         <Button size="sm" variant="outline" onClick={() => void query.refetch()} disabled={query.isFetching}>
           <RefreshCw className={query.isFetching ? 'animate-spin' : ''} /> Refresh
         </Button>

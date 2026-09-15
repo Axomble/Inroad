@@ -47,7 +47,7 @@ function renderToggle(isSentinel: boolean | undefined) {
 
 /** The control as an operator finds it: by its accessible name. */
 function toggle() {
-  return screen.getByRole('button', { name: /sentinel for one@acme\.test/i })
+  return screen.getByRole('button', { name: /reference mailbox for one@acme\.test/i })
 }
 
 // A build that does not report sentinels has no sentinel endpoint either, so the
@@ -65,9 +65,11 @@ test('the first click states the cost and sends nothing', async () => {
 
   fireEvent.click(toggle())
 
-  await waitFor(() => expect(screen.getByRole('group', { name: /designate/i })).toBeInTheDocument())
+  await waitFor(() =>
+    expect(screen.getByRole('group', { name: /make one@acme\.test a reference mailbox/i })).toBeInTheDocument(),
+  )
   const prompt = document.querySelector('[data-slot="sentinel-prompt"]')?.textContent ?? ''
-  expect(prompt).toMatch(/degrading/i)
+  expect(prompt).toMatch(/struggling/i)
   expect(prompt).toMatch(/shielded/i)
   expect(sentinelWrites()).toHaveLength(0)
 })
@@ -76,7 +78,7 @@ test('confirming designates the mailbox', async () => {
   renderToggle(false)
 
   fireEvent.click(toggle())
-  fireEvent.click(await screen.findByRole('button', { name: 'Designate as sentinel' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Make reference mailbox' }))
 
   await waitFor(() => expect(sentinelWrites()).toHaveLength(1))
   const [write] = sentinelWrites()
@@ -103,8 +105,8 @@ test('undesignating asks its own question and sends false', async () => {
   fireEvent.click(toggle())
 
   const prompt = document.querySelector('[data-slot="sentinel-prompt"]')?.textContent ?? ''
-  expect(prompt).toMatch(/peer-only/i)
-  fireEvent.click(await screen.findByRole('button', { name: 'Stop using as sentinel' }))
+  expect(prompt).toMatch(/partners only/i)
+  fireEvent.click(await screen.findByRole('button', { name: 'Stop using as reference' }))
 
   await waitFor(() => expect(sentinelWrites()).toHaveLength(1))
   expect(JSON.parse(sentinelWrites()[0]?.body ?? '{}')).toEqual({ is_sentinel: false })
@@ -115,7 +117,7 @@ test('a failed designation is reported rather than assumed', async () => {
   renderToggle(false)
 
   fireEvent.click(toggle())
-  fireEvent.click(await screen.findByRole('button', { name: 'Designate as sentinel' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Make reference mailbox' }))
 
   expect(await screen.findByRole('alert')).toHaveTextContent(/couldn't|could not/i)
 })
@@ -127,7 +129,7 @@ test('a mailbox that has left the pool says so', async () => {
   renderToggle(false)
 
   fireEvent.click(toggle())
-  fireEvent.click(await screen.findByRole('button', { name: 'Designate as sentinel' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Make reference mailbox' }))
 
-  expect(await screen.findByRole('alert')).toHaveTextContent(/no longer a warmup participant/i)
+  expect(await screen.findByRole('alert')).toHaveTextContent(/no longer part of warmup/i)
 })

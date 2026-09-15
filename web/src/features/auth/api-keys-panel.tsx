@@ -58,7 +58,7 @@ export function ApiKeysPanel() {
       <PageTopbar
         eyebrow="Workspace"
         title="API keys"
-        subtitle="Programmatic, scoped access to this workspace"
+        subtitle="Let your own tools and scripts connect to this workspace"
         actions={
           <Button variant="primary" size="sm" disabled={isLoading || isError} onClick={() => setCreating(true)}>
             <Plus className="size-4" />

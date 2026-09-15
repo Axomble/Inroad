@@ -67,7 +67,7 @@ function requestedUrls() {
 test('the metric tiles render pulse aggregates, and daily capacity is the meter denominator', async () => {
   renderWithProviders(<OverviewPage />, { preloadedState: authed })
 
-  expect(await screen.findByText('Good to see you, Ava.')).toBeInTheDocument()
+  expect(await screen.findByText(/Good to see you, Ava — here's how your outreach is going/)).toBeInTheDocument()
   // Active mailboxes: pulse.mailboxes.active over total.
   expect(await screen.findByText('9')).toBeInTheDocument()
   expect(screen.getByText('12 connected')).toBeInTheDocument()
@@ -77,9 +77,9 @@ test('the metric tiles render pulse aggregates, and daily capacity is the meter 
   expect(screen.getByText('118 sent today')).toBeInTheDocument()
   // Live campaigns + drafts from pulse.campaigns.
   expect(screen.getByText('3')).toBeInTheDocument()
-  expect(screen.getByText('4 drafts ready to refine')).toBeInTheDocument()
+  expect(screen.getByText('4 drafts waiting')).toBeInTheDocument()
   // Warmup healthy over pool, and the derived health ring share.
-  expect(screen.getByText('6 enrolled')).toBeInTheDocument()
+  expect(screen.getByText('6 warming up')).toBeInTheDocument()
   expect(screen.getByText('83%')).toBeInTheDocument()
   // Campaign rows still come from the one surviving list query.
   expect(screen.getByText('Founder outreach')).toBeInTheDocument()
@@ -122,7 +122,7 @@ test('the attention panel renders server-defined pulse.attention rows, worst-fir
   const rows = screen.getByText('Needs attention').closest('section')?.querySelectorAll('li')
   expect(rows).toHaveLength(2)
   expect(rows?.[0]).toHaveTextContent(/mailboxes need attention/i)
-  expect(rows?.[1]).toHaveTextContent(/senders gated/i)
+  expect(rows?.[1]).toHaveTextContent(/senders slowed down/i)
   expect(screen.queryByText('Nothing urgent')).not.toBeInTheDocument()
 })
 

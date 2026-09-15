@@ -72,12 +72,12 @@ describe('DeliverabilityPage', () => {
 
     const complaints = await waitFor(() => componentRow('complaint'))
     expect(complaints).toHaveAttribute('data-measured', 'false')
-    expect(within(complaints).getByText('Not measured')).toBeInTheDocument()
+    expect(within(complaints).getByText('No data yet')).toBeInTheDocument()
     // Not a clean zero, and not a percentage of any kind.
     expect(complaints.textContent).not.toContain('0.0%')
     expect(complaints.textContent).not.toMatch(/\d%/)
-    expect(within(complaints).getByText(/No complaint feed is connected/)).toBeInTheDocument()
-    expect(within(complaints).getByText(/not a clean complaint rate/)).toBeInTheDocument()
+    expect(within(complaints).getByText(/Complaint reports aren't connected/)).toBeInTheDocument()
+    expect(within(complaints).getByText(/doesn't mean your complaint rate is clean/)).toBeInTheDocument()
     // The healthy tone belongs to the measured-and-clean component, never here.
     expect(complaints.querySelector('.text-ok')).toBeNull()
     expect(componentRow('warmup').querySelector('.text-ok')).not.toBeNull()
@@ -115,11 +115,14 @@ describe('DeliverabilityPage', () => {
     expect(figure).toHaveClass('text-faint')
     expect(figure).not.toHaveClass('text-foreground')
     // …the band is replaced, not annotated…
-    expect(within(panel).getByText('Provisional')).toBeInTheDocument()
+    expect(within(panel).getByText('Early estimate')).toBeInTheDocument()
     expect(within(panel).queryByText('Strong')).not.toBeInTheDocument()
     // …and a full sentence, not a badge, carries the reason.
-    expect(within(panel).getByText(/11 delivered — too small a sample to be a verdict/)).toBeInTheDocument()
-    expect(within(panel).getByText('Small sample')).toBeInTheDocument()
+    expect(
+      within(panel).getByText(/haven't sent enough email yet for a reliable score/),
+    ).toBeInTheDocument()
+    expect(within(panel).getByText(/based on just 11 delivered/)).toBeInTheDocument()
+    expect(within(panel).getByText('Based on a small sample')).toBeInTheDocument()
   })
 
   test('the per-day chart renders measured panels and a not-measured one', async () => {
@@ -131,8 +134,8 @@ describe('DeliverabilityPage', () => {
     expect(within(bounce).getByText('Worst day 9.2% on 19 Aug')).toBeInTheDocument()
 
     const complaints = await screen.findByRole('region', { name: 'Complaint rate' })
-    expect(within(complaints).getByText('Not measured')).toBeInTheDocument()
-    expect(within(complaints).getByText(/not a run of clean days/)).toBeInTheDocument()
+    expect(within(complaints).getByText('No data yet')).toBeInTheDocument()
+    expect(within(complaints).getByText(/doesn't mean there were none/)).toBeInTheDocument()
     // No plot at all for an unmeasured signal — a blank axis reads as zero.
     expect(complaints.querySelector('svg')).toBeNull()
     expect(within(bounce).getByRole('group', { name: /Bounce rate by day/ })).toBeInTheDocument()
@@ -148,7 +151,7 @@ describe('DeliverabilityPage', () => {
     expect(within(row as HTMLElement).getByText('250')).toBeInTheDocument()
     expect(within(row as HTMLElement).getByText('9.2%')).toBeInTheDocument()
     // The unmeasured column says so in the table too.
-    expect(within(row as HTMLElement).getAllByText('Not measured')).toHaveLength(1)
+    expect(within(row as HTMLElement).getAllByText('No data')).toHaveLength(1)
   })
 
   test('at-risk mailboxes and domains render their reason and link to the mailbox screen', async () => {
@@ -189,7 +192,7 @@ describe('DeliverabilityPage', () => {
     stubReport({ ...REPORT, series: [REPORT.series[0]!] })
     renderWithProviders(<DeliverabilityPage />)
 
-    expect(await screen.findByText(/a single day is a number, not a trend/)).toBeInTheDocument()
+    expect(await screen.findByText(/a trend needs at least two days/)).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Bounce rate' })).not.toBeInTheDocument()
   })
 })

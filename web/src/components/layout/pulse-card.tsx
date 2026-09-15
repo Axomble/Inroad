@@ -1,6 +1,5 @@
 import { Link } from '@tanstack/react-router'
 import { Flame, Reply } from 'lucide-react'
-import { formatClock24 } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { PulseAttentionItem, PulseSeverity, WorkspacePulse } from '@/features/pulse/api'
@@ -111,7 +110,7 @@ const WARMUP_STATUS_RULES: Array<{ count: (w: WorkspacePulse['warmup']) => numbe
   { count: (w) => w.quarantine, label: (n) => `${n} withheld` },
   { count: (w) => w.at_risk, label: (n) => `${n} at risk` },
   { count: (w) => w.watch, label: (n) => `${n} on watch` },
-  { count: (w) => w.unknown, label: (n) => `${n} need evidence` },
+  { count: (w) => w.unknown, label: (n) => `${n} too new to judge` },
   { count: (w) => w.probation, label: (n) => `${n} proving` },
 ]
 
@@ -162,24 +161,15 @@ function WarmupLine({ warmup }: { warmup: WorkspacePulse['warmup'] }) {
 }
 
 export function PulseCard() {
-  const { data, isError, fulfilledTimeStamp } = usePulse()
+  const { data, isError } = usePulse()
 
   const attention = data ? sortAttention(data.attention) : []
 
+  // No eyebrow, no freshness clock: the card opens straight on its answer.
+  // The status line's dot and copy carry "is everything okay?" on their own —
+  // a mono header row here read as ops chrome and crowded the top of the rail.
   return (
-    <section data-slot="pulse-card" aria-label="Workspace pulse" className="mb-5 flex flex-col gap-1.5 border-b border-chrome-border px-2.5 pb-4">
-      <div className="flex items-center">
-        <span className="font-mono text-[9px] font-medium uppercase tracking-[0.18em] text-chrome-muted/70">Pulse</span>
-        {/* Freshness tick — the query's fulfilledTimeStamp, an honest "last
-            successful fetch", not a fake latency stat. */}
-        <span className="ml-auto flex items-center gap-1 font-mono text-[11px] tabular-nums text-chrome-muted">
-          <span className={cn('size-1.5 rounded-full', isError ? 'bg-danger' : 'bg-ok')} aria-hidden="true" />
-          <span className="sr-only">{isError ? 'Last successful update' : 'Updated'}</span>
-          {/* 24-hour: this card has no room for an AM/PM suffix. */}
-          {fulfilledTimeStamp !== undefined ? formatClock24(fulfilledTimeStamp) : '—'}
-        </span>
-      </div>
-
+    <section data-slot="pulse-card" aria-label="Workspace pulse" className="mb-5 flex flex-col gap-1.5 border-b border-chrome-border px-2.5 pb-4 pt-1">
       {isError ? (
         <p className="text-[12px] text-danger">Can't reach the server · retrying</p>
       ) : !data ? (

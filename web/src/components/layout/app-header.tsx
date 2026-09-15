@@ -63,10 +63,9 @@ export function AppHeader({
             works on both themes from one asset. No lime chip: the accent is
             spent on actions (the primary button), not on the logo. */}
         <BrandMark className="size-7 text-chrome-text" />
-        <div className="leading-none">
-          <span className="text-[15px] font-bold tracking-[-0.025em]">Inroad</span>
-          <span className="ml-2 hidden font-mono text-[8px] uppercase tracking-[0.18em] text-chrome-muted lg:inline">Outreach OS</span>
-        </div>
+        {/* Just the name — the old "Outreach OS" mono tag read as server-room
+            branding in a product aimed at founders and marketers. */}
+        <span className="text-[15px] font-bold leading-none tracking-[-0.025em]">Inroad</span>
       </div>
 
       {leftSlot}

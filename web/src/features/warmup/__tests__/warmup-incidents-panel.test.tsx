@@ -57,7 +57,7 @@ function renderPanel(
  * browser too — a named region rather than a class or a test id.
  */
 function panel(): HTMLElement {
-  return screen.getByRole('region', { name: /correlated degradation/i })
+  return screen.getByRole('region', { name: /shared problems/i })
 }
 
 /** The panel as an operator reads it: all its text, in one string. */
@@ -138,10 +138,10 @@ test('a marginal concentration and a strong one render as different findings', (
   expect(screen.getAllByText(/read it as a hint/i)).toHaveLength(1)
 })
 
-test('the panel says it gates nothing, on the same screen as the rows', () => {
+test('the panel says it is info only, on the same screen as the rows', () => {
   renderPanel([incident()], pool(25, (i) => (i < 4 ? { health_state: 'paused' } : {})))
 
-  expect(panelText()).toMatch(/no threshold, lane or promotion decision reads any of it/i)
+  expect(panelText()).toMatch(/nothing is paused, slowed or promoted/i)
   expect(panelText()).toMatch(/does not say the shared value is why/i)
 })
 
@@ -154,7 +154,7 @@ test('correlations beyond the cap are counted rather than dropped silently', () 
 
   expect(values()).toEqual(['d1.test', 'd2.test', 'd3.test', 'd4.test'])
   expect(document.querySelector('[data-slot="incident-truncated"]')?.textContent).toMatch(
-    /2 weaker correlations are not shown/i,
+    /2 weaker patterns are not shown/i,
   )
 })
 
@@ -164,16 +164,16 @@ test('correlations beyond the cap are counted rather than dropped silently', () 
 // whether the pool is degrading or perfectly quiet, and the two are different
 // answers. Asserted together, because the defect is not what either says alone —
 // it is the two saying the same thing.
-test('an empty array reads differently over a degrading pool than over a quiet one', () => {
-  const degrading = renderPanel([], pool(9, (i) => (i < 4 ? { health_state: 'throttled' } : {})))
-  expect(panelText()).toMatch(/4 mailboxes are degrading/i)
+test('an empty array reads differently over a struggling pool than over a quiet one', () => {
+  const struggling = renderPanel([], pool(9, (i) => (i < 4 ? { health_state: 'throttled' } : {})))
+  expect(panelText()).toMatch(/4 mailboxes are struggling/i)
   expect(panelText()).toMatch(/no shared cause found/i)
-  expect(panelText()).not.toMatch(/no degradation in the pool/i)
-  degrading.unmount()
+  expect(panelText()).not.toMatch(/doing fine/i)
+  struggling.unmount()
 
   renderPanel([], pool(9))
-  expect(panelText()).toMatch(/no degradation in the pool/i)
-  expect(panelText()).toMatch(/nothing to correlate/i)
+  expect(panelText()).toMatch(/doing fine/i)
+  expect(panelText()).toMatch(/nothing to connect/i)
   expect(panelText()).not.toMatch(/no shared cause found/i)
 })
 
@@ -184,7 +184,7 @@ test('an empty array renders no correlation rows at all', () => {
   expect(panel()).toBeInTheDocument()
   expect(values()).toEqual([])
   expect(stats()).toEqual([])
-  expect(panelText()).not.toMatch(/gates nothing|no threshold, lane or promotion/i)
+  expect(panelText()).not.toMatch(/info only|nothing is paused, slowed or promoted/i)
 })
 
 // Grouping on a value that means "we never resolved this" correlates degraded
@@ -207,12 +207,12 @@ test('an unresolved value never renders as a fault domain', () => {
 test('a server that does not report incidents renders no panel', () => {
   renderPanel(undefined, pool(9, (i) => (i < 4 ? { health_state: 'paused' } : {})))
 
-  expect(screen.queryByRole('region', { name: /correlated degradation/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: /shared problems/i })).not.toBeInTheDocument()
   expect(panelText()).toBe('')
 })
 
 test('a workspace with no participants renders no panel', () => {
   renderPanel([], [])
 
-  expect(screen.queryByRole('region', { name: /correlated degradation/i })).not.toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: /shared problems/i })).not.toBeInTheDocument()
 })

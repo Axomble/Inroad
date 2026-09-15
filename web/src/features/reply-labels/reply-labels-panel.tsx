@@ -42,7 +42,7 @@ export function ReplyLabelsPanel() {
       <PageTopbar
         eyebrow="Workspace"
         title="Reply labels"
-        subtitle="What a reply can be classified as, and what each label does to the enrollment"
+        subtitle="How replies get sorted, and what each one does to the campaign"
         actions={
           <Button variant="primary" size="sm" disabled={isLoading || isError} onClick={() => setCreating(true)}>
             <Plus className="size-4" />

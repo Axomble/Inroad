@@ -114,7 +114,7 @@ export type ObserversReading =
  * every row they become chrome to skip, said once above them they are read.
  */
 export const OBSERVERS_INTRO =
-  'Mailboxes that reported far more of the warmup mail they received as spam than their peers on the same receiving provider did. Placement is credited to the sender but recorded by the recipient, so one mailbox with an aggressive filter, a bulk-junked folder or a compromised account makes every sender that mails it look worse than it is. This says nothing about these mailboxes as senders, and it is not proof that any of them is wrong — a legitimately strict provider looks exactly the same from here. The arithmetic is shown so you can judge it yourself.'
+  'These mailboxes marked far more of the warmup mail they received as spam than similar mailboxes on the same provider did. That usually says more about their spam filters than about your senders, and it is not proof that any of them is wrong — a mailbox with a strict spam filter looks exactly the same from here. The numbers are shown so you can judge for yourself.'
 
 /**
  * The sentence this panel exists to carry, and the one the field name argues
@@ -128,7 +128,7 @@ export const OBSERVERS_INTRO =
  * time they finish the first row.
  */
 export const OBSERVERS_NOTHING_EXCLUDED =
-  "Nothing is excluded. Every report below still counts as evidence against the senders that mailed these mailboxes, exactly as it did before, and no health state, lane or promotion decision reads any of this. Acting on it is deferred on purpose: the peer comparison is gameable — adding clean volume to a provider's mailboxes drags the peer rate down until an honest mailbox clears the multiple — so a wrong verdict would silence the one reporting real spam and leave the sender it reported looking cleaner than it is. Evidence that makes a sender look worse than it is costs sending and is visible; evidence that makes one look better goes unnoticed. So this is published and acted on by nothing."
+  'Nothing is excluded. Every report below still counts as evidence, exactly as before, and none of this changes any mailbox\'s status. Inroad deliberately does not act on it automatically: a wrong call here would silence the one mailbox reporting real spam, and leave the sender it reported looking cleaner than it is.'
 
 /**
  * Nothing stood out, said as the answer it is.
@@ -142,7 +142,7 @@ export const OBSERVERS_NOTHING_EXCLUDED =
  * window. Naming a floor here would state a comparison this side never saw.
  */
 export const OBSERVERS_NONE =
-  'No mailbox in this pool reported spam far out of line with its peers on the same receiving provider, so every report counted the same as every other — which is an answer, not a gap. It is not a guarantee that none of them is strict: a mailbox is only ever compared against others on its own provider, so one with too few comparable peers, or too few reports of its own, is never judged either way.'
+  'None of your mailboxes marked spam far out of line with its peers on the same provider — a good sign. It is not a guarantee that none of them is strict: a mailbox is only ever compared against others on its own provider, so one with too few comparable peers, or too few reports of its own, is never judged either way.'
 
 /* ------------------------------------------------------------- the arithmetic */
 
@@ -191,14 +191,14 @@ function multipleStat(observer: WarmupDiscountedObserver): ObserverStat {
   const value = formatMultiple(observer.lift)
   if (value == null) {
     return {
-      label: 'Multiple of its peers',
+      label: 'Times its peers’ rate',
       value: 'Not stated',
       detail:
-        'No usable multiple arrived with this verdict, so the two rates beside it are the whole of the evidence. Not a zero, and not a strong result.',
+        'No usable multiple arrived with this finding, so the two rates beside it are the whole of the evidence. Not a zero, and not a strong result.',
     }
   }
   return {
-    label: 'Multiple of its peers',
+    label: 'Times its peers’ rate',
     value,
     detail: observer.cohort_spam_rate > 0 ? MULTIPLE_DETAIL : CONTINUITY_DETAIL,
   }
@@ -212,16 +212,16 @@ function multipleStat(observer: WarmupDiscountedObserver): ObserverStat {
 function observerStats(observer: WarmupDiscountedObserver, peers: string): ObserverStat[] {
   return [
     {
-      label: 'Called spam, of what it received',
+      label: 'Marked as spam, of what it received',
       // Both the count and the rate, because the rate alone hides the sample it
       // was computed over and the count alone makes the reader do the division.
       value: `${observer.spam} of ${observer.total} (${formatRate(observer.spam_rate)})`,
       detail: null,
     },
     {
-      label: 'Its peers, over the same window',
+      label: 'Its peers, same 7 days',
       value: formatRate(observer.cohort_spam_rate),
-      detail: `The same rate for ${peers}, with this mailbox left out of it — a mailbox that dominates its cohort would otherwise raise the very baseline it is measured against and hide itself.`,
+      detail: `The same rate for ${peers}, with this mailbox left out so it cannot skew its own baseline.`,
     },
     multipleStat(observer),
   ]

@@ -33,7 +33,7 @@ describe('spfCheck', () => {
   test('a published record passes and shows the record itself', () => {
     const check = spfCheck(domain())
     expect(check.verdict).toBe('pass')
-    expect(check.status).toBe('Published')
+    expect(check.status).toBe('Set up')
     expect(check.detail).toContain('v=spf1 include:_spf.google.com ~all')
   })
 
@@ -41,7 +41,7 @@ describe('spfCheck', () => {
     const check = spfCheck(domain({ state: 'failing', spf: { found: false } }))
     expect(check.verdict).toBe('attention')
     expect(check.tone).toBe('failing')
-    expect(check.detail).toMatch(/TXT record at the apex of acme\.com/)
+    expect(check.detail).toMatch(/TXT record on acme\.com/)
     expect(check.detail).toMatch(/v=spf1/)
   })
 
@@ -50,12 +50,12 @@ describe('spfCheck', () => {
     expect(check.verdict).toBe('unknown')
     expect(check.tone).toBe('draft')
     expect(check.status).toBe("Couldn't check")
-    expect(check.detail).toMatch(/isn't a verdict on your DNS/)
+    expect(check.detail).toMatch(/not a problem with your setup/)
   })
 
   test('a never-checked domain says so rather than reporting a lookup failure', () => {
     const check = spfCheck(domain({ state: 'unknown', spf: { found: false }, checked_at: null }))
-    expect(check.status).toBe('Not checked')
+    expect(check.status).toBe('Not checked yet')
     expect(check.detail).toMatch(/hasn't been checked yet/)
   })
 
@@ -72,13 +72,13 @@ describe('dmarcCheck', () => {
     expect(check.status).toBe(`Enforcing (p=${policy})`)
   })
 
-  test('p=none reads as monitoring only, never as a plain pass', () => {
+  test('p=none reads as report-only, never as a plain pass', () => {
     const check = dmarcCheck(domain({ dmarc: { found: true, policy: 'none' } }))
     expect(check.verdict).toBe('monitoring')
-    expect(check.status).toBe('Monitoring only')
+    expect(check.status).toBe('Report only')
     expect(check.tone).not.toBe('running')
     expect(check.detail).toMatch(/only collects reports/)
-    expect(check.detail).toMatch(/not asked to quarantine or reject/)
+    expect(check.detail).toMatch(/aren't asked to do anything about suspicious mail/)
   })
 
   test('a published record with no p= tag is monitoring too, and says why', () => {
@@ -113,8 +113,8 @@ describe('dkimCheck', () => {
     // The whole point: nothing here may read as broken or missing.
     expect(check.tone).not.toBe('failing')
     expect(check.status).not.toMatch(/missing/i)
-    expect(check.detail).toMatch(/can't be discovered from DNS/)
-    expect(check.detail).toMatch(/never counts against the domain/)
+    expect(check.detail).toMatch(/most common DKIM setups/)
+    expect(check.detail).toMatch(/never counts against your domain/)
   })
 
   test('DKIM stays advisory even when the domain state is unknown', () => {
@@ -136,14 +136,14 @@ describe('domainChecks', () => {
 })
 
 describe('domainStateLabel / domainStateTone', () => {
-  test('passing reads as authenticated', () => {
-    expect(domainStateLabel(domain())).toBe('Authenticated')
+  test('passing reads as looking good', () => {
+    expect(domainStateLabel(domain())).toBe('Looks good')
     expect(domainStateTone(domain())).toBe('running')
   })
 
   test('failing asks for action', () => {
     const failing = domain({ state: 'failing', spf: { found: false } })
-    expect(domainStateLabel(failing)).toBe('Action needed')
+    expect(domainStateLabel(failing)).toBe('Needs a fix')
     expect(domainStateTone(failing)).toBe('failing')
   })
 
@@ -151,7 +151,7 @@ describe('domainStateLabel / domainStateTone', () => {
     const failedLookup = domain({ state: 'unknown' })
     const neverChecked = domain({ state: 'unknown', checked_at: null })
     expect(domainStateLabel(failedLookup)).toBe("Couldn't check")
-    expect(domainStateLabel(neverChecked)).toBe('Not checked')
+    expect(domainStateLabel(neverChecked)).toBe('Not checked yet')
     // Never red — `unknown` is not a verdict.
     expect(domainStateTone(failedLookup)).toBe('draft')
     expect(domainStateTone(neverChecked)).toBe('draft')
@@ -160,22 +160,26 @@ describe('domainStateLabel / domainStateTone', () => {
 
 describe('domainSummary', () => {
   test('an enforcing domain says both records are in place', () => {
-    expect(domainSummary(domain())).toMatch(/published and enforcing/)
+    expect(domainSummary(domain())).toMatch(/set up and protecting/)
   })
 
   test('p=none is called out as reporting, not enforcing', () => {
     const summary = domainSummary(domain({ dmarc: { found: true, policy: 'none' } }))
-    expect(summary).toMatch(/monitoring only/)
-    expect(summary).toMatch(/does not enforce/)
+    expect(summary).toMatch(/report-only mode/)
+    expect(summary).toMatch(/without blocking anything/)
   })
 
   test('a failing domain lists exactly the records to add', () => {
     const both = domainSummary(domain({ state: 'failing', spf: { found: false }, dmarc: { found: false } }))
-    expect(both).toBe('Add an SPF TXT record at the apex and a DMARC TXT record at _dmarc.acme.com to authenticate this domain.')
+    expect(both).toBe(
+      'Add an SPF record and a DMARC record in your DNS settings so inbox providers trust email from this domain — the exact records to add are below.',
+    )
 
     const spfOnly = domainSummary(domain({ state: 'failing', spf: { found: false } }))
-    expect(spfOnly).toBe('Add an SPF TXT record at the apex to authenticate this domain.')
-    expect(spfOnly).not.toMatch(/_dmarc/)
+    expect(spfOnly).toBe(
+      'Add an SPF record in your DNS settings so inbox providers trust email from this domain — the exact records to add are below.',
+    )
+    expect(spfOnly).not.toMatch(/DMARC/)
   })
 
   test('a failing domain never blames DKIM', () => {
@@ -186,14 +190,14 @@ describe('domainSummary', () => {
   test('unknown separates "never checked" from a lookup that did not answer', () => {
     expect(domainSummary(domain({ state: 'unknown', checked_at: null }))).toMatch(/Not checked yet/)
     const failed = domainSummary(domain({ state: 'unknown' }))
-    expect(failed).toMatch(/problem with the check, not a verdict/)
+    expect(failed).toMatch(/problem with the check itself, not with your setup/)
   })
 })
 
 describe('lastCheckedLabel', () => {
   test('never-checked says so instead of showing an empty timestamp', () => {
-    expect(lastCheckedLabel(null)).toBe('Never checked')
-    expect(lastCheckedLabel(undefined)).toBe('Never checked')
+    expect(lastCheckedLabel(null)).toBe('Not checked yet')
+    expect(lastCheckedLabel(undefined)).toBe('Not checked yet')
   })
 
   test('a timestamp renders relative to the injected now', () => {
@@ -236,13 +240,13 @@ describe('recheckErrorMessage', () => {
 describe('listErrorMessage', () => {
   test('includes the status when there is one and disclaims any DNS verdict', () => {
     expect(listErrorMessage({ status: 500, data: {} })).toBe(
-      "Couldn't load domain authentication (500). This says nothing about your DNS — try again.",
+      "Couldn't load the domain checks (500). This doesn't mean anything is wrong with your domains — try again.",
     )
   })
 
   test('omits the status for a transport error', () => {
     expect(listErrorMessage({ status: 'FETCH_ERROR', error: 'boom' })).toBe(
-      "Couldn't load domain authentication. This says nothing about your DNS — try again.",
+      "Couldn't load the domain checks. This doesn't mean anything is wrong with your domains — try again.",
     )
   })
 })

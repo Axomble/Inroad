@@ -35,8 +35,8 @@ export default function DeliverabilityChart({ series }: { series: Deliverability
     return (
       <p className="px-5 py-6 text-sm text-muted-foreground">
         {series.length === 0
-          ? 'No days in this window yet. The series starts once this workspace has sent.'
-          : 'Only one day of history so far — a single day is a number, not a trend, so nothing is plotted yet.'}
+          ? 'No data yet — these charts fill in once you start sending.'
+          : 'Only one day of data so far — a trend needs at least two days, so the charts start filling in tomorrow.'}
       </p>
     )
   }
@@ -94,10 +94,10 @@ function Panel({ panel }: { panel: SeriesPanel }) {
       {panel.measured ? (
         <Plot panel={panel} active={active} onActive={setActive} />
       ) : (
-        // Not measured is a sentence, never an empty plot: a blank axis reads as
+        // No data is a sentence, never an empty plot: a blank axis reads as
         // "zero all week", which is the misreading this whole surface avoids.
         <p className="mt-2 rounded-md bg-surface-2/70 px-2.5 py-3 text-[12px] text-muted-foreground">
-          <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">Not measured</span>{' '}
+          <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">No data yet</span>{' '}
           — {panel.notMeasured}
         </p>
       )}
@@ -356,7 +356,7 @@ function SeriesTable({ panels }: { panels: SeriesPanel[] }) {
                   const point = panel.points[index]
                   return (
                     <td key={panel.key} className="py-1 pr-3">
-                      {point ? panelValueLabel(panel, point) : 'Not measured'}
+                      {point ? panelValueLabel(panel, point) : 'No data'}
                     </td>
                   )
                 })}

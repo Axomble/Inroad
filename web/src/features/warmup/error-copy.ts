@@ -24,7 +24,7 @@ export function warmupErrorMessage(error: unknown, fallback: string): string {
     case 403:
       return "You don't have access to this workspace's warmup data."
     case 404:
-      return 'This mailbox is no longer a warmup participant in this workspace — refresh the page.'
+      return 'This mailbox is no longer part of warmup in this workspace — refresh the page.'
     default:
       break
   }

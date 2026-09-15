@@ -65,11 +65,11 @@ const VERDICT_TONE: Record<CheckVerdict, StatusTone> = {
  * than borrowing a word that implies a fault.
  */
 const VERDICT_SHORT: Record<CheckVerdict, string> = {
-  pass: 'ok',
-  attention: 'missing',
-  monitoring: 'monitor',
-  advisory: 'no signal',
-  unknown: 'unchecked',
+  pass: 'passing',
+  attention: 'needs a fix',
+  monitoring: 'report only',
+  advisory: 'not detected',
+  unknown: 'not checked',
 }
 
 /** Compact status token for a verdict. Rendered uppercase by StatusPill. */
@@ -98,11 +98,11 @@ function couldNotCheck(domain: SendingDomain, found: boolean): boolean {
 
 function unknownDetail(domain: SendingDomain, record: string): string {
   return domain.checked_at
-    ? `The ${record} lookup didn't answer, so this isn't a verdict on your DNS. Recheck to try again.`
+    ? `We couldn't look up the ${record} record — a hiccup with the check, not a problem with your setup. Recheck to try again.`
     : `This domain hasn't been checked yet. Recheck to look up its ${record} record.`
 }
 
-const unknownStatus = (domain: SendingDomain) => (domain.checked_at ? "Couldn't check" : 'Not checked')
+const unknownStatus = (domain: SendingDomain) => (domain.checked_at ? "Couldn't check" : 'Not checked yet')
 
 export function spfCheck(domain: SendingDomain): DomainCheck {
   if (couldNotCheck(domain, domain.spf.found)) {
@@ -113,10 +113,10 @@ export function spfCheck(domain: SendingDomain): DomainCheck {
       'spf',
       'SPF',
       'pass',
-      'Published',
+      'Set up',
       domain.spf.record
-        ? `Published at the domain apex: ${domain.spf.record}`
-        : 'A v=spf1 record is published at the domain apex.',
+        ? `Your record: ${domain.spf.record}`
+        : 'A v=spf1 record is in place for this domain.',
     )
   }
   return check(
@@ -124,7 +124,7 @@ export function spfCheck(domain: SendingDomain): DomainCheck {
     'SPF',
     'attention',
     'Not found',
-    `Add a TXT record at the apex of ${domain.domain} starting v=spf1 that authorises whatever sends your mail. Without it, bulk receivers can reject or spam-folder every message from this domain.`,
+    `Add a TXT record on ${domain.domain} that starts with v=spf1 and lists the services that send your email. Without it, inbox providers may reject your messages or send them to spam.`,
   )
 }
 
@@ -138,7 +138,7 @@ export function dmarcCheck(domain: SendingDomain): DomainCheck {
       'DMARC',
       'attention',
       'Not found',
-      `Add a TXT record at _dmarc.${domain.domain} starting v=DMARC1; p=none to begin monitoring, then tighten to p=quarantine once the reports look clean.`,
+      `Add a TXT record at _dmarc.${domain.domain} starting v=DMARC1; p=none to begin collecting reports, then move to p=quarantine once they look clean.`,
     )
   }
   const policy = domain.dmarc.policy
@@ -148,7 +148,7 @@ export function dmarcCheck(domain: SendingDomain): DomainCheck {
       'DMARC',
       'pass',
       `Enforcing (p=${policy})`,
-      `Published at _dmarc.${domain.domain} with p=${policy}, so receivers act on messages that fail authentication.`,
+      `Set up at _dmarc.${domain.domain} with p=${policy}, so inbox providers act on suspicious messages that fail these checks.`,
     )
   }
   // Published but not enforcing. `p=none` and an absent `p=` tag land here
@@ -157,10 +157,10 @@ export function dmarcCheck(domain: SendingDomain): DomainCheck {
     'dmarc',
     'DMARC',
     'monitoring',
-    'Monitoring only',
+    'Report only',
     policy === 'none'
-      ? `Published at _dmarc.${domain.domain} with p=none, which only collects reports — receivers are not asked to quarantine or reject mail that fails. Move to p=quarantine when your reports look clean.`
-      : `Published at _dmarc.${domain.domain} with no p= tag, so receivers are given no instruction — treat it as monitoring only and set p=quarantine when you're ready.`,
+      ? `Set up at _dmarc.${domain.domain} with p=none, which only collects reports — inbox providers aren't asked to do anything about suspicious mail yet. Move to p=quarantine once your reports look clean.`
+      : `Set up at _dmarc.${domain.domain} with no p= tag, so inbox providers get no instruction — treat it as report-only and move to p=quarantine when you're ready.`,
   )
 }
 
@@ -187,7 +187,7 @@ export function dkimCheck(domain: SendingDomain): DomainCheck {
     'DKIM',
     'advisory',
     'Not detected',
-    "DKIM selectors can't be discovered from DNS, so we probe the common ones. A correctly signed domain can still show as not detected — this is informational and never counts against the domain.",
+    'We can only check the most common DKIM setups, so a correctly configured domain can still show as not detected — this is informational and never counts against your domain.',
   )
 }
 
@@ -198,9 +198,9 @@ export function domainChecks(domain: SendingDomain): DomainCheck[] {
 
 /** The domain-level pill: label plus tone. `unknown` is faint, never red. */
 export function domainStateLabel(domain: SendingDomain): string {
-  if (domain.state === 'passing') return 'Authenticated'
-  if (domain.state === 'failing') return 'Action needed'
-  return domain.checked_at ? "Couldn't check" : 'Not checked'
+  if (domain.state === 'passing') return 'Looks good'
+  if (domain.state === 'failing') return 'Needs a fix'
+  return domain.checked_at ? "Couldn't check" : 'Not checked yet'
 }
 
 export function domainStateTone(domain: SendingDomain): StatusTone {
@@ -217,25 +217,25 @@ export function domainStateTone(domain: SendingDomain): StatusTone {
 export function domainSummary(domain: SendingDomain): string {
   if (domain.state === 'unknown') {
     return domain.checked_at
-      ? "The last DNS lookup for this domain didn't answer. That's a problem with the check, not a verdict on your records — recheck to try again."
-      : "Not checked yet. Recheck to look up this domain's SPF and DMARC records."
+      ? "The last check couldn't get an answer for this domain. That's a problem with the check itself, not with your setup — try rechecking."
+      : 'Not checked yet. Run a quick check to make sure inbox providers trust emails from this domain.'
   }
   if (domain.state === 'failing') {
     const missing = [
-      domain.spf.found ? null : 'an SPF TXT record at the apex',
-      domain.dmarc.found ? null : `a DMARC TXT record at _dmarc.${domain.domain}`,
+      domain.spf.found ? null : 'an SPF record',
+      domain.dmarc.found ? null : 'a DMARC record',
     ].filter((entry): entry is string => entry !== null)
-    return `Add ${missing.join(' and ')} to authenticate this domain.`
+    return `Add ${missing.join(' and ')} in your DNS settings so inbox providers trust email from this domain — the exact records to add are below.`
   }
   const dmarc = dmarcCheck(domain)
   return dmarc.verdict === 'monitoring'
-    ? 'SPF and DMARC are both published, but DMARC is monitoring only — it reports, it does not enforce.'
-    : 'SPF and DMARC are published and enforcing.'
+    ? 'SPF and DMARC are both set up, but DMARC is in report-only mode — it watches for problems without blocking anything yet.'
+    : 'SPF and DMARC are set up and protecting this domain.'
 }
 
-/** "Never checked" / "Checked 3 hours ago". `now` injectable for tests. */
+/** "Not checked yet" / "Checked 3 hours ago". `now` injectable for tests. */
 export function lastCheckedLabel(checkedAt: string | null | undefined, now: number = Date.now()): string {
-  return checkedAt ? `Checked ${relativeTime(checkedAt, now)}` : 'Never checked'
+  return checkedAt ? `Checked ${relativeTime(checkedAt, now)}` : 'Not checked yet'
 }
 
 /** How many mailboxes a domain covers — the reason it's worth fixing. */
@@ -263,7 +263,7 @@ export function recheckErrorMessage(error: unknown, domain: string): string {
 /** Copy for a failed load of the domain list. */
 export function listErrorMessage(error: unknown): string {
   const status = httpStatus(error)
-  return `Couldn't load domain authentication${status ? ` (${status})` : ''}. This says nothing about your DNS — try again.`
+  return `Couldn't load the domain checks${status ? ` (${status})` : ''}. This doesn't mean anything is wrong with your domains — try again.`
 }
 
 /** The `{"error": "…"}` envelope the API writes, read through the typed seam. */

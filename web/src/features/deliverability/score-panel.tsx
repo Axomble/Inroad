@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
 import { StatusPill } from '@/components/shared/status-pill'
-import { componentCopies, scoreHeadline, type ComponentCopy } from '@/lib/deliverability-copy'
+import type { ComponentCopy } from '@/lib/deliverability-copy'
+import { friendlyComponentCopies, friendlyScoreHeadline } from './friendly-copy'
 import type { DeliverabilityScore } from './api'
 
 /**
@@ -12,8 +13,8 @@ import type { DeliverabilityScore } from './api'
  * it never renders an unmeasured component as a clean zero.
  */
 export function ScorePanel({ score }: { score: DeliverabilityScore }) {
-  const headline = scoreHeadline(score)
-  const components = componentCopies(score)
+  const headline = friendlyScoreHeadline(score)
+  const components = friendlyComponentCopies(score)
 
   return (
     <section aria-label="Deliverability score" className="border-b border-border bg-surface/60">
@@ -33,10 +34,10 @@ export function ScorePanel({ score }: { score: DeliverabilityScore }) {
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
             <StatusPill tone={headline.tone}>{headline.label}</StatusPill>
+            {/* Helper copy, not a structural label, so it stays plain sentence
+                case rather than the tracked-mono voice. */}
             {headline.provisional && (
-              <span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-warn">
-                Small sample
-              </span>
+              <span className="text-xs text-warn">Based on a small sample</span>
             )}
           </div>
         </div>
@@ -59,7 +60,7 @@ export function ScorePanel({ score }: { score: DeliverabilityScore }) {
 }
 
 /**
- * One component. An unmeasured one is faint with an explicit "Not measured"
+ * One component. An unmeasured one is faint with an explicit "No data yet"
  * status — never the `ok` tone, and never a percentage, because there is no
  * measurement to render.
  */

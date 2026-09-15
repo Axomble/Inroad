@@ -45,7 +45,7 @@ export function ReportsPage() {
       <PageTopbar
         eyebrow="Reports"
         title="Campaign performance"
-        subtitle="Lifetime totals, ranked by volume"
+        subtitle="How every campaign you've sent is doing, busiest first"
       />
 
       {/* An error replaces the numbers rather than sitting above them: a stat

@@ -94,7 +94,7 @@ export type ContentVersionsReading =
 
 /** What the panel says about itself, above the rows. */
 export const VERSIONS_INTRO =
-  "How each template in the warmup library placed over the last 7 days, across the whole pool. Two templates with different spam rates point at the content; one mailbox with a worse rate than its peers points at the mailbox. Each row is measured only on the mail that template produced."
+  'How each warmup email template did over the last 7 days, across all your mailboxes. Two templates with different spam rates point at the content; one mailbox doing worse than its peers points at the mailbox. Each row counts only the mail that template produced.'
 
 /**
  * The qualifier, and the one that matters most on this panel specifically.
@@ -106,14 +106,14 @@ export const VERSIONS_INTRO =
  * route condition is meant to expire and this one only shrinks.
  */
 export const VERSIONS_GATES_NOTHING =
-  'Reported for visibility only: no threshold, lane or promotion decision reads any of it. Two reasons, not one — the sample per template is small by construction, and whichever mailboxes happened to send a template are baked into its rate. A template sent mostly by a struggling mailbox will look like a bad template. Treat a disparity as somewhere to look, never as a verdict on the content.'
+  'For information only — nothing is paused, slowed or promoted based on it. Two grains of salt: each template’s sample is small, and whichever mailboxes happened to send a template are baked into its rate. A template sent mostly by a struggling mailbox will look like a bad template. Treat a difference as somewhere to look, never as a verdict on the content.'
 
 /**
  * Nothing has been observed on any template yet. Said as the absence it is: an
  * empty table with column headings reads as a library with clean rows.
  */
 export const VERSIONS_UNOBSERVED =
-  'No warmup mail has been observed landing yet, so there is nothing to split by template. That is not a delivery failure: rows appear once partners poll the mail this pool sends.'
+  'No warmup emails have landed yet — rows appear here once your mailboxes start exchanging mail. That is not a delivery failure: it can just take a little while for the first results to be checked.'
 
 /**
  * Exactly one template has been observed — so nothing has been compared, which is
@@ -121,7 +121,7 @@ export const VERSIONS_UNOBSERVED =
  * started sending has drawn one template.
  */
 export const VERSIONS_SOLE_NOTE =
-  'Only one template has been observed, so there is nothing to compare it against. Its rate describes that template over this pool — it cannot tell you whether the content or the mailboxes produced the result, because separating those is what a second template would do.'
+  'Only one template has been seen so far, so there is nothing to compare it against. Its rate describes that template across your mailboxes — it cannot tell you whether the content or the mailboxes produced the result; separating those is what a second template would do.'
 
 /* -------------------------------------------------------------- the figures */
 
@@ -146,8 +146,8 @@ function formatVersionPct(rate: number): string {
   return `${Math.round(rate * 100)}%`
 }
 
-function observations(count: number): string {
-  return `${count.toLocaleString()} observation${count === 1 ? '' : 's'}`
+function emailsChecked(count: number): string {
+  return `${count.toLocaleString()} email${count === 1 ? '' : 's'} checked`
 }
 
 /**
@@ -162,10 +162,10 @@ function placementFigure(label: string, rate: number | null | undefined, samples
   if (samples <= 0) {
     return {
       label,
-      value: 'No observations',
+      value: 'No emails checked',
       measured: false,
-      population: 'nothing produced by this template was observed',
-      detail: 'No mail from this template was observed landing anywhere in the window. An unmeasured template is not a clean one.',
+      population: 'nothing from this template was checked',
+      detail: 'No mail from this template was seen landing anywhere in the window. An unchecked template is not a clean one.',
     }
   }
   if (rate == null) {
@@ -173,16 +173,16 @@ function placementFigure(label: string, rate: number | null | undefined, samples
       label,
       value: 'Not established',
       measured: false,
-      population: `over ${observations(samples)} of this template`,
+      population: `over ${emailsChecked(samples)} from this template`,
       detail:
-        'Too few observations of this template to state a rate — not a zero, and not a clean result. A shared library split across a pool makes small counts ordinary here rather than exceptional.',
+        'Too few emails from this template to state a rate — not a zero, and not a clean result. A shared library split across many mailboxes makes small counts ordinary here rather than exceptional.',
     }
   }
   return {
     label,
     value: formatVersionPct(rate),
     measured: true,
-    population: `of ${observations(samples)} of this template`,
+    population: `of ${emailsChecked(samples)} from this template`,
     detail: null,
   }
 }
@@ -248,7 +248,7 @@ function versionReading(version: ContentVersion, index: number): VersionReading 
     key: fingerprint || `unidentified-${index}`,
     label: fingerprint ? shorten(fingerprint) : UNIDENTIFIED,
     fingerprint,
-    counts: `${inbox.toLocaleString()} inbox, ${spam.toLocaleString()} spam over ${observations(samples)}`,
+    counts: `${inbox.toLocaleString()} in the inbox, ${spam.toLocaleString()} in spam, of ${emailsChecked(samples)}`,
     figures: [
       placementFigure(INBOX_LABEL, version.inbox_rate, samples),
       placementFigure(SPAM_LABEL, version.spam_rate, samples),

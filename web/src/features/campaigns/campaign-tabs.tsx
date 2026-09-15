@@ -1,5 +1,5 @@
-import { Link } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
+import { NavLink } from '@/components/shared/nav-link'
 
 /**
  * Third-level navigation for /app/campaigns/$id/*.
@@ -45,31 +45,29 @@ export function CampaignTabs({ id }: { id: string }) {
       className="flex shrink-0 gap-1 overflow-x-auto border-b border-border bg-surface/60 px-3"
     >
       {CAMPAIGN_TABS.map((tab) => (
-        <Link
+        <NavLink
           key={tab.to}
           to={tab.to}
           params={{ id }}
           data-slot="campaign-tab-link"
           // `exact` only for Overview: it is the parent path of every sibling,
           // so without this it would stay active on all five tabs.
-          activeOptions={{ exact: tab.to === '/app/campaigns/$id' }}
+          exact={tab.to === '/app/campaigns/$id'}
           className={cn(
             'relative shrink-0 whitespace-nowrap px-3 py-2.5 text-[13px] text-muted-foreground transition-colors',
             'hover:text-foreground',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset',
           )}
-          activeProps={{
-            // The underline is drawn with a pseudo-element rather than a border
-            // so it overlaps the nav's own bottom border instead of stacking a
-            // second line beneath it.
-            className: cn(
-              'font-medium text-foreground',
-              'after:absolute after:inset-x-3 after:-bottom-px after:h-0.5 after:bg-primary after:content-[""]',
-            ),
-          }}
+          // The underline is drawn with a pseudo-element rather than a border so
+          // it overlaps the nav's own bottom border instead of stacking a second
+          // line beneath it.
+          activeClassName={cn(
+            'font-medium text-foreground',
+            'after:absolute after:inset-x-3 after:-bottom-px after:h-0.5 after:bg-primary after:content-[""]',
+          )}
         >
           {tab.label}
-        </Link>
+        </NavLink>
       ))}
     </nav>
   )

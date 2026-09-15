@@ -31,11 +31,14 @@ export function sortAttention(items: PulseAttentionItem[]): PulseAttentionItem[]
 // Keys mirror the server's kind constants (internal/app/pulse/service.go);
 // pulse-card.test.tsx asserts every known kind maps here so a renamed
 // producer can't silently fall through to the humanized fallback again.
+// Plain words over protocol names: "slowed down", "needs a DNS fix" — the
+// technical detail (which check failed, which gate fired) rides along in the
+// server-written `reason` line under each row.
 const ATTENTION_LABELS: Record<string, (count: number) => string> = {
   mailbox_error: (n) => (n === 1 ? 'mailbox needs attention' : 'mailboxes need attention'),
-  senders_gated: (n) => (n === 1 ? 'sender gated' : 'senders gated'),
-  dmarc_failing: (n) => (n === 1 ? 'domain failing DMARC' : 'domains failing DMARC'),
-  cap_consumed: (n) => (n === 1 ? 'sending pool near daily cap' : 'sending pools near daily cap'),
+  senders_gated: (n) => (n === 1 ? 'sender slowed down' : 'senders slowed down'),
+  dmarc_failing: (n) => (n === 1 ? 'domain needs a DNS fix' : 'domains need a DNS fix'),
+  cap_consumed: (n) => (n === 1 ? 'sender group near its daily limit' : 'sender groups near their daily limit'),
 }
 
 export function attentionLabel(kind: string, count: number): string {

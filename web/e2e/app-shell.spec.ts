@@ -120,7 +120,12 @@ async function signIn(page: Page) {
   await page.getByLabel('Email').fill('demo@inroad.test')
   await page.getByRole('textbox', { name: 'Password', exact: true }).fill('correct-horse-battery-staple')
   await page.getByRole('button', { name: 'Log in' }).click()
-  await expect(page.getByRole('heading', { name: 'Your outreach command center.' })).toBeVisible()
+  // Landing check is structural, not copy: waiting on the overview's marketing
+  // headline meant one wording change broke sign-in for four spec files at once.
+  // The work surface appearing at /app is what "signed in" actually means, and it
+  // holds on a phone viewport too, where the sidebar is a closed drawer.
+  await page.waitForURL(/\/app$/)
+  await expect(page.getByRole('main')).toBeVisible()
 }
 
 test('operator can navigate, inspect live metrics, search commands, and switch theme', async ({ page }, testInfo) => {
@@ -133,7 +138,7 @@ test('operator can navigate, inspect live metrics, search commands, and switch t
   // overview reports the workspace's daily capacity — instead of asserting that the
   // digits exist somewhere. (The metric is a StatStrip band, not a card article,
   // since the Volt design pass.)
-  await expect(page.locator('[data-slot="stat"]', { hasText: 'Daily capacity' })).toContainText('125')
+  await expect(page.locator('[data-slot="stat"]', { hasText: 'Daily send limit' })).toContainText('125')
   await expect(page.getByText('Founder signal')).toBeVisible()
   // Scoped for the same reason as the tile above: the reason string reaches the DOM
   // in more than one place. Reading it inside the priority queue is also the
@@ -178,11 +183,11 @@ test('mobile navigation and core screens stay within the viewport', async ({ pag
   // the disclosure, which is also where the long guidance that threatens the
   // layout lives.
   await expect(page.getByText('atlas.test', { exact: true })).toBeVisible()
-  await expect(page.getByText('Authenticated')).toBeVisible()
+  await expect(page.getByText('Looks good')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Recheck DNS for atlas.test' })).toBeVisible()
 
   await page.getByRole('button', { name: 'Show DNS records for atlas.test' }).click()
-  await expect(page.getByText('Monitoring only.')).toBeVisible()
+  await expect(page.getByText('Report only.', { exact: true })).toBeVisible()
   await expect(page.getByText('Not detected.')).toBeVisible()
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false)
@@ -196,10 +201,10 @@ test('a long pulse reason never scrolls the sidebar sideways', async ({ page }, 
 
   // The desktop rail only: the mobile drawer mounts a second, inert copy after it.
   const sidebar = page.locator('[data-slot="pulse-card"]').first().locator('..')
-  const row = sidebar.locator('[data-slot="pulse-attention-row"]', { hasText: 'senders gated' })
+  const row = sidebar.locator('[data-slot="pulse-attention-row"]', { hasText: 'senders slowed down' })
   // The label must survive with real width — the bug crushed it to zero and left
   // only the reason on screen.
-  await expect(row.getByText('2 senders gated')).toBeVisible()
+  await expect(row.getByText('2 senders slowed down')).toBeVisible()
   await expect(row).toContainText('warmup health limiting sending')
 
   const metrics = await sidebar.evaluate((el) => ({

@@ -88,10 +88,10 @@ export function CampaignDetailLayout() {
         </div>
       ) : (
         <StatStrip>
-          <Stat label="Queued" value={n('queued')} dot={<StatusDot tone="draft" />} />
-          <Stat label="Sent" value={n('sent')} dot={<StatusDot tone="running" />} sub="delivered to the provider" />
-          <Stat label="Failed" value={n('failed')} dot={<StatusDot tone="failing" />} sub="permanent errors" />
-          <Stat label="Skipped" value={n('skipped')} dot={<StatusDot tone="paused" />} sub="suppressed or capped" />
+          <Stat label="Queued" value={n('queued')} dot={<StatusDot tone="draft" />} sub="waiting to send" />
+          <Stat label="Sent" value={n('sent')} dot={<StatusDot tone="running" />} sub="on their way" />
+          <Stat label="Failed" value={n('failed')} dot={<StatusDot tone="failing" />} sub="couldn't be delivered" />
+          <Stat label="Skipped" value={n('skipped')} dot={<StatusDot tone="paused" />} sub="left out on purpose" />
         </StatStrip>
       )}
 

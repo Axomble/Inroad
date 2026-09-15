@@ -134,8 +134,8 @@ function Verdict({ verdict }: { verdict: VerdictFact }) {
             {verdict.value}
             {/* The tabbed rate's marker, verbatim, for the same reason: a failing
                 verdict is the one an operator would act on, and nothing acts on
-                it. Wrapped as a unit so "· gates" / "nothing" never split. */}
-            {verdict.negative && <span className="whitespace-nowrap text-faint"> · gates nothing</span>}
+                it. Wrapped as a unit so "· info" / "only" never split. */}
+            {verdict.negative && <span className="whitespace-nowrap text-faint"> · info only</span>}
           </span>
         </span>
         <Detail text={verdict.detail} />

@@ -41,7 +41,7 @@ test('the unobserved answer says nothing landed, not that the library is clean',
   const reading = contentVersionsReading([])
   if (reading.kind !== 'unobserved') throw new Error('expected unobserved')
 
-  expect(reading.message).toMatch(/nothing to split by template/i)
+  expect(reading.message).toMatch(/no warmup emails have landed yet/i)
   // It must not read as a delivery failure either — the mail may simply not have
   // been polled yet.
   expect(reading.message).toMatch(/not a delivery failure/i)
@@ -61,11 +61,11 @@ test('a rate below the sample floor reads as not established, never 0%', () => {
     expect(figure.value).toBe('Not established')
     expect(figure.measured).toBe(false)
     expect(figure.value).not.toMatch(/0%/)
-    // The denominator is still stated: an unestablished rate over 5 observations
-    // is a different claim from one over 500.
-    expect(figure.population).toMatch(/5 observations/)
+    // The denominator is still stated: an unestablished rate over 5 checked
+    // emails is a different claim from one over 500.
+    expect(figure.population).toMatch(/5 emails checked/)
   }
-  expect(row.counts).toMatch(/4 inbox, 1 spam over 5 observations/)
+  expect(row.counts).toMatch(/4 in the inbox, 1 in spam, of 5 emails checked/)
 })
 
 // The opposite case, and the one a falsiness check would break: a measured zero is
@@ -93,7 +93,7 @@ test('a template nobody observed reports no observations rather than a rate', ()
   const [row] = reading.versions
 
   for (const figure of row?.figures ?? []) {
-    expect(figure.value).toBe('No observations')
+    expect(figure.value).toBe('No emails checked')
     expect(figure.measured).toBe(false)
     expect(figure.detail).toMatch(/not a clean one/i)
   }

@@ -102,7 +102,7 @@ test('an empty placement window is shown as not measured', () => {
   )
 
   expect(screen.getAllByText('Not measured')).toHaveLength(2)
-  expect(screen.getByText('0 observations')).toBeInTheDocument()
+  expect(screen.getByText('0 emails checked')).toBeInTheDocument()
   expect(screen.getByText('Needs evidence')).toBeInTheDocument()
 })
 
@@ -127,7 +127,7 @@ test('an undetectable tabbed rate is words, never a percentage', () => {
     />,
   )
 
-  expect(tabbedText()).toMatch(/not detectable — no partner could report a tab/i)
+  expect(tabbedText()).toMatch(/not detectable — no partner mailbox can show tabs/i)
   // Not merely "0%": ANY figure here is a measurement claim nothing made.
   expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
 })
@@ -157,7 +157,7 @@ test('does not blame this mailbox\'s own provider for a partner limitation', () 
 test('a payload with no tabbed fields at all is undetectable, not zero', () => {
   renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={entry} />)
 
-  expect(tabbedText()).toMatch(/not detectable — no partner could report a tab/i)
+  expect(tabbedText()).toMatch(/not detectable — no partner mailbox can show tabs/i)
   expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
 })
 
@@ -173,10 +173,10 @@ test('a measured tabbed rate carries its own tab-capable sample count', () => {
   )
 
   expect(tabbedText()).toMatch(/35%/)
-  expect(tabbedText()).toMatch(/25 tab-capable/)
+  expect(tabbedText()).toMatch(/25 that can show tabs/)
   expect(tabbedText()).not.toMatch(/not detectable/i)
   // The inbox/spam denominator stays its own number, unshared.
-  expect(screen.getByText('40 observations')).toBeInTheDocument()
+  expect(screen.getByText('40 emails checked')).toBeInTheDocument()
 })
 
 // The opposite case, and the one a "falsy means unknown" implementation gets
@@ -192,7 +192,7 @@ test('a zero rate over real tab-capable observations renders as a measured 0%', 
   )
 
   expect(tabbedText()).toMatch(/\b0%/)
-  expect(tabbedText()).toMatch(/18 tab-capable/)
+  expect(tabbedText()).toMatch(/18 that can show tabs/)
   expect(tabbedText()).not.toMatch(/not detectable/i)
 })
 
@@ -206,7 +206,7 @@ test('a rate over zero tab-capable observations is not presented as a measuremen
     />,
   )
 
-  expect(tabbedText()).toMatch(/not detectable — no partner could report a tab/i)
+  expect(tabbedText()).toMatch(/not detectable — no partner mailbox can show tabs/i)
   expect(tabbedText()).not.toMatch(/\d+(\.\d+)?\s*%/)
 })
 
@@ -214,17 +214,17 @@ test('a rate over zero tab-capable observations is not presented as a measuremen
 // §8). It has to say so in both states: beside a rate so a high one isn't read as
 // the reason for a throttle, and beside the absence so an SMTP operator doesn't
 // read "not detectable" as a penalty.
-test('the tabbed rate states that it gates nothing, measured or not', () => {
+test('the tabbed rate states that it is info only, measured or not', () => {
   const { unmount } = renderWithProviders(
     <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, tabbed_rate_7d: 0.6, tab_capable_sample_7d: 30 }} />,
   )
-  expect(tabbedText()).toMatch(/gates nothing/i)
+  expect(tabbedText()).toMatch(/info only/i)
 
   unmount()
   renderWithProviders(
     <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, tabbed_rate_7d: null, tab_capable_sample_7d: 0 }} />,
   )
-  expect(tabbedText()).toMatch(/gates nothing/i)
+  expect(tabbedText()).toMatch(/info only/i)
 })
 
 // Rounding a real signal down to "0%" is the same false-clean reading in a
@@ -383,7 +383,7 @@ test('the observed identity is collapsed until the operator opens it', () => {
   expect(screen.getByText('DKIM signing domain')).toBeInTheDocument()
   // The failing verdict arrives with its disclaimer, not on its own.
   expect(document.querySelector('[data-slot="warmup-identity"]')?.textContent).toMatch(
-    /fail[^·]*· gates nothing/,
+    /fail[^·]*· info only/,
   )
 })
 
@@ -490,7 +490,7 @@ test('a failed disable surfaces the inline error alert with the generic copy', a
   expect(alert).toHaveTextContent(/couldn't disable warmup\. please try again\./i)
 })
 
-test('a 404 disable explains the mailbox is no longer a participant', async () => {
+test('a 404 disable explains the mailbox is no longer part of warmup', async () => {
   disableResponder = () =>
     new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: jsonHeaders })
 
@@ -499,7 +499,7 @@ test('a 404 disable explains the mailbox is no longer a participant', async () =
   fireEvent.click(screen.getByRole('button', { name: /^disable$/i }))
 
   const alert = await screen.findByRole('alert')
-  expect(alert).toHaveTextContent(/no longer a warmup participant/i)
+  expect(alert).toHaveTextContent(/no longer part of warmup/i)
 })
 
 /* ------------------------------------------------------------- sentinels */
@@ -518,21 +518,21 @@ test('no evidence label at all on a build that does not report one', () => {
   expect(document.querySelector('[data-slot="evidence-confidence"]')).toBeNull()
 })
 
-// Peer-only is what a healthy pool mostly produces. On the row it is a label
+// Partners-only is what a healthy pool mostly produces. On the row it is a label
 // beside the rates it qualifies — never a warning, and never a discount.
-test('peer-only evidence is labelled on the row and says it gates nothing', () => {
+test('partners-only evidence is labelled on the row and says it is info only', () => {
   renderWithProviders(
     <WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, evidence_confidence: 'peer_only' }} />,
   )
 
-  expect(evidenceText()).toMatch(/peer-only/i)
-  expect(evidenceText()).toMatch(/gates nothing/i)
+  expect(evidenceText()).toMatch(/measured by its warmup partners only/i)
+  expect(evidenceText()).toMatch(/info only/i)
   expect(evidenceText()).not.toMatch(/\bwarning\b|insufficient|\bweak\b/i)
 })
 
 // The arithmetic travels with the label, as it does for every other inference on
-// this screen: "corroborated" without a count is a badge.
-test('a corroborated row says how many of its observations came from a sentinel', () => {
+// this screen: "reference-backed" without a count is a badge.
+test('a reference-backed row says how many of its checks came from a reference mailbox', () => {
   renderWithProviders(
     <WarmupMailboxCard
       mailbox={mailbox}
@@ -540,8 +540,8 @@ test('a corroborated row says how many of its observations came from a sentinel'
     />,
   )
 
-  expect(evidenceText()).toMatch(/sentinel-corroborated/i)
-  expect(evidenceText()).toMatch(/12/)
+  expect(evidenceText()).toMatch(/partners \+ a reference mailbox/i)
+  expect(evidenceText()).toMatch(/12 from a reference mailbox/)
 })
 
 /** The designation mark alone: the control beside it also contains "sentinel". */
@@ -552,7 +552,7 @@ function sentinelMark(): string | null {
 test('a designated mailbox is marked on its own row', () => {
   renderWithProviders(<WarmupMailboxCard mailbox={mailbox} entry={{ ...entry, is_sentinel: true }} />)
 
-  expect(sentinelMark()).toMatch(/sentinel/i)
+  expect(sentinelMark()).toMatch(/reference/i)
 })
 
 test('an ordinary mailbox carries no designation mark', () => {

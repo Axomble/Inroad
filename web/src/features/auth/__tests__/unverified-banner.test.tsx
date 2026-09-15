@@ -45,7 +45,7 @@ test('an unverified account sees what is blocked and how to fix it', async () =>
   renderWithProviders(<UnverifiedBanner />, { preloadedState: AUTHED })
 
   const banner = await screen.findByRole('status')
-  expect(banner).toHaveTextContent(/connecting a mailbox, launching a campaign, and test sends/i)
+  expect(banner).toHaveTextContent(/connect mailboxes, send tests, and launch campaigns/i)
   expect(screen.getByRole('button', { name: /resend email/i })).toBeInTheDocument()
 })
 

@@ -35,12 +35,12 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-test('shows the "needs at least 2 mailboxes" notice when the pool is inactive', async () => {
+test('shows the "turn it on for at least two mailboxes" notice when the pool is inactive', async () => {
   renderWithProviders(<WarmupPage />)
 
-  expect(await screen.findByText(/warmup needs at least 2 mailboxes/i)).toBeInTheDocument()
-  // The pool-size summary reflects the single enrolled participant and idle state.
-  expect(screen.getByText(/idle — needs 2\+/i)).toBeInTheDocument()
+  expect(await screen.findByText(/turn it on for at least two mailboxes/i)).toBeInTheDocument()
+  // The warming-up summary reflects the single enrolled participant and idle state.
+  expect(screen.getByText(/needs 2\+ mailboxes to start/i)).toBeInTheDocument()
 })
 
 test('does not show the inactive notice once the pool is active', async () => {
@@ -59,7 +59,7 @@ test('does not show the inactive notice once the pool is active', async () => {
   renderWithProviders(<WarmupPage />)
 
   expect(await screen.findByText(/exchanging mail/i)).toBeInTheDocument()
-  expect(screen.queryByText(/warmup needs at least 2 mailboxes/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/turn it on for at least two mailboxes/i)).not.toBeInTheDocument()
 })
 
 test('surfaces an error banner when the overview request fails', async () => {
@@ -77,9 +77,9 @@ test('does not present fabricated zero stats alongside the overview error', asyn
   renderWithProviders(<WarmupPage />)
 
   await screen.findByRole('alert')
-  // The "0 / Idle — needs 2+" fallbacks would be misleading next to "couldn't
-  // load"; the strip shows em-dashes for unknown values instead.
-  expect(screen.queryByText(/idle — needs 2\+/i)).not.toBeInTheDocument()
+  // The "0 / Needs 2+ mailboxes to start" fallbacks would be misleading next to
+  // "couldn't load"; the strip shows em-dashes for unknown values instead.
+  expect(screen.queryByText(/needs 2\+ mailboxes to start/i)).not.toBeInTheDocument()
   expect(screen.queryByText(/exchanging mail/i)).not.toBeInTheDocument()
   expect(screen.getAllByText('—').length).toBeGreaterThan(0)
 })
@@ -123,7 +123,7 @@ test('a correlated incident is reported on the pool, above the mailbox list', as
 
   renderWithProviders(<WarmupPage />)
 
-  const panel = await screen.findByRole('region', { name: /correlated degradation/i })
+  const panel = await screen.findByRole('region', { name: /shared problems/i })
   expect(panel).toHaveTextContent('mail.acme.test')
   // The arithmetic, not a verdict: both counts and the concentration.
   expect([...panel.querySelectorAll('[data-slot="incident-stat"]')].map((n) => n.textContent)).toEqual([
@@ -167,7 +167,7 @@ test('a published observer verdict is reported on the pool, above the mailbox li
 
   renderWithProviders(<WarmupPage />)
 
-  const panel = await screen.findByRole('region', { name: /spam reporting outliers/i })
+  const panel = await screen.findByRole('region', { name: /spam complaints/i })
   // Named by its email from the same payload, with the arithmetic beside it.
   expect(panel.querySelector('[data-slot="observer-mailbox"]')?.textContent).toBe('b@example.com')
   expect([...panel.querySelectorAll('[data-slot="observer-stat"]')].map((n) => n.textContent)).toEqual([
@@ -214,7 +214,7 @@ test('the sentinel pool facts are reported above the mailbox list', async () => 
 
   renderWithProviders(<WarmupPage />)
 
-  const panel = await screen.findByRole('region', { name: /measurement sentinels/i })
+  const panel = await screen.findByRole('region', { name: /reference mailboxes/i })
   expect(panel.querySelector('[data-slot="sentinel-mailbox"]')?.textContent).toBe('a@example.com')
   expect(panel).toHaveTextContent(/1 of 2 mailboxes/)
   // Nothing is enforced, so nothing here is an alert.
@@ -230,8 +230,8 @@ test('an overview that never mentions sentinels draws no sentinel panel', async 
 
   renderWithProviders(<WarmupPage />)
 
-  await screen.findByRole('region', { name: /correlated degradation/i })
-  expect(screen.queryByRole('region', { name: /measurement sentinels/i })).toBeNull()
+  await screen.findByRole('region', { name: /shared problems/i })
+  expect(screen.queryByRole('region', { name: /reference mailboxes/i })).toBeNull()
 })
 
 // The wiring assertion, and the reason it exists: `sentinel_count` was declared,
@@ -255,12 +255,12 @@ test('a published content-version split reaches the page', async () => {
 
   renderWithProviders(<WarmupPage />)
 
-  const panel = await screen.findByRole('region', { name: /placement by template/i })
+  const panel = await screen.findByRole('region', { name: /where your warmup emails land/i })
   expect(panel).toHaveTextContent('sl1:aaaaaaaa…')
   expect(panel).toHaveTextContent('80%')
   // The thin row keeps its evidence and states no rate — a 0% here would be the
   // false-clean reading the whole panel is built to avoid.
-  expect(panel).toHaveTextContent(/8 inbox, 2 spam over 10 observations/)
+  expect(panel).toHaveTextContent(/8 in the inbox, 2 in spam, of 10 emails checked/)
   expect(panel).toHaveTextContent(/Not established/)
 })
 
@@ -269,8 +269,8 @@ test('a published content-version split reaches the page', async () => {
 test('an overview that never mentions templates draws no template panel', async () => {
   renderWithProviders(<WarmupPage />)
 
-  await screen.findByText(/warmup needs at least 2 mailboxes/i)
-  expect(screen.queryByRole('region', { name: /placement by template/i })).toBeNull()
+  await screen.findByText(/turn it on for at least two mailboxes/i)
+  expect(screen.queryByRole('region', { name: /where your warmup emails land/i })).toBeNull()
 })
 
 test('shows the no-mailboxes empty state when there are none to warm', async () => {

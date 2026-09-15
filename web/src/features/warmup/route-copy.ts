@@ -95,7 +95,7 @@ export type RoutesReading =
 
 /** What the panel says about itself, above the matrix. */
 export const ROUTES_INTRO =
-  "Where this mailbox's warmup mail was actually delivered over the last 7 days, split by destination provider — decided by the recipient domain's MX, not by how this mailbox sends. Each row is measured only on the mail that took that route."
+  "Where this mailbox's warmup emails were actually delivered over the last 7 days, split by the provider that received them — decided by the recipient's mail setup, not by how this mailbox sends. Each row counts only the mail that went to that provider."
 
 /**
  * Design §7, and deliberately NOT the sentence the tabbed rate and the identity
@@ -107,14 +107,14 @@ export const ROUTES_INTRO =
  * because this condition is meant to expire, and the copied one would not.
  */
 export const ROUTES_GATES_NOTHING =
-  'Reported for visibility only: no threshold, lane or promotion decision reads any of it. Not because a route cannot be measured — it can, on every provider — but because nobody has yet seen what a normal per-route rate looks like here, so any threshold set today would be a guess. Reading the disparity between rows is left to you.'
+  'For information only — nothing is paused, slowed or promoted based on it. Not because a route cannot be measured — it can, on every provider — but because nobody has yet seen what a normal per-route rate looks like here, so any threshold set today would be a guess. Reading the difference between rows is left to you.'
 
 /**
  * Nothing has been observed on any destination yet. Said as the absence it is:
  * an empty matrix with column headings reads as four clean routes.
  */
 export const ROUTES_UNOBSERVED =
-  "No warmup mail from this mailbox has been observed reaching a destination yet, so there is no route to report. That is not a delivery failure: rows appear once a partner polls the mail this mailbox sends."
+  'No warmup mail from this mailbox has been tracked to a destination yet, so there is no route to report. That is not a delivery failure: rows appear once the mailboxes receiving its warmup mail start checking where it landed.'
 
 /* ---------------------------------------------------------------- the rates */
 

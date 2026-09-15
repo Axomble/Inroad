@@ -59,7 +59,7 @@ export function WarmupIncidentsPanel({
       className="border-b border-border bg-surface/40 px-4 py-3 sm:px-5"
     >
       <h2 id={headingId} className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-        Correlated degradation
+        Shared problems
       </h2>
 
       {reading.kind === 'detected' ? (
@@ -126,7 +126,7 @@ function Incident({ incident }: { incident: IncidentReading }) {
 
       {incident.members.length > 0 && (
         <p className="mt-1.5 text-[12px] leading-snug text-muted-foreground">
-          <span className="text-faint">Degraded: </span>
+          <span className="text-faint">Affected: </span>
           <span data-slot="incident-members" className="font-mono">
             {incident.members.join(', ')}
           </span>

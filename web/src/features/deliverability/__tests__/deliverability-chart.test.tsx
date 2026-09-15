@@ -51,21 +51,21 @@ describe('DeliverabilityChart', () => {
     const plot = within(panel).getByRole('group', { name: /Bounce rate by day/ })
 
     fireEvent.keyDown(plot, { key: 'ArrowRight' })
-    expect(within(panel).getByText('19 Aug — Not measured')).toBeInTheDocument()
+    expect(within(panel).getByText('19 Aug — No data')).toBeInTheDocument()
   })
 
   test('an unmeasured signal has no plot to misread as a flat zero line', () => {
     renderChart()
     const complaints = screen.getByRole('region', { name: 'Complaint rate' })
     expect(complaints.querySelector('svg')).toBeNull()
-    expect(within(complaints).getByText('Not measured')).toBeInTheDocument()
+    expect(within(complaints).getByText('No data yet')).toBeInTheDocument()
     // …while a measured one does plot.
     expect(screen.getByRole('region', { name: 'Bounce rate' }).querySelector('svg')).not.toBeNull()
   })
 
   test('an empty window says the series has not started rather than drawing axes', () => {
     renderChart([])
-    expect(screen.getByText(/The series starts once this workspace has sent/)).toBeInTheDocument()
+    expect(screen.getByText(/these charts fill in once you start sending/)).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Bounce rate' })).not.toBeInTheDocument()
   })
 })

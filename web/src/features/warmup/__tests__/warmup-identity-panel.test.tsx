@@ -125,29 +125,29 @@ test('an unreported verdict is marked by shape, not by colour alone', () => {
 
 // A fail is a real negative and reads as one — and still decides nothing, so it
 // carries the tabbed rate's marker verbatim (design §7).
-test('a failing verdict is toned as a negative and labelled as gating nothing', () => {
+test('a failing verdict is toned as a negative and labelled as info only', () => {
   renderPanel({ ...identity, dmarc_result: 'fail' })
 
   const dmarc = verdictOf('DMARC')
   expect(dmarc).toHaveTextContent('fail')
   expect(dmarc.querySelector('.text-danger')).not.toBeNull()
-  expect(dmarc).toHaveTextContent(/fail[^·]*· gates nothing/)
+  expect(dmarc).toHaveTextContent(/fail[^·]*· info only/)
 })
 
 // The marker belongs to the failure, not to the panel wallpaper: on a clean
 // mailbox there is no negative to disclaim, and the panel's own note already
 // says nothing here gates anything.
-test('the gates-nothing marker sits on the failure, not on every verdict', () => {
+test('the info-only marker sits on the failure, not on every verdict', () => {
   renderPanel({ ...identity, spf_result: 'fail' })
 
-  expect(verdictOf('SPF')).toHaveTextContent(/· gates nothing/)
-  expect(verdictOf('DKIM')).not.toHaveTextContent(/gates nothing/)
+  expect(verdictOf('SPF')).toHaveTextContent(/· info only/)
+  expect(verdictOf('DKIM')).not.toHaveTextContent(/info only/)
 })
 
 test('the panel states that none of it gates anything', () => {
   renderPanel(identity)
 
-  expect(panelText()).toMatch(/no threshold, lane or promotion decision reads any of it/i)
+  expect(panelText()).toMatch(/nothing is paused, slowed or promoted/i)
 })
 
 // Nothing has been observed yet. Five "unknown" verdicts would report five
