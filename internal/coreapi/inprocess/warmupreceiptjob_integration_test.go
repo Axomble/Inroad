@@ -735,15 +735,21 @@ func TestReEnablingWarmupDoesNotClearContainment(t *testing.T) {
 
 	for _, sealed := range []string{warmup.LaneQuarantine, warmup.LaneBlocked} {
 		t.Run(sealed, func(t *testing.T) {
+			// mailbox_email derived from the mailboxes row, exactly as
+			// ApplyWarmupParticipantTransition derives it: the trail is read back
+			// BY ADDRESS, so a fixture that names only the mailbox id writes a
+			// containment record no lookup can see.
 			if _, err := f.raw.Exec(ctx,
 				`INSERT INTO warmup_state_transitions (
-				    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+				    workspace_id, mailbox_id, mailbox_email, from_state, to_state, from_lane, to_lane,
 				    reason_code, reason, lane_reason_code, lane_reason,
 				    placement_samples, spam_rate, bounce_samples, bounce_rate,
 				    complaint_samples, complaint_rate, invalid_tokens, policy_version)
-				 VALUES ($1,$2,'healthy','healthy','healthy',$3,
-				         'health_unchanged','x','lane_quarantined','x',
-				         0,0,0,0,0,0,0,'test')`,
+				 SELECT m.workspace_id, m.id, lower(btrim(m.email)),
+				        'healthy','healthy','healthy',$3,
+				        'health_unchanged','x','lane_quarantined','x',
+				        0,0,0,0,0,0,0,'test'
+				   FROM mailboxes m WHERE m.id = $2 AND m.workspace_id = $1`,
 				f.ws1, f.a, sealed); err != nil {
 				t.Fatalf("seed transition: %v", err)
 			}
@@ -779,12 +785,14 @@ func TestQuarantineCooldownIsNotRestartedByHealthOnlyTransitions(t *testing.T) {
 		t.Helper()
 		if _, err := f.raw.Exec(ctx,
 			`INSERT INTO warmup_state_transitions (
-			    workspace_id, mailbox_id, from_state, to_state, from_lane, to_lane,
+			    workspace_id, mailbox_id, mailbox_email, from_state, to_state, from_lane, to_lane,
 			    reason_code, reason, lane_reason_code, lane_reason,
 			    placement_samples, spam_rate, bounce_samples, bounce_rate,
 			    complaint_samples, complaint_rate, invalid_tokens, policy_version, created_at)
-			 VALUES ($1,$2,'paused','paused',$3,$4,'x','x','y','y',
-			         0,0,0,0,0,0,0,'test', now() - make_interval(hours => $5))`,
+			 SELECT m.workspace_id, m.id, lower(btrim(m.email)),
+			        'paused','paused',$3,$4,'x','x','y','y',
+			        0,0,0,0,0,0,0,'test', now() - make_interval(hours => $5)
+			   FROM mailboxes m WHERE m.id = $2 AND m.workspace_id = $1`,
 			f.ws1, f.a, fromLane, toLane, ageHours); err != nil {
 			t.Fatalf("seed transition: %v", err)
 		}
