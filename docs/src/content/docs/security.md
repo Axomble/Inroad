@@ -271,7 +271,15 @@ limit / abuse control here is tracked in the Deferred list below.
     mismatched (mailbox, workspace) pair yields zero source rows from the
     `INSERT … SELECT`, so it never reaches the conflict clause at all. The
     `workers` heartbeat registry is global infrastructure state — it holds no
-    tenant rows and is never returned on a tenant-facing API.
+    tenant rows and is never returned on a tenant-facing API, and neither is
+    `worker_provider_signals`, which records how a provider is treating one
+    egress IP. Scored placement (fleet F4) reads both fleet-wide on purpose:
+    `ListPlacementCandidates` answers "what is each worker carrying", which is a
+    question about infrastructure and has no per-tenant answer. It returns only
+    worker ids and counts — never a mailbox, an address or any tenant row — and
+    the single `workspace_id`-filtered aggregate in it measures the CALLING
+    workspace's own footprint, so it is a per-tenant number computed for that
+    tenant rather than a pin that could be forgotten.
 
 ## Warm-up engine
 25. **Warm-up mail is strictly isolated from campaign reply/bounce handling.** The
