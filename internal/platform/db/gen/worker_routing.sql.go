@@ -61,8 +61,9 @@ type GetLiveMailboxWorkerAssignmentParams struct {
 // return for F5, the stored band and a COUNT(DISTINCT band) "is the worker
 // mixed" flag, are gone with the tiers that read them: both existed to make a
 // LIVE incumbent's placement worth re-deciding, and under F4 it never is.
-// Whether a mailbox should MOVE at all is rotation's question, gated
-// separately, not something the send path decides in passing.
+// Whether a mailbox should MOVE at all is rotation's question, answered on its
+// own tick by ListRotationCandidates and RotateMailboxWorkerAssignment below,
+// not something the send path decides in passing.
 func (q *Queries) GetLiveMailboxWorkerAssignment(ctx context.Context, arg GetLiveMailboxWorkerAssignmentParams) (string, error) {
 	row := q.db.QueryRow(ctx, getLiveMailboxWorkerAssignment, arg.MailboxID, arg.WorkspaceID, arg.LiveSince)
 	var worker_id string
@@ -308,6 +309,143 @@ func (q *Queries) ListPlacementCandidates(ctx context.Context, arg ListPlacement
 	return items, nil
 }
 
+const listRotationCandidates = `-- name: ListRotationCandidates :many
+SELECT
+    a.mailbox_id,
+    a.workspace_id,
+    a.worker_id,
+    a.assigned_at,
+    mb.provider,
+    -- The LANE, not a band: warmup.RiskBandForLane is the one source of truth
+    -- for that mapping (see GetMailboxPlacementFacts, which returns it for the
+    -- same reason). The LEFT JOIN is load-bearing in the same way too — a
+    -- mailbox with no warmup_participants row is not a warmup participant at
+    -- all, and an empty lane reads as healthy.
+    coalesce(p.lane, '')::text AS lane,
+    -- Cast explicitly: without it sqlc cannot infer the type of a bare IS NOT
+    -- NULL and generates ` + "`" + `interface{}` + "`" + `, which the caller would then have to
+    -- type-assert at runtime.
+    (w.worker_id IS NOT NULL)::boolean AS incumbent_live,
+    coalesce(sig.ok_events, 0)::bigint AS incumbent_ok_events,
+    coalesce(sig.block_events, 0)::bigint AS incumbent_block_events
+FROM mailbox_worker_assignments a
+JOIN mailboxes mb ON mb.id = a.mailbox_id AND mb.workspace_id = a.workspace_id
+LEFT JOIN warmup_participants p
+       ON p.mailbox_id = a.mailbox_id AND p.workspace_id = a.workspace_id
+LEFT JOIN workers w
+       ON w.worker_id = a.worker_id AND w.last_seen_at >= $1::timestamptz
+LEFT JOIN LATERAL (
+    SELECT
+        coalesce(sum(s.events) FILTER (WHERE s.reason = 'ok'), 0)::bigint AS ok_events,
+        coalesce(sum(s.events) FILTER (WHERE s.reason IN ('blocked', 'unreachable')), 0)::bigint AS block_events
+    FROM worker_provider_signals s
+    WHERE s.worker_id = a.worker_id
+      AND s.provider = mb.provider
+      AND s.window_end >= $2::timestamptz
+) sig ON TRUE
+WHERE mb.status = 'active'
+  AND (
+        w.worker_id IS NULL
+     OR coalesce(sig.block_events, 0) > 0
+     OR a.assigned_at <= $3::timestamptz
+  )
+ORDER BY (w.worker_id IS NOT NULL) ASC,
+         coalesce(sig.block_events, 0) DESC,
+         a.assigned_at ASC,
+         a.mailbox_id ASC
+LIMIT $4::int
+`
+
+type ListRotationCandidatesParams struct {
+	LiveSince     pgtype.Timestamptz `json:"live_since"`
+	SignalsSince  pgtype.Timestamptz `json:"signals_since"`
+	SettledBefore pgtype.Timestamptz `json:"settled_before"`
+	RowLimit      int32              `json:"row_limit"`
+}
+
+type ListRotationCandidatesRow struct {
+	MailboxID            uuid.UUID          `json:"mailbox_id"`
+	WorkspaceID          uuid.UUID          `json:"workspace_id"`
+	WorkerID             string             `json:"worker_id"`
+	AssignedAt           pgtype.Timestamptz `json:"assigned_at"`
+	Provider             string             `json:"provider"`
+	Lane                 string             `json:"lane"`
+	IncumbentLive        bool               `json:"incumbent_live"`
+	IncumbentOkEvents    int64              `json:"incumbent_ok_events"`
+	IncumbentBlockEvents int64              `json:"incumbent_block_events"`
+}
+
+// Every assignment the rotation sweep should LOOK at this tick, with the facts
+// internal/platform/fleetrotate decides on. It decides nothing itself.
+//
+// FLEET-WIDE BY DESIGN, like ListPlacementCandidates above and for the same
+// reason: whether a mailbox can still send from the egress IP it is pinned to is
+// a question about the fleet, and the workers a mailbox could move between are
+// global infrastructure (migration 000017's trust-domain split). The tenant pin
+// is not absent, it lives one step later: every row RETURNS its workspace_id,
+// and the move itself (RotateMailboxWorkerAssignment) is pinned to the
+// (mailbox, workspace) pair this row reported. The composite join to mailboxes
+// is the same (id, workspace_id) pair the FK uses.
+//
+// THE WHERE CLAUSE IS A PREFILTER, NOT THE GATE. It is deliberately a SUPERSET
+// of what the policy will accept, so that policy can live in Go where it is
+// unit-testable:
+//
+//   - the incumbent is not live — its affinity queue has no consumer;
+//   - the incumbent has ANY 'blocked'/'unreachable' event for this mailbox's
+//     provider in the window. Wider than fleetscore.Eligible, which also
+//     requires that nothing succeeded since; restating Eligible here would be a
+//     second definition of health, and two disagreeing definitions are worse
+//     than either alone;
+//   - the assignment has settled past the residency floor, which is the only
+//     condition under which a non-urgent move is considered at all. The caller
+//     derives settled_before from the SAME policy value it then applies, so the
+//     two cannot drift.
+//
+// ORDER BY is a SCAN HEURISTIC and nothing more. It puts the rows most likely to
+// be urgent in front of the LIMIT so a large fleet does not spend a tick on
+// healthy mailboxes while a blocked worker waits; the caller re-derives the real
+// tier in Go and re-sorts (fleetrotate.Prioritise). If this ordering were wrong
+// the only cost would be a tick that moved less, never a wrong move.
+//
+// Paused and errored mailboxes are excluded: they are not sending, so moving one
+// buys nothing and would spend a unit of the tick's move budget and one
+// decision-log row on a mailbox nobody is waiting for.
+func (q *Queries) ListRotationCandidates(ctx context.Context, arg ListRotationCandidatesParams) ([]ListRotationCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listRotationCandidates,
+		arg.LiveSince,
+		arg.SignalsSince,
+		arg.SettledBefore,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRotationCandidatesRow
+	for rows.Next() {
+		var i ListRotationCandidatesRow
+		if err := rows.Scan(
+			&i.MailboxID,
+			&i.WorkspaceID,
+			&i.WorkerID,
+			&i.AssignedAt,
+			&i.Provider,
+			&i.Lane,
+			&i.IncumbentLive,
+			&i.IncumbentOkEvents,
+			&i.IncumbentBlockEvents,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const mailboxWorkerAssignmentExists = `-- name: MailboxWorkerAssignmentExists :one
 SELECT EXISTS (
     SELECT 1 FROM mailbox_worker_assignments
@@ -359,6 +497,58 @@ LIMIT 1
 // shared default queue).
 func (q *Queries) PickLeastLoadedWorker(ctx context.Context, liveSince pgtype.Timestamptz) (string, error) {
 	row := q.db.QueryRow(ctx, pickLeastLoadedWorker, liveSince)
+	var worker_id string
+	err := row.Scan(&worker_id)
+	return worker_id, err
+}
+
+const rotateMailboxWorkerAssignment = `-- name: RotateMailboxWorkerAssignment :one
+UPDATE mailbox_worker_assignments
+SET worker_id = $1::text,
+    band = $2::text,
+    assigned_at = now()
+WHERE mailbox_id = $3::uuid
+  AND workspace_id = $4::uuid
+  AND worker_id = $5::text
+RETURNING worker_id
+`
+
+type RotateMailboxWorkerAssignmentParams struct {
+	ToWorkerID   string    `json:"to_worker_id"`
+	Band         string    `json:"band"`
+	MailboxID    uuid.UUID `json:"mailbox_id"`
+	WorkspaceID  uuid.UUID `json:"workspace_id"`
+	FromWorkerID string    `json:"from_worker_id"`
+}
+
+// Move ONE mailbox from the worker it is on to another, and re-stamp the
+// residency clock the rotation floor is measured against.
+//
+// Pinned to (mailbox_id, workspace_id) AND to the worker the caller decided
+// FROM. That third predicate is the concurrency guard: between the scan and this
+// write, the send path may have re-placed the mailbox itself (a dead incumbent
+// is re-placed on the next resolve — see InsertMailboxWorkerAssignment), and a
+// blind UPDATE would then undo a placement made on fresher facts than the ones
+// this decision used. A mismatch matches zero rows, so the caller skips the
+// mailbox and records nothing, which is the honest outcome: the move it decided
+// did not happen.
+//
+// band is refreshed here and NOT refreshed by InsertMailboxWorkerAssignment, and
+// the difference is deliberate. That statement's band is the band a mailbox was
+// PLACED under and is left stale while the mailbox stays put, because paying a
+// write on every resolve to keep it exact would cost more than the weakest term
+// in the score is worth. A rotation is not a resolve: the row is being rewritten
+// anyway, the decision that produced it was scored under the mailbox's CURRENT
+// band, and storing the band the decision did not use would leave the row
+// disagreeing with the decision log entry beside it.
+func (q *Queries) RotateMailboxWorkerAssignment(ctx context.Context, arg RotateMailboxWorkerAssignmentParams) (string, error) {
+	row := q.db.QueryRow(ctx, rotateMailboxWorkerAssignment,
+		arg.ToWorkerID,
+		arg.Band,
+		arg.MailboxID,
+		arg.WorkspaceID,
+		arg.FromWorkerID,
+	)
 	var worker_id string
 	err := row.Scan(&worker_id)
 	return worker_id, err
