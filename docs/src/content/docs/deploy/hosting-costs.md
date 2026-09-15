@@ -1,5 +1,5 @@
 ---
-title: Costing a multi-IP sending fleet
+title: Hosting Costs
 description: Official, cited pricing for getting distinct sending IPs onto Inroad's execution plane — AWS, GCP, and Azure against plain VPS providers.
 ---
 

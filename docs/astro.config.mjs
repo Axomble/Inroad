@@ -51,7 +51,7 @@ export default defineConfig({
 						{ label: 'Single-Instance Docker Compose', slug: 'deploy/docker-compose' },
 						{ label: 'AWS Production (Terraform)', slug: 'deploy/aws-terraform' },
 						{ label: 'Kubernetes Cluster (Helm)', slug: 'deploy/kubernetes-helm' },
-						{ label: 'Costing a Multi-IP Fleet', slug: 'deploy/multi-ip-costs' },
+						{ label: 'Hosting Costs', slug: 'deploy/hosting-costs' },
 						{ label: 'Environment Variables Reference', slug: 'deploy/environment-variables' },
 					],
 				},

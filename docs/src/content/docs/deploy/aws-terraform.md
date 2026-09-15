@@ -19,8 +19,8 @@ from. Two ways to get it:
 - **One NAT Gateway + route table per IP**, extending this module's own
   pattern — this is the *expensive* way to do it on AWS specifically (flat
   per-gateway hourly billing regardless of instance count). See
-  [Costing a multi-IP sending fleet](/deploy/multi-ip-costs/) for real
-  numbers and cheaper alternatives, including on other clouds.
+  [Hosting Costs](/deploy/hosting-costs/) for real numbers and cheaper
+  alternatives, including on other clouds.
 - **Run `INROAD_WORKER_ROLE=send` workers on separate hosts outside this
   module** instead — a plain VPS from any provider gives you a distinct,
   stable IP for a fraction of the NAT Gateway cost, and is what the fleet's

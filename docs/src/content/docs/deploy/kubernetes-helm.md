@@ -60,6 +60,6 @@ sending fleet, prefer individually-addressed hosts outside the cluster: run
 cluster's Postgres/Redis. See
 [Splitting control and send roles](/deploy/environment-variables/#splitting-control-and-send-roles),
 the mailbox guide's [per-worker egress IP routing](/guides/mailboxes/), and
-[Costing a multi-IP sending fleet](/deploy/multi-ip-costs/) for what that
-actually costs across a few providers.
+[Hosting Costs](/deploy/hosting-costs/) for what that actually costs across a
+few providers.
 :::
