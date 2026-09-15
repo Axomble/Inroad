@@ -39,6 +39,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 	m.SendClaimed("step", metrics.ClaimOutcomeWon)
 	m.SweepCompleted("inbox", 1, time.Second)
 	m.JobRunCompleted("domain auth sweep", "ok", time.Second)
+	m.WorkerAssignmentStale()
 	if err := m.RegisterPool(realPoolStat(t)); err != nil {
 		t.Fatalf("register pool: %v", err)
 	}
@@ -81,6 +82,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 		"inroad_sends_total",
 		"inroad_sweep_rows_total",
 		"inroad_sweep_seconds",
+		"inroad_worker_assignment_stale_total",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("exposed inroad_* series:\n got %v\nwant %v", got, want)

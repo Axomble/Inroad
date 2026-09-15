@@ -49,6 +49,15 @@ func SweepHandler(core coreapi.Client, enq Enqueuer, mtx *metrics.Metrics) func(
 		for _, mb := range due {
 			dest, err := core.AssignMailboxWorker(ctx, mb.ID, mb.WorkspaceID)
 			if err != nil {
+				// A refusal (coreapi.ErrNoEligibleWorker) is a DECISION rather
+				// than a failure, and it used to be recorded in the decision log
+				// from HERE. It is not any more, and that is deliberate: only
+				// the placement path knows WHY it refused — which provider, how
+				// many workers it tried — and it now writes that entry itself,
+				// at the point the decision is made. Recording a second one here
+				// would double every refusal in the log, and the prose this
+				// package could write would be a guess about someone else's
+				// reasoning.
 				failures++
 				continue
 			}

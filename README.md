@@ -12,7 +12,7 @@
 **The self-hostable cold email sequencing and mailbox warm-up platform.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](web/package.json)
 [![Postgres](https://img.shields.io/badge/Postgres-16-336791?logo=postgresql&logoColor=white)](docker-compose.yml)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-docker%20compose-2496ED?logo=docker&logoColor=white)](docs/self-hosting.md)
@@ -105,12 +105,24 @@ Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md). `ma
 Inroad splits into a **control plane** that owns all state and an **execution plane** that owns all
 outbound network I/O. They meet at exactly one interface, `coreapi.Client`.
 
-**The split is logical, not physical — read that literally.** Worker packages reach relational data
-only through `coreapi`, enforced by convention, review and a lint rule. But the worker *process*
-still opens its own `pgxpool`, and `coreapi` is an in-process implementation, not a network call. So
-a compromised worker host is not yet contained by anything except the code it is running. Giving
-`coreapi` an HTTP transport so the split becomes physical is planned, not built — the seam was
-designed for it ("in-process now, HTTP later"). Nothing below claims otherwise.
+**The split is mostly logical, not physical — read that literally.** Worker packages reach
+relational data only through `coreapi`, and that is enforced mechanically: a `depguard` rule in
+`.golangci.yml` fails `golangci-lint run` (and therefore CI) if a non-test file under
+`internal/worker/` imports `internal/platform/db`. That closes one specific mistake, not the
+underlying gap: the worker *process* still opens its own `pgxpool` and calls `coreapi` as an
+in-process function, not over the network. Giving `coreapi` a full HTTP transport so the split
+becomes physical is planned, not built — the seam was designed for it ("in-process now, HTTP
+later"). Nothing below claims otherwise.
+
+**One piece of it IS physical now: the encryption key.** A `role=send` worker — the role meant for
+a fleet host — holds no `INROAD_MASTER_KEY` and refuses to start if it is given one. It asks the
+control plane to open each mailbox credential over an authenticated channel
+(`internal/platform/credbroker`), so a stolen worker disk or environment file decrypts nothing.
+The honest limit: while that worker is *running* it can still ask for any mailbox, because every
+`send` worker consumes the shared `send` queue and may legitimately be handed any mailbox's job —
+per-mailbox scoping needs per-mailbox routing first. What moved is the offline, permanent,
+un-revocable capability, not the live one. The single-process self-host topology is unaffected and
+keeps its local keyring.
 
 ### Zoomed out — the pieces and what moves between them
 
@@ -134,58 +146,85 @@ designed for it ("in-process now, HTTP later"). Nothing below claims otherwise.
    └────────────────────────────────┼──────────────┘     pgxpool — see the note above
                                     │
                        queues, and who consumes them
-                ┌───────────────────┴────────────────────┐
-                │  control  → the 6 periodic reconciles   │  role=control, role=all
-                │  send     → sends, polls, webhooks      │  role=send,    role=all
-                │  w:<id>   → one worker's warmup ticks   │  role=send,    role=all
-                │  default  → transitional drain only     │  role=send,    role=all
-                └────────────────────────────────────────┘
+                ┌───────────────────┴───────────────────────────────┐
+                │  control  → 6 reconciles + the campaign breaker   │  role=control, role=all
+                │  send     → sends, polls, webhooks                │  role=send,    role=all
+                │  w:<id>   → one worker's warmup ticks             │  role=send,    role=all
+                │  default  → transitional drain only               │  role=send,    role=all
+                └───────────────────────────────────────────────────┘
 ```
 
 A queue is not decoration: asynq claims a task **before** consulting the handler table, so a process
 that consumes a queue it cannot serve takes the task and fails it. `control` therefore consumes only
 `control` — that single omission is what stops a control host eating sends.
 
+`control` is a *role* queue, not a "scheduled work" queue. Six of its seven task types are the
+periodic reconciles the scheduler fires; the seventh, `deliverability:evaluate`, is enqueued by the
+**send** role after each finalised send, because re-scoring a campaign's breaker is a cross-campaign
+decision rather than one message's delivery. Routing is one table — `queueForTaskType` in
+`internal/platform/queue`.
+
 ### Zoomed in — one campaign step, end to end
 
 ```
-  [control role]                    [redis]                    [send role]
-        │                              │                            │
-  sweep finds a due enrollment         │                            │
-        │  enqueue ──────────────────▶ │  queue: send               │
-        │                              │ ───────────────────────▶ claim (row lock is the
-        │                              │                            │  idempotency guarantee;
-        │                              │                            │  queue dedup is defence
-        │                              │                            │  in depth)
-        │                              │                            │
-        │            coreapi.ResolveSenderTransport ◀───────────────┤
-        │  control plane unwraps the workspace DEK, refreshes the   │
-        │  OAuth token, returns a ready transport ─────────────────▶│  worker zeroizes it
-        │                              │                            │  after use; it never
-        │                              │                            │  holds a KEK
-        │                              │                            │
-        │                              │                      send ─┼──▶ provider
-        │                              │                            │
-        │            MarkStepDelivered (own committed statement) ◀───┤
-        │            AdvanceStepCursor (separate, idempotent)   ◀───┤
-        │                              │                            │
+  [control role]      [redis]             ┃ [send role] — one process, its own pgxpool, NO keyring
+        │                │                ┃
+  sweep finds a          │                ┃
+  due enrollment         │                ┃
+        │  enqueue ─────▶│                ┃
+        │                │ queue: send    ┃
+        │                │───────────────▶┃ claim  (the sends row lock is the idempotency
+        │                │                ┃        guarantee; queue dedup is defence in depth)
+        │                │                ┃  │
+        │                │                ┃  ▼
+        │                │                ┃ coreapi.GetStepSendJob — an in-process function call
+        │                │                ┃ against this process's own pool — EXCEPT the credential:
+        │                │                ┃ unwrapping the DEK and refreshing the OAuth token is one
+        │                │                ┃ authenticated call back to the control plane, which is
+        │                │                ┃ the only place the key lives (role=all keeps it local).
+        │                │                ┃  │
+        │                │                ┃  ▼
+        │                │                ┃ send ─────▶ provider (SMTP · Gmail API · MS Graph)
+        │                │                ┃  │
+        │                │                ┃  ▼
+        │                │                ┃ coreapi.MarkStepDelivered  (its own committed statement)
+        │                │                ┃  │
+        │                │                ┃  ▼
+        │                │                ┃ coreapi.AdvanceStepCursor  (separate, idempotent, and
+        │                │                ┃                             strictly after the mark)
+        │                │                ┃
         │   a retry after delivery sees 'sent' and recover-forwards, never re-sends
 ```
+
+Only the first hop crosses a process line. `GetStepSendJob` is reached from `AdvanceHandler`, which
+is registered under the per-message handler set — `role=send` and `role=all` only — so every step
+right of the heavy bar runs inside the send process against its own `coreapi` client. (The similar
+`ResolveSenderTransport` is a different path: ad hoc sends with no enrollment row, such as the test
+send and inbox replies.)
 
 Three properties worth knowing because they shape everything else:
 
 - **Determinism.** `platform/cadence` computes a send instant as a seeded hash of stable ids, so a
   retry recomputes the identical time. Placement, scheduling and A/B assignment are computed, not
   coordinated — which is why there is no central assignment service to keep consistent.
-- **Credentials never sit still.** The control plane is the only holder of the wrapping key; the
-  worker receives an already-decrypted transport for one send and zeroizes it. It has no way to
-  unwrap anything it was not handed.
+- **Credentials are envelope-encrypted, and a fleet host no longer holds the wrapping key.** Every
+  stored secret is sealed under a per-workspace DEK behind a `KeyProvider` seam, and the send path
+  holds a decrypted transport only for the one send, zeroizing it after use. A `role=send` worker
+  builds no `crypto.Keyring` at all and refuses to start if it is given `INROAD_MASTER_KEY`; it
+  asks the control plane to open each credential, one mailbox at a time
+  (`internal/platform/credbroker`). A stolen worker disk or environment file therefore decrypts
+  nothing, and revoking a fleet's access is rotating one token rather than re-encrypting every DEK.
+  The limit worth stating just as plainly: while that worker is *running* it can still ask for any
+  mailbox — every `send` worker consumes the shared `send` queue and may legitimately be handed any
+  mailbox's job — and it still holds its own pool, so it reads every workspace's rows even though it
+  can no longer decrypt them. What moved is the offline, permanent capability; per-mailbox scoping
+  needs per-mailbox routing, and losing the pool needs `coreapi` to grow a full HTTP transport.
+  `role=all` (self-host) keeps its local keyring and is unchanged.
 - **Send windows are unrepresentable-if-overlapping** via a GiST exclusion constraint — an illegal
   state made impossible at the schema rather than validated in application code.
 
-Outbound mail leaves through each mailbox's own provider, not the worker's IP. Secrets are
-envelope-encrypted per workspace behind a `KeyProvider` seam. The full write-up is in
-[docs/architecture.md](docs/architecture.md); the non-negotiables — the ones that must never be
+Outbound mail leaves through each mailbox's own provider, not the worker's IP. The full write-up is
+in [docs/architecture.md](docs/architecture.md); the non-negotiables — the ones that must never be
 broken — are in [docs/security.md](docs/security.md).
 
 ---

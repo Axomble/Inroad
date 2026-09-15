@@ -3,7 +3,7 @@ title: Single-Instance Docker Compose Self-Hosting
 description: Zero-configuration single-command self-hosting guide for Inroad using Docker Compose.
 ---
 
-Inroad provides a canonical, single-command Docker Compose setup suitable for self-hosting on any single VPS, EC2 instance, or dedicated server. The manifest is the `docker-compose.yml` at the repository root — the only production compose file.
+Inroad provides a canonical, single-command Docker Compose setup suitable for self-hosting on any single VPS, EC2 instance, or dedicated server. The manifest is the `docker-compose.yml` at the repository root — the production compose file for anyone who has cloned the repo (it **builds** the images locally). If you'd rather not clone at all, `scripts/install.sh` (`curl | sh`) pulls the equivalent published-image manifest, `deploy/docker/docker-compose.prod.yml`, instead — see that script's own `--help` for the environment overrides.
 
 ## Quick Start (Zero-Config)
 

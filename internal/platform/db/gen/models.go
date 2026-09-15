@@ -518,6 +518,17 @@ type Event struct {
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 }
 
+type FleetDecision struct {
+	ID          uuid.UUID          `json:"id"`
+	Kind        string             `json:"kind"`
+	WorkerID    *string            `json:"worker_id"`
+	MailboxID   pgtype.UUID        `json:"mailbox_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	Reason      string             `json:"reason"`
+	TriggeredBy string             `json:"triggered_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type IdempotencyKey struct {
 	WorkspaceID  uuid.UUID          `json:"workspace_id"`
 	Key          string             `json:"key"`
@@ -681,6 +692,7 @@ type MailboxWorkerAssignment struct {
 	WorkspaceID uuid.UUID          `json:"workspace_id"`
 	WorkerID    string             `json:"worker_id"`
 	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+	Band        string             `json:"band"`
 }
 
 type Note struct {
@@ -1233,6 +1245,7 @@ type WarmupStateTransition struct {
 	LaneReasonCode   *string            `json:"lane_reason_code"`
 	LaneReason       *string            `json:"lane_reason"`
 	BouncePopulation *string            `json:"bounce_population"`
+	MailboxEmail     string             `json:"mailbox_email"`
 }
 
 type WarmupThread struct {
@@ -1306,6 +1319,18 @@ type Worker struct {
 	WorkerID   string             `json:"worker_id"`
 	EgressIp   string             `json:"egress_ip"`
 	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+	IDFamily   string             `json:"id_family"`
+}
+
+type WorkerProviderSignal struct {
+	ID          int64              `json:"id"`
+	WorkerID    string             `json:"worker_id"`
+	Provider    string             `json:"provider"`
+	Operation   string             `json:"operation"`
+	Reason      string             `json:"reason"`
+	Events      int64              `json:"events"`
+	WindowStart pgtype.Timestamptz `json:"window_start"`
+	WindowEnd   pgtype.Timestamptz `json:"window_end"`
 }
 
 type Workspace struct {

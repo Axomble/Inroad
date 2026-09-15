@@ -87,10 +87,14 @@ const tenantColumn = "workspace_id"
 //	(c) DEPLOYMENT MAINTENANCE — a retention purge or crash-recovery sweep that operates
 //	    on age/liveness alone, returns only a count, and is invoked by the deployment
 //	    rather than by a tenant request. There is no tenant to scope to.
-//	(d) CROSS-TENANT FAN-OUT — a sweeper that deliberately reads across all workspaces
-//	    and RETURNS workspace_id so that each downstream unit of work is per-workspace.
-//	    These are the dangerous-looking ones: the pin exists, it just lives one step
-//	    later. Each entry names where.
+//	(d) CROSS-TENANT FAN-OUT — either a sweeper that deliberately reads across all
+//	    workspaces and RETURNS workspace_id so each downstream unit of work is
+//	    per-workspace (the pin exists, it just lives one step later), OR a query
+//	    over GLOBAL INFRASTRUCTURE (the worker fleet registry, migration 000017)
+//	    that answers a fleet-wide question — least-loaded, idle, pure-band — and
+//	    returns only a worker_id, with no workspace_id in the row at all: there is
+//	    no per-workspace answer to fan out to, because the worker fleet is not
+//	    tenant data. Each entry names which shape it is.
 var tenancyExceptions = map[string]string{
 	// (a) unguessable-secret lookup — the workspace is the result, not the filter.
 	"apikey.sql:GetApiKeyByPrefix":                  "verify path: resolves the workspace FROM the globally-unique key prefix; there is no authenticated workspace yet to filter by.",
@@ -133,11 +137,12 @@ var tenancyExceptions = map[string]string{
 	"warmup.sql:PurgeWarmupObservations":                "retention sweep over append-only warmup evidence, by age alone, returning a count (design §4.6).",
 	"deadletter.sql:PurgeTaskDeadLetters":               "retention sweep over captured retry-exhausted tasks, by age alone, returning a count. Same shape and same reasoning as PurgeWarmupObservations: the table is append-only in practice and had no sweep at all.",
 	"webhook.sql:PurgeWebhookDeliveries":                "retention sweep over the outbound-webhook delivery log, by age alone, returning a count. Same shape and reasoning as PurgeTaskDeadLetters: one row per (event, endpoint), append-only from the app, and no sweep of its own.",
+	"fleet.sql:PurgeFleetDecisions":                     "retention sweep over the append-only fleet decision log, by age alone, returning a count. The table carries workspace_id because a decision naming a mailbox is tenant data, but the 90-day purge is deployment maintenance across every tenant — scoping it would leave any workspace the sweep did not name growing forever.",
 	"agentchat.sql:FailStuckAgentRuns":                  "crash recovery at API startup: a run still 'running' at boot belongs to a process that is gone. Deployment-scoped repair, not a tenant read.",
 	"agentchat.sql:ResetStuckAgentMessages":             "companion to FailStuckAgentRuns; marks messages abandoned by a crashed process terminal.",
 
 	// (d) cross-tenant fan-out — returns workspace_id so downstream work is per-workspace.
-	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet; assignment counts are fleet-wide by design, and it returns only a worker_id.",
+	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet — infrastructure, not tenant data (migration 000017); assignment counts are fleet-wide by design.",
 	"enrollment.sql:ListDueEnrollments":               "sweeper fan-out: selects due enrollments across all workspaces and RETURNS workspace_id so each enrollment is then advanced workspace-scoped. The pin lives one step later, in the per-enrollment job.",
 	"mailbox.sql:ListActiveMailboxes":                 "poller fan-out: returns (id, workspace_id) for every active mailbox so each poll then runs workspace-scoped via GetMailbox.",
 	"warmup.sql:ListDueWarmupMailboxes":               "warmup sweep fan-out: returns (mailbox, workspace) pairs, and per-mailbox gating (NextWarmupDue, GetWarmupSendJob) is workspace-pinned.",
@@ -457,7 +462,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 46
+	const known = 47
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

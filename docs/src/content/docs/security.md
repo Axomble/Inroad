@@ -271,7 +271,15 @@ limit / abuse control here is tracked in the Deferred list below.
     mismatched (mailbox, workspace) pair yields zero source rows from the
     `INSERT … SELECT`, so it never reaches the conflict clause at all. The
     `workers` heartbeat registry is global infrastructure state — it holds no
-    tenant rows and is never returned on a tenant-facing API.
+    tenant rows and is never returned on a tenant-facing API, and neither is
+    `worker_provider_signals`, which records how a provider is treating one
+    egress IP. Scored placement (fleet F4) reads both fleet-wide on purpose:
+    `ListPlacementCandidates` answers "what is each worker carrying", which is a
+    question about infrastructure and has no per-tenant answer. It returns only
+    worker ids and counts — never a mailbox, an address or any tenant row — and
+    the single `workspace_id`-filtered aggregate in it measures the CALLING
+    workspace's own footprint, so it is a per-tenant number computed for that
+    tenant rather than a pin that could be forgotten.
 
 ## Warm-up engine
 25. **Warm-up mail is strictly isolated from campaign reply/bounce handling.** The
@@ -1353,6 +1361,86 @@ write history that never happened.
     the junk pass records warmup placement only, and letting a
     spam-filter-chosen folder trigger a contact suppression is a widening that
     needs its own design pass (`scanJunkForWarmup`).
+
+## Fleet credential brokering (the master key and the execution plane)
+
+66. **A `role=send` worker holds no master key, and refuses to start if it is
+    given one.** `INROAD_MASTER_KEY` is the KEK: it unwraps every workspace's
+    DEK (invariants 14–17) and therefore decrypts every stored SMTP password and
+    every OAuth refresh token in the installation. Until this slice, `cmd/worker`
+    called `keys.BuildKeyring` for EVERY role, and every compose file handed a
+    worker that key — so a fleet host, the role introduced precisely because it
+    may run on hardware we do not control, could decrypt the whole installation,
+    offline and permanently. A README claim that the control plane was the only
+    holder of the wrapping key was false and was corrected before this.
+
+    `cmd/worker.resolveCredentialMode` now decides from the role and the
+    configuration alone, and refuses the unsafe combinations at STARTUP:
+    `role=send` with `INROAD_MASTER_KEY` set, `role=send` with no broker (it
+    could not send, so it must not start), and ANY role holding the key while a
+    broker is configured — because a process configured to broker has no
+    business also being able to decrypt everything itself. The single-process
+    self-host topology (`RoleAll`) is untouched: it sets `INROAD_MASTER_KEY` and
+    nothing else, exactly as before, and none of the broker settings exist for
+    it. `role=control` needs neither, because `registerScheduled` wires no
+    handler that opens a credential.
+
+67. **A broker request names a subject; it never carries a ciphertext.** The
+    wire shape (`internal/platform/credbroker`) is `{workspace_id, mailbox_id}`
+    — ids only, asserted both on the server's view and on the raw request bytes.
+    If a worker could send the blob to open, the broker would be a
+    general-purpose decryption oracle and moving the key would have bought
+    nothing. The control plane re-reads the row itself, `workspace_id`-pinned
+    (invariant 4), with the same belt-and-braces `ErrCrossTenant` check every
+    other read has; the field ciphertext stays AAD-bound to its workspace
+    (invariant 15), so a cross-tenant pair fails closed twice over.
+
+    The opened value is produced by the SAME code path as the in-process one
+    (`inprocess.NewCredentialOpener`), so a brokered credential and a locally
+    opened one cannot drift. That is also what makes invariant 9 literally true
+    for a fleet: token refresh, re-seal and persist happen only where the key is,
+    and the worker receives a short-lived access token and never a refresh token.
+
+68. **The broker is a separate listener, off by default, https by default, and
+    fails closed.** It is never mounted on the public API router — the rule
+    `httpx.MetricsMux` follows, for a sharper reason: these responses ARE
+    credentials. `cmd/inroad` opens it only when `INROAD_FLEET_BROKER_ADDR` is
+    set, so an installation that has not opted in serves no such route. The
+    shared bearer token is at least 32 bytes (refused below that, at startup,
+    like `INROAD_JWT_SECRET`) and compared in constant time; redirects are never
+    followed (following one would replay the token and accept a credential from
+    wherever it pointed); error bodies are fixed strings, so the endpoint is not
+    a probe oracle for which ids exist; neither side logs a request or a response
+    body. An `http://` broker URL is refused unless
+    `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` is explicitly set — the identical rule
+    and the identical reasoning `INROAD_S3_ENDPOINT` gets in invariant 6, because
+    this channel carries both the bearer token and the plaintext credential. The
+    broker URL is OPERATOR-supplied, not user-supplied, so it does not go through
+    (and does not need) `mail.vetAddr`, for the same reason the S3 endpoint does
+    not. A worker that cannot obtain a credential refuses to send
+    (`credbroker.ErrNotConfigured`) — it never falls back to anything weaker.
+
+69. **What brokering does NOT contain, stated so the claim is not overstated.**
+    It removes the OFFLINE capability: a stolen worker disk, image or environment
+    file decrypts nothing, access is revocable by rotating one token instead of
+    re-encrypting every DEK, and every open is a request the control plane sees.
+    It does NOT shrink what a LIVE compromised `send` worker can reach. Two
+    reasons, both structural and both still true:
+    - Every `send` worker consumes the SHARED `send` queue and may legitimately
+      be handed a job for any mailbox (`sequence:advance`, `inbox:poll` and
+      `webhook:deliver` are never routed by assignment — only `warmup:tick` is),
+      so the broker must answer for any mailbox the token names. Scoping needs
+      per-mailbox routing first.
+    - The token is shared across the fleet, so the broker cannot tell which host
+      is asking; revoking one revokes all. Per-worker identity is only useful
+      once the point above is fixed.
+    - `cmd/worker` still opens its own `pgxpool`, so a live worker still reads
+      every workspace's rows — including `secret_ciphertext`, which it can no
+      longer decrypt. Removing the pool needs `coreapi` to grow a full HTTP
+      transport ("in-process now, HTTP later"), which this slice does not do.
+
+    Treat a `send` host as able to reach any mailbox in the installation while it
+    is running, and restrict the broker listener to the fleet network.
 
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**

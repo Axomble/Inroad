@@ -381,26 +381,12 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 		return coreapi.StepSendJob{}, err
 	}
 
-	// Transport dispatch on the mailbox provider: API providers
-	// (gmail, m365) return a refreshed short-lived access token and no password
-	// (the provider's oauth2 config selects the refresh endpoint); smtp unseals
-	// the stored password unchanged.
-	var accessToken, password []byte
-	if sender.provider == "gmail" || sender.provider == "m365" {
-		at, err := c.oauthAccessToken(ctx, sender.provider, sender.mailboxID, ws, sender.secretCiphertext, c.oauthConfigFor(sender.provider))
-		if err != nil {
-			return coreapi.StepSendJob{}, err
-		}
-		accessToken = []byte(at)
-	} else {
-		sealer, serr := c.keyring.SealerFor(ctx, ws)
-		if serr != nil {
-			return coreapi.StepSendJob{}, serr
-		}
-		password, err = sealer.Open(sender.secretCiphertext)
-		if err != nil {
-			return coreapi.StepSendJob{}, err
-		}
+	// Transport dispatch on the mailbox provider, behind the credential opener:
+	// API providers (gmail, m365) return a refreshed short-lived access token and
+	// no password; smtp returns the stored password unchanged.
+	accessToken, password, err := c.openMailboxSecret(ctx, ws, sender.mailboxID, sender.provider, sender.secretCiphertext)
+	if err != nil {
+		return coreapi.StepSendJob{}, err
 	}
 	suppressed, err := c.q.IsSuppressed(ctx, gen.IsSuppressedParams{WorkspaceID: ws, Lower: b.ToEmail})
 	if err != nil {

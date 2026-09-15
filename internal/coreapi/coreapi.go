@@ -35,6 +35,31 @@ var ErrNoMatch = errors.New("coreapi: no matching send")
 // may retry.
 var ErrInvalidComplaint = errors.New("coreapi: complaint rejected as invalid")
 
+// ErrNoEligibleWorker is returned by AssignMailboxWorker when NO live worker can
+// serve the mailbox at all: every one of them has recently been blocked or
+// unreachable for that mailbox's PROVIDER and none has completed an operation
+// since. Health is the only hard gate in scored placement (fleet F4), so this is
+// the only refusal it can produce, and it means the fleet genuinely cannot send
+// this mailbox's mail rather than that no worker matched a label.
+//
+// It replaces ErrNoBandCapacity, which refused whenever strict risk-band
+// segregation could not find a worker of the right band. That refusal was
+// reachable through ordinary placement on a healthy fleet — most easily when the
+// fleet was FULLEST — and is exactly the failure mode scoring exists to remove:
+// a score always has an answer while any healthy worker exists, so being over a
+// capacity target degrades a worker rather than disqualifying it.
+//
+// A refusal is visible (the caller's retry/backoff surfaces it, and a warmup
+// send's terminal retry reaches task_dead_letters), explained (placement writes
+// a fleet_decisions row naming the provider and the number of workers tried) and
+// recoverable (add fleet capacity, or wait for the block to clear).
+//
+// It is NEVER returned when the live fleet has at most one worker: with no
+// second worker there is no placement choice to make, so the inprocess
+// AssignMailboxWorker takes the self-host path and places unconditionally rather
+// than stopping a single-node deployment from sending.
+var ErrNoEligibleWorker = errors.New("coreapi: no live worker is eligible for this mailbox's provider")
+
 // CRMCaptureClient is an optional execution-plane capability. Keeping it
 // separate from Client lets inbox workers feature-detect CRM capture without
 // forcing every worker fake and future remote client to implement it.
@@ -352,21 +377,59 @@ type Client interface {
 	// --- Worker routing (per-IP egress; spec §15) ---
 
 	// UpsertWorkerHeartbeat refreshes this worker's row in the GLOBAL `workers`
-	// registry (worker_id, egress_ip, last_seen_at=now()) on each heartbeat tick,
-	// so AssignMailboxWorker can tell which workers are live. `workers` is global
-	// infrastructure state, NOT tenant data — no workspace pin (security
-	// invariant §17.9).
-	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP string) error
+	// registry (worker_id, egress_ip, id_family, last_seen_at=now()) on each
+	// heartbeat tick, so AssignMailboxWorker can tell which workers are live.
+	// idFamily is which identity source produced workerID ("ipv4" | "ipv6" |
+	// "hostname" | "override" — see internal/platform/workerid.Family),
+	// recorded so an operator inspecting `workers` can tell a NAT'd or
+	// hostname-derived worker from an IP-derived one without
+	// cross-referencing logs. `workers` is global infrastructure state, NOT
+	// tenant data — no workspace pin (security invariant §17.9).
+	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP, idFamily string) error
 	// AssignMailboxWorker resolves the destination queue for a mailbox's outbound
 	// traffic, pinning it to ONE worker's egress IP (the deliverability win). It
-	// is idempotent: an existing assignment is returned unchanged. A first
-	// assignment picks the least-loaded worker with a live heartbeat and persists
-	// it. When NO worker has a live heartbeat (single-node dev), it returns ""
-	// (the shared default queue) WITHOUT persisting, so everything still runs on
-	// one process and a real worker can claim the mailbox once it comes online.
-	// workspace-pinned — mailbox_worker_assignments is tenant data. The returned
-	// queueName is "w:<worker_id>" or "" for the default queue; it is derived
-	// server-side from the assignment, never from client input (invariant §17.8).
+	// is idempotent: an existing assignment to a LIVE worker is returned
+	// unchanged, unconditionally. When NO worker has a live heartbeat (single-node
+	// dev), it returns "" (the shared default queue) WITHOUT persisting, so
+	// everything still runs on one process and a real worker can claim the
+	// mailbox once it comes online. workspace-pinned — mailbox_worker_assignments
+	// is tenant data. The returned queueName is "w:<worker_id>" or "" for the
+	// default queue; it is derived server-side from the assignment, never from
+	// client input (invariant §17.8).
+	//
+	// SCORED PLACEMENT (fleet F4). A mailbox with no live assignment is placed by
+	// an additive score over every live worker, not by a chain of filters —
+	// filters compose multiplicatively, so each new constraint is another gate
+	// and conjoined gates eventually admit nothing, refusing exactly when the
+	// fleet is fullest. The terms and their weights live in
+	// internal/platform/fleetscore; the rules they implement are:
+	//
+	//  1. INCUMBENCY OUTRANKS EVERYTHING. A live incumbent is kept without
+	//     scoring: IP trust accrues per (mailbox, IP) pair at the PROVIDER and
+	//     moving a mailbox discards it. Whether a mailbox should move AT ALL —
+	//     off an overloaded or a degraded worker — is rotation's separate
+	//     decision, not this method's.
+	//  2. HEALTH IS THE ONLY HARD GATE, judged per PROVIDER from
+	//     worker_provider_signals: a worker Google has blocked is still a fine
+	//     home for an SMTP mailbox. Capacity is a target, so exceeding it
+	//     degrades a worker's score steeply and never disqualifies it — adding a
+	//     worker must always be able to relieve a saturated fleet.
+	//  3. The risk band (warmup.RiskBandForLane of the mailbox's CURRENT lane —
+	//     one source of truth, no parallel health concept) is one WEAK term among
+	//     several, not a partition. It is derived from recipient-side evidence,
+	//     and the recipient never observes a worker's egress IP, so it cannot
+	//     predict how that IP's provider will treat it. A mailbox whose lane
+	//     changes therefore stays where it is.
+	//
+	// Every placement and every refusal appends one fleet_decisions row naming
+	// what was decided and why; a forced or uncontested placement says so plainly
+	// rather than printing a score comparison that was never made.
+	//
+	// It returns ErrNoEligibleWorker only when NO live worker is eligible at all
+	// — UNLESS the live fleet has at most one worker, in which case there is no
+	// placement choice to make and neither the score nor the health gate applies
+	// (self-host, RoleAll's one worker, must never be stopped from sending by
+	// this).
 	AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (queueName string, err error)
 
 	// --- Warmup send path (warmup:tick; spec §4/§6) ---
@@ -762,8 +825,10 @@ type SendRef struct {
 
 // SenderTransport is one resolved mailbox's send identity plus its decrypted
 // credential, for a control-plane-triggered ad hoc send with no existing
-// sends/enrollment row (currently: the testsend:send task only). Mirrors the
-// transport fields on StepSendJob/WarmupSendJob rather than embedding
+// sends/enrollment row (currently: the testsend:send task, and
+// internal/worker/inbox's manual reply/compose sends — inbox:pending_reply_send,
+// inbox:pending_compose_send, and the legacy drain-only inbox:reply_send).
+// Mirrors the transport fields on StepSendJob/WarmupSendJob rather than embedding
 // platform/mail's OutboundJob, so this package stays free of that dependency
 // like every other job type here; the worker maps it onto mail.OutboundJob.
 //

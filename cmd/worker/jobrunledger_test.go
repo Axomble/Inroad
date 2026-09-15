@@ -77,6 +77,10 @@ func (c *recordingCore) PurgeDeadWorkers(context.Context) (int64, error)        
 func (c *recordingCore) PurgeDeadLetters(context.Context) (int64, error)        { return 0, nil }
 func (c *recordingCore) PurgeWebhookDeliveries(context.Context) (int64, error)  { return 0, nil }
 func (c *recordingCore) PurgeScheduledJobRuns(context.Context) (int64, error)   { return 0, nil }
+func (c *recordingCore) PurgeWorkerProviderSignals(context.Context) (int64, error) {
+	return 0, nil
+}
+func (c *recordingCore) PurgeFleetDecisions(context.Context) (int64, error) { return 0, nil }
 
 // --- recipientesp.Core (resolved by type assertion in Register) ---
 

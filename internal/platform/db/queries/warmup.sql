@@ -19,6 +19,14 @@
 -- warmup_state_transitions survives the delete, so the last recorded lane is
 -- restored when it was a sealed one. Only quarantine and blocked are carried
 -- forward: a mailbox that legitimately left them has a later transition saying so.
+--
+-- Keyed on the ADDRESS, not on mailbox_id (see the note above ListWarmupTransitions
+-- for the one statement of that rule). Deleting the MAILBOX and adding the same
+-- address again mints a new mailboxes.id, so an id-keyed lookup read none of the
+-- address's history and returned a quarantined address to probation — the same
+-- release the disable path is guarded against, reached by a different pair of
+-- ordinary UI actions. The two paths now share one lookup: a disabled mailbox
+-- keeps its address, so nothing about the case that already worked changes.
 INSERT INTO warmup_participants (
     mailbox_id, workspace_id,
     start_volume, max_volume, ramp_increment, reply_rate, lane
@@ -27,12 +35,12 @@ SELECT $1, $2, $3, $4, $5, $6,
        COALESCE((
            SELECT CASE WHEN t.to_lane IN ('quarantine','blocked') THEN t.to_lane END
            FROM warmup_state_transitions t
-           WHERE t.workspace_id = $2 AND t.mailbox_id = $1
+           WHERE t.workspace_id = $2 AND t.mailbox_email = lower(btrim(m.email))
              AND t.to_lane IS NOT NULL
            ORDER BY t.created_at DESC
            LIMIT 1
        ), 'probation')
-FROM mailboxes WHERE id = $1 AND workspace_id = $2
+FROM mailboxes m WHERE m.id = $1 AND m.workspace_id = $2
 ON CONFLICT (mailbox_id) DO UPDATE SET
     enabled        = true,
     start_volume   = EXCLUDED.start_volume,
@@ -62,25 +70,64 @@ SELECT EXISTS (
     SELECT 1 FROM mailboxes WHERE id = $1 AND workspace_id = $2
 ) AS in_workspace;
 
+-- ----------------------------------------------------------------------------
+-- Transition history is ADDRESSED, not id-keyed.
+--
+-- Every read of warmup_state_transitions below resolves the trail by
+-- (workspace_id, canonical address) — `t.mailbox_email = lower(btrim(m.email))`
+-- against the live mailboxes row — and never by t.mailbox_id. One rule with no
+-- exceptions, because the exception is what a laundering path is made of.
+--
+-- WHY. mailboxes.id defaults to gen_random_uuid(), so deleting a mailbox and
+-- adding the same address again mints a new id. An id-keyed lookup then reads
+-- none of the address's history, and a quarantined mailbox came back to
+-- 'probation' — a lane that may send and may take new campaign leads — off two
+-- ordinary UI actions. The address is the stable identity: mailboxes_workspace_
+-- email_key is UNIQUE (workspace_id, lower(email)), so within a workspace an
+-- address IS a mailbox, whatever row currently holds it.
+--
+-- CANONICAL FORM. lower() matches that unique index, so two spellings differing
+-- only in case cannot be two mailboxes and must not be two histories. btrim() is
+-- deliberately stricter than the index (which does not trim): the mailbox service
+-- canonicalizes and refuses whitespace, but a row predating that guard could
+-- carry it. The column itself is CHECKed into this form
+-- (20260914152247_warmup_containment_follows_address), so the rule is structural
+-- rather than four queries remembering to agree.
+--
+-- COST. Served by idx_warmup_state_transitions_address (workspace_id,
+-- mailbox_email, created_at DESC), which the same migration added in place of the
+-- id-keyed index these reads no longer use.
+-- ----------------------------------------------------------------------------
+
 -- name: ListWarmupTransitions :many
--- One mailbox's automated state-change history, newest first, workspace-pinned.
+-- One ADDRESS's automated state-change history, newest first, workspace-pinned.
 -- Serves GET /warmup/mailboxes/{mailbox_id}/transitions: every row already names
 -- the metric, sample size and threshold that produced it, which is what lets an
 -- operator answer "why is this mailbox here and what clears it" without reading
--- logs.
+-- logs. That question is exactly the one a re-added mailbox raises — it can be
+-- born quarantined — so this read spans the address's earlier mailbox rows too,
+-- or the lane on screen would have no visible cause.
+--
+-- The address is resolved from the caller's mailbox id in a scalar subquery
+-- rather than a join: a join would duplicate every row if two mailboxes in one
+-- workspace ever canonicalized alike, and an unknown mailbox yields NULL, which
+-- matches nothing (the handler has already 404'd on ownership).
 --
 -- id breaks a created_at tie so paging is deterministic; the ordering otherwise
--- matches idx_warmup_state_transitions_mailbox (workspace_id, mailbox_id,
--- created_at DESC) exactly, so this is an index scan with a LIMIT rather than a
--- sort of the whole history.
-SELECT id, created_at, from_state, to_state, reason_code, reason,
-       from_lane, to_lane, lane_reason_code, lane_reason,
-       placement_samples, spam_rate,
-       bounce_population, bounce_samples, bounce_rate,
-       complaint_samples, complaint_rate, invalid_tokens, policy_version
-FROM warmup_state_transitions
-WHERE workspace_id = $1 AND mailbox_id = $2
-ORDER BY created_at DESC, id DESC
+-- matches idx_warmup_state_transitions_address exactly, so this is an index scan
+-- with a LIMIT rather than a sort of the whole history.
+SELECT t.id, t.created_at, t.from_state, t.to_state, t.reason_code, t.reason,
+       t.from_lane, t.to_lane, t.lane_reason_code, t.lane_reason,
+       t.placement_samples, t.spam_rate,
+       t.bounce_population, t.bounce_samples, t.bounce_rate,
+       t.complaint_samples, t.complaint_rate, t.invalid_tokens, t.policy_version
+FROM warmup_state_transitions t
+WHERE t.workspace_id = $1
+  AND t.mailbox_email = (
+      SELECT lower(btrim(m.email)) FROM mailboxes m
+      WHERE m.id = sqlc.arg(mailbox_id) AND m.workspace_id = $1
+  )
+ORDER BY t.created_at DESC, t.id DESC
 LIMIT sqlc.arg(row_limit);
 
 -- name: CountEnabledParticipants :one
@@ -1787,10 +1834,19 @@ LEFT JOIN sending_domains d
        ON d.workspace_id = p.workspace_id
       AND d.domain = lower(split_part(m.email, '@', 2))
 LEFT JOIN LATERAL (
+    --
+    -- ADDRESSED, like every other read of this table (see the note above
+    -- ListWarmupTransitions), and here that is not merely consistency: the
+    -- carry-forward can seat a RE-ADDED mailbox straight into quarantine, and an
+    -- id-keyed anchor would find nothing for the new id. A NULL anchor never
+    -- elapses (warmup.NextLane holds an unanchored quarantine), so the mailbox
+    -- would be contained permanently with no path out — containment the operator
+    -- cannot end is as broken as containment they can launder. Keyed on the
+    -- address, the clock it inherits is the one it actually entered under.
     SELECT max(t.created_at)::timestamptz AS quarantined_since
     FROM warmup_state_transitions t
     WHERE t.workspace_id = p.workspace_id
-      AND t.mailbox_id = p.mailbox_id
+      AND t.mailbox_email = lower(btrim(m.email))
       AND t.to_lane = 'quarantine'
       -- Only rows that MOVED it into quarantine start the clock. Health-only
       -- transitions written while already quarantined carry
@@ -1816,10 +1872,16 @@ LEFT JOIN LATERAL (
     -- from_state = to_state = 'unknown', and counting those would restart the
     -- grace every time anything else happened — the same defect the quarantine
     -- cooldown had.
+    --
+    -- ADDRESSED, like every other read of this table (see the note above
+    -- ListWarmupTransitions). A re-added address inheriting an old lapse reads as
+    -- having lapsed long ago, which spends its grace immediately — the safe
+    -- direction, and the honest one: nothing about a new row id constitutes fresh
+    -- evidence.
     SELECT max(t.created_at)::timestamptz AS evidence_lapsed_since
     FROM warmup_state_transitions t
     WHERE t.workspace_id = p.workspace_id
-      AND t.mailbox_id = p.mailbox_id
+      AND t.mailbox_email = lower(btrim(m.email))
       AND t.to_state = 'unknown'
       AND t.from_state <> 'unknown'
 ) lapse ON true
@@ -1897,20 +1959,33 @@ WITH changed AS (
     RETURNING p.mailbox_id, p.workspace_id
 ), recorded AS (
     INSERT INTO warmup_state_transitions (
-        workspace_id, mailbox_id, from_state, to_state, reason_code, reason,
+        workspace_id, mailbox_id, mailbox_email, from_state, to_state, reason_code, reason,
         from_lane, to_lane, lane_reason_code, lane_reason,
         placement_samples, spam_rate,
         bounce_population, bounce_samples, bounce_rate,
         complaint_samples, complaint_rate, invalid_tokens, policy_version
     )
-    SELECT workspace_id, mailbox_id, @from_state, @to_state, @reason_code, @reason,
+    -- mailbox_email is the IDENTITY this row will be read back under, so it is
+    -- derived HERE from the mailboxes row rather than passed in: a caller-supplied
+    -- address would let the writer file one mailbox's containment under another's
+    -- name, and a row that no longer exists cannot be asked its address later.
+    --
+    -- The join is also what replaces the mailboxes FK this table no longer carries
+    -- (20260914152247): the (mailbox, workspace) pair is re-proved in SQL at the
+    -- one place that writes it, matching the self-enforcing INSERT ... SELECT every
+    -- other write in this file uses. It cannot drop the row — warmup_participants.
+    -- mailbox_id references mailboxes ON DELETE CASCADE, so a participant always
+    -- has one — so the applied flag keeps meaning exactly what it meant.
+    SELECT c.workspace_id, c.mailbox_id, lower(btrim(m.email)),
+           @from_state, @to_state, @reason_code, @reason,
            @from_lane, @to_lane,
            sqlc.arg(lane_reason_code)::text, sqlc.arg(lane_reason)::text,
            @placement_samples, sqlc.arg(spam_rate)::real,
            sqlc.arg(bounce_population)::text, @bounce_samples, sqlc.arg(bounce_rate)::real,
            @complaint_samples, sqlc.arg(complaint_rate)::real,
            @invalid_tokens, @policy_version
-    FROM changed
+    FROM changed c
+    JOIN mailboxes m ON m.id = c.mailbox_id AND m.workspace_id = c.workspace_id
     RETURNING id
 )
 SELECT EXISTS(SELECT 1 FROM recorded) AS applied;

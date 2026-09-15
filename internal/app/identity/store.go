@@ -290,25 +290,62 @@ func (s *Store) ResetPasswordTx(ctx context.Context, rawToken, kind, newHash str
 		return nil, err
 	}
 
-	if err := qtx.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: uid, PasswordHash: &newHash}); err != nil {
+	revoked, err := setPasswordAndRevoke(ctx, qtx, uid, newHash)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return revoked, nil
+}
+
+// SetPasswordTx overwrites userID's password_hash and revokes every one of
+// their sessions, atomically — the operator-initiated counterpart to
+// ResetPasswordTx, used by `inroadctl set-password` to recover an account
+// with no working token flow (e.g. the mailer, or auth itself, is broken).
+// There is no token to consume here: the operator's access to Postgres IS the
+// authorization, which is the whole point of a tool that "must work when
+// sign-in does not."
+func (s *Store) SetPasswordTx(ctx context.Context, userID uuid.UUID, newHash string) ([]uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+
+	qtx := s.q.WithTx(tx)
+	revoked, err := setPasswordAndRevoke(ctx, qtx, userID, newHash)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return revoked, nil
+}
+
+// setPasswordAndRevoke overwrites userID's password_hash and revokes every one
+// of their sessions, inside the caller's transaction. The shared tail of
+// ResetPasswordTx (token-authenticated) and SetPasswordTx (operator-
+// authenticated) — both must leave no window between the hash changing and
+// old sessions dying.
+func setPasswordAndRevoke(ctx context.Context, qtx *gen.Queries, userID uuid.UUID, newHash string) ([]uuid.UUID, error) {
+	if err := qtx.UpdatePasswordHash(ctx, gen.UpdatePasswordHashParams{ID: userID, PasswordHash: &newHash}); err != nil {
 		return nil, err
 	}
 	// The ids RevokeAllForUser flips are returned so the caller can bust each
 	// revoked session's cached auth-state in-process — a just-reset access token
 	// is then rejected on its next request rather than after the cache TTL.
-	revoked, err := qtx.RevokeAllForUser(ctx, uid)
+	revoked, err := qtx.RevokeAllForUser(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 	// Belt-and-braces with RevokeAllForUser: advance every session's
 	// token_version so any access token already minted for this user is
 	// rejected by the verifier even in the (impossible-by-construction) case a
-	// session escaped revocation. A password reset is a full security event.
-	if err := qtx.BumpTokenVersionForUser(ctx, uid); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
+	// session escaped revocation. A password change is a full security event.
+	if err := qtx.BumpTokenVersionForUser(ctx, userID); err != nil {
 		return nil, err
 	}
 	return revoked, nil
@@ -381,6 +418,52 @@ func (s *Store) RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) er
 // GetWorkspace returns the workspace with the given id.
 func (s *Store) GetWorkspace(ctx context.Context, id uuid.UUID) (gen.Workspace, error) {
 	return s.q.GetWorkspace(ctx, id)
+}
+
+// ListWorkspaces returns every workspace, newest first — `inroadctl workspaces`.
+func (s *Store) ListWorkspaces(ctx context.Context) ([]gen.Workspace, error) {
+	return s.q.ListWorkspaces(ctx)
+}
+
+// ListUsers returns every user, newest first — `inroadctl users`.
+func (s *Store) ListUsers(ctx context.Context) ([]gen.User, error) {
+	return s.q.ListUsers(ctx)
+}
+
+// UpsertMemberRole adds userID to wsID at role, or updates their existing
+// membership's role if they are already a member. See the query's own
+// comment (member.sql) for why this is an upsert rather than a plain update:
+// `inroadctl grant-role` must restore a lost owner whether they lost the role
+// or the membership entirely.
+func (s *Store) UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole) (gen.WorkspaceMember, error) {
+	return s.q.UpsertMemberRole(ctx, gen.UpsertMemberRoleParams{WorkspaceID: wsID, UserID: userID, Role: role})
+}
+
+// CreateMemberTx creates a new user and adds them to an EXISTING workspace at
+// role, atomically — either both rows land or neither does, so a crash
+// mid-create can never leave a user account with no membership. Unlike
+// RegisterTx/FederatedSignupTx this never creates a workspace or a session:
+// it is `inroadctl create-user --workspace`'s primitive, bootstrapping a
+// user into an instance that already has one.
+func (s *Store) CreateMemberTx(ctx context.Context, wsID uuid.UUID, email, passwordHash string, role gen.MemberRole) (uuid.UUID, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
+
+	qtx := s.q.WithTx(tx)
+	user, err := qtx.CreateUser(ctx, gen.CreateUserParams{Email: email, PasswordHash: &passwordHash})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if _, err := qtx.CreateMember(ctx, gen.CreateMemberParams{WorkspaceID: wsID, UserID: user.ID, Role: role}); err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, err
+	}
+	return user.ID, nil
 }
 
 // IdentityLink is an external (federated) identity to attach to a local user:

@@ -1,0 +1,136 @@
+# Inroad — published-image self-hosting manifest.
+#
+# Unlike the repository root's docker-compose.yml (which BUILDS from a local
+# checkout), every service here PULLS a pre-built image from GHCR — this is
+# the manifest scripts/install.sh fetches, so `curl | sh` needs neither a git
+# clone nor a Go/Node toolchain. See .github/workflows/build-push.yml for
+# what is published and under what tags.
+#
+# Secrets come from a real .env NEXT TO THIS FILE (docker compose auto-loads
+# it) — install.sh writes one with generated INROAD_JWT_SECRET /
+# INROAD_MASTER_KEY before this manifest is ever read, so there is
+# deliberately no init-secrets/generate-secrets.sh dance here the way the
+# build-from-source manifest has: those exist to keep a bare `docker compose
+# up` zero-config when nobody wrote a .env first, which install.sh already
+# guarantees by the time it calls this file.
+#
+# Usage (what install.sh runs):
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-inroad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-inroad}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-inroad}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: applies pending migrations, then exits 0. api/worker wait for
+  # that exit before they start, so neither ever queries a schema mid-migration.
+  migrate:
+    image: ${INROAD_IMAGE_REPO:-ghcr.io/axomble/inroad}-api:${INROAD_VERSION:-latest}
+    entrypoint: ["migrate", "up"]
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:?set INROAD_JWT_SECRET in .env}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:?set INROAD_MASTER_KEY in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ${INROAD_IMAGE_REPO:-ghcr.io/axomble/inroad}-api:${INROAD_VERSION:-latest}
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:?set INROAD_JWT_SECRET in .env}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:?set INROAD_MASTER_KEY in .env}
+      INROAD_WEB_DIR: /srv/web
+      INROAD_PUBLIC_URL: ${INROAD_PUBLIC_URL:-http://localhost:8080}
+      INROAD_ENV: ${INROAD_ENV:-production}
+      INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+      # OAuth providers — blank keeps the provider disabled; the redirect URLs
+      # default in-app to ${INROAD_PUBLIC_URL}-derived paths.
+      INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+      INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+      INROAD_GOOGLE_REDIRECT_URL: ${INROAD_GOOGLE_REDIRECT_URL:-}
+      INROAD_GOOGLE_SIGNIN_CLIENT_ID: ${INROAD_GOOGLE_SIGNIN_CLIENT_ID:-}
+      INROAD_GOOGLE_SIGNIN_CLIENT_SECRET: ${INROAD_GOOGLE_SIGNIN_CLIENT_SECRET:-}
+      INROAD_GOOGLE_SIGNIN_REDIRECT_URL: ${INROAD_GOOGLE_SIGNIN_REDIRECT_URL:-}
+      INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+      INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+      INROAD_MS_REDIRECT_URL: ${INROAD_MS_REDIRECT_URL:-}
+      INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # This worker runs the DEFAULT single-process role (INROAD_WORKER_ROLE unset),
+  # so it opens mailbox credentials itself and legitimately needs the master key
+  # — same process boundary as the API, same host, one trust domain.
+  #
+  # A FLEET worker is the opposite case and this block is not the template for
+  # it. A `role=send` host must NOT be given INROAD_MASTER_KEY (it refuses to
+  # start if it is): that key unwraps every workspace's DEK, so a host you run
+  # because it is cheap would hold every credential in the installation. Set
+  # INROAD_WORKER_ROLE=send, drop INROAD_MASTER_KEY, and point the host at the
+  # control plane's credential broker with INROAD_FLEET_BROKER_URL +
+  # INROAD_FLEET_BROKER_TOKEN (the API side serves it on
+  # INROAD_FLEET_BROKER_ADDR). See docs/deploy/environment-variables.md.
+  worker:
+    image: ${INROAD_IMAGE_REPO:-ghcr.io/axomble/inroad}-worker:${INROAD_VERSION:-latest}
+    environment:
+      INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
+      INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:?set INROAD_JWT_SECRET in .env}
+      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:?set INROAD_MASTER_KEY in .env}
+      INROAD_ENV: ${INROAD_ENV:-production}
+      INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
+      INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
+      INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
+      INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
+      INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
+      INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
