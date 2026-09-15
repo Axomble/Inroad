@@ -58,6 +58,8 @@ sending fleet, prefer individually-addressed hosts outside the cluster: run
 `INROAD_WORKER_ROLE=send` on a plain VPS per desired sending identity, with
 `INROAD_WORKER_EGRESS_IP` set to that host's own address, pointed at this
 cluster's Postgres/Redis. See
-[Splitting control and send roles](/deploy/environment-variables/#splitting-control-and-send-roles)
-and the mailbox guide's [per-worker egress IP routing](/guides/mailboxes/).
+[Splitting control and send roles](/deploy/environment-variables/#splitting-control-and-send-roles),
+the mailbox guide's [per-worker egress IP routing](/guides/mailboxes/), and
+[Costing a multi-IP sending fleet](/deploy/multi-ip-costs/) for what that
+actually costs across a few providers.
 :::
