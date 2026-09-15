@@ -217,12 +217,62 @@ fail silently rather than loudly:
   tasks sit in Redis until a `send` host is upgraded — but **sending stops
   meanwhile, with no error anywhere**.
 
-And one limit holds regardless of whether the queues route correctly: it is
-an operational lever, not a security boundary. A `send`-role process is
-*logically* restricted to per-message handlers (it simply never registers the
+And one limit holds regardless of whether the queues route correctly: the role
+split is an operational lever, not a containment boundary. A `send`-role process
+is *logically* restricted to per-message handlers (it simply never registers the
 cross-tenant handlers), but it still holds the same database connection as an
 `all` process, so it isn't *physically* prevented from reaching the rest of the
-schema.
+schema. What a `send` host no longer holds is the **encryption key** — see the
+next section.
+
+### Credential brokering (`send` role)
+
+A `role=send` worker **must not** be given `INROAD_MASTER_KEY` and will refuse to
+start if it is. That key is the KEK: it unwraps every workspace's DEK, and
+therefore decrypts every stored SMTP password and every OAuth refresh token in
+the installation. Handing it to a host you are running because it is *cheap*
+gives that host the whole installation's credentials, offline and permanently.
+
+Instead a `send` worker asks the control plane to open each credential, one
+mailbox at a time, over an authenticated HTTP channel.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_FLEET_BROKER_ADDR` | **API side.** Address `cmd/inroad` serves the credential broker on, e.g. `10.0.0.5:8090`. A **separate listener** from `INROAD_HTTP_ADDR` — bind it to an address only the fleet's network can reach. Unset = the broker is not served at all | unset |
+| `INROAD_FLEET_BROKER_URL` | **Worker side.** Base URL a `send` worker asks for credentials at, e.g. `https://control.internal:8090` | unset |
+| `INROAD_FLEET_BROKER_TOKEN` | Shared bearer credential both sides present and check, **at least 32 bytes**. Generate with `openssl rand -base64 32`. Required on either side once the other variable is set | unset |
+| `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` | Permits an `http://` broker URL. **Default false** — the channel carries the token and the decrypted credential | `false` |
+
+Rules the binaries enforce at startup, rather than at the first send:
+
+- `role=send` **with** `INROAD_MASTER_KEY` → refuses to start.
+- `role=send` **without** a broker URL → refuses to start (it could not send).
+- **Any** role with both the key and a broker URL → refuses to start. A process
+  configured to broker has no business also being able to decrypt everything.
+- `role=control` needs neither: it registers no handler that opens a credential.
+  An existing control host that still sets `INROAD_MASTER_KEY` keeps working.
+- **Unset `INROAD_WORKER_ROLE` (the single-process self-host default) is
+  completely unaffected.** Set `INROAD_MASTER_KEY` and nothing else, exactly as
+  before. None of the four variables above exist for you.
+
+#### What this does and does not contain
+
+Worth stating precisely, because the obvious stronger claim is false.
+
+**It removes the offline capability.** A stolen worker disk, container image or
+environment file now decrypts nothing, ever. Access becomes revocable — rotate
+`INROAD_FLEET_BROKER_TOKEN` instead of re-encrypting every DEK in the
+installation — and every open is a request the control plane sees and can log.
+Refresh tokens never leave the control plane at all: a worker receives only a
+short-lived access token for one API call.
+
+**It does not yet shrink what a LIVE compromised worker can reach.** Every
+`send` worker consumes the shared `send` queue and may legitimately be handed a
+job for any mailbox, so the broker has to answer for any mailbox the token names.
+Scoping a worker to only the mailboxes actually routed to it needs per-worker
+identity *and* per-mailbox routing; neither exists yet. Treat a `send` host as
+able to reach any mailbox in the installation while it is running, and firewall
+the broker listener accordingly.
 
 ## Database connection budget
 
