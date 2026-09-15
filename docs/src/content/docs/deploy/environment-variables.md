@@ -266,15 +266,22 @@ installation — and every open is a request the control plane sees and can log.
 Refresh tokens never leave the control plane at all: a worker receives only a
 short-lived access token for one API call.
 
-**It does not yet shrink what a LIVE compromised worker can reach.** Every
-`send` worker consumes the shared `send` queue and may legitimately be handed a
-job for any mailbox, so the broker has to answer for any mailbox the token names.
-Scoping a worker to only the mailboxes actually routed to it needs per-worker
-identity *and* per-mailbox routing — both now exist (the fleet's worker
-identity and scored placement), the broker just doesn't use them yet to narrow
-a token's reach. Treat a `send` host as able to reach any mailbox in the
-installation while it is running, and firewall the broker listener
-accordingly.
+**It narrows what a WELL-BEHAVED worker can reach, but not what a MALICIOUS
+one can.** A worker's request now names its own worker id, and the control
+plane checks that claim against the mailbox's live fleet assignment before
+opening anything — a worker asking for a mailbox it was never routed to gets
+refused (403), even with a valid token. That closes the accidental case: a
+bug, a stale queue, a misconfigured host reaching for the wrong mailbox. It
+does not close the deliberate one, because `INROAD_FLEET_BROKER_TOKEN` is
+still one credential shared by the whole fleet — a worker id is a claim the
+request makes about itself, not something the token cryptographically proves.
+An actor who has extracted the shared token can still name any worker id it
+likes and be believed. Treat a `send` host as able to reach any mailbox in
+the installation if it (or the token) is actually compromised, and firewall
+the broker listener accordingly; the assignment check is defense against
+bugs, not against a hostile holder of the token. Closing that needs a
+credential that is itself per-worker, which is what the join flow in the plan
+linked below will hand out.
 
 **And it doesn't cover the other database connection either.** The line above
 — "it still holds the same database connection as an `all` process" — is the

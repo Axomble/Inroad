@@ -2,10 +2,14 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/oauth2"
 
 	"github.com/inroad/inroad/internal/coreapi"
@@ -61,9 +65,16 @@ func NewCredentialOpener(q *gen.Queries, keyring *crypto.Keyring, googleOAuth ma
 // they are EMPTY the row is re-read here, workspace-pinned — which is the path
 // the HTTP broker takes, because a worker must never be able to name the
 // ciphertext that gets opened.
+//
+// ref.WorkerID, when the caller supplied one, is checked against the
+// mailbox's live fleet assignment before anything is opened — see
+// checkWorkerAssignment for exactly what that does and does not refuse.
 func (o localOpener) OpenMailbox(ctx context.Context, ref credbroker.MailboxRef) (credbroker.MailboxSecret, error) {
 	if o.keyring == nil {
 		return credbroker.MailboxSecret{}, credbroker.ErrNotConfigured
+	}
+	if err := o.checkWorkerAssignment(ctx, ref); err != nil {
+		return credbroker.MailboxSecret{}, err
 	}
 	provider, sealed := ref.Provider, ref.Sealed
 	if provider == "" || sealed == "" {
@@ -98,6 +109,56 @@ func (o localOpener) OpenMailbox(ctx context.Context, ref credbroker.MailboxRef)
 		return credbroker.MailboxSecret{}, err
 	}
 	return credbroker.MailboxSecret{Provider: provider, SMTPPassword: password}, nil
+}
+
+// checkWorkerAssignment enforces ref.WorkerID's claim against the mailbox's
+// live fleet assignment (fleet F4, internal/coreapi/inprocess/workerrouting.go),
+// when there is a claim to check at all.
+//
+// A no-op when ref.WorkerID is empty (every in-process caller, and any remote
+// caller not yet given a worker id) — this method only ever narrows an
+// answer the caller would otherwise have gotten, never widens one.
+//
+// Deliberately permissive when NO live assignment exists for the mailbox: a
+// fleet with at most one live worker never persists an assignment row at all
+// (see coreapi.Client.AssignMailboxWorker's own doc — "there is no placement
+// choice to make"), so refusing here would break that already-supported,
+// legitimate single-worker-plus-broker topology. What this refuses is the
+// case that actually matters: a live assignment exists, and it names a
+// DIFFERENT worker than the one presenting itself.
+//
+// What this does NOT do, stated precisely because the stronger claim is
+// false: WorkerID is self-asserted, not cryptographically bound to the
+// bearer token that got the caller in the door (that token is still shared
+// across the whole fleet — see credbroker.NewHandler's doc). This closes the
+// ACCIDENTAL case — a well-behaved worker asking for a mailbox it was never
+// assigned, due to a bug or a stale local queue — not a deliberate one: an
+// actor who has extracted the shared token can still forge any worker id in
+// its claim. Making the claim unforgeable needs a credential that is ITSELF
+// per-worker (docs/competitive-analysis/05-coreapi-http-transport-plan.md's
+// Stage 4 join flow), at which point this same check starts meaning what it
+// sounds like it means today.
+func (o localOpener) checkWorkerAssignment(ctx context.Context, ref credbroker.MailboxRef) error {
+	if ref.WorkerID == "" || o.q == nil {
+		return nil
+	}
+	liveSince := pgtype.Timestamptz{Time: time.Now().Add(-workerLiveWindow), Valid: true}
+	assigned, err := o.q.GetLiveMailboxWorkerAssignment(ctx, gen.GetLiveMailboxWorkerAssignmentParams{
+		MailboxID: ref.MailboxID, WorkspaceID: ref.WorkspaceID, LiveSince: liveSince,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("credbroker: check worker assignment: %w", err)
+	case assigned != ref.WorkerID:
+		slog.WarnContext(ctx, "credential broker: claimed worker id does not match live assignment",
+			"claimed_worker", ref.WorkerID, "assigned_worker", assigned,
+			"mailbox_id", ref.MailboxID, "workspace_id", ref.WorkspaceID)
+		return credbroker.ErrNotAssigned
+	default:
+		return nil
+	}
 }
 
 // OpenWebhookEndpointSecret unseals an endpoint's HMAC signing secret,

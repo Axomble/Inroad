@@ -158,12 +158,19 @@ func buildCredentialWiring(cfg *config.Config, role worker.Role, q *gen.Queries,
 			"note", "this worker holds INROAD_MASTER_KEY and opens credentials itself")
 		return credentialWiring{mode: mode, keyring: kr}, nil
 	case credentialsBrokered:
-		opener, err := credbroker.NewHTTPOpener(cfg.FleetBrokerURL, cfg.FleetBrokerToken, cfg.FleetBrokerAllowPlaintext)
+		opener, err := credbroker.NewHTTPOpener(cfg.FleetBrokerURL, cfg.FleetBrokerToken, cfg.WorkerID, cfg.FleetBrokerAllowPlaintext)
 		if err != nil {
 			return credentialWiring{}, err
 		}
-		logger.Info("credential source", "mode", mode.String(), "broker", cfg.FleetBrokerURL,
-			"note", "this worker holds no master key; every credential is opened by the control plane")
+		note := "this worker holds no master key; every credential is opened by the control plane"
+		if cfg.WorkerID == "" {
+			// Matches the heartbeat's own tolerance for an unset worker id (no
+			// per-IP affinity queue either, in that case) — this worker still
+			// brokers correctly, it just gets the broker's WIDER answer: any
+			// mailbox a valid token names, not only the ones assigned to it.
+			note += "; worker id is empty, so the broker cannot narrow answers to this worker's assigned mailboxes"
+		}
+		logger.Info("credential source", "mode", mode.String(), "broker", cfg.FleetBrokerURL, "note", note)
 		return credentialWiring{mode: mode, broker: opener}, nil
 	default:
 		logger.Warn("credential source", "mode", mode.String(),

@@ -72,16 +72,21 @@ const (
 // removes is the OFFLINE capability: a stolen disk, image or environment file
 // no longer decrypts anything, ever.
 type HTTPOpener struct {
-	baseURL string
-	token   string
-	hc      *http.Client
+	baseURL  string
+	token    string
+	workerID string
+	hc       *http.Client
 }
 
 var _ Opener = (*HTTPOpener)(nil)
 
 // NewHTTPOpener builds the remote opener. baseURL is the control plane's
 // credential-broker listener (scheme + host, no path); token is the shared
-// bearer credential both sides hold.
+// bearer credential both sides hold; workerID is this process's own fleet
+// identity (empty is legal — the same "no per-IP affinity" degradation the
+// rest of the fleet already tolerates for an unset worker id — and simply
+// means the control plane's per-assignment check does not run for this
+// caller's requests; see MailboxRef.WorkerID).
 //
 // https is REQUIRED unless allowPlaintext is explicitly set. This channel
 // carries the bearer token AND decrypted SMTP passwords and OAuth access
@@ -95,7 +100,7 @@ var _ Opener = (*HTTPOpener)(nil)
 // The broker URL is OPERATOR-supplied, never user-supplied, so it does not go
 // through (and does not need) the mail.vetAddr SSRF guard — the same reasoning
 // invariant 6 applies to the S3 endpoint.
-func NewHTTPOpener(baseURL, token string, allowPlaintext bool) (*HTTPOpener, error) {
+func NewHTTPOpener(baseURL, token, workerID string, allowPlaintext bool) (*HTTPOpener, error) {
 	if len(token) < MinTokenLen {
 		return nil, ErrWeakToken
 	}
@@ -119,8 +124,9 @@ func NewHTTPOpener(baseURL, token string, allowPlaintext bool) (*HTTPOpener, err
 		return nil, fmt.Errorf("credbroker: broker url %q has no host", baseURL)
 	}
 	return &HTTPOpener{
-		baseURL: strings.TrimSuffix(u.String(), "/"),
-		token:   token,
+		baseURL:  strings.TrimSuffix(u.String(), "/"),
+		token:    token,
+		workerID: workerID,
 		hc: &http.Client{
 			Timeout: requestTimeout,
 			// A broker does not redirect. Following one would replay the bearer
@@ -143,6 +149,7 @@ func (h *HTTPOpener) OpenMailbox(ctx context.Context, ref MailboxRef) (MailboxSe
 	err := h.post(ctx, PathMailbox, mailboxRequest{
 		WorkspaceID: ref.WorkspaceID.String(),
 		MailboxID:   ref.MailboxID.String(),
+		WorkerID:    h.workerID,
 	}, &out)
 	if err != nil {
 		return MailboxSecret{}, err

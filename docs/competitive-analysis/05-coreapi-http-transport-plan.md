@@ -90,17 +90,43 @@ not 35.
 
 ## Staging
 
-### Stage 0 (S) — tighten credbroker's blast radius, independent of the rest
+### Stage 0 (S) — tighten credbroker's blast radius, independent of the rest — **done**
 
-`credbroker`'s own doc comments flag this honestly: *"Scoping a worker to
-the mailboxes actually routed to it needs per-worker identity AND
+`credbroker`'s own doc comments used to flag this honestly: *"Scoping a
+worker to the mailboxes actually routed to it needs per-worker identity AND
 per-mailbox routing; neither exists yet"* (`client.go:73`). Both now exist
 — F3 gave every worker a stable id (`internal/platform/workerid`), F4 gives
-per-mailbox placement (`internal/coreapi/inprocess/workerrouting.go`). Scope
-the shared bearer token to a worker id, and have the handler check the
-requested mailbox is actually assigned to the caller before opening its
-credential. Ships independently of everything below; closes a real,
-already-documented gap.
+per-mailbox placement (`internal/coreapi/inprocess/workerrouting.go`).
+Shipped: a request now carries the caller's claimed worker id
+(`MailboxRef.WorkerID`, wire field `worker_id`, `omitempty` so an unset one
+changes nothing on the wire), and `localOpener.checkWorkerAssignment`
+(`internal/coreapi/inprocess/credentials.go`) refuses to open a mailbox
+whose live fleet assignment names a different worker — mapped to HTTP 403,
+which the client already folds into `ErrUnauthorized` so a caller learns it
+was refused, never why.
+
+**What this is not**, stated as precisely as the rest of this plan tries to
+be: the bearer token (`INROAD_FLEET_BROKER_TOKEN`) is still one credential
+shared by the whole fleet, so a worker id in a request is a claim, not
+something the token cryptographically proves. This closes the accidental
+case — a bug, a stale queue, a misrouted host asking for the wrong mailbox —
+not a deliberate one; an actor who has extracted the shared token can still
+claim any worker id and be believed. Making the claim unforgeable is exactly
+what Stage 4's per-worker join credentials are for; this stage's wire field
+and check are the seam that stage plugs into, not a substitute for it.
+
+Tests: `internal/platform/credbroker/credbroker_test.go`
+(`TestAConfiguredWorkerIDCrossesTheWire` and the unchanged
+`TestTheRequestBodyCarriesIdsOnly`, which pins that an *empty* claim still
+adds nothing to the wire) and `internal/coreapi/inprocess/
+credentials_integration_test.go` (`TestABrokeredWorkerCannotOpenAMailboxAssignedToAnotherWorker`,
+`TestABrokeredWorkerWithNoLiveAssignmentStillOpens` — the latter pins the
+single-worker exemption so this stage cannot regress the smallest
+legitimate brokered topology). The integration tests type-check under
+`-tags integration` but were not run against a live Postgres in the session
+that wrote them (no Docker daemon available there) — run
+`make test-integration` to actually exercise them before relying on this
+stage.
 
 ### Stage 1 (M) — split `coreapi.SendClient` out of `coreapi.Client`
 

@@ -20,9 +20,14 @@ const (
 // supply the ciphertext would be choosing what gets decrypted, which would make
 // the broker a general decryption oracle and defeat its purpose; the control
 // plane re-reads the row itself, workspace-pinned.
+//
+// WorkerID is the caller's claimed fleet identity, not itself a credential —
+// the bearer token is what authenticates the request. It only narrows what an
+// otherwise-valid token can open; see MailboxRef.WorkerID and localOpener.
 type mailboxRequest struct {
 	WorkspaceID string `json:"workspace_id"`
 	MailboxID   string `json:"mailbox_id"`
+	WorkerID    string `json:"worker_id,omitempty"`
 }
 
 // mailboxResponse is one opened transport credential. Exactly one secret field

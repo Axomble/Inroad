@@ -43,8 +43,14 @@ type brokerFixture struct {
 	q       *gen.Queries
 	ws      uuid.UUID
 	mailbox uuid.UUID
-	// remote is the worker's side of the broker: an HTTP client, no key.
+	// remote is the worker's side of the broker: an HTTP client, no key, no
+	// claimed worker id — every pre-existing test in this file exercises the
+	// unscoped path, unchanged.
 	remote *credbroker.HTTPOpener
+	// srvURL lets a test build ADDITIONAL openers against the same running
+	// broker, claiming a specific worker id — see the assignment-scoping
+	// tests below.
+	srvURL string
 }
 
 // setupBroker builds both planes against one database: a control-plane opener
@@ -101,11 +107,11 @@ func setupBroker(t *testing.T) brokerFixture {
 	t.Cleanup(srv.Close)
 
 	// http, because httptest speaks http; opted into explicitly.
-	remote, err := credbroker.NewHTTPOpener(srv.URL, itBrokerToken, true)
+	remote, err := credbroker.NewHTTPOpener(srv.URL, itBrokerToken, "", true)
 	if err != nil {
 		t.Fatalf("NewHTTPOpener: %v", err)
 	}
-	return brokerFixture{ctx: ctx, q: q, ws: ws.ID, mailbox: mb.ID, remote: remote}
+	return brokerFixture{ctx: ctx, q: q, ws: ws.ID, mailbox: mb.ID, remote: remote, srvURL: srv.URL}
 }
 
 // keylessCore builds the coreapi client a fleet worker gets: NIL keyring, plus
@@ -179,6 +185,71 @@ func TestTheBrokerWillNotOpenACrossTenantMailbox(t *testing.T) {
 	}
 	if len(got.SMTPPassword) != 0 || len(got.AccessToken) != 0 {
 		t.Errorf("a refused open still returned secret material: %+v", got)
+	}
+}
+
+// The load-bearing test for the credbroker assignment-scoping added in
+// docs/competitive-analysis/05-coreapi-http-transport-plan.md's Stage 0: a
+// bearer token alone no longer means "any mailbox in the fleet." A worker
+// that claims an id NOT live-assigned to this mailbox is refused, even
+// though its token is perfectly valid — and the actually-assigned worker is
+// unaffected, because this narrows an answer rather than replacing auth.
+func TestABrokeredWorkerCannotOpenAMailboxAssignedToAnotherWorker(t *testing.T) {
+	f := setupBroker(t)
+	if err := f.q.UpsertWorker(f.ctx, gen.UpsertWorkerParams{WorkerID: "worker-a", EgressIp: "203.0.113.1", IDFamily: "ipv4"}); err != nil {
+		t.Fatalf("upsert worker-a: %v", err)
+	}
+	if err := f.q.UpsertWorker(f.ctx, gen.UpsertWorkerParams{WorkerID: "worker-b", EgressIp: "203.0.113.2", IDFamily: "ipv4"}); err != nil {
+		t.Fatalf("upsert worker-b: %v", err)
+	}
+	if _, err := f.q.InsertMailboxWorkerAssignment(f.ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: f.mailbox, WorkspaceID: f.ws, WorkerID: "worker-a", Band: warmup.RiskBandHealthy, LiveSince: liveSinceNow(),
+	}); err != nil {
+		t.Fatalf("assign to worker-a: %v", err)
+	}
+
+	impersonator, err := credbroker.NewHTTPOpener(f.srvURL, itBrokerToken, "worker-b", true)
+	if err != nil {
+		t.Fatalf("NewHTTPOpener: %v", err)
+	}
+	got, err := impersonator.OpenMailbox(f.ctx, credbroker.MailboxRef{WorkspaceID: f.ws, MailboxID: f.mailbox})
+	if !errors.Is(err, credbroker.ErrUnauthorized) {
+		t.Fatalf("err = %v, want credbroker.ErrUnauthorized (the handler maps the assignment mismatch to 403, same as a bad token, so a caller cannot tell the two apart)", err)
+	}
+	if len(got.SMTPPassword) != 0 || len(got.AccessToken) != 0 {
+		t.Errorf("a refused open still returned secret material: %+v", got)
+	}
+
+	// The ACTUALLY assigned worker still opens it fine — confirms this is a
+	// narrowing of who can open THIS mailbox, not a general lockout.
+	incumbent, err := credbroker.NewHTTPOpener(f.srvURL, itBrokerToken, "worker-a", true)
+	if err != nil {
+		t.Fatalf("NewHTTPOpener: %v", err)
+	}
+	if _, err := incumbent.OpenMailbox(f.ctx, credbroker.MailboxRef{WorkspaceID: f.ws, MailboxID: f.mailbox}); err != nil {
+		t.Fatalf("the assigned worker was refused its own mailbox: %v", err)
+	}
+}
+
+// The other half, and the one that keeps this change from breaking the
+// smallest legitimate brokered topology: a mailbox with NO live assignment
+// at all — the state every single-worker-plus-broker fleet is in, since
+// AssignMailboxWorker persists nothing when there is no placement CHOICE to
+// make — must still open for whoever asks.
+func TestABrokeredWorkerWithNoLiveAssignmentStillOpens(t *testing.T) {
+	f := setupBroker(t)
+	// No UpsertWorker, no InsertMailboxWorkerAssignment: this mailbox has
+	// never been placed at all, exactly the single-worker self-host state.
+	solo, err := credbroker.NewHTTPOpener(f.srvURL, itBrokerToken, "the-only-worker", true)
+	if err != nil {
+		t.Fatalf("NewHTTPOpener: %v", err)
+	}
+	got, err := solo.OpenMailbox(f.ctx, credbroker.MailboxRef{WorkspaceID: f.ws, MailboxID: f.mailbox})
+	if err != nil {
+		t.Fatalf("OpenMailbox: %v", err)
+	}
+	if string(got.SMTPPassword) != "the-smtp-password" {
+		t.Fatalf("SMTPPassword = %q, want the-smtp-password", got.SMTPPassword)
 	}
 }
 

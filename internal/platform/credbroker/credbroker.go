@@ -45,6 +45,15 @@ import (
 // something weaker.
 var ErrNotConfigured = errors.New("credbroker: no credential source configured")
 
+// ErrNotAssigned is returned by the LOCAL opener when a request names a
+// worker id that contradicts the mailbox's live fleet assignment — an
+// otherwise-valid token asking for a mailbox that fleet placement has given
+// to a different worker. The control plane's handler maps this to 403,
+// which the remote client already folds into ErrUnauthorized: the caller
+// learns it was refused, not why, so a compromised token cannot be used to
+// probe which mailboxes exist or where they are assigned.
+var ErrNotAssigned = errors.New("credbroker: mailbox is not assigned to the requesting worker")
+
 // MailboxRef names the mailbox whose stored credential is to be opened.
 type MailboxRef struct {
 	WorkspaceID uuid.UUID
@@ -61,6 +70,19 @@ type MailboxRef struct {
 	// control plane re-reads the row itself, workspace-pinned.
 	Provider string
 	Sealed   string
+
+	// WorkerID is the caller's CLAIMED fleet identity — set by the remote
+	// opener from its own configured worker id, left empty by every in-process
+	// caller (there is no second worker to distinguish from). It is not trust
+	// on its own: the bearer token is still what gets a caller in the door at
+	// all. What it enables is narrower — the local opener MAY additionally
+	// check this claimed id against the mailbox's live fleet assignment before
+	// opening, so a valid token no longer means "any mailbox in the fleet,"
+	// only "the mailbox this worker is actually assigned." Left empty (the
+	// in-process default, and any remote caller that has not been given a
+	// worker id), that additional check does not run — see localOpener for
+	// exactly what it does and does not refuse.
+	WorkerID string
 }
 
 // MailboxSecret is one mailbox's opened transport credential. Exactly one of

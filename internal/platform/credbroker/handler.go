@@ -12,7 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// maxRequestBytes caps a broker request body. Both shapes are two UUIDs.
+// maxRequestBytes caps a broker request body. Both shapes are two UUIDs plus,
+// on the mailbox path, an optional worker id string — comfortably inside 4KiB.
 const maxRequestBytes = 4 << 10
 
 // NewHandler returns the CONTROL plane's credential-broker handler: the server
@@ -27,12 +28,23 @@ const maxRequestBytes = 4 << 10
 // this route at all.
 //
 // Authentication is a single shared bearer token, compared in constant time.
-// That is honestly weaker than per-worker identity: every fleet host holds the
-// same credential, so revoking one revokes all, and the broker cannot tell
-// which host is asking. Per-worker identity is only useful once a worker can be
-// scoped to a subset of mailboxes, and today it cannot be (see HTTPOpener's
-// doc), so the shared token is the right size for the boundary that actually
-// exists rather than machinery for one that does not.
+// That is honestly weaker than per-worker identity for getting in the door:
+// every fleet host holds the same credential, so revoking one revokes all,
+// and the token alone does not tell the broker which host is asking.
+//
+// What a valid token can DO once inside is narrower than it used to be. A
+// request may claim a worker id (MailboxRef.WorkerID), and the opener this
+// handler wraps MAY check that claim against the mailbox's live fleet
+// assignment (internal/coreapi/inprocess.localOpener does, when the caller
+// is the fleet — see its doc for exactly what "may" means: it does not
+// refuse a claim that names no live assignment at all, only one that
+// contradicts one). A caller that omits the claim, or whose claim can't be
+// checked, still gets the old, wider answer — this narrows the boundary, it
+// does not replace authentication with it. And the claim itself rides on the
+// SAME shared token as everything else: it is unforgeable only in the sense
+// that a well-behaved worker has no reason to lie about its own id, not in
+// the sense that a holder of the token cannot. Closing that needs a
+// credential that is itself per-worker, not a field in the request.
 func NewHandler(o Opener, token string, logger *slog.Logger) (http.Handler, error) {
 	if o == nil {
 		return nil, errors.New("credbroker: handler needs an opener")
@@ -89,8 +101,10 @@ func (h *handler) openMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Provider and Sealed are left zero on purpose: the opener re-reads the row
-	// itself, workspace-pinned. See MailboxRef.
-	sec, err := h.opener.OpenMailbox(r.Context(), MailboxRef{WorkspaceID: ws, MailboxID: mailbox})
+	// itself, workspace-pinned. See MailboxRef. WorkerID is passed through
+	// as-is — it is a claim the opener may check, not something this handler
+	// validates or trusts on its own.
+	sec, err := h.opener.OpenMailbox(r.Context(), MailboxRef{WorkspaceID: ws, MailboxID: mailbox, WorkerID: in.WorkerID})
 	if err != nil {
 		h.fail(w, "mailbox", err, "workspace_id", ws, "mailbox_id", mailbox)
 		return
@@ -117,13 +131,21 @@ func (h *handler) openWebhookEndpoint(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, webhookEndpointResponse{Secret: secret})
 }
 
-// fail maps an opener error to a status and logs it. A missing row is 404 and
-// everything else is 500; the RESPONSE carries a fixed string either way, so
-// the endpoint is not a probe oracle for which ids exist in which workspace.
-// The log keeps the real error, because that side is the operator's.
+// fail maps an opener error to a status and logs it. A missing row is 404, a
+// worker-assignment mismatch is 403 (which the client already folds into the
+// same ErrUnauthorized a bad token produces — a caller learns it was refused,
+// never why), and everything else is 500. The RESPONSE carries a fixed string
+// either way, so the endpoint is not a probe oracle for which ids exist in
+// which workspace or where they are assigned. The log keeps the real error,
+// because that side is the operator's.
 func (h *handler) fail(w http.ResponseWriter, subject string, err error, logArgs ...any) {
-	if errors.Is(err, pgx.ErrNoRows) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		respond(w, http.StatusNotFound, errorResponse{Error: "not found"})
+		return
+	case errors.Is(err, ErrNotAssigned):
+		h.logger.Warn("credential broker: worker assignment mismatch", append(logArgs, "subject", subject)...)
+		respond(w, http.StatusForbidden, errorResponse{Error: "forbidden"})
 		return
 	}
 	h.logger.Error("credential broker: open failed", append(logArgs, "subject", subject, "err", err)...)

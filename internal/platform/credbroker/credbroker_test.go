@@ -54,7 +54,7 @@ func serve(t *testing.T, o Opener, token string) (*HTTPOpener, *httptest.Server)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := NewHTTPOpener(srv.URL, token, true)
+	c, err := NewHTTPOpener(srv.URL, token, "", true)
 	if err != nil {
 		t.Fatalf("NewHTTPOpener: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestTheRequestBodyCarriesIdsOnly(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(mailboxResponse{Provider: "smtp"})
 	}))
 	defer srv.Close()
-	c, err := NewHTTPOpener(srv.URL, testToken, true)
+	c, err := NewHTTPOpener(srv.URL, testToken, "", true)
 	if err != nil {
 		t.Fatalf("NewHTTPOpener: %v", err)
 	}
@@ -130,8 +130,40 @@ func TestTheRequestBodyCarriesIdsOnly(t *testing.T) {
 	if err := json.Unmarshal(body, &fields); err != nil {
 		t.Fatalf("unmarshal %q: %v", body, err)
 	}
+	// worker_id is omitempty and this opener was built with none, so the body
+	// stays exactly workspace_id + mailbox_id — an empty claim adds nothing to
+	// the wire, matching MailboxRef.WorkerID's documented no-op behavior.
 	if len(fields) != 2 || fields["workspace_id"] != ws.String() || fields["mailbox_id"] != mb.String() {
 		t.Errorf("request body = %s, want exactly workspace_id + mailbox_id", body)
+	}
+}
+
+// A configured worker id DOES cross the wire — the opt-in half of the
+// property above. The opener never authenticates on its own (the bearer
+// token still does that); this only carries the claim to wherever it gets
+// checked.
+func TestAConfiguredWorkerIDCrossesTheWire(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(mailboxResponse{Provider: "smtp"})
+	}))
+	defer srv.Close()
+	c, err := NewHTTPOpener(srv.URL, testToken, "worker-abc", true)
+	if err != nil {
+		t.Fatalf("NewHTTPOpener: %v", err)
+	}
+	if _, err := c.OpenMailbox(context.Background(), MailboxRef{WorkspaceID: ws, MailboxID: mb}); err != nil {
+		t.Fatalf("OpenMailbox: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	if fields["worker_id"] != "worker-abc" {
+		t.Errorf("request body = %s, want worker_id = worker-abc", body)
 	}
 }
 
@@ -247,7 +279,7 @@ func TestAPlaintextBrokerURLIsRefusedUnlessChosen(t *testing.T) {
 		{"a non-http scheme is refused", "ftp://control.example", true, ErrInsecureURL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewHTTPOpener(tc.url, testToken, tc.allowPlaintext)
+			_, err := NewHTTPOpener(tc.url, testToken, "", tc.allowPlaintext)
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("err = %v, want nil", err)
@@ -263,7 +295,7 @@ func TestAPlaintextBrokerURLIsRefusedUnlessChosen(t *testing.T) {
 
 func TestAWeakTokenIsRefusedOnBothSides(t *testing.T) {
 	short := strings.Repeat("a", MinTokenLen-1)
-	if _, err := NewHTTPOpener("https://control.example", short, false); !errors.Is(err, ErrWeakToken) {
+	if _, err := NewHTTPOpener("https://control.example", short, "", false); !errors.Is(err, ErrWeakToken) {
 		t.Errorf("client err = %v, want ErrWeakToken", err)
 	}
 	if _, err := NewHandler(&fakeOpener{}, short, quietLogger()); !errors.Is(err, ErrWeakToken) {
@@ -297,7 +329,7 @@ func TestARedirectIsNotFollowed(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	c, err := NewHTTPOpener(redirector.URL, testToken, true)
+	c, err := NewHTTPOpener(redirector.URL, testToken, "", true)
 	if err != nil {
 		t.Fatalf("NewHTTPOpener: %v", err)
 	}
