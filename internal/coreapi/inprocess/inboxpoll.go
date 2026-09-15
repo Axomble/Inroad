@@ -68,28 +68,20 @@ func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID stri
 	// and resume from the opaque inbox_cursor (Gmail historyId / Graph delta-link),
 	// leaving the IMAP UID cursor columns zero; smtp unseals the stored IMAP
 	// password and resumes from the UID cursor.
+	accessToken, password, err := c.openMailboxSecret(ctx, ws, id, m.Provider, m.SecretCiphertext)
+	if err != nil {
+		return coreapi.InboxPollJob{}, err
+	}
 	if m.Provider == "gmail" || m.Provider == "m365" {
-		at, err := c.oauthAccessToken(ctx, m.Provider, id, ws, m.SecretCiphertext, c.oauthConfigFor(m.Provider))
-		if err != nil {
-			return coreapi.InboxPollJob{}, err
-		}
 		// Email comes from the mailbox row, NOT from ImapUsername: this branch's
 		// mailboxes authenticate by OAuth and their IMAP login column is empty. These
 		// are also the only two providers that stamp Authentication-Results, so an
 		// empty address here would make the one identity signal we can actually
 		// observe permanently unreadable (design §6).
 		return coreapi.InboxPollJob{
-			Provider: m.Provider, AccessToken: []byte(at), Cursor: m.InboxCursor,
+			Provider: m.Provider, AccessToken: accessToken, Cursor: m.InboxCursor,
 			Email: m.Email,
 		}, nil
-	}
-	sealer, err := c.keyring.SealerFor(ctx, ws)
-	if err != nil {
-		return coreapi.InboxPollJob{}, err
-	}
-	password, err := sealer.Open(m.SecretCiphertext)
-	if err != nil {
-		return coreapi.InboxPollJob{}, err
 	}
 	// Email is the mailbox's own address and Username its IMAP login. They are
 	// frequently the same string and are not the same thing — a login may be a bare

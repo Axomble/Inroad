@@ -8,13 +8,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
 // GetWebhookDeliveryJob loads one webhook delivery plus its endpoint's URL and
-// sealed secret, workspace-pinned, and opens the secret under the workspace DEK
-// so the worker receives plaintext bytes it can sign with and zeroize. The
-// worker never touches the keyring (docs/security.md invariant 1).
+// sealed secret, workspace-pinned, and opens the secret through the credential
+// opener so the worker receives plaintext bytes it can sign with and zeroize.
+// The worker never touches the keyring (docs/security.md invariant 1) — and on
+// a fleet host it does not have one, so this open is an HTTP call to the
+// control plane (internal/platform/credbroker).
 //
 // Consumed through internal/worker/webhook.Core, not coreapi.Client — see the
 // WebhookDeliveryJob doc for why.
@@ -36,11 +39,10 @@ func (c client) GetWebhookDeliveryJob(ctx context.Context, deliveryID, workspace
 		return coreapi.WebhookDeliveryJob{}, coreapi.ErrCrossTenant
 	}
 
-	sealer, err := c.keyring.SealerFor(ctx, ws)
-	if err != nil {
-		return coreapi.WebhookDeliveryJob{}, err
+	if c.creds == nil {
+		return coreapi.WebhookDeliveryJob{}, credbroker.ErrNotConfigured
 	}
-	secret, err := sealer.Open(string(row.EndpointSecretCiphertext))
+	secret, err := c.creds.OpenWebhookEndpointSecret(ctx, ws, row.EndpointID, row.EndpointSecretCiphertext)
 	if err != nil {
 		return coreapi.WebhookDeliveryJob{}, err
 	}

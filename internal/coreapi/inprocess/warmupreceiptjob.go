@@ -458,26 +458,13 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 		return coreapi.WarmupEngageJob{}, err
 	}
 
-	// Decrypt the recipient's send transport via the SAME keyring/sealer path
+	// Open the recipient's send transport via the SAME credential opener
 	// GetInboxPollJob/GetWarmupSendJob use: API providers refresh a short-lived
 	// access token; smtp unseals the stored password. Both are []byte, zeroized by
 	// the worker after the reply send.
-	var accessToken, password []byte
-	if b.Provider == "gmail" || b.Provider == "m365" {
-		at, aerr := c.oauthAccessToken(ctx, b.Provider, b.RecipientMailbox, ws, b.SecretCiphertext, c.oauthConfigFor(b.Provider))
-		if aerr != nil {
-			return coreapi.WarmupEngageJob{}, aerr
-		}
-		accessToken = []byte(at)
-	} else {
-		sealer, serr := c.keyring.SealerFor(ctx, ws)
-		if serr != nil {
-			return coreapi.WarmupEngageJob{}, serr
-		}
-		password, err = sealer.Open(b.SecretCiphertext)
-		if err != nil {
-			return coreapi.WarmupEngageJob{}, err
-		}
+	accessToken, password, err := c.openMailboxSecret(ctx, ws, b.RecipientMailbox, b.Provider, b.SecretCiphertext)
+	if err != nil {
+		return coreapi.WarmupEngageJob{}, err
 	}
 
 	dayKey := b.ReceivedAt.Time.UTC().Format("2006-01-02")

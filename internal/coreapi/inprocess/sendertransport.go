@@ -18,11 +18,11 @@ import (
 // maintenance.Cleaner / deliverability.Breaker pattern).
 //
 // Decrypting the credential — and, for a gmail/m365 mailbox, refreshing the
-// OAuth access token — reuses the SAME oauthAccessToken/keyring path every
-// other worker send job uses (GetStepSendJob, GetWarmupSendJob), so there is exactly
-// ONE implementation of "how a mailbox's credential is opened" (security
-// invariants 8/9). This runs ONLY in the execution plane (cmd/worker), never
-// in cmd/inroad (docs/security.md invariant 1).
+// OAuth access token — goes through c.openMailboxSecret, the SAME credential
+// opener every other job build uses (GetStepSendJob, GetWarmupSendJob), so
+// there is exactly ONE implementation of "how a mailbox's credential is opened"
+// (security invariants 8/9). On a fleet worker that opener is an HTTP call to
+// the control plane, so the unsealing itself happens where the key is.
 func (c client) ResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
@@ -38,22 +38,9 @@ func (c client) ResolveSenderTransport(ctx context.Context, workspaceID, mailbox
 		return coreapi.SenderTransport{}, err
 	}
 
-	var accessToken, password []byte
-	if m.Provider == "gmail" || m.Provider == "m365" {
-		at, aerr := c.oauthAccessToken(ctx, m.Provider, m.ID, ws, m.SecretCiphertext, c.oauthConfigFor(m.Provider))
-		if aerr != nil {
-			return coreapi.SenderTransport{}, aerr
-		}
-		accessToken = []byte(at)
-	} else {
-		sealer, serr := c.keyring.SealerFor(ctx, ws)
-		if serr != nil {
-			return coreapi.SenderTransport{}, serr
-		}
-		password, err = sealer.Open(m.SecretCiphertext)
-		if err != nil {
-			return coreapi.SenderTransport{}, err
-		}
+	accessToken, password, err := c.openMailboxSecret(ctx, ws, m.ID, m.Provider, m.SecretCiphertext)
+	if err != nil {
+		return coreapi.SenderTransport{}, err
 	}
 
 	return coreapi.SenderTransport{
