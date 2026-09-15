@@ -34,12 +34,18 @@ func (c client) RecordWorkerProviderSignals(ctx context.Context, in coreapi.Work
 		return fmt.Errorf("coreapi: provider signal window ends (%s) before it starts (%s)", in.WindowEnd, in.WindowStart)
 	}
 
-	start := pgtype.Timestamptz{Time: in.WindowStart, Valid: true}
-	end := pgtype.Timestamptz{Time: in.WindowEnd, Valid: true}
-	rows := make([]gen.RecordWorkerProviderSignalsParams, 0, len(in.Counts))
+	// The varying columns travel as parallel arrays that the query unnests back
+	// into rows, so the whole window is one statement. They are built together
+	// and appended to in lockstep: if they ever diverged in length, unnest would
+	// pad the short ones with NULL and the table's NOT NULLs would reject the
+	// write rather than silently record a row with a missing verdict.
+	providers := make([]string, 0, len(in.Counts))
+	operations := make([]string, 0, len(in.Counts))
+	reasons := make([]string, 0, len(in.Counts))
+	events := make([]int64, 0, len(in.Counts))
 	for _, count := range in.Counts {
 		// A zero or negative delta violates the table's CHECK and would fail the
-		// COPY for the WHOLE window, not just its own row. The collector cannot
+		// whole window's insert, not just its own row. The collector cannot
 		// produce one (a key exists only once it has been incremented), so this
 		// is a backstop against a future caller rather than a live path — and
 		// dropping the row is the right failure, since a counter that counted
@@ -47,20 +53,23 @@ func (c client) RecordWorkerProviderSignals(ctx context.Context, in coreapi.Work
 		if count.Events <= 0 {
 			continue
 		}
-		rows = append(rows, gen.RecordWorkerProviderSignalsParams{
-			WorkerID:    in.WorkerID,
-			Provider:    count.Provider,
-			Operation:   count.Operation,
-			Reason:      count.Reason,
-			Events:      count.Events,
-			WindowStart: start,
-			WindowEnd:   end,
-		})
+		providers = append(providers, count.Provider)
+		operations = append(operations, count.Operation)
+		reasons = append(reasons, count.Reason)
+		events = append(events, count.Events)
 	}
-	if len(rows) == 0 {
+	if len(providers) == 0 {
 		return nil
 	}
-	if _, err := c.q.RecordWorkerProviderSignals(ctx, rows); err != nil {
+	if err := c.q.RecordWorkerProviderSignals(ctx, gen.RecordWorkerProviderSignalsParams{
+		WorkerID:    in.WorkerID,
+		Providers:   providers,
+		Operations:  operations,
+		Reasons:     reasons,
+		Events:      events,
+		WindowStart: pgtype.Timestamptz{Time: in.WindowStart, Valid: true},
+		WindowEnd:   pgtype.Timestamptz{Time: in.WindowEnd, Valid: true},
+	}); err != nil {
 		return fmt.Errorf("coreapi: record worker provider signals: %w", err)
 	}
 	return nil

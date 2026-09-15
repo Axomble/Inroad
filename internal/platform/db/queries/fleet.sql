@@ -1,11 +1,19 @@
--- name: RecordWorkerProviderSignals :copyfrom
--- Persist ONE window of per-worker provider verdicts.
+-- name: RecordWorkerProviderSignals :exec
+-- Persist ONE window of per-verdict counts for a worker, in a single round trip.
 --
--- :copyfrom (pgx COPY) rather than N round trips: a window is written from the
--- worker's flush loop on a timer, and the whole point of accumulating in memory
--- is that reporting costs nothing on the send path. COPY still enforces every
--- CHECK and NOT NULL on the table, so a stray reason or a non-positive delta
--- fails the flush rather than being written.
+-- The varying columns arrive as parallel arrays and are unnested into rows; the
+-- three that repeat for a whole batch (worker, window bounds) are passed once as
+-- scalars. One statement, so the window lands atomically: a reader never sees
+-- half a window and mistake it for a quiet one.
+--
+-- This deliberately does NOT use sqlc's :copyfrom. COPY is the right tool for
+-- thousands of rows, and a flush carries at most one row per (provider,
+-- operation, reason) actually observed — dozens at the very worst. What it would
+-- cost is permanent: :copyfrom adds CopyFrom to the generated DBTX interface,
+-- which every hand-written implementation in the repo then owes, and it already
+-- broke an unrelated test double (countingDBTX in the inprocess package) that
+-- has nothing to do with fleet signals. A shared interface is the wrong place to
+-- pay for an optimisation this size.
 --
 -- worker_id/window_start/window_end repeat on every row of a batch. That is not
 -- redundancy to normalise away: each row must stand alone as "this worker saw
@@ -22,7 +30,14 @@
 -- `worker_provider_signals` is global infrastructure state like `workers`, not
 -- tenant data, so there is no workspace pin (see the table's migration).
 INSERT INTO worker_provider_signals (worker_id, provider, operation, reason, events, window_start, window_end)
-VALUES ($1, $2, $3, $4, $5, $6, $7);
+SELECT
+    @worker_id::text,
+    unnest(@providers::text[]),
+    unnest(@operations::text[]),
+    unnest(@reasons::text[]),
+    unnest(@events::bigint[]),
+    @window_start::timestamptz,
+    @window_end::timestamptz;
 
 -- name: PurgeWorkerProviderSignals :one
 -- Retention sweep: drop signal windows past the 30-day window any per-worker

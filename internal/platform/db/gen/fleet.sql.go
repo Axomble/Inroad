@@ -156,12 +156,67 @@ func (q *Queries) PurgeWorkerProviderSignals(ctx context.Context) (int64, error)
 	return deleted_rows, err
 }
 
+const recordWorkerProviderSignals = `-- name: RecordWorkerProviderSignals :exec
+INSERT INTO worker_provider_signals (worker_id, provider, operation, reason, events, window_start, window_end)
+SELECT
+    $1::text,
+    unnest($2::text[]),
+    unnest($3::text[]),
+    unnest($4::text[]),
+    unnest($5::bigint[]),
+    $6::timestamptz,
+    $7::timestamptz
+`
+
 type RecordWorkerProviderSignalsParams struct {
 	WorkerID    string             `json:"worker_id"`
-	Provider    string             `json:"provider"`
-	Operation   string             `json:"operation"`
-	Reason      string             `json:"reason"`
-	Events      int64              `json:"events"`
+	Providers   []string           `json:"providers"`
+	Operations  []string           `json:"operations"`
+	Reasons     []string           `json:"reasons"`
+	Events      []int64            `json:"events"`
 	WindowStart pgtype.Timestamptz `json:"window_start"`
 	WindowEnd   pgtype.Timestamptz `json:"window_end"`
+}
+
+// Persist ONE window of per-verdict counts for a worker, in a single round trip.
+//
+// The varying columns arrive as parallel arrays and are unnested into rows; the
+// three that repeat for a whole batch (worker, window bounds) are passed once as
+// scalars. One statement, so the window lands atomically: a reader never sees
+// half a window and mistake it for a quiet one.
+//
+// This deliberately does NOT use sqlc's :copyfrom. COPY is the right tool for
+// thousands of rows, and a flush carries at most one row per (provider,
+// operation, reason) actually observed — dozens at the very worst. What it would
+// cost is permanent: :copyfrom adds CopyFrom to the generated DBTX interface,
+// which every hand-written implementation in the repo then owes, and it already
+// broke an unrelated test double (countingDBTX in the inprocess package) that
+// has nothing to do with fleet signals. A shared interface is the wrong place to
+// pay for an optimisation this size.
+//
+// worker_id/window_start/window_end repeat on every row of a batch. That is not
+// redundancy to normalise away: each row must stand alone as "this worker saw
+// this many of this verdict between these two instants", because aggregation is
+// a SUM over a time range and a reader must never have to join to learn when a
+// delta applies.
+//
+// Every row is a DELTA for [window_start, window_end) -- never a running total.
+// There is deliberately no conflict handling: two flushes from the same worker
+// in the same window are two windows' worth of events and must both be summed,
+// not collapsed. The BIGSERIAL id keeps that true even when two flushes land on
+// the same instant.
+//
+// `worker_provider_signals` is global infrastructure state like `workers`, not
+// tenant data, so there is no workspace pin (see the table's migration).
+func (q *Queries) RecordWorkerProviderSignals(ctx context.Context, arg RecordWorkerProviderSignalsParams) error {
+	_, err := q.db.Exec(ctx, recordWorkerProviderSignals,
+		arg.WorkerID,
+		arg.Providers,
+		arg.Operations,
+		arg.Reasons,
+		arg.Events,
+		arg.WindowStart,
+		arg.WindowEnd,
+	)
+	return err
 }
