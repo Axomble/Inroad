@@ -104,7 +104,7 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		// thousands of identical rows.
 		return queueForWorker(incumbent), nil
 	case errors.Is(err, pgx.ErrNoRows):
-		c.reportStaleAssignment(ctx, mbID, wsID, mailboxID, workspaceID)
+		c.reportStaleAssignment(ctx, mbID, wsID)
 	default:
 		return "", fmt.Errorf("coreapi: load assignment: %w", err)
 	}
@@ -130,6 +130,11 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 		return "", fmt.Errorf("coreapi: count live workers: %w", err)
 	}
 
+	p := placement{
+		mailbox: mbID, workspace: wsID,
+		provider: facts.Provider, band: band, liveSince: liveSince,
+	}
+
 	// 3. Self-host bypass: at most one live worker means there is no placement
 	//    CHOICE to make, so nothing — not the band under F5, not the score or
 	//    the health gate under F4 — may apply. Byte for byte the pre-F5,
@@ -137,10 +142,49 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 	//    refinement above it can only ever amount to refusing to send from the
 	//    one worker there is.
 	if liveCount <= 1 {
-		return c.placeOnSoleWorker(ctx, mbID, wsID, mailboxID, workspaceID, band, liveSince)
+		return c.placeOnSoleWorker(ctx, p)
 	}
 
-	return c.placeByScore(ctx, mbID, wsID, mailboxID, workspaceID, facts.Provider, band, liveSince)
+	return c.placeByScore(ctx, p)
+}
+
+// placement is one resolution in flight: which mailbox is being placed, the
+// facts it will be scored on, and the live-worker cutoff every query in the
+// attempt must share. It travels as one value because the alternative is
+// threading the same five fields through three functions as parallel arguments,
+// where a mailbox id and the workspace it is pinned to could drift apart at a
+// call site.
+type placement struct {
+	mailbox   uuid.UUID
+	workspace uuid.UUID
+	// provider is the mailbox's transport leg, which decides both what it costs
+	// a worker and which worker_provider_signals rows the health gate reads.
+	provider string
+	// band is the risk band the mailbox is being placed UNDER, recorded on the
+	// assignment row and compared against every candidate's population.
+	band string
+	// liveSince is the heartbeat cutoff, computed ONCE per call so that the
+	// candidate scan, the pick and the upsert all agree about which workers were
+	// live — a cutoff recomputed per query could let a worker be live for the
+	// scan and dead for the insert.
+	liveSince pgtype.Timestamptz
+}
+
+// entry starts a decision-log entry for this placement, with the tenant pair
+// already attached. Ids are strings at the fleetdecision seam like every other
+// id crossing into coreapi.
+func (p placement) entry(kind fleetdecision.Kind, workerID string, reason fleetdecision.Reason) fleetdecision.Entry {
+	return fleetdecision.Entry{
+		Kind:        kind,
+		WorkerID:    workerID,
+		MailboxID:   p.mailbox.String(),
+		WorkspaceID: p.workspace.String(),
+		Reason:      reason,
+		// The actor is the ASSIGNMENT attempt, including when it refused: there
+		// is no separate "refuse" automation, and naming one would imply a
+		// component an operator could go and look at.
+		TriggeredBy: fleetdecision.Auto(fleetdecision.KindAssign),
+	}
 }
 
 // reportStaleAssignment distinguishes "this mailbox was never assigned" (the
@@ -154,12 +198,12 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 // the incumbent went stale — whether a live replacement is actually available is
 // a separate fact the caller has not established yet, and this message stays
 // true either way.
-func (c client) reportStaleAssignment(ctx context.Context, mbID, wsID uuid.UUID, mailboxID, workspaceID string) {
+func (c client) reportStaleAssignment(ctx context.Context, mbID, wsID uuid.UUID) {
 	stale, err := c.q.MailboxWorkerAssignmentExists(ctx, gen.MailboxWorkerAssignmentExistsParams{
 		MailboxID: mbID, WorkspaceID: wsID,
 	})
 	if err != nil {
-		slog.WarnContext(ctx, "worker assignment staleness check failed", "mailbox_id", mailboxID, "err", err)
+		slog.WarnContext(ctx, "worker assignment staleness check failed", "mailbox_id", mbID, "err", err)
 		return
 	}
 	if !stale {
@@ -167,12 +211,12 @@ func (c client) reportStaleAssignment(ctx context.Context, mbID, wsID uuid.UUID,
 	}
 	c.mtx.WorkerAssignmentStale()
 	slog.WarnContext(ctx, "stale worker assignment: incumbent worker fell out of the live window",
-		"mailbox_id", mailboxID, "workspace_id", workspaceID)
+		"mailbox_id", mbID, "workspace_id", wsID)
 }
 
 // placeOnSoleWorker is the self-host path: pick the one live worker and persist.
-func (c client) placeOnSoleWorker(ctx context.Context, mbID, wsID uuid.UUID, mailboxID, workspaceID, band string, liveSince pgtype.Timestamptz) (string, error) {
-	workerID, err := c.q.PickLeastLoadedWorker(ctx, liveSince)
+func (c client) placeOnSoleWorker(ctx context.Context, p placement) (string, error) {
+	workerID, err := c.q.PickLeastLoadedWorker(ctx, p.liveSince)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// No live worker at all (single-node dev, or the whole fleet
@@ -196,7 +240,7 @@ func (c client) placeOnSoleWorker(ctx context.Context, mbID, wsID uuid.UUID, mai
 		return "", fmt.Errorf("coreapi: pick least-loaded worker: %w", err)
 	}
 
-	assigned, err := c.persistAssignment(ctx, mbID, wsID, workerID, band, liveSince)
+	assigned, err := c.persistAssignment(ctx, p, workerID)
 	if err != nil {
 		return "", err
 	}
@@ -204,11 +248,7 @@ func (c client) placeOnSoleWorker(ctx context.Context, mbID, wsID uuid.UUID, mai
 	if !reason.Valid() {
 		reason = fleetdecision.Forced("the fleet has one live worker, so there was no placement choice to make")
 	}
-	c.recordPlacement(ctx, fleetdecision.Entry{
-		Kind: fleetdecision.KindAssign, WorkerID: assigned,
-		MailboxID: mailboxID, WorkspaceID: workspaceID,
-		Reason: reason, TriggeredBy: fleetdecision.Auto(fleetdecision.KindAssign),
-	})
+	c.recordPlacement(ctx, p.entry(fleetdecision.KindAssign, assigned, reason))
 	return queueForWorker(assigned), nil
 }
 
@@ -228,49 +268,39 @@ func (c client) placeOnSoleWorker(ctx context.Context, mbID, wsID uuid.UUID, mai
 // two callers placing the SAME mailbox must converge on ONE worker — is
 // unchanged and still enforced where it always was, inside
 // InsertMailboxWorkerAssignment's ON CONFLICT.
-func (c client) placeByScore(ctx context.Context, mbID, wsID uuid.UUID, mailboxID, workspaceID, provider, band string, liveSince pgtype.Timestamptz) (string, error) {
+func (c client) placeByScore(ctx context.Context, p placement) (string, error) {
 	rows, err := c.q.ListPlacementCandidates(ctx, gen.ListPlacementCandidatesParams{
-		LiveSince:    liveSince,
-		WorkspaceID:  wsID,
-		Band:         band,
-		Provider:     provider,
+		LiveSince:    p.liveSince,
+		WorkspaceID:  p.workspace,
+		Band:         p.band,
+		Provider:     p.provider,
 		SignalsSince: pgtype.Timestamptz{Time: time.Now().Add(-providerSignalWindow), Valid: true},
 	})
 	if err != nil {
 		return "", fmt.Errorf("coreapi: list placement candidates: %w", err)
 	}
 
-	ranked := fleetscore.Default().Rank(placementCandidates(rows), fleetscore.Incoming{Provider: provider})
+	ranked := fleetscore.Default().Rank(placementCandidates(rows), fleetscore.Incoming{Provider: p.provider})
 	if len(ranked) == 0 {
 		// Every live worker is refusing this provider's traffic. This is the ONLY
 		// refusal placement can produce — the health gate is the only hard gate —
 		// and it is genuinely "the fleet cannot serve this mailbox right now",
 		// not "no worker matched a label".
 		slog.WarnContext(ctx, "worker assignment refused: no eligible worker for this mailbox's provider",
-			"mailbox_id", mailboxID, "workspace_id", workspaceID, "provider", provider, "live_workers", len(rows))
-		c.recordPlacement(ctx, fleetdecision.Entry{
-			Kind: fleetdecision.KindRefused,
-			// No WorkerID: a refusal placed the mailbox nowhere, and naming a
-			// worker it was refused FROM would read as the one it landed on.
-			MailboxID: mailboxID, WorkspaceID: workspaceID,
-			Reason: fleetdecision.Forced(fmt.Sprintf(
-				"every one of the %d live workers has recently been blocked or unreachable for provider %q and none has completed an operation since; add fleet capacity or wait for the block to clear",
-				len(rows), provider)),
-			TriggeredBy: fleetdecision.Auto(fleetdecision.KindAssign),
-		})
+			"mailbox_id", p.mailbox, "workspace_id", p.workspace, "provider", p.provider, "live_workers", len(rows))
+		// No WorkerID on the entry: a refusal placed the mailbox nowhere, and
+		// naming a worker it was refused FROM would read as the one it landed on.
+		c.recordPlacement(ctx, p.entry(fleetdecision.KindRefused, "", fleetdecision.Forced(fmt.Sprintf(
+			"every one of the %d live workers has recently been blocked or unreachable for provider %q and none has completed an operation since; add fleet capacity or wait for the block to clear",
+			len(rows), p.provider))))
 		return "", coreapi.ErrNoEligibleWorker
 	}
 
-	assigned, err := c.persistAssignment(ctx, mbID, wsID, ranked[0].WorkerID, band, liveSince)
+	assigned, err := c.persistAssignment(ctx, p, ranked[0].WorkerID)
 	if err != nil {
 		return "", err
 	}
-	c.recordPlacement(ctx, fleetdecision.Entry{
-		Kind: fleetdecision.KindAssign, WorkerID: assigned,
-		MailboxID: mailboxID, WorkspaceID: workspaceID,
-		Reason:      placementReason(ranked, len(rows), assigned),
-		TriggeredBy: fleetdecision.Auto(fleetdecision.KindAssign),
-	})
+	c.recordPlacement(ctx, p.entry(fleetdecision.KindAssign, assigned, placementReason(ranked, len(rows), assigned)))
 	return queueForWorker(assigned), nil
 }
 
@@ -359,9 +389,9 @@ func (c client) recordPlacement(ctx context.Context, e fleetdecision.Entry) {
 // conflict the row is kept for a LIVE incumbent and handed to workerID
 // otherwise; liveSince makes that decision inside the statement, keeping it
 // atomic against another caller re-placing the same mailbox.
-func (c client) persistAssignment(ctx context.Context, mbID, wsID uuid.UUID, workerID, band string, liveSince pgtype.Timestamptz) (string, error) {
+func (c client) persistAssignment(ctx context.Context, p placement, workerID string) (string, error) {
 	assigned, err := c.q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
-		MailboxID: mbID, WorkspaceID: wsID, WorkerID: workerID, Band: band, LiveSince: liveSince,
+		MailboxID: p.mailbox, WorkspaceID: p.workspace, WorkerID: workerID, Band: p.band, LiveSince: p.liveSince,
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
