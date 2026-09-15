@@ -367,6 +367,15 @@ type deliveryBody struct {
 // form the operator copies and the HMAC key both sides use), and seals it under
 // the workspace DEK for storage.
 func (s *Service) mintSecret(ctx context.Context, ws uuid.UUID) (raw string, sealed []byte, err error) {
+	// A nil keyring means this process cannot seal — the configuration a fleet
+	// worker runs in, where credentials are brokered and no key is held
+	// (internal/platform/credbroker). Only Create and RotateSecret reach here
+	// and both are control-plane HTTP handlers the worker never serves, so this
+	// is a guard, not a path: it turns an impossible call into a readable error
+	// instead of a nil dereference in a send process.
+	if s.keyring == nil {
+		return "", nil, fmt.Errorf("webhook: this process holds no keyring and cannot mint a signing secret")
+	}
 	buf := make([]byte, secretBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", nil, fmt.Errorf("webhook: mint secret: %w", err)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/redisconn"
 	"github.com/inroad/inroad/internal/platform/workerid"
@@ -29,7 +30,18 @@ type Config struct {
 	DatabaseURL string
 	RedisAddr   string
 	JWTSecret   []byte
-	MasterKey   []byte
+
+	// MasterKey is INROAD_MASTER_KEY: the KEK that wraps every per-workspace
+	// DEK, and the legacy v1 field key (docs/security.md invariants 14–17).
+	//
+	// NIL is a legal value and means the variable was not set. It is not the
+	// permissive default it looks like: every binary that needs the key asserts
+	// it for itself (cmd/inroad unconditionally; cmd/worker per role), and a
+	// SET-BUT-MALFORMED value is still a hard error here, because a typo must
+	// never degrade into "no key". Nil exists for exactly one caller — a fleet
+	// worker, which is supposed to have no key at all and obtains credentials
+	// through internal/platform/credbroker instead.
+	MasterKey []byte
 
 	// MetricsAddr is the address the dedicated Prometheus /metrics listener
 	// binds to (e.g. ":9091"), started by both cmd/inroad and cmd/worker.
@@ -182,6 +194,42 @@ type Config struct {
 	// duplicating the valid-value list would give it two sources of truth. Empty
 	// means the default single-process topology.
 	WorkerRole string
+
+	// --- Fleet credential brokering (internal/platform/credbroker) ---
+	//
+	// These three exist so a fleet worker can obtain decrypted mailbox
+	// credentials WITHOUT holding INROAD_MASTER_KEY. All are empty by default:
+	// a self-hosted install running the single-process topology sets none of
+	// them and behaves exactly as it did before they existed.
+
+	// FleetBrokerAddr is the address cmd/inroad serves the credential broker
+	// on, e.g. "10.0.0.5:8090". EMPTY (the default) means the broker is not
+	// served at all — an installation that has not opted in has no such route.
+	// It is a SEPARATE listener from HTTPAddr on purpose: this endpoint returns
+	// plaintext credentials and must never sit on the public API router. Bind
+	// it to an address only the fleet's network can reach.
+	FleetBrokerAddr string
+	// FleetBrokerURL is the base URL a worker asks for credentials at, e.g.
+	// "https://control.internal:8090". Empty means this worker opens
+	// credentials itself with a local keyring, which only the single-process
+	// self-host topology may do (cmd/worker enforces that).
+	FleetBrokerURL string
+	// FleetBrokerToken is the shared bearer credential both sides present and
+	// check. At least credbroker.MinTokenLen bytes — validated here so a weak
+	// one fails at startup rather than at the first send.
+	//
+	// It is deliberately SHARED rather than per-worker. Per-worker identity
+	// only buys something once a worker can be scoped to a subset of mailboxes,
+	// and today it cannot be: every send-role worker consumes the shared `send`
+	// queue and may legitimately be handed any mailbox's job.
+	FleetBrokerToken string
+	// FleetBrokerAllowPlaintext permits an http:// FleetBrokerURL. Default
+	// FALSE: the broker channel carries the bearer token and the decrypted
+	// credential, so a plaintext hop exposes exactly what brokering exists to
+	// protect. Same shape and same reasoning as
+	// INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT — the opt-out is for a control plane
+	// reachable only over a trusted private network, and it has to be chosen.
+	FleetBrokerAllowPlaintext bool
 
 	// --- Worker identity + per-IP routing (spec §15, F3) ---
 
@@ -380,16 +428,37 @@ func Load() (*Config, error) {
 		cfg.WSTicketSecret = cfg.JWTSecret
 	}
 
-	rawKey, err := base64.StdEncoding.DecodeString(os.Getenv("INROAD_MASTER_KEY"))
-	if err != nil {
-		return nil, fmt.Errorf("INROAD_MASTER_KEY must be valid base64: %w", err)
+	// An UNSET master key leaves cfg.MasterKey nil and is not an error HERE —
+	// see the field doc. A SET one is still validated to the byte, so a
+	// truncated or mistyped value fails at startup instead of silently becoming
+	// "this process has no key" and falling through to whatever the binary does
+	// without one.
+	if encodedKey := os.Getenv("INROAD_MASTER_KEY"); encodedKey != "" {
+		rawKey, err := base64.StdEncoding.DecodeString(encodedKey)
+		if err != nil {
+			return nil, fmt.Errorf("INROAD_MASTER_KEY must be valid base64: %w", err)
+		}
+		if len(rawKey) != 32 {
+			return nil, fmt.Errorf("INROAD_MASTER_KEY must decode to 32 bytes, got %d", len(rawKey))
+		}
+		cfg.MasterKey = rawKey
 	}
-	if len(rawKey) != 32 {
-		return nil, fmt.Errorf("INROAD_MASTER_KEY must decode to 32 bytes, got %d", len(rawKey))
-	}
-	cfg.MasterKey = rawKey
 
 	cfg.KeyProvider = getenv("INROAD_KEY_PROVIDER", "local")
+
+	cfg.FleetBrokerAddr = getenv("INROAD_FLEET_BROKER_ADDR", "")
+	cfg.FleetBrokerURL = getenv("INROAD_FLEET_BROKER_URL", "")
+	cfg.FleetBrokerToken = getenv("INROAD_FLEET_BROKER_TOKEN", "")
+	cfg.FleetBrokerAllowPlaintext = getenvBool("INROAD_FLEET_BROKER_ALLOW_PLAINTEXT", false)
+	// Either side of the broker needs the token, and a weak one is refused
+	// rather than accepted — the same posture INROAD_JWT_SECRET takes. Checked
+	// here so the failure names the variable, at startup, instead of surfacing
+	// as a 401 on the first send of the day.
+	if cfg.FleetBrokerAddr != "" || cfg.FleetBrokerURL != "" {
+		if len(cfg.FleetBrokerToken) < credbroker.MinTokenLen {
+			return nil, fmt.Errorf("INROAD_FLEET_BROKER_TOKEN must be at least %d bytes when the credential broker is configured", credbroker.MinTokenLen)
+		}
+	}
 
 	// Blob storage: filesystem needs nothing else set; INROAD_S3_BUCKET is
 	// what opts a deployment into the S3 backend (see storage.FromEnv).
