@@ -77,6 +77,37 @@ type Candidate struct {
 	ProviderThrottleEvents int64
 }
 
+// Vacating returns this candidate as it would be measured with ONE mailbox of
+// the given provider taken off it — the counterfactual a rotation decision needs
+// (internal/platform/fleetrotate), and nothing placement itself ever asks for.
+//
+// It lives here rather than in the caller because the provider dispatch it
+// performs is the same rule MailboxWeight and sameProviderMailboxes already
+// encode — anything that is not "gmail" or "m365" is an SMTP mailbox — and a
+// second copy of that rule in another package is exactly how the two drift.
+//
+// SameWorkspaceMailboxes drops too: a Candidate is always measured for ONE
+// workspace (ListPlacementCandidates takes it as a parameter), and the mailbox
+// being vacated belongs to it. OtherBandMailboxes does not, because it counts
+// mailboxes in a DIFFERENT band from the one being scored and the vacating
+// mailbox is being scored under its own.
+//
+// Counts floor at zero: a candidate measured a moment before the mailbox left is
+// a fact about the fleet, not an invariant, and a negative count would put a
+// nonsense load into the score rather than reporting the disagreement.
+func (c Candidate) Vacating(provider string) Candidate {
+	switch provider {
+	case "gmail":
+		c.GmailMailboxes = max(c.GmailMailboxes-1, 0)
+	case "m365":
+		c.M365Mailboxes = max(c.M365Mailboxes-1, 0)
+	default:
+		c.SMTPMailboxes = max(c.SMTPMailboxes-1, 0)
+	}
+	c.SameWorkspaceMailboxes = max(c.SameWorkspaceMailboxes-1, 0)
+	return c
+}
+
 // Incoming is the mailbox being placed. Its band is not a field: the band
 // comparison is already folded into Candidate.OtherBandMailboxes by the query
 // that measured it.
