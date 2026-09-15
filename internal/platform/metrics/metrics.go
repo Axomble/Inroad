@@ -75,7 +75,7 @@ type Metrics struct {
 var sweepDurationBuckets = []float64{0.05, 0.25, 1, 5, 15, 60, 300, 900}
 
 // jobRunDurationBuckets bound inroad_job_run_seconds. Reuses sweepDurationBuckets'
-// range (sub-second through 900s) rather than a second bucket set: the six jobs
+// range (sub-second through 900s) rather than a second bucket set: the jobs
 // jobRunSeconds observes run on the same 5-minute-to-24-hour cadence spectrum as
 // the three sweeps sweepDuration already covers, so a run "longer than its own
 // interval" is interesting at the same scale. Kept as its own slice, not a shared
@@ -249,7 +249,7 @@ func (m *Metrics) SweepCompleted(kind string, rows int, elapsed time.Duration) {
 // and outcome, labeled by job (the sweepRegistrars() name) and outcome ("ok" |
 // "error"). It is the ONLY emitter of inroad_job_run_seconds — called from
 // internal/platform/jobrun.Record, never from a handler body directly, so
-// every one of the six wrapped jobs is measured the same way regardless of
+// every one of the wrapped jobs is measured the same way regardless of
 // what the handler itself does or does not instrument.
 //
 // Deliberately separate from SweepCompleted: that metric carries a row count

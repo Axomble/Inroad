@@ -22,10 +22,10 @@ type sweepRegistrar struct {
 
 // sweepRegistrars is every periodic reconcile the scheduler enqueues. Names
 // come from internal/platform/jobrun's constants, not string literals: the
-// worker wraps each of these six handlers in jobrun.Record with the SAME
+// worker wraps each of these handlers in jobrun.Record with the SAME
 // constants (internal/worker/handlers.go), so "the run ledger's job names
 // match this registrar list" holds by compilation rather than by two people
-// independently typing six strings identically forever.
+// independently typing the same strings identically forever.
 func sweepRegistrars() []sweepRegistrar {
 	return []sweepRegistrar{
 		{jobrun.NameEnrollments, queue.RegisterSweepEnrollments},
@@ -34,6 +34,7 @@ func sweepRegistrars() []sweepRegistrar {
 		{jobrun.NameMaintenanceCleanup, queue.RegisterMaintenanceCleanup},
 		{jobrun.NameDomainAuthSweep, queue.RegisterDomainAuthSweep},
 		{jobrun.NameRecipientESPSweep, queue.RegisterRecipientESPSweep},
+		{jobrun.NameFleetRotate, queue.RegisterFleetRotate},
 	}
 }
 

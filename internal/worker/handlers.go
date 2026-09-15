@@ -15,6 +15,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker/deliverability"
 	"github.com/inroad/inroad/internal/worker/domainauth"
+	"github.com/inroad/inroad/internal/worker/fleet"
 	"github.com/inroad/inroad/internal/worker/inbox"
 	"github.com/inroad/inroad/internal/worker/maintenance"
 	"github.com/inroad/inroad/internal/worker/recipientesp"
@@ -71,7 +72,7 @@ type Deps struct {
 	// Metrics records inroad_sends_total at the campaign and warmup send
 	// handlers' finalize points, inroad_sweep_seconds / inroad_sweep_rows_total
 	// at the enrollment, inbox and warmup sweeps, and (via jobrun.Record below)
-	// inroad_job_run_seconds at all six of the periodic reconciles in
+	// inroad_job_run_seconds at all seven of the periodic reconciles in
 	// cmd/worker/scheduler.go's sweepRegistrars(); a nil Metrics (metrics
 	// disabled) no-ops throughout.
 	Metrics *metrics.Metrics
@@ -91,7 +92,7 @@ func Register(mux *asynq.ServeMux, d Deps) {
 	// not implement it yields a nil recorder, and jobrun.Record treats nil as
 	// "record nothing, run the sweep anyway" (see its own doc) — degraded
 	// observability, never a failed sweep. Resolved once here, rather than at
-	// each of the six call sites below, so there is exactly one assertion to
+	// each of the call sites below, so there is exactly one assertion to
 	// keep in sync with the Recorder interface.
 	recorder, _ := d.Core.(jobrun.Recorder)
 
@@ -103,7 +104,7 @@ func Register(mux *asynq.ServeMux, d Deps) {
 	}
 }
 
-// registerScheduled wires the six periodic reconciles and the campaign breaker.
+// registerScheduled wires the seven periodic reconciles and the campaign breaker.
 // These scan or delete ACROSS TENANTS, so they are registered on the control
 // role only: a send host runs no handler that enumerates every workspace's due
 // enrollments (fleet design §1.2).
@@ -124,7 +125,7 @@ func registerScheduled(mux *asynq.ServeMux, d Deps, recorder jobrun.Recorder) {
 	// carry it. A Client that does not implement it simply has no breaker, which
 	// is what a future HTTP coreapi would report until it grows the endpoint.
 	//
-	// Not one of the six jobrun.Record wraps: deliverability:evaluate is not in
+	// Not one of the seven jobrun.Record wraps: deliverability:evaluate is not in
 	// cmd/worker/scheduler.go's sweepRegistrars() (it fires per-send-batch, not
 	// on a fixed schedule), so it is outside this ledger's scope. It is still
 	// control-plane work despite that: it reads campaign-wide aggregates and
@@ -145,7 +146,19 @@ func registerScheduled(mux *asynq.ServeMux, d Deps, recorder jobrun.Recorder) {
 		mux.HandleFunc(queue.TaskRecipientESPSweep, jobrun.Record(recorder, d.Metrics, jobrun.NameRecipientESPSweep,
 			recipientesp.SweepHandler(rc, d.MXResolver, recipientesp.DefaultStaleAfter, recipientesp.DefaultRetention)))
 	}
-	// Warmup: the fan-out/health sweep. Only warmup:sweep is one of the six
+	// Fleet rotation: the only thing that moves an ALREADY PLACED mailbox off
+	// its worker. Placement keeps a live incumbent unconditionally, so without
+	// this pass a worker the provider has blocked keeps every mailbox assigned
+	// to it and each of them goes on failing. Registered by type assertion for
+	// the same reason as the cleaner/breaker/esp cache above — the capability is
+	// consumed through fleet.Rotator rather than widening coreapi.Client. A
+	// Client without it simply never rotates, which is the behaviour that
+	// shipped before this existed.
+	if fr, ok := d.Core.(fleet.Rotator); ok {
+		mux.HandleFunc(queue.TaskFleetRotate, jobrun.Record(recorder, d.Metrics, jobrun.NameFleetRotate,
+			fleet.RotateHandler(fr)))
+	}
+	// Warmup: the fan-out/health sweep. Only warmup:sweep is one of the seven
 	// periodic reconciles; warmup:tick and warmup:engage are per-message
 	// follow-ups, not scheduled sweeps, so they are outside the ledger the same
 	// way warmup send/finalize is (see registerPerMessage).

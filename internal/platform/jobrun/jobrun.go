@@ -3,12 +3,12 @@
 // scheduled_job_runs instead of a log grep.
 //
 // internal/platform/metrics.SweepCompleted already exists, but only three of
-// the six periodic reconciles in cmd/worker/scheduler.go's sweepRegistrars()
+// the seven periodic reconciles in cmd/worker/scheduler.go's sweepRegistrars()
 // call it (the enrollment, inbox and warmup scans), and even where it is
 // called a Prometheus counter does not survive a scrape gap and carries no
 // error message — exactly what an operator needs when a sweep silently stops
 // running, or starts failing every tick. Record is a decorator that answers
-// both gaps for all six, uniformly, WITHOUT changing any handler body.
+// both gaps for all seven, uniformly, WITHOUT changing any handler body.
 //
 // This package knows nothing about Postgres. Record takes a Recorder
 // interface — the narrow, consumer-defined capability this package needs,
@@ -45,7 +45,7 @@ const (
 // each of the two call sites that need to agree (sweepRegistrars() itself,
 // and the Record wrapping in internal/worker/handlers.go) — so "the ledger's
 // job names match the registrar names" holds by compilation, not by two
-// people independently typing the same six strings correctly forever.
+// people independently typing the same strings correctly forever.
 const (
 	NameEnrollments        = "enrollments"
 	NameInboxSweep         = "inbox sweep"
@@ -53,6 +53,7 @@ const (
 	NameMaintenanceCleanup = "maintenance cleanup"
 	NameDomainAuthSweep    = "domain auth sweep"
 	NameRecipientESPSweep  = "recipient esp sweep"
+	NameFleetRotate        = "fleet rotation"
 )
 
 // Recorder is the narrow coreapi capability Record needs: persist one
@@ -90,7 +91,7 @@ const truncatedErrorMarker = " …[truncated]"
 //
 // What this is NOT. The column's own comment used to say the value is "never
 // tenant content", and this decorator cannot promise that: it stores
-// err.Error() from six handlers it does not own, and any one of them wrapping a
+// err.Error() from seven handlers it does not own, and any one of them wrapping a
 // mailbox address, a recipient or a subject line would make the claim false the
 // day it was written. What CAN be guaranteed is a bound, so that is what is
 // guaranteed — an unbounded column reachable by arbitrary error text, in a table

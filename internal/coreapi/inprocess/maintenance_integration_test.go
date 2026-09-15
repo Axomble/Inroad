@@ -272,7 +272,7 @@ func TestRecordJobRunPersistsWhatTheDecoratorObserved(t *testing.T) {
 	}
 }
 
-// task_dead_letters / webhook_deliveries reasoning (invariant 55): six jobs
+// task_dead_letters / webhook_deliveries reasoning (invariant 55): seven jobs
 // write a row per run through jobrun.Record, several every five minutes, so
 // scheduled_job_runs needed a retention sweep from day one. Global and
 // unpinned like the other purges in this file — deployment maintenance, not

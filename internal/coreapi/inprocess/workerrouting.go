@@ -77,8 +77,10 @@ func (c client) AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID 
 	//    Two conditions that used to sit here are gone with F5's tiers: the
 	//    stored band no longer has to match the mailbox's CURRENT band, and a
 	//    "mixed" incumbent is no longer re-evaluated. Both existed to MOVE a
-	//    mailbox off a live worker, and moving one is rotation's decision, gated
-	//    separately (a later PR), not something the send path makes in passing.
+	//    mailbox off a live worker, and moving one is rotation's decision — made
+	//    by RotateMailboxWorkers on its own tick, behind its own urgency gate
+	//    (internal/platform/fleetrotate) — not something the send path makes in
+	//    passing.
 	//    A mailbox whose lane degrades therefore stays where it is: the band it
 	//    moved between is derived from RECIPIENT-side evidence, and the
 	//    recipient never observes the worker's egress IP (see fleetscore's
@@ -248,7 +250,7 @@ func (c client) placeOnSoleWorker(ctx context.Context, p placement) (string, err
 	if !reason.Valid() {
 		reason = fleetdecision.Forced("the fleet has one live worker, so there was no placement choice to make")
 	}
-	c.recordPlacement(ctx, p.entry(fleetdecision.KindAssign, assigned, reason))
+	c.recordDecision(ctx, p.entry(fleetdecision.KindAssign, assigned, reason))
 	return queueForWorker(assigned), nil
 }
 
@@ -290,7 +292,7 @@ func (c client) placeByScore(ctx context.Context, p placement) (string, error) {
 			"mailbox_id", p.mailbox, "workspace_id", p.workspace, "provider", p.provider, "live_workers", len(rows))
 		// No WorkerID on the entry: a refusal placed the mailbox nowhere, and
 		// naming a worker it was refused FROM would read as the one it landed on.
-		c.recordPlacement(ctx, p.entry(fleetdecision.KindRefused, "", fleetdecision.Forced(fmt.Sprintf(
+		c.recordDecision(ctx, p.entry(fleetdecision.KindRefused, "", fleetdecision.Forced(fmt.Sprintf(
 			"every one of the %d live workers has recently been blocked or unreachable for provider %q and none has completed an operation since; add fleet capacity or wait for the block to clear",
 			len(rows), p.provider))))
 		return "", coreapi.ErrNoEligibleWorker
@@ -300,7 +302,7 @@ func (c client) placeByScore(ctx context.Context, p placement) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	c.recordPlacement(ctx, p.entry(fleetdecision.KindAssign, assigned, placementReason(ranked, len(rows), assigned)))
+	c.recordDecision(ctx, p.entry(fleetdecision.KindAssign, assigned, placementReason(ranked, len(rows), assigned)))
 	return queueForWorker(assigned), nil
 }
 
@@ -365,12 +367,18 @@ func adoptedReason(picked, assigned string) fleetdecision.Reason {
 		assigned, picked))
 }
 
-// recordPlacement appends one decision-log entry for a placement that actually
+// recordDecision appends one decision-log entry for something that actually
 // happened — a persisted assignment, or a refusal. Best effort by design: a
 // decision that could not be logged is degraded observability, and failing the
 // send path over a missing log line would turn that into a mailbox that stops
 // sending.
-func (c client) recordPlacement(ctx context.Context, e fleetdecision.Entry) {
+//
+// Named for DECISIONS rather than placements because it no longer serves only
+// placement: the rotation tick (workerrotation.go) writes through the same
+// best-effort rule, from a path with no client to hand. It reaches
+// RecordFleetDecision through coreapi.FleetDecisionRecorder instead, which is
+// why it does not simply call this.
+func (c client) recordDecision(ctx context.Context, e fleetdecision.Entry) {
 	if err := c.RecordFleetDecision(ctx, e); err != nil {
 		slog.WarnContext(ctx, "fleet decision not recorded",
 			"kind", e.Kind, "mailbox_id", e.MailboxID, "err", err)

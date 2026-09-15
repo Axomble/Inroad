@@ -144,7 +144,7 @@ func TestRecordNilRecorderIsNoOpAndHandlerStillRuns(t *testing.T) {
 // length, so whatever a sweep's error string happens to contain is what lands
 // in an instance-scoped table that is read by an operator, not a tenant. The
 // column comment claimed "never tenant content", which the decorator cannot
-// promise: it stores errors.Error() from six handlers it does not own, and one
+// promise: it stores errors.Error() from handlers it does not own, and one
 // of them wrapping a mailbox address or a recipient list would make the claim
 // false. Capping is the guarantee that can actually be kept.
 func TestRecordCapsAnUnboundedErrorMessage(t *testing.T) {

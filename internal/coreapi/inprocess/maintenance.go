@@ -61,7 +61,7 @@ func (c client) PurgeDeadWorkers(ctx context.Context) (int64, error) {
 
 // PurgeScheduledJobRuns removes scheduled_job_runs rows past their 30-day
 // retention window. task_dead_letters / webhook_deliveries reasoning
-// (invariant 55): six jobs write a row per run through
+// (invariant 55): seven jobs write a row per run through
 // internal/platform/jobrun.Record, several every five minutes, and nothing
 // else in the codebase ever deletes from the table. Kept separate from
 // CleanupExpired for the same reason as the purges above: a job-run record is
