@@ -126,14 +126,22 @@ func storedAssignment(t *testing.T, ctx context.Context, pool *pgxpool.Pool, mai
 	return found[0], true
 }
 
-// resetRouting clears the two GLOBAL-infra routing tables. Unlike tenant data
-// (isolated per test by unique workspace/mailbox UUIDs), `workers` and
-// `mailbox_worker_assignments` use fixed worker ids that otherwise leak across
-// tests sharing this Postgres — a stale live worker would be picked by the
-// fleet-wide least-loaded query and make assignment order non-deterministic.
+// resetRouting clears the GLOBAL-infra routing tables. Unlike tenant data
+// (isolated per test by unique workspace/mailbox UUIDs), `workers`,
+// `mailbox_worker_assignments` and `worker_provider_signals` are keyed by fixed
+// worker ids that otherwise leak across tests sharing this Postgres — a stale
+// live worker would be picked by the fleet-wide scoring query, and a stale
+// `blocked` signal left by a health test would make a worker ineligible in a
+// completely unrelated one, which is the kind of failure that reads as a bug in
+// the code under test.
+//
+// fleet_decisions goes too: the placement path appends to it on every
+// placement, and a decision-log assertion that counted rows from a previous
+// test's placements would be measuring history rather than behaviour.
 func resetRouting(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, "TRUNCATE mailbox_worker_assignments, workers"); err != nil {
+	if _, err := pool.Exec(ctx,
+		"TRUNCATE mailbox_worker_assignments, workers, worker_provider_signals, fleet_decisions"); err != nil {
 		t.Fatalf("reset routing tables: %v", err)
 	}
 }
@@ -169,9 +177,8 @@ func TestAssignMailboxWorkerNoLiveWorkerFallback(t *testing.T) {
 }
 
 // TestAssignMailboxWorkerLeastLoadedAndIdempotent: the assigner picks the
-// least-loaded live worker ALREADY IN the mailbox's risk band, then returns
-// that same assignment on every subsequent call (idempotent), even after the
-// load balance changes.
+// worker with the most headroom, then returns that same assignment on every
+// subsequent call (idempotent), even after the load balance changes.
 func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	pool, q := claimConnect(t)
@@ -190,12 +197,10 @@ func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 	if err := c.UpsertWorkerHeartbeat(ctx, "bbb", "203.0.113.2", "hostname"); err != nil {
 		t.Fatalf("heartbeat bbb: %v", err)
 	}
-	// Both already carry the SAME band ("healthy" — mb below has no
-	// warmup_participants row either, so it is healthy too): risk-band
-	// segregation (fleet F5) prefers a worker ALREADY in the matching band over
-	// promoting an untouched one, so both must already be band-committed for
-	// "least loaded" to be the thing under test here, rather than idle
-	// promotion. "aaa" carries strictly more load than "bbb".
+	// Both carry the SAME band ("healthy" — mb below has no warmup_participants
+	// row either, so it is healthy too) and the same provider, so the band and
+	// crowding terms are equal and headroom is what separates them. "aaa"
+	// carries strictly more load than "bbb".
 	preload := func(worker string, n int) {
 		for i := 0; i < n; i++ {
 			load := createRoutingMailbox(t, ctx, q, ws.ID)
@@ -215,7 +220,7 @@ func TestAssignMailboxWorkerLeastLoadedAndIdempotent(t *testing.T) {
 		t.Fatalf("assign: %v", err)
 	}
 	if got != "w:bbb" {
-		t.Fatalf("least-loaded pick = %q, want w:bbb", got)
+		t.Fatalf("headroom pick = %q, want w:bbb", got)
 	}
 
 	// Idempotent: repeated calls return the SAME assignment even though "bbb" is

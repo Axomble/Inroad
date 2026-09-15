@@ -23,33 +23,52 @@ DO UPDATE SET egress_ip = EXCLUDED.egress_ip, id_family = EXCLUDED.id_family, la
 -- assignment outlives a worker restart that reuses the same id (the common
 -- case, and the one where keeping the pin preserves egress-IP stability).
 --
--- band travels with the row (fleet F5: risk-band segregation) so the caller can
--- compare it against the mailbox's CURRENT computed band without a second
--- query: a mismatch (the mailbox's warmup lane moved since this row was
--- written) is treated exactly like a dead worker — fall through and reassign.
---
--- worker_mixed reports whether the ASSIGNED WORKER currently carries more than
--- one band (fix-round-1, Important 2's convergence design). It is what lets
--- the caller's idempotent fast path distinguish "stable, leave it" from "this
--- mailbox is parked on a legacy/last-resort mixed worker, and should keep
--- checking whether a pure or idle worker has since become available" — without
--- it, a mailbox landed on a mixed worker via the tier-3 fallback would never
--- re-evaluate and would sit there forever even after capacity opened up,
--- because its OWN band never changes.
-SELECT a.worker_id, a.band,
-       (SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2 WHERE a2.worker_id = a.worker_id) > 1 AS worker_mixed
+-- It returns the worker and NOTHING ELSE, which is the whole of fleet F4's
+-- incumbency rule: a live incumbent is kept, unconditionally. IP trust accrues
+-- per (mailbox, IP) pair at the PROVIDER — it is what decides whether a sign-in
+-- from that address is challenged — and moving a mailbox discards it, so no
+-- packing preference is worth paying that. Two columns this query used to
+-- return for F5, the stored band and a COUNT(DISTINCT band) "is the worker
+-- mixed" flag, are gone with the tiers that read them: both existed to make a
+-- LIVE incumbent's placement worth re-deciding, and under F4 it never is.
+-- Whether a mailbox should MOVE at all is rotation's question, gated
+-- separately, not something the send path decides in passing.
+SELECT a.worker_id
 FROM mailbox_worker_assignments a
 JOIN workers w ON w.worker_id = a.worker_id
 WHERE a.mailbox_id = $1
   AND a.workspace_id = $2
   AND w.last_seen_at >= @live_since::timestamptz;
 
+-- name: GetMailboxPlacementFacts :one
+-- The two mailbox facts placement scores on, in one workspace-pinned round
+-- trip: which transport leg it runs (mailboxes.provider — an API-backed mailbox
+-- occupies a worker far less than an SMTP+IMAP one) and its warmup lane, from
+-- which the caller derives the risk band through warmup.RiskBandForLane. The
+-- LANE is returned rather than a band computed here, so that mapping stays in
+-- one place instead of being re-implemented in SQL.
+--
+-- The LEFT JOIN is load-bearing: a mailbox with no warmup_participants row is
+-- not enrolled in warmup at all, and gets an empty lane, which RiskBandForLane
+-- reads as healthy. Opting out of warmup must not cost a mailbox placement.
+--
+-- Zero rows means the mailbox does not belong to this workspace. The caller
+-- fails closed on that (coreapi.ErrCrossTenant) BEFORE any placement work,
+-- rather than discovering it at the insert.
+SELECT m.provider, coalesce(p.lane, '')::text AS lane
+FROM mailboxes m
+LEFT JOIN warmup_participants p
+       ON p.mailbox_id = m.id AND p.workspace_id = m.workspace_id
+WHERE m.id = $1 AND m.workspace_id = $2;
+
 -- name: PickLeastLoadedWorker :one
--- The least-loaded LIVE worker (heartbeat at or after live_since), with NO band
--- filter. Used only when the fleet has at most one live worker (self-host: there
--- is no second worker to segregate onto, so segregation must not apply — refusing
--- would stop self-host from sending) — the band-aware picks below are used
--- otherwise. Load is the current assignment count across ALL workspaces — workers
+-- The least-loaded LIVE worker (heartbeat at or after live_since), with NO
+-- scoring of any kind. Used only when the fleet has at most one live worker
+-- (self-host): with no second worker there is no placement CHOICE to make, so
+-- every later refinement — bands under F5, the score under F4, the health gate
+-- — would only ever amount to refusing to send from the one worker there is.
+-- This path is deliberately byte-for-byte what it was before either feature
+-- existed. Load is the current assignment count across ALL workspaces — workers
 -- are global infra, so balancing is fleet-wide, not per-tenant. Deterministic
 -- worker_id tie-break. No live worker => zero rows (the caller falls back to the
 -- shared default queue).
@@ -64,162 +83,97 @@ LIMIT 1;
 -- name: CountLiveWorkers :one
 -- How many workers are currently live. Drives the self-host bypass: at most one
 -- live worker means there is no placement CHOICE to make, so AssignMailboxWorker
--- skips band matching entirely and falls back to PickLeastLoadedWorker — the
--- exact pre-F5 behaviour, byte for byte, for the single-worker topology.
+-- skips scoring entirely and falls back to PickLeastLoadedWorker.
 SELECT count(*) FROM workers WHERE last_seen_at >= @live_since::timestamptz;
 
--- name: PickPureWorkerForBand :one
--- Tier 1 (fix-round-1, Important 2). The least-loaded LIVE worker that is
--- PURELY this band — EVERY assignment it currently carries shares `band`,
--- never a worker that merely carries SOME of this band alongside others.
+-- name: ListPlacementCandidates :many
+-- Every live worker, with the facts fleet F4 scores it on. One aggregate, one
+-- round trip; the scoring itself is a pure function in
+-- internal/platform/fleetscore, so the weights are unit-testable without a
+-- database and this query holds no policy at all.
 --
--- The original round-1 query (`... EXISTS (a.band = @band)`, no exclusion of
--- other bands) proved only "carries at least one row of this band", which a
--- MIXED worker satisfies for BOTH bands simultaneously. On a real fleet —
--- where placement was band-blind before this feature, and a brand-new
--- warmup_participants row defaults to lane='probation' (migration
--- 000055:12), which RiskBandForLane maps to degraded — essentially every
--- worker already carries a mix on migration day, so that query treated every
--- worker as a valid pick for every band: idle promotion (and therefore
--- ErrNoBandCapacity, the strictness guarantee) effectively never fired. Never
--- widening a pure worker's population with the WRONG band is what "never
--- newly mix a worker that is currently pure" means in practice — this tier
--- is the only one placement may pick from for FREE (see PickMixedWorker for
--- the last-resort tier that costs a warning log).
-SELECT w.worker_id
+-- FLEET-WIDE BY DESIGN, and it returns no tenant row. `workers` is global
+-- infrastructure (migration 000017's trust-domain split) and a worker's
+-- occupancy is a fact about a host, not about a tenant. The two workspace_id
+-- predicates here are NOT a tenancy scope and must not be read as one: one is
+-- the composite join to mailboxes (integrity — the same (id, workspace_id) pair
+-- the FK uses), the other is the FILTER that measures how much of the CALLER's
+-- workspace already sits on each worker. Everything returned is a count or a
+-- worker id.
+--
+-- The provider split is three columns rather than a weighted sum computed here
+-- for the reason the whole file follows: a weight is policy, and policy that
+-- lives in SQL cannot be unit-tested or tuned without a migration.
+--
+-- Signals are read PER PROVIDER (worker_provider_signals, migration
+-- 20260914150140). A worker Google has blocked is still a perfectly good home
+-- for an SMTP mailbox, so asking "how is this worker doing" fleet-wide would
+-- take workers out of service for providers that are perfectly happy with them.
+-- 'blocked' and 'unreachable' are the two verdicts that say the provider will
+-- not talk to this address (providersignal's own doc: 'rejected' is about the
+-- recipient and must never be read as per-IP risk); the softer trio is returned
+-- alongside for the score, not the gate.
+SELECT
+    w.worker_id,
+    count(mb.id) FILTER (WHERE mb.provider = 'smtp')::bigint  AS smtp_mailboxes,
+    count(mb.id) FILTER (WHERE mb.provider = 'gmail')::bigint AS gmail_mailboxes,
+    count(mb.id) FILTER (WHERE mb.provider = 'm365')::bigint  AS m365_mailboxes,
+    count(mb.id) FILTER (WHERE a.workspace_id = @workspace_id::uuid)::bigint AS same_workspace_mailboxes,
+    count(mb.id) FILTER (WHERE a.band <> @band::text)::bigint AS other_band_mailboxes,
+    sig.ok_events,
+    sig.block_events,
+    sig.throttle_events
 FROM workers w
+LEFT JOIN mailbox_worker_assignments a ON a.worker_id = w.worker_id
+LEFT JOIN mailboxes mb ON mb.id = a.mailbox_id AND mb.workspace_id = a.workspace_id
+LEFT JOIN LATERAL (
+    SELECT
+        coalesce(sum(s.events) FILTER (WHERE s.reason = 'ok'), 0)::bigint AS ok_events,
+        coalesce(sum(s.events) FILTER (WHERE s.reason IN ('blocked', 'unreachable')), 0)::bigint AS block_events,
+        coalesce(sum(s.events) FILTER (WHERE s.reason IN ('rate_limited', 'throttled', 'auth_failed')), 0)::bigint AS throttle_events
+    FROM worker_provider_signals s
+    WHERE s.worker_id = w.worker_id
+      AND s.provider = @provider::text
+      AND s.window_end >= @signals_since::timestamptz
+) sig ON TRUE
 WHERE w.last_seen_at >= @live_since::timestamptz
-  AND EXISTS (
-      SELECT 1 FROM mailbox_worker_assignments a
-      WHERE a.worker_id = w.worker_id AND a.band = @band::text
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM mailbox_worker_assignments a
-      WHERE a.worker_id = w.worker_id AND a.band <> @band::text
-  )
-ORDER BY (
-    SELECT count(*) FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
-) ASC, w.worker_id ASC
-LIMIT 1;
-
--- name: PickIdleLiveWorker :one
--- Tier 2 (requirement 3's promotion path). A live worker carrying NO
--- assignments at all (any band) — only a genuinely idle worker may be
--- adopted into a band, never one already carrying another band's mailboxes.
--- Deterministic worker_id tie-break, matching the other picks.
---
--- MUST be called inside the SAME transaction as the LockWorkerPromotion
--- advisory lock immediately before it, and the InsertMailboxWorkerAssignment
--- that follows it (see coreapi/inprocess.client.claimIdleWorker). Without the
--- lock, two DIFFERENT mailboxes of DIFFERENT bands racing to place
--- concurrently can BOTH see the same worker as idle (neither has inserted
--- yet) and both succeed — mixing a worker the promotion path exists to keep
--- pure (fix-round-1, Important 1; TestAssignMailboxWorkerIdlePromotionRaceNeverMixesAWorker
--- proves it against the unlocked version first). ON CONFLICT on
--- mailbox_worker_assignments cannot catch this: the two racing INSERTs are
--- for DIFFERENT mailbox_ids, so they never conflict with each other.
-SELECT w.worker_id
-FROM workers w
-WHERE w.last_seen_at >= @live_since::timestamptz
-  AND NOT EXISTS (
-      SELECT 1 FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
-  )
-ORDER BY w.worker_id ASC
-LIMIT 1;
-
--- name: LockWorkerPromotion :exec
--- A single global advisory lock, held for the transaction (auto-released at
--- COMMIT or ROLLBACK — never the session-scoped form, which could strand the
--- lock on a pooled connection reused for something else after a crash)
--- serializing ONLY the tier-2 idle-promotion decision (fix-round-1,
--- Important 1).
---
--- Scoped narrowly on purpose. Tier 1 (PickPureWorkerForBand) and tier 3
--- (PickMixedWorker) need NO lock: concentrating another mailbox onto an
--- ALREADY-committed-band or already-mixed worker always inserts a DISTINCT
--- row (mailbox_id is the assignment's primary key), so two concurrent
--- inserts for different mailboxes never conflict — the race exists only
--- because ADOPTING an idle worker changes what "pure" means for that worker
--- for every future placement, and only one band may win that decision.
---
--- One fixed key rather than one per band or per worker: the lock is held only
--- across a single SELECT + INSERT (microseconds), and it is only ever
--- CONTENDED while a band has zero committed workers — i.e. during a fleet's
--- initial ramp-up, not steady-state operation, where tier 1 already satisfies
--- every placement without ever reaching this lock at all.
-SELECT pg_advisory_xact_lock(hashtext('inroad:worker_idle_promotion'));
-
--- name: PickMixedWorker :one
--- Tier 3 (fix-round-1, Important 2's convergence design; last resort). The
--- least-loaded LIVE worker that is ALREADY mixed — carries more than one
--- band today, from before this feature existed or from the lane-derived
--- migration-day reality PickPureWorkerForBand's doc describes. Placing one
--- more mailbox here is never a NEW contamination — the worker was already
--- impure — and refusing when this is the only capacity left would stop a
--- real, already-mixed fleet from sending at all on its very first deploy,
--- which is a worse failure than an imperfectly segregated placement.
---
--- This is not a permanent home: every mailbox landed here still migrates off
--- lazily on its own NEXT AssignMailboxWorker call once a pure or idle worker
--- becomes available — GetLiveMailboxWorkerAssignment's worker_mixed flag is
--- what makes the caller keep re-evaluating a mailbox parked here instead of
--- treating it as stable forever, the same way a lane change does (requirement
--- 4) — so a fleet converges toward purity over time. The CALLER logs every
--- use of this tier so an operator can watch that convergence happen.
-SELECT w.worker_id
-FROM workers w
-WHERE w.last_seen_at >= @live_since::timestamptz
-  AND (
-      SELECT count(DISTINCT a.band) FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
-  ) > 1
-ORDER BY (
-    SELECT count(*) FROM mailbox_worker_assignments a WHERE a.worker_id = w.worker_id
-) ASC, w.worker_id ASC
-LIMIT 1;
+GROUP BY w.worker_id, sig.ok_events, sig.block_events, sig.throttle_events
+ORDER BY w.worker_id ASC;
 
 -- name: InsertMailboxWorkerAssignment :one
--- Persist an assignment (with its risk band, fleet F5). Self-enforcing tenancy
--- (defense in depth): the row is written ONLY when the mailbox truly belongs to
--- the workspace, so a mismatched (mailbox, workspace) pair inserts zero rows and
--- RETURNING yields pgx.ErrNoRows — the caller maps that to a cross-tenant
--- rejection.
+-- Persist an assignment (with the risk band it was placed under, fleet F5).
+-- Self-enforcing tenancy (defense in depth): the row is written ONLY when the
+-- mailbox truly belongs to the workspace, so a mismatched (mailbox, workspace)
+-- pair inserts zero rows and RETURNING yields pgx.ErrNoRows — the caller maps
+-- that to a cross-tenant rejection.
 --
--- On a mailbox_id conflict the row is claimed for the incoming (worker, band)
--- ONLY if the incumbent is LIVE, already in the same band as the incoming
--- write, AND NOT CURRENTLY MIXED; otherwise the incumbent is replaced. That
--- single rule serves four callers:
+-- On a mailbox_id conflict the incumbent row is kept UNTOUCHED if its worker is
+-- LIVE, and replaced otherwise. Two callers depend on exactly that rule:
 --
---   * concurrent first-send race — both racers computed the SAME target band for
---     this mailbox (it hasn't changed mid-race), so whichever inserted first
---     wins and the loser's EXCLUDED.band matches the winner's stored band; the
---     existing row wins unchanged and both resolve to the same queue.
+--   * concurrent first-send race — whichever racer inserted first wins, and
+--     every later racer sees a live incumbent and adopts that answer, so all of
+--     them resolve to ONE queue. Two IPs sending as one mailbox is the
+--     deliverability failure the pin exists to prevent, and it is why this stays
+--     a single atomic upsert rather than a DELETE + INSERT in the caller.
 --   * reassignment after a worker died — the incumbent is not live, so the row
---     moves to the caller's freshly-picked worker instead of being pinned to a
+--     moves to the caller's freshly-picked worker instead of staying pinned to a
 --     queue nobody consumes.
---   * a mailbox's warmup lane changed band since it was last assigned — the
---     incumbent is live but its stored band now disagrees with EXCLUDED.band
---     (the caller already re-picked a worker matching the NEW band before
---     calling this), so the row moves even though the old worker is still up.
---     This is how a degrading mailbox's NEXT assignment lands in the degraded
---     band (requirement 4): AssignMailboxWorker recomputes and compares the
---     band on every call, so the very next warmup tick after a lane change
---     picks this branch.
---   * a mailbox is parked on an already-mixed worker, its OWN band hasn't
---     changed, but the caller found a pure or idle worker to move it to
---     (fix-round-1, Important 2's convergence design). Without the "not
---     mixed" clause, the incumbent's band matching EXCLUDED.band alone would
---     keep the row on the mixed worker forever — the caller's whole tiered
---     re-pick would be silently discarded here, because band-match was the
---     ONLY signal this statement used to check before that fix. The mixed
---     check is evaluated against mailbox_worker_assignments.worker_id (the
---     row's CURRENT, not-yet-updated worker) so it reads the incumbent's
---     population INCLUDING this row's own not-yet-moved band, matching
---     GetLiveMailboxWorkerAssignment's worker_mixed flag exactly.
 --
--- Keeping this as one atomic upsert (rather than a DELETE + INSERT in the
--- caller) means two workers reassigning the same stranded mailbox converge: the
--- first takes it, the second sees a live, same-band, non-mixed incumbent and
--- adopts that answer.
+-- The band and mixedness conditions this CASE used to carry are gone with fleet
+-- F4. Both existed to let a LATER call MOVE a mailbox off a live worker — when
+-- its warmup lane changed band, or when a purer worker became available — and
+-- F4 does not move mailboxes: a live incumbent is kept (see
+-- GetLiveMailboxWorkerAssignment), and whether a mailbox should move at all is
+-- rotation's separate decision. Keeping the conditions would have left this
+-- statement able to repoint a row that the caller had already decided to leave
+-- alone.
+--
+-- band therefore records the band the mailbox was PLACED under, and is not
+-- refreshed while the mailbox stays put. That staleness is deliberate and
+-- bounded: the band is the weakest term in the score precisely because a
+-- warmup lane is derived from recipient-side signals the worker's egress IP is
+-- invisible to, so paying a write on every resolve to keep it exact would cost
+-- more than the term is worth.
 INSERT INTO mailbox_worker_assignments (mailbox_id, workspace_id, worker_id, band)
 SELECT $1, $2, $3, $4 FROM mailboxes WHERE id = $1 AND workspace_id = $2
 ON CONFLICT (mailbox_id)
@@ -228,11 +182,7 @@ DO UPDATE SET worker_id = CASE
         SELECT 1 FROM workers w
         WHERE w.worker_id = mailbox_worker_assignments.worker_id
           AND w.last_seen_at >= @live_since::timestamptz
-    ) AND mailbox_worker_assignments.band = EXCLUDED.band
-    AND (
-        SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2
-        WHERE a2.worker_id = mailbox_worker_assignments.worker_id
-    ) <= 1
+    )
     THEN mailbox_worker_assignments.worker_id
     ELSE EXCLUDED.worker_id
 END,
@@ -241,11 +191,7 @@ band = CASE
         SELECT 1 FROM workers w
         WHERE w.worker_id = mailbox_worker_assignments.worker_id
           AND w.last_seen_at >= @live_since::timestamptz
-    ) AND mailbox_worker_assignments.band = EXCLUDED.band
-    AND (
-        SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2
-        WHERE a2.worker_id = mailbox_worker_assignments.worker_id
-    ) <= 1
+    )
     THEN mailbox_worker_assignments.band
     ELSE EXCLUDED.band
 END,
@@ -254,11 +200,7 @@ assigned_at = CASE
         SELECT 1 FROM workers w
         WHERE w.worker_id = mailbox_worker_assignments.worker_id
           AND w.last_seen_at >= @live_since::timestamptz
-    ) AND mailbox_worker_assignments.band = EXCLUDED.band
-    AND (
-        SELECT count(DISTINCT a2.band) FROM mailbox_worker_assignments a2
-        WHERE a2.worker_id = mailbox_worker_assignments.worker_id
-    ) <= 1
+    )
     THEN mailbox_worker_assignments.assigned_at
     ELSE now()
 END

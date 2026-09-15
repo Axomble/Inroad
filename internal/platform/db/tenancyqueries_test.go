@@ -143,9 +143,6 @@ var tenancyExceptions = map[string]string{
 
 	// (d) cross-tenant fan-out — returns workspace_id so downstream work is per-workspace.
 	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet — infrastructure, not tenant data (migration 000017); assignment counts are fleet-wide by design.",
-	"worker_routing.sql:PickPureWorkerForBand":        "risk-band segregation (fleet F5) tier 1: finds a LIVE worker that is purely one risk band already, fleet-wide like PickLeastLoadedWorker — a mailbox's band is tenant-derived, but the worker it may join is a fleet-wide infrastructure question, not a per-tenant one.",
-	"worker_routing.sql:PickIdleLiveWorker":           "risk-band segregation (fleet F5) tier 2 (promotion path): finds a LIVE worker carrying no assignments at all, fleet-wide for the same reason as PickLeastLoadedWorker — idleness is a property of the worker, not of one tenant's slice of it.",
-	"worker_routing.sql:PickMixedWorker":              "risk-band segregation (fleet F5) tier 3 (last-resort convergence path): finds a LIVE worker that already carries more than one band, fleet-wide for the same reason as the other worker picks — which workers exist and what they carry is infrastructure state, not a tenant's.",
 	"enrollment.sql:ListDueEnrollments":               "sweeper fan-out: selects due enrollments across all workspaces and RETURNS workspace_id so each enrollment is then advanced workspace-scoped. The pin lives one step later, in the per-enrollment job.",
 	"mailbox.sql:ListActiveMailboxes":                 "poller fan-out: returns (id, workspace_id) for every active mailbox so each poll then runs workspace-scoped via GetMailbox.",
 	"warmup.sql:ListDueWarmupMailboxes":               "warmup sweep fan-out: returns (mailbox, workspace) pairs, and per-mailbox gating (NextWarmupDue, GetWarmupSendJob) is workspace-pinned.",
@@ -465,7 +462,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 50
+	const known = 47
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+
