@@ -1,9 +1,9 @@
 import { useId, useState } from 'react'
-import { Link } from '@tanstack/react-router'
 import { Building2, ChartNoAxesColumn, ChevronRight, CircleCheckBig, CircleDollarSign, Inbox, SendHorizontal, LayoutDashboard, Mail, Megaphone, Users, Settings, Flame, Gauge, Sparkles, BookOpen, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { config } from '@/lib/config'
 import { Button } from '@/components/ui/button'
+import { NavLink } from '@/components/shared/nav-link'
 import { PulseCard } from './pulse-card'
 import { SidebarFooter } from './sidebar-footer'
 import { useNavCounts } from './use-nav-counts'
@@ -35,11 +35,10 @@ type NavItem = { label: string; icon: LucideIcon } & (
       to: string
       href?: never
       /**
-       * Highlight this row only on its exact path. TanStack matches a `to`
-       * against route *prefixes* by default, which is right for a section row
-       * (Campaigns stays lit on a campaign's detail page) and wrong for
-       * `/app` — the prefix of every screen in the app, so Overview rendered
-       * as active everywhere and two rows always looked selected at once.
+       * Highlight this row only on its exact path — needed for `/app`, the
+       * parent of every screen in the product. Omitted rows keep prefix
+       * matching, so Campaigns stays lit on a campaign's detail tabs. See
+       * `components/shared/nav-link.tsx` for why this decision is explicit.
        */
       exact?: boolean
     }
@@ -98,14 +97,14 @@ function NavRow({ item, count }: { item: NavItem; count?: number }) {
   }
 
   return (
-    <Link
+    <NavLink
       to={item.to}
+      exact={item.exact ?? false}
       className={rowClass}
-      activeOptions={{ exact: item.exact ?? false }}
-      activeProps={{ className: 'bg-chrome-hover font-medium text-chrome-text shadow-[inset_0_0_0_1px_var(--chrome-border)] before:absolute before:left-0 before:h-4 before:w-0.5 before:rounded-full before:bg-primary' }}
+      activeClassName="bg-chrome-hover font-medium text-chrome-text shadow-[inset_0_0_0_1px_var(--chrome-border)] before:absolute before:left-0 before:h-4 before:w-0.5 before:rounded-full before:bg-primary"
     >
       {content}
-    </Link>
+    </NavLink>
   )
 }
 
