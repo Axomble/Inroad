@@ -51,6 +51,11 @@ export default defineConfig({
 						{ label: 'Single-Instance Docker Compose', slug: 'deploy/docker-compose' },
 						{ label: 'AWS Production (Terraform)', slug: 'deploy/aws-terraform' },
 						{ label: 'Kubernetes Cluster (Helm)', slug: 'deploy/kubernetes-helm' },
+						// Placed directly after the three deployment methods and before the
+						// reference material: whichever way you stood the instance up, the
+						// operator CLI is the first thing you need once it is running, and
+						// the one page you must be able to find when sign-in is broken.
+						{ label: 'Operator CLI (inroadctl)', slug: 'deploy/operator-cli' },
 						{ label: 'Hosting Costs', slug: 'deploy/hosting-costs' },
 						{ label: 'Environment Variables Reference', slug: 'deploy/environment-variables' },
 					],

@@ -53,6 +53,13 @@ That's the whole install. Secrets are generated on first boot, migrations run au
 app is on <http://localhost>. Deployment options (env vars, Gmail/M365 OAuth setup, Terraform, Helm)
 are in [docs/self-hosting.md](docs/self-hosting.md).
 
+The API image also ships `inroadctl`, the operator CLI. It talks to Postgres directly rather than
+through the API, which is what makes it work when sign-in itself is broken — create the first
+account, reset a password, or restore a lost owner from the shell. See
+[the operator CLI reference](docs/src/content/docs/deploy/operator-cli.md); the zero-config compose
+stack above needs one extra step, because its generated secrets live in a volume rather than in the
+container's environment.
+
 **Hack on it** (live-reloading dev stack, still only Docker required):
 
 ```bash
