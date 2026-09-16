@@ -62,12 +62,12 @@ or SSRF. (Not a full threat model; that's future work.)
 
    The **transactional** sender (`platform/notify`, system email: verification,
    password reset, login codes, invites) follows the same rule with its own
-   explicit opt-out, `INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` (default **false**;
-   any value that isn't an explicit `true`/`1`/`yes` stays false). Unset, empty,
-   or misspelled all keep TLS mandatory — the reasoning is identical to the
-   per-mailbox flag above: a configuration mistake must never be able to
-   downgrade a send to cleartext, so cleartext has to be *chosen*, never
-   defaulted into. It exists so the dev stack can reach a local mail catcher
+   explicit opt-out, `INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` (default **false**).
+   Unset and empty keep TLS mandatory, and a value `config.Load` does not
+   recognise is a **startup error** rather than a silent false — the reasoning is
+   identical to the per-mailbox flag above: a configuration mistake must never be
+   able to downgrade a send to cleartext, so cleartext has to be *chosen*, never
+   defaulted into, and never mistyped into. It exists so the dev stack can reach a local mail catcher
    (Mailpit, plaintext and no AUTH); it must never be set in production. Auth is
    offered only when a system SMTP username is configured, which is orthogonal:
    omitting credentials never relaxes transport security.
@@ -1574,8 +1574,10 @@ write history that never happened.
     surfacing as a killed handler with no cause.
 
 75. **The switch is off by default and refuses what cannot work.**
-    `INROAD_FLEET_COREAPI_REMOTE` defaults false and fails closed on anything
-    that is not explicitly truthy, the same rule as every other opt-out here. A
+    `INROAD_FLEET_COREAPI_REMOTE` defaults false, needs an explicitly truthy
+    value to turn on, and makes a value `config.Load` cannot parse a startup
+    error rather than a silent false — the same rule as every other opt-out
+    here, so a typo can neither enable the transport nor pretend to. A
     self-hosted installation sets none of it: `config.Load` with a cleared
     environment yields false, `resolveCoreAPIMode` returns in-process for all
     three roles, and the wiring installs ZERO `inprocess` options, so

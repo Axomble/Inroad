@@ -5,33 +5,47 @@ description: Every environment variable the Inroad backend reads, with its real 
 
 `internal/platform/config/config.go` is the source of truth for this page. It is
 the only place the binaries read `INROAD_*` configuration from — the one
-exception is `INROAD_LOG_LEVEL`, which `internal/platform/log` re-reads directly
-so a logger can exist before config does. Every default below is that file's,
-and the tables are complete against it: all **82** variables it reads are listed
-here.
+exception is `INROAD_LOG_LEVEL`, which `internal/platform/log` reads directly
+(and alone) so a logger can exist before config does. Every default below is
+that file's, and the tables are complete against it: all **82** variables the
+backend reads are listed here.
 
 ## How values are parsed
 
 Four rules apply to everything on this page, and each of them has surprised
 somebody:
 
-- **Empty is the same as unset.** A variable set to the empty string takes its
-  default. You cannot blank out a defaulted value (`INROAD_MS_TENANT=""` is
-  `common`, not empty); you have to give it a different value.
-- **Booleans accept exactly `1`, `true`, `yes`** (case-insensitive for the two
-  words). **Every other non-empty value is `false`** — including `on`, `y`, and
-  `TRUE!`. That is safe for the many flags that default to `false`, but note what
-  it means for the ones that default to **`true`**
-  (`INROAD_MAIL_ALLOW_PRIVATE_HOSTS`, `INROAD_RUN_SCHEDULER`,
-  `INROAD_COOKIE_SECURE`): a typo turns them **off**, silently.
-- **An unparseable number or duration falls back to the default, silently.**
-  `INROAD_ACCESS_TOKEN_TTL=5` is not five of anything — it is not a valid Go
-  duration, so it is discarded and you get the 5-minute default. Durations need a
-  unit: `30s`, `5m`, `720h`.
-- **Only a few values are validated at startup.** `INROAD_JWT_SECRET`,
-  `INROAD_REDIS_ADDR`, `INROAD_MASTER_KEY`, `INROAD_FLEET_BROKER_TOKEN` and the
-  database-pool sizes fail loudly and immediately when they are wrong. Everything
-  else is taken as given.
+- **Empty is the same as unset**, and whitespace counts as empty. A variable set
+  to the empty string takes its default. You cannot blank out a defaulted value
+  (`INROAD_MS_TENANT=""` is `common`, not empty); you have to give it a different
+  value.
+- **Booleans accept `1`/`0`, `true`/`false`, `t`/`f`, `yes`/`no`, `y`/`n` and
+  `on`/`off`**, in any case, with surrounding whitespace ignored. **Anything else
+  is a startup error** that names the variable and quotes what you gave it.
+  `ture` does not mean `false`.
+- **A number or duration that does not parse is a startup error too.**
+  `INROAD_ACCESS_TOKEN_TTL=5` is not five of anything — a duration needs a unit
+  (`30s`, `5m`, `720h`) — so the process refuses to start rather than taking the
+  5-minute default and leaving you to believe your setting took effect.
+- **Everything wrong is reported together.** One startup lists every malformed
+  value, so a bad configuration costs one restart to diagnose rather than one per
+  mistake. `INROAD_JWT_SECRET`, `INROAD_REDIS_ADDR`, `INROAD_MASTER_KEY`,
+  `INROAD_FLEET_BROKER_TOKEN` and the database-pool budget are validated on top
+  of that.
+
+:::caution[Upgrading: a value that used to be ignored can now stop the process]
+Until this changed, an unrecognised boolean read as `false` and an unparseable
+number or duration was discarded in favour of its default — so a working
+deployment may be carrying a typo that has never done anything visible. It now
+fails at startup, naming the variable.
+
+Nothing that parsed before stops parsing: `1`, `true` and `yes` are still
+accepted and the boolean set only grew. The typo is what changed, and on the
+three flags that default to **`true`** (`INROAD_MAIL_ALLOW_PRIVATE_HOSTS`,
+`INROAD_RUN_SCHEDULER`, `INROAD_COOKIE_SECURE`) that typo was silently turning
+the flag **off** — which is how `INROAD_COOKIE_SECURE=on` dropped the `Secure`
+attribute from the session cookie while looking like it had enabled it.
+:::
 
 ## Core
 
@@ -225,9 +239,10 @@ MinIO, R2, Wasabi) backend.
 
 A deployment already running on AWS with an attached role needs only the bucket
 name. `INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT` defaults to `false` so that an absent
-or misspelled value keeps HTTPS mandatory — a misconfiguration can never silently
-put SigV4-signed requests, object bodies and presigned URLs on the wire in
-cleartext.
+value keeps HTTPS mandatory, and a misspelled one stops the binary rather than
+being read as `false` — a misconfiguration can never put SigV4-signed requests,
+object bodies and presigned URLs on the wire in cleartext, and never goes
+unnoticed either.
 
 :::note[Configured, not yet consumed]
 These variables load and validate today, but nothing reads the storage provider
@@ -261,10 +276,10 @@ development, use a mail catcher — the dev compose stack runs Mailpit and serve
 the caught mail at `http://localhost:8025`.
 
 `INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` exists only so a local catcher (plaintext,
-no AUTH) can be reached. TLS is mandatory unless it is set to an explicit
-`true`/`1`/`yes`; unset, empty, or misspelled all keep TLS on, so a
-configuration mistake cannot downgrade delivery to cleartext. Do not set it in
-production.
+no AUTH) can be reached. TLS is mandatory unless it is set to an explicitly
+truthy value; unset and empty keep TLS on, and a misspelled value refuses to
+start, so a configuration mistake cannot downgrade delivery to cleartext. Do not
+set it in production.
 
 ## OAuth providers
 
@@ -317,9 +332,14 @@ Unset, the level comes from `INROAD_ENV`: **`debug` when it is `development`,
 `info` otherwise.** An explicit level always wins; an *unrecognised* one falls
 back to that same environment-derived default rather than failing.
 
-This is the one variable read outside `config.go`: `log.New` reads the process
-environment itself, and the `Config.LogLevel` field is not what the logger
-consults.
+This is the one variable read outside `config.go`, and it is read there *only*:
+`log.New` consults the process environment itself, because a logger has to exist
+before configuration is loaded. `Config` carries no log-level field — it used to,
+set and never read by anything, which is one source of truth too many.
+
+Unlike the parsed values above, a misspelled level does not stop the process —
+deliberately. It logs at the environment default instead, because a binary that
+refuses to start over the verbosity of its own logs helps nobody.
 
 ## Worker Tuning
 
