@@ -81,22 +81,15 @@ type HTTPOpener struct {
 
 var _ Opener = (*HTTPOpener)(nil)
 
-// NewHTTPOpener builds the remote opener. baseURL is the control plane's
-// credential-broker listener (scheme + host, no path); token is the shared
-// bearer credential both sides hold.
+// NewHTTPOpener builds the remote opener. baseURL is the control plane's fleet
+// listener (scheme + host, no path); token is the shared bearer credential both
+// sides hold.
 //
-// https is REQUIRED unless allowPlaintext is explicitly set. This channel
-// carries the bearer token AND decrypted SMTP passwords and OAuth access
-// tokens, so a plaintext hop puts in the clear exactly the material the rest of
-// this change exists to protect. The reasoning and the shape are the same as
-// storage.FromEnv's INROAD_S3_ENDPOINT rule (docs/security.md invariant 6): a
-// missing scheme is refused rather than assumed, because assuming is how a typo
-// becomes a silent downgrade, and the opt-out has to be CHOSEN — it exists for
-// a control plane reachable only over a trusted private network.
-//
-// The broker URL is OPERATOR-supplied, never user-supplied, so it does not go
-// through (and does not need) the mail.vetAddr SSRF guard — the same reasoning
-// invariant 6 applies to the S3 endpoint.
+// https is required unless allowPlaintext is explicitly set, a weak token is
+// refused, and a missing scheme is refused rather than assumed. All three rules
+// and the reasoning behind them are ParseEndpoint's — they are the FLEET
+// CHANNEL's rules rather than this transport's, because the same address and
+// token also carry internal/coreapi/remote.
 func NewHTTPOpener(baseURL, token string, allowPlaintext bool) (*HTTPOpener, error) {
 	base, err := ParseEndpoint(baseURL, token, allowPlaintext)
 	if err != nil {
