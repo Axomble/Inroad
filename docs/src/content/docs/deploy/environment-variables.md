@@ -563,11 +563,33 @@ credential token is already the more powerful of the two. Rotate
 #### Remote coreapi (worker side)
 
 `INROAD_FLEET_COREAPI_REMOTE=true` moves a `role=send` worker's `coreapi` reads
-from its own `pgxpool` onto the fleet channel. Today it moves **one method**:
-the suppression check every send makes. The worker still opens a pool for
-everything else, so this is the first step toward a worker that cannot read the
-tenant database at all — not the finished thing. Leave it off unless you are
-deliberately exercising that path.
+from its own `pgxpool` onto the fleet channel. It currently moves the
+suppression check every send makes, plus the eight **per-message job reads** —
+everything a worker needs to know in order to do one piece of work:
+
+| Method | What it answers |
+| :--- | :--- |
+| `IsSuppressed` | Is this address on the workspace's suppression list |
+| `GetStepSendJob` | The enrollment's next due step: content, gates, schedule, sender |
+| `GetInboxPollJob` | One mailbox's poll transport and stored cursor |
+| `GetWarmupSendJob` | The next warm-up action for a warming mailbox |
+| `GetWarmupEngageJob` | What to do about one received warm-up message |
+| `GetWebhookDeliveryJob` | One outbound delivery, its URL and its stored body |
+| `GetTestSendContent` | One test-send's raw step content and preview values |
+| `ResolveSenderTransport` | One mailbox's send identity and connection settings |
+| `FindSendByMessageID` | Which send an inbound reply or bounce is about |
+
+Nothing that CLAIMS, marks, finalizes or advances anything has moved yet — the
+worker still opens a pool for all of those, and for the periodic sweeps. So this
+is a step toward a worker that cannot read the tenant database at all, not the
+finished thing. Leave it off unless you are deliberately exercising that path.
+
+**Credentials do not travel on these routes.** A job response carries the
+mailbox's host, port, username and TLS policy, and no secret at all; the worker
+obtains the decrypted password or access token from the credential broker on the
+same listener, by mailbox id. That is why the flag requires
+`INROAD_FLEET_BROKER_URL` rather than merely coexisting with it: one channel in
+the installation hands out a plaintext secret, and it is the one built for it.
 
 What it enforces at startup:
 
@@ -576,11 +598,14 @@ What it enforces at startup:
   network hop to reach it would be pure latency, and silently ignoring the
   setting would leave you believing your worker had stopped reading the
   database.
-- Set **without** `INROAD_FLEET_BROKER_URL` → refuses to start.
-- A worker that cannot reach the control plane **refuses to send**. It never
-  falls back to a local read and never assumes "not suppressed": a false
-  negative here is mail delivered to someone who opted out.
-- There is **no cache**. Every check is a direct call, because a TTL on a
+- Set **without** `INROAD_FLEET_BROKER_URL` → refuses to start. That URL is both
+  where the reads go and where their credentials come from.
+- A worker that cannot reach the control plane **refuses to work**. It never
+  falls back to a local read, never assumes "not suppressed" (a false negative
+  there is mail delivered to someone who opted out), and never returns a
+  half-built job — a job with an empty body or an unset gate flag would send the
+  wrong mail rather than none.
+- There is **no cache**. Every read is a direct call, because a TTL on a
   suppression answer is a correctness decision, not a tuning knob.
 
 #### What this does and does not contain

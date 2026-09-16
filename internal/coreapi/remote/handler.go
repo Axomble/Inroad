@@ -9,14 +9,26 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/credbroker"
 )
 
-// maxRequestBytes caps a request body. The one shape is a uuid and an address.
-const maxRequestBytes = 4 << 10
+// maxRequestBytes caps a request body. Every shape is a small number of uuids
+// plus, on two routes, one free-text subject: a contact's address, and an
+// inbound Message-ID.
+//
+// 64 KiB rather than the few hundred bytes those actually need, because of what
+// refusing one would do. The Message-ID comes off unauthenticated inbound mail,
+// so its length is chosen by whoever sent the message; in-process an absurd one
+// simply matches nothing, but a 400 here would be an error the poller cannot
+// distinguish from a real failure, so it would return before SetInboxCursor and
+// the mailbox would stop processing ALL inbound mail — campaign replies and
+// bounces included. The cap still bounds the body hard; it just sits far above
+// anything a real header carries.
+const maxRequestBytes = 64 << 10
 
-// SuppressionReader is the control plane's side of the one method this slice
-// carries. It is defined HERE, at the consumer, and is deliberately the exact
+// SuppressionReader is the control plane's side of the one method slice 1
+// carried. It is defined HERE, at the consumer, and is deliberately the exact
 // signature internal/app/suppression.Store already has, so cmd/inroad wires the
 // store it already builds straight in with no adapter — one implementation of
 // "is this address suppressed", shared by the HTTP API, the in-process coreapi
@@ -26,6 +38,46 @@ const maxRequestBytes = 4 << 10
 // boundary, and a value that reaches this interface has already been validated.
 type SuppressionReader interface {
 	IsSuppressed(ctx context.Context, workspaceID uuid.UUID, email string) (bool, error)
+}
+
+// JobReader is the control plane's side of the per-message job reads. Like
+// SuppressionReader it is defined HERE, at the consumer, and its methods are
+// the EXACT signatures the in-process client already has — so cmd/inroad
+// satisfies it by type assertion on the client it already built, with no
+// adapter and no second implementation of a job build.
+//
+// It is one interface rather than eight because there is one decision behind
+// it ("this control plane serves job reads to the fleet") and one implementor.
+// Splitting it would be eight things to wire and eight things to forget.
+//
+// Every method takes ids as STRINGS, which is what the coreapi seam speaks and
+// what the in-process implementations parse themselves. The handler parses them
+// first anyway, so a malformed id never reaches a query — but it hands the
+// original string on, so the two transports feed the implementation identical
+// input.
+type JobReader interface {
+	GetStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (coreapi.StepSendJob, error)
+	GetInboxPollJob(ctx context.Context, mailboxID, workspaceID string) (coreapi.InboxPollJob, error)
+	GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID string) (coreapi.WarmupSendJob, error)
+	GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID string) (coreapi.WarmupEngageJob, error)
+	GetWebhookDeliveryJob(ctx context.Context, deliveryID, workspaceID string) (coreapi.WebhookDeliveryJob, error)
+	GetTestSendContent(ctx context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error)
+	ResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error)
+	FindSendByMessageID(ctx context.Context, workspaceID, messageID string) (coreapi.SendRef, error)
+}
+
+// Deps is what the control-plane handler serves. A struct rather than a
+// parameter list so a later slice adds a field instead of a fourth positional
+// argument, and so cmd/inroad's fleetDeps maps onto it one-to-one.
+//
+// Both are REQUIRED. A handler serving half the transport would start, register
+// its routes, and fail every call to the other half at the first send — and the
+// operator who enabled the flag would have no signal until then.
+type Deps struct {
+	// Suppression answers one suppression question (slice 1).
+	Suppression SuppressionReader
+	// Jobs answers the per-message job reads (slice 2).
+	Jobs JobReader
 }
 
 // NewHandler returns the CONTROL plane's coreapi transport handler: the server
@@ -41,9 +93,12 @@ type SuppressionReader interface {
 // token, by decision rather than convenience: the same principal (a role=send
 // worker) needs both this transport and the credential broker, so two tokens
 // would partition nothing while doubling what an operator has to rotate.
-func NewHandler(r SuppressionReader, token string, logger *slog.Logger) (http.Handler, error) {
-	if r == nil {
+func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error) {
+	if d.Suppression == nil {
 		return nil, errors.New("coreapi remote: handler needs a suppression reader")
+	}
+	if d.Jobs == nil {
+		return nil, errors.New("coreapi remote: handler needs a job reader")
 	}
 	if len(token) < credbroker.MinTokenLen {
 		return nil, credbroker.ErrWeakToken
@@ -51,15 +106,28 @@ func NewHandler(r SuppressionReader, token string, logger *slog.Logger) (http.Ha
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{suppression: r, logger: logger}
+	h := &handler{suppression: d.Suppression, jobs: d.Jobs, logger: logger}
 	authed := credbroker.RequireToken(token, logger)
 	mux := http.NewServeMux()
-	mux.Handle("POST "+PathSuppressionCheck, authed(http.HandlerFunc(h.checkSuppression)))
+	for path, fn := range map[string]http.HandlerFunc{
+		PathSuppressionCheck:   h.checkSuppression,
+		PathStepSendJob:        h.stepSendJob,
+		PathInboxPollJob:       h.inboxPollJob,
+		PathWarmupSendJob:      h.warmupSendJob,
+		PathWarmupEngageJob:    h.warmupEngageJob,
+		PathWebhookDeliveryJob: h.webhookDeliveryJob,
+		PathTestSendContent:    h.testSendContent,
+		PathSenderTransport:    h.senderTransport,
+		PathSendByMessageID:    h.sendByMessageID,
+	} {
+		mux.Handle("POST "+path, authed(fn))
+	}
 	return mux, nil
 }
 
 type handler struct {
 	suppression SuppressionReader
+	jobs        JobReader
 	logger      *slog.Logger
 }
 
@@ -114,9 +182,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func respond(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	// A suppression answer is a tenant's compliance state. Nothing between the
-	// two planes may cache it, however unlikely an intermediary is here — and a
-	// cached answer is precisely the stale negative this slice refuses to have.
+	// Every body this handler writes is a tenant's own data: a compliance state,
+	// a contact's address, the copy of a message about to go out. Nothing
+	// between the two planes may cache it, however unlikely an intermediary is
+	// here — and for the suppression answer specifically, a cached one is
+	// precisely the stale negative this transport refuses to have.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)

@@ -39,12 +39,12 @@ func (c client) ListActiveMailboxes(ctx context.Context) ([]coreapi.MailboxRef, 
 	return out, nil
 }
 
-// GetInboxPollJob loads everything the inbox poller needs to open one
+// localInboxPollJob loads everything the inbox poller needs to open one
 // mailbox's IMAP connection and resume from its stored cursor: connection
 // details, decrypted credential, and (LastSeenUID, UIDValidity). workspaceID
 // is pinned in the SQL WHERE (defense in depth on the unguessable mailbox
 // UUID).
-func (c client) GetInboxPollJob(ctx context.Context, mailboxID, workspaceID string) (coreapi.InboxPollJob, error) {
+func (c client) localInboxPollJob(ctx context.Context, mailboxID, workspaceID string) (coreapi.InboxPollJob, error) {
 	id, err := uuid.Parse(mailboxID)
 	if err != nil {
 		return coreapi.InboxPollJob{}, err
@@ -128,11 +128,11 @@ func (c client) SetInboxCursorString(ctx context.Context, mailboxID, workspaceID
 	})
 }
 
-// FindSendByMessageID matches an inbound reply/bounce's Message-ID back to the
+// localFindSendByMessageID matches an inbound reply/bounce's Message-ID back to the
 // send that caused it, workspace-scoped. Returns ErrNoMatch when nothing
 // matches (unknown Message-ID — e.g. a reply to a message this workspace
 // never sent).
-func (c client) FindSendByMessageID(ctx context.Context, workspaceID, messageID string) (coreapi.SendRef, error) {
+func (c client) localFindSendByMessageID(ctx context.Context, workspaceID, messageID string) (coreapi.SendRef, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.SendRef{}, err

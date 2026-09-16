@@ -62,11 +62,11 @@ func deriveWarmupReplySendID(receiptID uuid.UUID) uuid.UUID {
 	return uuid.NewSHA1(warmupReplySendIDNamespace, receiptID[:])
 }
 
-// GetWarmupSendJob resolves the next warmup action for a warming mailbox. It is
+// localWarmupSendJob resolves the next warmup action for a warming mailbox. It is
 // read-only w.r.t. warmup_sends (the claim inserts that row) but MAY open a
 // warmup_threads row when starting a new thread, so the returned job carries a
 // valid thread id. workspaceID is pinned in every SQL WHERE.
-func (c client) GetWarmupSendJob(ctx context.Context, mailboxID, workspaceID string) (coreapi.WarmupSendJob, error) {
+func (c client) localWarmupSendJob(ctx context.Context, mailboxID, workspaceID string) (coreapi.WarmupSendJob, error) {
 	mbID, err := uuid.Parse(mailboxID)
 	if err != nil {
 		return coreapi.WarmupSendJob{}, err

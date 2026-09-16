@@ -21,7 +21,7 @@ const (
 	testSendFallbackCompany   = "Acme"
 )
 
-// GetTestSendContent loads the raw (unrendered) step content plus the
+// localTestSendContent loads the raw (unrendered) step content plus the
 // preview personalization vars for one test-send: the step's
 // subject/body_text/body_html, and the campaign list's first (earliest-added)
 // contact's first_name/company -- or the synthetic fallback when the list has
@@ -29,7 +29,7 @@ const (
 // belong to campaignID (defense in depth on top of the API's own ownership
 // check, which resolved this same campaignID/stepID pair before enqueuing) is
 // coreapi.ErrCrossTenant.
-func (c client) GetTestSendContent(ctx context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error) {
+func (c client) localTestSendContent(ctx context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.TestSendContent{}, err

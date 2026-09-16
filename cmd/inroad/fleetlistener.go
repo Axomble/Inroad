@@ -70,6 +70,16 @@ type fleetDeps struct {
 	// so there is exactly one implementation of "is this address suppressed"
 	// behind the HTTP API, the in-process coreapi path and the wire.
 	suppression remote.SuppressionReader
+	// jobs answers the per-message job reads. cmd/inroad passes the SAME
+	// in-process coreapi client the API server and its own workers use, by type
+	// assertion — so a job a fleet worker is handed and a job the single-process
+	// topology builds come out of identical code, including every workspace pin
+	// and every gate, rather than two implementations that can drift.
+	//
+	// That build opens the mailbox credential as it always has. This transport
+	// does not carry it: the job types tag their secrets json:"-" and a fleet
+	// worker brokers them. See internal/coreapi/remote's jobs.go for why.
+	jobs remote.JobReader
 }
 
 // newFleetHandler assembles the listener's router: each transport's own handler
@@ -79,14 +89,14 @@ type fleetDeps struct {
 // out here, so a route that moves cannot silently stop being mounted. Anything
 // not under one of them is a 404: this listener is not a second copy of the API.
 func newFleetHandler(d fleetDeps, token string, logger *slog.Logger) (http.Handler, error) {
-	if d.credentials == nil || d.suppression == nil {
-		return nil, errors.New("fleet listener: both transports must be wired")
+	if d.credentials == nil || d.suppression == nil || d.jobs == nil {
+		return nil, errors.New("fleet listener: every transport must be wired")
 	}
 	brokerHandler, err := credbroker.NewHandler(d.credentials, token, logger)
 	if err != nil {
 		return nil, err
 	}
-	coreHandler, err := remote.NewHandler(d.suppression, token, logger)
+	coreHandler, err := remote.NewHandler(remote.Deps{Suppression: d.suppression, Jobs: d.jobs}, token, logger)
 	if err != nil {
 		return nil, err
 	}

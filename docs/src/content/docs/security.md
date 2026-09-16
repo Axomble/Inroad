@@ -1573,6 +1573,20 @@ write history that never happened.
     attributable and retried — rather than burning the task's budget and
     surfacing as a killed handler with no cause.
 
+    A JOB read is sized separately, on its own `http.Client`, rather than by
+    loosening those: a job build runs several indexed SELECTs and opens a mailbox
+    credential, and an EXPIRED OAuth token makes one round trip to Google or
+    Microsoft inside the handler. So 20s whole request and 15s response header,
+    matching `credbroker`'s numbers for the identical work behind the identical
+    listener, still ~17% of the tightest ceiling above it. The response cap is
+    likewise sized for what a job actually is: a realistic step send encodes to
+    ~4.8 KiB, but the API accepts up to httpx's 1 MiB JSON body for a step, and
+    1 MiB of HTML encodes to ~2.8 MiB here because `encoding/json` escapes every
+    `<`, `>` and `&`. The 8 MiB cap is therefore ~2.8x the largest job the
+    product can legitimately produce — sizing it tighter would mean a campaign
+    that silently never sent on a fleet worker, which is worse than the
+    allocation it bounds.
+
 75. **The switch is off by default and refuses what cannot work.**
     `INROAD_FLEET_COREAPI_REMOTE` defaults false, needs an explicitly truthy
     value to turn on, and makes a value `config.Load` cannot parse a startup
@@ -1588,6 +1602,74 @@ write history that never happened.
     database, and silently ignoring the setting would leave an operator
     believing their worker had stopped reading it — and refuses it without
     `INROAD_FLEET_BROKER_URL`, at startup, before anything connects.
+
+76. **A coreapi job response carries no credential. There is ONE channel in the
+    installation that hands out a plaintext secret, and it is the credential
+    broker.** The eight per-message job reads (`GetStepSendJob`,
+    `GetInboxPollJob`, `GetWarmupSendJob`, `GetWarmupEngageJob`,
+    `GetWebhookDeliveryJob`, `GetTestSendContent`, `ResolveSenderTransport`,
+    `FindSendByMessageID`) answer with everything about a piece of work EXCEPT
+    its secret: a mailbox's host, port, username and TLS policy travel, the
+    decrypted password or access token does not. The worker then opens that one
+    secret through `credbroker` (invariants 67–69), naming the mailbox by id.
+
+    Inlining it would have been one round trip instead of two and would have
+    matched the in-process shape exactly. It was rejected because `credbroker`
+    already exists FOR this, with a reviewed ids-in/values-out contract, and is
+    already MANDATORY on the only role permitted to read coreapi remotely
+    (`role=send` cannot start without a broker) — so a second plaintext channel
+    would have added a second set of audit properties to keep in step, over the
+    same listener, with the same token, for the same principal. Two channels
+    that both hand out secrets is the duplication that drifts.
+
+    **Omission is structural, not remembered.** Every secret field on the
+    `coreapi` job types is tagged `json:"-"` at its declaration — the same
+    "omission by construction" standard invariant 2 sets for API response DTOs —
+    so no later change to a job build can start emitting one.
+    `TestSecretJobFieldsNeverCrossTheWire` populates every secret field with a
+    recognisable marker, drives all six credential-bearing routes through the
+    real handler, and fails if the marker appears in any response body, raw or
+    base64. It was verified against an untagged field and fails.
+
+    **Zeroization is unchanged, and the honest statement is worth making.** The
+    worker still wipes the `[]byte` it holds, and that still does not reach every
+    copy: on a fleet host the plaintext has arrived through an HTTP read buffer
+    and a base64 decode since brokering existed (invariant 69). Slice 2 does not
+    change that in either direction, and the reason it does not is precisely that
+    the secret does not travel on this wire. On the warm-up engage path the
+    worker's single deferred wipe covers only the OUTER copy, so the transport
+    installs the SAME slices on the nested reply rather than copies — an
+    unaliased inner copy would survive the wipe intact
+    (`TestTheEngageJobsReplyCredentialAliasesTheOuterOne`, verified against an
+    un-aliased implementation).
+
+    **Fail closed on both halves.** A job that fetched but whose credential could
+    not be opened is discarded, never returned: a job with an empty password
+    would dial without authenticating, and a job with an unset gate flag would
+    send mail a gate meant to stop. Every read returns the ZERO value alongside
+    its error (`TestEveryJobReadFailsClosedWhenTheControlPlaneDies`, which first
+    proves every read works while the control plane is up, then kills it).
+
+    **Workspace-pinned exactly as invariant 73 describes**, over the SAME
+    in-process job builds the single-process topology runs — `cmd/inroad` serves
+    them by type assertion on a real `inprocess` client, so a fleet worker's job
+    and a local one come out of identical code including every tenant pin and
+    every send gate, rather than two implementations that can drift.
+    `TestJobReadsArePinnedToTheRequestedWorkspace` drives a foreign workspace id
+    at six routes through the real handler and gets a refusal and a zero value
+    from each.
+
+    **Two sentinels cross as themselves**, because the execution plane branches
+    on them and flattening either would change what a worker does:
+    `coreapi.ErrNoMatch` (the ordinary answer for nearly every inbound message —
+    a generic error would abort the poll before `SetInboxCursor` and stop the
+    mailbox processing inbound mail at all) and `pgx.ErrNoRows` (a webhook
+    delivery deleted after its task was queued must be dropped, not retried to
+    exhaustion). A 404 naming NEITHER — an un-upgraded control plane answering
+    `net/http`'s own plain-text 404 — maps to no sentinel and stays a plain
+    error, because reading it as "row gone" would make a worker silently discard
+    every webhook delivery (`TestAnUnrecognised404IsNotMistakenForAVanishedRow`,
+    verified against an implementation that did).
 
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`

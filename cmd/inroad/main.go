@@ -60,6 +60,7 @@ import (
 	"github.com/inroad/inroad/internal/app/warmup"
 	"github.com/inroad/inroad/internal/app/webhook"
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
+	"github.com/inroad/inroad/internal/coreapi/remote"
 	"github.com/inroad/inroad/internal/platform/ai"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
@@ -79,6 +80,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/redisconn"
 	"github.com/inroad/inroad/internal/platform/throttle"
 	"github.com/inroad/inroad/internal/platform/version"
+	warmuplib "github.com/inroad/inroad/internal/platform/warmup"
 )
 
 func main() {
@@ -386,9 +388,38 @@ func run() error {
 	// two share one listener and one token.
 	//
 	// Started here rather than earlier because suppStore is what it serves.
+	//
+	// The job reader is a full in-process coreapi client, built here for the
+	// first time in this binary. It is the control plane's own implementation of
+	// every job build — the same one the single-process worker runs — so a fleet
+	// worker's job and a local one come out of identical code rather than two
+	// implementations that can drift on a workspace pin or a send gate. The
+	// optional wiring (metrics, realtime, webhooks) is deliberately omitted: no
+	// job READ touches any of it, and a nil is a no-op throughout.
+	//
+	// warmuplib is internal/platform/warmup, aliased because internal/app/warmup
+	// already holds the plain name in this file. It is the CONTENT LIBRARY the
+	// warmup send job draws its synthetic conversations from.
+	//
+	// The assertion is comma-ok and its failure is a returned error, not a
+	// panic and not a silent nil: inprocess.New returns coreapi.Client, three of
+	// these eight methods are deliberately NOT on that interface, and a
+	// signature drifting out from under this is exactly how #216 nearly shipped
+	// a listener that registered no handlers. TestTheInProcessClientSatisfies
+	// TheFleetJobReader (internal/coreapi/inprocess) catches it at compile time;
+	// this catches it at startup.
+	coreClient := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL,
+		googleOAuth, msOAuth, cfg.WarmupSecret, warmuplib.NewStaticLibrary())
+	fleetJobs, ok := coreClient.(remote.JobReader)
+	if !ok {
+		logger.Error("fleet listener init failed",
+			"err", "the in-process coreapi client does not satisfy remote.JobReader")
+		return errors.New("inroad: in-process coreapi client does not satisfy remote.JobReader")
+	}
 	stopFleet, err := startFleetListener(ctx, cfg, fleetDeps{
 		credentials: inprocess.NewCredentialOpener(queries, keyring, googleOAuth, msOAuth),
 		suppression: suppStore,
+		jobs:        fleetJobs,
 	}, logger)
 	if err != nil {
 		logger.Error("fleet listener init failed", "err", err)

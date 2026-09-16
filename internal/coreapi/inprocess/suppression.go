@@ -52,11 +52,12 @@ func (l localSuppression) IsSuppressed(ctx context.Context, workspaceID, email s
 // (ReplyCore, PendingReplyCore, ComposeCore). Each treats a non-nil error as
 // "do not send", which is what makes a remote source safe to fail closed.
 //
-// NOT the only suppression read on the send path: GetStepSendJob runs its own
-// gate inline while building a step send. That one is deliberately left on the
-// pool in this slice — routing it remotely while the rest of the job build
-// still reads Postgres would buy nothing and confuse what the flag means. It
-// moves when GetStepSendJob itself moves.
+// GetStepSendJob's own inline gate (the Suppressed flag on a step send) now
+// reads through this SAME field rather than going straight at the pool, so the
+// sentence above is exact: c.suppression is the one route. Slice 1 left it on
+// the pool because routing it while the rest of that job build still read
+// Postgres would have blurred what the flag meant; slice 2 moved the whole job
+// build, so there is nothing left to blur.
 func (c client) IsSuppressed(ctx context.Context, workspaceID, to string) (bool, error) {
 	return c.suppression.IsSuppressed(ctx, workspaceID, to)
 }

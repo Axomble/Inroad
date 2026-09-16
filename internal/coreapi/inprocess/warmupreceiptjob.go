@@ -439,10 +439,10 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	}), nil
 }
 
-// GetWarmupEngageJob loads the transport + reply content for one receipt. See the
+// localWarmupEngageJob loads the transport + reply content for one receipt. See the
 // coreapi.Client interface doc. The Do* flags are recomputed deterministically from
 // the receipt so they agree with the plan RecordWarmupReceipt returned.
-func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID string) (coreapi.WarmupEngageJob, error) {
+func (c client) localWarmupEngageJob(ctx context.Context, receiptID, workspaceID string) (coreapi.WarmupEngageJob, error) {
 	rid, err := uuid.Parse(receiptID)
 	if err != nil {
 		return coreapi.WarmupEngageJob{}, err
@@ -510,22 +510,25 @@ func (c client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID s
 	}
 
 	return coreapi.WarmupEngageJob{
-		Provider:       b.Provider,
-		AccessToken:    accessToken,
-		IMAPHost:       b.ImapHost,
-		IMAPPort:       int(b.ImapPort),
-		IMAPUsername:   b.ImapUsername,
-		SMTPHost:       b.SmtpHost,
-		SMTPPort:       int(b.SmtpPort),
-		SMTPUsername:   b.SmtpUsername,
-		SMTPPassword:   password,
-		AllowPlaintext: b.AllowPlaintext,
-		SourceFolder:   b.SourceFolder,
-		MessageID:      b.MessageID,
-		DoRescue:       doRescue,
-		DoMarkRead:     true,
-		DoReply:        doReply,
-		ReplySend:      reply,
+		// The credential subject, carried explicitly so a transport that does
+		// not ship the credential can still name the mailbox it belongs to.
+		RecipientMailbox: b.RecipientMailbox.String(),
+		Provider:         b.Provider,
+		AccessToken:      accessToken,
+		IMAPHost:         b.ImapHost,
+		IMAPPort:         int(b.ImapPort),
+		IMAPUsername:     b.ImapUsername,
+		SMTPHost:         b.SmtpHost,
+		SMTPPort:         int(b.SmtpPort),
+		SMTPUsername:     b.SmtpUsername,
+		SMTPPassword:     password,
+		AllowPlaintext:   b.AllowPlaintext,
+		SourceFolder:     b.SourceFolder,
+		MessageID:        b.MessageID,
+		DoRescue:         doRescue,
+		DoMarkRead:       true,
+		DoReply:          doReply,
+		ReplySend:        reply,
 	}, nil
 }
 
