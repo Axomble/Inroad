@@ -301,7 +301,7 @@ func TestGmailReaderReportsNoTabForSpam(t *testing.T) {
 
 // TestGmailReaderRejectsNonPositiveMaxN mirrors NetInboxReader.Fetch's guard.
 func TestGmailReaderRejectsNonPositiveMaxN(t *testing.T) {
-	g := NewGmailReader()
+	g := NewGmailReader(nil)
 	if _, _, err := g.Fetch(context.Background(), "tok", "1", 0); err == nil {
 		t.Fatal("expected an error for maxN <= 0")
 	}

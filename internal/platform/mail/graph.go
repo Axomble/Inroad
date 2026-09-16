@@ -6,10 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
-
-	"golang.org/x/oauth2"
 )
 
 // graphMessagesURL is the fixed Microsoft Graph collection for the signed-in
@@ -21,6 +20,10 @@ const graphMessagesURL = "https://graph.microsoft.com/v1.0/me/messages"
 // GraphSender sends mail through the Microsoft Graph API using a per-call access
 // token. No SSRF vetting: the host is Graph's fixed API endpoint, not user input.
 type GraphSender struct {
+	// httpClient is the egress-bound, timeout-bounded client every API call
+	// dials through (newAPIHTTPClient). Built once by NewGraphSender and reused,
+	// so the draft/send/delete legs of one send share a connection.
+	httpClient *http.Client
 	// createDraftFn creates a draft from the base64-encoded RFC822 message and
 	// returns the draft id + the AUTHORITATIVE internetMessageId Exchange
 	// assigned. sendDraftFn sends the created draft. deleteDraftFn best-effort
@@ -34,8 +37,13 @@ type GraphSender struct {
 	deleteDraftFn func(ctx context.Context, accessToken, id string) error
 }
 
-// NewGraphSender returns a GraphSender that talks to the real Graph API.
-func NewGraphSender() *GraphSender { return &GraphSender{} }
+// NewGraphSender returns a GraphSender that talks to the real Graph API,
+// egressing from localAddr (mail.ParseEgressIP; nil = OS default route). See
+// NewGmailSender for why the address is a constructor argument rather than a
+// settable field.
+func NewGraphSender(localAddr *net.TCPAddr) *GraphSender {
+	return &GraphSender{httpClient: newAPIHTTPClient(localAddr)}
+}
 
 // Send builds the RFC822 message (reusing buildMessage — same headers,
 // threading, body as the SMTP and Gmail paths), then runs Graph's two-step MIME
@@ -61,31 +69,44 @@ func (g *GraphSender) Send(ctx context.Context, accessToken string, msg Message)
 	}
 	enc := base64.StdEncoding.EncodeToString(buf.Bytes())
 
-	createDraft := g.createDraftFn
-	if createDraft == nil {
-		createDraft = createGraphDraft
-	}
-	sendDraft := g.sendDraftFn
-	if sendDraft == nil {
-		sendDraft = sendGraphDraft
-	}
-	deleteDraft := g.deleteDraftFn
-	if deleteDraft == nil {
-		deleteDraft = deleteGraphDraft
-	}
-
-	id, internetMessageID, err := createDraft(ctx, accessToken, []byte(enc))
+	id, internetMessageID, err := g.createDraft(ctx, accessToken, []byte(enc))
 	if err != nil {
 		return "", err
 	}
-	if err := sendDraft(ctx, accessToken, id); err != nil {
+	if err := g.sendDraft(ctx, accessToken, id); err != nil {
 		// The draft was created but never sent. Best-effort delete so a failed
 		// send doesn't leave an orphaned draft in the user's mailbox; ignore the
 		// delete outcome (it's cleanup, not the operation's result).
-		_ = deleteDraft(ctx, accessToken, id)
+		_ = g.deleteDraft(ctx, accessToken, id)
 		return "", err
 	}
 	return internetMessageID, nil
+}
+
+// The three accessors below dispatch to a test's stub when one is set, otherwise
+// to the real wire call with this sender's egress-bound client. Mirrors the
+// accessor shape GmailReader/GmailEngager already use, which is what keeps the
+// client threaded through the seam instead of being rebuilt inside each call.
+
+func (g *GraphSender) createDraft(ctx context.Context, accessToken string, rawB64 []byte) (string, string, error) {
+	if g.createDraftFn != nil {
+		return g.createDraftFn(ctx, accessToken, rawB64)
+	}
+	return createGraphDraft(ctx, g.httpClient, accessToken, rawB64)
+}
+
+func (g *GraphSender) sendDraft(ctx context.Context, accessToken, id string) error {
+	if g.sendDraftFn != nil {
+		return g.sendDraftFn(ctx, accessToken, id)
+	}
+	return sendGraphDraft(ctx, g.httpClient, accessToken, id)
+}
+
+func (g *GraphSender) deleteDraft(ctx context.Context, accessToken, id string) error {
+	if g.deleteDraftFn != nil {
+		return g.deleteDraftFn(ctx, accessToken, id)
+	}
+	return deleteGraphDraft(ctx, g.httpClient, accessToken, id)
 }
 
 // createGraphDraft POSTs the base64 MIME to /me/messages. Graph parses the MIME
@@ -93,14 +114,13 @@ func (g *GraphSender) Send(ctx context.Context, accessToken string, msg Message)
 // internetMessageId Exchange assigned (the authoritative Message-ID). A
 // non-2xx reports the status only — never the response body — so a bearer token
 // echoed by Graph never lands in logs or errors.
-func createGraphDraft(ctx context.Context, accessToken string, rawB64 []byte) (string, string, error) {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+func createGraphDraft(ctx context.Context, hc *http.Client, accessToken string, rawB64 []byte) (string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, graphMessagesURL, bytes.NewReader(rawB64))
 	if err != nil {
 		return "", "", fmt.Errorf("graph: draft request: %w", err)
 	}
 	req.Header.Set("Content-Type", "text/plain")
-	resp, err := client.Do(req)
+	resp, err := bearerClient(ctx, hc, accessToken).Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("graph: draft: %w", err)
 	}
@@ -134,13 +154,12 @@ func createGraphDraft(ctx context.Context, accessToken string, rawB64 []byte) (s
 
 // sendGraphDraft POSTs to /me/messages/{id}/send with an empty body. A 202
 // Accepted (any 2xx) is success. Non-2xx reports status only.
-func sendGraphDraft(ctx context.Context, accessToken, id string) error {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+func sendGraphDraft(ctx context.Context, hc *http.Client, accessToken, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, graphMessagesURL+"/"+url.PathEscape(id)+"/send", http.NoBody)
 	if err != nil {
 		return fmt.Errorf("graph: send request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := bearerClient(ctx, hc, accessToken).Do(req)
 	if err != nil {
 		return fmt.Errorf("graph: send: %w", err)
 	}
@@ -154,13 +173,12 @@ func sendGraphDraft(ctx context.Context, accessToken, id string) error {
 
 // deleteGraphDraft best-effort removes an unsent draft after a failed send.
 // The caller ignores the result; errors here are not the operation's outcome.
-func deleteGraphDraft(ctx context.Context, accessToken, id string) error {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+func deleteGraphDraft(ctx context.Context, hc *http.Client, accessToken, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, graphMessagesURL+"/"+url.PathEscape(id), http.NoBody)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
+	resp, err := bearerClient(ctx, hc, accessToken).Do(req)
 	if err != nil {
 		return err
 	}

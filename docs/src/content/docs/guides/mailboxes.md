@@ -117,9 +117,11 @@ INROAD_WORKER_EGRESS_IP=192.0.2.11
 
 When `INROAD_WORKER_EGRESS_IP` is configured:
 
-- Outbound TCP sockets dial from the specified local network IP interface. It sets
-  the **source** address only, and never relaxes the SSRF destination vet — see
-  [invariant 22](/security/).
+- Outbound TCP sockets dial from the specified local network IP interface. This
+  covers every provider leg — SMTP and IMAP, and the Gmail and Microsoft Graph
+  API calls (send, poll and warmup engagement), which bind the same address on
+  their HTTP transport. It sets the **source** address only, and never relaxes
+  the SSRF destination vet — see [invariant 22](/security/).
 - Mailboxes are pinned to workers by the `mailbox_worker_assignments` table, which
   the fleet's placement scoring writes. An existing assignment to a live worker is
   never revisited by the send path, so a mailbox keeps its egress identity; moving

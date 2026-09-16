@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
-	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -59,6 +59,10 @@ type deltaMsg struct {
 // selects the real Graph call, tests stub them to run network-free. The access
 // token is constant within a pass and threaded through every call.
 type GraphReader struct {
+	// httpClient is the egress-bound, timeout-bounded client every API call
+	// dials through (newAPIHTTPClient). Built once by NewGraphReader and reused,
+	// so its connection pool serves the whole /$value get fan-out below.
+	httpClient *http.Client
 	// deltaFn GETs one delta page (the baseline or the stored cursor URL) and
 	// returns its message entries, the @odata.nextLink (more pages) and the
 	// @odata.deltaLink (final page); returns errGraphDeltaExpired on 410/resync.
@@ -80,8 +84,13 @@ type GraphReader struct {
 // fixed API endpoint, not user input, so no SSRF vetting is needed.
 const graphJunkURL = "https://graph.microsoft.com/v1.0/me/mailFolders('junkemail')/messages?$select=id&$orderby=receivedDateTime%20desc"
 
-// NewGraphReader returns a GraphReader that talks to the real Graph API.
-func NewGraphReader() *GraphReader { return &GraphReader{} }
+// NewGraphReader returns a GraphReader that talks to the real Graph API,
+// egressing from localAddr (mail.ParseEgressIP; nil = OS default route). See
+// NewGmailSender for why the address is a constructor argument rather than a
+// settable field.
+func NewGraphReader(localAddr *net.TCPAddr) *GraphReader {
+	return &GraphReader{httpClient: newAPIHTTPClient(localAddr)}
+}
 
 // Fetch returns new inbound messages for reply/bounce detection plus the new
 // opaque cursor (a Graph delta/next-link URL). maxN must be positive.
@@ -257,20 +266,19 @@ func (g *GraphReader) junkList(ctx context.Context, accessToken string, maxN int
 	if g.junkListFn != nil {
 		return g.junkListFn(ctx, accessToken, maxN)
 	}
-	return graphJunkList(ctx, accessToken, maxN)
+	return graphJunkList(ctx, g.httpClient, accessToken, maxN)
 }
 
 // graphJunkList GETs up to maxN ids from the JunkEmail folder (newest-first). It
 // reports the status only on a non-2xx, never the body, so a bearer token echoed
 // by Graph never lands in logs or errors — matching graphDelta/graphGetRaw.
-func graphJunkList(ctx context.Context, accessToken string, maxN int) ([]string, error) {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+func graphJunkList(ctx context.Context, hc *http.Client, accessToken string, maxN int) ([]string, error) {
 	u := graphJunkURL + "&$top=" + strconv.Itoa(maxN)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("graph: junk list request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := bearerClient(ctx, hc, accessToken).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("graph: junk list: %w", err)
 	}
@@ -299,21 +307,21 @@ func (g *GraphReader) delta(ctx context.Context, accessToken, u string) ([]delta
 	if g.deltaFn != nil {
 		return g.deltaFn(ctx, accessToken, u)
 	}
-	return graphDelta(ctx, accessToken, u)
+	return graphDelta(ctx, g.httpClient, accessToken, u)
 }
 
 func (g *GraphReader) baseline(ctx context.Context, accessToken string) (string, error) {
 	if g.baselineFn != nil {
 		return g.baselineFn(ctx, accessToken)
 	}
-	return graphBaseline(ctx, accessToken)
+	return graphBaseline(ctx, g.httpClient, accessToken)
 }
 
 func (g *GraphReader) getRaw(ctx context.Context, accessToken, id string) ([]byte, error) {
 	if g.getRawFn != nil {
 		return g.getRawFn(ctx, accessToken, id)
 	}
-	return graphGetRaw(ctx, accessToken, id)
+	return graphGetRaw(ctx, g.httpClient, accessToken, id)
 }
 
 // graphDelta GETs one delta page (either the $deltatoken=latest baseline or the
@@ -322,13 +330,12 @@ func (g *GraphReader) getRaw(ctx context.Context, accessToken, id string) ([]byt
 // 400 to errGraphDeltaExpired so Fetch can re-baseline; other non-2xx report the
 // status only (never the body) so a bearer token echoed by Graph never lands in
 // logs or errors.
-func graphDelta(ctx context.Context, accessToken, u string) ([]deltaMsg, string, string, error) {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+func graphDelta(ctx context.Context, hc *http.Client, accessToken, u string) ([]deltaMsg, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("graph: delta request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := bearerClient(ctx, hc, accessToken).Do(req)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("graph: delta: %w", err)
 	}
@@ -372,8 +379,8 @@ func graphResyncRequired(r io.Reader) bool {
 // graphBaseline reads the current top-of-Inbox deltaLink via $deltatoken=latest,
 // used to baseline the cursor on a first poll or a delta-expired re-baseline. The
 // baseline response carries an empty value and the deltaLink directly (no pages).
-func graphBaseline(ctx context.Context, accessToken string) (string, error) {
-	_, _, deltaLink, err := graphDelta(ctx, accessToken, graphInboxDeltaURL)
+func graphBaseline(ctx context.Context, hc *http.Client, accessToken string) (string, error) {
+	_, _, deltaLink, err := graphDelta(ctx, hc, accessToken, graphInboxDeltaURL)
 	if err != nil {
 		return "", err
 	}
@@ -387,14 +394,13 @@ func graphBaseline(ctx context.Context, accessToken string) (string, error) {
 // Unlike Gmail's format=RAW (base64url JSON), the $value endpoint returns the raw
 // MIME bytes directly, so the response body is handed to parseInbound with no
 // decode step. A non-2xx reports the status only, never the body.
-func graphGetRaw(ctx context.Context, accessToken, id string) ([]byte, error) {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+func graphGetRaw(ctx context.Context, hc *http.Client, accessToken, id string) ([]byte, error) {
 	u := graphMessagesURL + "/" + url.PathEscape(id) + "/$value"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("graph: raw request: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := bearerClient(ctx, hc, accessToken).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("graph: raw: %w", err)
 	}

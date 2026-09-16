@@ -212,7 +212,7 @@ func TestGraphReaderRejectsOffHostCursor(t *testing.T) {
 
 // TestGraphReaderRejectsNonPositiveMaxN mirrors GmailReader.Fetch's guard.
 func TestGraphReaderRejectsNonPositiveMaxN(t *testing.T) {
-	g := NewGraphReader()
+	g := NewGraphReader(nil)
 	if _, _, err := g.Fetch(context.Background(), "tok", graphCursorBase+"?$skiptoken=CUR", 0); err == nil {
 		t.Fatal("expected an error for maxN <= 0")
 	}

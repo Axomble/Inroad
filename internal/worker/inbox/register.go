@@ -1,6 +1,8 @@
 package inbox
 
 import (
+	"net"
+
 	"github.com/hibiken/asynq"
 
 	"github.com/inroad/inroad/internal/coreapi"
@@ -28,9 +30,13 @@ func RegisterScheduled(mux *asynq.ServeMux, core coreapi.Client, enq *queue.Clie
 
 // RegisterPerMessage attaches this domain's PER-MESSAGE handlers to the mux:
 // one mailbox polled, or one manual reply or composed email delivered, per
-// task. The Gmail and Graph (m365) readers are constructed here (neither needs
-// config — each provider's API host is fixed, so there is no SSRF flag to
-// thread) and dispatched to per-mailbox by provider inside PollHandler.
+// task. The Gmail and Graph (m365) readers are constructed here and dispatched
+// to per-mailbox by provider inside PollHandler. Neither takes the SSRF flag —
+// each provider's API host is fixed, so there is nothing to vet — but both take
+// egressAddr, the worker's optional source address (mail.ParseEgressIP, nil =
+// OS default route): an API poll authenticates to the mailbox's provider from
+// this host exactly as an IMAP poll does, so it must leave from the same IP or
+// the fleet's per-mailbox IP affinity holds for only half the fleet.
 // warmupSecret verifies the X-Inroad-Warmup receipt token so the poller can
 // isolate warmup mail from campaign classification (spec §7/§9.4); enq
 // schedules the warmup:engage follow-up when a warmup receipt is detected.
@@ -39,12 +45,12 @@ func RegisterScheduled(mux *asynq.ServeMux, core coreapi.Client, enq *queue.Clie
 //
 // It takes no *metrics.Metrics: the only metric this package records is the
 // sweep's, and the sweep moved to RegisterScheduled.
-func RegisterPerMessage(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader, sender Mailer, enq *queue.Client, warmupSecret []byte) {
+func RegisterPerMessage(mux *asynq.ServeMux, core coreapi.Client, reader mail.InboxReader, sender Mailer, enq *queue.Client, warmupSecret []byte, egressAddr *net.TCPAddr) {
 	// New(nil): Layer 3 (the optional model) is UNWIRED — there is no AI
 	// provider yet, so a matched reply is classified by the deterministic,
 	// offline Layer 1 (headers) + Layer 2 (lexicon) only.
 	classifier := replyclassify.New(nil)
-	mux.HandleFunc(queue.TaskInboxPoll, PollHandler(core, reader, mail.NewGmailReader(), mail.NewGraphReader(), classifier, warmupSecret, enq))
+	mux.HandleFunc(queue.TaskInboxPoll, PollHandler(core, reader, mail.NewGmailReader(egressAddr), mail.NewGraphReader(egressAddr), classifier, warmupSecret, enq))
 	// DRAIN ONLY. Nothing enqueues an inbox:reply_send any more — every manual
 	// reply, immediate or deferred, is now an inbox_pending_replies row and the
 	// pointer task below. This registration stays for one release so tasks
