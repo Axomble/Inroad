@@ -158,7 +158,7 @@ func (c client) localFindSendByMessageID(ctx context.Context, workspaceID, messa
 // MarkReplied halts the enrollment on an inbound reply and tags it with the
 // classified reply. A no-op when enrollmentID is "" (the matched send has no
 // enrollment — the legacy direct-send path has nothing to stop or tag).
-func (c client) MarkReplied(ctx context.Context, enrollmentID, workspaceID, replyClass, replySource string, confidence float64) error {
+func (c client) localMarkReplied(ctx context.Context, enrollmentID, workspaceID, replyClass, replySource string, confidence float64) error {
 	if enrollmentID == "" {
 		return nil
 	}
@@ -179,7 +179,7 @@ func (c client) MarkReplied(ctx context.Context, enrollmentID, workspaceID, repl
 // RecordReplyClass tags the enrollment with a classified reply without touching
 // its status — for automated replies (auto_reply/out_of_office) that must not
 // halt the sequence. A no-op when enrollmentID is "" (nothing to tag).
-func (c client) RecordReplyClass(ctx context.Context, enrollmentID, workspaceID, class, source string, confidence float64) error {
+func (c client) localRecordReplyClass(ctx context.Context, enrollmentID, workspaceID, class, source string, confidence float64) error {
 	if enrollmentID == "" {
 		return nil
 	}
@@ -201,7 +201,7 @@ func (c client) RecordReplyClass(ctx context.Context, enrollmentID, workspaceID,
 // differs ("unsubscribe"). Suppression happens EVEN WHEN enrollmentID is ""
 // (a reply-unsubscribe to a legacy direct-send must still suppress the address
 // — compliance).
-func (c client) MarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID, email string) error {
+func (c client) localMarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID, email string) error {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return err
@@ -267,7 +267,7 @@ func nilIfEmpty(s string) *string {
 // bounces are handled by the caller (logged, no action) — MarkBounced is only
 // called with hard=true; the flag is kept on the signature so that stays an
 // explicit, visible decision at the call site rather than an implicit one.
-func (c client) MarkBounced(ctx context.Context, enrollmentID, workspaceID, email string, hard bool) error {
+func (c client) localMarkBounced(ctx context.Context, enrollmentID, workspaceID, email string, hard bool) error {
 	if !hard {
 		return nil
 	}

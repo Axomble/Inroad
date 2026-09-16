@@ -24,6 +24,33 @@
 // boring work's review. The pool is still opened for them and for every
 // periodic sweep; it goes when nothing needs it.
 //
+// Slice 3 (outcomes.go, outcomehandler.go) is that dangerous work: the claim
+// and outcome path for the three engines a role=send worker runs — the sequence
+// step, the warmup send and engagement, the inbox reply/bounce outcomes, and
+// the webhook delivery outcomes.
+//
+// It is the slice where a network changes the problem rather than the latency.
+// In process a call either happened or it did not. Over HTTP there is a third
+// outcome — it happened, the control plane committed, and the RESPONSE was lost
+// — and the four-state claim protocol plus the ordering rule (MarkStepDelivered
+// commits separately and BEFORE AdvanceStepCursor, so a retry recovers forward)
+// stop being guaranteed by a function call that cannot be half-executed.
+//
+// Three rules hold them up, and all three are tested rather than asserted:
+//
+//  1. Every mutating method is idempotent by KEY, not by attempt. outcomes.go
+//     carries the per-method audit, including the one exception and why it is
+//     one.
+//  2. A lost response never becomes a double send. The claim is what does this:
+//     the worker retries the whole asynq task, re-claims, and is told
+//     ClaimAlreadySent. That path was UNREACHABLE in tests before this slice —
+//     in process a response cannot be lost — so
+//     internal/coreapi/inprocess/remoteoutcomes_integration_test.go drops
+//     responses AFTER the control plane commits and asserts exactly one send.
+//  3. No method returns "unknown". A timeout is a failure, the task retries,
+//     and the claim decides what the retry does. Nothing here invents a success
+//     or a zero value on a failed call.
+//
 // No credential crosses this wire. A job response carries a mailbox's host,
 // port, username and TLS policy and no secret at all; the worker opens the
 // secret through internal/platform/credbroker, on this same listener, by
@@ -179,6 +206,51 @@ const (
 	jobMaxResponseBytes = 8 << 20
 )
 
+// Outcome budgets. A claim or a finalize is a WRITE — a short transaction that
+// can wait on a row lock another worker holds — and its answer is a handful of
+// bytes. Neither of the two budgets above fits: the check budget's 5s
+// response-header bound would fail exactly the claims that are CONTENDING,
+// which is the worst moment to give up, and the job budget's 8 MiB response cap
+// is absurd for an enum.
+//
+// So a third budget, and therefore a third connection pool to the same host —
+// a handful of idle sockets, in exchange for each call class failing on its own
+// schedule instead of borrowing a neighbour's.
+const (
+	// outcomeRequestTimeout bounds a whole outcome call. Sized against the same
+	// asynq ceiling as the rest (queue.sendTimeout, 2m): at ~12% of it, a wedged
+	// outcome fails the CALL — attributable, retried, one line in a log — while
+	// leaving the task's remaining budget intact.
+	//
+	// It is deliberately LONGER than the suppression check's 10s. This runs
+	// AFTER the message is already out of the door on the success path, so
+	// giving up early is not free: the task retries, re-claims, and recovers
+	// forward, which is correct but costs a round trip nobody needed. Waiting
+	// out a contended lock is cheaper than that.
+	outcomeRequestTimeout = 15 * time.Second
+	// outcomeResponseHeaderTimeout is the control plane's think time. A claim
+	// takes a row lock; a finalize takes one and commits a cursor advance with
+	// it. 10s is far beyond either on a healthy database and short enough that a
+	// wedged one fails the call rather than holding a send slot.
+	outcomeResponseHeaderTimeout = 10 * time.Second
+)
+
+// maxJobRequestBytes caps a request that carries a JOB back — the claim, mark,
+// finalize, advance and release routes.
+//
+// It matches jobMaxResponseBytes because it bounds the SAME OBJECT travelling
+// the other way: a step send job carries the campaign's subject, text and HTML,
+// and slice 2 measured that a 1 MiB HTML email encodes to ~2.8 MiB here
+// (encoding/json escapes every < > & to \uXXXX). The ids-only routes keep
+// maxRequestBytes.
+//
+// Sizing it tighter would mean an operator who pasted a very large HTML email
+// got a campaign whose sends were delivered and then could not be RECORDED on a
+// fleet worker — the row stuck 'sending', re-claimed after its lease, and sent
+// again. That is the double send this slice exists to prevent, caused by a
+// buffer limit.
+const maxJobRequestBytes = 8 << 20
+
 // callBudget pairs an http.Client with the response cap that matches the class
 // of call it serves. It exists so post takes a budget instead of two more
 // positional parameters, and so the two classes cannot borrow each other's.
@@ -195,16 +267,19 @@ type callBudget struct {
 // What it does NOT do yet, stated plainly because the opposite is easy to
 // assume from the package existing: it does not remove the worker's database
 // access. cmd/worker still opens a pgxpool for every method this transport has
-// not yet taken over — every claim, mark, finalize and advance, and every
-// periodic sweep. The containment claim becomes true when the pool is gone, not
-// when this type is constructed.
+// not yet taken over — after slice 3 that is the inbox poll cursor, the
+// manual reply/compose claim family, the warmup receipt, the inbound-message
+// store, and every periodic sweep. The containment claim becomes true when the
+// pool is gone (slice 4), not when this type is constructed.
 type Client struct {
 	baseURL string
 	token   string
 	// check is the budget for a single-fact lookup (IsSuppressed). jobs is the
-	// budget for a job build. See callBudget.
-	check callBudget
-	jobs  callBudget
+	// budget for a job build. outcomes is the budget for a claim/mark/finalize
+	// write. See callBudget.
+	check    callBudget
+	jobs     callBudget
+	outcomes callBudget
 	// creds opens the decrypted credentials the job responses deliberately do
 	// NOT carry. It is the credential broker — the same one this process
 	// already had to be configured with, since a worker may only read coreapi
@@ -246,6 +321,14 @@ func NewClient(baseURL, token string, allowPlaintext bool, creds credbroker.Open
 		jobs: callBudget{
 			hc:       newHTTPClient(jobRequestTimeout, jobResponseHeaderTimeout),
 			maxBytes: jobMaxResponseBytes,
+		},
+		outcomes: callBudget{
+			hc: newHTTPClient(outcomeRequestTimeout, outcomeResponseHeaderTimeout),
+			// An outcome answers with an enum, a counter or a two-field advance.
+			// The same 4 KiB the suppression check uses is already two orders of
+			// magnitude of headroom, and it is the one call class where a tight
+			// cap costs nothing.
+			maxBytes: maxResponseBytes,
 		},
 		creds: creds,
 	}, nil

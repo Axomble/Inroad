@@ -1,6 +1,10 @@
 package remote
 
-import "github.com/inroad/inroad/internal/coreapi"
+import (
+	"time"
+
+	"github.com/inroad/inroad/internal/coreapi"
+)
 
 // The wire contract between a worker (Client) and the control plane (Handler).
 // Both sides are in this package on purpose, exactly as credbroker does it: one
@@ -29,6 +33,60 @@ const (
 	PathTestSendContent    = PathPrefix + "test-send/content"
 	PathSenderTransport    = PathPrefix + "sender-transport"
 	PathSendByMessageID    = PathPrefix + "send/by-message-id"
+
+	// The CLAIM AND OUTCOME routes (slice 3). Everything that claims, marks,
+	// finalizes, advances, stops, defers or fails — the writes slices 1 and 2
+	// deliberately kept out, because over a network a call has a third outcome
+	// the in-process seam does not: it happened, the control plane committed,
+	// and the RESPONSE was lost.
+	//
+	// What makes that safe is not this transport. It is the claim: a worker that
+	// claimed, sent, and lost the response to MarkStepDelivered retries the whole
+	// asynq task, re-claims, and is told ClaimAlreadySent — so it advances the
+	// cursor instead of delivering again. Every route below is idempotent by KEY
+	// (the deterministic send id, the enrollment id, the receipt id), never by
+	// attempt, so a repeat is a no-op returning the same answer. See outcomes.go
+	// for the per-method audit.
+	PathStepSendClaim         = PathPrefix + "step-send/claim"
+	PathStepSendDelivered     = PathPrefix + "step-send/delivered"
+	PathStepSendAdvance       = PathPrefix + "step-send/advance"
+	PathStepSendRelease       = PathPrefix + "step-send/release"
+	PathStepSendFinalize      = PathPrefix + "step-send/finalize"
+	PathEnrollmentStop        = PathPrefix + "enrollment/stop"
+	PathEnrollmentDefer       = PathPrefix + "enrollment/defer"
+	PathEnrollmentCapDeferral = PathPrefix + "enrollment/cap-deferral"
+	PathWarmupSendClaim       = PathPrefix + "warmup-send/claim"
+	PathWarmupSendSent        = PathPrefix + "warmup-send/sent"
+	PathWarmupSendRelease     = PathPrefix + "warmup-send/release"
+	PathWarmupSendFail        = PathPrefix + "warmup-send/fail"
+	PathWarmupEngaged         = PathPrefix + "warmup-engage/engaged"
+	PathReplyReplied          = PathPrefix + "reply/replied"
+	PathReplyClass            = PathPrefix + "reply/class"
+	PathReplyUnsubscribed     = PathPrefix + "reply/unsubscribed"
+	PathReplyBounced          = PathPrefix + "reply/bounced"
+	PathWebhookMarkDelivered  = PathPrefix + "webhook-delivery/delivered"
+	PathWebhookMarkRetrying   = PathPrefix + "webhook-delivery/retrying"
+	PathWebhookMarkFailed     = PathPrefix + "webhook-delivery/failed"
+)
+
+// The claim outcome, on the wire.
+//
+// It is a STRING, not the Go enum's integer. coreapi.ClaimOutcome is an iota
+// whose zero value is ClaimSkip, so encoding the int would make the enum's
+// DECLARATION ORDER part of a network contract: inserting a constant would
+// silently re-point every deployed worker's reading of every other value, and
+// the failure would be a send decision, not a decode error.
+//
+// An unrecognised string is an ERROR on both sides rather than a default. There
+// is a tempting default — ClaimSkip, which never double-sends — and taking it
+// would hide a control plane and a worker that no longer agree about the
+// protocol behind a worker that quietly stops sending. A refusal fails the CALL,
+// which asynq retries and an operator can see.
+const (
+	claimOutcomeSkip        = "skip"
+	claimOutcomeWon         = "won"
+	claimOutcomeAlreadySent = "already_sent"
+	claimOutcomeDeferred    = "deferred"
 )
 
 // Error codes. A code names a SENTINEL the in-process path returns and a
@@ -199,3 +257,199 @@ type senderTransportResponse struct {
 type sendRefResponse struct {
 	Send coreapi.SendRef `json:"send"`
 }
+
+// The CLAIM AND OUTCOME shapes.
+//
+// # Why the whole job travels back
+//
+// ClaimStepSend / MarkStepDelivered / AdvanceStepCursor / ReleaseStepSend /
+// FinalizeStepSend all take the coreapi.StepSendJob the worker was handed, and
+// so these requests carry it whole rather than the subset each method reads.
+// A subset would be a hand-written mirror, and it would fail exactly the way the
+// response mirrors would (see the job-response block above): the day a new gate
+// field is added to the job and ClaimStepSend starts reading it, a forgotten
+// mirror field arrives ZERO-VALUED. For NotDueUntil that is not a decode error,
+// it is a send into a stated out-of-office absence. One definition cannot drift
+// from itself.
+//
+// This is what makes maxJobRequestBytes necessary: a step job carries the
+// campaign's subject and HTML body, so a request here is as large as a job
+// RESPONSE, and the 64 KiB cap the ids-only routes use would refuse a claim for
+// any campaign with a real HTML email in it.
+//
+// # Why the workspace is on the envelope as well as inside the job
+//
+// Every other route on this transport names its workspace at the top level, and
+// the handler pins with it. Keeping that true here means the pin is visible on
+// the wire rather than buried in one field of a two-thousand-byte struct, and it
+// gives the handler a workspace to parse, refuse and log BEFORE anything runs.
+// A request whose envelope and job disagree is a 400: the two can only differ if
+// the caller assembled them from different places, which is not a state a correct
+// worker reaches.
+
+// stepJobRequest names one claimed-or-claimable step send. Shared by the claim,
+// the release and the cursor advance — the three that need the job and nothing
+// else.
+type stepJobRequest struct {
+	WorkspaceID string              `json:"workspace_id"`
+	Job         coreapi.StepSendJob `json:"job"`
+}
+
+// stepDeliveredRequest records a delivery: the job plus the Message-ID the
+// provider assigned.
+type stepDeliveredRequest struct {
+	WorkspaceID string              `json:"workspace_id"`
+	Job         coreapi.StepSendJob `json:"job"`
+	MessageID   string              `json:"message_id"`
+}
+
+// stepFinalizeRequest finalizes a step to a NON-'sent' terminal state and
+// advances the cursor in one transaction (the fail-forward path).
+type stepFinalizeRequest struct {
+	WorkspaceID string              `json:"workspace_id"`
+	Job         coreapi.StepSendJob `json:"job"`
+	Result      coreapi.StepResult  `json:"result"`
+}
+
+// enrollmentStopRequest halts one enrollment. Reason is one of the enrollment
+// stop reasons; it is validated by the enrollment state machine on the control
+// plane, exactly as it is in process, rather than a second time here.
+type enrollmentStopRequest struct {
+	WorkspaceID  string `json:"workspace_id"`
+	EnrollmentID string `json:"enrollment_id"`
+	Reason       string `json:"reason"`
+}
+
+// enrollmentDeferRequest pushes an active enrollment's next_due_at out.
+type enrollmentDeferRequest struct {
+	WorkspaceID  string    `json:"workspace_id"`
+	EnrollmentID string    `json:"enrollment_id"`
+	Until        time.Time `json:"until"`
+}
+
+// warmupJobRequest names one claimed-or-claimable warmup send. Shared by the
+// claim and the release, like stepJobRequest.
+type warmupJobRequest struct {
+	WorkspaceID string                `json:"workspace_id"`
+	Job         coreapi.WarmupSendJob `json:"job"`
+}
+
+// warmupSentRequest finalizes a warmup send to 'sent'.
+type warmupSentRequest struct {
+	WorkspaceID string                `json:"workspace_id"`
+	Job         coreapi.WarmupSendJob `json:"job"`
+	MessageID   string                `json:"message_id"`
+}
+
+// warmupFailRequest finalizes a warmup send to 'failed' after a PERMANENT
+// failure. Error is a diagnostic the control plane stores on the row; it is a
+// send error the worker observed, never relayed anywhere a tenant reads.
+type warmupFailRequest struct {
+	WorkspaceID string                `json:"workspace_id"`
+	Job         coreapi.WarmupSendJob `json:"job"`
+	Error       string                `json:"error"`
+}
+
+// warmupEngagedRequest flips one receipt's engaged guard.
+type warmupEngagedRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	ReceiptID   string `json:"receipt_id"`
+	Replied     bool   `json:"replied"`
+}
+
+// replyClassRequest tags one enrollment with a classified reply. Shared by the
+// two routes whose signature it is — MarkReplied (which also STOPS the
+// enrollment) and RecordReplyClass (which deliberately does not) — because the
+// difference between them is which route was called, not what was sent.
+//
+// EnrollmentID is "" for a matched send with no enrollment (the legacy
+// direct-send path), and the empty string must survive the wire: in process it
+// makes both methods a no-op, so validating it here would turn the ordinary
+// answer into a 400 the poller cannot distinguish from a real failure.
+type replyClassRequest struct {
+	WorkspaceID  string  `json:"workspace_id"`
+	EnrollmentID string  `json:"enrollment_id"`
+	Class        string  `json:"class"`
+	Source       string  `json:"source"`
+	Confidence   float64 `json:"confidence"`
+}
+
+// unsubscribeRequest suppresses one address and, when an enrollment matched,
+// stops it. Email is a contact's address and is here for the reason
+// suppressionRequest.Email is: the worker already holds it, off the send row it
+// just matched, so the request reveals nothing the caller did not have.
+type unsubscribeRequest struct {
+	WorkspaceID  string `json:"workspace_id"`
+	EnrollmentID string `json:"enrollment_id"`
+	Email        string `json:"email"`
+}
+
+// bounceRequest records a hard bounce. Hard travels EXPLICITLY rather than being
+// assumed true, because the in-process method no-ops on false and the two
+// transports must agree about that.
+type bounceRequest struct {
+	WorkspaceID  string `json:"workspace_id"`
+	EnrollmentID string `json:"enrollment_id"`
+	Email        string `json:"email"`
+	Hard         bool   `json:"hard"`
+}
+
+// The three webhook delivery outcomes are three shapes rather than one with
+// optional fields. A shared shape would mean the 'delivered' route silently
+// accepting and ignoring a next_attempt_at — which is precisely the "a caller
+// adds a parameter this endpoint does not honour and believes the answer"
+// failure DisallowUnknownFields exists to prevent.
+
+type webhookDeliveredRequest struct {
+	WorkspaceID    string `json:"workspace_id"`
+	DeliveryID     string `json:"delivery_id"`
+	Attempts       int    `json:"attempts"`
+	ResponseStatus int    `json:"response_status"`
+}
+
+type webhookRetryingRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	DeliveryID  string `json:"delivery_id"`
+	Attempts    int    `json:"attempts"`
+	LastError   string `json:"last_error"`
+	// ResponseStatus is nil for a transport-level failure — no HTTP response
+	// arrived at all — which is a different fact from a 0 status and is stored
+	// as SQL NULL. A non-pointer here would flatten the two.
+	ResponseStatus *int      `json:"response_status"`
+	NextAttemptAt  time.Time `json:"next_attempt_at"`
+}
+
+type webhookFailedRequest struct {
+	WorkspaceID    string `json:"workspace_id"`
+	DeliveryID     string `json:"delivery_id"`
+	Attempts       int    `json:"attempts"`
+	LastError      string `json:"last_error"`
+	ResponseStatus *int   `json:"response_status"`
+}
+
+// claimOutcomeResponse is the four-state claim protocol's answer. A struct
+// rather than a bare string for the reason suppressionResponse is one: the
+// route can gain a sibling field without every deployed worker changing on the
+// same day.
+type claimOutcomeResponse struct {
+	Outcome string `json:"outcome"`
+}
+
+// advanceResponse wraps the coreapi type itself rather than mirroring its two
+// fields, same rule as the job responses.
+type advanceResponse struct {
+	Advance coreapi.Advance `json:"advance"`
+}
+
+// capDeferralResponse carries the cap-deferral counter's new value.
+type capDeferralResponse struct {
+	Deferrals int `json:"deferrals"`
+}
+
+// ackResponse is what a route that returns nothing but "this committed" writes.
+// It is deliberately EMPTY rather than {"ok":true}: the status code already says
+// the call succeeded, and a boolean nobody reads is a boolean somebody will
+// eventually branch on. The body exists at all so the client has valid JSON to
+// decode — an empty body would be io.EOF, which is indistinguishable from a
+// truncated response.
+type ackResponse struct{}

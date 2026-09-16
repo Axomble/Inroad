@@ -24,15 +24,17 @@ func remoteQuiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard
 // controlPlane stands the real handler up over the real suppression store on
 // real Postgres, and returns the URL a worker would dial.
 //
-// The job half is wired with a pool-less in-process client purely so the
-// handler can be BUILT — this file drives the suppression route only, and the
-// job routes are proven end to end in remotejobs_integration_test.go.
+// The job and outcome halves are wired with a pool-less in-process client purely
+// so the handler can be BUILT — this file drives the suppression route only, and
+// those routes are proven end to end in remotejobs_integration_test.go and
+// remoteoutcomes_integration_test.go.
 func controlPlane(t *testing.T, q *gen.Queries) *httptest.Server {
 	t.Helper()
+	poolless := New(nil, nil, nil, "", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, nil, nil)
 	h, err := remote.NewHandler(remote.Deps{
 		Suppression: suppression.NewStore(q),
-		Jobs: jobReader(t, New(nil, nil, nil, "",
-			mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, nil, nil)),
+		Jobs:        jobReader(t, poolless),
+		Outcomes:    outcomeWriter(t, poolless),
 	}, remoteTestToken, remoteQuiet())
 	if err != nil {
 		t.Fatalf("remote.NewHandler: %v", err)

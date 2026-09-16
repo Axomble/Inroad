@@ -44,7 +44,7 @@ func (h *handler) stepSendJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := h.jobs.GetStepSendJob(r.Context(), enrollment.String(), ws.String())
 	if err != nil {
-		h.fail(w, "step send job", err, "workspace_id", ws, "enrollment_id", enrollment)
+		h.fail(w, failRead, "step send job", err, "workspace_id", ws, "enrollment_id", enrollment)
 		return
 	}
 	respond(w, http.StatusOK, stepSendJobResponse{Job: job})
@@ -61,7 +61,7 @@ func (h *handler) inboxPollJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := h.jobs.GetInboxPollJob(r.Context(), mailbox.String(), ws.String())
 	if err != nil {
-		h.fail(w, "inbox poll job", err, "workspace_id", ws, "mailbox_id", mailbox)
+		h.fail(w, failRead, "inbox poll job", err, "workspace_id", ws, "mailbox_id", mailbox)
 		return
 	}
 	respond(w, http.StatusOK, inboxPollJobResponse{Job: job})
@@ -78,7 +78,7 @@ func (h *handler) warmupSendJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := h.jobs.GetWarmupSendJob(r.Context(), mailbox.String(), ws.String())
 	if err != nil {
-		h.fail(w, "warmup send job", err, "workspace_id", ws, "mailbox_id", mailbox)
+		h.fail(w, failRead, "warmup send job", err, "workspace_id", ws, "mailbox_id", mailbox)
 		return
 	}
 	respond(w, http.StatusOK, warmupSendJobResponse{Job: job})
@@ -95,7 +95,7 @@ func (h *handler) warmupEngageJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := h.jobs.GetWarmupEngageJob(r.Context(), receipt.String(), ws.String())
 	if err != nil {
-		h.fail(w, "warmup engage job", err, "workspace_id", ws, "receipt_id", receipt)
+		h.fail(w, failRead, "warmup engage job", err, "workspace_id", ws, "receipt_id", receipt)
 		return
 	}
 	respond(w, http.StatusOK, warmupEngageJobResponse{Job: job})
@@ -112,7 +112,7 @@ func (h *handler) webhookDeliveryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := h.jobs.GetWebhookDeliveryJob(r.Context(), delivery.String(), ws.String())
 	if err != nil {
-		h.fail(w, "webhook delivery job", err, "workspace_id", ws, "delivery_id", delivery)
+		h.fail(w, failRead, "webhook delivery job", err, "workspace_id", ws, "delivery_id", delivery)
 		return
 	}
 	respond(w, http.StatusOK, webhookDeliveryJobResponse{Job: job})
@@ -134,7 +134,7 @@ func (h *handler) testSendContent(w http.ResponseWriter, r *http.Request) {
 	}
 	content, err := h.jobs.GetTestSendContent(r.Context(), ws.String(), campaign.String(), step.String())
 	if err != nil {
-		h.fail(w, "test send content", err, "workspace_id", ws, "campaign_id", campaign, "step_id", step)
+		h.fail(w, failRead, "test send content", err, "workspace_id", ws, "campaign_id", campaign, "step_id", step)
 		return
 	}
 	respond(w, http.StatusOK, testSendContentResponse{Content: content})
@@ -151,7 +151,7 @@ func (h *handler) senderTransport(w http.ResponseWriter, r *http.Request) {
 	}
 	transport, err := h.jobs.ResolveSenderTransport(r.Context(), ws.String(), mailbox.String())
 	if err != nil {
-		h.fail(w, "sender transport", err, "workspace_id", ws, "mailbox_id", mailbox)
+		h.fail(w, failRead, "sender transport", err, "workspace_id", ws, "mailbox_id", mailbox)
 		return
 	}
 	respond(w, http.StatusOK, senderTransportResponse{Transport: transport})
@@ -176,7 +176,7 @@ func (h *handler) sendByMessageID(w http.ResponseWriter, r *http.Request) {
 		// The Message-ID is deliberately absent from the log arguments: it is
 		// content from a tenant's inbound mail, and ErrNoMatch — by far the
 		// most common outcome — does not reach the log at all (see fail).
-		h.fail(w, "send by message id", err, "workspace_id", ws)
+		h.fail(w, failRead, "send by message id", err, "workspace_id", ws)
 		return
 	}
 	respond(w, http.StatusOK, sendRefResponse{Send: send})
@@ -200,7 +200,18 @@ func parsePair(w http.ResponseWriter, workspaceID, subjectField, subjectID strin
 	return ws, subject, true
 }
 
-// fail maps a reader error to a status and a FIXED body, and logs the real one.
+// failKind is what a failure was a failure OF. It exists so the read routes and
+// the outcome-write routes share ONE sentinel mapping — the part that must not
+// diverge — while still saying the right thing in a log line and a body.
+type failKind struct{ logMsg, bodyPrefix string }
+
+var (
+	failRead  = failKind{logMsg: "coreapi remote: job read failed", bodyPrefix: "could not read "}
+	failWrite = failKind{logMsg: "coreapi remote: outcome write failed", bodyPrefix: "could not record "}
+)
+
+// fail maps an implementation error to a status and a FIXED body, and logs the
+// real one.
 //
 // Two sentinels are reported as themselves, because the execution plane
 // branches on them and a generic failure would change what the worker does:
@@ -213,17 +224,22 @@ func parsePair(w http.ResponseWriter, workspaceID, subjectField, subjectID strin
 //     on it rather than retrying to exhaustion.
 //
 // Everything else is a 500 whose body is this package's own string. The
-// reader's error text is never relayed: it can carry a pg message or request
-// detail, and relaying it would make this seam a probe oracle and put a
+// implementation's error text is never relayed: it can carry a pg message or
+// request detail, and relaying it would make this seam a probe oracle and put a
 // database message in a fleet host's log.
-func (h *handler) fail(w http.ResponseWriter, route string, err error, logArgs ...any) {
+//
+// A 500 on an OUTCOME route is what the whole slice rests on: it fails the CALL,
+// the worker returns the error, asynq retries the task, and the retry passes
+// through the claim — which is the only thing that knows whether the write
+// landed. So this never guesses, and it never answers 200 on a failure.
+func (h *handler) fail(w http.ResponseWriter, k failKind, route string, err error, logArgs ...any) {
 	switch {
 	case errors.Is(err, coreapi.ErrNoMatch):
 		respond(w, http.StatusNotFound, errorResponse{Error: "no matching send", Code: codeNoMatch})
 	case errors.Is(err, pgx.ErrNoRows):
 		respond(w, http.StatusNotFound, errorResponse{Error: "not found", Code: codeNotFound})
 	default:
-		h.logger.Error("coreapi remote: job read failed", append(logArgs, "route", route, "err", err)...)
-		respond(w, http.StatusInternalServerError, errorResponse{Error: "could not read " + route})
+		h.logger.Error(k.logMsg, append(logArgs, "route", route, "err", err)...)
+		respond(w, http.StatusInternalServerError, errorResponse{Error: k.bodyPrefix + route})
 	}
 }
