@@ -63,7 +63,8 @@ That makes the shared `appsecrets` volume a trap: `load-secrets.sh` sources
 not already set, so a `send` service that mounts that volume inherits the key and
 dies on boot. A `send` host therefore mounts **no** secrets volume and is given
 `INROAD_JWT_SECRET` explicitly, plus the broker URL and token. The `api` service
-grows `INROAD_FLEET_BROKER_ADDR` to serve the broker on a separate listener.
+grows `INROAD_FLEET_BROKER_ADDR` to serve the **fleet listener** on a separate
+port.
 
 See [credential brokering](/deploy/environment-variables/#credential-brokering-send-role)
 for what this does and does not contain.
@@ -137,10 +138,18 @@ can reach it, and the same shared token:
       INROAD_FLEET_BROKER_TOKEN: ${INROAD_FLEET_BROKER_TOKEN:?openssl rand -base64 32}
 ```
 
-The broker is never mounted on the public API router, because its responses *are*
-credentials. It is `https`-only unless `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` is
-set explicitly — the channel carries both the bearer token and the decrypted
-credential, so plaintext has to be chosen, never defaulted into.
+That one address serves both fleet transports: the credential broker and the
+remote `coreapi` transport (off on the worker side unless
+`INROAD_FLEET_COREAPI_REMOTE` is set — see
+[Remote coreapi](/deploy/environment-variables/#remote-coreapi-worker-side)).
+One token authenticates both, so rotating `INROAD_FLEET_BROKER_TOKEN` revokes
+both.
+
+Neither is ever mounted on the public API router, because one set of responses
+*are* credentials and the other is a tenant's compliance state. The channel is
+`https`-only unless `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` is set explicitly —
+it carries the bearer token and the decrypted credential, so plaintext has to be
+chosen, never defaulted into.
 
 `worker-control` keeps `INROAD_MASTER_KEY` above and that is fine: `role=control`
 registers no handler that opens a credential, and the startup guard only refuses
