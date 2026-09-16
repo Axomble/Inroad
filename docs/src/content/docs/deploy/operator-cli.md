@@ -51,8 +51,8 @@ supplies its secrets:
 That last row is the one that surprises people. In the zero-config path the
 secrets do not live in the container's environment at all — `init-secrets` writes
 them to a volume and `api-entrypoint.sh` sources `load-secrets.sh` before
-`exec inroad`. A new process started with `exec` never ran that entrypoint, so it
-sees `INROAD_JWT_SECRET` as the empty string the manifest sets and fails with
+`exec inroad`. A process started later by `docker compose exec` never ran that
+entrypoint, so it sees `INROAD_JWT_SECRET` as the empty string the manifest sets and fails with
 `inroadctl: config: INROAD_JWT_SECRET must be set and at least 16 bytes`. Source
 the same script first and it behaves identically to the other rows.
 
@@ -201,7 +201,8 @@ and one failure does not suppress the rest:
   database answered.
 - **workers** — how many worker rows are registered and how many heartbeated
   within the last **15 minutes**. Zero live is reported as a failure, with the
-  consequence spelled out: sends, warmup and inbox polling are not running.
+  consequence spelled out: sends, warmup and inbox polling are not running. Also
+  only attempted when the database answered, since it is a query.
 - **redis** — reachable, or `UNREACHABLE` with the error.
 
 It ends with `status: healthy` or `status: UNHEALTHY`, and **exits non-zero when
