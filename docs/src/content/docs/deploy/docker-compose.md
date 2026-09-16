@@ -54,6 +54,21 @@ webhooks). Queue consumption follows the role, so the topology is operable; read
 first, because the *order* you roll it out in matters and one of the wrong orders
 fails silently.
 
+:::caution[A `send` worker must not receive `INROAD_MASTER_KEY`]
+`role=send` **refuses to start** if it is given the master key, and also refuses
+to start without a credential broker to ask instead. Both checks run at startup.
+
+That makes the shared `appsecrets` volume a trap: `load-secrets.sh` sources
+`SECRETS_FILE` and exports `INROAD_MASTER_KEY` from it whenever the variable is
+not already set, so a `send` service that mounts that volume inherits the key and
+dies on boot. A `send` host therefore mounts **no** secrets volume and is given
+`INROAD_JWT_SECRET` explicitly, plus the broker URL and token. The `api` service
+grows `INROAD_FLEET_BROKER_ADDR` to serve the broker on a separate listener.
+
+See [credential brokering](/deploy/environment-variables/#credential-brokering-send-role)
+for what this does and does not contain.
+:::
+
 Add these to your own compose file and remove the stock `worker` service (or
 scale it to 0), so the same work is not registered twice:
 
@@ -86,9 +101,9 @@ scale it to 0), so the same work is not registered twice:
     environment:
       INROAD_DATABASE_URL: ${INROAD_DATABASE_URL:-postgres://${POSTGRES_USER:-inroad}:${POSTGRES_PASSWORD:-inroad}@postgres:5432/${POSTGRES_DB:-inroad}?sslmode=disable}
       INROAD_REDIS_ADDR: ${INROAD_REDIS_ADDR:-redis:6379}
-      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:-}
-      INROAD_MASTER_KEY: ${INROAD_MASTER_KEY:-}
-      SECRETS_FILE: /run/secrets/inroad/env
+      # Explicit, NOT from the appsecrets volume: sourcing that file would also
+      # export INROAD_MASTER_KEY, which this role refuses to start with.
+      INROAD_JWT_SECRET: ${INROAD_JWT_SECRET:?set this on the send host}
       INROAD_ENV: ${INROAD_ENV:-production}
       INROAD_LOG_LEVEL: ${INROAD_LOG_LEVEL:-info}
       INROAD_WORKER_ROLE: send
@@ -96,21 +111,40 @@ scale it to 0), so the same work is not registered twice:
       # recreate — and a warmup tick already routed to the old w:<id> queue then
       # sits on a queue nothing consumes, with no dead-letter row to show for it.
       INROAD_WORKER_ID: send-1
-      # The worker refreshes OAuth mailbox tokens when sending, so it needs the
-      # same provider credentials as the api (redirect URLs are api-only).
-      INROAD_GOOGLE_CLIENT_ID: ${INROAD_GOOGLE_CLIENT_ID:-}
-      INROAD_GOOGLE_CLIENT_SECRET: ${INROAD_GOOGLE_CLIENT_SECRET:-}
-      INROAD_MS_CLIENT_ID: ${INROAD_MS_CLIENT_ID:-}
-      INROAD_MS_CLIENT_SECRET: ${INROAD_MS_CLIENT_SECRET:-}
-      INROAD_MS_TENANT: ${INROAD_MS_TENANT:-common}
-    volumes:
-      - appsecrets:/run/secrets/inroad:ro
+      # This host's own public address, so its sends and polls authenticate to
+      # each provider from a stable source IP.
+      INROAD_WORKER_EGRESS_IP: ${SEND_1_EGRESS_IP:-}
+      # No master key. Every credential is opened by the control plane, one
+      # mailbox at a time — which is also why no Google/Microsoft client
+      # credentials are needed here: the refresh happens where the key is.
+      INROAD_FLEET_BROKER_URL: ${INROAD_FLEET_BROKER_URL:?e.g. https://api:8090}
+      INROAD_FLEET_BROKER_TOKEN: ${INROAD_FLEET_BROKER_TOKEN:?openssl rand -base64 32}
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
 ```
+
+The `api` service needs two additions to answer those brokered requests — a
+listener address **separate** from `INROAD_HTTP_ADDR`, bound where only the fleet
+can reach it, and the same shared token:
+
+```yaml
+  api:
+    environment:
+      INROAD_FLEET_BROKER_ADDR: ${INROAD_FLEET_BROKER_ADDR:-0.0.0.0:8090}
+      INROAD_FLEET_BROKER_TOKEN: ${INROAD_FLEET_BROKER_TOKEN:?openssl rand -base64 32}
+```
+
+The broker is never mounted on the public API router, because its responses *are*
+credentials. It is `https`-only unless `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` is
+set explicitly — the channel carries both the bearer token and the decrypted
+credential, so plaintext has to be chosen, never defaulted into.
+
+`worker-control` keeps `INROAD_MASTER_KEY` above and that is fine: `role=control`
+registers no handler that opens a credential, and the startup guard only refuses
+a role that holds the key *and* is configured to broker.
 
 For more than one send host, copy `worker-send` and give each copy its own
 `INROAD_WORKER_ID` — do **not** `--scale` a single service past one replica.

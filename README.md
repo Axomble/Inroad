@@ -80,6 +80,12 @@ Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md). `ma
 - **Sending infrastructure**: Gmail API, Microsoft Graph, and SMTP/IMAP behind one seam; sender
   pools with round-robin / LRU / weighted rotation; ramped daily caps and campaign-wide limits
   enforced on the send path.
+- **Multi-IP sending fleet**: `role=send` workers take an IP-derived identity and each mailbox is
+  scored onto one of them — packing, blast radius, provider crowding and health, with incumbency
+  outranking all of it because IP trust accrues per mailbox at the provider. Per-worker provider
+  verdicts are collected as window deltas; a worker the provider has blocked or that stops
+  heartbeating has its mailboxes rotated off it. Every placement, refusal and move is explained in
+  an append-only decision log, surfaced in an admin-only fleet view.
 - **Warm-up**: opted-in mailboxes exchange real threaded mail on a ramping volume; placement is
   measured (inbox vs spam), health is recomputed from it, and a mailbox that turns bad is paused
   instead of pushed. Warmup health gates cold sending.
@@ -93,8 +99,9 @@ Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md). `ma
 - **AI, human-in-the-loop**: an in-app agent and AI-drafted replies behind an approval queue;
   bring your own key, and the entire feature is off (and makes no calls) until you add one.
 - **Platform**: multi-workspace teams and roles; passkeys, TOTP, Google sign-in, refresh-token
-  rotation; scoped API keys, an OAuth 2.0 provider, and an MCP server exposing the agent's typed
-  tools; envelope-encrypted credentials with per-workspace crypto-shredding.
+  rotation; scoped API keys, an OAuth 2.0 provider, signed outbound webhooks, and an MCP server
+  exposing the agent's typed tools; envelope-encrypted credentials with per-workspace
+  crypto-shredding.
 
 ![The unified inbox: every reply from every mailbox, classified and labelled](docs/images/inbox.png)
 
@@ -147,7 +154,7 @@ keeps its local keyring.
                                     │
                        queues, and who consumes them
                 ┌───────────────────┴───────────────────────────────┐
-                │  control  → 6 reconciles + the campaign breaker   │  role=control, role=all
+                │  control  → 7 reconciles + the campaign breaker   │  role=control, role=all
                 │  send     → sends, polls, webhooks                │  role=send,    role=all
                 │  w:<id>   → one worker's warmup ticks             │  role=send,    role=all
                 │  default  → transitional drain only               │  role=send,    role=all
@@ -248,8 +255,8 @@ The same docs ship as a browsable site (`docs/`, Astro/Starlight). The dev stack
 
 Pre-1.0 and under active development. Everything in [Features](#features) works today and is covered
 by unit and integration tests. Notable roadmap items: lead-flow throttling, list verification before
-send, soft-bounce retry and FBL ingestion, custom tracking domains, outbound webhooks, cloud KMS, and
-billing for the open-core split. Open work is tracked as
+send, soft-bounce retry and FBL ingestion, custom tracking domains, cloud KMS, and billing for the
+open-core split. Open work is tracked as
 [GitHub issues](https://github.com/Axomble/Inroad/issues).
 
 ---
