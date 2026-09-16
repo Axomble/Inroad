@@ -198,7 +198,7 @@ func (c client) newLeadLimitReached(ctx context.Context, ws, campaignID uuid.UUI
 // GetStepSendJob resolves the enrollment's next due step and builds the send
 // job. Read-only: creates no rows. workspaceID is pinned in the SQL WHERE
 // (defense in depth on the unguessable enrollment UUID).
-func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (coreapi.StepSendJob, error) {
+func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (coreapi.StepSendJob, error) {
 	eid, err := uuid.Parse(enrollmentID)
 	if err != nil {
 		return coreapi.StepSendJob{}, err
@@ -388,7 +388,17 @@ func (c client) GetStepSendJob(ctx context.Context, enrollmentID, workspaceID st
 	if err != nil {
 		return coreapi.StepSendJob{}, err
 	}
-	suppressed, err := c.q.IsSuppressed(ctx, gen.IsSuppressedParams{WorkspaceID: ws, Lower: b.ToEmail})
+	// Through c.suppression, the SAME replaceable source the four
+	// defense-in-depth re-checks go through, rather than straight at c.q. This
+	// is what makes that field's claim — "the ONLY route from this client to
+	// that answer" — literally true instead of nearly true; it was the one
+	// second route, and slice 1 of the remote transport documented it as such
+	// while deliberately leaving it on the pool.
+	//
+	// It changes nothing in any shipped configuration. In the control plane the
+	// source IS the pool-backed query, and a worker reading jobs remotely never
+	// runs this build at all.
+	suppressed, err := c.suppression.IsSuppressed(ctx, ws.String(), b.ToEmail)
 	if err != nil {
 		return coreapi.StepSendJob{}, err
 	}

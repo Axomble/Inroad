@@ -29,7 +29,7 @@ const (
 // belong to campaignID (defense in depth on top of the API's own ownership
 // check, which resolved this same campaignID/stepID pair before enqueuing) is
 // coreapi.ErrCrossTenant.
-func (c client) GetTestSendContent(ctx context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error) {
+func (c client) localTestSendContent(ctx context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.TestSendContent{}, err

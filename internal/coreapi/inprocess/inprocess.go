@@ -43,8 +43,14 @@ type client struct {
 	// internal/coreapi/remote's HTTP client via WithRemoteSuppression, and then
 	// this one method needs no database. See suppression.go.
 	suppression SuppressionSource
-	jwtSecret   []byte
-	publicURL   string
+	// jobs answers the per-message job reads. NIL IS THE DEFAULT and means
+	// "build them here, from the pool" — the self-host path, unchanged. A fleet
+	// worker installs internal/coreapi/remote's client via WithRemoteJobs and
+	// then none of those eight methods touches a database. See jobsource.go for
+	// why this one defaults to nil where suppression defaults to a value.
+	jobs      JobSource
+	jwtSecret []byte
+	publicURL string
 	// enroll owns the enrollment state machine (advance/complete/stop). The
 	// control plane composes the domain service here so the MarkStep* coreapi
 	// methods delegate the transition to a single, unit-tested place.
@@ -174,6 +180,28 @@ func WithRemoteSuppression(s SuppressionSource) Option {
 	return func(c *client) {
 		if s != nil {
 			c.suppression = s
+		}
+	}
+}
+
+// WithRemoteJobs replaces the pool-backed per-message job builds with another
+// JobSource — in practice internal/coreapi/remote's HTTP client, pointed at the
+// control plane's fleet listener.
+//
+// This is slice 2 of giving up the worker's pgxpool: eight read methods, end to
+// end, over the wire. Same shape and same reasoning as WithRemoteSuppression —
+// an Option rather than a positional parameter because every other caller
+// (cmd/inroad, cmd/seed, every test, and the self-host RoleAll worker) wants
+// the local build and should not have to say so, and OFF by default, so an
+// installation that sets nothing behaves exactly as it did before this existed.
+//
+// Passing nil is a no-op, NOT a way to disable job reads: silently dropping a
+// source that was meant to be wired would leave the process reading a pool it
+// was supposed to give up, with nothing saying so.
+func WithRemoteJobs(s JobSource) Option {
+	return func(c *client) {
+		if s != nil {
+			c.jobs = s
 		}
 	}
 }

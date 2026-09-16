@@ -23,7 +23,7 @@ import (
 // there is exactly ONE implementation of "how a mailbox's credential is opened"
 // (security invariants 8/9). On a fleet worker that opener is an HTTP call to
 // the control plane, so the unsealing itself happens where the key is.
-func (c client) ResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error) {
+func (c client) localResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.SenderTransport{}, err

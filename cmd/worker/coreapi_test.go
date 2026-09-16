@@ -1,15 +1,31 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/worker"
 )
+
+// stubOpener stands in for the credential broker the remote coreapi client
+// takes. It opens nothing: these tests are about which wiring a configuration
+// resolves to, and no call reaches it.
+type stubOpener struct{}
+
+func (stubOpener) OpenMailbox(context.Context, credbroker.MailboxRef) (credbroker.MailboxSecret, error) {
+	return credbroker.MailboxSecret{}, errors.New("stub opener")
+}
+
+func (stubOpener) OpenWebhookEndpointSecret(context.Context, uuid.UUID, uuid.UUID, []byte) ([]byte, error) {
+	return nil, errors.New("stub opener")
+}
 
 // clearCoreAPIEnv puts the process into the environment a self-hosted install
 // actually has: none of the fleet variables set. t.Setenv cannot unset, so this
@@ -62,15 +78,17 @@ func TestSelfHostDefaultsToTheInProcessCoreAPI(t *testing.T) {
 		})
 	}
 
-	wiring, err := buildCoreAPIWiring(cfg, worker.RoleAll, quiet())
+	// A local-mode wiring installs NOTHING, even when a broker happens to be
+	// available: the mode is the decision, not the availability of a dependency.
+	wiring, err := buildCoreAPIWiring(cfg, coreAPILocal, &stubOpener{}, quiet())
 	if err != nil {
 		t.Fatalf("buildCoreAPIWiring: %v", err)
 	}
 	if opts := wiring.coreOptions(); len(opts) != 0 {
 		t.Errorf("coreOptions() returned %d options for the self-host path, want 0", len(opts))
 	}
-	if wiring.suppression != nil {
-		t.Error("self-host wiring carries a remote suppression source, want none")
+	if wiring.client != nil {
+		t.Error("self-host wiring carries a remote coreapi client, want none")
 	}
 }
 
@@ -90,15 +108,63 @@ func TestTheRemoteCoreAPIResolvesForAConfiguredSendWorker(t *testing.T) {
 		t.Fatalf("mode = %v, want %v", mode, coreAPIRemote)
 	}
 
-	wiring, err := buildCoreAPIWiring(cfg, worker.RoleSend, quiet())
+	wiring, err := buildCoreAPIWiring(cfg, mode, &stubOpener{}, quiet())
 	if err != nil {
 		t.Fatalf("buildCoreAPIWiring: %v", err)
 	}
-	if wiring.suppression == nil {
-		t.Fatal("remote wiring carries no suppression source")
+	if wiring.client == nil {
+		t.Fatal("remote wiring carries no coreapi client")
 	}
-	if len(wiring.coreOptions()) != 1 {
-		t.Errorf("coreOptions() returned %d options, want 1", len(wiring.coreOptions()))
+	// Two options after slice 2: the suppression source and the job source, both
+	// satisfied by the one client.
+	if got := len(wiring.coreOptions()); got != 2 {
+		t.Errorf("coreOptions() returned %d options, want 2", got)
+	}
+}
+
+// The remote coreapi transport depends on the credential broker, because the
+// job responses it reads carry no credential. Without one a worker would fetch
+// work it cannot do, and the failure would surface at a mailbox dial rather
+// than at startup.
+func TestTheRemoteCoreAPIWithoutACredentialBrokerRefusesToStart(t *testing.T) {
+	cfg := &config.Config{
+		FleetCoreAPIRemote: true,
+		FleetBrokerURL:     brokerURL,
+		FleetBrokerToken:   brokerToken,
+	}
+	if _, err := buildCoreAPIWiring(cfg, coreAPIRemote, nil, quiet()); !errors.Is(err, ErrCoreAPIRemoteNeedsBroker) {
+		t.Fatalf("err = %v, want ErrCoreAPIRemoteNeedsBroker", err)
+	}
+}
+
+// The two decisions this binary makes agree by construction: every role/config
+// combination that resolves to remote coreapi ALSO resolves to brokered
+// credentials, so the refusal above is unreachable through resolve* rather than
+// merely unlikely. Driven through both real resolvers, not asserted by reading.
+func TestRemoteCoreAPIAlwaysImpliesBrokeredCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{"send worker with the fleet channel", &config.Config{
+			FleetCoreAPIRemote: true, FleetBrokerURL: brokerURL, FleetBrokerToken: brokerToken,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, role := range []worker.Role{worker.RoleAll, worker.RoleControl, worker.RoleSend} {
+				coreMode, coreErr := resolveCoreAPIMode(tc.cfg, role)
+				if coreErr != nil || coreMode != coreAPIRemote {
+					continue // this role cannot read remotely; nothing to imply
+				}
+				credMode, credErr := resolveCredentialMode(tc.cfg, role)
+				if credErr != nil {
+					t.Fatalf("%s reads coreapi remotely but has no credential mode: %v", role, credErr)
+				}
+				if credMode != credentialsBrokered {
+					t.Errorf("%s reads coreapi remotely with credential mode %v, want brokered", role, credMode)
+				}
+			}
+		})
 	}
 }
 
@@ -142,7 +208,7 @@ func TestARemoteCoreAPIRefusesAPlaintextFleetURL(t *testing.T) {
 		FleetBrokerURL:     "http://control.internal:8090",
 		FleetBrokerToken:   brokerToken,
 	}
-	if _, err := buildCoreAPIWiring(cfg, worker.RoleSend, quiet()); !errors.Is(err, credbroker.ErrInsecureURL) {
+	if _, err := buildCoreAPIWiring(cfg, coreAPIRemote, &stubOpener{}, quiet()); !errors.Is(err, credbroker.ErrInsecureURL) {
 		t.Fatalf("err = %v, want credbroker.ErrInsecureURL", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/coreapi/remote"
 	"github.com/inroad/inroad/internal/platform/config"
+	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/worker"
 )
 
@@ -24,12 +25,19 @@ const (
 	// worker that sets no new variable gets.
 	coreAPILocal coreAPIMode = iota
 	// coreAPIRemote: the process asks the control plane over the fleet channel
-	// for the methods the transport has taken over — in slice 1, IsSuppressed
-	// and nothing else. The pool is still open for everything else; see
+	// for the methods the transport has taken over — after slice 2, the one
+	// suppression check plus the eight per-message job READS. The pool is still
+	// open for everything else (every claim, mark, finalize and sweep); see
 	// internal/coreapi/remote's package doc for what that does and does not buy
 	// yet.
 	coreAPIRemote
 )
+
+// coreAPIRemoteMethods is what this worker reads remotely, logged at startup so
+// an operator can see the boundary move slice by slice rather than having to
+// read the source to find out what the flag currently covers.
+const coreAPIRemoteMethods = "IsSuppressed, GetStepSendJob, GetInboxPollJob, GetWarmupSendJob, " +
+	"GetWarmupEngageJob, GetWebhookDeliveryJob, GetTestSendContent, ResolveSenderTransport, FindSendByMessageID"
 
 func (m coreAPIMode) String() string {
 	if m == coreAPIRemote {
@@ -78,39 +86,70 @@ func resolveCoreAPIMode(cfg *config.Config, role worker.Role) (coreAPIMode, erro
 	return coreAPIRemote, nil
 }
 
-// coreAPIWiring is what the composition root got back. suppression is non-nil
-// only in coreAPIRemote.
+// ErrCoreAPIRemoteNeedsBroker is the third fail-closed refusal, and it names a
+// dependency between the two decisions this binary makes. Reading coreapi
+// remotely means the job responses carry no credential — a fleet worker gets
+// those from the credential broker, so that one channel stays the only thing in
+// the installation handing out a plaintext secret. Without a broker there would
+// be a job and nothing to send it with.
+//
+// In practice resolveCredentialMode has already refused a role=send worker
+// without a broker (ErrSendRoleNeedsBroker), and role=send is the only role
+// this flag is allowed on — so this is the belt-and-braces half, checked here
+// because the ORDER of two independent resolutions is not something the next
+// person to touch this file should have to reason about.
+var ErrCoreAPIRemoteNeedsBroker = errors.New(
+	"INROAD_FLEET_COREAPI_REMOTE needs the credential broker: coreapi job responses carry no credential, and a worker reading them remotely obtains one through INROAD_FLEET_BROKER_URL")
+
+// coreAPIWiring is what the composition root got back. client is non-nil only
+// in coreAPIRemote, and it satisfies BOTH inprocess source interfaces — one
+// transport, one connection pool, one token.
 type coreAPIWiring struct {
-	mode        coreAPIMode
-	suppression inprocess.SuppressionSource
+	mode   coreAPIMode
+	client *remote.Client
 }
 
-// buildCoreAPIWiring turns the resolved mode into the concrete dependency. It
-// is the only place cmd/worker builds a remote coreapi client.
-func buildCoreAPIWiring(cfg *config.Config, role worker.Role, logger *slog.Logger) (coreAPIWiring, error) {
-	mode, err := resolveCoreAPIMode(cfg, role)
-	if err != nil {
-		return coreAPIWiring{}, err
-	}
+// buildCoreAPIWiring turns an ALREADY-RESOLVED mode into the concrete
+// dependency. It is the only place cmd/worker builds a remote coreapi client.
+//
+// The mode is a parameter rather than resolved here because the two halves have
+// to happen at different points in the composition root: resolveCoreAPIMode is
+// pure and runs before anything connects, so a role/flag combination that
+// cannot work fails with no database attempt behind it; this half needs the
+// credential broker, which is built after the pool.
+//
+// creds is that broker. The coreapi client takes it because a job response
+// carries no credential and the client fills one in per job; it is nil in every
+// mode but credentialsBrokered, which is why remote mode refuses without it.
+func buildCoreAPIWiring(cfg *config.Config, mode coreAPIMode, creds credbroker.Opener, logger *slog.Logger) (coreAPIWiring, error) {
 	if mode != coreAPIRemote {
 		return coreAPIWiring{mode: mode}, nil
 	}
-	client, err := remote.NewClient(cfg.FleetBrokerURL, cfg.FleetBrokerToken, cfg.FleetBrokerAllowPlaintext)
+	if creds == nil {
+		return coreAPIWiring{}, ErrCoreAPIRemoteNeedsBroker
+	}
+	client, err := remote.NewClient(cfg.FleetBrokerURL, cfg.FleetBrokerToken, cfg.FleetBrokerAllowPlaintext, creds)
 	if err != nil {
 		return coreAPIWiring{}, err
 	}
 	logger.Info("coreapi source", "mode", mode.String(), "control_plane", cfg.FleetBrokerURL,
-		"methods", "IsSuppressed",
-		"note", "this worker asks the control plane for the methods the remote transport carries; it still opens a pool for the rest")
-	return coreAPIWiring{mode: mode, suppression: client}, nil
+		"methods", coreAPIRemoteMethods,
+		"note", "this worker asks the control plane for the methods the remote transport carries and brokers their credentials separately; it still opens a pool for the rest")
+	return coreAPIWiring{mode: mode, client: client}, nil
 }
 
 // coreOptions returns the inprocess options this wiring implies. The local mode
 // returns NONE, so inprocess.New builds exactly the client it built before this
 // slice existed — that emptiness is the self-host guarantee, not an oversight.
 func (w coreAPIWiring) coreOptions() []inprocess.Option {
-	if w.suppression == nil {
+	if w.client == nil {
 		return nil
 	}
-	return []inprocess.Option{inprocess.WithRemoteSuppression(w.suppression)}
+	// Both sources, one client. They are separate seams because they shipped in
+	// separate slices, not because a deployment would ever want one without the
+	// other.
+	return []inprocess.Option{
+		inprocess.WithRemoteSuppression(w.client),
+		inprocess.WithRemoteJobs(w.client),
+	}
 }

@@ -1,6 +1,32 @@
 // Package coreapi is the control⇄execution boundary. Workers depend on this
 // interface, never on platform/db directly. v1 satisfies it in-process; a
 // future HTTP implementation swaps in without changing worker code.
+//
+// # The job types are wire types
+//
+// The per-message job structs below (StepSendJob, InboxPollJob, WarmupSendJob,
+// WarmupEngageJob, WebhookDeliveryJob, SenderTransport, TestSendContent,
+// SendRef) carry snake_case json tags because internal/coreapi/remote encodes
+// THESE types rather than a parallel set of wire structs. That is deliberate,
+// and the reason is the failure mode a mirror would have: a field added to a
+// job here and forgotten in a hand-written mirror reaches the worker
+// ZERO-VALUED, which for a gate flag is a silently wrong send rather than a
+// build error. One definition cannot drift from itself.
+//
+// # Credentials are tagged json:"-" and do not cross this wire
+//
+// Every decrypted secret on a job (AccessToken, SMTPPassword, Password, the
+// webhook Secret) is `json:"-"`. A remote worker obtains those from the
+// CREDENTIAL BROKER (internal/platform/credbroker), which exists for exactly
+// that purpose and is already mandatory on the only role permitted to read
+// coreapi remotely. Two channels handing out plaintext secrets would be two
+// sets of audit properties to keep in step; there is one.
+//
+// The tag is the enforcement, at the declaration site rather than in a mapper
+// somebody has to remember to update — the same "omission by construction"
+// standard docs/security.md invariant 2 sets for API response DTOs.
+// TestSecretJobFieldsNeverCrossTheWire (internal/coreapi/remote) fails if a
+// secret field loses the tag.
 package coreapi
 
 import (
@@ -604,11 +630,11 @@ const (
 // ContactVars are the personalization values for a contact, applied worker-side
 // to the raw step templates ({{first_name}}, {{custom.<key>}}, …).
 type ContactVars struct {
-	FirstName string
-	LastName  string
-	Email     string
-	Company   string
-	Custom    map[string]string
+	FirstName string            `json:"first_name"`
+	LastName  string            `json:"last_name"`
+	Email     string            `json:"email"`
+	Company   string            `json:"company"`
+	Custom    map[string]string `json:"custom"`
 }
 
 // StepSendJob is everything the sequence:advance worker needs to send one
@@ -622,17 +648,23 @@ type ContactVars struct {
 // CurrentStep (the cursor before this send), NextDelaySeconds (delay of the step
 // after this one; 0 when LastStep), and References (the stored references chain).
 type StepSendJob struct {
-	Skip         bool
-	EnrollmentID string
-	WorkspaceID  string
-	CampaignID   string
-	ContactID    string
-	MailboxID    string
+	Skip         bool   `json:"skip"`
+	EnrollmentID string `json:"enrollment_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	CampaignID   string `json:"campaign_id"`
+	ContactID    string `json:"contact_id"`
+	// MailboxID is the RESOLVED sending mailbox, and it is set exactly when a
+	// sender was resolved — which is also exactly when the credential was
+	// opened (see the in-process builder, which resolves the sender before
+	// opening anything). The remote transport reads it as "this job needs a
+	// credential, and it is this mailbox's": every deferral/skip branch returns
+	// before a sender exists and therefore leaves it empty.
+	MailboxID string `json:"mailbox_id"`
 	// SendID is generated up front (before the step is sent) so the worker can
 	// embed it in tracking tokens at MIME-build time; MarkStepSent writes it as
 	// the sends row's id, so the events recorded against it (via the pixel/
 	// click endpoints) line up with the eventual send row.
-	SendID string
+	SendID string `json:"send_id"`
 	// VariantID is the A/B variant whose copy Subject/BodyText/BodyHTML carry,
 	// or "" when the step's own base content was selected (see migration 000053:
 	// a step IS variant A). It is written to sends.variant_id at claim time so
@@ -642,18 +674,18 @@ type StepSendJob struct {
 	// chooses, and travels here already decided. The worker must not re-select:
 	// it has no reason to reach the variant rows, and a second roll could
 	// disagree with the copy already in this job.
-	VariantID        string
-	CurrentStep      int
-	StepOrder        int
-	NextDelaySeconds int
-	LastStep         bool
-	Suppressed       bool
+	VariantID        string `json:"variant_id"`
+	CurrentStep      int    `json:"current_step"`
+	StepOrder        int    `json:"step_order"`
+	NextDelaySeconds int    `json:"next_delay_seconds"`
+	LastStep         bool   `json:"last_step"`
+	Suppressed       bool   `json:"suppressed"`
 	// MailboxRemoved means this thread's sending mailbox has been deleted, so the
 	// enrollment's pin was cleared (ON DELETE SET NULL) and the sequence cannot
 	// legitimately continue: a follow-up would go out from a different address
 	// carrying In-Reply-To/References for a Message-ID that address never sent.
 	// Handled like Suppressed — the worker stops the enrollment and sends nothing.
-	MailboxRemoved bool
+	MailboxRemoved bool `json:"mailbox_removed"`
 	// CampaignLimited means the campaign has reached campaigns.daily_limit for the
 	// UTC day: its whole pool is still under its per-mailbox caps, but the campaign
 	// as a whole may not send more today. HealthPaused means the mailbox this
@@ -664,15 +696,15 @@ type StepSendJob struct {
 	// SentToday >= EffectiveDailyCap: those two numbers reach the logs and describe
 	// the mailbox, so a campaign-wide limit or a health pause must not masquerade as
 	// a mailbox that has used up its cap.
-	CampaignLimited bool
+	CampaignLimited bool `json:"campaign_limited"`
 	// NewLeadLimited means the campaign has reached campaigns.max_new_leads_per_day
 	// for the UTC day and THIS job is a step-1 send (a brand-new contact starting
 	// the sequence). It is narrower than CampaignLimited: a follow-up step (step
 	// 2+) is never gated by it, so a sequence already in flight keeps replying on
 	// schedule while the campaign is closed to new contacts. Deferred exactly like
 	// CampaignLimited (backoff snapped into the send window, never a failure).
-	NewLeadLimited bool
-	HealthPaused   bool
+	NewLeadLimited bool `json:"new_lead_limited"`
+	HealthPaused   bool `json:"health_paused"`
 	// CampaignPaused means the campaign is not 'running' — paused (by hand or by the
 	// deliverability circuit breaker), or still draft, or done. It gates the send
 	// itself: without it a breaker-paused campaign kept sending, because every
@@ -684,51 +716,55 @@ type StepSendJob struct {
 	// Skip means "nothing to do here ever" and leaves the enrollment where it is,
 	// whereas a pause is a condition that CLEARS. The enrollment has to wait and
 	// resume, so the worker defers it (see the blocked branch in advance.go).
-	CampaignPaused bool
+	CampaignPaused bool `json:"campaign_paused"`
 	// NotDueUntil is the enrollment's persisted next_due_at, carried so the
 	// claim can refuse a step that is not due yet. It exists because pushing
 	// next_due_at out (DeferEnrollment, the out-of-office path) cannot cancel
 	// the asynq advance task ALREADY queued for the old time: without this
 	// guard that task fires on schedule and sends into the stated absence.
 	// Zero when the enrollment has no due time recorded.
-	NotDueUntil        time.Time
-	EffectiveDailyCap  int
-	SentToday          int
-	MinIntervalSeconds int
-	ToEmail            string
-	Vars               ContactVars
-	Subject            string
-	ThreadSubject      string
-	BodyText           string
-	BodyHTML           string
-	UnsubURL           string
-	InReplyTo          string
-	References         string
+	NotDueUntil        time.Time   `json:"not_due_until"`
+	EffectiveDailyCap  int         `json:"effective_daily_cap"`
+	SentToday          int         `json:"sent_today"`
+	MinIntervalSeconds int         `json:"min_interval_seconds"`
+	ToEmail            string      `json:"to_email"`
+	Vars               ContactVars `json:"vars"`
+	Subject            string      `json:"subject"`
+	ThreadSubject      string      `json:"thread_subject"`
+	BodyText           string      `json:"body_text"`
+	BodyHTML           string      `json:"body_html"`
+	UnsubURL           string      `json:"unsub_url"`
+	InReplyTo          string      `json:"in_reply_to"`
+	References         string      `json:"references"`
 	// TrackingEnabled mirrors the campaign's tracking_enabled column: when true
 	// and BodyHTML is non-empty, the worker rewrites links and appends an open
 	// pixel before sending.
-	TrackingEnabled bool
+	TrackingEnabled bool `json:"tracking_enabled"`
 	// Schedule is the campaign's sending window, carried on the job so
 	// MarkStepSent can place the NEXT step's due time inside it without a second
 	// round trip. Compiled (and therefore validated) at job-build time, before the
 	// send happens, so a corrupted schedule stops the send rather than being
 	// discovered after the message is already out.
-	Schedule  cadence.Schedule
-	FromEmail string
-	FromName  string
+	Schedule  cadence.Schedule `json:"schedule"`
+	FromEmail string           `json:"from_email"`
+	FromName  string           `json:"from_name"`
 	// Provider selects the send transport ("smtp" | "gmail"). AccessToken is the
 	// decrypted OAuth bearer for gmail (nil for smtp); zeroized after use like
 	// SMTPPassword. For gmail the SMTP* fields are empty.
-	Provider     string
-	AccessToken  []byte
-	SMTPHost     string
-	SMTPPort     int
-	SMTPUsername string
-	SMTPPassword []byte
+	//
+	// AccessToken and SMTPPassword are json:"-": they never cross the remote
+	// coreapi wire. A fleet worker fills them from the credential broker for
+	// MailboxID — see the package doc.
+	Provider     string `json:"provider"`
+	AccessToken  []byte `json:"-"`
+	SMTPHost     string `json:"smtp_host"`
+	SMTPPort     int    `json:"smtp_port"`
+	SMTPUsername string `json:"smtp_username"`
+	SMTPPassword []byte `json:"-"`
 	// AllowPlaintext is the persisted per-mailbox cleartext opt-out (mailboxes.
 	// allow_plaintext). Threaded into OutboundJob so the send applies the SAME
 	// TLS policy the connect-test validated; false keeps TLS enforced.
-	AllowPlaintext bool
+	AllowPlaintext bool `json:"allow_plaintext"`
 }
 
 // NotYetDue reports whether this step's enrollment is scheduled for a moment
@@ -779,15 +815,22 @@ type InboxPollJob struct {
 	// fields are zero and AccessToken/Cursor carry the decrypted OAuth bearer and
 	// the opaque historyId cursor; AccessToken is zeroized after the poll like
 	// Password. For smtp the AccessToken/Cursor fields are empty.
-	Provider    string
-	AccessToken []byte
-	Cursor      string
-	Host        string
-	Port        int
-	Username    string
-	Password    []byte
-	LastSeenUID uint32
-	UIDValidity uint32
+	//
+	// "Zeroized after the poll" is a statement about the WORKER's own copy, and
+	// it has never been a statement about every copy in the system: on a fleet
+	// worker the plaintext also passes through the credential broker's HTTP
+	// response buffer and its base64 decode, neither of which zeroize reaches.
+	// See credbroker's package doc for what brokering does and does not buy.
+	// Both secrets are json:"-" — they do not cross the coreapi wire at all.
+	Provider    string `json:"provider"`
+	AccessToken []byte `json:"-"`
+	Cursor      string `json:"cursor"`
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	Username    string `json:"username"`
+	Password    []byte `json:"-"`
+	LastSeenUID uint32 `json:"last_seen_uid"`
+	UIDValidity uint32 `json:"uid_validity"`
 	// Email is the polled mailbox's OWN address, carried so the poller can tell
 	// warmup.ExtractIdentity which system received the message it is parsing.
 	//
@@ -802,7 +845,7 @@ type InboxPollJob struct {
 	// reads. Populating only the IMAP branch would leave the API providers silently
 	// unmeasurable — the failure that would look exactly like a provider that
 	// stamps nothing.
-	Email string
+	Email string `json:"email"`
 }
 
 // SendRef identifies the send an inbound reply/bounce matched, and the
@@ -814,13 +857,13 @@ type InboxPollJob struct {
 // Message-ID (MessageID — the reply's In-Reply-To/References target, i.e. the
 // thread's root_message_id) without a second lookup.
 type SendRef struct {
-	SendID       string
-	EnrollmentID string
-	ContactEmail string
-	MailboxID    string
-	CampaignID   string
-	ContactID    string
-	MessageID    string
+	SendID       string `json:"send_id"`
+	EnrollmentID string `json:"enrollment_id"`
+	ContactEmail string `json:"contact_email"`
+	MailboxID    string `json:"mailbox_id"`
+	CampaignID   string `json:"campaign_id"`
+	ContactID    string `json:"contact_id"`
+	MessageID    string `json:"message_id"`
 }
 
 // SenderTransport is one resolved mailbox's send identity plus its decrypted
@@ -837,18 +880,22 @@ type SendRef struct {
 // "avoid widening Client's ~40-method surface for one call site" trade as
 // BreakerResult), satisfied by the in-process client via type assertion.
 type SenderTransport struct {
-	FromEmail string
-	FromName  string
+	FromEmail string `json:"from_email"`
+	FromName  string `json:"from_name"`
 	// Provider selects the send transport ("smtp" | "gmail" | "m365").
 	// AccessToken is the decrypted OAuth bearer for gmail/m365 (nil for smtp);
 	// the worker zeroizes it after use, like every other job's credential.
-	Provider       string
-	AccessToken    []byte
-	SMTPHost       string
-	SMTPPort       int
-	SMTPUsername   string
-	SMTPPassword   []byte
-	AllowPlaintext bool
+	//
+	// json:"-" on both: the remote transport carries the send IDENTITY and the
+	// non-secret connection settings, and the secret itself comes from the
+	// credential broker for the mailbox the caller named.
+	Provider       string `json:"provider"`
+	AccessToken    []byte `json:"-"`
+	SMTPHost       string `json:"smtp_host"`
+	SMTPPort       int    `json:"smtp_port"`
+	SMTPUsername   string `json:"smtp_username"`
+	SMTPPassword   []byte `json:"-"`
+	AllowPlaintext bool   `json:"allow_plaintext"`
 }
 
 // TestSendContent is one test-send's raw (unrendered) step content plus the
@@ -860,11 +907,11 @@ type SenderTransport struct {
 // internal/worker/testsend, through the SAME personalize package every real
 // send renders through.
 type TestSendContent struct {
-	Subject   string
-	BodyText  string
-	BodyHTML  string
-	FirstName string
-	Company   string
+	Subject   string `json:"subject"`
+	BodyText  string `json:"body_text"`
+	BodyHTML  string `json:"body_html"`
+	FirstName string `json:"first_name"`
+	Company   string `json:"company"`
 }
 
 // WarmupSendJob is everything the warmup:tick worker needs to send one warmup
@@ -877,64 +924,76 @@ type TestSendContent struct {
 // Secrets are []byte (AccessToken, SMTPPassword) so the worker can zeroize them
 // after one send — a Go string would be immutable and linger in memory until GC.
 type WarmupSendJob struct {
-	Skip        bool
-	WorkspaceID string
+	Skip        bool   `json:"skip"`
+	WorkspaceID string `json:"workspace_id"`
 	// FromMailbox / ToMailbox identify the two participants; ThreadID is the thread
 	// this send belongs to (an existing open thread for a reply, or a freshly
 	// opened one for a new-thread send).
-	FromMailbox string
-	ToMailbox   string
-	ThreadID    string
-	IsReply     bool
+	//
+	// FromMailbox is also the credential subject, and it is set exactly when
+	// this job carries a transport — every Skip branch returns before a partner
+	// is selected. The remote transport reads it that way.
+	FromMailbox string `json:"from_mailbox"`
+	ToMailbox   string `json:"to_mailbox"`
+	ThreadID    string `json:"thread_id"`
+	IsReply     bool   `json:"is_reply"`
 	// SendID is the deterministic warmup_sends row id, derived up front (before the
 	// send) so it can be embedded in the receipt token — ClaimWarmupSend writes it
 	// as the row id so a retried tick reclaims the SAME row. Derived from
 	// (from_mailbox, UTC day, today's send index), the stable tuple available
 	// read-side; see the inprocess deriveWarmupSendID doc for why this replaces the
 	// spec's dueUnix (GetWarmupSendJob's signature carries no tick time).
-	SendID string
+	SendID string `json:"send_id"`
 	// The LEASE this send was decided under. ClaimWarmupSend refuses the send if
 	// the sender's lane has moved, the policy version has moved, or the expiry has
 	// passed — so an assignment cannot fire under a decision that no longer holds
 	// (reputation design acceptance criterion 7). LeaseExpiresAt is minted by the
 	// DATABASE at issue and compared against the DATABASE clock at claim; it never
 	// passes through a Go clock.
-	IssuedLane          string
-	IssuedPolicyVersion string
-	LeaseExpiresAt      time.Time
+	IssuedLane          string    `json:"issued_lane"`
+	IssuedPolicyVersion string    `json:"issued_policy_version"`
+	LeaseExpiresAt      time.Time `json:"lease_expires_at"`
 	// ContentVersion identifies WHICH library content this send carries — the
 	// (thread template, turn) warmup.ContentVersion derives from the thread's
 	// content_key. ClaimWarmupSend persists it, and the placement observation copies
 	// it off the send row, so a spam spike can be attributed to a template rather
 	// than only to a mailbox. Empty when the content could not be resolved to a
 	// library turn; it gates nothing either way (see warmup/contentversionfold.go).
-	ContentVersion string
+	ContentVersion string `json:"content_version"`
 	// ToEmail / FromEmail / FromName address the message envelope.
-	ToEmail   string
-	FromEmail string
-	FromName  string
-	Subject   string
-	BodyText  string
-	BodyHTML  string
+	ToEmail   string `json:"to_email"`
+	FromEmail string `json:"from_email"`
+	FromName  string `json:"from_name"`
+	Subject   string `json:"subject"`
+	BodyText  string `json:"body_text"`
+	BodyHTML  string `json:"body_html"`
 	// InReplyTo / References thread a reply to the conversation root; empty for a
 	// new-thread opener.
-	InReplyTo  string
-	References string
+	InReplyTo  string `json:"in_reply_to"`
+	References string `json:"references"`
 	// Token is the signed X-Inroad-Warmup receipt header value the poller verifies.
-	Token string
+	//
+	// It DOES cross the remote coreapi wire, unlike the credential fields below,
+	// and the difference is deliberate rather than an oversight: this is a
+	// header the message carries in the clear to its recipient, minted from
+	// INROAD_WARMUP_SECRET, which a fleet worker does not hold and cannot mint
+	// one with. It authenticates a message; it opens nothing.
+	Token string `json:"token"`
 	// Provider selects the send transport ("smtp" | "gmail" | "m365"). AccessToken
 	// is the decrypted OAuth bearer for API providers (nil for smtp); zeroized after
 	// use like SMTPPassword. For API providers the SMTP* fields are empty.
-	Provider     string
-	AccessToken  []byte
-	SMTPHost     string
-	SMTPPort     int
-	SMTPUsername string
-	SMTPPassword []byte
+	//
+	// json:"-" on both secrets: a fleet worker brokers them for FromMailbox.
+	Provider     string `json:"provider"`
+	AccessToken  []byte `json:"-"`
+	SMTPHost     string `json:"smtp_host"`
+	SMTPPort     int    `json:"smtp_port"`
+	SMTPUsername string `json:"smtp_username"`
+	SMTPPassword []byte `json:"-"`
 	// AllowPlaintext is the persisted per-mailbox cleartext opt-out; threaded into
 	// the outbound job so the send applies the SAME TLS policy the connect-test
 	// validated. False keeps TLS enforced.
-	AllowPlaintext bool
+	AllowPlaintext bool `json:"allow_plaintext"`
 }
 
 // WarmupReceiptInput is the poller's report of one detected warmup message: the
@@ -1042,45 +1101,59 @@ type WarmupEngagePlan struct {
 // zeroizes them after use, like WarmupSendJob. The Do* flags are recomputed
 // deterministically from the receipt.
 type WarmupEngageJob struct {
+	// RecipientMailbox is the mailbox this job's transport belongs to: the
+	// receipt's own recipient, resolved control-plane-side and workspace-pinned.
+	//
+	// It is carried EXPLICITLY rather than inferred. ReplySend.FromMailbox holds
+	// the same id, but only when the deterministic plan replies AND the thread
+	// still has a turn — so on a passive engagement (mark-read only) there would
+	// be nothing to infer it from, and a fleet worker needs it on every
+	// engagement to broker the credential this job no longer carries.
+	RecipientMailbox string `json:"recipient_mailbox"`
 	// Provider selects both the engage transport (IMAP-modify for smtp, API-modify
 	// for gmail, unsupported for m365) and the reply-send transport ("smtp" |
 	// "gmail" | "m365"). AccessToken is the decrypted OAuth bearer for API providers
 	// (nil for smtp), used for BOTH the Gmail modify calls and the reply send;
 	// zeroized after use like SMTPPassword.
-	Provider    string
-	AccessToken []byte
+	//
+	// json:"-" on both secrets: a fleet worker brokers them for RecipientMailbox
+	// and installs the SAME slices on ReplySend, because the worker's single
+	// deferred zeroize wipes only the outer copy (see internal/worker/warmup's
+	// EngageHandler) and an unaliased inner copy would survive it.
+	Provider    string `json:"provider"`
+	AccessToken []byte `json:"-"`
 	// IMAPHost/Port/Username are the recipient's IMAP-MODIFY transport (mark-read /
 	// rescue) for smtp mailboxes; empty for API providers.
-	IMAPHost     string
-	IMAPPort     int
-	IMAPUsername string
+	IMAPHost     string `json:"imap_host"`
+	IMAPPort     int    `json:"imap_port"`
+	IMAPUsername string `json:"imap_username"`
 	// SMTPHost/Port/Username are the recipient's SMTP transport for the reply send;
 	// empty for API providers.
-	SMTPHost     string
-	SMTPPort     int
-	SMTPUsername string
+	SMTPHost     string `json:"smtp_host"`
+	SMTPPort     int    `json:"smtp_port"`
+	SMTPUsername string `json:"smtp_username"`
 	// SMTPPassword is the recipient's single decrypted mailbox secret. A mailbox uses
 	// ONE password for both IMAP and SMTP, so the engage worker feeds this same slice
 	// to the IMAP-modify dial and the reply send; zeroized once after use.
-	SMTPPassword []byte
+	SMTPPassword []byte `json:"-"`
 	// AllowPlaintext is the recipient mailbox's cleartext opt-out; threaded into the
 	// reply's outbound job so it applies the SAME TLS policy the connect-test validated.
-	AllowPlaintext bool
+	AllowPlaintext bool `json:"allow_plaintext"`
 	// SourceFolder is the ACTUAL provider folder the message was found in (INBOX / a
 	// junk folder name), stored on the C5a receipt; the engager locates + rescues the
 	// message by it. MessageID is the received message's RFC822 Message-ID, also from
 	// the receipt, used to locate the exact message. Both are attacker-influenceable
 	// inbound content — the engager passes them as literal protocol arguments.
-	SourceFolder string
-	MessageID    string
+	SourceFolder string `json:"source_folder"`
+	MessageID    string `json:"message_id"`
 	// DoRescue / DoMarkRead / DoReply mirror the plan, recomputed from the receipt.
-	DoRescue   bool
-	DoMarkRead bool
-	DoReply    bool
+	DoRescue   bool `json:"do_rescue"`
+	DoMarkRead bool `json:"do_mark_read"`
+	DoReply    bool `json:"do_reply"`
 	// ReplySend is the fully-formed NEW warmup send FROM the recipient (its own
 	// deterministic SendID, threading headers, and signed X-Inroad-Warmup token),
 	// populated ONLY when DoReply is true AND the thread still has a turn to send. The
 	// engage worker claims → sends → finalizes it exactly like a tick send. Its
 	// transport fields reuse the same decrypted secret slices above (zeroized once).
-	ReplySend WarmupSendJob
+	ReplySend WarmupSendJob `json:"reply_send"`
 }

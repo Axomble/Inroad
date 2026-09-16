@@ -45,19 +45,30 @@ func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard
 
 // serve stands the handler up on an httptest server and returns a client
 // pointed at it. allowPlaintext is true because httptest speaks http.
+//
+// The job reader is a fake that answers nothing: this file exercises slice 1's
+// one route, and a handler needs both halves wired to be built at all. The job
+// routes have their own file.
 func serve(t *testing.T, r SuppressionReader, clientToken string) (*Client, *httptest.Server) {
 	t.Helper()
-	h, err := NewHandler(r, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: r, Jobs: &fakeJobs{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := NewClient(srv.URL, clientToken, true)
+	c, err := newTestClient(t, srv.URL, clientToken)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	return c, srv
+}
+
+// newTestClient builds a client with a credential broker that answers nothing.
+// Slice 1's route needs no credential; the job tests supply a real one.
+func newTestClient(t *testing.T, baseURL, token string) (*Client, error) {
+	t.Helper()
+	return NewClient(baseURL, token, true, &fakeOpener{})
 }
 
 // The headline: a client holding nothing but a URL and a token answers the
@@ -110,7 +121,7 @@ func TestTheRequestBodyCarriesTheWorkspaceAndTheAddressOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, err := NewClient(srv.URL, testToken, true)
+	c, err := newTestClient(t, srv.URL, testToken)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -132,7 +143,7 @@ func TestTheRequestBodyCarriesTheWorkspaceAndTheAddressOnly(t *testing.T) {
 // here is mail sent to someone who opted out.
 func TestAnUnreachableControlPlaneIsAnErrorNeverAFalseNegative(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	c, err := NewClient(srv.URL, testToken, true)
+	c, err := newTestClient(t, srv.URL, testToken)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -190,7 +201,7 @@ func TestAWrongTokenIsRejectedAndAnswersNothing(t *testing.T) {
 // even read, and likewise reaches no reader.
 func TestAMissingAuthorizationHeaderIsRejected(t *testing.T) {
 	f := &fakeSuppression{answer: true}
-	h, err := NewHandler(f, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: f, Jobs: &fakeJobs{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -316,7 +327,7 @@ func TestAPlaintextURLIsRefusedUnlessChosen(t *testing.T) {
 		{"a non-http scheme is refused", "ftp://control.example", true, credbroker.ErrInsecureURL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewClient(tc.url, testToken, tc.allowPlaintext)
+			_, err := NewClient(tc.url, testToken, tc.allowPlaintext, &fakeOpener{})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("err = %v, want nil", err)
@@ -332,10 +343,10 @@ func TestAPlaintextURLIsRefusedUnlessChosen(t *testing.T) {
 
 func TestAWeakTokenIsRefusedOnBothSides(t *testing.T) {
 	short := strings.Repeat("a", credbroker.MinTokenLen-1)
-	if _, err := NewClient("https://control.example", short, false); !errors.Is(err, credbroker.ErrWeakToken) {
+	if _, err := NewClient("https://control.example", short, false, &fakeOpener{}); !errors.Is(err, credbroker.ErrWeakToken) {
 		t.Errorf("client err = %v, want ErrWeakToken", err)
 	}
-	if _, err := NewHandler(&fakeSuppression{}, short, quietLogger()); !errors.Is(err, credbroker.ErrWeakToken) {
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}}, short, quietLogger()); !errors.Is(err, credbroker.ErrWeakToken) {
 		t.Errorf("handler err = %v, want ErrWeakToken", err)
 	}
 }
@@ -356,7 +367,7 @@ func TestARedirectIsNotFollowed(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	c, err := NewClient(redirector.URL, testToken, true)
+	c, err := newTestClient(t, redirector.URL, testToken)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

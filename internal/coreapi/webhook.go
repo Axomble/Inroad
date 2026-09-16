@@ -16,24 +16,28 @@ package coreapi
 // ~40-method surface (and its 13 fakes) for one call site" trade as
 // BreakerResult / SenderTransport.
 type WebhookDeliveryJob struct {
-	DeliveryID  string
-	EndpointID  string
-	WorkspaceID string
-	EventType   string
+	DeliveryID string `json:"delivery_id"`
+	// EndpointID names the endpoint whose signing secret this job needs. A fleet
+	// worker brokers that secret by this id (credbroker.OpenWebhookEndpointSecret).
+	EndpointID  string `json:"endpoint_id"`
+	WorkspaceID string `json:"workspace_id"`
+	EventType   string `json:"event_type"`
 	// Payload is the stored, byte-identical body to POST (and re-sign each
-	// attempt).
-	Payload []byte
-	// Secret is the decrypted HMAC signing key.
-	Secret []byte
+	// attempt). It is NOT a secret — it is the body the receiver is about to be
+	// handed — so it crosses the wire with the rest of the job.
+	Payload []byte `json:"payload"`
+	// Secret is the decrypted HMAC signing key. json:"-": it does not cross the
+	// remote coreapi wire; see the package doc on coreapi.
+	Secret []byte `json:"-"`
 	// URL is the receiver endpoint; the worker re-runs the SSRF guard on it
 	// immediately before dialing (the DNS-rebinding window).
-	URL string
+	URL string `json:"url"`
 	// Attempts is how many attempts have already been made (0 before the first).
-	Attempts int
+	Attempts int `json:"attempts"`
 	// Status is the delivery row's current status. The handler no-ops on anything
 	// but "pending".
-	Status string
+	Status string `json:"status"`
 	// EndpointActive is false when the endpoint was deactivated after this
 	// delivery was queued — the handler fails the delivery without dialing.
-	EndpointActive bool
+	EndpointActive bool `json:"endpoint_active"`
 }

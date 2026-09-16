@@ -107,12 +107,13 @@ func run() error {
 	// Where this worker's coreapi reads come from (INROAD_FLEET_COREAPI_REMOTE,
 	// off by default). Resolved here, beside ParseRole and before anything
 	// connects, for the same reason: a configuration that cannot work should
-	// fail with no DB attempt behind it. buildCoreAPIWiring owns the whole
-	// decision and refuses the combinations that cannot work — see
-	// cmd/worker/coreapi.go. The options it yields are installed on the
-	// in-process client further down; an unset flag yields none of them, which
-	// is what keeps the self-host path byte-for-byte what it was.
-	coreWiring, err := buildCoreAPIWiring(cfg, role, logger)
+	// fail with no DB attempt behind it. resolveCoreAPIMode refuses the
+	// combinations that cannot work — see cmd/worker/coreapi.go.
+	//
+	// Only the DECISION happens here. The client itself is built after the
+	// credential broker below, because a coreapi job response carries no
+	// credential and the client needs the broker to fill one in.
+	coreMode, err := resolveCoreAPIMode(cfg, role)
 	if err != nil {
 		logger.Error("coreapi source unusable", "err", err)
 		return err
@@ -188,6 +189,16 @@ func run() error {
 	// secret without one (a path the worker never takes — it only dispatches).
 	keyring := creds.keyring
 
+	// Now the coreapi client, for the mode resolved before anything connected.
+	// It takes the broker above because the job reads it carries answer with
+	// everything about a send EXCEPT its credential — one channel in this
+	// installation hands out a plaintext secret, and it is that one.
+	coreWiring, err := buildCoreAPIWiring(cfg, coreMode, creds.broker, logger)
+	if err != nil {
+		logger.Error("coreapi source unusable", "err", err)
+		return err
+	}
+
 	// The worker package depends only on coreapi.Client; the DB-backed
 	// implementation is wired here at the composition root.
 	googleOAuth := mail.GoogleOAuth{
@@ -238,9 +249,10 @@ func run() error {
 	// by the control plane and none of them by this host.
 	coreOpts = append(coreOpts, creds.coreOptions()...)
 	// Empty unless this worker reads remotely. When present it REPLACES the
-	// pool-backed source for the methods the remote transport has taken over —
-	// in slice 1, IsSuppressed alone. The pool above is still opened, because
-	// everything else still needs it (see internal/coreapi/remote).
+	// pool-backed sources for the methods the remote transport has taken over —
+	// after slice 2, the suppression check and the eight per-message job reads.
+	// The pool above is still opened, because everything else still needs it
+	// (see internal/coreapi/remote).
 	coreOpts = append(coreOpts, coreWiring.coreOptions()...)
 	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(), coreOpts...)
 

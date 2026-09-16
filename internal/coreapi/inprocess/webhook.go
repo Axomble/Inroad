@@ -21,7 +21,7 @@ import (
 //
 // Consumed through internal/worker/webhook.Core, not coreapi.Client — see the
 // WebhookDeliveryJob doc for why.
-func (c client) GetWebhookDeliveryJob(ctx context.Context, deliveryID, workspaceID string) (coreapi.WebhookDeliveryJob, error) {
+func (c client) localWebhookDeliveryJob(ctx context.Context, deliveryID, workspaceID string) (coreapi.WebhookDeliveryJob, error) {
 	did, err := uuid.Parse(deliveryID)
 	if err != nil {
 		return coreapi.WebhookDeliveryJob{}, err

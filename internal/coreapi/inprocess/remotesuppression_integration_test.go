@@ -12,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/suppression"
 	"github.com/inroad/inroad/internal/coreapi/remote"
+	"github.com/inroad/inroad/internal/platform/credbroker"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
 )
@@ -22,9 +23,17 @@ func remoteQuiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard
 
 // controlPlane stands the real handler up over the real suppression store on
 // real Postgres, and returns the URL a worker would dial.
+//
+// The job half is wired with a pool-less in-process client purely so the
+// handler can be BUILT — this file drives the suppression route only, and the
+// job routes are proven end to end in remotejobs_integration_test.go.
 func controlPlane(t *testing.T, q *gen.Queries) *httptest.Server {
 	t.Helper()
-	h, err := remote.NewHandler(suppression.NewStore(q), remoteTestToken, remoteQuiet())
+	h, err := remote.NewHandler(remote.Deps{
+		Suppression: suppression.NewStore(q),
+		Jobs: jobReader(t, New(nil, nil, nil, "",
+			mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, nil, nil)),
+	}, remoteTestToken, remoteQuiet())
 	if err != nil {
 		t.Fatalf("remote.NewHandler: %v", err)
 	}
@@ -36,9 +45,14 @@ func controlPlane(t *testing.T, q *gen.Queries) *httptest.Server {
 // remoteCore builds the EXECUTION plane's coreapi client with a NIL POOL. The
 // nil is the assertion, not a shortcut: localSuppression would dereference it,
 // so every answer this client gives came off the wire.
+//
+// The credential broker is credbroker.Unconfigured — a real Opener that fails
+// closed on every call. The suppression route needs no credential, so a working
+// one would prove nothing here, and a broker that refuses makes it impossible
+// for this file to pass by accidentally opening one.
 func remoteCore(t *testing.T, baseURL string) suppressionCapability {
 	t.Helper()
-	rc, err := remote.NewClient(baseURL, remoteTestToken, true) // httptest speaks http
+	rc, err := remote.NewClient(baseURL, remoteTestToken, true, credbroker.Unconfigured{}) // httptest speaks http
 	if err != nil {
 		t.Fatalf("remote.NewClient: %v", err)
 	}
@@ -136,7 +150,7 @@ func TestAWorkerWithTheWrongTokenLearnsNothing(t *testing.T) {
 	}
 	srv := controlPlane(t, q)
 
-	rc, err := remote.NewClient(srv.URL, strings.Repeat("z", len(remoteTestToken)), true)
+	rc, err := remote.NewClient(srv.URL, strings.Repeat("z", len(remoteTestToken)), true, credbroker.Unconfigured{})
 	if err != nil {
 		t.Fatalf("remote.NewClient: %v", err)
 	}
