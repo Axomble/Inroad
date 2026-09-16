@@ -18,6 +18,12 @@ docker compose up -d
 
 Open `http://localhost` (or your server's IP) in your browser.
 
+The API image also carries `inroadctl`, the operator CLI — create the first
+account from the shell, reset a password, or restore a lost owner without going
+through the app. See the [operator CLI reference](/deploy/operator-cli/), which
+includes the extra step this zero-config manifest needs (its secrets live in a
+volume, not in the container's environment).
+
 ## Service Composition
 
 The root `docker-compose.yml` includes 7 services:

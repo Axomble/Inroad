@@ -29,6 +29,12 @@ export default defineConfig({
 					label: 'Overview & Architecture',
 					items: [
 						{ label: 'System Architecture & Planes', slug: 'architecture' },
+						// Directly after the page that links to it: architecture.md is the
+						// system's shape and this is the rules, and they are read together.
+						// It builds and Pagefind indexes it either way, so leaving it out of
+						// the sidebar never hid it — it only meant a reader who arrived from
+						// search landed somewhere the nav could not place.
+						{ label: 'Architecture Principles', slug: 'architecture-principles' },
 						{ label: 'Core Security Invariants', slug: 'security' },
 					],
 				},
@@ -42,6 +48,10 @@ export default defineConfig({
 						{ label: 'Deliverability & Circuit Breaker', slug: 'guides/deliverability' },
 						{ label: 'Offline Reply Classification', slug: 'guides/reply-classification' },
 						{ label: 'Unified Inbox', slug: 'guides/unified-inbox' },
+						// Beside the inbox guide on purpose: that page is how reply, bounce
+						// and opt-out events come in, this one is how they go back out to
+						// your own automation.
+						{ label: 'Outbound Webhooks', slug: 'guides/webhooks' },
 						{ label: 'Authentication & Tenant Security', slug: 'guides/auth-security' },
 					],
 				},
@@ -51,6 +61,11 @@ export default defineConfig({
 						{ label: 'Single-Instance Docker Compose', slug: 'deploy/docker-compose' },
 						{ label: 'AWS Production (Terraform)', slug: 'deploy/aws-terraform' },
 						{ label: 'Kubernetes Cluster (Helm)', slug: 'deploy/kubernetes-helm' },
+						// Placed directly after the three deployment methods and before the
+						// reference material: whichever way you stood the instance up, the
+						// operator CLI is the first thing you need once it is running, and
+						// the one page you must be able to find when sign-in is broken.
+						{ label: 'Operator CLI (inroadctl)', slug: 'deploy/operator-cli' },
 						{ label: 'Hosting Costs', slug: 'deploy/hosting-costs' },
 						{ label: 'Environment Variables Reference', slug: 'deploy/environment-variables' },
 					],
