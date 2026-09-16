@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bufio"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +244,59 @@ func TestMalformedPoolSizeIsNotReportedAsTheBudgetCrossCheck(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "must be at least") {
 		t.Fatalf("Load() error = %q, want no budget cross-check error derived from the fallback value", err)
+	}
+}
+
+// Refusing a malformed value is only safe if nothing an operator is already
+// running counts as malformed. .env.example is the file self-hosters copy, so
+// every value in it has to survive Load — read from the file rather than
+// restated here, because a restated copy is what drifts.
+//
+// Values arrive the way `make dev` delivers them: the Makefile `-include`s .env
+// and GNU Make drops a `#` comment while KEEPING the whitespace before it, so
+// `INROAD_RATELIMIT_LOGIN_IP=10          # POST /login per IP` is exported as
+// "10          ". That trailing run of spaces is the whole point of this test —
+// eight variables in the file carry it, and without trimming they would all be
+// startup errors on the project's own documented setup path.
+//
+// The two secrets are placeholders ("replace-me-with-base64-32-bytes" is not
+// base64 of 32 bytes) and are overridden with real ones: their validation is
+// older than this test and has its own.
+func TestEnvExampleStillParses(t *testing.T) {
+	f, err := os.Open(filepath.Join("..", "..", "..", ".env.example"))
+	if err != nil {
+		t.Fatalf("opening .env.example: %v", err)
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("closing .env.example: %v", err)
+		}
+	}()
+
+	var set int
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		key, value, ok := strings.Cut(strings.TrimSpace(scanner.Text()), "=")
+		if !ok || !strings.HasPrefix(key, "INROAD_") {
+			continue
+		}
+		// Make's comment rule, deliberately not trimmed afterwards: the
+		// whitespace it leaves behind is what Load has to cope with.
+		if comment := strings.Index(value, "#"); comment >= 0 {
+			value = value[:comment]
+		}
+		t.Setenv(key, value)
+		set++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("reading .env.example: %v", err)
+	}
+	if set == 0 {
+		t.Fatal("no INROAD_* assignments found in .env.example — the test is not reading the file it thinks it is")
+	}
+	setRequiredSecrets(t)
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() with every .env.example value (%d of them): %v", set, err)
 	}
 }

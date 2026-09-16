@@ -793,9 +793,20 @@ func (r *envReader) err() error { return errors.Join(r.errs...) }
 
 // trimmedEnv reads key and reports whether it carries a value to parse. Empty
 // means unset — the documented rule for every variable — and whitespace counts
-// as empty, so a stray space in a compose file takes the default rather than
-// failing startup for a value the operator never set. Surrounding whitespace on
-// a real value is likewise a transcription slip, not a different setting.
+// as empty, so a stray space takes the default rather than failing startup for
+// a value the operator never set.
+//
+// Trimming a real value is NOT cosmetic, and refusing malformed input would
+// break the project's own documented setup without it. The Makefile loads .env
+// with `-include` (Makefile:7), and GNU Make strips a `#` comment but keeps the
+// whitespace in front of it — so `cp .env.example .env && make dev` exports
+// INROAD_RATELIMIT_LOGIN_IP as "10          " from
+//
+//	INROAD_RATELIMIT_LOGIN_IP=10          # POST /login per IP
+//
+// and seven more like it. Those used to fail Atoi and land on a default that
+// happens to equal the number in the file, which is why nobody noticed: change
+// one of them and keep the comment, and the new value was silently ignored.
 func trimmedEnv(key string) (string, bool) {
 	v := strings.TrimSpace(os.Getenv(key))
 	return v, v != ""
