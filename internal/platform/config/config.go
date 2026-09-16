@@ -3,6 +3,7 @@ package config
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -280,10 +281,6 @@ type Config struct {
 	// cannot live in this package.
 	WorkerQueues []string
 
-	// LogLevel is one of debug/info/warn/error. When empty, the logger
-	// falls back to env-based defaults (debug in development, info elsewhere).
-	LogLevel string
-
 	// TrustedProxies is a list of CIDRs whose X-Forwarded-For header the app will
 	// trust. Empty = trust none (default): the direct peer address is used. When a
 	// direct peer falls in this set, the client is the RIGHTMOST XFF entry that is
@@ -384,6 +381,10 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	// Collects malformed numbers, durations and booleans as they are read; both
+	// env.err() checks below turn whatever it has gathered into a startup error.
+	var env envReader
+
 	cfg := &Config{
 		Env:         getenv("INROAD_ENV", "development"),
 		HTTPAddr:    getenv("INROAD_HTTP_ADDR", ":8080"),
@@ -391,7 +392,7 @@ func Load() (*Config, error) {
 		RedisAddr:   getenv("INROAD_REDIS_ADDR", "localhost:6379"),
 	}
 	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
-	cfg.PprofEnabled = getenvBool("INROAD_PPROF_ENABLED", false)
+	cfg.PprofEnabled = env.boolVal("INROAD_PPROF_ENABLED", false)
 
 	// INROAD_REDIS_ADDR is either a bare host:port or a redis:// / rediss:// URL
 	// (auth, db, TLS). Reject a malformed URL here, at the boundary, so it fails
@@ -467,8 +468,8 @@ func Load() (*Config, error) {
 	cfg.FleetBrokerAddr = getenv("INROAD_FLEET_BROKER_ADDR", "")
 	cfg.FleetBrokerURL = getenv("INROAD_FLEET_BROKER_URL", "")
 	cfg.FleetBrokerToken = getenv("INROAD_FLEET_BROKER_TOKEN", "")
-	cfg.FleetBrokerAllowPlaintext = getenvBool("INROAD_FLEET_BROKER_ALLOW_PLAINTEXT", false)
-	cfg.FleetCoreAPIRemote = getenvBool("INROAD_FLEET_COREAPI_REMOTE", false)
+	cfg.FleetBrokerAllowPlaintext = env.boolVal("INROAD_FLEET_BROKER_ALLOW_PLAINTEXT", false)
+	cfg.FleetCoreAPIRemote = env.boolVal("INROAD_FLEET_COREAPI_REMOTE", false)
 	// Either side of the broker needs the token, and a weak one is refused
 	// rather than accepted — the same posture INROAD_JWT_SECRET takes. Checked
 	// here so the failure names the variable, at startup, instead of surfacing
@@ -487,16 +488,16 @@ func Load() (*Config, error) {
 	cfg.StorageS3Endpoint = getenv("INROAD_S3_ENDPOINT", "")
 	cfg.StorageS3AccessKeyID = getenv("INROAD_S3_ACCESS_KEY_ID", "")
 	cfg.StorageS3SecretAccessKey = getenv("INROAD_S3_SECRET_ACCESS_KEY", "")
-	cfg.StorageS3ForcePathStyle = getenvBool("INROAD_S3_FORCE_PATH_STYLE", false)
-	cfg.StorageS3AllowPlaintextEndpoint = getenvBool("INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT", false)
+	cfg.StorageS3ForcePathStyle = env.boolVal("INROAD_S3_FORCE_PATH_STYLE", false)
+	cfg.StorageS3AllowPlaintextEndpoint = env.boolVal("INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT", false)
 
-	cfg.MailAllowPrivateHosts = getenvBool("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
-	cfg.AIAllowPrivateBaseURL = getenvBool("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
-	cfg.WebhookAllowPrivate = getenvBool("INROAD_WEBHOOK_ALLOW_PRIVATE", false)
+	cfg.MailAllowPrivateHosts = env.boolVal("INROAD_MAIL_ALLOW_PRIVATE_HOSTS", true)
+	cfg.AIAllowPrivateBaseURL = env.boolVal("INROAD_AI_ALLOW_PRIVATE_BASE_URL", false)
+	cfg.WebhookAllowPrivate = env.boolVal("INROAD_WEBHOOK_ALLOW_PRIVATE", false)
 	// Zero is passed through and means "use the run manager's own default";
 	// platform packages never import app packages, so the number itself lives
 	// in agentrun.DefaultMaxConcurrentRuns.
-	cfg.AgentMaxConcurrentRuns = getenvInt("INROAD_AGENT_MAX_CONCURRENT_RUNS", 0)
+	cfg.AgentMaxConcurrentRuns = env.intVal("INROAD_AGENT_MAX_CONCURRENT_RUNS", 0)
 	cfg.PublicURL = getenv("INROAD_PUBLIC_URL", "http://localhost:8080")
 
 	// Derive the WebAuthn Relying Party from the public URL by default: RPID is the
@@ -510,29 +511,20 @@ func Load() (*Config, error) {
 	// store every request, so a ~5-minute TTL plus per-request revocation check
 	// is the revocation guarantee (a revoked session is rejected within the
 	// session-cache TTL, not the token TTL).
-	cfg.AccessTokenTTL = getenvDuration("INROAD_ACCESS_TOKEN_TTL", 5*time.Minute)
-	cfg.RefreshTokenTTL = getenvDuration("INROAD_REFRESH_TOKEN_TTL", 720*time.Hour)
-	cfg.SessionCacheTTL = getenvDuration("INROAD_SESSION_CACHE_TTL", 5*time.Second)
-	cfg.CookieSecure = getenvBool("INROAD_COOKIE_SECURE", true)
+	cfg.AccessTokenTTL = env.durationVal("INROAD_ACCESS_TOKEN_TTL", 5*time.Minute)
+	cfg.RefreshTokenTTL = env.durationVal("INROAD_REFRESH_TOKEN_TTL", 720*time.Hour)
+	cfg.SessionCacheTTL = env.durationVal("INROAD_SESSION_CACHE_TTL", 5*time.Second)
+	cfg.CookieSecure = env.boolVal("INROAD_COOKIE_SECURE", true)
 	cfg.CookieDomain = getenv("INROAD_COOKIE_DOMAIN", "")
-	cfg.WorkerConcurrency = getenvInt("INROAD_WORKER_CONCURRENCY", 10)
+	cfg.WorkerConcurrency = env.intVal("INROAD_WORKER_CONCURRENCY", 10)
 
-	// Pool sizing is validated here, at the env boundary, so a bad budget fails at
-	// startup with the offending numbers rather than as pool.Acquire blocking
-	// forever on the first request — the failure mode this setting exists to fix.
-	cfg.DBMaxConns = getenvInt("INROAD_DB_MAX_CONNS", DefaultDBMaxConns)
-	cfg.DBMinConns = getenvInt("INROAD_DB_MIN_CONNS", DefaultDBMinConns)
-	if cfg.DBMaxConns <= 0 {
-		return nil, fmt.Errorf("INROAD_DB_MAX_CONNS must be greater than 0, got %d", cfg.DBMaxConns)
-	}
-	if cfg.DBMinConns < 0 {
-		return nil, fmt.Errorf("INROAD_DB_MIN_CONNS must not be negative, got %d", cfg.DBMinConns)
-	}
-	if cfg.DBMaxConns < cfg.DBMinConns {
-		return nil, fmt.Errorf("INROAD_DB_MAX_CONNS (%d) must be at least INROAD_DB_MIN_CONNS (%d)", cfg.DBMaxConns, cfg.DBMinConns)
-	}
+	// Pool sizing is read here and cross-checked at the end of Load, once every
+	// value has been parsed — see poolBudget below for why the budget check has
+	// to wait.
+	cfg.DBMaxConns = env.intVal("INROAD_DB_MAX_CONNS", DefaultDBMaxConns)
+	cfg.DBMinConns = env.intVal("INROAD_DB_MIN_CONNS", DefaultDBMinConns)
 
-	cfg.RunScheduler = getenvBool("INROAD_RUN_SCHEDULER", true)
+	cfg.RunScheduler = env.boolVal("INROAD_RUN_SCHEDULER", true)
 	cfg.WorkerRole = os.Getenv("INROAD_WORKER_ROLE")
 
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
@@ -572,7 +564,9 @@ func Load() (*Config, error) {
 			}
 		}
 	}
-	cfg.LogLevel = strings.ToLower(getenv("INROAD_LOG_LEVEL", ""))
+	// INROAD_LOG_LEVEL is deliberately absent from Config: log.New reads it
+	// itself, so the level has one reader and one source of truth. A field here
+	// would be set and never read.
 	if raw := os.Getenv("INROAD_TRUSTED_PROXIES"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
 			if s = strings.TrimSpace(s); s != "" {
@@ -583,11 +577,11 @@ func Load() (*Config, error) {
 
 	cfg.TransactionalDriver = getenv("INROAD_TRANSACTIONAL_DRIVER", "console")
 	cfg.SystemSMTPHost = getenv("INROAD_SYSTEM_SMTP_HOST", "")
-	cfg.SystemSMTPPort = getenvInt("INROAD_SYSTEM_SMTP_PORT", 587)
+	cfg.SystemSMTPPort = env.intVal("INROAD_SYSTEM_SMTP_PORT", 587)
 	cfg.SystemSMTPUsername = getenv("INROAD_SYSTEM_SMTP_USERNAME", "")
 	cfg.SystemSMTPPassword = getenv("INROAD_SYSTEM_SMTP_PASSWORD", "")
 	cfg.SystemEmailFrom = getenv("INROAD_SYSTEM_EMAIL_FROM", "")
-	cfg.SystemSMTPAllowPlaintext = getenvBool("INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT", false)
+	cfg.SystemSMTPAllowPlaintext = env.boolVal("INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT", false)
 	cfg.AppBaseURL = getenv("INROAD_APP_BASE_URL", "http://localhost:5173")
 	cfg.WebDir = getenv("INROAD_WEB_DIR", "")
 	cfg.GoogleClientID = getenv("INROAD_GOOGLE_CLIENT_ID", "")
@@ -621,33 +615,67 @@ func Load() (*Config, error) {
 	cfg.MSClientSecret = getenv("INROAD_MS_CLIENT_SECRET", "")
 	cfg.MSRedirectURL = getenv("INROAD_MS_REDIRECT_URL", cfg.PublicURL+"/oauth/microsoft/callback")
 	cfg.MSTenant = getenv("INROAD_MS_TENANT", "common")
-	cfg.EmailVerifyTTL = getenvDuration("INROAD_EMAIL_VERIFY_TTL", 24*time.Hour)
-	cfg.PasswordResetTTL = getenvDuration("INROAD_PASSWORD_RESET_TTL", time.Hour)
-	cfg.InviteTTL = getenvDuration("INROAD_INVITE_TTL", 72*time.Hour)
+	cfg.EmailVerifyTTL = env.durationVal("INROAD_EMAIL_VERIFY_TTL", 24*time.Hour)
+	cfg.PasswordResetTTL = env.durationVal("INROAD_PASSWORD_RESET_TTL", time.Hour)
+	cfg.InviteTTL = env.durationVal("INROAD_INVITE_TTL", 72*time.Hour)
 
 	cfg.TurnstileSecret = getenv("INROAD_TURNSTILE_SECRET", "")
-	cfg.RateLimitLoginIP = getenvInt("INROAD_RATELIMIT_LOGIN_IP", 10)
-	cfg.RateLimitLoginAccount = getenvInt("INROAD_RATELIMIT_LOGIN_ACCOUNT", 5)
-	cfg.RateLimitVerifyIP = getenvInt("INROAD_RATELIMIT_VERIFY_IP", 10)
-	cfg.RateLimitVerifyAccount = getenvInt("INROAD_RATELIMIT_VERIFY_ACCOUNT", 5)
-	cfg.RateLimitSensitiveIP = getenvInt("INROAD_RATELIMIT_SENSITIVE_IP", 5)
-	cfg.RateLimitSensitiveAccount = getenvInt("INROAD_RATELIMIT_SENSITIVE_ACCOUNT", 3)
+	cfg.RateLimitLoginIP = env.intVal("INROAD_RATELIMIT_LOGIN_IP", 10)
+	cfg.RateLimitLoginAccount = env.intVal("INROAD_RATELIMIT_LOGIN_ACCOUNT", 5)
+	cfg.RateLimitVerifyIP = env.intVal("INROAD_RATELIMIT_VERIFY_IP", 10)
+	cfg.RateLimitVerifyAccount = env.intVal("INROAD_RATELIMIT_VERIFY_ACCOUNT", 5)
+	cfg.RateLimitSensitiveIP = env.intVal("INROAD_RATELIMIT_SENSITIVE_IP", 5)
+	cfg.RateLimitSensitiveAccount = env.intVal("INROAD_RATELIMIT_SENSITIVE_ACCOUNT", 3)
 	// Generous enough that a human clicking "Draft a reply" never notices, tight
 	// enough that a scripted loop cannot run up a provider bill. The per-IP cap is
 	// the higher-tolerance one because a whole office can share one NAT address,
 	// while the per-workspace cap is what actually bounds spend.
-	cfg.RateLimitDraftReplyIP = getenvInt("INROAD_RATELIMIT_DRAFT_REPLY_IP", 20)
-	cfg.RateLimitDraftReplyWorkspace = getenvInt("INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE", 60)
+	cfg.RateLimitDraftReplyIP = env.intVal("INROAD_RATELIMIT_DRAFT_REPLY_IP", 20)
+	cfg.RateLimitDraftReplyWorkspace = env.intVal("INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE", 60)
 
 	// Generous by design: one mint per socket connect, and a rolling deploy has
 	// every open tab reconnecting at once. 60/min per IP still covers a shared
 	// office NAT; 600/min per workspace bounds a farming loop.
-	cfg.RateLimitRealtimeTicketIP = getenvInt("INROAD_RATELIMIT_REALTIME_TICKET_IP", 60)
-	cfg.RateLimitRealtimeTicketWorkspace = getenvInt("INROAD_RATELIMIT_REALTIME_TICKET_WORKSPACE", 600)
-	cfg.RealtimeMaxConnsPerUser = getenvInt("INROAD_REALTIME_MAX_CONNS_PER_USER", 0)
-	cfg.RealtimeMaxConnsPerWorkspace = getenvInt("INROAD_REALTIME_MAX_CONNS_PER_WORKSPACE", 0)
+	cfg.RateLimitRealtimeTicketIP = env.intVal("INROAD_RATELIMIT_REALTIME_TICKET_IP", 60)
+	cfg.RateLimitRealtimeTicketWorkspace = env.intVal("INROAD_RATELIMIT_REALTIME_TICKET_WORKSPACE", 600)
+	cfg.RealtimeMaxConnsPerUser = env.intVal("INROAD_REALTIME_MAX_CONNS_PER_USER", 0)
+	cfg.RealtimeMaxConnsPerWorkspace = env.intVal("INROAD_REALTIME_MAX_CONNS_PER_WORKSPACE", 0)
+
+	// Every malformed value is reported together, and BEFORE any cross-check
+	// below reads one of them. A parse failure leaves its field holding the
+	// compiled default, so cross-checking first would report
+	// "INROAD_DB_MAX_CONNS (25) must be at least INROAD_DB_MIN_CONNS (100)" to an
+	// operator who wrote "ten" — a number they never typed, sending them to look
+	// in the wrong place.
+	if err := env.err(); err != nil {
+		return nil, err
+	}
+
+	// The pool budget fails at startup with the offending numbers rather than as
+	// pool.Acquire blocking forever on the first request — the failure mode this
+	// setting exists to fix.
+	if err := poolBudget(cfg.DBMaxConns, cfg.DBMinConns); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// poolBudget rejects a pgx pool size that cannot work. Separate from the reads
+// above because it consumes two already-parsed numbers: it must not run until
+// Load has confirmed both of them came from the environment rather than from a
+// fallback substituted for a malformed value.
+func poolBudget(maxConns, minConns int) error {
+	if maxConns <= 0 {
+		return fmt.Errorf("INROAD_DB_MAX_CONNS must be greater than 0, got %d", maxConns)
+	}
+	if minConns < 0 {
+		return fmt.Errorf("INROAD_DB_MIN_CONNS must not be negative, got %d", minConns)
+	}
+	if maxConns < minConns {
+		return fmt.Errorf("INROAD_DB_MAX_CONNS (%d) must be at least INROAD_DB_MIN_CONNS (%d)", maxConns, minConns)
+	}
+	return nil
 }
 
 // webauthnDefaults derives the default RP id (bare host) and RP origin
@@ -681,15 +709,6 @@ func workerRoleIsAllOrUnset(raw string) bool {
 	}
 }
 
-func getenvInt(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return fallback
-}
-
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -697,19 +716,102 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func getenvBool(key string, fallback bool) bool {
-	v := os.Getenv(key)
-	if v == "" {
+// envReader parses the typed environment variables, collecting every malformed
+// value rather than returning on the first one — an operator fixing a bad
+// configuration should see the whole list in one startup, not discover the next
+// one on each restart.
+//
+// A malformed value still yields its default from the accessor, purely so Load
+// can keep going and find the rest. That default never reaches a running
+// process: Load returns the collected error, so the binary does not start.
+type envReader struct{ errs []error }
+
+// intVal returns the whole number in key, or fallback when it is unset or blank.
+// A value that is set but not a number is recorded as an error (principle B8:
+// validate at startup and fail loud) instead of silently becoming the default,
+// which left the operator with behaviour that did not match their configuration
+// and no signal at all.
+func (r *envReader) intVal(key string, fallback int) int {
+	v, ok := trimmedEnv(key)
+	if !ok {
 		return fallback
 	}
-	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s must be a whole number, got %q", key, v))
+		return fallback
+	}
+	return n
 }
 
-func getenvDuration(key string, fallback time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+// durationVal returns the Go duration in key, or fallback when it is unset or
+// blank. The unit is not optional: INROAD_ACCESS_TOKEN_TTL=5 is not five of
+// anything, and used to be discarded in favour of a 5-minute default that made
+// it look like it had worked.
+func (r *envReader) durationVal(key string, fallback time.Duration) time.Duration {
+	v, ok := trimmedEnv(key)
+	if !ok {
+		return fallback
 	}
-	return fallback
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s must be a duration with a unit (e.g. 30s, 5m, 720h), got %q", key, v))
+		return fallback
+	}
+	return d
+}
+
+// boolVal returns the flag in key, or fallback when it is unset or blank.
+//
+// The accepted set is a SUPERSET of what this parser took before — `1`, `true`
+// and `yes`, case-insensitively, which the environment-variable reference
+// promised and TestSystemSMTPAllowPlaintextFailsClosed pins — widened with
+// strconv.ParseBool's single letters and the on/off and y/n pairs. (The deploy
+// artifacts themselves only ever write `true` or `false`, so nothing shipped
+// depends on the wider end.)
+//
+// Widening is the safe direction here and narrowing is not: an unrecognised
+// value used to read as FALSE, so `INROAD_COOKIE_SECURE=on` dropped the Secure
+// attribute from the auth cookies, silently, on a flag that defaults to true.
+// Anything outside the set is now refused outright, so no spelling can quietly
+// disable a security control in either direction.
+func (r *envReader) boolVal(key string, fallback bool) bool {
+	v, ok := trimmedEnv(key)
+	if !ok {
+		return fallback
+	}
+	switch strings.ToLower(v) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	case "0", "f", "false", "n", "no", "off":
+		return false
+	default:
+		r.errs = append(r.errs, fmt.Errorf("%s must be a boolean (true/false, yes/no, on/off, 1/0), got %q", key, v))
+		return fallback
+	}
+}
+
+// err reports every malformed value collected so far, one per line, or nil when
+// there are none.
+func (r *envReader) err() error { return errors.Join(r.errs...) }
+
+// trimmedEnv reads key and reports whether it carries a value to parse. Empty
+// means unset — the documented rule for every variable — and whitespace counts
+// as empty, so a stray space takes the default rather than failing startup for
+// a value the operator never set.
+//
+// Trimming a real value is NOT cosmetic, and refusing malformed input would
+// break the project's own documented setup without it. The Makefile loads .env
+// with `-include` (Makefile:7), and GNU Make strips a `#` comment but keeps the
+// whitespace in front of it — so `cp .env.example .env && make dev` exports
+// INROAD_RATELIMIT_LOGIN_IP as "10          " from
+//
+//	INROAD_RATELIMIT_LOGIN_IP=10          # POST /login per IP
+//
+// and seven more like it. Those used to fail Atoi and land on a default that
+// happens to equal the number in the file, which is why nobody noticed: change
+// one of them and keep the comment, and the new value was silently ignored.
+func trimmedEnv(key string) (string, bool) {
+	v := strings.TrimSpace(os.Getenv(key))
+	return v, v != ""
 }

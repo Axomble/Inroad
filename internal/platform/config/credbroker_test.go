@@ -122,17 +122,21 @@ func TestNoBrokerSettingsIsNotAnError(t *testing.T) {
 }
 
 // The plaintext opt-out fails closed exactly like the system-SMTP and S3 ones:
-// only an explicitly truthy value relaxes https.
+// only an explicitly truthy value relaxes https, and a value this parser does
+// not recognise stops the process rather than being read as false — which is
+// the same guarantee enforced harder, since a binary that refuses to start
+// cannot carry a bearer token over a plaintext hop either.
 func TestFleetBrokerAllowPlaintextFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name, value string
 		want        bool
+		wantErr     bool
 	}{
-		{"unset", "", false},
-		{"false", "false", false},
-		{"garbage", "sure-why-not", false},
-		{"true", "true", true},
-		{"one", "1", true},
+		{name: "unset", value: "", want: false},
+		{name: "false", value: "false", want: false},
+		{name: "garbage", value: "sure-why-not", wantErr: true},
+		{name: "true", value: "true", want: true},
+		{name: "one", value: "1", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearKeyAndBroker(t)
@@ -141,6 +145,15 @@ func TestFleetBrokerAllowPlaintextFailsClosed(t *testing.T) {
 				t.Setenv("INROAD_FLEET_BROKER_ALLOW_PLAINTEXT", tc.value)
 			}
 			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() with %q = nil error (FleetBrokerAllowPlaintext=%v), want a rejection", tc.value, cfg.FleetBrokerAllowPlaintext)
+				}
+				if !strings.Contains(err.Error(), "INROAD_FLEET_BROKER_ALLOW_PLAINTEXT") {
+					t.Fatalf("Load() error = %q, want it to name the variable", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Load(): %v", err)
 			}
