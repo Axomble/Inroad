@@ -6,9 +6,11 @@ import (
 )
 
 // ParseEgressIP converts an optional worker egress IP into a *net.TCPAddr for
-// net.Dialer.LocalAddr, binding only the SOURCE address of outbound SMTP/IMAP
-// dials (spec §15). An empty ip returns (nil, nil): the dialer then uses the OS
-// default route (single-node dev). A malformed ip is rejected at wiring time.
+// net.Dialer.LocalAddr, binding only the SOURCE address of this worker's
+// outbound provider dials (spec §15) — SMTP and IMAP directly, Gmail and
+// Microsoft Graph through the dialer inside newAPIHTTPClient. An empty ip
+// returns (nil, nil): the dialer then uses the OS default route (single-node
+// dev). A malformed ip is rejected at wiring time.
 //
 // SECURITY (spec §17.7): the result sets the SOURCE address ONLY. It never
 // influences destination selection — every dial still resolves and vetAddr-vets

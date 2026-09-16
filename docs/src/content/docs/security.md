@@ -253,7 +253,11 @@ limit / abuse control here is tracked in the Deferred list below.
     destination IP. Source-bind can only choose the egress interface; it can never
     reach a destination the guard blocked (`internal/platform/mail/{sender,inbox,
     net_tester}.go`, proven by `TestSendSourceBindDoesNotBypassSSRF` /
-    `TestInboxSourceBindDoesNotBypassSSRF`).
+    `TestInboxSourceBindDoesNotBypassSSRF`). The Gmail and Microsoft Graph API
+    legs bind the same source address on their HTTP transport
+    (`internal/platform/mail/apiclient.go`) and are likewise source-only: their
+    destinations are fixed provider-host constants, never user input, so there is
+    no vet for a source bind to relax.
 23. **A job's routing destination is derived server-side, never from the client.**
     The target queue (`w:<worker_id>`, or the shared `send` queue when the
     mailbox has no live assignment) comes from the persisted

@@ -250,9 +250,11 @@ type Config struct {
 	// public address was found (NAT, no egress, CI), or explicitly pinned,
 	// rather than leaving that indistinguishable from the id string alone.
 	WorkerIDFamily string
-	// WorkerEgressIP is the optional source IP outbound SMTP/IMAP dials bind to
-	// (net.Dialer.LocalAddr). Empty = OS default route (single-node dev). It sets
-	// the SOURCE address only and never relaxes the SSRF destination vet.
+	// WorkerEgressIP is the optional source IP every outbound provider dial binds
+	// to: SMTP and IMAP through net.Dialer.LocalAddr, Gmail and Microsoft Graph
+	// through the HTTP transport their API clients are built with. Empty = OS
+	// default route (single-node dev). It sets the SOURCE address only and never
+	// relaxes the SSRF destination vet.
 	WorkerEgressIP string
 	// WorkerQueues is the operator's explicit override of the asynq queues this
 	// worker consumes (INROAD_WORKER_QUEUES), parsed as a trimmed CSV. Empty

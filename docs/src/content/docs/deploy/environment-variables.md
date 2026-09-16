@@ -285,7 +285,7 @@ self-host default.
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `INROAD_WORKER_EGRESS_IP` | Source address outbound SMTP/IMAP dials bind to (`net.Dialer.LocalAddr`). Set it to the host's own public address on a multi-IP fleet. Sets the **source** only — it never relaxes the SSRF destination vet | unset (OS default route) |
+| `INROAD_WORKER_EGRESS_IP` | Source address every outbound provider dial binds to (`net.Dialer.LocalAddr`) — SMTP and IMAP, and the Gmail and Microsoft Graph API clients alike. Set it to the host's own public address on a multi-IP fleet. Sets the **source** only — it never relaxes the SSRF destination vet | unset (OS default route) |
 | `INROAD_WORKER_ID` | Pins this worker's id explicitly, overriding derivation. It keys the `workers` heartbeat row and names the worker's affinity queue `w:<id>` | unset (derived) |
 
 **Identity is derived from the host's public IP, not its hostname.** Reputation is

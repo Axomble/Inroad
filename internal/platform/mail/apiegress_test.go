@@ -110,12 +110,17 @@ func TestProviderAPILegsDialThroughTheConfiguredClient(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rt := &recordingTransport{}
-			if err := tc.call(t.Context(), &http.Client{Transport: rt}); err != nil {
-				t.Fatalf("call failed: %v", err)
-			}
+			err := tc.call(t.Context(), &http.Client{Transport: rt})
 			seen := rt.seen()
+			// Checked before the error, because it is the sharper diagnosis: a leg
+			// that built its own client dials the REAL provider and fails with
+			// whatever that host says (a 401, or a dial error on an offline box),
+			// which says nothing about the cause.
 			if len(seen) == 0 {
-				t.Fatal("the injected client saw no request: this leg built its own HTTP client, so the egress binding and timeouts did not apply to it")
+				t.Fatalf("the injected client saw no request (call returned %v): this leg built its own HTTP client, so the egress binding and timeouts did not apply to it", err)
+			}
+			if err != nil {
+				t.Fatalf("call failed: %v", err)
 			}
 			for _, u := range seen {
 				if !strings.Contains(u, tc.wantHost) {
