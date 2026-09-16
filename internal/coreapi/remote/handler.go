@@ -182,9 +182,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func respond(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	// A suppression answer is a tenant's compliance state. Nothing between the
-	// two planes may cache it, however unlikely an intermediary is here — and a
-	// cached answer is precisely the stale negative this slice refuses to have.
+	// Every body this handler writes is a tenant's own data: a compliance state,
+	// a contact's address, the copy of a message about to go out. Nothing
+	// between the two planes may cache it, however unlikely an intermediary is
+	// here — and for the suppression answer specifically, a cached one is
+	// precisely the stale negative this transport refuses to have.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)

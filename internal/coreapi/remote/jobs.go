@@ -272,6 +272,11 @@ func (c *Client) FindSendByMessageID(ctx context.Context, workspaceID, messageID
 // which mailbox a send goes from. An empty mailbox id means "this job carries no
 // transport" — a skip, a stop, a deferral — and nothing is brokered for it.
 //
+// That last rule does not fit every route, and GetWarmupEngageJob is the
+// exception: every engagement dials the recipient's own mailbox, so an empty
+// subject there is a control plane that did not say whose, not a job with
+// nothing to dial. It checks for that itself, after this returns.
+//
 // It RETURNS the secrets rather than installing them, because where they go
 // differs too: an inbox poll's lands on Password, a send job's on SMTPPassword,
 // an engage job's in two aliased places at once. A callback for that would hide
