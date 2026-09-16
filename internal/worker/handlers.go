@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"net"
 
 	"github.com/hibiken/asynq"
 
@@ -51,6 +52,15 @@ type Deps struct {
 	Engager  mail.Engager
 	Reader   mail.InboxReader
 	Enqueuer *queue.Client
+
+	// EgressAddr is this worker's optional outbound source address
+	// (mail.ParseEgressIP of INROAD_WORKER_EGRESS_IP; nil = OS default route).
+	// Sender, Engager and Reader are already bound to it by the composition
+	// root, but the Gmail and Graph inbox readers are constructed downstream in
+	// inbox.RegisterPerMessage, so the address has to travel with the rest of
+	// the wiring to reach them. Without it, API-backed mailboxes would poll from
+	// whichever address the OS picked while their SMTP/IMAP peers stayed pinned.
+	EgressAddr *net.TCPAddr
 
 	// Resolver is the DNS seam the domain-authentication sweep looks records up
 	// through — injected at the composition root so tests never touch real DNS,
@@ -195,8 +205,10 @@ func registerPerMessage(mux *asynq.ServeMux, d Deps) {
 	// Multi-step sequencing: advance one step per task (lazy chain).
 	mux.HandleFunc(queue.TaskSequenceAdvance, sequence.AdvanceHandler(d.Core, d.Sender, d.Enqueuer, d.PublicURL, d.TrackingSecret, d.Metrics))
 	// Reply & bounce detection: poll one mailbox's INBOX per task.
-	// WarmupSecret lets the poller verify + isolate warmup mail (spec §7/§9.4).
-	inbox.RegisterPerMessage(mux, d.Core, d.Reader, d.Sender, d.Enqueuer, d.WarmupSecret)
+	// WarmupSecret lets the poller verify + isolate warmup mail (spec §7/§9.4);
+	// EgressAddr binds the Gmail/Graph API polls to this worker's egress IP, the
+	// same address the IMAP reader in d.Reader was already bound to.
+	inbox.RegisterPerMessage(mux, d.Core, d.Reader, d.Sender, d.Enqueuer, d.WarmupSecret, d.EgressAddr)
 	// Outbound webhooks: POST one signed delivery per task, retry on backoff.
 	// Registered by type assertion for the same reason as the cleaner/breaker
 	// above — the capability (load a delivery + open its endpoint secret) is

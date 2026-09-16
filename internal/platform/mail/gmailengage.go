@@ -3,6 +3,8 @@ package mail
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 
 	gmail "google.golang.org/api/gmail/v1"
@@ -22,6 +24,11 @@ const (
 // GmailReader/GmailSender): nil selects the real client call, tests stub them to
 // run network-free.
 type GmailEngager struct {
+	// httpClient is the egress-bound, timeout-bounded client every API call
+	// dials through (newAPIHTTPClient). Engagement authenticates to the provider
+	// from this host exactly like a send or a poll does, so it egresses from the
+	// same address.
+	httpClient *http.Client
 	// newServiceFn builds the per-call Gmail service. nil = the real static-token
 	// service (gmailService).
 	newServiceFn func(ctx context.Context, accessToken string) (*gmail.Service, error)
@@ -33,8 +40,13 @@ type GmailEngager struct {
 	modifyFn func(ctx context.Context, srv *gmail.Service, msgID string, add, remove []string) error
 }
 
-// NewGmailEngager returns a GmailEngager that talks to the real Gmail API.
-func NewGmailEngager() *GmailEngager { return &GmailEngager{} }
+// NewGmailEngager returns a GmailEngager that talks to the real Gmail API,
+// egressing from localAddr (mail.ParseEgressIP; nil = OS default route). See
+// NewGmailSender for why the address is a constructor argument rather than a
+// settable field.
+func NewGmailEngager(localAddr *net.TCPAddr) *GmailEngager {
+	return &GmailEngager{httpClient: newAPIHTTPClient(localAddr)}
+}
 
 // gmailMsgIDQuery builds the Gmail search query that matches one RFC822 Message-ID
 // exactly (the rfc822msgid: operator). The surrounding angle brackets carried on a
@@ -90,7 +102,7 @@ func (g *GmailEngager) newService(ctx context.Context, accessToken string) (*gma
 	if g.newServiceFn != nil {
 		return g.newServiceFn(ctx, accessToken)
 	}
-	return gmailService(ctx, accessToken)
+	return gmailService(ctx, g.httpClient, accessToken)
 }
 
 func (g *GmailEngager) find(ctx context.Context, srv *gmail.Service, messageID string) ([]string, error) {

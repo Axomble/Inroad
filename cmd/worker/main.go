@@ -225,9 +225,12 @@ func run() error {
 	coreOpts = append(coreOpts, creds.coreOptions()...)
 	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(), coreOpts...)
 
-	// Resolve the optional worker egress IP once. When set, outbound SMTP/IMAP
-	// dials bind their SOURCE address to it (spec §15) so a mailbox's mail
-	// egresses from one IP; it never relaxes the SSRF destination vet (§17.7).
+	// Resolve the optional worker egress IP once. When set, every outbound dial
+	// this worker makes to a mailbox provider binds its SOURCE address to it
+	// (spec §15) so a mailbox's mail egresses from one IP — SMTP and IMAP via
+	// net.Dialer.LocalAddr, Gmail and Microsoft Graph via the HTTP transport the
+	// API clients below are constructed with. It never relaxes the SSRF
+	// destination vet (§17.7).
 	egressAddr, err := mail.ParseEgressIP(cfg.WorkerEgressIP)
 	if err != nil {
 		logger.Error("invalid worker egress ip", "err", err)
@@ -251,10 +254,14 @@ func run() error {
 	// observed by one wrapper. It returns each send's result untouched — a
 	// telemetry decorator that could alter a send's outcome would be a delivery
 	// bug waiting to happen.
+	//
+	// All three legs take the same egressAddr. The API legs take it as a
+	// constructor argument rather than a field assignment because they build an
+	// HTTP transport (and its connection pool) once; see NewGmailSender.
 	smtpSender := mail.NewNetSender(cfg.MailAllowPrivateHosts)
 	smtpSender.LocalAddr = egressAddr
 	sndr := fleetsignal.NewSender(
-		mail.NewMultiSender(smtpSender, mail.NewGmailSender(), mail.NewGraphSender()), signals)
+		mail.NewMultiSender(smtpSender, mail.NewGmailSender(egressAddr), mail.NewGraphSender(egressAddr)), signals)
 	// The IMAP reader is wrapped for the same reason: a poll is an
 	// authentication from this IP on every tick. LocalAddr is set on the concrete
 	// reader BEFORE wrapping — the decorator forwards calls, it does not forward
@@ -267,7 +274,7 @@ func run() error {
 	// Gmail leg uses the fixed Google host; m365 is a documented clean skip.
 	imapEngager := mail.NewNetEngager(cfg.MailAllowPrivateHosts)
 	imapEngager.LocalAddr = egressAddr
-	engager := mail.NewMultiEngager(imapEngager, mail.NewGmailEngager())
+	engager := mail.NewMultiEngager(imapEngager, mail.NewGmailEngager(egressAddr))
 
 	// Queue backlog per queue, read on scrape. Wired on the worker (not the
 	// API) because the worker is what consumes the queues, so the depth and the
@@ -361,6 +368,7 @@ func run() error {
 		Engager:             engager,
 		Reader:              reader,
 		Enqueuer:            enq,
+		EgressAddr:          egressAddr,
 		Resolver:            dnsauth.NewResolver(),
 		MXResolver:          esp.NewResolver(),
 		PublicURL:           cfg.PublicURL,

@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	netmail "net/mail"
 	"strconv"
 	"strings"
 
-	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	gmail "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
@@ -41,6 +42,10 @@ var errGmailHistoryExpired = errors.New("gmail: history id expired")
 // A single *gmail.Service is built per Fetch pass (the access token is constant
 // within a pass) and threaded through every call.
 type GmailReader struct {
+	// httpClient is the egress-bound, timeout-bounded client every API call
+	// dials through (newAPIHTTPClient). Built once by NewGmailReader and reused,
+	// so its connection pool serves the whole get fan-out below.
+	httpClient *http.Client
 	// newServiceFn builds the per-pass Gmail service. nil = the real static-token
 	// service (gmailService).
 	newServiceFn func(ctx context.Context, accessToken string) (*gmail.Service, error)
@@ -60,8 +65,13 @@ type GmailReader struct {
 	spamListFn func(ctx context.Context, srv *gmail.Service, maxN int) (msgIDs []string, err error)
 }
 
-// NewGmailReader returns a GmailReader that talks to the real Gmail API.
-func NewGmailReader() *GmailReader { return &GmailReader{} }
+// NewGmailReader returns a GmailReader that talks to the real Gmail API,
+// egressing from localAddr (mail.ParseEgressIP; nil = OS default route). See
+// NewGmailSender for why the address is a constructor argument rather than a
+// settable field.
+func NewGmailReader(localAddr *net.TCPAddr) *GmailReader {
+	return &GmailReader{httpClient: newAPIHTTPClient(localAddr)}
+}
 
 // Fetch returns new inbound messages for reply/bounce detection plus the new
 // opaque cursor (Gmail historyId). maxN must be positive.
@@ -303,7 +313,7 @@ func (g *GmailReader) newService(ctx context.Context, accessToken string) (*gmai
 	if g.newServiceFn != nil {
 		return g.newServiceFn(ctx, accessToken)
 	}
-	return gmailService(ctx, accessToken)
+	return gmailService(ctx, g.httpClient, accessToken)
 }
 
 func (g *GmailReader) profile(ctx context.Context, srv *gmail.Service) (string, error) {
@@ -328,11 +338,11 @@ func (g *GmailReader) get(ctx context.Context, srv *gmail.Service, msgID string)
 }
 
 // gmailService builds a Gmail API service bound to a static access token (no
-// refresh — the fresh token is minted upstream in coreapi). Built once per Fetch
-// pass and reused across the history call and every message get.
-func gmailService(ctx context.Context, accessToken string) (*gmail.Service, error) {
-	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
-	srv, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+// refresh — the fresh token is minted upstream in coreapi) over the caller's
+// egress-bound base client. Built once per Fetch pass and reused across the
+// history call and every message get.
+func gmailService(ctx context.Context, hc *http.Client, accessToken string) (*gmail.Service, error) {
+	srv, err := gmail.NewService(ctx, option.WithHTTPClient(bearerClient(ctx, hc, accessToken)))
 	if err != nil {
 		return nil, fmt.Errorf("gmail: service: %w", err)
 	}
