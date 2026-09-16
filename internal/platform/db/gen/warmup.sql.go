@@ -468,6 +468,33 @@ func (q *Queries) FindWarmupSendByMessageIDForRecipient(ctx context.Context, arg
 	return id, err
 }
 
+const getLastWarmupSentAt = `-- name: GetLastWarmupSentAt :one
+SELECT MAX(sent_at)::timestamptz AS last_sent_at
+FROM warmup_sends
+WHERE from_mailbox = $1 AND workspace_id = $2 AND status = 'sent'
+`
+
+type GetLastWarmupSentAtParams struct {
+	FromMailbox uuid.UUID `json:"from_mailbox"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// When this mailbox's last warmup mail actually went out (NULL = never sent).
+// Feeds warmup.NextDue's spacing FLOOR: the ramp's inter-send gap is only a real
+// gap if something refuses an early send, and nothing did — warmup:sweep fans a
+// tick out to every participant every five minutes, so the chained tick's spacing
+// was routinely pre-empted and the daily quota went out back-to-back.
+//
+// Reads warmup_sends rather than warmup_daily_stats because the stats row carries
+// a per-day COUNT, not an instant. Only 'sent' counts: a queued or failed row
+// never reached a provider, so it must not hold the next send back.
+func (q *Queries) GetLastWarmupSentAt(ctx context.Context, arg GetLastWarmupSentAtParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getLastWarmupSentAt, arg.FromMailbox, arg.WorkspaceID)
+	var last_sent_at pgtype.Timestamptz
+	err := row.Scan(&last_sent_at)
+	return last_sent_at, err
+}
+
 const getOpenWarmupThread = `-- name: GetOpenWarmupThread :one
 SELECT id, workspace_id, sender_mailbox, partner_mailbox, subject,
        root_message_id, turn, content_key, last_activity_at, created_at
