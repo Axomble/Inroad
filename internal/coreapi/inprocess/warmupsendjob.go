@@ -491,6 +491,13 @@ func (c client) NextWarmupDue(ctx context.Context, mailboxID, workspaceID string
 	if err != nil {
 		return time.Time{}, false, err
 	}
+	// The spacing floor's input. A mailbox that has never sent yields a NULL
+	// (invalid) timestamp, which NextDue reads as "no previous send to measure
+	// from" and lets through — the first warmup mail must not be held back.
+	lastSent, err := c.q.GetLastWarmupSentAt(ctx, gen.GetLastWarmupSentAtParams{FromMailbox: mbID, WorkspaceID: ws})
+	if err != nil {
+		return time.Time{}, false, err
+	}
 	in := warmup.DueInputs{
 		MailboxID:   mailboxID,
 		StartVolume: int(p.StartVolume),
@@ -503,6 +510,9 @@ func (c client) NextWarmupDue(ctx context.Context, mailboxID, workspaceID string
 	}
 	if p.PausedUntil.Valid {
 		in.PausedUntil = p.PausedUntil.Time
+	}
+	if lastSent.Valid {
+		in.LastSentAt = lastSent.Time.UTC()
 	}
 	plan := warmup.NextDue(in)
 	return plan.NextDue, plan.SendNow, nil

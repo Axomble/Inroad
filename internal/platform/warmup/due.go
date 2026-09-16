@@ -19,6 +19,10 @@ type DueInputs struct {
 	PausedUntil time.Time // zero when not paused
 	Now         time.Time
 	Loc         *time.Location // recipient-local window; nil = UTC
+	// LastSentAt is when this mailbox's last warmup mail actually went out
+	// (zero = never). It is what makes NextSpacing a FLOOR rather than a
+	// suggestion — see NextDue.
+	LastSentAt time.Time
 }
 
 // DuePlan is the scheduling verdict for one mailbox: SendNow reports whether a
@@ -57,6 +61,32 @@ func NextDue(in DueInputs) DuePlan {
 	}
 
 	spacing := NextSpacing(effective, in.MailboxID, in.SentToday)
+
+	// The spacing FLOOR. Every other gate here answers "may this mailbox send
+	// today?"; this one answers "may it send YET", and without it the ramp had
+	// no pacing at all.
+	//
+	// SendNow used to be `withinWaking(now)` alone, so any trigger arriving
+	// inside waking hours sent immediately while the quota lasted. There is
+	// always such a trigger: warmup:sweep fans a tick out to every enabled
+	// participant every five minutes, keyed on (mailbox, due-second), so
+	// consecutive sweeps never dedup. The computed spacing only ever reached
+	// the chained tick, which the sweep then pre-empted — so a mailbox emptied
+	// its whole daily quota back-to-back and went silent, which is the shape
+	// warmup exists to avoid. Restarting the worker made it obvious, because
+	// the first sweep fires immediately.
+	//
+	// A zero LastSentAt means no previous send to measure from (a mailbox's
+	// first ever warmup mail), which must not be held back or warmup never
+	// starts. Ordering matters too: this sits AFTER the pause and quota
+	// refusals, so a long-elapsed floor can never revive a mailbox those
+	// stronger gates already stopped.
+	if !in.LastSentAt.IsZero() {
+		if earliest := in.LastSentAt.Add(spacing); in.Now.Before(earliest) {
+			return DuePlan{NextDue: DeferToWakingHours(earliest, in.Loc), SendNow: false}
+		}
+	}
+
 	next := DeferToWakingHours(in.Now.Add(spacing), in.Loc)
 	sendNow := withinWaking(in.Now, in.Loc)
 	return DuePlan{NextDue: next, SendNow: sendNow}

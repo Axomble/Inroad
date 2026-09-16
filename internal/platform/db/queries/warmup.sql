@@ -156,6 +156,20 @@ FROM warmup_daily_stats
 WHERE mailbox_id = $1 AND workspace_id = $2
   AND day = CURRENT_DATE;
 
+-- name: GetLastWarmupSentAt :one
+-- When this mailbox's last warmup mail actually went out (NULL = never sent).
+-- Feeds warmup.NextDue's spacing FLOOR: the ramp's inter-send gap is only a real
+-- gap if something refuses an early send, and nothing did — warmup:sweep fans a
+-- tick out to every participant every five minutes, so the chained tick's spacing
+-- was routinely pre-empted and the daily quota went out back-to-back.
+--
+-- Reads warmup_sends rather than warmup_daily_stats because the stats row carries
+-- a per-day COUNT, not an instant. Only 'sent' counts: a queued or failed row
+-- never reached a provider, so it must not hold the next send back.
+SELECT MAX(sent_at)::timestamptz AS last_sent_at
+FROM warmup_sends
+WHERE from_mailbox = $1 AND workspace_id = $2 AND status = 'sent';
+
 -- name: ListWarmupOverviewRows :many
 -- One workspace-pinned row per participant for GET /warmup/overview: the
 -- participant's ramp/health fields, the mailbox email (INNER join — a participant

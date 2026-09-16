@@ -122,3 +122,77 @@ func TestNextDueRampBoundedByStartVolume(t *testing.T) {
 		t.Fatalf("mailbox far over its ramp ceiling should not send")
 	}
 }
+
+// The spacing floor. NextSpacing computes the gap that makes a ramp look human
+// — waking window ÷ today's target — but before this it was only ever used to
+// schedule the NEXT tick, never to refuse an early one. Any other trigger for
+// the same mailbox (the 5-minute warmup:sweep fans one out for every enabled
+// participant, at `now`) therefore sent immediately, so a restart emptied the
+// day's whole quota back-to-back in minutes. Volume stayed correct; the pacing
+// warmup exists to produce did not.
+func TestSendNowRefusedInsideTheSpacingFloor(t *testing.T) {
+	now := noon()
+	in := baseInputs(now)
+	in.SentToday = 1
+	spacing := NextSpacing(EffectiveDailyVolume(RampTarget(in.StartVolume, in.MaxVolume, in.Increment, 5), in.MailboxID, now), in.MailboxID, in.SentToday)
+	// The previous send is recent enough that the floor has not elapsed.
+	in.LastSentAt = now.Add(-spacing / 2)
+
+	plan := NextDue(in)
+
+	if plan.SendNow {
+		t.Fatalf("sent %s ago with a %s floor: SendNow must be false", spacing/2, spacing)
+	}
+	// And the chain must point at the moment the floor lifts, so the mailbox
+	// resumes on its own rather than waiting for the next sweep.
+	if want := in.LastSentAt.Add(spacing); !plan.NextDue.Equal(want) {
+		t.Fatalf("NextDue = %s, want the floor's end %s", plan.NextDue, want)
+	}
+}
+
+func TestSendNowAllowedOnceTheSpacingFloorHasElapsed(t *testing.T) {
+	now := noon()
+	in := baseInputs(now)
+	in.SentToday = 1
+	spacing := NextSpacing(EffectiveDailyVolume(RampTarget(in.StartVolume, in.MaxVolume, in.Increment, 5), in.MailboxID, now), in.MailboxID, in.SentToday)
+	in.LastSentAt = now.Add(-spacing - time.Minute)
+
+	if plan := NextDue(in); !plan.SendNow {
+		t.Fatalf("floor elapsed (%s ago, floor %s): SendNow must be true", spacing+time.Minute, spacing)
+	}
+}
+
+// A mailbox that has never sent must not be held back: the floor is a gap
+// BETWEEN sends, and a zero LastSentAt means there is no previous send to
+// measure from. Without this, warmup would never start.
+func TestFirstEverSendIsNotHeldBackByTheFloor(t *testing.T) {
+	in := baseInputs(noon())
+	in.SentToday = 0
+	in.LastSentAt = time.Time{}
+
+	if plan := NextDue(in); !plan.SendNow {
+		t.Fatal("a mailbox that has never sent must be allowed its first warmup send")
+	}
+}
+
+// The floor must not resurrect a mailbox that is out of quota or paused — those
+// refusals are stronger and already tested above; this pins the ORDER so a
+// future edit cannot let a long-elapsed floor override them.
+func TestFloorDoesNotOverrideQuotaOrPause(t *testing.T) {
+	now := noon()
+	longAgo := now.Add(-48 * time.Hour)
+
+	overQuota := baseInputs(now)
+	overQuota.SentToday = 1_000
+	overQuota.LastSentAt = longAgo
+	if plan := NextDue(overQuota); plan.SendNow {
+		t.Fatal("quota exhausted: SendNow must stay false however long ago the last send was")
+	}
+
+	paused := baseInputs(now)
+	paused.HealthState = StatePaused
+	paused.LastSentAt = longAgo
+	if plan := NextDue(paused); plan.SendNow {
+		t.Fatal("paused: SendNow must stay false however long ago the last send was")
+	}
+}
