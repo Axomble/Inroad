@@ -119,7 +119,7 @@ function joinLabels(components: ScoreComponent[]): string {
 export function scoreHeadline(score: DeliverabilityScore): ScoreHeadline {
   const missing = unmeasuredComponents(score)
   const exclusion = missing.length
-    ? ` ${joinLabels(missing)} ${missing.length === 1 ? "wasn't" : "weren't"} measured, so ${
+    ? ` ${joinLabels(missing)} ${missing.length === 1 ? "hasn't" : "haven't"} been measured yet, so ${
         missing.length === 1 ? 'it' : 'they'
       } didn't count toward it.`
     : ''
@@ -127,22 +127,22 @@ export function scoreHeadline(score: DeliverabilityScore): ScoreHeadline {
   if (score.confidence === 'low') {
     return {
       value: score.value,
-      label: 'Provisional',
+      label: 'Early estimate',
       // Deliberately not `running`: a faint tone reads as "no verdict yet",
       // which is exactly what a score over too small a sample is.
       tone: 'draft',
       provisional: true,
       qualifier:
-        `Computed over ${deliveredLabel(score.delivered)} — too small a sample to be a verdict, ` +
-        `so read this as provisional rather than as a score.${exclusion}`,
+        `You haven't sent enough email yet for a reliable score — this is based on just ` +
+        `${deliveredLabel(score.delivered)} so far and will firm up as you send more.${exclusion}`,
     }
   }
 
   const band = bandLabel(score.value)
   const strength =
     score.confidence === 'medium'
-      ? `Computed over ${deliveredLabel(score.delivered)} — enough to be indicative, not yet enough to be firm.`
-      : `Computed over ${deliveredLabel(score.delivered)}.`
+      ? `Based on ${deliveredLabel(score.delivered)} — enough for a rough read, not enough to be sure yet.`
+      : `Based on ${deliveredLabel(score.delivered)}.`
   return {
     value: score.value,
     label: band.label,
@@ -176,12 +176,13 @@ export function componentName(component: ScoreComponent): string {
  */
 const NOT_MEASURED_DETAIL: Record<ScoreComponent['key'], string> = {
   complaint:
-    'No complaint feed is connected, so this was never looked at — it is not a clean complaint rate. Point a provider feed (an SES SNS subscriber, say) at the deliverability ingest endpoint to start measuring it.',
+    "Complaint reports aren't connected yet, so this doesn't mean your complaint rate is clean — nothing was ever counted. Connect your email provider's feedback feed to start measuring it.",
   spam_placement:
-    'No warmup receipts landed in the window, so placement was never observed. Enable warmup on your sending mailboxes to measure where your mail actually lands.',
-  bounce: 'Nothing has been delivered in this window, so there is no bounce rate to compute yet.',
-  warmup: 'None of these mailboxes is warming up, so there is no warmup state to read.',
-  domain_auth: 'No SPF/DMARC lookup has answered for these domains yet, so authentication is unknown.',
+    "No warmup emails landed in this period, so we couldn't see where your mail is landing. Turn on warmup for your mailboxes to start measuring this.",
+  bounce: "Nothing has been delivered in this period, so there's no bounce rate to show yet.",
+  warmup: "None of these mailboxes is warming up yet, so there's nothing to measure here.",
+  domain_auth:
+    "Your domains haven't been checked yet, so we don't know how they're set up. Run a check from the Mailboxes page.",
 }
 
 export interface ComponentCopy {
@@ -214,7 +215,7 @@ export function componentCopy(component: ScoreComponent): ComponentCopy {
     return {
       key: component.key,
       label,
-      status: 'Not measured',
+      status: 'No data yet',
       detail: serverDetail && serverDetail.length > 0 ? serverDetail : NOT_MEASURED_DETAIL[component.key],
       measured: false,
       tone: 'draft',
@@ -281,26 +282,26 @@ export function verdictCopy(verdict: Verdict, guardrails: CampaignGuardrails): V
 
   if (verdict === 'paused') {
     return {
-      label: 'Paused by the guardrail',
+      label: 'Paused automatically',
       tone: 'failing',
       actionable: false,
       detail:
-        'The breaker stopped this campaign. Every pause is recorded below with the rate it saw and the sample it judged — fix the underlying list or copy, then restart the campaign the normal way.',
+        'We stopped this campaign to protect your sending reputation. Each pause is listed below with the numbers behind it — clean up the contact list or rewrite the email, then start the campaign again.',
     }
   }
   if (verdict === 'warn') {
     return {
-      label: 'Trending toward a pause',
+      label: 'Close to being paused',
       tone: 'paused',
       actionable: true,
-      detail: `A rate has entered the warning band below its pause threshold. Nothing has stopped yet — this is the point where cleaning the list or fixing the copy still prevents a pause at ${limits}.`,
+      detail: `One of your rates is creeping toward the limit. Nothing has stopped yet — cleaning up the contact list or rewriting the email now is what keeps this campaign from pausing at ${limits}.`,
     }
   }
   return {
-    label: 'Within limits',
+    label: 'All good',
     tone: 'running',
     actionable: false,
-    detail: `Both measured rates sit below their thresholds. The breaker fires at ${limits}.`,
+    detail: `Both rates are comfortably below their limits. This campaign pauses itself at ${limits}.`,
   }
 }
 
@@ -311,17 +312,17 @@ export function verdictCopy(verdict: Verdict, guardrails: CampaignGuardrails): V
  * operator, so every field the API records is spent here.
  */
 export function pauseEventSentence(event: CampaignPauseEvent, now: number = Date.now()): string {
-  const metric = event.metric === 'complaint_rate' ? 'complaint rate' : 'bounce rate'
+  const metric = event.metric === 'complaint_rate' ? 'spam complaints' : 'bounces'
   return (
     `Paused automatically on ${shortDate(event.created_at, now)} — ` +
-    `${metric} ${formatPct(event.value)} over ${deliveredLabel(event.delivered)}, ` +
-    `threshold ${formatPct(event.threshold)}.`
+    `${metric} hit ${formatPct(event.value)} across ${deliveredLabel(event.delivered)}, ` +
+    `past your ${formatPct(event.threshold)} limit.`
   )
 }
 
 /** What tripped it, as a short label beside the sentence. */
 export function pauseReasonLabel(event: CampaignPauseEvent): string {
-  return event.reason === 'complaint_spike' ? 'Complaint spike' : 'Bounce spike'
+  return event.reason === 'complaint_spike' ? 'Too many spam reports' : 'Too many bounces'
 }
 
 /**
@@ -334,13 +335,13 @@ export function autoPauseCopy(guardrails: CampaignGuardrails): { label: string; 
         label: 'Auto-pause on',
         tone: 'running',
         detail:
-          'This campaign stops itself if a rate crosses its threshold on a large enough sample. It never pauses on a handful of sends.',
+          'This campaign stops itself if too many emails bounce or get marked as spam. It waits for enough sends to be sure, so a couple of bad addresses will never pause it.',
       }
     : {
         label: 'Auto-pause off',
         tone: 'failing',
         detail:
-          'Nothing will stop this campaign automatically. The thresholds below are recorded but not enforced, so a bad list keeps sending until someone notices.',
+          "Nothing will stop this campaign automatically. The limits below are saved but not enforced, so a bad contact list will keep sending until you notice — which is what damages a sending reputation.",
       }
 }
 
@@ -402,7 +403,7 @@ function serverReason(error: unknown): string | undefined {
 export function reportErrorMessage(error: unknown): string {
   const status = httpStatus(error)
   if (status === 403) return "You don't have access to this workspace's deliverability data."
-  return `Couldn't load deliverability${status ? ` (${status})` : ''}. No score is being shown — this is a failed request, not a clean result.`
+  return `Couldn't load your deliverability${status ? ` (${status})` : ''}. Nothing is being shown because the request failed — not because everything is clean.`
 }
 
 /** Copy for a failed guardrails save. */
@@ -410,10 +411,10 @@ export function guardrailsErrorMessage(error: unknown): string {
   const status = httpStatus(error)
   if (status === 404) return 'This campaign no longer exists.'
   if (status === 422) {
-    return `Those thresholds were rejected — both must be between ${MIN_THRESHOLD_PCT}% and ${MAX_THRESHOLD_PCT}%.`
+    return `Those limits were rejected — both must be between ${MIN_THRESHOLD_PCT}% and ${MAX_THRESHOLD_PCT}%.`
   }
   const reason = serverReason(error)
   return reason
-    ? `Couldn't save the guardrails: ${reason}. The previous settings are still in force.`
-    : "Couldn't save the guardrails. The previous settings are still in force — try again."
+    ? `Couldn't save your limits: ${reason}. Your previous settings are still active.`
+    : "Couldn't save your limits. Your previous settings are still active — try again."
 }

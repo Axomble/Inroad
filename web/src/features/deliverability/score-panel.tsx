@@ -1,7 +1,6 @@
 import { cn } from '@/lib/utils'
 import { StatusPill } from '@/components/shared/status-pill'
-import type { ComponentCopy } from '@/lib/deliverability-copy'
-import { friendlyComponentCopies, friendlyScoreHeadline } from './friendly-copy'
+import { componentCopies, scoreHeadline, type ComponentCopy } from '@/lib/deliverability-copy'
 import type { DeliverabilityScore } from './api'
 
 /**
@@ -13,8 +12,8 @@ import type { DeliverabilityScore } from './api'
  * it never renders an unmeasured component as a clean zero.
  */
 export function ScorePanel({ score }: { score: DeliverabilityScore }) {
-  const headline = friendlyScoreHeadline(score)
-  const components = friendlyComponentCopies(score)
+  const headline = scoreHeadline(score)
+  const components = componentCopies(score)
 
   return (
     <section aria-label="Deliverability score" className="border-b border-border bg-surface/60">

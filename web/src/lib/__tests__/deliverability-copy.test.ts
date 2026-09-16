@@ -65,16 +65,17 @@ describe('shortDate', () => {
 })
 
 describe('scoreHeadline', () => {
-  test('low confidence replaces the band with "Provisional" and never a healthy tone', () => {
+  test('low confidence replaces the band with "Early estimate" and never a healthy tone', () => {
     const headline = scoreHeadline(score({ value: 96, confidence: 'low', delivered: 11 }))
-    expect(headline.label).toBe('Provisional')
+    expect(headline.label).toBe('Early estimate')
     expect(headline.provisional).toBe(true)
     expect(headline.tone).not.toBe('running')
     expect(headline.tone).toBe('draft')
     // The number is still shown — it is qualified, not hidden.
     expect(headline.value).toBe(96)
     expect(headline.qualifier).toContain('11 delivered')
-    expect(headline.qualifier).toContain('too small a sample to be a verdict')
+    expect(headline.qualifier).toMatch(/haven't sent enough email yet for a reliable score/)
+    expect(headline.qualifier).toMatch(/firm up as you send more/)
   })
 
   test('a high-confidence strong score reads as strong and states its sample', () => {
@@ -88,7 +89,7 @@ describe('scoreHeadline', () => {
   test('medium confidence says indicative rather than firm', () => {
     const headline = scoreHeadline(score({ confidence: 'medium', delivered: 90 }))
     expect(headline.provisional).toBe(false)
-    expect(headline.qualifier).toContain('indicative')
+    expect(headline.qualifier).toMatch(/enough for a rough read, not enough to be sure yet/)
   })
 
   test('the bands are labelled and toned distinctly', () => {
@@ -104,7 +105,7 @@ describe('scoreHeadline', () => {
         components: [component(), component({ key: 'complaint', label: 'Complaints', measured: false, rate: null })],
       }),
     )
-    expect(headline.qualifier).toContain("Complaints wasn't measured")
+    expect(headline.qualifier).toContain("Complaints hasn't been measured yet")
     expect(headline.qualifier).toContain("didn't count toward it")
   })
 
@@ -117,7 +118,7 @@ describe('scoreHeadline', () => {
         ],
       }),
     )
-    expect(headline.qualifier).toContain("Complaints and Spam placement weren't measured")
+    expect(headline.qualifier).toContain("Complaints and Spam placement haven't been measured yet")
     expect(headline.qualifier).toContain("they didn't count")
   })
 })
@@ -125,20 +126,20 @@ describe('scoreHeadline', () => {
 describe('componentCopy', () => {
   test('an unmeasured component reads as not measured, never as 0%, and is never healthy-toned', () => {
     const copy = componentCopy(component({ key: 'complaint', label: 'Complaints', measured: false, rate: null }))
-    expect(copy.status).toBe('Not measured')
+    expect(copy.status).toBe('No data yet')
     expect(copy.status).not.toContain('%')
     expect(copy.tone).toBe('draft')
     expect(copy.tone).not.toBe('running')
     expect(copy.penaltyLabel).toBeNull()
-    expect(copy.detail).toContain('No complaint feed is connected')
-    expect(copy.detail).toContain('not a clean complaint rate')
+    expect(copy.detail).toMatch(/Complaint reports aren't connected yet/)
+    expect(copy.detail).toMatch(/doesn't mean your complaint rate is clean/)
   })
 
   test('an unmeasured component with a zero rate still reads as not measured', () => {
     // The dangerous case: a payload that carries `rate: 0` alongside
     // `measured: false`. The flag wins.
     const copy = componentCopy(component({ key: 'complaint', measured: false, rate: 0, penalty: 0 }))
-    expect(copy.status).toBe('Not measured')
+    expect(copy.status).toBe('No data yet')
     expect(copy.measured).toBe(false)
   })
 
@@ -199,7 +200,7 @@ describe('verdictCopy', () => {
   test('paused points at the recorded reasons rather than just saying paused', () => {
     const paused = verdictCopy('paused', GUARDRAILS)
     expect(paused.label).not.toBe('Paused')
-    expect(paused.detail).toContain('recorded below')
+    expect(paused.detail).toMatch(/listed below with the numbers behind it/)
   })
 })
 
@@ -208,7 +209,7 @@ describe('autoPauseCopy', () => {
     const copy = autoPauseCopy(GUARDRAILS)
     expect(copy.label).toBe('Auto-pause on')
     expect(copy.tone).toBe('running')
-    expect(copy.detail).toContain('never pauses on a handful of sends')
+    expect(copy.detail).toMatch(/a couple of bad addresses will never pause it/)
   })
 
   test('disabled is called out as unenforced, not as a neutral setting', () => {
@@ -231,9 +232,9 @@ describe('pauseEventSentence', () => {
 
   test('carries reason, observed rate, threshold and sample in one sentence', () => {
     expect(pauseEventSentence(event, NOW)).toBe(
-      'Paused automatically on 12 Aug — bounce rate 9.2% over 218 delivered, threshold 8.0%.',
+      'Paused automatically on 12 Aug — bounces hit 9.2% across 218 delivered, past your 8.0% limit.',
     )
-    expect(pauseReasonLabel(event)).toBe('Bounce spike')
+    expect(pauseReasonLabel(event)).toBe('Too many bounces')
   })
 
   test('a complaint pause names the complaint rate and keeps sub-1% precision', () => {
@@ -246,10 +247,10 @@ describe('pauseEventSentence', () => {
       delivered: 900,
     }
     const sentence = pauseEventSentence(complaint, NOW)
-    expect(sentence).toContain('complaint rate 1.6%')
-    expect(sentence).toContain('over 900 delivered')
-    expect(sentence).toContain('threshold 1.5%')
-    expect(pauseReasonLabel(complaint)).toBe('Complaint spike')
+    expect(sentence).toContain('spam complaints hit 1.6%')
+    expect(sentence).toContain('across 900 delivered')
+    expect(sentence).toContain('past your 1.5% limit')
+    expect(pauseReasonLabel(complaint)).toBe('Too many spam reports')
   })
 })
 
@@ -285,7 +286,7 @@ describe('error copy', () => {
   test('a failed report says no score is shown rather than implying a clean result', () => {
     const message = reportErrorMessage({ status: 500, data: {} })
     expect(message).toContain('(500)')
-    expect(message).toContain('not a clean result')
+    expect(message).toMatch(/not because everything is clean/)
   })
 
   test('403 is about access, not about deliverability', () => {
@@ -293,15 +294,15 @@ describe('error copy', () => {
   })
 
   test('a transport error still reads as a failed request', () => {
-    expect(reportErrorMessage({ status: 'FETCH_ERROR', error: 'offline' })).toContain('failed request')
+    expect(reportErrorMessage({ status: 'FETCH_ERROR', error: 'offline' })).toMatch(/because the request failed/)
   })
 
   test('a rejected save says the previous settings still apply', () => {
     expect(guardrailsErrorMessage({ status: 422, data: {} })).toContain('between 0.1% and 100%')
     expect(guardrailsErrorMessage({ status: 404, data: {} })).toContain('no longer exists')
     expect(guardrailsErrorMessage({ status: 500, data: { error: 'db down' } })).toContain(
-      'db down. The previous settings are still in force',
+      'db down. Your previous settings are still active',
     )
-    expect(guardrailsErrorMessage(undefined)).toContain('previous settings are still in force')
+    expect(guardrailsErrorMessage(undefined)).toContain('previous settings are still active')
   })
 })
