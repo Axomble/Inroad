@@ -95,6 +95,14 @@ different version is a different rule set and would not match CI. The version li
 Makefile (`GOLANGCI_VERSION`), which CI reads too:
 `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2`.
 
+**`oxlint` is pinned exactly in `web/package.json` (no caret) for the same
+reason.** It was previously `^1.71.0`, which happily resolves to any 1.x — and
+1.82 moved React Compiler rules (set-state-in-effect, refs-during-render) into
+the `correctness` category that `.oxlintrc.json` treats as errors. A routine
+`npm install` could therefore turn 56 pre-existing findings into a red build
+that nobody chose to take on. Upgrading the pin is now a deliberate act with its
+own PR, exactly like bumping `GOLANGCI_VERSION`.
+
 ## More docs
 
 The `docs/` directory is an Astro/Starlight docs site; content lives under `docs/src/content/docs/`.
