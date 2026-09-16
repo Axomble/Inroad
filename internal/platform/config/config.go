@@ -231,6 +231,22 @@ type Config struct {
 	// reachable only over a trusted private network, and it has to be chosen.
 	FleetBrokerAllowPlaintext bool
 
+	// FleetCoreAPIRemote moves a role=send worker's coreapi reads onto the
+	// fleet channel instead of its own pgxpool (internal/coreapi/remote).
+	// Slice 1 of that transport carries exactly one method, IsSuppressed.
+	//
+	// DEFAULT FALSE, and fail-closed like every other opt-in here: unset,
+	// empty, "false" or a typo all keep the in-process path, because a
+	// configuration mistake must never be able to change where a worker gets
+	// its data. A self-hosted installation sets nothing and is unaffected.
+	//
+	// It deliberately adds NO address, URL or token of its own — it reuses the
+	// three FleetBroker* values above, because the coreapi transport and the
+	// credential broker share one listener and one token by decision (see
+	// cmd/inroad/fleetlistener.go). cmd/worker refuses the combinations that
+	// cannot work: the flag needs role=send and needs FleetBrokerURL.
+	FleetCoreAPIRemote bool
+
 	// --- Worker identity + per-IP routing (spec §15, F3) ---
 
 	// WorkerID is this worker's stable id. It keys the `workers` heartbeat row
@@ -452,6 +468,7 @@ func Load() (*Config, error) {
 	cfg.FleetBrokerURL = getenv("INROAD_FLEET_BROKER_URL", "")
 	cfg.FleetBrokerToken = getenv("INROAD_FLEET_BROKER_TOKEN", "")
 	cfg.FleetBrokerAllowPlaintext = getenvBool("INROAD_FLEET_BROKER_ALLOW_PLAINTEXT", false)
+	cfg.FleetCoreAPIRemote = getenvBool("INROAD_FLEET_COREAPI_REMOTE", false)
 	// Either side of the broker needs the token, and a weak one is refused
 	// rather than accepted — the same posture INROAD_JWT_SECRET takes. Checked
 	// here so the failure names the variable, at startup, instead of surfacing

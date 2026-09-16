@@ -11,8 +11,14 @@ package credbroker
 // The broker's two routes. Mounted under the caller-supplied base URL by the
 // client and at the router root by Handler.
 const (
-	PathMailbox         = "/internal/fleet/credentials/mailbox"
-	PathWebhookEndpoint = "/internal/fleet/credentials/webhook-endpoint"
+	// PathPrefix is where the composition root mounts NewHandler on the fleet
+	// listener. Exported so cmd/inroad mounts this package as a unit, beside
+	// the coreapi transport's own prefix, without spelling out either
+	// package's routes — a route that moves cannot then silently stop being
+	// served.
+	PathPrefix          = "/internal/fleet/credentials/"
+	PathMailbox         = PathPrefix + "mailbox"
+	PathWebhookEndpoint = PathPrefix + "webhook-endpoint"
 )
 
 // mailboxRequest names the mailbox whose credential is wanted. It carries IDS

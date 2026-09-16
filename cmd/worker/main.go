@@ -104,6 +104,20 @@ func run() error {
 	// one.
 	logger.Info("worker identity", "worker_id", cfg.WorkerID, "id_family", cfg.WorkerIDFamily)
 
+	// Where this worker's coreapi reads come from (INROAD_FLEET_COREAPI_REMOTE,
+	// off by default). Resolved here, beside ParseRole and before anything
+	// connects, for the same reason: a configuration that cannot work should
+	// fail with no DB attempt behind it. buildCoreAPIWiring owns the whole
+	// decision and refuses the combinations that cannot work — see
+	// cmd/worker/coreapi.go. The options it yields are installed on the
+	// in-process client further down; an unset flag yields none of them, which
+	// is what keeps the self-host path byte-for-byte what it was.
+	coreWiring, err := buildCoreAPIWiring(cfg, role, logger)
+	if err != nil {
+		logger.Error("coreapi source unusable", "err", err)
+		return err
+	}
+
 	// Prometheus /metrics listener. mtx is always constructed (never nil): the
 	// campaign/warmup send handlers' finalize points record into it
 	// unconditionally below; INROAD_METRICS_ADDR only controls whether the
@@ -223,6 +237,11 @@ func run() error {
 	// keyring-backed opener, so every credential this process needs is opened
 	// by the control plane and none of them by this host.
 	coreOpts = append(coreOpts, creds.coreOptions()...)
+	// Empty unless this worker reads remotely. When present it REPLACES the
+	// pool-backed source for the methods the remote transport has taken over —
+	// in slice 1, IsSuppressed alone. The pool above is still opened, because
+	// everything else still needs it (see internal/coreapi/remote).
+	coreOpts = append(coreOpts, coreWiring.coreOptions()...)
 	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(), coreOpts...)
 
 	// Resolve the optional worker egress IP once. When set, every outbound dial
