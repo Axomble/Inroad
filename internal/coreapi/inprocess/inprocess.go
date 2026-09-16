@@ -35,9 +35,16 @@ type client struct {
 	// client, so that process never sees INROAD_MASTER_KEY at all. See
 	// internal/platform/credbroker for why that boundary exists and what it
 	// does and does not buy.
-	creds     credbroker.Opener
-	jwtSecret []byte
-	publicURL string
+	creds credbroker.Opener
+	// suppression answers IsSuppressed. Like creds above, it is the ONLY route
+	// from this client to that answer, so replacing it moves every consumer at
+	// once. Defaults to localSuppression (the pool-backed query every
+	// self-hosted install runs); a fleet worker replaces it with
+	// internal/coreapi/remote's HTTP client via WithRemoteSuppression, and then
+	// this one method needs no database. See suppression.go.
+	suppression SuppressionSource
+	jwtSecret   []byte
+	publicURL   string
 	// enroll owns the enrollment state machine (advance/complete/stop). The
 	// control plane composes the domain service here so the MarkStep* coreapi
 	// methods delegate the transition to a single, unit-tested place.
@@ -149,6 +156,28 @@ func WithCredentialBroker(o credbroker.Opener) Option {
 	}
 }
 
+// WithRemoteSuppression replaces the pool-backed suppression query with another
+// SuppressionSource — in practice internal/coreapi/remote's HTTP client,
+// pointed at the control plane's fleet listener.
+//
+// This is slice 1 of giving up the worker's pgxpool: one method, end to end,
+// over the wire. It is an Option rather than a positional parameter for the
+// same reason WithCredentialBroker is — every other caller (cmd/inroad,
+// cmd/seed, every test, and the self-host RoleAll worker) wants the local query
+// and should not have to say so — and OFF by default, so an installation that
+// sets nothing behaves exactly as it did before this existed.
+//
+// Passing nil is a no-op, NOT a way to disable suppression checks: silently
+// dropping a source that was meant to be wired would leave the process reading
+// a pool it was supposed to give up, with nothing saying so.
+func WithRemoteSuppression(s SuppressionSource) Option {
+	return func(c *client) {
+		if s != nil {
+			c.suppression = s
+		}
+	}
+}
+
 // New returns the in-process coreapi client backed by the given connection
 // pool. The pool backs the pool-bound *gen.Queries for reads and lets
 // MarkStepSent run the record+advance writes in one transaction. The keyring
@@ -171,6 +200,7 @@ func New(pool *pgxpool.Pool, keyring *crypto.Keyring, jwtSecret []byte, publicUR
 	c := client{
 		pool: pool, q: q, jwtSecret: jwtSecret, publicURL: publicURL,
 		creds:         NewCredentialOpener(q, keyring, googleOAuth, msOAuth),
+		suppression:   localSuppression{q: q},
 		enroll:        enrollment.NewService(enrollment.NewPgStore(q)),
 		breaker:       deliverability.NewService(deliverability.NewPgStore(pool)),
 		warmupSecret:  warmupSecret,

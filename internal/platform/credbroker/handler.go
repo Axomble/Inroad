@@ -1,12 +1,10 @@
 package credbroker
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,13 +24,9 @@ const maxRequestBytes = 4 << 10
 // address and a token, so an installation that has not opted in does not serve
 // this route at all.
 //
-// Authentication is a single shared bearer token, compared in constant time.
-// That is honestly weaker than per-worker identity: every fleet host holds the
-// same credential, so revoking one revokes all, and the broker cannot tell
-// which host is asking. Per-worker identity is only useful once a worker can be
-// scoped to a subset of mailboxes, and today it cannot be (see HTTPOpener's
-// doc), so the shared token is the right size for the boundary that actually
-// exists rather than machinery for one that does not.
+// Authentication is the fleet channel's shared bearer token (RequireToken),
+// which this listener now serves more than one transport under — see
+// channel.go.
 func NewHandler(o Opener, token string, logger *slog.Logger) (http.Handler, error) {
 	if o == nil {
 		return nil, errors.New("credbroker: handler needs an opener")
@@ -43,40 +37,17 @@ func NewHandler(o Opener, token string, logger *slog.Logger) (http.Handler, erro
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{opener: o, token: token, logger: logger}
+	h := &handler{opener: o, logger: logger}
+	authed := RequireToken(token, logger)
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST "+PathMailbox, h.authed(h.openMailbox))
-	mux.HandleFunc("POST "+PathWebhookEndpoint, h.authed(h.openWebhookEndpoint))
+	mux.Handle("POST "+PathMailbox, authed(http.HandlerFunc(h.openMailbox)))
+	mux.Handle("POST "+PathWebhookEndpoint, authed(http.HandlerFunc(h.openWebhookEndpoint)))
 	return mux, nil
 }
 
 type handler struct {
 	opener Opener
-	token  string
 	logger *slog.Logger
-}
-
-// authed wraps a route in the shared-token check. It runs BEFORE the body is
-// read, so an unauthenticated caller cannot make the process parse anything.
-func (h *handler) authed(next func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !h.authorized(r) {
-			// The remote address only. Never the presented token, not even a
-			// prefix: a partial secret in a log is still a secret in a log.
-			h.logger.Warn("credential broker: rejected an unauthenticated request", "remote", r.RemoteAddr)
-			respond(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
-			return
-		}
-		next(w, r)
-	}
-}
-
-func (h *handler) authorized(r *http.Request) bool {
-	presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(presented), []byte(h.token)) == 1
 }
 
 func (h *handler) openMailbox(w http.ResponseWriter, r *http.Request) {

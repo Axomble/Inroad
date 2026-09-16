@@ -1485,10 +1485,107 @@ write history that never happened.
     - `cmd/worker` still opens its own `pgxpool`, so a live worker still reads
       every workspace's rows — including `secret_ciphertext`, which it can no
       longer decrypt. Removing the pool needs `coreapi` to grow a full HTTP
-      transport ("in-process now, HTTP later"), which this slice does not do.
+      transport ("in-process now, HTTP later"). That transport now EXISTS
+      (invariant 72) but carries one method, so this sentence is still true.
 
     Treat a `send` host as able to reach any mailbox in the installation while it
-    is running, and restrict the broker listener to the fleet network.
+    is running, and restrict the fleet listener to the fleet network.
+
+## Remote coreapi transport (the worker's database connection)
+72. **The fleet listener serves two transports under one token, deliberately.**
+    `INROAD_FLEET_BROKER_ADDR` now carries both the credential broker
+    (`/internal/fleet/credentials/…`) and the coreapi remote transport
+    (`/internal/fleet/coreapi/…`, `internal/coreapi/remote`), authenticated by
+    the same `INROAD_FLEET_BROKER_TOKEN` through one shared constant-time check
+    (`credbroker.RequireToken`), validated by one shared endpoint parser
+    (`credbroker.ParseEndpoint`, which is where invariant 68's https rule and
+    32-byte floor now live for BOTH).
+
+    Sharing is the security decision, not the convenient one, and the argument
+    is worth recording because the alternative is defensible. Separating would
+    give blast-radius isolation between "unwrap a credential" and "read job
+    data". It buys nothing here: there is no principal that holds one and not
+    the other — a `role=send` worker brokers the credential it dials with AND
+    checks suppression before every send — so two tokens partition no capability
+    while doubling what must be rotated, and rotation that misses one leaves a
+    live capability. The asymmetry also runs the wrong way: the credential token
+    is strictly the more powerful, since it yields the ability to authenticate
+    AS a customer's mailbox. What would change the answer is a role that needs
+    coreapi data and not credentials; it does not exist, and both sides already
+    take a base URL and token as parameters, so splitting later is additive.
+
+    Everything invariant 68 states holds unchanged and now covers both: separate
+    listener never mounted on the public API router (asserted by
+    `TestThePublicAPIRouterServesNoFleetRoute`), off unless the address is set,
+    https unless explicitly opted out, redirects never followed, fixed error
+    strings, no request or response body logged.
+
+73. **A coreapi request names one subject and can never express a query.** The
+    wire shape is `{workspace_id, email}` — asserted on the raw request bytes,
+    and unknown fields are refused rather than ignored, so a caller cannot add a
+    parameter and believe the narrower answer it gets back. There is no filter,
+    no pattern, no limit and no cursor, which is the same restriction invariant
+    67 puts on the broker and for the same reason: a request that could express
+    "rows matching X" would make this seam a general query engine over the tenant
+    database, which is exactly the capability the plane split exists to remove.
+    Every route a later slice adds answers to that rule.
+
+    The address is not an id, and that is stated rather than glossed. The
+    subject of a suppression record IS an email address and the worker already
+    holds this one, from the job it was handed — so the request reveals nothing
+    to the control plane, and the answer is one bit about an address the caller
+    named. What it is not is enumerable: nothing lists the table, pages it, or
+    matches a prefix.
+
+    **Workspace-pinned, adding to the tenant pin rather than replacing it.** The
+    workspace travels on the wire because there is no session here to derive it
+    from — the caller is a machine holding the fleet token, not a user holding a
+    JWT. The handler parses it and the reader applies the same `workspace_id`
+    SQL filter the in-process path applies (invariant 4), over the SAME
+    `app/suppression` store the HTTP API and the in-process coreapi path use, so
+    there is one implementation of "is this address suppressed" behind all
+    three. Naming a different workspace asks a question about that workspace,
+    which is what the fleet token already authorises — one worker legitimately
+    serves every tenant's sends. Proven against Postgres end to end by
+    `TestARemoteCoreAPIClientWithNoPoolAnswersFromTheControlPlane`, whose client
+    holds a nil pool: every answer it gives came off the wire, and the foreign
+    workspace reads false.
+
+74. **A worker that cannot reach the control plane refuses to send.** Every
+    failure — unreachable host, 500, rejected token, malformed id — is
+    `(false, err)`, and all four call sites (`worker/testsend`, and
+    `worker/inbox`'s manual reply, pending reply and pending compose sends)
+    already treat a non-nil error as "do not send". It never falls back to a
+    local read, never retries into a guess, and never reopens a pool.
+    `TestAnUnreachableControlPlaneRefusesRatherThanMissingASuppression` proves
+    the direction that matters: the address IS suppressed in Postgres, the
+    control plane is down, and the answer is an error rather than a false
+    negative — which would be mail delivered to someone who opted out.
+
+    **There is deliberately no cache.** A TTL on a suppression answer is a
+    correctness knob, not a tuning knob, for exactly that reason; it gets its
+    own decision when a measured cost justifies it.
+
+    Timeouts are chosen and sit UNDER the asynq ceilings the call runs inside
+    (`queue.sendTimeout` 2m, `pollTimeout` 5m), following the precedent
+    `internal/platform/mail/apiclient.go` set: 10s whole request, 5s dial, 5s
+    TLS handshake, 5s response header. A wedged call therefore fails the CALL —
+    attributable and retried — rather than burning the task's budget and
+    surfacing as a killed handler with no cause.
+
+75. **The switch is off by default and refuses what cannot work.**
+    `INROAD_FLEET_COREAPI_REMOTE` defaults false and fails closed on anything
+    that is not explicitly truthy, the same rule as every other opt-out here. A
+    self-hosted installation sets none of it: `config.Load` with a cleared
+    environment yields false, `resolveCoreAPIMode` returns in-process for all
+    three roles, and the wiring installs ZERO `inprocess` options, so
+    `inprocess.New` builds the client it built before the transport existed
+    (`TestSelfHostDefaultsToTheInProcessCoreAPI`,
+    `TestTheDefaultSuppressionSourceReadsPostgres`). `cmd/worker` refuses the
+    flag on any role but `send` — a `control` or `all` worker runs beside the
+    database, and silently ignoring the setting would leave an operator
+    believing their worker had stopped reading it — and refuses it without
+    `INROAD_FLEET_BROKER_URL`, at startup, before anything connects.
 
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`

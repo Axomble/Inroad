@@ -15,7 +15,7 @@ weigh what it gives up — see [Architecture Principles](/architecture-principle
 
 - **Control Plane (`cmd/inroad`):** Hosts the HTTP REST API server, identity/authentication services, workspace configurations, webhooks, and database management. It directly manages PostgreSQL and Redis.
 - **Execution Plane (`cmd/worker`):** Contains background engines responsible for sending campaign emails, inbox polling, deliverability evaluation, and mailbox warmup.
-- **CoreAPI Boundary (`internal/coreapi`):** The worker *packages* reach relational data and unseal encrypted mailbox credentials only through `internal/coreapi` — one seam, so the execution plane can move to its own host without touching worker code. That much is enforced mechanically: a `depguard` rule in `.golangci.yml` fails the build if a non-test file under `internal/worker/` imports `internal/platform/db`. The *process* boundary is still partial. The worker opens its own `pgxpool` and resolves `coreapi` to an in-process function call rather than a network hop, so a compromised worker host still reads the tenant database. What it no longer holds is the KEY: a `role=send` worker builds no `crypto.Keyring`, refuses to start if it is given `INROAD_MASTER_KEY`, and obtains each mailbox credential from the control plane over an authenticated channel (`internal/platform/credbroker`) — so the ciphertext it can read, it cannot decrypt. The single-process self-host topology (`role=all`) keeps its local keyring and is unchanged. The boundary becomes a full one — a worker host that cannot read the tenant database at all — when `coreapi` gains its remote transport (HTTP/gRPC) and the worker gives up its pool. That part is designed, not built.
+- **CoreAPI Boundary (`internal/coreapi`):** The worker *packages* reach relational data and unseal encrypted mailbox credentials only through `internal/coreapi` — one seam, so the execution plane can move to its own host without touching worker code. That much is enforced mechanically: a `depguard` rule in `.golangci.yml` fails the build if a non-test file under `internal/worker/` imports `internal/platform/db`. The *process* boundary is still partial. The worker opens its own `pgxpool` and resolves `coreapi` to an in-process function call rather than a network hop, so a compromised worker host still reads the tenant database. What it no longer holds is the KEY: a `role=send` worker builds no `crypto.Keyring`, refuses to start if it is given `INROAD_MASTER_KEY`, and obtains each mailbox credential from the control plane over an authenticated channel (`internal/platform/credbroker`) — so the ciphertext it can read, it cannot decrypt. The single-process self-host topology (`role=all`) keeps its local keyring and is unchanged. The boundary becomes a full one — a worker host that cannot read the tenant database at all — when the worker gives up its pool. `coreapi`'s remote transport now exists (`internal/coreapi/remote`, an authenticated HTTP hop on the same fleet listener as the credential broker, off by default behind `INROAD_FLEET_COREAPI_REMOTE`), but it carries ONE method so far — the suppression check on the send path — so the pool is still opened for everything else and the containment claim is still not true. See [What is designed, not built](#what-is-designed-not-built).
 
 ## The Sending Fleet
 
@@ -205,11 +205,29 @@ outright.
 
 ### What is designed, not built
 
-Per-mailbox credential scoping. Every `send` worker consumes the shared `send`
-queue and may legitimately be handed any mailbox's job — only `warmup:tick` is
-routed by assignment — so the credential broker must answer for any mailbox the
-token names. Scoping needs per-mailbox routing first. Worker identity, which that
-scoping also needs, does now exist.
+**The worker's own database connection.** The remote `coreapi` transport now
+exists (`internal/coreapi/remote`): an HTTP client on the execution plane, a
+handler on the control plane's fleet listener, authenticated by the same shared
+token the credential broker uses, selected by `INROAD_FLEET_COREAPI_REMOTE` (off
+by default, refused on any role but `send`). It carries **one** method today —
+the suppression check every send makes — chosen because it is read-only,
+side-effect free and on the hot path, so it exercises the latency and the
+correctness of a network hop without the claim-protocol risk of moving a send
+claim. It fails closed: a worker that cannot reach the control plane refuses to
+send, never falls back to a local read, and never assumes "not suppressed".
+
+Everything else still goes through `cmd/worker`'s `pgxpool`, so the containment
+claim is still not true. **It becomes true when the pool is gone**, which needs
+the remaining methods ported — notably the send-claim protocol, which is where
+the real design work is. This is the first of four slices; the wire shape,
+authentication, listener and configuration switch it establishes are what the
+rest build on.
+
+**Per-mailbox credential scoping.** Every `send` worker consumes the shared
+`send` queue and may legitimately be handed any mailbox's job — only
+`warmup:tick` is routed by assignment — so the credential broker must answer for
+any mailbox the token names. Scoping needs per-mailbox routing first. Worker
+identity, which that scoping also needs, does now exist.
 
 ## System Monorepo Layout
 

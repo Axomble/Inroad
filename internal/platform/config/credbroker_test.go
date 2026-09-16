@@ -19,6 +19,7 @@ func clearKeyAndBroker(t *testing.T) {
 		"INROAD_FLEET_BROKER_URL",
 		"INROAD_FLEET_BROKER_TOKEN",
 		"INROAD_FLEET_BROKER_ALLOW_PLAINTEXT",
+		"INROAD_FLEET_COREAPI_REMOTE",
 	} {
 		prev, had := os.LookupEnv(k)
 		if had {

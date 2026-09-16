@@ -238,10 +238,11 @@ mailbox at a time, over an authenticated HTTP channel.
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `INROAD_FLEET_BROKER_ADDR` | **API side.** Address `cmd/inroad` serves the credential broker on, e.g. `10.0.0.5:8090`. A **separate listener** from `INROAD_HTTP_ADDR` — bind it to an address only the fleet's network can reach. Unset = the broker is not served at all | unset |
-| `INROAD_FLEET_BROKER_URL` | **Worker side.** Base URL a `send` worker asks for credentials at, e.g. `https://control.internal:8090` | unset |
+| `INROAD_FLEET_BROKER_ADDR` | **API side.** Address `cmd/inroad` serves the **fleet listener** on, e.g. `10.0.0.5:8090`. A **separate listener** from `INROAD_HTTP_ADDR` — bind it to an address only the fleet's network can reach. Unset = nothing fleet-facing is served at all | unset |
+| `INROAD_FLEET_BROKER_URL` | **Worker side.** Base URL a `send` worker asks at, e.g. `https://control.internal:8090` | unset |
 | `INROAD_FLEET_BROKER_TOKEN` | Shared bearer credential both sides present and check, **at least 32 bytes**. Generate with `openssl rand -base64 32`. Required on either side once the other variable is set | unset |
-| `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` | Permits an `http://` broker URL. **Default false** — the channel carries the token and the decrypted credential | `false` |
+| `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` | Permits an `http://` fleet URL. **Default false** — the channel carries the token and the decrypted credential | `false` |
+| `INROAD_FLEET_COREAPI_REMOTE` | **Worker side.** Read `coreapi` over the fleet channel instead of this worker's own database connection. **Default false.** See [Remote coreapi](#remote-coreapi-worker-side) below | `false` |
 
 Rules the binaries enforce at startup, rather than at the first send:
 
@@ -253,7 +254,41 @@ Rules the binaries enforce at startup, rather than at the first send:
   An existing control host that still sets `INROAD_MASTER_KEY` keeps working.
 - **Unset `INROAD_WORKER_ROLE` (the single-process self-host default) is
   completely unaffected.** Set `INROAD_MASTER_KEY` and nothing else, exactly as
-  before. None of the four variables above exist for you.
+  before. None of the five variables above exist for you.
+
+#### One listener, one token
+
+`INROAD_FLEET_BROKER_ADDR` serves **both** fleet transports: the credential
+broker (`/internal/fleet/credentials/…`) and the remote `coreapi` transport
+(`/internal/fleet/coreapi/…`). They share one address and one token
+deliberately. A `role=send` worker needs both at once — it brokers the
+credential it dials with *and* it checks suppression before every send — so two
+tokens would partition nothing while doubling what you have to rotate, and the
+credential token is already the more powerful of the two. Rotate
+`INROAD_FLEET_BROKER_TOKEN` and both are revoked.
+
+#### Remote coreapi (worker side)
+
+`INROAD_FLEET_COREAPI_REMOTE=true` moves a `role=send` worker's `coreapi` reads
+from its own `pgxpool` onto the fleet channel. Today it moves **one method**:
+the suppression check every send makes. The worker still opens a pool for
+everything else, so this is the first step toward a worker that cannot read the
+tenant database at all — not the finished thing. Leave it off unless you are
+deliberately exercising that path.
+
+What it enforces at startup:
+
+- On any role **but** `send` → refuses to start. A `control` worker runs beside
+  the API and a single-process (`all`) worker *is* the database's host; a
+  network hop to reach it would be pure latency, and silently ignoring the
+  setting would leave you believing your worker had stopped reading the
+  database.
+- Set **without** `INROAD_FLEET_BROKER_URL` → refuses to start.
+- A worker that cannot reach the control plane **refuses to send**. It never
+  falls back to a local read and never assumes "not suppressed": a false
+  negative here is mail delivered to someone who opted out.
+- There is **no cache**. Every check is a direct call, because a TTL on a
+  suppression answer is a correctness decision, not a tuning knob.
 
 #### What this does and does not contain
 

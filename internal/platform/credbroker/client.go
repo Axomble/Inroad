@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,6 +18,10 @@ import (
 // explicitly-set weak secret rather than accepting it: this token is the only
 // thing between a network peer and every credential in the installation, so a
 // guessable one is worse than no broker at all.
+//
+// It is the floor for the FLEET CHANNEL, not only for this package: the same
+// address and the same token also carry internal/coreapi/remote (see
+// ParseEndpoint).
 const MinTokenLen = 32
 
 var (
@@ -79,47 +81,22 @@ type HTTPOpener struct {
 
 var _ Opener = (*HTTPOpener)(nil)
 
-// NewHTTPOpener builds the remote opener. baseURL is the control plane's
-// credential-broker listener (scheme + host, no path); token is the shared
-// bearer credential both sides hold.
+// NewHTTPOpener builds the remote opener. baseURL is the control plane's fleet
+// listener (scheme + host, no path); token is the shared bearer credential both
+// sides hold.
 //
-// https is REQUIRED unless allowPlaintext is explicitly set. This channel
-// carries the bearer token AND decrypted SMTP passwords and OAuth access
-// tokens, so a plaintext hop puts in the clear exactly the material the rest of
-// this change exists to protect. The reasoning and the shape are the same as
-// storage.FromEnv's INROAD_S3_ENDPOINT rule (docs/security.md invariant 6): a
-// missing scheme is refused rather than assumed, because assuming is how a typo
-// becomes a silent downgrade, and the opt-out has to be CHOSEN — it exists for
-// a control plane reachable only over a trusted private network.
-//
-// The broker URL is OPERATOR-supplied, never user-supplied, so it does not go
-// through (and does not need) the mail.vetAddr SSRF guard — the same reasoning
-// invariant 6 applies to the S3 endpoint.
+// https is required unless allowPlaintext is explicitly set, a weak token is
+// refused, and a missing scheme is refused rather than assumed. All three rules
+// and the reasoning behind them are ParseEndpoint's — they are the FLEET
+// CHANNEL's rules rather than this transport's, because the same address and
+// token also carry internal/coreapi/remote.
 func NewHTTPOpener(baseURL, token string, allowPlaintext bool) (*HTTPOpener, error) {
-	if len(token) < MinTokenLen {
-		return nil, ErrWeakToken
-	}
-	u, err := url.Parse(strings.TrimSpace(baseURL))
+	base, err := ParseEndpoint(baseURL, token, allowPlaintext)
 	if err != nil {
-		return nil, fmt.Errorf("credbroker: broker url: %w", err)
-	}
-	// Scheme first: "control.example:8090" parses with Scheme="control.example"
-	// and no host, and the useful thing to tell an operator who wrote that is
-	// that the scheme is missing, not that the host is.
-	switch u.Scheme {
-	case "https":
-	case "http":
-		if !allowPlaintext {
-			return nil, ErrInsecureURL
-		}
-	default:
-		return nil, ErrInsecureURL
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("credbroker: broker url %q has no host", baseURL)
+		return nil, err
 	}
 	return &HTTPOpener{
-		baseURL: strings.TrimSuffix(u.String(), "/"),
+		baseURL: base,
 		token:   token,
 		hc: &http.Client{
 			Timeout: requestTimeout,
