@@ -12,7 +12,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
-// GetWebhookDeliveryJob loads one webhook delivery plus its endpoint's URL and
+// localWebhookDeliveryJob loads one webhook delivery plus its endpoint's URL and
 // sealed secret, workspace-pinned, and opens the secret through the credential
 // opener so the worker receives plaintext bytes it can sign with and zeroize.
 // The worker never touches the keyring (docs/security.md invariant 1) — and on

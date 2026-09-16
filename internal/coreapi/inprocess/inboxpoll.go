@@ -39,7 +39,7 @@ func (c client) ListActiveMailboxes(ctx context.Context) ([]coreapi.MailboxRef, 
 	return out, nil
 }
 
-// GetInboxPollJob loads everything the inbox poller needs to open one
+// localInboxPollJob loads everything the inbox poller needs to open one
 // mailbox's IMAP connection and resume from its stored cursor: connection
 // details, decrypted credential, and (LastSeenUID, UIDValidity). workspaceID
 // is pinned in the SQL WHERE (defense in depth on the unguessable mailbox
@@ -128,7 +128,7 @@ func (c client) SetInboxCursorString(ctx context.Context, mailboxID, workspaceID
 	})
 }
 
-// FindSendByMessageID matches an inbound reply/bounce's Message-ID back to the
+// localFindSendByMessageID matches an inbound reply/bounce's Message-ID back to the
 // send that caused it, workspace-scoped. Returns ErrNoMatch when nothing
 // matches (unknown Message-ID — e.g. a reply to a message this workspace
 // never sent).

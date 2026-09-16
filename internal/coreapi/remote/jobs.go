@@ -134,6 +134,16 @@ func (c *Client) GetWarmupEngageJob(ctx context.Context, receiptID, workspaceID 
 		return coreapi.WarmupEngageJob{}, err
 	}
 	job := out.Job
+	// This is the one route where an empty credential subject cannot mean "no
+	// credential needed". Every engage job has a transport — the in-process
+	// build opens one before it branches on anything, because even a passive
+	// mark-read dials IMAP — so an empty RecipientMailbox means the control
+	// plane did not say whose mailbox this is, and credentialledJob's skip
+	// branch would hand back a job that dials unauthenticated. Refuse instead.
+	if job.RecipientMailbox == "" {
+		return coreapi.WarmupEngageJob{}, fmt.Errorf(
+			"coreapi remote: %s: the engage job names no recipient mailbox, so its credential cannot be opened", PathWarmupEngageJob)
+	}
 	job.AccessToken, job.SMTPPassword = at, pw
 	// The SAME slices on the nested reply, not copies. internal/worker/warmup's
 	// EngageHandler defers a zeroize of job.AccessToken and job.SMTPPassword

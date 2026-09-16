@@ -27,8 +27,8 @@ import (
 // anything a real header carries.
 const maxRequestBytes = 64 << 10
 
-// SuppressionReader is the control plane's side of the one method this slice
-// carries. It is defined HERE, at the consumer, and is deliberately the exact
+// SuppressionReader is the control plane's side of the one method slice 1
+// carried. It is defined HERE, at the consumer, and is deliberately the exact
 // signature internal/app/suppression.Store already has, so cmd/inroad wires the
 // store it already builds straight in with no adapter — one implementation of
 // "is this address suppressed", shared by the HTTP API, the in-process coreapi

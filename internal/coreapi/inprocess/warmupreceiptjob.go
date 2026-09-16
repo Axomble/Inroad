@@ -439,7 +439,7 @@ func (c client) RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceip
 	}), nil
 }
 
-// GetWarmupEngageJob loads the transport + reply content for one receipt. See the
+// localWarmupEngageJob loads the transport + reply content for one receipt. See the
 // coreapi.Client interface doc. The Do* flags are recomputed deterministically from
 // the receipt so they agree with the plan RecordWarmupReceipt returned.
 func (c client) localWarmupEngageJob(ctx context.Context, receiptID, workspaceID string) (coreapi.WarmupEngageJob, error) {

@@ -21,7 +21,7 @@ const (
 	testSendFallbackCompany   = "Acme"
 )
 
-// GetTestSendContent loads the raw (unrendered) step content plus the
+// localTestSendContent loads the raw (unrendered) step content plus the
 // preview personalization vars for one test-send: the step's
 // subject/body_text/body_html, and the campaign list's first (earliest-added)
 // contact's first_name/company -- or the synthetic fallback when the list has

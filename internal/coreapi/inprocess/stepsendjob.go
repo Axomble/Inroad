@@ -195,7 +195,7 @@ func (c client) newLeadLimitReached(ctx context.Context, ws, campaignID uuid.UUI
 	return started >= int64(*limit), nil
 }
 
-// GetStepSendJob resolves the enrollment's next due step and builds the send
+// localStepSendJob resolves the enrollment's next due step and builds the send
 // job. Read-only: creates no rows. workspaceID is pinned in the SQL WHERE
 // (defense in depth on the unguessable enrollment UUID).
 func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (coreapi.StepSendJob, error) {

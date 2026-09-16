@@ -9,7 +9,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
-// ResolveSenderTransport resolves one mailbox's decrypted send transport for
+// localResolveSenderTransport resolves one mailbox's decrypted send transport for
 // the testsend:send task (internal/worker/testsend). It is NOT part of
 // coreapi.Client (see coreapi.SenderTransport's doc comment for why widening
 // that ~40-method interface for one call site is the wrong trade): the

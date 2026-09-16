@@ -10,12 +10,24 @@
 // boundary, and a worker cannot run on a host the operator does not control.
 // This package is the first of the slices that make it true.
 //
-// Scope, deliberately. Slice 1 carries exactly ONE method, IsSuppressed. It is
-// read-only, side-effect free, answers a single boolean, and sits directly in
-// front of every send — so it exercises the latency and the correctness of a
-// network hop on the hot path without the claim-protocol risk that moving the
-// send claim would carry. The pool is untouched; later slices port more
-// methods, and the pool goes when nothing needs it.
+// Scope, deliberately, slice by slice.
+//
+// Slice 1 carried exactly ONE method, IsSuppressed: read-only, side-effect
+// free, a single boolean, directly in front of every send — so it exercised the
+// latency and the correctness of a network hop on the hot path without the
+// claim-protocol risk that moving the send claim would carry.
+//
+// Slice 2 adds the eight per-message job READS (jobs.go): the whole question
+// "what is the work, and what do I need to do it". Still nothing that CLAIMS,
+// marks, finalizes, advances or fails — those carry the idempotency risk, and
+// keeping them separate is what stops the dangerous work sitting behind the
+// boring work's review. The pool is still opened for them and for every
+// periodic sweep; it goes when nothing needs it.
+//
+// No credential crosses this wire. A job response carries a mailbox's host,
+// port, username and TLS policy and no secret at all; the worker opens the
+// secret through internal/platform/credbroker, on this same listener, by
+// mailbox id. jobs.go has the full argument for why that beats inlining it.
 //
 // No cache. A TTL on a suppression answer is a real correctness knob — a stale
 // negative is mail delivered to someone who opted out — and deserves its own
@@ -183,8 +195,9 @@ type callBudget struct {
 // What it does NOT do yet, stated plainly because the opposite is easy to
 // assume from the package existing: it does not remove the worker's database
 // access. cmd/worker still opens a pgxpool for every method this transport has
-// not yet taken over, which today is all but one. The containment claim becomes
-// true when the pool is gone, not when this type is constructed.
+// not yet taken over — every claim, mark, finalize and advance, and every
+// periodic sweep. The containment claim becomes true when the pool is gone, not
+// when this type is constructed.
 type Client struct {
 	baseURL string
 	token   string

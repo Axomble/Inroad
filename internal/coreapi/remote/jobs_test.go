@@ -489,6 +489,29 @@ func TestTheEngageJobsReplyCredentialAliasesTheOuterOne(t *testing.T) {
 	}
 }
 
+// An engage job that names no recipient is REFUSED, not returned uncredentialled.
+// It is the one route where an empty credential subject cannot mean "no
+// credential needed": every engagement dials the recipient's own mailbox, even a
+// passive mark-read, so a job without one would dial unauthenticated.
+func TestAnEngageJobWithNoRecipientIsRefused(t *testing.T) {
+	jobs := &fakeJobs{engage: coreapi.WarmupEngageJob{
+		Provider: "smtp", DoMarkRead: true, // RecipientMailbox deliberately empty
+	}}
+	opener := smtpSecret("never-reached")
+	c, _ := serveJobs(t, jobs, opener)
+
+	job, err := c.GetWarmupEngageJob(context.Background(), uuid.New().String(), uuid.New().String())
+	if err == nil {
+		t.Fatal("an engage job with no recipient was accepted, want an error")
+	}
+	if !reflect.ValueOf(job).IsZero() {
+		t.Errorf("a refused engage job was returned: %+v", job)
+	}
+	if opener.calls != 0 {
+		t.Errorf("the broker was asked %d times for a job naming no mailbox, want 0", opener.calls)
+	}
+}
+
 // A passive engagement (mark-read only, no reply) still needs a credential —
 // the IMAP modify uses it — and it is brokered for the recipient named on the
 // job rather than inferred from a ReplySend that is not there.
