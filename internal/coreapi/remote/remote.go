@@ -51,10 +51,14 @@
 //     and the claim decides what the retry does. Nothing here invents a success
 //     or a zero value on a failed call.
 //
-// No credential crosses this wire. A job response carries a mailbox's host,
-// port, username and TLS policy and no secret at all; the worker opens the
-// secret through internal/platform/credbroker, on this same listener, by
-// mailbox id. jobs.go has the full argument for why that beats inlining it.
+// No credential crosses this wire, in EITHER direction. A job response carries
+// a mailbox's host, port, username and TLS policy and no secret at all; the
+// worker opens the secret through internal/platform/credbroker, on this same
+// listener, by mailbox id. jobs.go has the full argument for why that beats
+// inlining it. The outcome requests hand the same job BACK, from a worker that
+// is by then holding the decrypted password it dialed with — the json:"-" tags
+// on the coreapi job types cover that direction too, and outcomes_test.go
+// asserts it on the request bytes.
 //
 // No cache. A TTL on a suppression answer is a real correctness knob — a stale
 // negative is mail delivered to someone who opted out — and deserves its own

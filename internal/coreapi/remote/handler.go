@@ -14,9 +14,11 @@ import (
 	"github.com/inroad/inroad/internal/platform/credbroker"
 )
 
-// maxRequestBytes caps a request body. Every shape is a small number of uuids
-// plus, on two routes, one free-text subject: a contact's address, and an
-// inbound Message-ID.
+// maxRequestBytes caps an IDS-ONLY request body — every route except the ones
+// that carry a job back, which use maxJobRequestBytes. Each shape here is a
+// small number of uuids plus, on a handful of routes, one bounded free-text
+// value: a contact's address, an inbound Message-ID, a stop reason, a reply
+// class, a webhook receiver's error text.
 //
 // 64 KiB rather than the few hundred bytes those actually need, because of what
 // refusing one would do. The Message-ID comes off unauthenticated inbound mail,
@@ -24,8 +26,10 @@ import (
 // simply matches nothing, but a 400 here would be an error the poller cannot
 // distinguish from a real failure, so it would return before SetInboxCursor and
 // the mailbox would stop processing ALL inbound mail — campaign replies and
-// bounces included. The cap still bounds the body hard; it just sits far above
-// anything a real header carries.
+// bounces included. The webhook error text is likewise chosen by a receiver a
+// tenant configured, and it is truncated to 1000 bytes before it is stored, not
+// before it is sent. The cap still bounds the body hard; it just sits far above
+// anything a real value carries.
 const maxRequestBytes = 64 << 10
 
 // SuppressionReader is the control plane's side of the one method slice 1

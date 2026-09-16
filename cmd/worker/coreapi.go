@@ -107,8 +107,9 @@ var ErrCoreAPIRemoteNeedsBroker = errors.New(
 	"INROAD_FLEET_COREAPI_REMOTE needs the credential broker: coreapi job responses carry no credential, and a worker reading them remotely obtains one through INROAD_FLEET_BROKER_URL")
 
 // coreAPIWiring is what the composition root got back. client is non-nil only
-// in coreAPIRemote, and it satisfies BOTH inprocess source interfaces — one
-// transport, one connection pool, one token.
+// in coreAPIRemote, and it satisfies ALL THREE inprocess source interfaces
+// (SuppressionSource, JobSource, OutcomeSource) — one transport, one set of
+// connection pools, one token.
 type coreAPIWiring struct {
 	mode   coreAPIMode
 	client *remote.Client
