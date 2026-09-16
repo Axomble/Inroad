@@ -212,12 +212,12 @@ test('an automatically paused campaign explains itself on a phone-sized viewport
   await page.goto(`/app/campaigns/${CAMPAIGN_ID}/preferences`)
 
   const card = page.getByRole('region', { name: 'Deliverability guardrails' })
-  await expect(card.getByText('Paused by the guardrail')).toBeVisible()
+  await expect(card.getByText('Paused automatically').first()).toBeVisible()
   // The whole point: reason, observed rate, threshold and sample, all visible.
   await expect(
-    card.getByText('Paused automatically on 12 Aug — bounce rate 9.2% over 218 delivered, threshold 8.0%.'),
+    card.getByText('Paused automatically on 12 Aug — bounces hit 9.2% across 218 delivered, past your 8.0% limit.'),
   ).toBeVisible()
-  await expect(card.getByText('Bounce spike')).toBeVisible()
+  await expect(card.getByText('Too many bounces')).toBeVisible()
   await expect(card.getByLabel('Bounce threshold')).toHaveValue('8')
   await expect(card.getByLabel('Complaint threshold')).toHaveValue('1.5')
   await expect(card.getByRole('switch', { name: 'Turn automatic pausing off' })).toBeVisible()

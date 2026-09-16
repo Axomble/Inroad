@@ -98,8 +98,8 @@ describe('DeliverabilityPage', () => {
 
     const panel = await screen.findByRole('region', { name: 'Deliverability score' })
     expect(within(panel).getByText('74')).toBeInTheDocument()
-    expect(within(panel).getByText(/Computed over 4,120 delivered/)).toBeInTheDocument()
-    expect(within(panel).getByText(/Complaints wasn't measured/)).toBeInTheDocument()
+    expect(within(panel).getByText(/Based on 4,120 delivered/)).toBeInTheDocument()
+    expect(within(panel).getByText(/Complaints hasn't been measured yet/)).toBeInTheDocument()
   })
 
   test('a low-confidence score is visibly qualified rather than badged as clean', async () => {
@@ -181,8 +181,8 @@ describe('DeliverabilityPage', () => {
     renderWithProviders(<DeliverabilityPage />)
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent("Couldn't load deliverability (500)")
-    expect(alert).toHaveTextContent('not a clean result')
+    expect(alert).toHaveTextContent("Couldn't load your deliverability (500)")
+    expect(alert).toHaveTextContent('not because everything is clean')
     // Critically: no score panel, so there are no zeros to mistake for data.
     expect(screen.queryByRole('region', { name: 'Deliverability score' })).not.toBeInTheDocument()
     expect(screen.queryByText('0')).not.toBeInTheDocument()

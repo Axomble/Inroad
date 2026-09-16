@@ -86,7 +86,7 @@ describe('GuardrailsCard', () => {
       'true',
     )
     expect(screen.getByText('Auto-pause on')).toBeInTheDocument()
-    expect(screen.getByText('Within limits')).toBeInTheDocument()
+    expect(screen.getByText('All good')).toBeInTheDocument()
     expect(screen.getByText('This campaign has never been paused automatically.')).toBeInTheDocument()
   })
 
@@ -94,14 +94,14 @@ describe('GuardrailsCard', () => {
     stubCard({ pages: [{ ...OK, verdict: 'paused', pause_events: [PAUSE] }] })
     renderWithProviders(<GuardrailsCard campaignId="c1" />)
 
-    expect(await screen.findByText('Bounce spike')).toBeInTheDocument()
+    expect(await screen.findByText('Too many bounces')).toBeInTheDocument()
     const sentence = screen.getByText(
-      'Paused automatically on 12 Aug — bounce rate 9.2% over 218 delivered, threshold 8.0%.',
+      'Paused automatically on 12 Aug — bounces hit 9.2% across 218 delivered, past your 8.0% limit.',
     )
     expect(sentence).toBeInTheDocument()
     expect(screen.getByText('Automatic pauses (1)')).toBeInTheDocument()
     // The verdict itself explains where to look rather than just saying "paused".
-    expect(screen.getByText('Paused by the guardrail')).toBeInTheDocument()
+    expect(screen.getByText('Paused automatically', { selector: '*' })).toBeInTheDocument()
   })
 
   test('every pause is listed, not just the latest', async () => {
@@ -118,30 +118,30 @@ describe('GuardrailsCard', () => {
     renderWithProviders(<GuardrailsCard campaignId="c1" />)
 
     expect(await screen.findByText('Automatic pauses (2)')).toBeInTheDocument()
-    expect(screen.getByText(/complaint rate 1\.9% over 900 delivered, threshold 1\.5%/)).toBeInTheDocument()
-    expect(screen.getByText('Complaint spike')).toBeInTheDocument()
+    expect(screen.getByText(/spam complaints hit 1\.9% across 900 delivered, past your 1\.5% limit/)).toBeInTheDocument()
+    expect(screen.getByText('Too many spam reports')).toBeInTheDocument()
   })
 
   test('a warn verdict is visibly distinct from both ok and paused', async () => {
     stubCard({ pages: [{ ...OK, verdict: 'warn' }] })
     const { unmount } = renderWithProviders(<GuardrailsCard campaignId="c1" />)
 
-    expect(await screen.findByText('Trending toward a pause')).toBeInTheDocument()
+    expect(await screen.findByText('Close to being paused')).toBeInTheDocument()
     const warnBlock = document.querySelector('[data-verdict="warn"]')
     expect(warnBlock).not.toBeNull()
     expect(warnBlock).toHaveClass('bg-warn/10')
     // The state that still allows action says so, in words as well as colour.
     expect(screen.getByText('Act now')).toBeInTheDocument()
     expect(screen.getByText(/Nothing has stopped yet/)).toBeInTheDocument()
-    expect(screen.queryByText('Within limits')).not.toBeInTheDocument()
-    expect(screen.queryByText('Paused by the guardrail')).not.toBeInTheDocument()
+    expect(screen.queryByText('All good')).not.toBeInTheDocument()
+    expect(screen.queryByText('Paused automatically', { selector: '*' })).not.toBeInTheDocument()
     unmount()
 
     // …and neither neighbour borrows its treatment.
     vi.unstubAllGlobals()
     stubCard({ pages: [{ ...OK, verdict: 'paused', pause_events: [PAUSE] }] })
     renderWithProviders(<GuardrailsCard campaignId="c2" />)
-    expect(await screen.findByText('Paused by the guardrail')).toBeInTheDocument()
+    expect(await screen.findByText('Paused automatically', { selector: '*' })).toBeInTheDocument()
     expect(document.querySelector('[data-verdict="paused"]')).toHaveClass('bg-danger/10')
     expect(screen.queryByText('Act now')).not.toBeInTheDocument()
   })
@@ -228,7 +228,7 @@ describe('GuardrailsCard', () => {
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('rejected')
-    expect(alert).toHaveTextContent('previous settings are still in force')
+    expect(alert).toHaveTextContent('previous settings are still active')
     // The edit is kept so it isn't silently lost.
     expect(screen.getByLabelText('Bounce threshold')).toHaveValue(6)
   })
@@ -238,7 +238,7 @@ describe('GuardrailsCard', () => {
     renderWithProviders(<GuardrailsCard campaignId="c1" />)
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent("Couldn't load deliverability (500)")
+    expect(alert).toHaveTextContent("Couldn't load your deliverability (500)")
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
     expect(screen.queryByText('This campaign has never been paused automatically.')).not.toBeInTheDocument()
     // The section header stays, so the failure is attributable to this card.
