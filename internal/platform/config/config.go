@@ -764,13 +764,17 @@ func (r *envReader) durationVal(key string, fallback time.Duration) time.Duratio
 // boolVal returns the flag in key, or fallback when it is unset or blank.
 //
 // The accepted set is a SUPERSET of what this parser took before — `1`, `true`
-// and `yes`, which .env.example, the compose files and the published docs all
-// promise — widened with strconv.ParseBool's single letters and the on/off and
-// y/n pairs. Widening is the safe direction here and narrowing is not: an
-// unrecognised value used to read as FALSE, so `INROAD_COOKIE_SECURE=on` turned
-// the Secure attribute off on the session cookie, silently, on a flag that
-// defaults to true. Anything outside the set is now refused outright, so no
-// spelling can quietly disable a security control in either direction.
+// and `yes`, case-insensitively, which the environment-variable reference
+// promised and TestSystemSMTPAllowPlaintextFailsClosed pins — widened with
+// strconv.ParseBool's single letters and the on/off and y/n pairs. (The deploy
+// artifacts themselves only ever write `true` or `false`, so nothing shipped
+// depends on the wider end.)
+//
+// Widening is the safe direction here and narrowing is not: an unrecognised
+// value used to read as FALSE, so `INROAD_COOKIE_SECURE=on` dropped the Secure
+// attribute from the auth cookies, silently, on a flag that defaults to true.
+// Anything outside the set is now refused outright, so no spelling can quietly
+// disable a security control in either direction.
 func (r *envReader) boolVal(key string, fallback bool) bool {
 	v, ok := trimmedEnv(key)
 	if !ok {
