@@ -34,20 +34,27 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 
 // TestSystemSMTPAllowPlaintextFailsClosed pins the default for the
 // transactional cleartext opt-out. Only an explicitly truthy value may relax
-// TLS; unset, empty, false, and anything unparseable must all stay false, so a
-// typo in production configuration cannot downgrade system email to cleartext.
+// TLS: unset, empty and every falsy spelling stay false, and an unparseable
+// value REFUSES TO START — so a typo in production configuration cannot
+// downgrade system email to cleartext.
+//
+// The unparseable case used to assert a silent false. Refusing at startup is
+// the same guarantee enforced harder: a process that does not start cannot send
+// in cleartext either, and the operator finds out immediately instead of
+// discovering the flag they set never took effect.
 func TestSystemSMTPAllowPlaintextFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name, value string
 		want        bool
+		wantErr     bool
 	}{
-		{"unset", "", false},
-		{"false", "false", false},
-		{"zero", "0", false},
-		{"garbage", "sure-why-not", false},
-		{"true", "true", true},
-		{"one", "1", true},
-		{"yes", "yes", true},
+		{name: "unset", value: "", want: false},
+		{name: "false", value: "false", want: false},
+		{name: "zero", value: "0", want: false},
+		{name: "garbage", value: "sure-why-not", wantErr: true},
+		{name: "true", value: "true", want: true},
+		{name: "one", value: "1", want: true},
+		{name: "yes", value: "yes", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("INROAD_JWT_SECRET", "0123456789abcdef0123456789abcdef")
@@ -55,6 +62,15 @@ func TestSystemSMTPAllowPlaintextFailsClosed(t *testing.T) {
 			t.Setenv("INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT", tc.value)
 
 			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() with %q = nil error (SystemSMTPAllowPlaintext=%v), want a rejection", tc.value, cfg.SystemSMTPAllowPlaintext)
+				}
+				if !strings.Contains(err.Error(), "INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT") {
+					t.Fatalf("Load() error = %q, want it to name the variable", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Load(): %v", err)
 			}
