@@ -1,25 +1,240 @@
 ---
 title: Environment Variables Reference
-description: Complete reference guide for all backend configuration environment variables.
+description: Every environment variable the Inroad backend reads, with its real default, grouped by what it configures.
 ---
 
-## Required Configuration
+`internal/platform/config/config.go` is the source of truth for this page. It is
+the only place the binaries read `INROAD_*` configuration from — the one
+exception is `INROAD_LOG_LEVEL`, which `internal/platform/log` re-reads directly
+so a logger can exist before config does. Every default below is that file's,
+and the tables are complete against it: all **82** variables it reads are listed
+here.
 
-| Variable | Description | Example / Default |
-| :--- | :--- | :--- |
-| `INROAD_DATABASE_URL` | PostgreSQL connection URL | `postgres://inroad:inroad@postgres:5432/inroad` |
-| `INROAD_REDIS_ADDR` | Redis host & port | `redis:6379` |
-| `INROAD_JWT_SECRET` | 32-byte secret for JWT signing | `openssl rand -base64 32` |
-| `INROAD_MASTER_KEY` | Base64 encoded 32-byte master key | `base64 of 32 random bytes` |
-| `INROAD_PUBLIC_URL` | Canonical public HTTP/HTTPS URL | `http://localhost:5173` |
+## How values are parsed
 
-## Optional & Security Overrides
+Four rules apply to everything on this page, and each of them has surprised
+somebody:
+
+- **Empty is the same as unset.** A variable set to the empty string takes its
+  default. You cannot blank out a defaulted value (`INROAD_MS_TENANT=""` is
+  `common`, not empty); you have to give it a different value.
+- **Booleans accept exactly `1`, `true`, `yes`** (case-insensitive for the two
+  words). **Every other non-empty value is `false`** — including `on`, `y`, and
+  `TRUE!`. That is safe for the many flags that default to `false`, but note what
+  it means for the ones that default to **`true`**
+  (`INROAD_MAIL_ALLOW_PRIVATE_HOSTS`, `INROAD_RUN_SCHEDULER`,
+  `INROAD_COOKIE_SECURE`): a typo turns them **off**, silently.
+- **An unparseable number or duration falls back to the default, silently.**
+  `INROAD_ACCESS_TOKEN_TTL=5` is not five of anything — it is not a valid Go
+  duration, so it is discarded and you get the 5-minute default. Durations need a
+  unit: `30s`, `5m`, `720h`.
+- **Only a few values are validated at startup.** `INROAD_JWT_SECRET`,
+  `INROAD_REDIS_ADDR`, `INROAD_MASTER_KEY`, `INROAD_FLEET_BROKER_TOKEN` and the
+  database-pool sizes fail loudly and immediately when they are wrong. Everything
+  else is taken as given.
+
+## Core
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `INROAD_LOG_LEVEL` | Logging level (`debug`, `info`, `warn`, `error`) | `info` |
-| `INROAD_MAIL_ALLOW_PRIVATE_HOSTS` | Allow loopback/private RFC1918 mail server dials | `false` |
-| `INROAD_KEY_PROVIDER` | Key Encryption Key provider — only `local` is implemented today (an AWS KMS backend exists behind the same seam but is not yet selectable) | `local` |
+| `INROAD_ENV` | Deployment environment name. Sets the default log level, and `cmd/seed -sandbox` **refuses to run** when it is `production`, `prod`, `live` (case-insensitive) or empty — a harness that fabricates data will not assume an environment it cannot identify is safe | `development` |
+| `INROAD_DATABASE_URL` | PostgreSQL connection URL. `pool_max_conns` / `pool_min_conns` in the DSN override the pool variables — see [Database connection budget](#database-connection-budget) | `postgres://inroad:inroad@localhost:5432/inroad?sslmode=disable` |
+| `INROAD_REDIS_ADDR` | Either a bare `host:port` or a `redis://` / `rediss://` URL (auth, database index, TLS). **Validated at startup** — a malformed URL fails with the offending value rather than panicking inside a client constructor later | `localhost:6379` |
+| `INROAD_PUBLIC_URL` | Externally reachable base URL. Unsubscribe links in outbound mail, the OAuth redirect URLs, and the WebAuthn relying party all default from it | `http://localhost:8080` |
+| `INROAD_APP_BASE_URL` | Frontend origin that emailed links (verify, reset, invite) point at | `http://localhost:5173` |
+| `INROAD_WEB_DIR` | Built SPA directory. When it exists the API also serves the static assets and an index fallback; an empty or missing directory leaves the API in API-only mode and logs a warning | unset (API-only) |
+
+In a compose deployment the API and worker each need `INROAD_DATABASE_URL`,
+`INROAD_REDIS_ADDR` and `INROAD_JWT_SECRET` at minimum, plus `INROAD_MASTER_KEY`
+on every process that opens a mailbox credential — which is every topology except
+a [`role=send` fleet worker](#credential-brokering-send-role), where it is
+forbidden.
+
+## Listeners, metrics and profiling
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_HTTP_ADDR` | Address the public API server binds to (`cmd/inroad` only — the worker serves no HTTP) | `:8080` |
+| `INROAD_METRICS_ADDR` | Address of the **dedicated** Prometheus `/metrics` listener, e.g. `:9091`. Started by both `cmd/inroad` and `cmd/worker`. Empty disables it entirely, so a self-hoster who runs no Prometheus opens no extra port | unset (disabled) |
+| `INROAD_PPROF_ENABLED` | Mounts `net/http/pprof` under `/debug/pprof/*` on the **metrics** listener | `false` |
+
+Metrics are never mounted on the public API router, which is why serving them
+raises no authentication question — but it also means the listener has none.
+Bind `INROAD_METRICS_ADDR` to an interface only your scrapers can reach.
+
+`INROAD_PPROF_ENABLED` is a separate flag rather than something implied by
+`INROAD_METRICS_ADDR` on purpose: goroutine stacks and heap profiles are a
+strictly more sensitive disclosure than a counter value, and pointing a scraper
+at a port is not consent to publish them.
+
+## Secrets and key management
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_JWT_SECRET` | Signs access tokens. **Required**, minimum **16 bytes** — generate 32 with `openssl rand -base64 32` | none (startup error) |
+| `INROAD_MASTER_KEY` | The KEK that wraps every per-workspace DEK. **Base64 decoding to exactly 32 bytes.** Unset is legal at the config layer and each binary asserts it for itself; a set-but-malformed value is always a hard error, so a typo can never degrade into "this process has no key" | unset |
+| `INROAD_KEY_PROVIDER` | KEK backend. Only `local` (wrap under `INROAD_MASTER_KEY`) is selectable — an AWS KMS provider exists behind the same interface but is not wired to this switch, and any other value **fails closed** on every process that builds a keyring | `local` |
+| `INROAD_TRACKING_SECRET` | Signs open/click tracking tokens. Falls back to `INROAD_JWT_SECRET`; minimum 16 bytes when set explicitly | `INROAD_JWT_SECRET` |
+| `INROAD_WARMUP_SECRET` | Signs the `X-Inroad-Warmup` receipt header so the inbox poller can attribute a received warmup message to its send. Same fallback and floor | `INROAD_JWT_SECRET` |
+| `INROAD_WS_TICKET_SECRET` | Signs the realtime WebSocket connect ticket (a browser cannot set an `Authorization` header on an Upgrade request). Same fallback and floor | `INROAD_JWT_SECRET` |
+
+The three derived secrets exist so that rotating one does not invalidate the
+others: change `INROAD_TRACKING_SECRET` and live sessions survive. Sharing
+`INROAD_JWT_SECRET` between them is safe because each token payload carries a
+domain prefix, so a tracking token cannot be presented as a connect ticket.
+
+## Sessions, tokens and cookies
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_ACCESS_TOKEN_TTL` | Access-token lifetime | `5m` |
+| `INROAD_REFRESH_TOKEN_TTL` | Refresh-token (session) lifetime | `720h` (30 days) |
+| `INROAD_SESSION_CACHE_TTL` | How long a process caches a session's revocation/expiry state before re-reading Postgres. `0` or less disables the cache and every request hits the database | `5s` |
+| `INROAD_COOKIE_SECURE` | `Secure` attribute on the refresh cookie | `true` |
+| `INROAD_COOKIE_DOMAIN` | `Domain` attribute on the refresh cookie | unset (host-only) |
+| `INROAD_EMAIL_VERIFY_TTL` | Lifetime of an email-verification token | `24h` |
+| `INROAD_PASSWORD_RESET_TTL` | Lifetime of a password-reset token | `1h` |
+| `INROAD_INVITE_TTL` | Lifetime of a workspace invite | `72h` |
+
+The short access-token TTL is not the revocation guarantee on its own. Every
+request re-validates the token against the session store, so a revoked session
+stops working within `INROAD_SESSION_CACHE_TTL`, not within
+`INROAD_ACCESS_TOKEN_TTL`. Raising the cache TTL buys database load and costs
+revocation latency across replicas — that is the whole trade.
+
+## WebAuthn relying party
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_RP_ID` | Registrable domain passkey ceremonies bind to — **host only**, no scheme or port | host of `INROAD_PUBLIC_URL` |
+| `INROAD_RP_ORIGIN` | Fully-qualified origin the browser must present, `scheme://host[:port]` | origin of `INROAD_PUBLIC_URL` |
+
+When `INROAD_PUBLIC_URL` is unparseable and neither is set explicitly, both stay
+empty and the passkey endpoints fail cleanly — the feature is off rather than
+validating ceremonies against a wrong domain.
+
+`INROAD_RP_ORIGIN` does double duty: it is also the **allowed `Origin` for the
+realtime WebSocket**. If you set it by hand, set it to the origin browsers
+actually load the app from, or sockets will be refused even though passkeys work.
+
+## Outbound dial policy
+
+These three decide whether a destination on a private network is reachable at
+all. **Loopback, link-local (including the cloud metadata address
+`169.254.169.254`) and multicast stay blocked regardless of every one of them.**
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_MAIL_ALLOW_PRIVATE_HOSTS` | Permit mailbox SMTP/IMAP hosts on RFC1918 / ULA private ranges | **`true`** |
+| `INROAD_AI_ALLOW_PRIVATE_BASE_URL` | Permit an `openai_compatible` AI provider base URL on a private or loopback host — a local Ollama or vLLM | `false` |
+| `INROAD_WEBHOOK_ALLOW_PRIVATE` | Permit outbound webhook receiver URLs on private or loopback hosts. `cmd/inroad` logs a warning at startup when it is on | `false` |
+
+The asymmetry is deliberate, not an oversight. Mail defaults **open** because a
+self-hoster reaching an internal Exchange or Postfix server is the ordinary case;
+set it to `false` for a multi-tenant deployment where a workspace could otherwise
+point a "mailbox" at your internal network. The other two default **closed**
+because they are development conveniences, and a convenience that is on by
+default is a hole.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_TRUSTED_PROXIES` | Comma-separated CIDRs whose `X-Forwarded-For` header is trusted. Empty trusts none and uses the direct peer address | unset (trust none) |
+
+When the direct peer falls inside this set, the client IP is the **rightmost**
+XFF entry that is not itself a listed proxy. Getting this wrong is not cosmetic:
+the client IP is what the rate limits below are keyed on, so trusting nothing
+behind a real load balancer collapses every caller onto one key, and trusting too
+much lets a caller spoof the key entirely.
+
+## Rate limits
+
+All values are **requests per minute** in a fixed window, backed by the shared
+Redis limiter, which **fails closed**. A non-positive value means no cap for that
+key.
+
+Pre-authentication — each abusable open endpoint is throttled on the client IP
+and, where the request body names one, the target account:
+
+| Variable | Applies to | Default |
+| :--- | :--- | :--- |
+| `INROAD_RATELIMIT_LOGIN_IP` | `POST /login`, per IP | `10` |
+| `INROAD_RATELIMIT_LOGIN_ACCOUNT` | `POST /login`, per email | `5` |
+| `INROAD_RATELIMIT_VERIFY_IP` | 2FA / passkey / email-OTP verify, per IP | `10` |
+| `INROAD_RATELIMIT_VERIFY_ACCOUNT` | email-OTP verify, per email | `5` |
+| `INROAD_RATELIMIT_SENSITIVE_IP` | password/forgot, email-OTP start, OAuth register, Google sign-in start, per IP | `5` |
+| `INROAD_RATELIMIT_SENSITIVE_ACCOUNT` | password/forgot and email-OTP start, per email | `3` |
+
+Authenticated — these are not throttled against abuse of an open door, so their
+second key is the **workspace** rather than an email:
+
+| Variable | Applies to | Default |
+| :--- | :--- | :--- |
+| `INROAD_RATELIMIT_DRAFT_REPLY_IP` | `POST /inbox/threads/{id}/draft-reply`, per IP | `20` |
+| `INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE` | the same endpoint, per workspace | `60` |
+| `INROAD_RATELIMIT_REALTIME_TICKET_IP` | `POST /realtime/ticket`, per IP | `60` |
+| `INROAD_RATELIMIT_REALTIME_TICKET_WORKSPACE` | the same endpoint, per workspace | `600` |
+
+Draft-reply is capped because every call spends real money at an AI provider, and
+the workspace owns that budget. Realtime ticket minting is capped because the
+endpoint issues a **credential** — but generously, because one tab mints one
+ticket per connect and a reconnect storm after a deploy is legitimate traffic. In
+both pairs the per-IP number is the more tolerant one, since a whole office can
+share a single NAT address.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_TURNSTILE_SECRET` | Cloudflare Turnstile secret, validated server-side on register / login / email-OTP start. Empty disables the captcha gate entirely (a verifier that always passes). Never logged | unset (no captcha) |
+
+## Realtime connections
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_REALTIME_MAX_CONNS_PER_USER` | Open WebSockets per user. `0` takes the package default | `0` → `8` |
+| `INROAD_REALTIME_MAX_CONNS_PER_WORKSPACE` | Open WebSockets per workspace. `0` takes the package default | `0` → `200` |
+
+Each connection costs a goroutine, a buffer and a registry slot, so an unbounded
+socket count is a trivial resource-exhaustion vector. Note that `0` here means
+"use the default", **not** "unlimited".
+
+## AI agent runs
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_AGENT_MAX_CONCURRENT_RUNS` | How many agent runs one API process executes simultaneously. `0` takes the package default | `0` → `20` |
+
+Agent runs are goroutines inside the API binary rather than queued tasks, so
+without a bound a burst is unbounded concurrency against the AI provider, the
+database pool, and every tool the runs call.
+
+## Blob storage
+
+The filesystem backend is the default and needs nothing configured. Setting
+`INROAD_S3_BUCKET` is what switches a deployment to the S3 (or S3-compatible:
+MinIO, R2, Wasabi) backend.
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_STORAGE_FS_ROOT` | Filesystem blob root | `./data/blobs` |
+| `INROAD_S3_BUCKET` | Bucket name. **Setting this selects the S3 backend** | unset (filesystem) |
+| `INROAD_S3_REGION` | AWS region | `us-east-1` |
+| `INROAD_S3_ENDPOINT` | Custom endpoint for an S3-compatible server. Empty uses AWS's own | unset |
+| `INROAD_S3_ACCESS_KEY_ID` | Static access key. Blank falls back to the AWS SDK's default credential chain — env, shared config, an instance or task role | unset |
+| `INROAD_S3_SECRET_ACCESS_KEY` | Static secret key, same fallback | unset |
+| `INROAD_S3_FORCE_PATH_STYLE` | Path-style addressing (`https://host/bucket/key`), which MinIO and some other S3-compatible servers require and AWS S3 does not use | `false` |
+| `INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT` | **Dev only.** Permits a plaintext `INROAD_S3_ENDPOINT` | `false` |
+
+A deployment already running on AWS with an attached role needs only the bucket
+name. `INROAD_S3_ALLOW_PLAINTEXT_ENDPOINT` defaults to `false` so that an absent
+or misspelled value keeps HTTPS mandatory — a misconfiguration can never silently
+put SigV4-signed requests, object bodies and presigned URLs on the wire in
+cleartext.
+
+:::note[Configured, not yet consumed]
+These variables load and validate today, but nothing reads the storage provider
+yet — the first consumer is the attachments feature. Setting them changes no
+behaviour until then, and that is worth knowing before you spend an afternoon
+debugging why nothing appears in your bucket.
+:::
 
 ## Transactional Email
 
@@ -36,7 +251,9 @@ the operator's own sending identity.
 | `INROAD_SYSTEM_SMTP_PASSWORD` | SMTP password | — |
 | `INROAD_SYSTEM_EMAIL_FROM` | From address (required for `smtp`) | — |
 | `INROAD_SYSTEM_SMTP_ALLOW_PLAINTEXT` | **Dev only.** Send over cleartext instead of requiring TLS | `false` |
-| `INROAD_APP_BASE_URL` | Frontend origin that emailed links point at | `http://localhost:5173` |
+
+The links inside those messages point at `INROAD_APP_BASE_URL` (see
+[Core](#core)), not at `INROAD_PUBLIC_URL` — they are frontend routes.
 
 The `console` driver never logs message bodies, because they contain single-use
 bearer credentials (verify/reset links, login codes). To read a real message in
@@ -49,6 +266,61 @@ no AUTH) can be reached. TLS is mandatory unless it is set to an explicit
 configuration mistake cannot downgrade delivery to cleartext. Do not set it in
 production.
 
+## OAuth providers
+
+Three independent flows. Each is **disabled** while its client id or secret is
+blank: the start endpoint returns `501` and, for sign-in, the SPA hides the
+button.
+
+Mailbox connect via Gmail:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_GOOGLE_CLIENT_ID` | OAuth client id | unset (Gmail connect disabled) |
+| `INROAD_GOOGLE_CLIENT_SECRET` | OAuth client secret | unset |
+| `INROAD_GOOGLE_REDIRECT_URL` | Callback URL | `${INROAD_PUBLIC_URL}/oauth/google/callback` |
+
+Inroad **sign-in** via Google — a different flow with its own callback and only
+the `openid`/`email`/`profile` scopes, never Gmail:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_GOOGLE_SIGNIN_CLIENT_ID` | OAuth client id | falls back to `INROAD_GOOGLE_CLIENT_ID` |
+| `INROAD_GOOGLE_SIGNIN_CLIENT_SECRET` | OAuth client secret | falls back to `INROAD_GOOGLE_CLIENT_SECRET` |
+| `INROAD_GOOGLE_SIGNIN_REDIRECT_URL` | Callback URL. **Does not fall back** | `${INROAD_PUBLIC_URL}/api/v1/auth/oauth/google/callback` |
+
+The id and secret fall back **as a pair, keyed on the id**: setting a sign-in id
+without a sign-in secret leaves both empty rather than pairing your sign-in id
+with the *mailbox* secret, which would fail at Google in a way no log here could
+explain. One configured Google client therefore makes both features work. The
+reason to give sign-in its own client is that the mailbox client requests
+restricted Gmail scopes subject to Google's verification review, and on a
+separate client a pending review can never block people signing in. Whichever
+client you use must list the exact redirect URL in its authorized redirect URIs.
+
+Mailbox connect via Microsoft 365 / Graph:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_MS_CLIENT_ID` | OAuth client id | unset (M365 connect disabled) |
+| `INROAD_MS_CLIENT_SECRET` | OAuth client secret | unset |
+| `INROAD_MS_REDIRECT_URL` | Callback URL | `${INROAD_PUBLIC_URL}/oauth/microsoft/callback` |
+| `INROAD_MS_TENANT` | Azure AD authority | `common` |
+
+## Logging
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `INROAD_LOG_LEVEL` | `debug`, `info`, `warn` (or `warning`), or `error` | unset — see below |
+
+Unset, the level comes from `INROAD_ENV`: **`debug` when it is `development`,
+`info` otherwise.** An explicit level always wins; an *unrecognised* one falls
+back to that same environment-derived default rather than failing.
+
+This is the one variable read outside `config.go`: `log.New` reads the process
+environment itself, and the `Config.LogLevel` field is not what the logger
+consults.
+
 ## Worker Tuning
 
 | Variable | Description | Default |
@@ -56,6 +328,7 @@ production.
 | `INROAD_WORKER_CONCURRENCY` | Number of concurrent asynq worker goroutines per worker process | `10` |
 | `INROAD_RUN_SCHEDULER` | Whether **this** worker process runs the periodic scheduler | `true` |
 | `INROAD_WORKER_ROLE` | Which half of the worker this process runs — `control`, `send`, or unset for both. See [Splitting control and send roles](#splitting-control-and-send-roles) before using it in production | unset (`all`) |
+| `INROAD_WORKER_QUEUES` | Explicit comma-separated override of the asynq queues this worker consumes. Set, it replaces the role's queue set outright rather than merging with it | unset (derived from the role) |
 
 The default of `10` is sized for small deployments. Every per-mailbox send and
 inbox-poll task shares this pool, so with many active mailboxes the queue backs
@@ -431,3 +704,15 @@ pool_max_conns / pool_min_conns in INROAD_DATABASE_URL
 
 The two keys resolve independently, so pinning only `pool_max_conns` in the DSN
 leaves the minimum to the environment variable.
+
+## Variables that are not application configuration
+
+These appear in the deployment manifests and will show up in a `grep`, but
+`config.Load` never reads them. They are listed so their absence above is not
+mistaken for an omission:
+
+| Variable | Read by | Purpose |
+| :--- | :--- | :--- |
+| `SECRETS_FILE` | `deploy/docker/load-secrets.sh` | Path the entrypoint sources generated secrets from when `INROAD_JWT_SECRET` / `INROAD_MASTER_KEY` are not already set. Defaults to `/run/secrets/inroad/env`. This is also why [`inroadctl`](/deploy/operator-cli/) needs an extra step on the zero-config compose stack |
+| `INROAD_TEST_DATABASE_URL` | `internal/platform/db/dbtest` | Database the integration tests connect to. Never read by a running binary |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`, `REDIS_PORT`, `API_PORT`, `INROAD_IMAGE_REPO`, `INROAD_VERSION` | the compose manifests | Interpolated by Docker Compose to build image tags, port bindings and the default `INROAD_DATABASE_URL` |
