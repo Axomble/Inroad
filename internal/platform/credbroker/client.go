@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,6 +18,10 @@ import (
 // explicitly-set weak secret rather than accepting it: this token is the only
 // thing between a network peer and every credential in the installation, so a
 // guessable one is worse than no broker at all.
+//
+// It is the floor for the FLEET CHANNEL, not only for this package: the same
+// address and the same token also carry internal/coreapi/remote (see
+// ParseEndpoint).
 const MinTokenLen = 32
 
 var (
@@ -96,30 +98,12 @@ var _ Opener = (*HTTPOpener)(nil)
 // through (and does not need) the mail.vetAddr SSRF guard — the same reasoning
 // invariant 6 applies to the S3 endpoint.
 func NewHTTPOpener(baseURL, token string, allowPlaintext bool) (*HTTPOpener, error) {
-	if len(token) < MinTokenLen {
-		return nil, ErrWeakToken
-	}
-	u, err := url.Parse(strings.TrimSpace(baseURL))
+	base, err := ParseEndpoint(baseURL, token, allowPlaintext)
 	if err != nil {
-		return nil, fmt.Errorf("credbroker: broker url: %w", err)
-	}
-	// Scheme first: "control.example:8090" parses with Scheme="control.example"
-	// and no host, and the useful thing to tell an operator who wrote that is
-	// that the scheme is missing, not that the host is.
-	switch u.Scheme {
-	case "https":
-	case "http":
-		if !allowPlaintext {
-			return nil, ErrInsecureURL
-		}
-	default:
-		return nil, ErrInsecureURL
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("credbroker: broker url %q has no host", baseURL)
+		return nil, err
 	}
 	return &HTTPOpener{
-		baseURL: strings.TrimSuffix(u.String(), "/"),
+		baseURL: base,
 		token:   token,
 		hc: &http.Client{
 			Timeout: requestTimeout,
