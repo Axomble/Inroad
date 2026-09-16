@@ -10,7 +10,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
@@ -116,8 +118,15 @@ func TestARemoteStepSendJobIsCompleteAndCredentialled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStepSendJob in process: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("the wire and the pool disagree about the same job\n wire: %+v\n pool: %+v", got, want)
+	// cmp with an explicit time comparer, NOT reflect.DeepEqual, and the reason
+	// is worth keeping: DeepEqual compares a time.Time's loc POINTER, and under
+	// TZ=UTC time.Local and time.UTC are two different *Location values that
+	// both render as "UTC". So a pgx-sourced instant and that same instant
+	// after a JSON round trip compared unequal while printing identically —
+	// green on any developer machine outside UTC, red in CI, and the %+v dump
+	// of two 2000-character structs showed a reader nothing.
+	if diff := cmp.Diff(want, got, cmp.Comparer(func(a, b time.Time) bool { return a.Equal(b) })); diff != "" {
+		t.Errorf("the wire and the pool disagree about the same job (-pool +wire):\n%s", diff)
 	}
 
 	// Spot-checks that a zero-valued or half-built job would fail, stated
