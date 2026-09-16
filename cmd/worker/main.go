@@ -431,14 +431,38 @@ type heartbeatClient interface {
 //
 // A worker heartbeats as assignable IF AND ONLY IF it runs per-message work.
 // AssignMailboxWorker picks a mailbox's owner from the `workers` table and
-// returns a "w:<worker_id>" queue name that redisbus routes jobs to directly.
-// Two producers set bus.Job.Dest — queue.EnqueueWarmupTickAt (the from-mailbox's
-// affinity queue) and queue.EnqueueWarmupEngageIn (a fixed QueueSend, no
-// per-mailbox routing) — but only the FIRST is actually redirected by an
-// assignment, since the second's Dest never varies with one. warmup:tick is
-// therefore the only task an assignment changes the destination of;
-// sequence:advance, inbox:poll and webhook:deliver always go to the shared
-// QueueSend, whoever owns the mailbox.
+// returns a "w:<worker_id>" queue name, which queue.affinityQueue then uses as
+// the destination in place of the task type's role queue.
+//
+// An assignment redirects two task types today: warmup:tick
+// (queue.EnqueueWarmupTickAt) and inbox:poll (queue.EnqueueInboxPoll). Both are
+// provider authentications from this host's egress IP, and that is the whole
+// rule — it is not about warmup.
+//
+// The rest go to the shared QueueSend whoever owns the mailbox, for reasons
+// that differ by task and are worth keeping straight:
+//   - sequence:advance is keyed on an ENROLLMENT. Its mailbox does not exist at
+//     enqueue time for an initial step: it is chosen inside GetStepSendJob ->
+//     resolveSender, which claims a pool member write-once and bumps its
+//     rotation counters — deliberately AFTER the campaign-paused, daily-limit
+//     and not-due gates, so a send that never happens pins nothing. Routing it
+//     per-mailbox therefore needs sender selection to move, which is a design
+//     decision, not a routing one. This is a KNOWN GAP: campaign sends do
+//     authenticate from an arbitrary worker.
+//   - testsend:send DOES name a mailbox in its payload and is a real provider
+//     authentication, so the rule applies — but its only producer is
+//     campaign.Service in the API server, which holds no coreapi client (no
+//     app/* package does), and an operator triggers it a handful of times a day
+//     against a per-workspace rate limit. Pinning it means giving that service a
+//     worker-resolver seam; worth doing, not worth doing here.
+//   - warmup:engage acts on the RECIPIENT's own mailbox, so there is no
+//     from-mailbox affinity to honour.
+//   - webhook:deliver POSTs to a customer endpoint, not a mailbox provider.
+//     There is no authentication and no per-IP provider reputation involved,
+//     and its dial does not even bind LocalAddr (mail.GuardedDialContext), so
+//     pinning it would buy nothing.
+//   - inbox:pending_reply_send / inbox:pending_compose_send name a PENDING ROW,
+//     not a mailbox; same shape as sequence:advance, much lower volume.
 //
 // A control-role host registers no per-message handlers (worker.Register), and
 // — since resolveWorkerQueues derives consumption from worker.QueuesFor —

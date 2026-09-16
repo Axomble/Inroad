@@ -18,9 +18,9 @@ import (
 // out.
 func TestSweepRecordsRowsScanned(t *testing.T) {
 	m := metrics.New()
-	core := &stubCore{mailboxes: []coreapi.MailboxRef{
+	core := &sweepCore{stubCore: stubCore{mailboxes: []coreapi.MailboxRef{
 		{ID: "m1", WorkspaceID: "w1"}, {ID: "m2", WorkspaceID: "w1"}, {ID: "m3", WorkspaceID: "w2"},
-	}}
+	}}}
 	h := SweepHandler(core, &fakeEnqueuer{}, m)
 	if err := h(context.Background(), asynq.NewTask("inbox:sweep", nil)); err != nil {
 		t.Fatalf("handler: %v", err)
@@ -40,7 +40,7 @@ func TestSweepRecordsRowsScanned(t *testing.T) {
 // exactly the incident an operator is investigating.
 func TestSweepRecordsNothingWhenTheScanFails(t *testing.T) {
 	m := metrics.New()
-	core := &stubCore{listErr: errors.New("db down")}
+	core := &sweepCore{stubCore: stubCore{listErr: errors.New("db down")}}
 	h := SweepHandler(core, &fakeEnqueuer{}, m)
 	if err := h(context.Background(), asynq.NewTask("inbox:sweep", nil)); err == nil {
 		t.Fatal("expected the scan error to propagate")
