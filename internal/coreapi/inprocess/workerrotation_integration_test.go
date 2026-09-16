@@ -14,6 +14,8 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/fleetdecision"
 	"github.com/inroad/inroad/internal/platform/fleetrotate"
+	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -152,6 +154,54 @@ func TestABlockedWorkerLosesItsMailboxesEvenThoughPlacementWouldKeepThem(t *test
 	}
 	if strings.Contains(got.Reason, " over ") {
 		t.Errorf("reason = %q, which reads as a score comparison that was never made", got.Reason)
+	}
+}
+
+// The counter reaches the registry through the REAL composition path — the
+// client's own *metrics.Metrics, not one handed to rotateFleet by a test. A tick
+// that forgot to pass it would leave the series silent while every other
+// assertion in this file still passed, which is the failure mode this covers:
+// the unit tests drive rotateFleet directly and cannot see the wiring at all.
+func TestARealRotationPassCountsTheMoveUnderItsTier(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	mtx := metrics.New()
+	c := routingClientWithMetrics(pool, q, mtx)
+	resetRouting(t, ctx, pool)
+
+	ws, err := q.CreateWorkspace(ctx, "Rotation metric "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	for _, w := range []string{"rot-metric-blocked", "rot-metric-ok"} {
+		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.127", "hostname"); err != nil {
+			t.Fatalf("heartbeat %s: %v", w, err)
+		}
+	}
+
+	mb := createRoutingMailbox(t, ctx, q, ws.ID)
+	if _, err := q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: mb, WorkspaceID: ws.ID, WorkerID: "rot-metric-blocked",
+		Band: warmup.RiskBandHealthy, LiveSince: liveSinceNow(),
+	}); err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+	blockWorkerForProvider(t, ctx, c, "rot-metric-blocked", "smtp", 0)
+
+	if moved, err := c.RotateMailboxWorkers(ctx); err != nil || moved != 1 {
+		t.Fatalf("RotateMailboxWorkers moved %d (err=%v), want 1", moved, err)
+	}
+
+	families := metricstest.Scrape(t, mtx)
+	if got := metricstest.CounterValue(families, "inroad_fleet_rotations_total",
+		map[string]string{"tier": fleetrotate.TierUnhealthy.String()}); got != 1 {
+		t.Errorf("rotations{tier=unhealthy} = %v, want 1", got)
+	}
+	// The blocked incumbent was never scored against anything, so this was not an
+	// opportunistic move and must not appear as one.
+	if got := metricstest.CounterValue(families, "inroad_fleet_rotations_total",
+		map[string]string{"tier": fleetrotate.TierBalance.String()}); got != 0 {
+		t.Errorf("rotations{tier=balance} = %v for a forced move, want 0", got)
 	}
 }
 

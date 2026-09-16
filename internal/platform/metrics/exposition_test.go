@@ -40,6 +40,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 	m.SweepCompleted("inbox", 1, time.Second)
 	m.JobRunCompleted("domain auth sweep", "ok", time.Second)
 	m.WorkerAssignmentStale()
+	m.FleetRotated("unhealthy")
 	if err := m.RegisterPool(realPoolStat(t)); err != nil {
 		t.Fatalf("register pool: %v", err)
 	}
@@ -73,6 +74,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 		"inroad_db_pool_idle_conns",
 		"inroad_db_pool_max_conns",
 		"inroad_db_pool_total_conns",
+		"inroad_fleet_rotations_total",
 		// The three that predate this work; their meaning is unchanged.
 		"inroad_http_request_seconds",
 		"inroad_http_requests_total",

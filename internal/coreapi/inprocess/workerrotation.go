@@ -16,6 +16,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/fleetdecision"
 	"github.com/inroad/inroad/internal/platform/fleetrotate"
 	"github.com/inroad/inroad/internal/platform/fleetscore"
+	"github.com/inroad/inroad/internal/platform/metrics"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -46,10 +47,35 @@ type rotationStore interface {
 	RotateMailboxWorkerAssignment(ctx context.Context, arg gen.RotateMailboxWorkerAssignmentParams) (string, error)
 }
 
+// rotationTick is everything ONE pass needs that is not the context: its two
+// seams, its instrumentation and its policy. A struct rather than four more
+// positional parameters, so a call site says which is which and so a later
+// input (or a later collaborator) does not reopen every existing one.
+type rotationTick struct {
+	// store is the four queries the pass issues. Consumer-defined — see
+	// rotationStore.
+	store rotationStore
+	// recorder appends the decision log. Its failures are degraded
+	// observability, never a failed tick (see applyRotation).
+	recorder coreapi.FleetDecisionRecorder
+	// mtx counts the moves that actually landed, by tier. NIL IS VALID and is
+	// what every unit test and cmd/seed gets: *metrics.Metrics is
+	// nil-receiver-safe throughout, so there is no branch here for it.
+	mtx *metrics.Metrics
+	// policy holds the brakes: the tiers, the residency floor, the score margin
+	// and the per-tick caps.
+	policy fleetrotate.Policy
+}
+
 // RotateMailboxWorkers runs one rotation tick. See the coreapi.FleetRotator
 // interface doc for the contract.
 func (c client) RotateMailboxWorkers(ctx context.Context) (int64, error) {
-	return rotateFleet(ctx, c.q, c, fleetrotate.Default())
+	return rotateFleet(ctx, rotationTick{
+		store:    c.q,
+		recorder: c,
+		mtx:      c.mtx,
+		policy:   fleetrotate.Default(),
+	})
 }
 
 // rotateFleet is the tick proper, over interfaces rather than over the client,
@@ -61,7 +87,8 @@ func (c client) RotateMailboxWorkers(ctx context.Context) (int64, error) {
 // The order of business is: refuse if there is nowhere to rotate to, scan,
 // classify and prioritise, then consider one mailbox at a time until the budget
 // is spent.
-func rotateFleet(ctx context.Context, q rotationStore, recorder coreapi.FleetDecisionRecorder, p fleetrotate.Policy) (int64, error) {
+func rotateFleet(ctx context.Context, tick rotationTick) (int64, error) {
+	q, p := tick.store, tick.policy
 	now := time.Now()
 	liveSince := pgtype.Timestamptz{Time: now.Add(-workerLiveWindow), Valid: true}
 
@@ -113,7 +140,7 @@ func rotateFleet(ctx context.Context, q rotationStore, recorder coreapi.FleetDec
 		if !ok {
 			continue
 		}
-		applied, err := applyRotation(ctx, q, recorder, move)
+		applied, err := applyRotation(ctx, tick, move)
 		if err != nil {
 			return moved, err
 		}
@@ -216,11 +243,13 @@ func (f *rotationFleets) measure(ctx context.Context, q rotationStore, inc fleet
 //
 // It did NOT happen when the guarded UPDATE matches nothing, which means the
 // mailbox is no longer on the worker this decision was made about — the send
-// path re-placed it in the meantime. Nothing is logged in that case, and that is
-// the point: a decision-log entry saying a mailbox moved from a worker it had
-// already left would be a lie in the one table an operator trusts to explain
-// where mail is coming from.
-func applyRotation(ctx context.Context, q rotationStore, recorder coreapi.FleetDecisionRecorder, move fleetrotate.Move) (bool, error) {
+// path re-placed it in the meantime. Nothing is logged in that case, and NOTHING
+// IS COUNTED, and that is the point: a decision-log entry (or a metric sample)
+// saying a mailbox moved from a worker it had already left would be a lie in the
+// one table, and the one series, an operator trusts to explain where mail is
+// coming from.
+func applyRotation(ctx context.Context, tick rotationTick, move fleetrotate.Move) (bool, error) {
+	q, recorder := tick.store, tick.recorder
 	mbID, err := uuid.Parse(move.MailboxID)
 	if err != nil {
 		return false, fmt.Errorf("coreapi: parse mailbox id: %w", err)
@@ -250,6 +279,11 @@ func applyRotation(ctx context.Context, q rotationStore, recorder coreapi.FleetD
 		"mailbox_id", move.MailboxID, "workspace_id", move.WorkspaceID,
 		"from_worker_id", move.FromWorkerID, "to_worker_id", move.ToWorkerID,
 		"tier", move.Tier.String(), "reason", move.Reason.String())
+
+	// Counted HERE, beside the log line and under the same condition: the write
+	// matched. Tier.String() is the label vocabulary's one source of truth — see
+	// metrics.FleetRotated, which deliberately does not restate it.
+	tick.mtx.FleetRotated(move.Tier.String())
 
 	// Best effort, like every other decision-log write (see recordDecision): a
 	// decision that could not be logged is degraded observability, and failing

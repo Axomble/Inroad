@@ -64,6 +64,7 @@ type Metrics struct {
 	sweepRows             *prometheus.CounterVec
 	jobRunSeconds         *prometheus.HistogramVec
 	workerAssignmentStale prometheus.Counter
+	fleetRotations        *prometheus.CounterVec
 }
 
 // sweepRowBuckets bound the rows-scanned histogram-free counter's companion
@@ -127,10 +128,14 @@ func New() *Metrics {
 			Name: "inroad_worker_assignment_stale_total",
 			Help: "Count of times AssignMailboxWorker found an existing mailbox_worker_assignments row whose worker had fallen out of the live window and reassigned it. Liveness expiry used to be a silent log line only; a rising rate here means a fleet host is dying without a graceful stop, or the live window is too narrow for the fleet's actual heartbeat jitter.",
 		}),
+		fleetRotations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "inroad_fleet_rotations_total",
+			Help: `Mailboxes the rotation pass actually MOVED to a different worker, labeled by the tier that justified each move ("unreachable"|"unhealthy"|"balance"). A rising "unreachable" is a host dying, "unhealthy" is a provider refusing a worker's egress IP, and "balance" is opportunistic repacking — which should be near-flat, since a mailbox that moves discards the IP trust it had accrued.`,
+		}, []string{"tier"}),
 	}
 	m.registry.MustRegister(
 		m.httpRequests, m.httpDuration, m.sends, m.claims, m.sweepDuration, m.sweepRows, m.jobRunSeconds,
-		m.workerAssignmentStale,
+		m.workerAssignmentStale, m.fleetRotations,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -293,6 +298,56 @@ func (m *Metrics) WorkerAssignmentStale() {
 		return
 	}
 	m.workerAssignmentStale.Inc()
+}
+
+// FleetRotated increments inroad_fleet_rotations_total for ONE mailbox that
+// actually changed worker, labeled by the tier that justified the move
+// ("unreachable" | "unhealthy" | "balance").
+//
+// Counted at the MOVE, not at the decision. The sole emitter is
+// coreapi/inprocess.applyRotation, after the guarded UPDATE has reported that it
+// matched a row — so a move the send path won the race to (the mailbox had
+// already left the worker the decision was made about) is not counted, exactly
+// as it is not written to the fleet decision log. A counter that rose for
+// decisions rather than moves would disagree with both that log and the
+// assignment table.
+//
+// WHY THE TIER LABEL. The three tiers have three different operators and three
+// different fixes: "unreachable" means a fleet host stopped heartbeating,
+// "unhealthy" means a provider is refusing a worker's egress IP, and "balance"
+// means the scorer found a materially better home. A single undifferentiated
+// rotation counter would leave the only operationally interesting question —
+// WHY is the fleet moving mailboxes — unanswerable. "balance" in particular is
+// the series to alert on for the opposite reason to the other two: rotation
+// discards accrued IP trust, so a rising opportunistic rate is a tuning problem
+// (internal/platform/fleetrotate's residency floor and score margin), not an
+// incident.
+//
+// The label vocabulary is fleetrotate.Tier.String()'s, and it is NOT mirrored
+// here as constants the way ClaimOutcome* is: Tier already owns that spelling
+// as a closed set, so a second copy in this package would be a second source of
+// truth for it rather than the compile-time agreement those constants buy.
+// "none" cannot appear — fleetrotate.TierNone never produces a Move.
+//
+// Deliberately NOT folded into SweepCompleted. That metric's rows counter
+// documents rows SCANNED, and the rotation pass scans far more assignments than
+// it moves; feeding a move count into it would put a differently-meaning number
+// into a series operators already read one way. inroad_job_run_seconds{job=
+// "fleet rotation"} already carries the pass's wall time and outcome via
+// jobrun.Record, which is why nothing here re-times it: this counter reports
+// what the pass DID, which a duration histogram cannot express.
+//
+// No mailbox, worker or workspace label: those ids are already in the log line
+// and the fleet_decisions row, and as a Prometheus dimension they would be the
+// unbounded-cardinality mistake HTTPMiddleware's route-pattern comment warns
+// about. Tier is a closed set of three.
+//
+// A nil receiver is a no-op, like every other method on Metrics.
+func (m *Metrics) FleetRotated(tier string) {
+	if m == nil {
+		return
+	}
+	m.fleetRotations.WithLabelValues(tier).Inc()
 }
 
 // statusRecorder captures the status code the wrapped handler actually wrote,

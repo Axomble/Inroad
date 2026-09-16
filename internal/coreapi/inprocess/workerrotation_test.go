@@ -13,6 +13,8 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/fleetdecision"
 	"github.com/inroad/inroad/internal/platform/fleetrotate"
+	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -97,6 +99,16 @@ func blockedCandidate(worker string) gen.ListRotationCandidatesRow {
 	}
 }
 
+// deadCandidate is one assignment whose worker stopped heartbeating. Nothing
+// about the provider explains it — an absent worker records no signals at all —
+// so this is the only input that produces TierUnreachable.
+func deadCandidate(worker string) gen.ListRotationCandidatesRow {
+	row := blockedCandidate(worker)
+	row.IncumbentLive = false
+	row.IncumbentBlockEvents = 0
+	return row
+}
+
 // twoWorkerFleet is the destination measurement: the blocked incumbent (which
 // the scorer must drop) and one healthy alternative.
 func twoWorkerFleet(blocked, healthy string) []gen.ListPlacementCandidatesRow {
@@ -113,7 +125,7 @@ func TestRotationOnASingleWorkerFleetScansNothingAtAll(t *testing.T) {
 	store := &fakeRotationStore{liveWorkers: 1, candidates: []gen.ListRotationCandidatesRow{blockedCandidate("w-only")}}
 	rec := &fakeDecisionRecorder{}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -144,7 +156,7 @@ func TestABlockedIncumbentIsMovedAndRecordedAsARotation(t *testing.T) {
 	}
 	rec := &fakeDecisionRecorder{}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -200,7 +212,7 @@ func TestTheDestinationIsMeasuredAsPlacementWouldMeasureIt(t *testing.T) {
 		},
 	}
 
-	if _, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, fleetrotate.Default()); err != nil {
+	if _, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: fleetrotate.Default()}); err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
 	if len(store.placementArgs) != 1 {
@@ -238,7 +250,7 @@ func TestTheDestinationMeasurementIsReReadAfterEveryMove(t *testing.T) {
 		},
 	}
 
-	moved, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -269,7 +281,7 @@ func TestAMailboxThatMovedUnderTheTickIsNeitherRotatedNorLogged(t *testing.T) {
 	}
 	rec := &fakeDecisionRecorder{}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -293,7 +305,7 @@ func TestALogWriteFailureDoesNotUndoOrStopTheRotation(t *testing.T) {
 	}
 	rec := &fakeDecisionRecorder{err: errors.New("decision log unavailable")}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet must not fail over a log write: %v", err)
 	}
@@ -315,7 +327,7 @@ func TestARotationWriteFailureFailsTheTick(t *testing.T) {
 		rotateErr: sentinel,
 	}
 
-	if _, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, fleetrotate.Default()); !errors.Is(err, sentinel) {
+	if _, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: fleetrotate.Default()}); !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want it to wrap %v", err, sentinel)
 	}
 }
@@ -356,7 +368,7 @@ func TestTheMoveBudgetIsSpentOnUrgentMailboxesFirst(t *testing.T) {
 		},
 	}
 
-	if _, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, p); err != nil {
+	if _, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: p}); err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
 	if len(store.rotations) == 0 {
@@ -394,11 +406,92 @@ func TestATickNeverExceedsTheMoveBudget(t *testing.T) {
 		},
 	}
 
-	moved, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, p)
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: p})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
 	if moved != int64(p.MaxMoves) {
 		t.Fatalf("moved %d of %d candidates, want the budget %d", moved, len(rows), p.MaxMoves)
+	}
+}
+
+// Each move lands on the series for the tier that justified it. An operator
+// seeing churn asks WHY, and the three tiers have three different answers and
+// three different fixes — a host that died, a provider refusing an egress IP, or
+// a score margin tuned too loose. One undifferentiated counter could not tell
+// them apart.
+func TestEveryRotationIsCountedUnderTheTierThatJustifiedIt(t *testing.T) {
+	ws := uuid.New()
+	blocked, dead := blockedCandidate("w-blocked"), deadCandidate("w-dead")
+	blocked.WorkspaceID, dead.WorkspaceID = ws, ws
+
+	store := &fakeRotationStore{
+		liveWorkers: 3,
+		candidates:  []gen.ListRotationCandidatesRow{blocked, dead},
+		placementFleet: func(int, gen.ListPlacementCandidatesParams) []gen.ListPlacementCandidatesRow {
+			// w-dead is absent from the live fleet, which is exactly what makes
+			// its mailbox unreachable rather than merely unhealthy.
+			return twoWorkerFleet("w-blocked", "w-healthy")
+		},
+	}
+	mtx := metrics.New()
+
+	moved, err := rotateFleet(context.Background(), rotationTick{
+		store: store, recorder: &fakeDecisionRecorder{}, mtx: mtx, policy: fleetrotate.Default(),
+	})
+	if err != nil {
+		t.Fatalf("rotateFleet: %v", err)
+	}
+	if moved != 2 {
+		t.Fatalf("moved = %d, want 2", moved)
+	}
+
+	families := metricstest.Scrape(t, mtx)
+	for tier, want := range map[string]float64{
+		fleetrotate.TierUnhealthy.String():   1,
+		fleetrotate.TierUnreachable.String(): 1,
+		// Nothing opportunistic happened, so that series must stay empty: a
+		// rotation counter that lumped a forced move in with a repack would make
+		// the one tier worth alerting on unreadable.
+		fleetrotate.TierBalance.String(): 0,
+	} {
+		got := metricstest.CounterValue(families, "inroad_fleet_rotations_total", map[string]string{"tier": tier})
+		if got != want {
+			t.Errorf("rotations{tier=%q} = %v, want %v", tier, got, want)
+		}
+	}
+}
+
+// A decision the guarded UPDATE refused is NOT a rotation and must not be
+// counted. This is the same rule the decision log follows (nothing is written
+// for a move that did not happen), and counting decisions instead of moves would
+// leave this counter permanently disagreeing with both that log and the
+// assignment table.
+func TestARotationThatLostTheRaceIsNotCounted(t *testing.T) {
+	store := &fakeRotationStore{
+		liveWorkers: 2,
+		candidates:  []gen.ListRotationCandidatesRow{blockedCandidate("w-blocked")},
+		placementFleet: func(int, gen.ListPlacementCandidatesParams) []gen.ListPlacementCandidatesRow {
+			return twoWorkerFleet("w-blocked", "w-healthy")
+		},
+		rotateErr: pgx.ErrNoRows,
+	}
+	mtx := metrics.New()
+
+	if _, err := rotateFleet(context.Background(), rotationTick{
+		store: store, recorder: &fakeDecisionRecorder{}, mtx: mtx, policy: fleetrotate.Default(),
+	}); err != nil {
+		t.Fatalf("rotateFleet: %v", err)
+	}
+
+	families := metricstest.Scrape(t, mtx)
+	for _, tier := range []string{
+		fleetrotate.TierUnhealthy.String(),
+		fleetrotate.TierUnreachable.String(),
+		fleetrotate.TierBalance.String(),
+	} {
+		if got := metricstest.CounterValue(families, "inroad_fleet_rotations_total", map[string]string{"tier": tier}); got != 0 {
+			t.Errorf("rotations{tier=%q} = %v after a move that never happened, want 0", tier, got)
+		}
 	}
 }

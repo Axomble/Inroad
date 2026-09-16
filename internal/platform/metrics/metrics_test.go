@@ -192,6 +192,31 @@ func TestSweepCompletedIgnoresNegativeRows(t *testing.T) {
 	}
 }
 
+// TestFleetRotatedSeparatesTheTiers is the point of the tier label: the three
+// reasons a mailbox moves have three different operators and three different
+// fixes (a dead host, a provider refusing an egress IP, a mistuned score), so
+// folding them into one undifferentiated rotation counter would leave the only
+// question worth asking — WHY is the fleet moving mailboxes — unanswerable.
+func TestFleetRotatedSeparatesTheTiers(t *testing.T) {
+	m := metrics.New()
+	m.FleetRotated("unreachable")
+	m.FleetRotated("unhealthy")
+	m.FleetRotated("unhealthy")
+	m.FleetRotated("balance")
+
+	families := metricstest.Scrape(t, m)
+	for tier, want := range map[string]float64{
+		"unreachable": 1,
+		"unhealthy":   2,
+		"balance":     1,
+	} {
+		got := metricstest.CounterValue(families, "inroad_fleet_rotations_total", map[string]string{"tier": tier})
+		if got != want {
+			t.Errorf("rotations{tier=%q} = %v, want %v", tier, got, want)
+		}
+	}
+}
+
 // TestNewRegistersRuntimeAndProcessCollectors pins the free-and-standard
 // collectors being present on every process's registry without any wiring.
 func TestNewRegistersRuntimeAndProcessCollectors(t *testing.T) {
@@ -214,6 +239,7 @@ func TestNoTenantLabelsAnywhere(t *testing.T) {
 	m.SendFinalized("campaign", "sent")
 	m.SendClaimed("step", metrics.ClaimOutcomeWon)
 	m.SweepCompleted("inbox", 1, time.Second)
+	m.FleetRotated("unhealthy")
 
 	banned := map[string]bool{
 		"workspace_id": true, "workspace": true, "tenant_id": true, "tenant": true,
@@ -243,6 +269,7 @@ func TestNilMetricsNoOps(t *testing.T) {
 	m.SendFinalized("campaign", "sent")
 	m.SendClaimed("step", metrics.ClaimOutcomeWon)
 	m.SweepCompleted("inbox", 12, 3*time.Second)
+	m.FleetRotated("unreachable")
 
 	r := chi.NewRouter()
 	r.Use(m.HTTPMiddleware())
