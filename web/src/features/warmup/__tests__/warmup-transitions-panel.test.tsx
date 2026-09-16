@@ -94,7 +94,7 @@ test('a row that moves both axes shows both, each with its own ends', async () =
   expect(entry).toHaveTextContent(/Throttled/)
   expect(entry).toHaveTextContent(/Withheld/)
   expect(entry).toHaveTextContent(/campaign hard bounces crossed the throttle threshold/i)
-  expect(entry).toHaveTextContent(/withheld from the pool/i)
+  expect(entry).toHaveTextContent(/withheld from warmup/i)
 })
 
 // Rows written before pool lanes existed carry null lane fields. History without

@@ -111,7 +111,7 @@ export type IncidentsReading =
  * becomes chrome to skip, and said once above them it is read.
  */
 export const INCIDENTS_INTRO =
-  'Degradation that is concentrated in one thing several mailboxes have in common, recomputed from the pool each time this page loads. Each row says only that: these mailboxes share this value, and degradation is concentrated among them rather than spread across the pool. It does not say the shared value is why — two dimensions can carry one underlying problem from different angles, and a small pool can put the same mailboxes on one domain, one route and one return path at once. The counts are shown so you can disagree with the inference.'
+  'Several mailboxes are struggling at once, and each row below names one thing they have in common. That is all a row says: the trouble is concentrated among them rather than spread across your other mailboxes. It does not say the shared value is why — two rows can point at one underlying problem from different angles, and a small setup can put the same mailboxes on one domain, one route and one return path at once. The counts are shown so you can judge it yourself.'
 
 /**
  * Design §7, and it needs two reasons where the identity panel and the route
@@ -121,14 +121,10 @@ export const INCIDENTS_INTRO =
  * recording the difference is the point of writing it out.
  */
 export const INCIDENTS_GATES_NOTHING =
-  "Reported for visibility only: no threshold, lane or promotion decision reads any of it. Two reasons, either sufficient alone. The concentration these rows are reported from, and the cohort sizes behind them, are guesses nobody has calibrated against real pools yet. And the destination dimension rests on where mail was delivered, which inside one workspace is steerable by whoever controls a mailbox domain's MX — tolerable for a row you can dismiss, not for a control that withholds sending."
+  "For information only — nothing is paused, slowed or promoted based on it. Two reasons, either sufficient alone. The cut-offs these rows are reported from are guesses nobody has calibrated against real workspaces yet. And the destination row rests on where mail was delivered, which is steerable by whoever controls a mailbox domain's MX — tolerable for a note you can dismiss, not for a rule that stops sending."
 
 /* ------------------------------------------------------------- the absences */
 
-
-function participantCount(count: number): string {
-  return `${count} participant${count === 1 ? '' : 's'}`
-}
 
 function mailboxCount(count: number): string {
   return `${count} mailbox${count === 1 ? '' : 'es'}`
@@ -141,7 +137,7 @@ function mailboxCount(count: number): string {
  * to search across.
  */
 function quietMessage(participants: number): string {
-  return `No degradation in the pool: ${participantCount(participants)}, and none is degrading on either axis — reputation or pool lane — so there is nothing to correlate. Not the same as looking across degraded mailboxes and finding nothing in common; here there is nothing to look across.`
+  return `All ${mailboxCount(participants)} in warmup are doing fine, so there is nothing to connect. Not the same as looking across struggling mailboxes and finding nothing in common — here there is nothing to look across.`
 }
 
 /**
@@ -151,12 +147,12 @@ function quietMessage(participants: number): string {
  */
 function noneFoundMessage(degraded: number, participants: number, minPool: number): string {
   if (degraded === 1) {
-    return 'One mailbox is degrading, and one mailbox on its own cannot correlate with anything — a shared pattern takes at least two. So nothing here is a shared-cause finding, and nothing here rules one out either.'
+    return 'One mailbox is struggling, and one mailbox on its own cannot share a pattern with anything — a shared pattern takes at least two. So nothing here points at a shared cause, and nothing here rules one out either.'
   }
   if (participants < minPool) {
-    return `${mailboxCount(degraded)} are degrading, and a pool of ${participantCount(participants)} cannot show concentration at all: concentration is a comparison between the mailboxes sharing a value and the rest of the pool, and that comparison needs at least ${participantCount(minPool)} before it can be made at all. Nothing is ruled out here; there is not enough pool to look.`
+    return `${mailboxCount(degraded)} are struggling, and with only ${mailboxCount(participants)} in warmup there is no way to tell whether a pattern stands out: that comparison needs at least ${mailboxCount(minPool)} before it can be made at all. Nothing is ruled out here; there are not enough mailboxes to look yet.`
   }
-  return `${mailboxCount(degraded)} are degrading, and no destination, signing domain, return path or sender domain runs through them in a way that stands out from the rest of the pool. No shared cause found, which is an answer: work through them one at a time rather than looking for one thing behind them all.`
+  return `${mailboxCount(degraded)} are struggling, and no destination, signing domain, return path or sender domain runs through them in a way that stands out from your other mailboxes. No shared cause found, which is an answer: work through them one at a time rather than looking for one thing behind them all.`
 }
 
 /**
@@ -174,7 +170,7 @@ const MAX_SHOWN = 4
 
 function truncationNote(hidden: number): string | null {
   if (hidden <= 0) return null
-  return `${hidden} weaker correlation${hidden === 1 ? '' : 's'} ${hidden === 1 ? 'is' : 'are'} not shown. The most concentrated are above; the rest are further from being distinguishable from the pool as a whole.`
+  return `${hidden} weaker pattern${hidden === 1 ? '' : 's'} ${hidden === 1 ? 'is' : 'are'} not shown. The clearest are above; the rest are harder to tell apart from your mailboxes as a whole.`
 }
 
 /* ------------------------------------------------------------- the arithmetic */
@@ -201,7 +197,7 @@ function formatLift(lift: number): string | null {
 const MARGINAL_LIFT = 3
 
 const LIFT_DETAIL =
-  'How many times more degraded the mailboxes sharing this value are than the rest of the pool. 1× would be no concentration at all.'
+  'How many times more likely the mailboxes sharing this value are to be struggling than your other mailboxes. 1× would be no concentration at all.'
 
 const MARGINAL_LIFT_DETAIL = `${LIFT_DETAIL} This one is barely above that, so read it as a hint and check the two counts beside it — a handful of mailboxes can land this way by chance.`
 
@@ -212,7 +208,7 @@ function liftStat(lift: number): IncidentStat {
       label: 'Concentration',
       value: 'Not stated',
       detail:
-        'No usable concentration figure arrived with this correlation, so the two counts beside it are the whole of the evidence. Not a zero, and not a strong result.',
+        'No usable concentration figure arrived with this row, so the two counts beside it are the whole of the evidence. Not a zero, and not a strong result.',
     }
   }
   return {
@@ -230,12 +226,12 @@ function liftStat(lift: number): IncidentStat {
 function cohortStats(incident: WarmupIncident): IncidentStat[] {
   return [
     {
-      label: 'Degraded, of those sharing it',
+      label: 'Struggling, of those sharing it',
       value: `${incident.degraded_inside} of ${incident.cohort_size}`,
       detail: null,
     },
     {
-      label: 'Degraded, of the rest of the pool',
+      label: 'Struggling, of your other mailboxes',
       value: `${incident.degraded_outside} of ${incident.cohort_outside}`,
       detail: null,
     },
@@ -266,7 +262,7 @@ const DIMENSION_COPY: Record<IncidentDimension, DimensionCopy> = {
   signing_domain: {
     label: 'signing domain (DKIM)',
     detail:
-      'Their last observed warmup mail was signed by the same DKIM d= domain. They share a signer; whether the signature has anything to do with the degradation is not something this can tell you.',
+      'Their last observed warmup mail was signed by the same DKIM d= domain. They share a signer; whether the signature has anything to do with the trouble is not something this can tell you.',
   },
   return_path_domain: {
     label: 'return path',
@@ -281,7 +277,7 @@ const DIMENSION_COPY: Record<IncidentDimension, DimensionCopy> = {
   relay_ip: {
     label: 'relay address',
     detail:
-      'Their warmup mail was seen arriving from the same address — the machine it actually came out of, recorded by the receiver rather than claimed by the sender. The most concrete thing on this list and still not a cause: a provider\'s whole outbound pool shares addresses, so mailboxes on one host or ESP group here whether or not the relay has anything to do with the degradation.',
+      'Their warmup mail was seen arriving from the same address — the machine it actually came out of, recorded by the receiver rather than claimed by the sender. The most concrete thing on this list and still not a cause: a provider sends many customers’ mail from shared addresses, so mailboxes on one host or provider group here whether or not the relay has anything to do with the trouble.',
   },
 }
 

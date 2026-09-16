@@ -47,7 +47,7 @@ export function WarmupContentVersionsPanel({
       className="border-b border-border bg-surface/40 px-4 py-3 sm:px-5"
     >
       <h2 id={headingId} className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint">
-        Placement by template
+        Where your warmup emails land
       </h2>
 
       {reading.kind === 'observed' ? (
@@ -103,7 +103,7 @@ function Version({ version }: { version: VersionReading }) {
     <li className="border-l border-border pl-3">
       <p className="min-w-0">
         <span data-slot="version-kind" className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">
-          Template fingerprint
+          Template
         </span>
         <span
           data-slot="version-label"

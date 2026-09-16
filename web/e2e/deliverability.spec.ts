@@ -144,7 +144,12 @@ async function signIn(page: Page) {
   await page.getByLabel('Email').fill('demo@inroad.test')
   await page.getByRole('textbox', { name: 'Password', exact: true }).fill('correct-horse-battery-staple')
   await page.getByRole('button', { name: 'Log in' }).click()
-  await expect(page.getByRole('heading', { name: 'Your outreach command center.' })).toBeVisible()
+  // Landing check is structural, not copy: waiting on the overview's marketing
+  // headline meant one wording change broke sign-in for four spec files at once.
+  // The work surface appearing at /app is what "signed in" actually means, and it
+  // holds on a phone viewport too, where the sidebar is a closed drawer.
+  await page.waitForURL(/\/app$/)
+  await expect(page.getByRole('main')).toBeVisible()
 }
 
 test('the deliverability page qualifies a small-sample score and never shows an unmeasured signal as clean', async ({
@@ -153,20 +158,25 @@ test('the deliverability page qualifies a small-sample score and never shows an 
   await mockApi(page)
   await signIn(page)
 
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: /Deliverability/ }).click()
+  // Deliverability is one of the secondary screens behind the sidebar's "More"
+  // disclosure, so reaching it is two steps now — the same two a user takes.
+  // `.first()`: the shell mounts the sidebar twice (desktop rail + mobile drawer).
+  const primaryNav = page.getByRole('navigation', { name: 'Primary' }).first()
+  await primaryNav.getByRole('button', { name: 'More' }).click()
+  await primaryNav.getByRole('link', { name: /Deliverability/ }).click()
 
   const score = page.getByRole('region', { name: 'Deliverability score' })
   await expect(score).toContainText('96/100')
   // 96 over eleven delivered is not a clean bill of health, and the page says so
   // in a sentence rather than a badge.
-  await expect(score.getByText('Provisional', { exact: true })).toBeVisible()
-  await expect(score.getByText(/11 delivered — too small a sample to be a verdict/)).toBeVisible()
+  await expect(score.getByText('Early estimate', { exact: true })).toBeVisible()
+  await expect(score.getByText(/based on just 11 delivered so far and will firm up as you send more/)).toBeVisible()
   await expect(score.getByText('Strong')).toBeHidden()
 
   // The complaint component has no feed behind it. "Not measured", never 0%.
   const complaints = score.locator('[data-component="complaint"]')
-  await expect(complaints.getByText('Not measured')).toBeVisible()
-  await expect(complaints.getByText(/No complaint feed is connected/)).toBeVisible()
+  await expect(complaints.getByText('No data yet')).toBeVisible()
+  await expect(complaints.getByText(/Complaint reports aren't connected yet/)).toBeVisible()
   await expect(complaints).not.toContainText('0.0%')
 
   await page.screenshot({ path: testInfo.outputPath('deliverability-score.png') })
@@ -175,7 +185,7 @@ test('the deliverability page qualifies a small-sample score and never shows an 
   // sentence there too rather than a flat line along zero.
   await expect(page.getByRole('region', { name: 'Bounce rate' })).toBeVisible()
   const complaintPanel = page.getByRole('region', { name: 'Complaint rate' })
-  await expect(complaintPanel.getByText(/not a run of clean days/)).toBeVisible()
+  await expect(complaintPanel.getByText(/this doesn't mean there were none/)).toBeVisible()
   await expect(complaintPanel.locator('svg')).toHaveCount(0)
 
   // Every plotted value is also reachable as text.
@@ -191,7 +201,7 @@ test('the deliverability page qualifies a small-sample score and never shows an 
   // The same screen in dark mode: tokens, not hardcoded greys.
   await page.getByRole('button', { name: 'Use dark theme' }).click()
   await expect(page.locator('html')).toHaveClass(/dark/)
-  await expect(score.getByText('Provisional', { exact: true })).toBeVisible()
+  await expect(score.getByText('Early estimate', { exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('deliverability-dark.png'), fullPage: true })
 })
 

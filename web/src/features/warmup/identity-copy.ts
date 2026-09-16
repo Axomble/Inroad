@@ -75,7 +75,7 @@ export const IDENTITY_INTRO =
 
 /** Design §7, in the UI as well as in the code, because the temptation is obvious. */
 export const IDENTITY_GATES_NOTHING =
-  'Reported for visibility only: no threshold, lane or promotion decision reads any of it. Authentication is gated separately, from DNS we verify ourselves.'
+  'For information only — nothing is paused, slowed or promoted based on it. Authentication is checked separately, from DNS we verify ourselves.'
 
 /**
  * Said once, when not one verdict came back, rather than three times inside
@@ -149,7 +149,7 @@ const VERDICT_COPY: Record<AuthVerdict, VerdictCopy> = {
   }),
   fail: (mechanism) => ({
     value: 'fail',
-    detail: `The receiving partner checked ${mechanism.checked} and it failed. Worth investigating, and it changes nothing here — pool eligibility reads authentication from DNS we verify ourselves, never from a header a message carried.`,
+    detail: `The receiving partner checked ${mechanism.checked} and it failed. Worth investigating, and it changes nothing here — warmup eligibility reads authentication from DNS we verify ourselves, never from a header a message carried.`,
     reported: true,
     negative: true,
     tone: 'text-danger',

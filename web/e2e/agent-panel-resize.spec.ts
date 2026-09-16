@@ -96,7 +96,12 @@ test.beforeEach(async ({ page }) => {
   await page.getByLabel('Email').fill('demo@inroad.test')
   await page.getByRole('textbox', { name: 'Password', exact: true }).fill('correct-horse-battery-staple')
   await page.getByRole('button', { name: 'Log in' }).click()
-  await expect(page.getByRole('heading', { name: 'Your outreach command center.' })).toBeVisible()
+  // Landing check is structural, not copy: waiting on the overview's marketing
+  // headline meant one wording change broke sign-in for four spec files at once.
+  // The work surface appearing at /app is what "signed in" actually means, and it
+  // holds on a phone viewport too, where the sidebar is a closed drawer.
+  await page.waitForURL(/\/app$/)
+  await expect(page.getByRole('main')).toBeVisible()
 })
 
 test('the whole grab strip is reachable and centred on the panel edge', async ({ page }) => {

@@ -27,8 +27,8 @@ export function UnverifiedBanner() {
     >
       <MailWarning className="size-4 shrink-0 text-warm" aria-hidden="true" />
       <span className="min-w-0 flex-1 truncate">
-        Please verify your email address — connecting a mailbox, launching a campaign, and test sends stay
-        blocked until you do.
+        Please verify your email address — once you do, you can connect mailboxes, send tests, and launch
+        campaigns.
       </span>
       {/* Feedback for both outcomes, as text (never colour alone). No nested
           live region: this whole banner is already `role="status"`, so content

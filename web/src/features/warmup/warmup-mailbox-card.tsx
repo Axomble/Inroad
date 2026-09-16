@@ -44,8 +44,13 @@ function formatPct(value: number | null): string {
 }
 
 function disableErrorMessage(status?: number): string {
-  if (status === 404) return 'This mailbox is no longer a warmup participant — refresh the page.'
+  if (status === 404) return 'This mailbox is no longer part of warmup — refresh the page.'
   return "Couldn't disable warmup. Please try again."
+}
+
+/** "1 email checked" / "40 emails checked" — never a bare jargon count. */
+function emailsChecked(count: number): string {
+  return `${count.toLocaleString()} email${count === 1 ? '' : 's'} checked`
 }
 
 /**
@@ -101,7 +106,7 @@ export function WarmupMailboxCard({
                 <SentinelMark designated={entry.is_sentinel} />
               </>
             ) : (
-              <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">Not warming</span>
+              <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-faint">Not warming up</span>
             )}
           </div>
           {enrolled && entry && (
@@ -114,7 +119,7 @@ export function WarmupMailboxCard({
                 <span>
                   spam 7d <span className="tabular-nums text-foreground">{formatPct(entry.spam_rate_7d)}</span>
                 </span>
-                <span className="tabular-nums">{entry.placement_sample_7d} observations</span>
+                <span className="tabular-nums">{emailsChecked(entry.placement_sample_7d ?? 0)}</span>
                 <TabbedPlacement rate={entry.tabbed_rate_7d} tabCapableSamples={entry.tab_capable_sample_7d} />
                 <EvidenceConfidence
                   confidence={entry.evidence_confidence}
@@ -306,14 +311,14 @@ function SentinelMark({ designated }: { designated: boolean | undefined }) {
       className="font-mono text-[10px] uppercase tracking-[0.1em] text-warm"
       title={SENTINEL_MARK_TITLE}
     >
-      <span className="sr-only">Measurement role: </span>
+      <span className="sr-only">Role: </span>
       {SENTINEL_MARK}
     </span>
   )
 }
 
 const SENTINEL_MARK_TITLE =
-  'Designated as a measurement sentinel: exposed to every lane so degrading mailboxes have something dependable to be measured against. Not a lane — its health state and lane are unaffected.'
+  'This mailbox is a reference: it exchanges warmup mail with every group, including struggling mailboxes, so they have something dependable to be measured against. Its own health status is unaffected.'
 
 /**
  * WHO produced the placement evidence the rates on this row are computed from.
@@ -350,13 +355,16 @@ function EvidenceConfidence({
       : null
   return (
     <span data-slot="evidence-confidence" title={reading.detail}>
-      evidence <span className="text-foreground">{reading.label}</span>
+      measured by <span className="text-foreground">{reading.label}</span>
       {corroborations !== null && (
-        <span className="whitespace-nowrap tabular-nums"> · {corroborations.toLocaleString()} from a sentinel</span>
+        <span className="whitespace-nowrap tabular-nums">
+          {' '}
+          · {corroborations.toLocaleString()} from a reference mailbox
+        </span>
       )}
       {/* Wrapped as a unit for the reason the tabbed note is: split across two
-          lines on a phone, "· gates" / "nothing" reads worse than a wrap. */}
-      <span className="whitespace-nowrap text-faint"> · gates nothing</span>
+          lines on a phone, "· info" / "only" reads worse than a wrap. */}
+      <span className="whitespace-nowrap text-faint"> · info only</span>
     </span>
   )
 }
@@ -415,20 +423,20 @@ function TabbedPlacement({
   const reading = tabbedReading(rate, tabCapableSamples)
   return (
     <span data-slot="tabbed-placement">
-      tabbed 7d{' '}
+      in tabs 7d{' '}
       {reading.detected ? (
         <>
           <span className="tabular-nums text-foreground">{reading.pct}</span>{' '}
           <span className="whitespace-nowrap tabular-nums">
-            of {reading.tabCapableSamples.toLocaleString()} tab-capable
+            of {reading.tabCapableSamples.toLocaleString()} that can show tabs
           </span>
         </>
       ) : (
-        <span className="text-foreground">Not detectable — no partner could report a tab</span>
+        <span className="text-foreground">Not detectable — no partner mailbox can show tabs</span>
       )}
-      {/* Wrapped as a unit: on a phone this line breaks, and "· gates" / "nothing"
+      {/* Wrapped as a unit: on a phone this line breaks, and "· info" / "only"
           split across two lines reads worse than moving the whole note down. */}
-      <span className="whitespace-nowrap text-faint"> · gates nothing</span>
+      <span className="whitespace-nowrap text-faint"> · info only</span>
     </span>
   )
 }

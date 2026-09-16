@@ -167,7 +167,7 @@ test('both sides of the comparison are shown, each over its own population', () 
   const row = only(incident({ cohort_size: 5, degraded_inside: 4, cohort_outside: 20, degraded_outside: 1 }))
 
   expect(statOf(row, 'those sharing it').value).toBe('4 of 5')
-  expect(statOf(row, 'rest of the pool').value).toBe('1 of 20')
+  expect(statOf(row, 'other mailboxes').value).toBe('1 of 20')
   // The value it is all about, and it is the value itself — not a summary of it.
   expect(row.value).toBe('mail.acme.test')
 })
@@ -264,12 +264,12 @@ test('an unresolved value does not suppress the resolved incidents beside it', (
 // Nothing is degrading. The reading an operator most needs kept apart from the
 // one below it: "no shared cause found" over a healthy pool says the search came
 // back empty, when there was nothing to search across.
-test('a pool with nothing degrading says that, not that no cause was found', () => {
+test('a pool with nothing struggling says that, not that no cause was found', () => {
   const message = messageOf([], pool(6))
 
-  expect(message).toMatch(/no degradation in the pool/i)
-  expect(message).toMatch(/6 participants/)
-  expect(message).toMatch(/nothing to correlate/i)
+  expect(message).toMatch(/doing fine/i)
+  expect(message).toMatch(/6 mailboxes/)
+  expect(message).toMatch(/nothing to connect/i)
   expect(message).toMatch(/nothing to look across/i)
   expect(message).not.toMatch(/no shared cause found/i)
 })
@@ -277,17 +277,17 @@ test('a pool with nothing degrading says that, not that no cause was found', () 
 // The same empty array, and a different answer. This is the pair the contract
 // cannot distinguish on its own: `incidents: []` is byte-identical in both cases
 // and only the pool it arrived with says which sentence is true.
-test('a pool with degradation and no concentration says no shared cause was found', () => {
+test('a pool with struggling mailboxes and no concentration says no shared cause was found', () => {
   const degraded = pool(9, (i) => (i < 4 ? { health_state: 'throttled' } : {}))
   const message = messageOf([], degraded)
 
-  expect(message).toMatch(/^4 mailboxes are degrading/)
+  expect(message).toMatch(/^4 mailboxes are struggling/)
   expect(message).toMatch(/no shared cause found/i)
   expect(message).toMatch(/which is an answer/i)
   // It names the four dimensions searched, so "no shared cause" is not read as a
   // claim about every possible cause.
   expect(message).toMatch(/no destination, signing domain, return path or sender domain/i)
-  expect(message).not.toMatch(/no degradation in the pool/i)
+  expect(message).not.toMatch(/doing fine/i)
 })
 
 // Both axes count as degradation, because the two are independent by design and
@@ -298,18 +298,18 @@ test('degradation on the lane axis alone still counts as degradation', () => {
   const laneOnly = pool(9, (i) => (i < 3 ? { lane: 'quarantine' } : {}))
   const recovery = pool(9, (i) => (i < 2 ? { lane: 'recovery' } : {}))
 
-  expect(messageOf([], laneOnly)).toMatch(/^3 mailboxes are degrading/)
-  expect(messageOf([], recovery)).toMatch(/^2 mailboxes are degrading/)
+  expect(messageOf([], laneOnly)).toMatch(/^3 mailboxes are struggling/)
+  expect(messageOf([], recovery)).toMatch(/^2 mailboxes are struggling/)
 })
 
 // One mailbox cannot correlate with anything, so "no shared cause found" would
 // describe a search that was never possible rather than one that came back
 // empty.
-test('a single degrading mailbox says a pattern needs at least two', () => {
+test('a single struggling mailbox says a pattern needs at least two', () => {
   const message = messageOf([], pool(9, (i) => (i < 1 ? { health_state: 'watch' } : {})))
 
-  expect(message).toMatch(/one mailbox is degrading/i)
-  expect(message).toMatch(/cannot correlate with anything/i)
+  expect(message).toMatch(/one mailbox is struggling/i)
+  expect(message).toMatch(/cannot share a pattern with anything/i)
   expect(message).toMatch(/at least two/i)
   expect(message).not.toMatch(/no shared cause found/i)
 })
@@ -319,9 +319,9 @@ test('a single degrading mailbox says a pattern needs at least two', () => {
 test('a pool too small for concentration says so instead of reporting none found', () => {
   const message = messageOf([], pool(3, (i) => (i < 2 ? { health_state: 'paused' } : {})))
 
-  expect(message).toMatch(/cannot show concentration at all/i)
-  expect(message).toMatch(/at least 4 participants/i)
-  expect(message).toMatch(/not enough pool to look/i)
+  expect(message).toMatch(/no way to tell whether a pattern stands out/i)
+  expect(message).toMatch(/at least 4 mailboxes/i)
+  expect(message).toMatch(/not enough mailboxes to look/i)
   expect(message).not.toMatch(/no shared cause found/i)
 })
 
@@ -331,7 +331,7 @@ test('the smallest pool that can show concentration gets the ordinary answer', (
   const message = messageOf([], pool(4, (i) => (i < 2 ? { health_state: 'paused' } : {})))
 
   expect(message).toMatch(/no shared cause found/i)
-  expect(message).not.toMatch(/not enough pool to look/i)
+  expect(message).not.toMatch(/not enough mailboxes to look/i)
 })
 
 // A mailbox that left the pool is not a participant. Counting its last-known
@@ -340,9 +340,9 @@ test('the smallest pool that can show concentration gets the ordinary answer', (
 test('a disabled mailbox is not a participant, however it was last seen', () => {
   const message = messageOf([], pool(6, (i) => (i < 2 ? { enabled: false, health_state: 'paused' } : {})))
 
-  expect(message).toMatch(/no degradation in the pool/i)
+  expect(message).toMatch(/doing fine/i)
   // And it is not counted in the pool size either.
-  expect(message).toMatch(/4 participants/)
+  expect(message).toMatch(/4 mailboxes/)
 })
 
 // A server that does not report incidents has run no inference, and neither has
@@ -374,7 +374,7 @@ test('only the strongest few are shown, and the rest are counted out loud', () =
   const reading = expectKind(incidentsReading(many, pool(25), MIN_POOL), 'detected')
 
   expect(reading.incidents.map((row) => row.value)).toEqual(['a.test', 'b.test', 'c.test', 'Microsoft'])
-  expect(reading.truncated).toMatch(/2 weaker correlations are not shown/i)
+  expect(reading.truncated).toMatch(/2 weaker patterns are not shown/i)
 })
 
 // Exactly at the cap, which is the boundary and the only interesting side of it:
@@ -448,21 +448,21 @@ test('nothing the panel can say claims a cause', () => {
 // And it is said, not merely avoided: an operator has to be told that the row is
 // a correlation, or they will supply the causal reading themselves.
 test('the panel says outright that a shared value is not a reason', () => {
-  expect(INCIDENTS_INTRO).toMatch(/concentrated among them rather than spread across the pool/i)
+  expect(INCIDENTS_INTRO).toMatch(/concentrated among them rather than spread across/i)
   expect(INCIDENTS_INTRO).toMatch(/does not say the shared value is why/i)
-  // Two dimensions can carry one problem, which is why a row is a place to look
+  // Two rows can carry one problem, which is why a row is a place to look
   // and not an answer.
-  expect(INCIDENTS_INTRO).toMatch(/two dimensions can carry one underlying problem/i)
+  expect(INCIDENTS_INTRO).toMatch(/two rows can point at one underlying problem/i)
   // And the counts are named as the operator's own check on the inference.
-  expect(INCIDENTS_INTRO).toMatch(/so you can disagree with the inference/i)
+  expect(INCIDENTS_INTRO).toMatch(/so you can judge it yourself/i)
 })
 
 // Design §7, and deliberately not either of the sentences the identity panel and
 // the route matrix carry: this one needs two reasons, and the second — that the
 // destination axis is steerable inside a workspace — does not expire when
 // calibration data arrives.
-test('the panel says it gates nothing, and gives both reasons', () => {
-  expect(INCIDENTS_GATES_NOTHING).toMatch(/no threshold, lane or promotion decision reads any of it/i)
+test('the panel says it is info only, and gives both reasons', () => {
+  expect(INCIDENTS_GATES_NOTHING).toMatch(/nothing is paused, slowed or promoted/i)
   expect(INCIDENTS_GATES_NOTHING).toMatch(/guesses nobody has calibrated/i)
   expect(INCIDENTS_GATES_NOTHING).toMatch(/steerable by whoever controls a mailbox domain's MX/i)
 })
@@ -479,8 +479,8 @@ test('the panel says it gates nothing, and gives both reasons', () => {
 test('one degraded mailbox outranks a below-floor pool as the reason', () => {
   const message = messageOf([], pool(3, (i) => (i === 0 ? { health_state: 'paused' } : {})))
 
-  expect(message).toMatch(/one mailbox on its own cannot correlate/i)
-  expect(message).not.toMatch(/not enough pool to look/i)
+  expect(message).toMatch(/one mailbox on its own cannot share a pattern/i)
+  expect(message).not.toMatch(/not enough mailboxes to look/i)
 })
 
 // And with two degraded in the same undersized pool, the floor becomes the true
@@ -488,6 +488,6 @@ test('one degraded mailbox outranks a below-floor pool as the reason', () => {
 test('two degraded in a below-floor pool reports the floor', () => {
   const message = messageOf([], pool(3, (i) => (i < 2 ? { health_state: 'paused' } : {})))
 
-  expect(message).toMatch(/not enough pool to look/i)
-  expect(message).not.toMatch(/one mailbox on its own cannot correlate/i)
+  expect(message).toMatch(/not enough mailboxes to look/i)
+  expect(message).not.toMatch(/one mailbox on its own cannot share a pattern/i)
 })

@@ -44,13 +44,13 @@ export function WarmupPage() {
       */}
       <StatStrip className={cn(overviewError && 'opacity-40')} aria-hidden={overviewError || undefined}>
         <Stat
-          label="Pool size"
+          label="Warming up"
           value={overviewError ? '—' : (overview?.pool_size ?? 0)}
-          sub={overviewError ? undefined : active ? 'Exchanging mail' : 'Idle — needs 2+'}
+          sub={overviewError ? undefined : active ? 'Exchanging mail' : 'Needs 2+ mailboxes to start'}
         />
         <Stat label="Healthy" value={overviewError ? '—' : countHealth('healthy')} dot={<StatusDot tone="running" />} />
-        <Stat label="Watch" value={overviewError ? '—' : countHealth('watch')} dot={<StatusDot tone="paused" />} />
-        <Stat label="Needs evidence" value={overviewError ? '-' : countHealth('unknown')} />
+        <Stat label="Watching" value={overviewError ? '—' : countHealth('watch')} dot={<StatusDot tone="paused" />} />
+        <Stat label="Too new to judge" value={overviewError ? '—' : countHealth('unknown')} />
         <Stat
           label="At risk"
           value={overviewError ? '—' : countHealth('throttled') + countHealth('paused')}
@@ -62,8 +62,8 @@ export function WarmupPage() {
         <div className="flex items-start gap-2 border-b border-warm/30 bg-warm/10 px-5 py-2.5 text-xs text-warm">
           <Flame className="size-4 shrink-0" aria-hidden="true" />
           <span>
-            Warmup needs at least 2 mailboxes to exchange mail. Enable warmup on another mailbox below to start
-            building the pool.
+            Warmup works by having your mailboxes send friendly emails to each other — turn it on for at least two
+            mailboxes to get started.
           </span>
         </div>
       )}
@@ -73,8 +73,8 @@ export function WarmupPage() {
           <LoadingRows />
         ) : mailboxes.length === 0 ? (
           <EmptyBlock
-            title="No mailboxes to warm"
-            description="Connect a mailbox first, then enable warmup on it here. Warmup builds sender reputation by exchanging low-volume mail between your own opted-in mailboxes."
+            title="No mailboxes to warm up yet"
+            description="Connect a mailbox first, then turn on warmup for it here. Warmup builds your sender reputation by having your own mailboxes send a small number of friendly emails to each other."
           />
         ) : (
           <>

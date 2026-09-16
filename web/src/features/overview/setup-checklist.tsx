@@ -75,7 +75,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
   const somePulseStepOpen = !(pulseDone.mailbox && pulseDone.warmup && pulseDone.contacts && pulseDone.campaign)
 
   // Until both reads settle there is nothing truthful to assert. But this slot
-  // sits ABOVE the hero, so rendering nothing while the domains request is in
+  // opens the page, so rendering nothing while the domains request is in
   // flight would shove the whole page down when the panel lands (a large
   // layout shift on the landing route). The pulse is warm — shared with the
   // sidebar — so it already tells us whether the panel is GUARANTEED to render
@@ -94,7 +94,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
     {
       id: 'mailbox',
       title: 'Connect a mailbox',
-      detail: 'Add Gmail, Microsoft 365, or SMTP — the account your outreach sends from.',
+      detail: 'Connect the Gmail, Microsoft 365, or other email account your outreach sends from.',
       done: pulseDone.mailbox,
       to: '/app/mailboxes',
       cta: 'Connect',
@@ -102,7 +102,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
     {
       id: 'domain',
       title: 'Verify your sending domain',
-      detail: 'Pass SPF, DKIM and DMARC so receiving servers trust your mail.',
+      detail: 'A quick one-time DNS check that proves to inbox providers your email is really from you.',
       done: domainVerified,
       to: '/app/mailboxes',
       cta: 'Check DNS',
@@ -112,8 +112,8 @@ export const SetupChecklist = memo(function SetupChecklist() {
       title: 'Start warmup',
       detail:
         pool === 1
-          ? '1 mailbox warming — enroll a second so the pool can exchange mail.'
-          : 'Enroll at least two mailboxes to build sender reputation before cold volume.',
+          ? '1 mailbox warming up — add a second so they can trade friendly mail with each other.'
+          : 'Warm up at least two mailboxes so your emails earn a good reputation before you go cold.',
       done: pulseDone.warmup,
       to: '/app/warmup',
       cta: 'Set up warmup',
@@ -121,7 +121,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
     {
       id: 'contacts',
       title: 'Import contacts',
-      detail: 'Upload a clean CSV into a list — the audience your first campaign enrolls.',
+      detail: 'Upload a spreadsheet of the people you want to reach.',
       done: pulseDone.contacts,
       to: '/app/contacts',
       cta: 'Import',
@@ -129,7 +129,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
     {
       id: 'campaign',
       title: 'Launch your first campaign',
-      detail: 'Write a sequence, pick senders and audience, then take it out of draft.',
+      detail: 'Write your emails, choose who gets them, and hit launch.',
       done: pulseDone.campaign,
       to: '/app/campaigns',
       cta: 'Launch',
@@ -180,7 +180,7 @@ export const SetupChecklist = memo(function SetupChecklist() {
               )}
             </span>
             {!step.done &&
-              // Accent discipline: the topbar's "Build campaign" already spends
+              // Accent discipline: the topbar's "New campaign" already spends
               // this page's one primary button, so the checklist's lead action
               // stays a tactile secondary — still the only button in the panel.
               (step.id === firstOpenId ? (

@@ -13,8 +13,8 @@ describe('warmup error copy', () => {
     expect(message).not.toContain('undefined')
   })
 
-  test('a 404 says the mailbox is not a participant in this workspace', () => {
-    expect(warmupErrorMessage({ status: 404, data: {} }, fallback).toLowerCase()).toContain('participant')
+  test('a 404 says the mailbox is no longer part of warmup in this workspace', () => {
+    expect(warmupErrorMessage({ status: 404, data: {} }, fallback).toLowerCase()).toContain('part of warmup')
   })
 
   test('a 403 names the access problem rather than the data', () => {

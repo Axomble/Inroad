@@ -775,12 +775,12 @@ test('a lower-bounded zero renders as unestablished, never as a clean percentage
 test('a mailbox nothing could categorise says so, and shows no tabbed percentage', async ({ page }) => {
   const proving = card(page, 'proving@acme.test')
 
-  await expect(proving).toContainText('Not detectable — no partner could report a tab')
+  await expect(proving).toContainText('Not detectable — no partner mailbox can show tabs')
   // Scoped to the tabbed metric: the row legitimately shows inbox and spam
   // percentages, so only "a figure directly after the tabbed label" is the defect.
-  await expect(proving).not.toContainText(/tabbed 7d\s*[<\d]/)
+  await expect(proving).not.toContainText(/in tabs 7d\s*[<\d]/)
   // And it is not read as a penalty: nothing gates on this number.
-  await expect(proving).toContainText(/tabbed 7d[^·]*· gates nothing/)
+  await expect(proving).toContainText(/in tabs 7d[^·]*· info only/)
 })
 
 // The tabbed denominator is smaller than the placement one by construction, so the
@@ -789,8 +789,8 @@ test('a mailbox nothing could categorise says so, and shows no tabbed percentage
 test('a measured tabbed rate carries its own denominator, not the observations count', async ({ page }) => {
   const withheld = card(page, 'withheld@acme.test')
 
-  await expect(withheld).toContainText('tabbed 7d 35% of 25 tab-capable · gates nothing')
-  await expect(withheld).toContainText('40 observations')
+  await expect(withheld).toContainText('in tabs 7d 35% of 25 that can show tabs · info only')
+  await expect(withheld).toContainText('40 emails checked')
   await expect(withheld).not.toContainText(/not detectable/i)
 })
 
@@ -800,7 +800,7 @@ test('a measured tabbed rate carries its own denominator, not the observations c
 test('a measured zero renders as 0%, not as an absence', async ({ page }) => {
   const primary = card(page, 'primary@acme.test')
 
-  await expect(primary).toContainText('tabbed 7d 0% of 18 tab-capable · gates nothing')
+  await expect(primary).toContainText('in tabs 7d 0% of 18 that can show tabs · info only')
   await expect(primary).not.toContainText(/not detectable/i)
 })
 
@@ -832,8 +832,8 @@ test('a checked-and-absent verdict and an unreported one do not read alike', asy
 test('a failing verdict is visible and says plainly that it gates nothing', async ({ page }) => {
   const identity = await openIdentity(page, 'withheld@acme.test')
 
-  await expect(identity).toContainText(/fail[^·]*· gates nothing/)
-  await expect(identity).toContainText(/no threshold, lane or promotion decision reads any of it/i)
+  await expect(identity).toContainText(/fail[^·]*· info only/)
+  await expect(identity).toContainText(/nothing is paused, slowed or promoted based on it/i)
   // The identity is one observation, and a dated one — not a live configuration.
   await expect(identity).toContainText(/observed/i)
 })
@@ -850,7 +850,7 @@ test('a never-stamped mailbox reads as unobserved, never as failing', async ({ p
   // do not read as three things to go and fix.
   await expect(identity).toContainText(/stay unreported however well the mail authenticates/i)
   // Nothing failed, so nothing carries the failure disclaimer either.
-  await expect(identity).not.toContainText(/· gates nothing/)
+  await expect(identity).not.toContainText(/· info only/)
   // And the limitation is the partner's, not this mailbox's own provider.
   await expect(identity).not.toContainText(/this provider|your provider/i)
 })
@@ -1036,7 +1036,7 @@ test('a matrix that is one unresolved row says nothing is known about any provid
 test('the matrix says it gates nothing, and gives the calibration reason', async ({ page }) => {
   const panel = await openRoutes(page, 'withheld@acme.test')
 
-  await expect(panel).toContainText(/no threshold, lane or promotion decision reads any of it/i)
+  await expect(panel).toContainText(/nothing is paused, slowed or promoted based on it/i)
   await expect(panel).toContainText(/nobody has yet seen what a normal per-route rate looks like/i)
   await expect(panel).toContainText(/it can, on every provider/i)
 })
@@ -1051,7 +1051,7 @@ test('the matrix says it gates nothing, and gives the calibration reason', async
  * degradation would pass on somebody else's text.
  */
 function incidentsPanel(page: Page) {
-  return page.getByRole('region', { name: 'Correlated degradation' })
+  return page.getByRole('region', { name: 'Shared problems' })
 }
 
 /**
@@ -1118,10 +1118,10 @@ test('a correlation names its members and claims no cause', async ({ page }) => 
   await expect(signing).toContainText(/signed by the same DKIM d= domain/i)
 
   await expect(panel).toContainText(/does not say the shared value is why/i)
-  await expect(panel).toContainText(/two dimensions can carry one underlying problem/i)
+  await expect(panel).toContainText(/two rows can point at one underlying problem/i)
   await expect(panel).not.toContainText(/caused by|root cause|is broken|at fault|to blame/i)
   // Design §7's two reasons, on the screen with the rows.
-  await expect(panel).toContainText(/no threshold, lane or promotion decision reads any of it/i)
+  await expect(panel).toContainText(/nothing is paused, slowed or promoted based on it/i)
   await expect(panel).toContainText(/steerable by whoever controls a mailbox domain's MX/i)
 })
 
@@ -1153,14 +1153,14 @@ test('an empty array over a degrading pool is an answer, not an empty state', as
   await serveOverview(page, UNATTRIBUTED_OVERVIEW)
   const panel = incidentsPanel(page)
 
-  await expect(panel).toContainText('5 mailboxes are degrading')
+  await expect(panel).toContainText('5 mailboxes are struggling')
   await expect(panel).toContainText(/no shared cause found/i)
   await expect(panel).toContainText(/work through them one at a time/i)
   // It names what was searched, so "no shared cause" is not read as a claim about
   // every possible cause.
   await expect(panel).toContainText(/no destination, signing domain, return path or sender domain/i)
   // And it is not the OTHER empty answer: this pool is not quiet.
-  await expect(panel).not.toContainText(/no degradation in the pool/i)
+  await expect(panel).not.toContainText(/every mailbox in warmup is doing fine/i)
   await expect(panel.locator('[data-slot="incident-value"]')).toHaveCount(0)
 })
 
@@ -1183,7 +1183,7 @@ test('a server that does not report correlations shows no panel at all', async (
 // their spam evidence was filtered out, because none of it was.
 test('an observer verdict is a suspicion with its arithmetic, and excludes nothing', async ({ page }) => {
   await serveOverview(page, CORRELATED_OVERVIEW)
-  const panel = page.getByRole('region', { name: 'Spam reporting outliers' })
+  const panel = page.getByRole('region', { name: 'Spam complaints' })
   await expect(panel).toBeVisible()
 
   // Worst multiple first, and the one the pool cannot name is named by its id
@@ -1225,8 +1225,8 @@ test('an observer verdict is a suspicion with its arithmetic, and excludes nothi
   const note = panel.locator('[data-slot="observers-nothing-excluded"]')
   await expect(note).toContainText(/nothing is excluded/i)
   await expect(note).toContainText(/still counts as evidence/i)
-  await expect(note).toContainText(/no health state, lane or promotion decision reads any of this/i)
-  await expect(note).toContainText(/the peer comparison is gameable/i)
+  await expect(note).toContainText(/none of this changes any mailbox's status/i)
+  await expect(note).toContainText(/a wrong call here would silence the one mailbox reporting real spam/i)
   const noteBox = await note.boundingBox()
   const rowBox = await microsoft.boundingBox()
   if (!noteBox || !rowBox) throw new Error('the note and the rows must both be laid out')
@@ -1264,7 +1264,7 @@ test('designating a sentinel shows what it costs before anything is written', as
 
   // The pool's arrangement, named — one sentinel out of three, and no advisory,
   // because the server said this pool is inside the advised share.
-  const panel = page.getByRole('region', { name: 'Measurement sentinels' })
+  const panel = page.getByRole('region', { name: 'Reference mailboxes' })
   await expect(panel).toBeVisible()
   await expect(panel.locator('[data-slot="sentinel-mailbox"]')).toHaveText(['reference@acme.test'])
   await expect(panel.locator('[data-slot="sentinel-advisory"]')).toHaveCount(0)
@@ -1273,8 +1273,8 @@ test('designating a sentinel shows what it costs before anything is written', as
 
   const plain = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'plain@acme.test' })
   const label = plain.locator('[data-slot="evidence-confidence"]')
-  await expect(label).toContainText('Peer-only')
-  await expect(label).toContainText('gates nothing')
+  await expect(label).toContainText('its warmup partners only')
+  await expect(label).toContainText('info only')
   // The ordinary case is not a fault. Asserted on the label node alone, because
   // the card around it legitimately carries a lane reason and a tabbed note that
   // would make a card-wide assertion pass on somebody else's words.
@@ -1283,19 +1283,19 @@ test('designating a sentinel shows what it costs before anything is written', as
   // The corroborated row ships the count behind its label, as every other
   // inference on this screen ships its arithmetic.
   const watched = page.locator('[data-slot="page-body"] > ul > li').filter({ hasText: 'watched@acme.test' })
-  await expect(watched.locator('[data-slot="evidence-confidence"]')).toContainText('9 from a sentinel')
+  await expect(watched.locator('[data-slot="evidence-confidence"]')).toContainText('9 from a reference mailbox')
 
   // The first click asks. It must not write.
-  await page.getByRole('button', { name: 'Designate as sentinel for plain@acme.test' }).click()
+  await page.getByRole('button', { name: 'Make reference mailbox for plain@acme.test' }).click()
   const prompt = plain.locator('[data-slot="sentinel-prompt"]')
-  await expect(prompt).toContainText(/receive warmup mail from members that are degrading/i)
+  await expect(prompt).toContainText(/receive warmup mail from mailboxes that are struggling/i)
   await expect(prompt).toContainText(/shielded/i)
   // Containment outranks measurement: the prompt must not read as opening this
   // mailbox to quarantined senders too.
-  await expect(prompt).toContainText(/quarantined or blocked mailbox is withheld/i)
+  await expect(prompt).toContainText(/blocked or paused for safety stays out of warmup entirely/i)
   expect(sentinelWrites, 'asking must not write').toEqual([])
 
-  await page.getByRole('button', { name: 'Designate as sentinel', exact: true }).click()
+  await page.getByRole('button', { name: 'Make reference mailbox', exact: true }).click()
 
   await expect.poll(() => sentinelWrites.length).toBe(1)
   expect(sentinelWrites[0]).toBe('{"is_sentinel":true}')

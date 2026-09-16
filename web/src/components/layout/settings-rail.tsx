@@ -1,6 +1,6 @@
-import { Link } from '@tanstack/react-router'
 import { AlertTriangle, KeyRound, ListPlus, Plug, Server, Settings, ShieldCheck, Sparkles, Tags, Webhook, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { NavLink } from '@/components/shared/nav-link'
 import { useHasRole } from '@/hooks/use-has-role'
 import type { WorkspaceRole } from '@/lib/rbac'
 
@@ -91,22 +91,23 @@ export function SettingsRail() {
       {items.map((item) => {
         const Icon = item.icon
         return (
-          <Link
+          <NavLink
             key={item.to}
             to={item.to}
             data-slot="settings-rail-link"
+            // Every row here is a leaf — no settings path is the parent of
+            // another — so prefix matching cannot light up two at once.
+            exact={false}
             className={cn(
               'flex h-9 shrink-0 items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-muted-foreground transition-colors',
               'hover:bg-surface-2 hover:text-foreground',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
             )}
-            activeProps={{
-              className: 'bg-surface-2 font-medium text-foreground shadow-[inset_0_0_0_1px_var(--border)]',
-            }}
+            activeClassName="bg-surface-2 font-medium text-foreground shadow-[inset_0_0_0_1px_var(--border)]"
           >
             <Icon className="size-4 shrink-0" strokeWidth={1.75} aria-hidden="true" />
             <span className="truncate">{item.label}</span>
-          </Link>
+          </NavLink>
         )
       })}
     </nav>

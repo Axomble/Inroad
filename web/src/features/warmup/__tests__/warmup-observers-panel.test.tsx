@@ -49,7 +49,7 @@ function renderPanel(observers: WarmupDiscountedObserver[] | undefined, pool: Wa
  * browser too — a named region rather than a class or a test id.
  */
 function panel() {
-  return screen.queryByRole('region', { name: /spam reporting outliers/i })
+  return screen.queryByRole('region', { name: /spam complaints/i })
 }
 
 /** The panel as an operator reads it: all its text, in one string. */
@@ -101,9 +101,9 @@ test('the verdict reads as a suspicion, never as a sanction', () => {
 
   expect(panelText()).toMatch(/reporting more spam than its peers/i)
   expect(panelText()).toMatch(/not proof that any of them is wrong/i)
-  // A legitimately strict provider produces exactly this signal, which is why the
+  // A strict spam filter produces exactly this signal, which is why the
   // row is a comparison rather than a judgement.
-  expect(panelText()).toMatch(/a legitimately strict provider looks exactly the same/i)
+  expect(panelText()).toMatch(/strict spam filter looks exactly the same/i)
   expect(panelText()).not.toMatch(/untrusted|not trusted|hostile|discounted|blocked|removed|dropped|penalis|penaliz/i)
 })
 
@@ -116,10 +116,10 @@ test('the panel says plainly that nothing is excluded and the reports still coun
   const note = document.querySelector('[data-slot="observers-nothing-excluded"]')?.textContent ?? ''
   expect(note).toMatch(/nothing is excluded/i)
   expect(note).toMatch(/still counts as evidence/i)
-  expect(note).toMatch(/no health state, lane or promotion decision reads any of this/i)
+  expect(note).toMatch(/none of this changes any mailbox's status/i)
   // And why acting on it is deferred, which is the part that keeps "nothing is
   // excluded" from reading as an oversight nobody noticed.
-  expect(note).toMatch(/the peer comparison is gameable/i)
+  expect(note).toMatch(/does not act on it automatically/i)
   expect(note).toMatch(/leave the sender it reported looking cleaner than it is/i)
 })
 
@@ -249,8 +249,8 @@ test('an empty array is an answer rather than an empty state, and invents no flo
   expect(panel()).toBeInTheDocument()
   expect(mailboxes()).toEqual([])
   expect(stats()).toEqual([])
-  expect(panelText()).toMatch(/reported spam far out of line with its peers/i)
-  expect(panelText()).toMatch(/which is an answer, not a gap/i)
+  expect(panelText()).toMatch(/marked spam far out of line with its peers/i)
+  expect(panelText()).toMatch(/a good sign/i)
   // It says what it cannot rule out, without stating a sample floor or a cohort
   // size this side never received.
   expect(panelText()).toMatch(/too few comparable peers, or too few reports of its own/i)
@@ -267,7 +267,7 @@ test('an unresolved cohort never renders as a provider', () => {
   expect(stats()).toEqual([])
   expect(panelText()).not.toMatch(/unknown/i)
   // And the panel falls back to the honest reading, not to silence.
-  expect(panelText()).toMatch(/which is an answer, not a gap/i)
+  expect(panelText()).toMatch(/a good sign/i)
 })
 
 // One resolved verdict beside an unresolved one still reports the resolved one:

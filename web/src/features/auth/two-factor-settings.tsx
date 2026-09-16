@@ -53,7 +53,7 @@ export function TwoFactorSettings() {
       <PageTopbar
         eyebrow="Security"
         title="Two-factor authentication"
-        subtitle="A second factor at sign-in"
+        subtitle="An extra step at sign-in that keeps your account safe"
       />
 
       {notice && <NoticeBanner notice={notice} />}

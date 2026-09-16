@@ -28,8 +28,8 @@ test('nothing renders when no overview arrived', () => {
 test('an observed-nothing pool gets a section and a sentence', () => {
   render(<WarmupContentVersionsPanel versions={[]} />)
 
-  expect(screen.getByRole('heading', { name: /placement by template/i })).toBeInTheDocument()
-  expect(screen.getByText(/nothing to split by template/i)).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: /where your warmup emails land/i })).toBeInTheDocument()
+  expect(screen.getByText(/no warmup emails have landed yet/i)).toBeInTheDocument()
 })
 
 test('a template renders its fingerprint, its counts and both rates', () => {
@@ -39,7 +39,7 @@ test('a template renders its fingerprint, its counts and both rates', () => {
   // The full fingerprint stays reachable — it is the handle for matching the row
   // against the library.
   expect(screen.getByTitle('sl1:aaaaaaaaaaaaaaaa')).toBeInTheDocument()
-  expect(screen.getByText(/40 inbox, 10 spam over 50 observations/)).toBeInTheDocument()
+  expect(screen.getByText(/40 in the inbox, 10 in spam, of 50 emails checked/)).toBeInTheDocument()
   expect(screen.getByText('80%')).toBeInTheDocument()
   expect(screen.getByText('20%')).toBeInTheDocument()
 })
@@ -54,7 +54,7 @@ test('a below-floor template still shows the evidence behind its missing rates',
     />,
   )
 
-  expect(screen.getByText(/4 inbox, 1 spam over 5 observations/)).toBeInTheDocument()
+  expect(screen.getByText(/4 in the inbox, 1 in spam, of 5 emails checked/)).toBeInTheDocument()
   expect(screen.getAllByText('Not established')).toHaveLength(2)
   // The false-clean reading this panel must never produce.
   expect(screen.queryByText('0%')).not.toBeInTheDocument()

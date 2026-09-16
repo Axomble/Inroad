@@ -71,7 +71,7 @@ export function AiSettingsPage() {
       <PageTopbar
         eyebrow="Workspace"
         title="AI"
-        subtitle="Providers, enabled models, and workspace defaults for the assistant"
+        subtitle="Which AI models your assistant can use, and which one it picks by default"
       />
 
       <PageBody>

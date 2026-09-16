@@ -79,20 +79,20 @@ test('a pool with no sentinels is the ordinary case, never a misconfiguration', 
   expect(message).not.toMatch(/\bwarning\b|\bfix\b|\berror\b/i)
 })
 
-// It explains rather than nags: what a sentinel WOULD buy, in terms of the
-// same-lane limitation an operator can already see on the cards below.
-test('the empty state explains what a sentinel would buy, in terms of the lane limit', () => {
+// It explains rather than nags: what a reference WOULD buy, in terms of the
+// same-group limitation an operator can already see on the cards below.
+test('the empty state explains what a reference would buy, in terms of the group limit', () => {
   const message = noneMessage(4)
 
-  expect(message).toMatch(/own lane/i)
-  expect(message).toMatch(/watch/i)
+  expect(message).toMatch(/same shape|same group/i)
+  expect(message).toMatch(/struggling/i)
   expect(message).toMatch(/measured/i)
 })
 
 // And it prices it in the same breath. The cost is the whole reason an operator
 // might decline, so an explainer that omits it is a recruitment pitch.
-test('the empty state states the exposure a sentinel would take on', () => {
-  expect(noneMessage(4)).toMatch(/receives? (warmup )?mail from .*degrading|exposure|exposed/i)
+test('the empty state states the exposure a reference would take on', () => {
+  expect(noneMessage(4)).toMatch(/receives? (warmup )?mail from .*struggling|exposure|exposed?/i)
 })
 
 test('a designated pool reports the count and names the mailboxes carrying it', () => {
@@ -170,7 +170,7 @@ test('peer-only names the shared cause that makes it dependent, not weak', () =>
 
   expect(detail).toMatch(/independent/i)
   expect(detail).toMatch(/shared cause|both sides/i)
-  expect(detail).toMatch(/own lane|lane-mates/i)
+  expect(detail).toMatch(/own warmup partners|same group/i)
 })
 
 test('a corroborated reading names how many observations came from a sentinel', () => {
@@ -221,9 +221,9 @@ test('designating names the exposure it buys before the flip', () => {
 
   expect(prompt.title).toContain('one@acme.test')
   expect(prompt.body).toMatch(/receive/i)
-  expect(prompt.body).toMatch(/degrading/i)
+  expect(prompt.body).toMatch(/struggling/i)
   expect(prompt.body).toMatch(/shielded|the rest of the pool is not|other mailboxes are not/i)
-  expect(prompt.confirm).toMatch(/sentinel/i)
+  expect(prompt.confirm).toMatch(/reference/i)
 })
 
 // A flag, not a lane: designation says nothing about this mailbox's own standing,
@@ -243,6 +243,6 @@ test('undesignating says what becomes of the evidence already gathered', () => {
 
   expect(prompt.title).toContain('one@acme.test')
   expect(prompt.body).toMatch(/already|existing/i)
-  expect(prompt.body).toMatch(/peer-only|own lane/i)
-  expect(prompt.confirm).not.toMatch(/^Designate/)
+  expect(prompt.body).toMatch(/partners only|own group/i)
+  expect(prompt.confirm).not.toMatch(/^Make/)
 })
