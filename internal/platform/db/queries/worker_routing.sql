@@ -235,11 +235,40 @@ RETURNING worker_id;
 --     derives settled_before from the SAME policy value it then applies, so the
 --     two cannot drift.
 --
--- ORDER BY is a SCAN HEURISTIC and nothing more. It puts the rows most likely to
--- be urgent in front of the LIMIT so a large fleet does not spend a tick on
--- healthy mailboxes while a blocked worker waits; the caller re-derives the real
--- tier in Go and re-sorts (fleetrotate.Prioritise). If this ordering were wrong
--- the only cost would be a tick that moved less, never a wrong move.
+-- ORDER BY is a SCAN HEURISTIC and nothing more. The caller re-derives the real
+-- tier in Go and re-sorts (fleetrotate.Prioritise), so if this ordering were
+-- wrong the only cost would be a tick that moved less, never a wrong move. Its
+-- four keys are two pairs, and the pairs answer different questions.
+--
+-- KEYS 1-2 DECIDE WHO PREEMPTS, and they are absolute. An incumbent that is not
+-- live sorts ahead of everything (its affinity queue has no consumer, so the
+-- mailbox's tasks neither run nor fail nor alert), then anything the provider has
+-- refused, then everything else. Every urgent row therefore precedes every
+-- merely-settled one whatever the keys below do — which is what lets the pair
+-- below be a fairness device rather than a delay on a broken mailbox.
+--
+-- KEYS 3-4 DECIDE WHICH SETTLED ROWS THIS TICK GETS TO SEE. Together they are a
+-- RING over mailbox_id starting at scan_cursor: rows at or after the cursor
+-- first, then the rest, each arc in id order. The caller advances the cursor with
+-- the wall clock (coreapi/inprocess.rotationScanCursor), so successive ticks read
+-- successive arcs of the fleet and every qualifying row comes round.
+--
+-- They replaced `a.assigned_at ASC`, which starved. Ordered by residency alone
+-- the LIMIT always returns the same longest-resident rows, and a settled
+-- assignment is NOT changed by being scanned — so a window full of rows the
+-- policy declines (the normal state of a healthy fleet, and the state this
+-- prefilter is a deliberate superset for) stays full forever and every qualifying
+-- assignment behind it is never examined again. On any fleet with more than
+-- row_limit settled assignments that is the steady state, not an edge case.
+-- Residency has not been lost: fleetrotate.Prioritise still spends the tick's
+-- move budget longest-resident first, WITHIN the rows this returned.
+--
+-- mailboxes.id is gen_random_uuid() with no client-supplied path, and v4's fixed
+-- version/variant nibbles sit below the 48 random leading bits that decide this
+-- ordering, so the ring is an unbiased sample: a row's expected wait does not
+-- depend on where it sits. The cursor costs nothing — the ORDER BY was already a
+-- top-N sort over a fleet-wide scan of this disjunction, and swapping a timestamp
+-- key for a boolean does not change that.
 --
 -- Paused and errored mailboxes are excluded: they are not sending, so moving one
 -- buys nothing and would spend a unit of the tick's move budget and one
@@ -285,7 +314,7 @@ WHERE mb.status = 'active'
   )
 ORDER BY (w.worker_id IS NOT NULL) ASC,
          coalesce(sig.block_events, 0) DESC,
-         a.assigned_at ASC,
+         (a.mailbox_id < @scan_cursor::uuid) ASC,
          a.mailbox_id ASC
 LIMIT @row_limit::int;
 

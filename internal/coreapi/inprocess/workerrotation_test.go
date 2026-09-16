@@ -1,6 +1,7 @@
 package inprocess
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/fleetdecision"
 	"github.com/inroad/inroad/internal/platform/fleetrotate"
+	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -97,6 +100,16 @@ func blockedCandidate(worker string) gen.ListRotationCandidatesRow {
 	}
 }
 
+// deadCandidate is one assignment whose worker stopped heartbeating. Nothing
+// about the provider explains it — an absent worker records no signals at all —
+// so this is the only input that produces TierUnreachable.
+func deadCandidate(worker string) gen.ListRotationCandidatesRow {
+	row := blockedCandidate(worker)
+	row.IncumbentLive = false
+	row.IncumbentBlockEvents = 0
+	return row
+}
+
 // twoWorkerFleet is the destination measurement: the blocked incumbent (which
 // the scorer must drop) and one healthy alternative.
 func twoWorkerFleet(blocked, healthy string) []gen.ListPlacementCandidatesRow {
@@ -113,7 +126,7 @@ func TestRotationOnASingleWorkerFleetScansNothingAtAll(t *testing.T) {
 	store := &fakeRotationStore{liveWorkers: 1, candidates: []gen.ListRotationCandidatesRow{blockedCandidate("w-only")}}
 	rec := &fakeDecisionRecorder{}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -144,7 +157,7 @@ func TestABlockedIncumbentIsMovedAndRecordedAsARotation(t *testing.T) {
 	}
 	rec := &fakeDecisionRecorder{}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -200,7 +213,7 @@ func TestTheDestinationIsMeasuredAsPlacementWouldMeasureIt(t *testing.T) {
 		},
 	}
 
-	if _, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, fleetrotate.Default()); err != nil {
+	if _, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: fleetrotate.Default()}); err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
 	if len(store.placementArgs) != 1 {
@@ -238,7 +251,7 @@ func TestTheDestinationMeasurementIsReReadAfterEveryMove(t *testing.T) {
 		},
 	}
 
-	moved, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -269,7 +282,7 @@ func TestAMailboxThatMovedUnderTheTickIsNeitherRotatedNorLogged(t *testing.T) {
 	}
 	rec := &fakeDecisionRecorder{}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
@@ -293,7 +306,7 @@ func TestALogWriteFailureDoesNotUndoOrStopTheRotation(t *testing.T) {
 	}
 	rec := &fakeDecisionRecorder{err: errors.New("decision log unavailable")}
 
-	moved, err := rotateFleet(context.Background(), store, rec, fleetrotate.Default())
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: rec, policy: fleetrotate.Default()})
 	if err != nil {
 		t.Fatalf("rotateFleet must not fail over a log write: %v", err)
 	}
@@ -315,7 +328,7 @@ func TestARotationWriteFailureFailsTheTick(t *testing.T) {
 		rotateErr: sentinel,
 	}
 
-	if _, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, fleetrotate.Default()); !errors.Is(err, sentinel) {
+	if _, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: fleetrotate.Default()}); !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want it to wrap %v", err, sentinel)
 	}
 }
@@ -356,7 +369,7 @@ func TestTheMoveBudgetIsSpentOnUrgentMailboxesFirst(t *testing.T) {
 		},
 	}
 
-	if _, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, p); err != nil {
+	if _, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: p}); err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
 	if len(store.rotations) == 0 {
@@ -394,11 +407,144 @@ func TestATickNeverExceedsTheMoveBudget(t *testing.T) {
 		},
 	}
 
-	moved, err := rotateFleet(context.Background(), store, &fakeDecisionRecorder{}, p)
+	moved, err := rotateFleet(context.Background(), rotationTick{store: store, recorder: &fakeDecisionRecorder{}, policy: p})
 	if err != nil {
 		t.Fatalf("rotateFleet: %v", err)
 	}
 	if moved != int64(p.MaxMoves) {
 		t.Fatalf("moved %d of %d candidates, want the budget %d", moved, len(rows), p.MaxMoves)
+	}
+}
+
+// The cursor is a clock, not a counter: it walks the whole mailbox-id space once
+// per sweep and arrives back where it started. That is what makes it stateless —
+// nothing is persisted between ticks, a missed tick costs nothing, and two
+// control-plane processes ticking at the same instant agree — and it is what
+// makes "every settled assignment comes round" true rather than hoped for.
+func TestTheScanCursorWalksTheWholeIdSpaceOncePerSweep(t *testing.T) {
+	const steps = 8
+	start := time.Now().Truncate(rotationScanSweep)
+
+	var cursors []uuid.UUID
+	for i := 0; i < steps; i++ {
+		cursors = append(cursors, rotationScanCursor(start.Add(time.Duration(i)*(rotationScanSweep/steps))))
+	}
+
+	if cursors[0] != (uuid.UUID{}) {
+		t.Errorf("the cursor at the start of a sweep is %s, want the ring's origin", cursors[0])
+	}
+	for i := 1; i < len(cursors); i++ {
+		if bytes.Compare(cursors[i-1][:], cursors[i][:]) >= 0 {
+			t.Fatalf("cursor %d (%s) did not advance past cursor %d (%s) — the mapping is not monotone, "+
+				"so part of the id space is never read", i, cursors[i], i-1, cursors[i-1])
+		}
+	}
+	// Past the halfway point by seven eighths of the way through, which is the
+	// difference between traversing the space and creeping across a corner of it.
+	if last := cursors[len(cursors)-1]; last[0] < 0x80 {
+		t.Errorf("the cursor reached only %s by the end of a sweep, want past the middle of the id space", last)
+	}
+	// The final instant of the sweep is the highest cursor of all. Asserted
+	// separately because it is where a mapping that scaled too aggressively would
+	// overflow and wrap — silently sending the tick back to the bottom of the
+	// ring while the sweep still had an arc to go.
+	end := rotationScanCursor(start.Add(rotationScanSweep - time.Nanosecond))
+	if bytes.Compare(cursors[len(cursors)-1][:], end[:]) >= 0 {
+		t.Errorf("the cursor at the last instant of a sweep is %s, not past %s — the mapping wrapped early", end, cursors[len(cursors)-1])
+	}
+	if got := rotationScanCursor(start.Add(rotationScanSweep)); got != cursors[0] {
+		t.Errorf("the cursor one sweep on is %s, want it back at %s — the ring must close", got, cursors[0])
+	}
+}
+
+// The sweep outlasts the residency floor, and by a clear margin. A mailbox the
+// cursor moved must be past the floor again before the cursor returns to it;
+// otherwise every sweep would arrive at rows it can only decline for a reason
+// that has nothing to do with where they should be.
+func TestTheScanSweepOutlastsTheResidencyFloor(t *testing.T) {
+	if floor := fleetrotate.Default().ResidencyFloor; rotationScanSweep < 2*floor {
+		t.Fatalf("scan sweep %s is less than twice the residency floor %s: the cursor would come back "+
+			"to mailboxes that are still serving it out", rotationScanSweep, floor)
+	}
+}
+
+// Each move lands on the series for the tier that justified it. An operator
+// seeing churn asks WHY, and the three tiers have three different answers and
+// three different fixes — a host that died, a provider refusing an egress IP, or
+// a score margin tuned too loose. One undifferentiated counter could not tell
+// them apart.
+func TestEveryRotationIsCountedUnderTheTierThatJustifiedIt(t *testing.T) {
+	ws := uuid.New()
+	blocked, dead := blockedCandidate("w-blocked"), deadCandidate("w-dead")
+	blocked.WorkspaceID, dead.WorkspaceID = ws, ws
+
+	store := &fakeRotationStore{
+		liveWorkers: 3,
+		candidates:  []gen.ListRotationCandidatesRow{blocked, dead},
+		placementFleet: func(int, gen.ListPlacementCandidatesParams) []gen.ListPlacementCandidatesRow {
+			// w-dead is absent from the live fleet, which is exactly what makes
+			// its mailbox unreachable rather than merely unhealthy.
+			return twoWorkerFleet("w-blocked", "w-healthy")
+		},
+	}
+	mtx := metrics.New()
+
+	moved, err := rotateFleet(context.Background(), rotationTick{
+		store: store, recorder: &fakeDecisionRecorder{}, mtx: mtx, policy: fleetrotate.Default(),
+	})
+	if err != nil {
+		t.Fatalf("rotateFleet: %v", err)
+	}
+	if moved != 2 {
+		t.Fatalf("moved = %d, want 2", moved)
+	}
+
+	families := metricstest.Scrape(t, mtx)
+	for tier, want := range map[string]float64{
+		fleetrotate.TierUnhealthy.String():   1,
+		fleetrotate.TierUnreachable.String(): 1,
+		// Nothing opportunistic happened, so that series must stay empty: a
+		// rotation counter that lumped a forced move in with a repack would make
+		// the one tier worth alerting on unreadable.
+		fleetrotate.TierBalance.String(): 0,
+	} {
+		got := metricstest.CounterValue(families, "inroad_fleet_rotations_total", map[string]string{"tier": tier})
+		if got != want {
+			t.Errorf("rotations{tier=%q} = %v, want %v", tier, got, want)
+		}
+	}
+}
+
+// A decision the guarded UPDATE refused is NOT a rotation and must not be
+// counted. This is the same rule the decision log follows (nothing is written
+// for a move that did not happen), and counting decisions instead of moves would
+// leave this counter permanently disagreeing with both that log and the
+// assignment table.
+func TestARotationThatLostTheRaceIsNotCounted(t *testing.T) {
+	store := &fakeRotationStore{
+		liveWorkers: 2,
+		candidates:  []gen.ListRotationCandidatesRow{blockedCandidate("w-blocked")},
+		placementFleet: func(int, gen.ListPlacementCandidatesParams) []gen.ListPlacementCandidatesRow {
+			return twoWorkerFleet("w-blocked", "w-healthy")
+		},
+		rotateErr: pgx.ErrNoRows,
+	}
+	mtx := metrics.New()
+
+	if _, err := rotateFleet(context.Background(), rotationTick{
+		store: store, recorder: &fakeDecisionRecorder{}, mtx: mtx, policy: fleetrotate.Default(),
+	}); err != nil {
+		t.Fatalf("rotateFleet: %v", err)
+	}
+
+	families := metricstest.Scrape(t, mtx)
+	for _, tier := range []string{
+		fleetrotate.TierUnhealthy.String(),
+		fleetrotate.TierUnreachable.String(),
+		fleetrotate.TierBalance.String(),
+	} {
+		if got := metricstest.CounterValue(families, "inroad_fleet_rotations_total", map[string]string{"tier": tier}); got != 0 {
+			t.Errorf("rotations{tier=%q} = %v after a move that never happened, want 0", tier, got)
+		}
 	}
 }

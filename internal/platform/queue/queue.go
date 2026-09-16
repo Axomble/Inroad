@@ -1076,6 +1076,13 @@ func RegisterRecipientESPSweep(sch *asynq.Scheduler) error {
 // scans a fixed number of assignments and moves at most fleetrotate.Policy's
 // budget. Overlapping ticks are harmless — every move is guarded on the worker
 // it was decided from, so the loser of a race matches zero rows.
+//
+// The RATE is also how finely the opportunistic scan samples the fleet. A tick
+// reads a fixed-size window from a rotating cursor that crosses the whole
+// mailbox-id space in a day (coreapi/inprocess.rotationScanSweep), so slowing
+// this schedule does not merely delay each pass — it widens the arc between
+// consecutive windows, and past a point leaves settled assignments unread for a
+// whole sweep. Read that constant's doc before changing this one.
 func RegisterFleetRotate(sch *asynq.Scheduler) error {
 	return registerControlSweep(sch, "@every 5m", TaskFleetRotate)
 }

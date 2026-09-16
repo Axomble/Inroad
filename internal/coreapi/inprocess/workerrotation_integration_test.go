@@ -14,6 +14,8 @@ import (
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/fleetdecision"
 	"github.com/inroad/inroad/internal/platform/fleetrotate"
+	"github.com/inroad/inroad/internal/platform/metrics"
+	"github.com/inroad/inroad/internal/platform/metrics/metricstest"
 	"github.com/inroad/inroad/internal/platform/warmup"
 )
 
@@ -48,6 +50,20 @@ func ageAssignment(t *testing.T, ctx context.Context, pool *pgxpool.Pool, mb uui
 		mb, age.String()); err != nil {
 		t.Fatalf("age assignment for %s: %v", mb, err)
 	}
+}
+
+// justAfter is the immediate successor of a uuid, which as a scan cursor is the
+// value that puts that row at the very BACK of the ring instead of the front.
+// Carries through, and an all-ones uuid wraps to the ring's origin — which is
+// the same answer, since the row would then be the largest id there is.
+func justAfter(u uuid.UUID) uuid.UUID {
+	for i := len(u) - 1; i >= 0; i-- {
+		u[i]++
+		if u[i] != 0 {
+			break
+		}
+	}
+	return u
 }
 
 // rotationDecisions reads the decision log for one mailbox through the query
@@ -152,6 +168,54 @@ func TestABlockedWorkerLosesItsMailboxesEvenThoughPlacementWouldKeepThem(t *test
 	}
 	if strings.Contains(got.Reason, " over ") {
 		t.Errorf("reason = %q, which reads as a score comparison that was never made", got.Reason)
+	}
+}
+
+// The counter reaches the registry through the REAL composition path — the
+// client's own *metrics.Metrics, not one handed to rotateFleet by a test. A tick
+// that forgot to pass it would leave the series silent while every other
+// assertion in this file still passed, which is the failure mode this covers:
+// the unit tests drive rotateFleet directly and cannot see the wiring at all.
+func TestARealRotationPassCountsTheMoveUnderItsTier(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	mtx := metrics.New()
+	c := routingClientWithMetrics(pool, q, mtx)
+	resetRouting(t, ctx, pool)
+
+	ws, err := q.CreateWorkspace(ctx, "Rotation metric "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	for _, w := range []string{"rot-metric-blocked", "rot-metric-ok"} {
+		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.127", "hostname"); err != nil {
+			t.Fatalf("heartbeat %s: %v", w, err)
+		}
+	}
+
+	mb := createRoutingMailbox(t, ctx, q, ws.ID)
+	if _, err := q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: mb, WorkspaceID: ws.ID, WorkerID: "rot-metric-blocked",
+		Band: warmup.RiskBandHealthy, LiveSince: liveSinceNow(),
+	}); err != nil {
+		t.Fatalf("seed assignment: %v", err)
+	}
+	blockWorkerForProvider(t, ctx, c, "rot-metric-blocked", "smtp", 0)
+
+	if moved, err := c.RotateMailboxWorkers(ctx); err != nil || moved != 1 {
+		t.Fatalf("RotateMailboxWorkers moved %d (err=%v), want 1", moved, err)
+	}
+
+	families := metricstest.Scrape(t, mtx)
+	if got := metricstest.CounterValue(families, "inroad_fleet_rotations_total",
+		map[string]string{"tier": fleetrotate.TierUnhealthy.String()}); got != 1 {
+		t.Errorf("rotations{tier=unhealthy} = %v, want 1", got)
+	}
+	// The blocked incumbent was never scored against anything, so this was not an
+	// opportunistic move and must not appear as one.
+	if got := metricstest.CounterValue(families, "inroad_fleet_rotations_total",
+		map[string]string{"tier": fleetrotate.TierBalance.String()}); got != 0 {
+		t.Errorf("rotations{tier=balance} = %v for a forced move, want 0", got)
 	}
 }
 
@@ -406,6 +470,158 @@ func TestRotationKeepsEachMailboxWithItsOwnWorkspace(t *testing.T) {
 				t.Errorf("mailbox %s has %d decisions under a FOREIGN workspace: %+v", mb, len(d), d)
 			}
 		}
+	}
+}
+
+// STARVATION, and the cursor that ends it.
+//
+// The scan reads a fixed forty rows. Ordered by residency alone, those forty are
+// the same forty on every tick — a settled assignment is not moved BY being
+// scanned, so a window full of rows the policy declines stays full forever, and
+// a qualifying mailbox behind it is never examined again for as long as the
+// fleet runs. This fixture is that state: sixty long-resident mailboxes whose
+// only eligible destination is worse than where they already are (so the window
+// never drains), and one younger mailbox on a worker crushed far past target
+// (so it genuinely should move). Under residency ordering it sits at row
+// sixty-one and no number of ticks reaches it.
+//
+// The urgent tiers are deliberately absent here, and that is the point: they are
+// ordered ahead of the cursor, not by it, so nothing in this test can reorder
+// them (TestTheScanCursorNeverDelaysAnUnreachableIncumbent).
+func TestAnOpportunisticCandidateBehindTheScanWindowIsReachedWithinASweep(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	c := routingClient(pool, q)
+	resetRouting(t, ctx, pool)
+
+	jammed, err := q.CreateWorkspace(ctx, "Rotation jam "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	starved, err := q.CreateWorkspace(ctx, "Rotation starved "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	for _, w := range []string{"rot-jam", "rot-crush", "rot-dest"} {
+		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.128", "hostname"); err != nil {
+			t.Fatalf("heartbeat %s: %v", w, err)
+		}
+	}
+
+	// The jam: sixty gmail mailboxes, long settled, on a worker nothing beats.
+	// rot-dest is blocked for gmail — the health gate drops it from their fleet
+	// entirely — and rot-crush is far over target, so every one of these is
+	// examined and declined. They qualify for the scan and never leave it.
+	const jam = 60
+	seedAssignments(t, ctx, q, jammed.ID, "rot-jam", warmup.RiskBandHealthy, "gmail", jam)
+	blockWorkerForProvider(t, ctx, c, "rot-dest", "gmail", 0)
+	if _, err := pool.Exec(ctx,
+		`UPDATE mailbox_worker_assignments SET assigned_at = now() - interval '30 days' WHERE worker_id = 'rot-jam'`); err != nil {
+		t.Fatalf("age the jam: %v", err)
+	}
+
+	// The starved candidate: one settled smtp mailbox on a worker carrying sixty
+	// freshly placed ones. Those sixty are NOT scan candidates (nothing about
+	// them is urgent and they are nowhere near the residency floor), so they only
+	// weigh the worker down — which is exactly the imbalance an opportunistic
+	// rotation exists to relieve.
+	seedAssignments(t, ctx, q, starved.ID, "rot-crush", warmup.RiskBandHealthy, "smtp", 60)
+	mb := createRoutingMailbox(t, ctx, q, starved.ID)
+	if _, err := q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: mb, WorkspaceID: starved.ID, WorkerID: "rot-crush",
+		Band: warmup.RiskBandHealthy, LiveSince: liveSinceNow(),
+	}); err != nil {
+		t.Fatalf("seed the starved assignment: %v", err)
+	}
+	// Younger than every row in the jam, which under residency ordering is the
+	// whole of its problem.
+	ageAssignment(t, ctx, pool, mb, 20*24*time.Hour)
+
+	// One sweep of the cursor. Each step advances it a twelfth of the id space —
+	// about five of these sixty-one rows against a forty-row window — so
+	// consecutive windows overlap heavily and the sweep reaches every one of
+	// them.
+	const steps = 12
+	base := time.Now()
+	for i := 0; i < steps; i++ {
+		tick := rotationTick{
+			store:      q,
+			recorder:   c,
+			policy:     fleetrotate.Default(),
+			scanCursor: rotationScanCursor(base.Add(time.Duration(i) * (rotationScanSweep / steps))),
+		}
+		if _, err := rotateFleet(ctx, tick); err != nil {
+			t.Fatalf("rotation tick %d: %v", i, err)
+		}
+	}
+
+	if got := assignedWorker(t, ctx, pool, mb); got != "rot-dest" {
+		t.Fatalf("the starved mailbox is still on %q after a full sweep, want rot-dest — "+
+			"a scan ordered by residency alone never reaches row %d", got, jam+1)
+	}
+	// And the sweep moved that one mailbox and nothing else. Reaching more of the
+	// fleet must not mean MOVING more of it: the jam is declined on the margin,
+	// which is the brake, and a cursor that made those sixty movable would be
+	// churning away exactly the IP trust rotation is supposed to protect.
+	var elsewhere int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM mailbox_worker_assignments WHERE worker_id <> 'rot-jam' AND worker_id <> 'rot-crush'`).Scan(&elsewhere); err != nil {
+		t.Fatalf("count moved assignments: %v", err)
+	}
+	if elsewhere != 1 {
+		t.Fatalf("a full sweep moved %d mailboxes, want exactly 1 — the jam must still be declining on the score margin", elsewhere)
+	}
+}
+
+// The cursor reorders the OPPORTUNISTIC tail of the scan and nothing above it.
+// An unreachable incumbent has no consumer for its affinity queue, so its
+// mailbox's tasks neither run nor fail nor alert; making it wait for its turn on
+// a ring would be the one starvation worth caring about, traded for the one that
+// is not. Here the whole scan window is full of settled rows and the urgent row
+// is the very last one the cursor would reach — and it still moves first.
+func TestTheScanCursorNeverDelaysAnUnreachableIncumbent(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	c := routingClient(pool, q)
+	resetRouting(t, ctx, pool)
+
+	ws, err := q.CreateWorkspace(ctx, "Rotation preempt "+uuid.NewString())
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	for _, w := range []string{"rot-pre-jam", "rot-pre-dead", "rot-pre-dest"} {
+		if err := c.UpsertWorkerHeartbeat(ctx, w, "203.0.113.129", "hostname"); err != nil {
+			t.Fatalf("heartbeat %s: %v", w, err)
+		}
+	}
+
+	// More settled rows than the scan will read, so the urgent one can only be
+	// seen if it sorts ahead of every one of them.
+	seedAssignments(t, ctx, q, ws.ID, "rot-pre-jam", warmup.RiskBandHealthy, "gmail", rotationScanLimit+20)
+	blockWorkerForProvider(t, ctx, c, "rot-pre-dest", "gmail", 0)
+	if _, err := pool.Exec(ctx,
+		`UPDATE mailbox_worker_assignments SET assigned_at = now() - interval '30 days' WHERE worker_id = 'rot-pre-jam'`); err != nil {
+		t.Fatalf("age the jam: %v", err)
+	}
+
+	mb := createRoutingMailbox(t, ctx, q, ws.ID)
+	if _, err := q.InsertMailboxWorkerAssignment(ctx, gen.InsertMailboxWorkerAssignmentParams{
+		MailboxID: mb, WorkspaceID: ws.ID, WorkerID: "rot-pre-dead",
+		Band: warmup.RiskBandHealthy, LiveSince: liveSinceNow(),
+	}); err != nil {
+		t.Fatalf("seed the unreachable assignment: %v", err)
+	}
+	killWorker(t, ctx, pool, "rot-pre-dead", 2*workerLiveWindow)
+
+	// The cursor placed exactly one past this mailbox's id, so on the ring it is
+	// the LAST row of them all rather than the first. Nothing but the urgency
+	// keys can rescue it.
+	tick := rotationTick{store: q, recorder: c, policy: fleetrotate.Default(), scanCursor: justAfter(mb)}
+	if _, err := rotateFleet(ctx, tick); err != nil {
+		t.Fatalf("rotateFleet: %v", err)
+	}
+	if got := assignedWorker(t, ctx, pool, mb); got == "rot-pre-dead" {
+		t.Fatal("the mailbox is still pinned to a worker that stopped heartbeating: the cursor delayed an urgent row")
 	}
 }
 
