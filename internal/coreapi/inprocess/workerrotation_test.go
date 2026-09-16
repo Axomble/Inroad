@@ -1,6 +1,7 @@
 package inprocess
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -412,6 +413,58 @@ func TestATickNeverExceedsTheMoveBudget(t *testing.T) {
 	}
 	if moved != int64(p.MaxMoves) {
 		t.Fatalf("moved %d of %d candidates, want the budget %d", moved, len(rows), p.MaxMoves)
+	}
+}
+
+// The cursor is a clock, not a counter: it walks the whole mailbox-id space once
+// per sweep and arrives back where it started. That is what makes it stateless —
+// nothing is persisted between ticks, a missed tick costs nothing, and two
+// control-plane processes ticking at the same instant agree — and it is what
+// makes "every settled assignment comes round" true rather than hoped for.
+func TestTheScanCursorWalksTheWholeIdSpaceOncePerSweep(t *testing.T) {
+	const steps = 8
+	start := time.Now().Truncate(rotationScanSweep)
+
+	var cursors []uuid.UUID
+	for i := 0; i < steps; i++ {
+		cursors = append(cursors, rotationScanCursor(start.Add(time.Duration(i)*(rotationScanSweep/steps))))
+	}
+
+	if cursors[0] != (uuid.UUID{}) {
+		t.Errorf("the cursor at the start of a sweep is %s, want the ring's origin", cursors[0])
+	}
+	for i := 1; i < len(cursors); i++ {
+		if bytes.Compare(cursors[i-1][:], cursors[i][:]) >= 0 {
+			t.Fatalf("cursor %d (%s) did not advance past cursor %d (%s) — the mapping is not monotone, "+
+				"so part of the id space is never read", i, cursors[i], i-1, cursors[i-1])
+		}
+	}
+	// Past the halfway point by seven eighths of the way through, which is the
+	// difference between traversing the space and creeping across a corner of it.
+	if last := cursors[len(cursors)-1]; last[0] < 0x80 {
+		t.Errorf("the cursor reached only %s by the end of a sweep, want past the middle of the id space", last)
+	}
+	// The final instant of the sweep is the highest cursor of all. Asserted
+	// separately because it is where a mapping that scaled too aggressively would
+	// overflow and wrap — silently sending the tick back to the bottom of the
+	// ring while the sweep still had an arc to go.
+	end := rotationScanCursor(start.Add(rotationScanSweep - time.Nanosecond))
+	if bytes.Compare(cursors[len(cursors)-1][:], end[:]) >= 0 {
+		t.Errorf("the cursor at the last instant of a sweep is %s, not past %s — the mapping wrapped early", end, cursors[len(cursors)-1])
+	}
+	if got := rotationScanCursor(start.Add(rotationScanSweep)); got != cursors[0] {
+		t.Errorf("the cursor one sweep on is %s, want it back at %s — the ring must close", got, cursors[0])
+	}
+}
+
+// The sweep outlasts the residency floor, and by a clear margin. A mailbox the
+// cursor moved must be past the floor again before the cursor returns to it;
+// otherwise every sweep would arrive at rows it can only decline for a reason
+// that has nothing to do with where they should be.
+func TestTheScanSweepOutlastsTheResidencyFloor(t *testing.T) {
+	if floor := fleetrotate.Default().ResidencyFloor; rotationScanSweep < 2*floor {
+		t.Fatalf("scan sweep %s is less than twice the residency floor %s: the cursor would come back "+
+			"to mailboxes that are still serving it out", rotationScanSweep, floor)
 	}
 }
 

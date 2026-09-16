@@ -2,9 +2,11 @@ package inprocess
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,9 +33,73 @@ import (
 // lookup is memoised per (workspace, band, provider) and re-read after every
 // applied move — see rotationFleets), against a tick that fires every five
 // minutes. The scan is ordered urgent-first, so a fleet with more than 40
-// qualifying assignments drains the broken ones first and the merely
-// long-resident ones over subsequent ticks.
+// qualifying assignments drains the broken ones first; which of the merely
+// long-resident ones a tick sees is decided by rotationScanCursor below.
 const rotationScanLimit = 40
+
+// rotationScanSweep is how long the scan cursor takes to travel once around the
+// mailbox-id space, and with it how long a settled assignment may wait before a
+// tick looks at it again.
+//
+// WHAT IT IS FOR. rotationScanLimit reads a fixed number of rows; the SETTLED
+// population it reads them from is unbounded (every assignment older than the
+// residency floor qualifies, which after twelve hours is most of the fleet).
+// Ordered by residency alone the same rows came back on every tick forever — a
+// settled assignment is not changed by being scanned, so a window full of rows
+// the policy declines never drains and everything behind it was starved
+// permanently. The cursor makes the window an unbiased moving sample instead of
+// a frozen prefix. See the ORDER BY comment on ListRotationCandidates.
+//
+// 24 HOURS, and the number is chosen against two other numbers:
+//
+//   - The pass ticks every 5 minutes (queue.RegisterFleetRotate), so the cursor
+//     advances a 288th of the id space per tick. While a 288th of the fleet's
+//     settled assignments is under rotationScanLimit — about 11,500 of them —
+//     consecutive ticks' windows OVERLAP and the sweep misses nothing. Past that
+//     size a sweep samples rather than enumerates, which is still the property
+//     that matters: no row's wait depends on where it sits.
+//   - fleetrotate's residency floor is 12 hours, so a mailbox the cursor moved
+//     is comfortably past the floor by the time the cursor comes round to it
+//     again. The sweep never arrives to find a mailbox it must decline purely
+//     because it was here last time.
+//
+// This does NOT raise how much the fleet may move. That is fleetrotate.Policy's
+// MaxMoves and MaxMovesPerDestination, both untouched, and every move the wider
+// reach enables still has to clear the residency floor and the score margin.
+const rotationScanSweep = 24 * time.Hour
+
+// rotationScanCursorStep is how far one nanosecond of a sweep advances the
+// cursor through the top 64 bits of the id space. Integer arithmetic, and
+// deliberately the whole range divided by the whole sweep: the largest elapsed
+// value the sweep can produce times this cannot overflow uint64, which a
+// float-free mapping has to be able to state.
+const rotationScanCursorStep = math.MaxUint64 / uint64(rotationScanSweep)
+
+// rotationScanCursor is where the scan's ring starts for a tick happening at
+// `now`: the point in the mailbox-id space the tick reads forward from.
+//
+// Derived from the WALL CLOCK and nothing else, which is what keeps this
+// stateless. There is no cursor column, no counter, and nothing to reconcile
+// when a tick is missed or a control-plane host restarts — two processes ticking
+// at the same instant compute the same cursor, and a fleet that skipped an hour
+// of ticks simply resumes where the clock says it should be. (Truncate works on
+// absolute time since the zero instant, so the phase does not depend on the
+// host's timezone.)
+//
+// The result is a bound for a comparison and never a stored id: only the top 64
+// bits vary, and it is not a valid v4 uuid. That is fine, and so is comparing it
+// against ones that are. mailboxes.id has no client-supplied path — every row
+// takes gen_random_uuid() (migration 000002) — and v4's fixed version and
+// variant nibbles sit in bytes 6 and 8, below the 48 fully random leading bits
+// that decide the ordering. A cursor uniform over the space therefore samples
+// the rows uniformly, which is the whole property: no assignment's wait depends
+// on where in the fleet it happens to sit.
+func rotationScanCursor(now time.Time) uuid.UUID {
+	elapsed := uint64(now.Sub(now.Truncate(rotationScanSweep)))
+	var cursor uuid.UUID
+	binary.BigEndian.PutUint64(cursor[:8], elapsed*rotationScanCursorStep)
+	return cursor
+}
 
 // rotationStore is the slice of the generated query set the rotation tick uses.
 // Consumer-defined and four methods wide, so the tick's control flow — the
@@ -48,9 +114,10 @@ type rotationStore interface {
 }
 
 // rotationTick is everything ONE pass needs that is not the context: its two
-// seams, its instrumentation and its policy. A struct rather than four more
-// positional parameters, so a call site says which is which and so a later
-// input (or a later collaborator) does not reopen every existing one.
+// seams, its instrumentation, its policy and where in the fleet it starts
+// reading. A struct rather than five more positional parameters, so a call site
+// says which is which and so a later input (or a later collaborator) does not
+// reopen every existing one.
 type rotationTick struct {
 	// store is the four queries the pass issues. Consumer-defined — see
 	// rotationStore.
@@ -65,16 +132,23 @@ type rotationTick struct {
 	// policy holds the brakes: the tiers, the residency floor, the score margin
 	// and the per-tick caps.
 	policy fleetrotate.Policy
+	// scanCursor is where this tick reads the settled tail of the fleet from —
+	// see rotationScanCursor, which is what production passes. The zero value is
+	// meaningful rather than missing: it is the ring's origin, so a caller that
+	// leaves it out gets the lowest ids first on every tick, which is exactly the
+	// frozen window the cursor exists to unfreeze.
+	scanCursor uuid.UUID
 }
 
 // RotateMailboxWorkers runs one rotation tick. See the coreapi.FleetRotator
 // interface doc for the contract.
 func (c client) RotateMailboxWorkers(ctx context.Context) (int64, error) {
 	return rotateFleet(ctx, rotationTick{
-		store:    c.q,
-		recorder: c,
-		mtx:      c.mtx,
-		policy:   fleetrotate.Default(),
+		store:      c.q,
+		recorder:   c,
+		mtx:        c.mtx,
+		policy:     fleetrotate.Default(),
+		scanCursor: rotationScanCursor(time.Now()),
 	})
 }
 
@@ -112,7 +186,11 @@ func rotateFleet(ctx context.Context, tick rotationTick) (int64, error) {
 		// Derived from the SAME policy value the floor is then applied from, so
 		// the prefilter and the gate cannot drift apart.
 		SettledBefore: pgtype.Timestamptz{Time: now.Add(-p.ResidencyFloor), Valid: true},
-		RowLimit:      rotationScanLimit,
+		// Which settled rows this tick gets to see. Only the settled tail is
+		// affected: unreachable and refused incumbents sort ahead of the cursor's
+		// key, not by it.
+		ScanCursor: tick.scanCursor,
+		RowLimit:   rotationScanLimit,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("coreapi: list rotation candidates: %w", err)
