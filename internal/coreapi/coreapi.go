@@ -13,6 +13,13 @@
 // ZERO-VALUED, which for a gate flag is a silently wrong send rather than a
 // build error. One definition cannot drift from itself.
 //
+// The manual reply/compose types in inboxreply.go (InboxReplyJob,
+// RecordInboxReplyInput, PendingInboxReply, PendingInboxCompose) are tagged for
+// the same reason, and they are the ONE place a tenant's own CORRESPONDENCE
+// crosses this wire: a worker cannot send a reply it has not been given the text
+// of. See inboxreply.go for why that is not a widening of the ids-in/values-out
+// rule the rest of the seam follows.
+//
 // Since the CLAIM AND OUTCOME slice, StepSendJob and WarmupSendJob travel in
 // the OTHER direction too: the claim/mark/finalize methods take the job the
 // worker was handed, so the whole job goes back on the request. The same

@@ -112,11 +112,43 @@ type OutcomeWriter interface {
 	MarkWebhookFailed(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int) error
 }
 
+// InboxSendWriter is the control plane's side of the MANUAL MAIL protocol — the
+// reply and compose path for email a HUMAN wrote. Like the three interfaces above
+// it is defined HERE, at the consumer, with the EXACT signatures the in-process
+// client already has, so cmd/inroad satisfies it by type assertion on the client
+// it already built, with no adapter and no second implementation of a claim.
+//
+// One interface rather than twelve, for the reason JobReader and OutcomeWriter
+// are one: there is one decision behind it ("this control plane serves the fleet
+// its manual mail"), one implementor, and twelve things to wire would be twelve
+// things to forget.
+//
+// Reading them as a group is the point here too. The four pending-reply methods
+// are one claim protocol, the four compose ones are another, and the three legacy
+// drain methods are the third — and half a claim protocol is not a smaller
+// protocol, it is a lease nothing can give back.
+type InboxSendWriter interface {
+	GetInboxReplyJob(ctx context.Context, threadID, workspaceID string) (coreapi.InboxReplyJob, error)
+	RecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error
+	ClaimInboxReply(ctx context.Context, workspaceID, taskID string) (bool, error)
+	ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error
+
+	ClaimPendingInboxReply(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxReply, error)
+	MarkPendingInboxReplySent(ctx context.Context, workspaceID, pendingID, messageID string) error
+	ReleasePendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error
+	FailPendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error
+
+	ClaimPendingInboxCompose(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxCompose, error)
+	MarkPendingInboxComposeSent(ctx context.Context, workspaceID, pendingID, messageID string) error
+	ReleasePendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error
+	FailPendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error
+}
+
 // Deps is what the control-plane handler serves. A struct rather than a
-// parameter list so a later slice adds a field instead of a fourth positional
+// parameter list so a later slice adds a field instead of a fifth positional
 // argument, and so cmd/inroad's fleetDeps maps onto it one-to-one.
 //
-// All THREE are REQUIRED. A handler serving part of the transport would start,
+// All FOUR are REQUIRED. A handler serving part of the transport would start,
 // register its routes, and fail every call to the rest at the first send — and
 // the operator who enabled the flag would have no signal until then.
 type Deps struct {
@@ -126,6 +158,8 @@ type Deps struct {
 	Jobs JobReader
 	// Outcomes accepts the claim and outcome writes (slice 3).
 	Outcomes OutcomeWriter
+	// InboxSends serves the manual reply/compose protocol (slice 3b).
+	InboxSends InboxSendWriter
 }
 
 // NewHandler returns the CONTROL plane's coreapi transport handler: the server
@@ -151,13 +185,19 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 	if d.Outcomes == nil {
 		return nil, errors.New("coreapi remote: handler needs an outcome writer")
 	}
+	if d.InboxSends == nil {
+		return nil, errors.New("coreapi remote: handler needs an inbox send writer")
+	}
 	if len(token) < credbroker.MinTokenLen {
 		return nil, credbroker.ErrWeakToken
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{suppression: d.Suppression, jobs: d.Jobs, outcomes: d.Outcomes, logger: logger}
+	h := &handler{
+		suppression: d.Suppression, jobs: d.Jobs, outcomes: d.Outcomes,
+		inboxSends: d.InboxSends, logger: logger,
+	}
 	authed := credbroker.RequireToken(token, logger)
 	mux := http.NewServeMux()
 	for path, fn := range map[string]http.HandlerFunc{
@@ -192,6 +232,20 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 		PathWebhookMarkDelivered:  h.markWebhookDelivered,
 		PathWebhookMarkRetrying:   h.markWebhookRetrying,
 		PathWebhookMarkFailed:     h.markWebhookFailed,
+
+		// The manual reply/compose routes (slice 3b).
+		PathInboxReplyJob:              h.inboxReplyJob,
+		PathInboxReplyRecord:           h.recordInboxReply,
+		PathInboxReplyClaim:            h.claimInboxReply,
+		PathInboxReplyRelease:          h.releaseInboxReply,
+		PathInboxPendingReplyClaim:     h.claimPendingInboxReply,
+		PathInboxPendingReplySent:      h.markPendingInboxReplySent,
+		PathInboxPendingReplyRelease:   h.releasePendingInboxReply,
+		PathInboxPendingReplyFail:      h.failPendingInboxReply,
+		PathInboxPendingComposeClaim:   h.claimPendingInboxCompose,
+		PathInboxPendingComposeSent:    h.markPendingInboxComposeSent,
+		PathInboxPendingComposeRelease: h.releasePendingInboxCompose,
+		PathInboxPendingComposeFail:    h.failPendingInboxCompose,
 	} {
 		mux.Handle("POST "+path, authed(fn))
 	}
@@ -202,6 +256,7 @@ type handler struct {
 	suppression SuppressionReader
 	jobs        JobReader
 	outcomes    OutcomeWriter
+	inboxSends  InboxSendWriter
 	logger      *slog.Logger
 }
 
@@ -255,6 +310,13 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 // ceiling. See maxJobRequestBytes for what refusing one would cost.
 func decodeJob(w http.ResponseWriter, r *http.Request, v any) bool {
 	return decodeUpTo(w, r, v, maxJobRequestBytes)
+}
+
+// decodeMessage is decode for the ONE route that carries a human's message back
+// — the manual reply record. Same decode under the message cap, which is the same
+// number as decodeJob's for a different reason: see maxMessageRequestBytes.
+func decodeMessage(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeUpTo(w, r, v, maxMessageRequestBytes)
 }
 
 func decodeUpTo(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {

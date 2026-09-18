@@ -51,7 +51,7 @@ func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard
 // built at all. Those routes have their own files.
 func serve(t *testing.T, r SuppressionReader, clientToken string) (*Client, *httptest.Server) {
 	t.Helper()
-	h, err := NewHandler(Deps{Suppression: r, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}}, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: r, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestAWrongTokenIsRejectedAndAnswersNothing(t *testing.T) {
 // even read, and likewise reaches no reader.
 func TestAMissingAuthorizationHeaderIsRejected(t *testing.T) {
 	f := &fakeSuppression{answer: true}
-	h, err := NewHandler(Deps{Suppression: f, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}}, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: f, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestAWeakTokenIsRefusedOnBothSides(t *testing.T) {
 	if _, err := NewClient("https://control.example", short, false, &fakeOpener{}); !errors.Is(err, credbroker.ErrWeakToken) {
 		t.Errorf("client err = %v, want ErrWeakToken", err)
 	}
-	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}}, short, quietLogger()); !errors.Is(err, credbroker.ErrWeakToken) {
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, short, quietLogger()); !errors.Is(err, credbroker.ErrWeakToken) {
 		t.Errorf("handler err = %v, want ErrWeakToken", err)
 	}
 }
