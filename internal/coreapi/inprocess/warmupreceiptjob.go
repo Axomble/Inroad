@@ -649,7 +649,7 @@ func (c client) buildWarmupReply(ctx context.Context, receiptID, recipient, ws u
 // replied, bumps the recipient's daily replies counter — atomically. See the
 // coreapi.Client interface doc. Idempotent: a re-run over an already-engaged row
 // flips nothing (pgx.ErrNoRows) and skips the reply bump.
-func (c client) MarkWarmupEngaged(ctx context.Context, receiptID, workspaceID string, replied bool) error {
+func (c client) localMarkWarmupEngaged(ctx context.Context, receiptID, workspaceID string, replied bool) error {
 	rid, err := uuid.Parse(receiptID)
 	if err != nil {
 		return err

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 )
 
 // The spacing floor, end to end against real Postgres.

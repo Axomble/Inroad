@@ -1671,6 +1671,84 @@ write history that never happened.
     every webhook delivery (`TestAnUnrecognised404IsNotMistakenForAVanishedRow`,
     verified against an implementation that did).
 
+77. **A lost response is never a double send. The claim decides what the retry
+    does, not the transport.** The claim and outcome path now crosses the wire —
+    the sequence step's claim/deliver/advance/release/finalize, the enrollment
+    stop/defer/cap-deferral, the warm-up claim/sent/release/fail/engaged, the
+    inbox reply/class/unsubscribe/bounce outcomes, and the three webhook delivery
+    outcomes (`internal/coreapi/remote/outcomes.go`).
+
+    A network adds a third outcome a function call does not have: the request
+    arrived, the control plane COMMITTED, and the response was lost. A worker
+    cannot tell that apart from a call that never happened, so nothing here tries
+    to. Every method fails the CALL, the worker returns the error, asynq retries
+    the whole task, and the retry passes through `ClaimStepSend` — the only thing
+    in the system that knows what already happened. A worker that claimed, sent
+    and lost the answer to `MarkStepDelivered` re-claims, is told
+    `ClaimAlreadySent`, and advances the cursor instead of delivering again.
+    Invariant 4a's posture is unchanged and now holds over HTTP: never double,
+    occasionally drop a rare ambiguous send.
+
+    That path was UNREACHABLE in tests before this slice, because in process a
+    response cannot be lost. `remoteoutcomes_integration_test.go` makes it
+    reachable with a fault injector that runs the REAL handler to completion
+    against a throwaway recorder — so everything it committed is committed — then
+    hijacks the connection and closes it without writing a byte. Three scenarios
+    drive the real `sequence.AdvanceHandler` with a counting sender against real
+    Postgres: the claim's response lost (the retry must not re-claim), the
+    delivery's response lost (the retry must not re-send), and the delivery
+    committed with the advance never run (the retry must recover forward). All
+    three assert EXACTLY ONE SEND, and all three were verified to report two
+    against an implementation whose wire loses the `ClaimAlreadySent` state, and
+    against one whose claim re-claims without consulting the existing row.
+
+    **Idempotent by KEY, never by attempt**, audited per method against its SQL
+    rather than assumed (the audit is in `outcomes.go`): the two claims key on the
+    deterministic send id that IS the row id; `MarkStepDelivered`,
+    `AdvanceStepCursor` and `FinalizeStepSend` set their values absolutely;
+    release/stop/fail/engaged/the webhook trio are status-guarded in SQL;
+    `MarkUnsubscribed` and `MarkBounced` reuse the `ON CONFLICT DO NOTHING`
+    suppression insert of invariants 20 and 42. The ONE exception is
+    `IncrementEnrollmentCapDeferrals` (`cap_deferrals + 1`), left non-idempotent
+    deliberately: its only consumer is a log threshold — the count-based ceiling
+    that used to stop an enrollment was removed because a daily cap is
+    self-clearing — and the same double-bump window already exists in process
+    when its enqueue fails.
+
+    **No method returns "unknown", and none invents a success.** A failed outcome
+    returns the ZERO value alongside its error; a failed claim returns
+    `ClaimSkip`, which is "do nothing" rather than "send". The four-state protocol
+    crosses as a STRING enum, not the Go iota, so the enum's declaration order is
+    not part of a network contract, and an unrecognised value is an ERROR on both
+    sides rather than a default — defaulting to `ClaimSkip` would hide a version
+    skew behind a fleet that quietly stopped sending.
+
+    **The credential does not travel in this direction either.** These methods
+    take the job the worker was handed, and that worker is HOLDING the decrypted
+    SMTP password and OAuth token it just dialed with. The `json:"-"` tags of
+    invariant 76 cover the request as well as the response, and
+    `TestAnOutcomeRequestCarriesNoCredential` asserts it on the bytes of all nine
+    job-carrying requests. The job travels WHOLE rather than as a subset for the
+    reason invariant 76 gives for the responses: a hand-written mirror that
+    forgot `NotDueUntil` would not fail to compile, it would send into a stated
+    out-of-office absence.
+
+    **Workspace-pinned twice on the job-carrying routes** — the envelope's
+    `workspace_id` and the workspace inside the job must parse to the same uuid,
+    or the request is a 400 before anything runs — and by the same `workspace_id`
+    SQL filter everywhere else.
+    `TestOutcomeWritesArePinnedToTheRequestedWorkspace` re-points a real job at
+    another tenant and asserts the owning workspace's rows and cursor are
+    untouched.
+
+    **The control plane's coreapi client is now built WITH its optional wiring**
+    (`cmd/inroad/main.go`): metrics, realtime and the webhook emitter. While it
+    served only reads, omitting them was correct and documented. The outcome
+    writes touch all three — `MarkBounced` publishes `send.bounced` and emits
+    `email.bounced`, `MarkUnsubscribed` emits `contact.unsubscribed`, every claim
+    reports `inroad_send_claims_total` — and omitting them would not have failed
+    anything, it would have silently stopped a fleet deployment's webhooks firing.
+
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`
     has no `workspace_id` and cannot honestly have one — a periodic reconcile runs

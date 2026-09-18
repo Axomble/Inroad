@@ -457,7 +457,7 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 // after the claim is benign: worst case we return ClaimSkip on a row that just
 // became 'sent' (the sweeper/retry re-drives it) or ClaimAlreadySent on one that
 // just became 'sent' by another worker (the cursor advance is idempotent).
-func (c client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
+func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
 	// Not-due guard, BEFORE any row is written: an advance task queued for an
 	// earlier due time must not deliver after next_due_at was pushed out (the
 	// out-of-office deferral). Enqueueing cannot be undone, so the claim — the
@@ -571,7 +571,7 @@ func claimWonOutcome(freshlyInserted bool) string {
 // remaining window — we shrank it from the pre-fix "whole finalize tx + an
 // ordinary asynq retry" down to "one UPDATE failing to commit". Any failure AFTER
 // this commit recovers forward via ClaimAlreadySent instead of re-delivering.
-func (c client) MarkStepDelivered(ctx context.Context, job coreapi.StepSendJob, messageID string) error {
+func (c client) localMarkStepDelivered(ctx context.Context, job coreapi.StepSendJob, messageID string) error {
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return err
@@ -592,7 +592,7 @@ func (c client) MarkStepDelivered(ctx context.Context, job coreapi.StepSendJob, 
 // already-'sent' row (persisted by MarkStepDelivered) to record the thread root,
 // so it behaves identically on the normal success path and on recover-forward
 // (where there is no fresh send result). workspace_id is pinned on every write.
-func (c client) AdvanceStepCursor(ctx context.Context, job coreapi.StepSendJob) (coreapi.Advance, error) {
+func (c client) localAdvanceStepCursor(ctx context.Context, job coreapi.StepSendJob) (coreapi.Advance, error) {
 	eid, err := uuid.Parse(job.EnrollmentID)
 	if err != nil {
 		return coreapi.Advance{}, err
@@ -645,7 +645,7 @@ func (c client) AdvanceStepCursor(ctx context.Context, job coreapi.StepSendJob) 
 // ReleaseStepSend expires the claim's lease after a RETRYABLE send failure so
 // the asynq retry reclaims it promptly, without advancing the cursor. Guarded on
 // status='sending' (in SQL), workspace-pinned.
-func (c client) ReleaseStepSend(ctx context.Context, job coreapi.StepSendJob) error {
+func (c client) localReleaseStepSend(ctx context.Context, job coreapi.StepSendJob) error {
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return err
@@ -672,7 +672,7 @@ func (c client) ReleaseStepSend(ctx context.Context, job coreapi.StepSendJob) er
 // the job); here workspace_id is pinned on every write (the send UPDATE's WHERE
 // and each enrollment UPDATE's WHERE), so a mismatch cannot touch another
 // tenant's rows.
-func (c client) FinalizeStepSend(ctx context.Context, job coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error) {
+func (c client) localFinalizeStepSend(ctx context.Context, job coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error) {
 	eid, err := uuid.Parse(job.EnrollmentID)
 	if err != nil {
 		return coreapi.Advance{}, err
@@ -734,7 +734,7 @@ func (c client) FinalizeStepSend(ctx context.Context, job coreapi.StepSendJob, r
 }
 
 // MarkStepStopped halts an enrollment via the single stop entry point.
-func (c client) MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error {
+func (c client) localMarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error {
 	eid, err := uuid.Parse(enrollmentID)
 	if err != nil {
 		return err
@@ -754,7 +754,7 @@ func (c client) MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, 
 // It does NOT cancel the advance task already queued for the old time — nothing
 // can — so the ClaimStepSend not-due guard above is the half that actually
 // prevents the early send.
-func (c client) DeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error {
+func (c client) localDeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error {
 	eid, err := uuid.Parse(enrollmentID)
 	if err != nil {
 		return err
@@ -768,7 +768,7 @@ func (c client) DeferEnrollment(ctx context.Context, enrollmentID, workspaceID s
 
 // IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter
 // and returns the new value (workspace-pinned).
-func (c client) IncrementEnrollmentCapDeferrals(ctx context.Context, enrollmentID, workspaceID string) (int, error) {
+func (c client) localIncrementEnrollmentCapDeferrals(ctx context.Context, enrollmentID, workspaceID string) (int, error) {
 	eid, err := uuid.Parse(enrollmentID)
 	if err != nil {
 		return 0, err

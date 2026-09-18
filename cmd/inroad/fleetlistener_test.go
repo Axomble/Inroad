@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -80,6 +81,112 @@ func (f *fakeJobReader) FindSendByMessageID(context.Context, string, string) (co
 	return coreapi.SendRef{}, nil
 }
 
+// fakeOutcomeWriter is the control plane's claim/outcome half. Like
+// fakeJobReader it answers zero values: this file is about which routes are
+// mounted, behind which token, on which listener — what the writes DO is
+// internal/coreapi/remote's and internal/coreapi/inprocess's subject.
+type fakeOutcomeWriter struct{ calls int }
+
+func (f *fakeOutcomeWriter) ClaimStepSend(context.Context, coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
+	f.calls++
+	return coreapi.ClaimSkip, nil
+}
+
+func (f *fakeOutcomeWriter) MarkStepDelivered(context.Context, coreapi.StepSendJob, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) AdvanceStepCursor(context.Context, coreapi.StepSendJob) (coreapi.Advance, error) {
+	f.calls++
+	return coreapi.Advance{}, nil
+}
+
+func (f *fakeOutcomeWriter) ReleaseStepSend(context.Context, coreapi.StepSendJob) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) FinalizeStepSend(context.Context, coreapi.StepSendJob, coreapi.StepResult) (coreapi.Advance, error) {
+	f.calls++
+	return coreapi.Advance{}, nil
+}
+
+func (f *fakeOutcomeWriter) MarkStepStopped(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) DeferEnrollment(context.Context, string, string, time.Time) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) IncrementEnrollmentCapDeferrals(context.Context, string, string) (int, error) {
+	f.calls++
+	return 0, nil
+}
+
+func (f *fakeOutcomeWriter) ClaimWarmupSend(context.Context, coreapi.WarmupSendJob) (coreapi.ClaimOutcome, error) {
+	f.calls++
+	return coreapi.ClaimSkip, nil
+}
+
+func (f *fakeOutcomeWriter) MarkWarmupSent(context.Context, coreapi.WarmupSendJob, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) ReleaseWarmupSend(context.Context, coreapi.WarmupSendJob) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) FailWarmupSend(context.Context, coreapi.WarmupSendJob, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkWarmupEngaged(context.Context, string, string, bool) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkReplied(context.Context, string, string, string, string, float64) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) RecordReplyClass(context.Context, string, string, string, string, float64) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkUnsubscribed(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkBounced(context.Context, string, string, string, bool) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkWebhookDelivered(context.Context, string, string, int, int) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkWebhookRetrying(context.Context, string, string, int, string, *int, time.Time) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeOutcomeWriter) MarkWebhookFailed(context.Context, string, string, int, string, *int) error {
+	f.calls++
+	return nil
+}
+
 // fleetRoutes is every route the fleet listener is supposed to mount, with a
 // body each accepts. Listing them in ONE place is what makes the "behind the
 // token" and "not on the public router" tests grow with the transport instead
@@ -98,6 +205,31 @@ func fleetRoutes() []struct{ name, path, body string } {
 		{"coreapi: test send content", remote.PathTestSendContent, `{"workspace_id":"` + ws + `","campaign_id":"` + id + `","step_id":"` + id + `"}`},
 		{"coreapi: sender transport", remote.PathSenderTransport, `{"workspace_id":"` + ws + `","mailbox_id":"` + id + `"}`},
 		{"coreapi: send by message id", remote.PathSendByMessageID, `{"workspace_id":"` + ws + `","message_id":"<a@b.test>"}`},
+
+		// The claim and outcome routes (slice 3). The five job-carrying ones send
+		// a minimal job whose workspace matches the envelope — the handler refuses
+		// a mismatch before it reaches the writer, so a body that omitted it would
+		// make this a 400 test rather than a mounting test.
+		{"coreapi: step send claim", remote.PathStepSendClaim, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"}}`},
+		{"coreapi: step send delivered", remote.PathStepSendDelivered, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"},"message_id":"<a@b.test>"}`},
+		{"coreapi: step cursor advance", remote.PathStepSendAdvance, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"}}`},
+		{"coreapi: step send release", remote.PathStepSendRelease, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"}}`},
+		{"coreapi: step send finalize", remote.PathStepSendFinalize, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"},"result":{"status":"failed"}}`},
+		{"coreapi: enrollment stop", remote.PathEnrollmentStop, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `","reason":"suppressed"}`},
+		{"coreapi: enrollment defer", remote.PathEnrollmentDefer, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `","until":"2026-01-01T00:00:00Z"}`},
+		{"coreapi: enrollment cap deferral", remote.PathEnrollmentCapDeferral, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `"}`},
+		{"coreapi: warmup send claim", remote.PathWarmupSendClaim, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"}}`},
+		{"coreapi: warmup send sent", remote.PathWarmupSendSent, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"},"message_id":"<a@b.test>"}`},
+		{"coreapi: warmup send release", remote.PathWarmupSendRelease, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"}}`},
+		{"coreapi: warmup send fail", remote.PathWarmupSendFail, `{"workspace_id":"` + ws + `","job":{"workspace_id":"` + ws + `"},"error":"boom"}`},
+		{"coreapi: warmup engaged", remote.PathWarmupEngaged, `{"workspace_id":"` + ws + `","receipt_id":"` + id + `","replied":true}`},
+		{"coreapi: reply replied", remote.PathReplyReplied, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `","class":"positive","source":"lexicon","confidence":0.9}`},
+		{"coreapi: reply class", remote.PathReplyClass, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `","class":"out_of_office","source":"header","confidence":1}`},
+		{"coreapi: reply unsubscribed", remote.PathReplyUnsubscribed, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `","email":"ada@example.test"}`},
+		{"coreapi: reply bounced", remote.PathReplyBounced, `{"workspace_id":"` + ws + `","enrollment_id":"` + id + `","email":"ada@example.test","hard":true}`},
+		{"coreapi: webhook delivered", remote.PathWebhookMarkDelivered, `{"workspace_id":"` + ws + `","delivery_id":"` + id + `","attempts":1,"response_status":200}`},
+		{"coreapi: webhook retrying", remote.PathWebhookMarkRetrying, `{"workspace_id":"` + ws + `","delivery_id":"` + id + `","attempts":1,"last_error":"502","response_status":502,"next_attempt_at":"2026-01-01T00:00:00Z"}`},
+		{"coreapi: webhook failed", remote.PathWebhookMarkFailed, `{"workspace_id":"` + ws + `","delivery_id":"` + id + `","attempts":5,"last_error":"gave up","response_status":null}`},
 	}
 }
 
@@ -117,8 +249,8 @@ func postFleet(t *testing.T, h http.Handler, path, token, body string) int {
 // transports and ONE token authenticates both. A worker holds a single
 // credential and an operator firewalls a single address.
 func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
-	opener, reader, jobs := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}
-	h, err := newFleetHandler(fleetDeps{credentials: opener, suppression: reader, jobs: jobs},
+	opener, reader, jobs, outcomes := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}, &fakeOutcomeWriter{}
+	h, err := newFleetHandler(fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -138,13 +270,16 @@ func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
 	if jobs.calls != 8 {
 		t.Errorf("job reader reached %d times, want 8", jobs.calls)
 	}
+	if outcomes.calls != 20 {
+		t.Errorf("outcome writer reached %d times, want 20", outcomes.calls)
+	}
 }
 
 // One token means one rotation — and one refusal. A wrong token is rejected on
 // BOTH transports and reaches neither dependency.
 func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
-	opener, reader, jobs := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}
-	h, err := newFleetHandler(fleetDeps{credentials: opener, suppression: reader, jobs: jobs},
+	opener, reader, jobs, outcomes := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}, &fakeOutcomeWriter{}
+	h, err := newFleetHandler(fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -162,9 +297,9 @@ func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
 			}
 		})
 	}
-	if opener.calls != 0 || reader.calls != 0 || jobs.calls != 0 {
-		t.Errorf("dependencies were reached (%d opener, %d reader, %d jobs) despite rejected tokens",
-			opener.calls, reader.calls, jobs.calls)
+	if opener.calls != 0 || reader.calls != 0 || jobs.calls != 0 || outcomes.calls != 0 {
+		t.Errorf("dependencies were reached (%d opener, %d reader, %d jobs, %d outcomes) despite rejected tokens",
+			opener.calls, reader.calls, jobs.calls, outcomes.calls)
 	}
 }
 
@@ -173,7 +308,7 @@ func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
 // whatever a catch-all would do.
 func TestTheFleetListenerServesNothingElse(t *testing.T) {
 	h, err := newFleetHandler(
-		fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}},
+		fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -193,9 +328,10 @@ func TestTheFleetListenerRefusesAMissingTransport(t *testing.T) {
 		name string
 		deps fleetDeps
 	}{
-		{"no credentials", fleetDeps{suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}}},
-		{"no suppression", fleetDeps{credentials: &fakeOpener{}, jobs: &fakeJobReader{}}},
-		{"no jobs", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}}},
+		{"no credentials", fleetDeps{suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}}},
+		{"no suppression", fleetDeps{credentials: &fakeOpener{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}}},
+		{"no jobs", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, outcomes: &fakeOutcomeWriter{}}},
+		{"no outcomes", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := newFleetHandler(tc.deps, fleetTestToken, discardLogger()); err == nil {
@@ -222,7 +358,7 @@ func TestThePublicAPIRouterServesNoFleetRoute(t *testing.T) {
 // rather than at the first request as a 401 nobody is watching for.
 func TestTheFleetListenerRefusesAWeakToken(t *testing.T) {
 	_, err := newFleetHandler(
-		fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}},
+		fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}},
 		strings.Repeat("a", credbroker.MinTokenLen-1), discardLogger())
 	if err == nil {
 		t.Fatal("newFleetHandler accepted a short token, want an error")

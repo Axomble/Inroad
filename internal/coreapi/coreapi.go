@@ -13,6 +13,14 @@
 // ZERO-VALUED, which for a gate flag is a silently wrong send rather than a
 // build error. One definition cannot drift from itself.
 //
+// Since the CLAIM AND OUTCOME slice, StepSendJob and WarmupSendJob travel in
+// the OTHER direction too: the claim/mark/finalize methods take the job the
+// worker was handed, so the whole job goes back on the request. The same
+// argument applies with more force there — ClaimStepSend reads NotDueUntil to
+// refuse a step whose enrollment was deferred, and a mirror that forgot that
+// field would send into a stated absence rather than fail to compile. StepResult
+// and Advance are tagged below for the same reason.
+//
 // # Credentials are tagged json:"-" and do not cross this wire
 //
 // Every decrypted secret on a job (AccessToken, SMTPPassword, Password, the
@@ -779,17 +787,22 @@ func (j StepSendJob) NotYetDue(now time.Time) bool {
 }
 
 // StepResult is the outcome of one step send.
+//
+// It carries json tags for the reason the job types above do: internal/coreapi/
+// remote encodes THIS type on the FinalizeStepSend route rather than a parallel
+// wire struct, so one definition cannot drift from itself.
 type StepResult struct {
-	Status    string // "sent" | "failed"
-	MessageID string
-	Err       string
+	Status    string `json:"status"` // "sent" | "failed"
+	MessageID string `json:"message_id"`
+	Err       string `json:"error"`
 }
 
 // Advance tells the worker whether the enrollment finished and, if not, when
-// the next step is due (so it can schedule the next sequence:advance).
+// the next step is due (so it can schedule the next sequence:advance). Tagged
+// for the wire for the same reason as StepResult above.
 type Advance struct {
-	Completed bool
-	NextDueAt time.Time
+	Completed bool      `json:"completed"`
+	NextDueAt time.Time `json:"next_due_at"`
 }
 
 // DueEnrollment is an (enrollment id, workspace id) pair from the sweeper query.

@@ -378,48 +378,83 @@ func run() error {
 	// needed (unlike domainAuthAdapter, whose source returns a different shape).
 	suppStore := suppression.NewStore(queries)
 
+	// Outbound webhooks: endpoint management + the delivery log. The service also
+	// backs the Emitter (webhook.NewServiceEmitter) the poller's coreapi writes
+	// fan out through; below it is passed to the one-click unsubscribe handler so
+	// a manual opt-out fires contact.unsubscribed too.
+	//
+	// Built HERE, before the fleet listener, because that listener's coreapi
+	// client is one of the writers: a fleet worker's MarkBounced /
+	// MarkUnsubscribed runs on the control plane, so the emitter has to exist by
+	// the time it is constructed.
+	webhookSvc := webhook.NewService(webhook.NewPgStore(queries), keyring, enq, cfg.WebhookAllowPrivate)
+	webhookEmitter := webhook.NewServiceEmitter(webhookSvc)
+	if cfg.WebhookAllowPrivate {
+		logger.Warn("INROAD_WEBHOOK_ALLOW_PRIVATE is set: webhook endpoints may target private/loopback addresses — dev only, never production")
+	}
+
 	// The fleet listener: the control plane's machine-facing surface, serving
 	// the execution plane and nothing else. Off unless an operator sets
 	// INROAD_FLEET_BROKER_ADDR, so a self-hosted install serves none of it.
-	// Both transports get the SAME implementation the in-process paths use —
+	// Every transport gets the SAME implementation the in-process paths use —
 	// the credential opener the job builds use, and the suppression store the
 	// test-send check above reads — so a fleet answer and a local one are
-	// produced by identical code. See cmd/inroad/fleetlistener.go for why the
-	// two share one listener and one token.
+	// produced by identical code. See cmd/inroad/fleetlistener.go for why they
+	// share one listener and one token.
 	//
-	// Started here rather than earlier because suppStore is what it serves.
+	// Started here rather than earlier because suppStore and the webhook emitter
+	// are what it serves.
 	//
-	// The job reader is a full in-process coreapi client, built here for the
-	// first time in this binary. It is the control plane's own implementation of
-	// every job build — the same one the single-process worker runs — so a fleet
-	// worker's job and a local one come out of identical code rather than two
-	// implementations that can drift on a workspace pin or a send gate. The
-	// optional wiring (metrics, realtime, webhooks) is deliberately omitted: no
-	// job READ touches any of it, and a nil is a no-op throughout.
+	// The job reader AND the outcome writer are one full in-process coreapi
+	// client, built here for the first time in this binary. It is the control
+	// plane's own implementation of every job build and every claim — the same
+	// one the single-process worker runs — so a fleet worker's job, and the claim
+	// it then takes, come out of identical code rather than two implementations
+	// that can drift on a workspace pin, a send gate, or the four-state claim
+	// protocol.
+	//
+	// THE OPTIONAL WIRING IS NOT OPTIONAL HERE, and that changed with slice 3.
+	// While this client only served READS, omitting metrics/realtime/webhooks was
+	// correct: no job read touches any of them and a nil is a no-op throughout.
+	// The outcome writes do touch them — MarkBounced publishes send.bounced and
+	// emits email.bounced, MarkUnsubscribed emits contact.unsubscribed, and every
+	// claim reports inroad_send_claims_total. Leaving them nil would not fail
+	// anything; it would silently stop a fleet deployment's webhooks firing and
+	// its claim metric moving, which is the failure mode nobody notices.
 	//
 	// warmuplib is internal/platform/warmup, aliased because internal/app/warmup
 	// already holds the plain name in this file. It is the CONTENT LIBRARY the
 	// warmup send job draws its synthetic conversations from.
 	//
-	// The assertion is comma-ok and its failure is a returned error, not a
-	// panic and not a silent nil: inprocess.New returns coreapi.Client, three of
-	// these eight methods are deliberately NOT on that interface, and a
-	// signature drifting out from under this is exactly how #216 nearly shipped
-	// a listener that registered no handlers. TestTheInProcessClientSatisfies
-	// TheFleetJobReader (internal/coreapi/inprocess) catches it at compile time;
-	// this catches it at startup.
+	// Both assertions are comma-ok and their failure is a returned error, not a
+	// panic and not a silent nil: inprocess.New returns coreapi.Client, and
+	// several of these methods are deliberately NOT on that interface, so a
+	// signature drifting out from under this is exactly how #216 nearly shipped a
+	// listener that registered no handlers. The compile-time assertions in
+	// internal/coreapi/inprocess/jobsource_test.go and outcomesource_test.go
+	// catch it at build; these catch it at startup.
 	coreClient := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL,
-		googleOAuth, msOAuth, cfg.WarmupSecret, warmuplib.NewStaticLibrary())
+		googleOAuth, msOAuth, cfg.WarmupSecret, warmuplib.NewStaticLibrary(),
+		inprocess.WithMetrics(mtx),
+		inprocess.WithRealtime(realtimeHub),
+		inprocess.WithWebhooks(webhookEmitter))
 	fleetJobs, ok := coreClient.(remote.JobReader)
 	if !ok {
 		logger.Error("fleet listener init failed",
 			"err", "the in-process coreapi client does not satisfy remote.JobReader")
 		return errors.New("inroad: in-process coreapi client does not satisfy remote.JobReader")
 	}
+	fleetOutcomes, ok := coreClient.(remote.OutcomeWriter)
+	if !ok {
+		logger.Error("fleet listener init failed",
+			"err", "the in-process coreapi client does not satisfy remote.OutcomeWriter")
+		return errors.New("inroad: in-process coreapi client does not satisfy remote.OutcomeWriter")
+	}
 	stopFleet, err := startFleetListener(ctx, cfg, fleetDeps{
 		credentials: inprocess.NewCredentialOpener(queries, keyring, googleOAuth, msOAuth),
 		suppression: suppStore,
 		jobs:        fleetJobs,
+		outcomes:    fleetOutcomes,
 	}, logger)
 	if err != nil {
 		logger.Error("fleet listener init failed", "err", err)
@@ -487,15 +522,6 @@ func run() error {
 	// operator action on the control plane, never something the execution plane
 	// initiates.
 	deadLetterSvc := deadletter.NewService(deadletter.NewPgStore(queries), enq)
-	// Outbound webhooks: endpoint management + the delivery log. The service also
-	// backs the Emitter (webhook.NewServiceEmitter) the poller's coreapi writes
-	// fan out through in the worker; here it is passed to the one-click
-	// unsubscribe handler so a manual opt-out fires contact.unsubscribed too.
-	webhookSvc := webhook.NewService(webhook.NewPgStore(queries), keyring, enq, cfg.WebhookAllowPrivate)
-	webhookEmitter := webhook.NewServiceEmitter(webhookSvc)
-	if cfg.WebhookAllowPrivate {
-		logger.Warn("INROAD_WEBHOOK_ALLOW_PRIVATE is set: webhook endpoints may target private/loopback addresses — dev only, never production")
-	}
 	// Auto-capture is no longer pinned to reply_class="positive": it fires for
 	// any label carrying captures_deal, read through the narrow
 	// replyLabelAdapter (app/* packages never import each other). Unwired it

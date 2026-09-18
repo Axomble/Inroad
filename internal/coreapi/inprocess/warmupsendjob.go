@@ -336,7 +336,7 @@ func (c client) localWarmupSendJob(ctx context.Context, mailboxID, workspaceID s
 // reclaim WHERE, so a cross-tenant id claims zero rows. On a lost claim it reads
 // the row's status so the caller can recover forward: 'sent' → ClaimAlreadySent
 // (do not re-send); anything else → ClaimSkip.
-func (c client) ClaimWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) (coreapi.ClaimOutcome, error) {
+func (c client) localClaimWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) (coreapi.ClaimOutcome, error) {
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return coreapi.ClaimSkip, err
@@ -390,7 +390,7 @@ func (c client) ClaimWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) 
 // counter — all in ONE transaction. The finalize is guarded on status='sending'
 // and returns rows affected, so a re-run over an already-'sent' row does the side
 // effects zero times (idempotent, never double-counts). workspace_id is pinned.
-func (c client) MarkWarmupSent(ctx context.Context, job coreapi.WarmupSendJob, messageID string) error {
+func (c client) localMarkWarmupSent(ctx context.Context, job coreapi.WarmupSendJob, messageID string) error {
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return err
@@ -438,7 +438,7 @@ func (c client) MarkWarmupSent(ctx context.Context, job coreapi.WarmupSendJob, m
 // ReleaseWarmupSend releases a claimed-but-unsent row after a RETRYABLE failure
 // (back to 'queued', lease cleared) so the asynq retry reclaims it promptly.
 // Guarded on status='sending' in SQL, workspace-pinned.
-func (c client) ReleaseWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) error {
+func (c client) localReleaseWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) error {
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return err
@@ -452,7 +452,7 @@ func (c client) ReleaseWarmupSend(ctx context.Context, job coreapi.WarmupSendJob
 
 // FailWarmupSend finalizes the claimed row to 'failed' after a PERMANENT failure
 // (no thread advance, no stat bump). Guarded on status='sending', workspace-pinned.
-func (c client) FailWarmupSend(ctx context.Context, job coreapi.WarmupSendJob, errMsg string) error {
+func (c client) localFailWarmupSend(ctx context.Context, job coreapi.WarmupSendJob, errMsg string) error {
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return err

@@ -80,6 +80,19 @@ type fleetDeps struct {
 	// does not carry it: the job types tag their secrets json:"-" and a fleet
 	// worker brokers them. See internal/coreapi/remote's jobs.go for why.
 	jobs remote.JobReader
+	// outcomes accepts the claim and outcome writes. cmd/inroad passes the SAME
+	// in-process client as jobs, by the same type assertion, so a claim taken by
+	// a fleet worker and one taken by the single-process topology run identical
+	// SQL — including the four-state claim protocol that is the only thing
+	// standing between a lost HTTP response and a double send.
+	//
+	// That client has to be built with its OPTIONAL wiring, unlike the read-only
+	// slices: MarkBounced and MarkUnsubscribed fan out email.bounced /
+	// contact.unsubscribed webhooks and publish a realtime event, and
+	// ClaimStepSend records inroad_send_claims_total. A client built without them
+	// would not fail — every one is a nil-safe no-op — it would silently stop a
+	// fleet deployment's integrations firing. See cmd/inroad/main.go.
+	outcomes remote.OutcomeWriter
 }
 
 // newFleetHandler assembles the listener's router: each transport's own handler
@@ -89,14 +102,16 @@ type fleetDeps struct {
 // out here, so a route that moves cannot silently stop being mounted. Anything
 // not under one of them is a 404: this listener is not a second copy of the API.
 func newFleetHandler(d fleetDeps, token string, logger *slog.Logger) (http.Handler, error) {
-	if d.credentials == nil || d.suppression == nil || d.jobs == nil {
+	if d.credentials == nil || d.suppression == nil || d.jobs == nil || d.outcomes == nil {
 		return nil, errors.New("fleet listener: every transport must be wired")
 	}
 	brokerHandler, err := credbroker.NewHandler(d.credentials, token, logger)
 	if err != nil {
 		return nil, err
 	}
-	coreHandler, err := remote.NewHandler(remote.Deps{Suppression: d.suppression, Jobs: d.jobs}, token, logger)
+	coreHandler, err := remote.NewHandler(remote.Deps{
+		Suppression: d.suppression, Jobs: d.jobs, Outcomes: d.outcomes,
+	}, token, logger)
 	if err != nil {
 		return nil, err
 	}

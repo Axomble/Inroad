@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,9 +14,11 @@ import (
 	"github.com/inroad/inroad/internal/platform/credbroker"
 )
 
-// maxRequestBytes caps a request body. Every shape is a small number of uuids
-// plus, on two routes, one free-text subject: a contact's address, and an
-// inbound Message-ID.
+// maxRequestBytes caps an IDS-ONLY request body — every route except the ones
+// that carry a job back, which use maxJobRequestBytes. Each shape here is a
+// small number of uuids plus, on a handful of routes, one bounded free-text
+// value: a contact's address, an inbound Message-ID, a stop reason, a reply
+// class, a webhook receiver's error text.
 //
 // 64 KiB rather than the few hundred bytes those actually need, because of what
 // refusing one would do. The Message-ID comes off unauthenticated inbound mail,
@@ -23,8 +26,10 @@ import (
 // simply matches nothing, but a 400 here would be an error the poller cannot
 // distinguish from a real failure, so it would return before SetInboxCursor and
 // the mailbox would stop processing ALL inbound mail — campaign replies and
-// bounces included. The cap still bounds the body hard; it just sits far above
-// anything a real header carries.
+// bounces included. The webhook error text is likewise chosen by a receiver a
+// tenant configured, and it is truncated to 1000 bytes before it is stored, not
+// before it is sent. The cap still bounds the body hard; it just sits far above
+// anything a real value carries.
 const maxRequestBytes = 64 << 10
 
 // SuppressionReader is the control plane's side of the one method slice 1
@@ -66,18 +71,61 @@ type JobReader interface {
 	FindSendByMessageID(ctx context.Context, workspaceID, messageID string) (coreapi.SendRef, error)
 }
 
+// OutcomeWriter is the control plane's side of the claim and outcome path. Like
+// the two interfaces above it is defined HERE, at the consumer, with the EXACT
+// signatures the in-process client already has — so cmd/inroad satisfies it by
+// type assertion on the client it already built, with no adapter and no second
+// implementation of a claim.
+//
+// One interface rather than twenty, for the reason JobReader is one rather than
+// eight: there is one decision behind it ("this control plane accepts outcome
+// writes from the fleet"), one implementor, and twenty things to wire would be
+// twenty things to forget.
+//
+// Reading the method list as a group is also the point. These are the writes the
+// claim-before-send protocol is made of, and they only make sense together: a
+// claim with no release is a lease nothing can give back, and a delivery with no
+// cursor advance is the recover-forward case that never recovers.
+type OutcomeWriter interface {
+	ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error)
+	MarkStepDelivered(ctx context.Context, job coreapi.StepSendJob, messageID string) error
+	AdvanceStepCursor(ctx context.Context, job coreapi.StepSendJob) (coreapi.Advance, error)
+	ReleaseStepSend(ctx context.Context, job coreapi.StepSendJob) error
+	FinalizeStepSend(ctx context.Context, job coreapi.StepSendJob, res coreapi.StepResult) (coreapi.Advance, error)
+	MarkStepStopped(ctx context.Context, enrollmentID, workspaceID, reason string) error
+	DeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error
+	IncrementEnrollmentCapDeferrals(ctx context.Context, enrollmentID, workspaceID string) (int, error)
+
+	ClaimWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) (coreapi.ClaimOutcome, error)
+	MarkWarmupSent(ctx context.Context, job coreapi.WarmupSendJob, messageID string) error
+	ReleaseWarmupSend(ctx context.Context, job coreapi.WarmupSendJob) error
+	FailWarmupSend(ctx context.Context, job coreapi.WarmupSendJob, errMsg string) error
+	MarkWarmupEngaged(ctx context.Context, receiptID, workspaceID string, replied bool) error
+
+	MarkReplied(ctx context.Context, enrollmentID, workspaceID, replyClass, replySource string, confidence float64) error
+	RecordReplyClass(ctx context.Context, enrollmentID, workspaceID, class, source string, confidence float64) error
+	MarkUnsubscribed(ctx context.Context, enrollmentID, workspaceID, email string) error
+	MarkBounced(ctx context.Context, enrollmentID, workspaceID, email string, hard bool) error
+
+	MarkWebhookDelivered(ctx context.Context, deliveryID, workspaceID string, attempts, responseStatus int) error
+	MarkWebhookRetrying(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int, nextAttemptAt time.Time) error
+	MarkWebhookFailed(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int) error
+}
+
 // Deps is what the control-plane handler serves. A struct rather than a
 // parameter list so a later slice adds a field instead of a fourth positional
 // argument, and so cmd/inroad's fleetDeps maps onto it one-to-one.
 //
-// Both are REQUIRED. A handler serving half the transport would start, register
-// its routes, and fail every call to the other half at the first send — and the
-// operator who enabled the flag would have no signal until then.
+// All THREE are REQUIRED. A handler serving part of the transport would start,
+// register its routes, and fail every call to the rest at the first send — and
+// the operator who enabled the flag would have no signal until then.
 type Deps struct {
 	// Suppression answers one suppression question (slice 1).
 	Suppression SuppressionReader
 	// Jobs answers the per-message job reads (slice 2).
 	Jobs JobReader
+	// Outcomes accepts the claim and outcome writes (slice 3).
+	Outcomes OutcomeWriter
 }
 
 // NewHandler returns the CONTROL plane's coreapi transport handler: the server
@@ -100,13 +148,16 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 	if d.Jobs == nil {
 		return nil, errors.New("coreapi remote: handler needs a job reader")
 	}
+	if d.Outcomes == nil {
+		return nil, errors.New("coreapi remote: handler needs an outcome writer")
+	}
 	if len(token) < credbroker.MinTokenLen {
 		return nil, credbroker.ErrWeakToken
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &handler{suppression: d.Suppression, jobs: d.Jobs, logger: logger}
+	h := &handler{suppression: d.Suppression, jobs: d.Jobs, outcomes: d.Outcomes, logger: logger}
 	authed := credbroker.RequireToken(token, logger)
 	mux := http.NewServeMux()
 	for path, fn := range map[string]http.HandlerFunc{
@@ -119,6 +170,28 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 		PathTestSendContent:    h.testSendContent,
 		PathSenderTransport:    h.senderTransport,
 		PathSendByMessageID:    h.sendByMessageID,
+
+		// The claim and outcome routes (slice 3).
+		PathStepSendClaim:         h.claimStepSend,
+		PathStepSendDelivered:     h.markStepDelivered,
+		PathStepSendAdvance:       h.advanceStepCursor,
+		PathStepSendRelease:       h.releaseStepSend,
+		PathStepSendFinalize:      h.finalizeStepSend,
+		PathEnrollmentStop:        h.markStepStopped,
+		PathEnrollmentDefer:       h.deferEnrollment,
+		PathEnrollmentCapDeferral: h.incrementCapDeferrals,
+		PathWarmupSendClaim:       h.claimWarmupSend,
+		PathWarmupSendSent:        h.markWarmupSent,
+		PathWarmupSendRelease:     h.releaseWarmupSend,
+		PathWarmupSendFail:        h.failWarmupSend,
+		PathWarmupEngaged:         h.markWarmupEngaged,
+		PathReplyReplied:          h.markReplied,
+		PathReplyClass:            h.recordReplyClass,
+		PathReplyUnsubscribed:     h.markUnsubscribed,
+		PathReplyBounced:          h.markBounced,
+		PathWebhookMarkDelivered:  h.markWebhookDelivered,
+		PathWebhookMarkRetrying:   h.markWebhookRetrying,
+		PathWebhookMarkFailed:     h.markWebhookFailed,
 	} {
 		mux.Handle("POST "+path, authed(fn))
 	}
@@ -128,6 +201,7 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 type handler struct {
 	suppression SuppressionReader
 	jobs        JobReader
+	outcomes    OutcomeWriter
 	logger      *slog.Logger
 }
 
@@ -171,7 +245,20 @@ func (h *handler) checkSuppression(w http.ResponseWriter, r *http.Request) {
 // stops a caller quietly adding a parameter this endpoint does not honour and
 // believing the narrower answer it gets back.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	return decodeUpTo(w, r, v, maxRequestBytes)
+}
+
+// decodeJob is decode for the routes that carry a JOB back — the claim, mark,
+// finalize, advance and release requests. It is the same decode under a much
+// larger cap, because the body is a step send job including the campaign's
+// subject and HTML: the same object the job routes RETURN, so it gets the same
+// ceiling. See maxJobRequestBytes for what refusing one would cost.
+func decodeJob(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeUpTo(w, r, v, maxJobRequestBytes)
+}
+
+func decodeUpTo(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		respond(w, http.StatusBadRequest, errorResponse{Error: "invalid request"})

@@ -63,7 +63,7 @@ func (c client) localWebhookDeliveryJob(ctx context.Context, deliveryID, workspa
 // MarkWebhookDelivered finalizes a delivery to 'delivered' with the receiver's
 // 2xx status and the attempt count. The UPDATE is guarded on status='pending',
 // so a retried asynq job that races a finalize is a clean no-op.
-func (c client) MarkWebhookDelivered(ctx context.Context, deliveryID, workspaceID string, attempts, responseStatus int) error {
+func (c client) localMarkWebhookDelivered(ctx context.Context, deliveryID, workspaceID string, attempts, responseStatus int) error {
 	did, ws, err := parseDeliveryIDs(deliveryID, workspaceID)
 	if err != nil {
 		return err
@@ -81,7 +81,7 @@ func (c client) MarkWebhookDelivered(ctx context.Context, deliveryID, workspaceI
 // row stays 'pending' and next_attempt_at carries the backoff schedule's next
 // due time. responseStatus is nil for a transport-level failure (no HTTP
 // response).
-func (c client) MarkWebhookRetrying(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int, nextAttemptAt time.Time) error {
+func (c client) localMarkWebhookRetrying(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int, nextAttemptAt time.Time) error {
 	did, ws, err := parseDeliveryIDs(deliveryID, workspaceID)
 	if err != nil {
 		return err
@@ -99,7 +99,7 @@ func (c client) MarkWebhookRetrying(ctx context.Context, deliveryID, workspaceID
 
 // MarkWebhookFailed finalizes a delivery to 'failed' after the app-level retry
 // schedule is exhausted. Same 'pending' guard as the success path.
-func (c client) MarkWebhookFailed(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int) error {
+func (c client) localMarkWebhookFailed(ctx context.Context, deliveryID, workspaceID string, attempts int, lastErr string, responseStatus *int) error {
 	did, ws, err := parseDeliveryIDs(deliveryID, workspaceID)
 	if err != nil {
 		return err

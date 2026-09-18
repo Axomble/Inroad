@@ -40,7 +40,11 @@ import (
 // the way cmd/inroad's newFleetHandler does. Both are needed: the job routes
 // answer with everything except a credential, and the worker gets that from the
 // credential broker beside them.
-func fleetListener(t *testing.T, q *gen.Queries, keyring *crypto.Keyring, jobs remote.JobReader) *httptest.Server {
+//
+// It takes the control-plane coreapi.Client and makes the same two type
+// assertions cmd/inroad makes, so a signature that drifts fails here the way it
+// would fail at startup.
+func fleetListener(t *testing.T, q *gen.Queries, keyring *crypto.Keyring, cp coreapi.Client) *httptest.Server {
 	t.Helper()
 	broker, err := credbroker.NewHandler(
 		NewCredentialOpener(q, keyring, mail.GoogleOAuth{}, mail.MicrosoftOAuth{}),
@@ -50,7 +54,8 @@ func fleetListener(t *testing.T, q *gen.Queries, keyring *crypto.Keyring, jobs r
 	}
 	core, err := remote.NewHandler(remote.Deps{
 		Suppression: suppression.NewStore(q),
-		Jobs:        jobs,
+		Jobs:        jobReader(t, cp),
+		Outcomes:    outcomeWriter(t, cp),
 	}, remoteTestToken, remoteQuiet())
 	if err != nil {
 		t.Fatalf("remote.NewHandler: %v", err)
@@ -72,6 +77,16 @@ func jobReader(t *testing.T, c coreapi.Client) remote.JobReader {
 		t.Fatalf("the in-process client (%T) does not satisfy remote.JobReader", c)
 	}
 	return r
+}
+
+// outcomeWriter is the same assertion for the claim and outcome half.
+func outcomeWriter(t *testing.T, c coreapi.Client) remote.OutcomeWriter {
+	t.Helper()
+	o, ok := c.(remote.OutcomeWriter)
+	if !ok {
+		t.Fatalf("the in-process client (%T) does not satisfy remote.OutcomeWriter", c)
+	}
+	return o
 }
 
 // remoteJobCore builds the EXECUTION plane's coreapi client the way
@@ -104,7 +119,7 @@ func remoteJobCore(t *testing.T, baseURL string) JobSource {
 func TestARemoteStepSendJobIsCompleteAndCredentialled(t *testing.T) {
 	ctx, f := setupPool(t)
 	enrollmentID := f.enroll(t, ctx)
-	srv := fleetListener(t, f.q, itKeyring(t, f.q), jobReader(t, f.core))
+	srv := fleetListener(t, f.q, itKeyring(t, f.q), f.core)
 	worker := remoteJobCore(t, srv.URL)
 
 	got, err := worker.GetStepSendJob(ctx, enrollmentID.String(), f.ws.String())
@@ -163,7 +178,7 @@ func TestEveryJobReadCrossesTheWireWithNoPool(t *testing.T) {
 		"Preview subject", "Preview text", "<p>Preview</p>")
 	deliveryID, endpointID := seedWebhookDelivery(t, ctx, f)
 	messageID := seedSentMessage(t, ctx, f)
-	srv := fleetListener(t, f.q, itKeyring(t, f.q), jobReader(t, f.core))
+	srv := fleetListener(t, f.q, itKeyring(t, f.q), f.core)
 	worker := remoteJobCore(t, srv.URL)
 
 	t.Run("GetStepSendJob", func(t *testing.T) {
@@ -294,7 +309,7 @@ func TestEveryJobReadCrossesTheWireWithNoPool(t *testing.T) {
 // mailbox's decrypted credential.
 func TestTheWarmupJobReadsCrossTheWireWithNoPool(t *testing.T) {
 	ctx, f := setupWarmup(t)
-	srv := fleetListener(t, f.q, itKeyring(t, f.q), jobReader(t, f.core))
+	srv := fleetListener(t, f.q, itKeyring(t, f.q), f.core)
 	worker := remoteJobCore(t, srv.URL)
 
 	send, err := worker.GetWarmupSendJob(ctx, f.a.String(), f.ws1.String())
@@ -370,7 +385,7 @@ func TestEveryJobReadFailsClosedWhenTheControlPlaneDies(t *testing.T) {
 	stepID := seedStep(t, ctx, f.pool, f.ws, f.campaignID, 3, "Preview", "Preview", "")
 	deliveryID, _ := seedWebhookDelivery(t, ctx, f)
 	messageID := seedSentMessage(t, ctx, f)
-	srv := fleetListener(t, f.q, itKeyring(t, f.q), jobReader(t, f.core))
+	srv := fleetListener(t, f.q, itKeyring(t, f.q), f.core)
 	worker := remoteJobCore(t, srv.URL)
 
 	reads := []struct {
@@ -433,7 +448,7 @@ func TestJobReadsArePinnedToTheRequestedWorkspace(t *testing.T) {
 	stepID := seedStep(t, ctx, f.pool, f.ws, f.campaignID, 3, "Preview", "Preview", "")
 	deliveryID, _ := seedWebhookDelivery(t, ctx, f)
 	messageID := seedSentMessage(t, ctx, f)
-	srv := fleetListener(t, f.q, itKeyring(t, f.q), jobReader(t, f.core))
+	srv := fleetListener(t, f.q, itKeyring(t, f.q), f.core)
 	worker := remoteJobCore(t, srv.URL)
 
 	foreign := f.foreignWS.String()
@@ -478,7 +493,7 @@ func TestJobReadsArePinnedToTheRequestedWorkspace(t *testing.T) {
 // processing inbound mail at all.
 func TestAnUnmatchedMessageIDCrossesAsErrNoMatch(t *testing.T) {
 	ctx, f := setupPool(t)
-	srv := fleetListener(t, f.q, itKeyring(t, f.q), jobReader(t, f.core))
+	srv := fleetListener(t, f.q, itKeyring(t, f.q), f.core)
 	worker := remoteJobCore(t, srv.URL)
 
 	ref, err := worker.FindSendByMessageID(ctx, f.ws.String(), "<never-sent-"+uuid.NewString()+"@elsewhere.test>")

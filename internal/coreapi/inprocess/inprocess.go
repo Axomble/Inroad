@@ -48,7 +48,13 @@ type client struct {
 	// worker installs internal/coreapi/remote's client via WithRemoteJobs and
 	// then none of those eight methods touches a database. See jobsource.go for
 	// why this one defaults to nil where suppression defaults to a value.
-	jobs      JobSource
+	jobs JobSource
+	// outcomes accepts the claim and outcome writes. NIL IS THE DEFAULT and
+	// means "write them here, to the pool" — the self-host path, unchanged. A
+	// fleet worker installs internal/coreapi/remote's client via
+	// WithRemoteOutcomes and then none of those twenty methods touches a
+	// database. Same nil-means-local shape as jobs above; see outcomesource.go.
+	outcomes  OutcomeSource
 	jwtSecret []byte
 	publicURL string
 	// enroll owns the enrollment state machine (advance/complete/stop). The
@@ -202,6 +208,33 @@ func WithRemoteJobs(s JobSource) Option {
 	return func(c *client) {
 		if s != nil {
 			c.jobs = s
+		}
+	}
+}
+
+// WithRemoteOutcomes replaces the pool-backed claim and outcome WRITES with
+// another OutcomeSource — in practice internal/coreapi/remote's HTTP client,
+// pointed at the control plane's fleet listener.
+//
+// This is slice 3 of giving up the worker's pgxpool, and the one that carries
+// the risk: over a network a write has a third outcome a function call does not
+// — it committed and the response was lost. What makes that safe is the claim,
+// not this option; see internal/coreapi/remote's outcomes.go for the per-method
+// idempotency audit and the fault-injection tests that prove it.
+//
+// Same shape and same reasoning as WithRemoteSuppression and WithRemoteJobs — an
+// Option rather than a positional parameter because every other caller
+// (cmd/inroad, cmd/seed, every test, and the self-host RoleAll worker) wants the
+// local write and should not have to say so, and OFF by default, so an
+// installation that sets nothing behaves exactly as it did before this existed.
+//
+// Passing nil is a no-op, NOT a way to disable outcome writes: silently dropping
+// a source that was meant to be wired would leave the process writing to a pool
+// it was supposed to give up, with nothing saying so.
+func WithRemoteOutcomes(s OutcomeSource) Option {
+	return func(c *client) {
+		if s != nil {
+			c.outcomes = s
 		}
 	}
 }
