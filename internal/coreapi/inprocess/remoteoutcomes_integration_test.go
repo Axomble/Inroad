@@ -5,6 +5,7 @@ package inprocess
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -198,7 +199,7 @@ func proxyTo(t *testing.T, baseURL string, w http.ResponseWriter, r *http.Reques
 
 // remoteOutcomeCore builds the EXECUTION plane's coreapi client the way
 // cmd/worker does for a role=send fleet host: NO POOL, NO KEYRING, a credential
-// broker, and all THREE remote source seams installed.
+// broker, and all FOUR remote source seams installed.
 //
 // The nil pool is the assertion, not a shortcut: localOutcomes would dereference
 // it on the first Begin, so every row this client moves demonstrably moved over
@@ -215,7 +216,7 @@ func remoteOutcomeCore(t *testing.T, baseURL string) coreapi.Client {
 	}
 	return New(nil, nil, nil, "", mail.GoogleOAuth{}, mail.MicrosoftOAuth{}, nil, nil,
 		WithCredentialBroker(opener), WithRemoteSuppression(rc),
-		WithRemoteJobs(rc), WithRemoteOutcomes(rc))
+		WithRemoteJobs(rc), WithRemoteOutcomes(rc), WithRemoteInboxSends(rc))
 }
 
 // ---------------------------------------------------------------------------
@@ -223,13 +224,26 @@ func remoteOutcomeCore(t *testing.T, baseURL string) coreapi.Client {
 // ---------------------------------------------------------------------------
 
 // countingSender is the SMTP leg. Its only job is to count: every assertion in
-// this file about a double send is an assertion about this number.
+// this file and in remoteinboxsends_integration_test.go about a double send is an
+// assertion about this number.
+//
+// failNext makes the next N attempts fail BEFORE the count moves, which is what a
+// provider rejection looks like to a handler: nothing left this process, so the
+// release-and-retry path is exercised without inventing a send that did not
+// happen.
 type countingSender struct {
-	sends   int
-	lastMsg string
+	sends    int
+	failNext int
+	lastMsg  string
 }
 
+var errSenderRejected = errors.New("the provider rejected the message")
+
 func (s *countingSender) Send(_ context.Context, _ mail.OutboundJob, _ mail.Message) (string, error) {
+	if s.failNext > 0 {
+		s.failNext--
+		return "", errSenderRejected
+	}
 	s.sends++
 	s.lastMsg = "<sent-" + uuid.NewString() + "@acme.test>"
 	return s.lastMsg, nil

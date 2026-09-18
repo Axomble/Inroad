@@ -56,6 +56,7 @@ func fleetListener(t *testing.T, q *gen.Queries, keyring *crypto.Keyring, cp cor
 		Suppression: suppression.NewStore(q),
 		Jobs:        jobReader(t, cp),
 		Outcomes:    outcomeWriter(t, cp),
+		InboxSends:  inboxSendWriter(t, cp),
 	}, remoteTestToken, remoteQuiet())
 	if err != nil {
 		t.Fatalf("remote.NewHandler: %v", err)
@@ -87,6 +88,16 @@ func outcomeWriter(t *testing.T, c coreapi.Client) remote.OutcomeWriter {
 		t.Fatalf("the in-process client (%T) does not satisfy remote.OutcomeWriter", c)
 	}
 	return o
+}
+
+// inboxSendWriter is the same assertion for the manual reply/compose half.
+func inboxSendWriter(t *testing.T, c coreapi.Client) remote.InboxSendWriter {
+	t.Helper()
+	s, ok := c.(remote.InboxSendWriter)
+	if !ok {
+		t.Fatalf("the in-process client (%T) does not satisfy remote.InboxSendWriter", c)
+	}
+	return s
 }
 
 // remoteJobCore builds the EXECUTION plane's coreapi client the way
