@@ -74,14 +74,21 @@ import (
 //     ('scheduled','sending') and absolute. A repeat writes the same terminal
 //     state.
 //
-//   - RecordInboxReply — the ONE method here that is not idempotent, and it is
-//     left that way deliberately. It appends an inbox_messages row inside the
-//     transaction that bumps the thread; a lost response would duplicate the row
-//     if it were retried. It is not retried: both handlers call it PAST THE DIAL
-//     and only log its failure, because returning an error there would re-run the
-//     send. So the reachable outcomes are "the thread is missing one row" (the
-//     call failed) and "the thread has it" — never two, unless a future caller
-//     retries it, which is what this paragraph exists to warn against.
+//   - RecordInboxReply — idempotent by the PROVIDER'S Message-ID, which is the
+//     key here rather than a row id. A partial UNIQUE INDEX on (workspace_id,
+//     message_id) WHERE message_id <> '' makes the duplicate impossible, and
+//     InsertInboxMessage's matching ON CONFLICT ... DO NOTHING is what turns a
+//     repeat into a no-op instead of an error (queries/inbox.sql). The thread
+//     bump it commits with is a CASE-guarded absolute update that lands on the
+//     same values.
+//
+//     The partial index's predicate is the exception worth naming rather than
+//     glossing: an EMPTY Message-ID falls outside it, so a repeat would append a
+//     SECOND outbound row on the thread. That is reachable only if a sender
+//     returned no id at all — gomail mints one and both API legs return the
+//     provider's — and it is not retried in any case, because both handlers call
+//     this PAST THE DIAL and only log its failure. Returning an error there would
+//     re-run the send, which is the one thing worse than a missing history row.
 //
 //   - ClaimInboxReply — the LEGACY drain's claim, an insert into idempotency_keys
 //     keyed on (workspace, "inbox-reply:"+taskID). A lost response means the claim

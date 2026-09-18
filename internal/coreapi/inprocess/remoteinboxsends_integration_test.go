@@ -529,6 +529,56 @@ func TestTheManualSendProtocolIsPinnedToTheRequestedWorkspace(t *testing.T) {
 	}
 }
 
+// Repeating the RECORD directly is a no-op, not a second message on the thread.
+//
+// Both handlers call RecordInboxReply past the dial and only LOG its failure, so
+// nothing retries it today — which is exactly why this is asserted at the method
+// rather than inferred from a caller. The property is
+// InsertInboxMessage's ON CONFLICT (workspace_id, message_id) DO NOTHING, and a
+// future caller that did retry after a lost response has to be able to rely on
+// it.
+func TestARepeatedRemoteReplyRecordIsANoOp(t *testing.T) {
+	ctx, f := setupPool(t)
+	pendingID := seedPendingReply(t, ctx, f, "Recorded once.")
+	worker, _ := faultyFleet(t, f)
+	sends, ok := worker.(InboxSendSource)
+	if !ok {
+		t.Fatalf("the remote-sourced client (%T) does not satisfy InboxSendSource", worker)
+	}
+	var threadID uuid.UUID
+	if err := f.pool.QueryRow(ctx,
+		`SELECT thread_id FROM inbox_pending_replies WHERE id = $1 AND workspace_id = $2`,
+		pendingID, f.ws).Scan(&threadID); err != nil {
+		t.Fatalf("read thread id: %v", err)
+	}
+
+	in := coreapi.RecordInboxReplyInput{
+		WorkspaceID: f.ws.String(), ThreadID: threadID.String(),
+		MessageID: "<recorded-once-" + uuid.NewString() + "@acme.test>",
+		FromEmail: "me@acme.test", FromName: "Acme", ToEmail: "lead@x.test",
+		Subject: "Re: Question about pricing", BodyText: "Recorded once.",
+	}
+	for i := range 3 {
+		if err := sends.RecordInboxReply(ctx, in); err != nil {
+			t.Fatalf("RecordInboxReply attempt %d: %v", i+1, err)
+		}
+	}
+	if got := outboundMessages(t, ctx, f, pendingID); got != 1 {
+		t.Errorf("the thread has %d outbound messages after three identical records, want 1", got)
+	}
+	// And the body crossed intact rather than arriving empty — a record that
+	// wrote a blank message would satisfy the count above.
+	var stored string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT body_text FROM inbox_messages WHERE workspace_id = $1 AND message_id = $2`,
+		f.ws, in.MessageID).Scan(&stored); err != nil {
+		t.Fatalf("read the recorded message: %v", err)
+	}
+	if stored != in.BodyText {
+		t.Errorf("recorded body = %q, want %q", stored, in.BodyText)
+	}
+}
+
 // The legacy drain's claim, over the wire, against the REAL idempotency_keys
 // table it reuses: a fresh claim wins, a second claim of the same task id loses
 // until released, and a release lets the retry's own re-claim win again.
