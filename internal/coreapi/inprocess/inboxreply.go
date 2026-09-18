@@ -2,6 +2,7 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -170,7 +171,7 @@ func (c client) ClaimPendingInboxReply(ctx context.Context, workspaceID, pending
 	// The claim comes FIRST, before reading anything: a read-then-claim
 	// ordering would let two workers both read a claimable row and race.
 	if err := c.inbox.ClaimPendingReply(ctx, ws, id); err != nil {
-		return coreapi.PendingInboxReply{}, err
+		return coreapi.PendingInboxReply{}, notClaimable(err)
 	}
 
 	pending, err := c.inbox.GetPendingReply(ctx, ws, id)
@@ -226,6 +227,27 @@ func (c client) FailPendingInboxReply(ctx context.Context, workspaceID, pendingI
 	return c.inbox.FailPendingReply(ctx, ws, id, reason)
 }
 
+// notClaimable translates the inbox domain's own "the guarded UPDATE matched no
+// row" into the coreapi sentinel the EXECUTION plane branches on.
+//
+// The two are different errors.New values — inbox.ErrPendingNotClaimable and
+// coreapi.ErrInboxPendingNotClaimable — so passing the store's error through
+// unchanged made worker/inbox's errors.Is check never match. The ordinary undo
+// path (cancelled, already sent, not yet due, another worker's live lease) was
+// therefore returned to asynq as a failure, retried to exhaustion, and captured
+// into task_dead_letters, instead of ending the task quietly. It is translated
+// HERE because inprocess is the one package that imports both, and because the
+// coreapi seam is where the execution plane's vocabulary is defined.
+//
+// The domain error is WRAPPED rather than replaced: a control-plane caller that
+// already branches on inbox.ErrPendingNotClaimable keeps working.
+func notClaimable(err error) error {
+	if errors.Is(err, inbox.ErrPendingNotClaimable) {
+		return fmt.Errorf("%w: %w", coreapi.ErrInboxPendingNotClaimable, err)
+	}
+	return err
+}
+
 func parsePendingIDs(workspaceID, pendingID string) (ws, id uuid.UUID, err error) {
 	ws, err = uuid.Parse(workspaceID)
 	if err != nil {
@@ -249,7 +271,7 @@ func (c client) ClaimPendingInboxCompose(ctx context.Context, workspaceID, pendi
 		return coreapi.PendingInboxCompose{}, err
 	}
 	if err := c.inbox.ClaimPendingCompose(ctx, ws, id); err != nil {
-		return coreapi.PendingInboxCompose{}, err
+		return coreapi.PendingInboxCompose{}, notClaimable(err)
 	}
 	row, err := c.inbox.GetPendingCompose(ctx, ws, id)
 	if err != nil {
