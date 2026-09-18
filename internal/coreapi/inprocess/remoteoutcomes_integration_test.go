@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,23 +60,59 @@ import (
 // reaches the handler at all, so nothing was committed. The pair is what lets a
 // test say "the delivery landed and the advance never ran" precisely rather than
 // approximately.
+//
+// Every field below is touched by TWO goroutines: the test sets the predicates
+// and reads the counters, while net/http runs ServeHTTP on its own connection
+// goroutine. They are therefore all guarded. This is not defensive style — an
+// unguarded version passed locally and failed under `go test -race`, which is
+// how CI runs the integration suite.
 type responseDropper struct {
-	inner   http.Handler
+	inner http.Handler
+
+	mu      sync.Mutex
 	drop    func(path string) bool
 	refuse  func(path string) bool
 	dropped int
 	refused int
 }
 
+// setDrop / setRefuse install a predicate; counts() reads the tallies. The test
+// goroutine must go through these rather than touching the fields directly.
+func (d *responseDropper) setDrop(fn func(path string) bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.drop = fn
+}
+
+func (d *responseDropper) setRefuse(fn func(path string) bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.refuse = fn
+}
+
+func (d *responseDropper) counts() (dropped, refused int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dropped, d.refused
+}
+
 func (d *responseDropper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	d.mu.Lock()
+	refuse, drop := d.refuse, d.drop
+	d.mu.Unlock()
+
 	switch {
-	case d.refuse != nil && d.refuse(r.URL.Path):
+	case refuse != nil && refuse(r.URL.Path):
+		d.mu.Lock()
 		d.refused++
+		d.mu.Unlock()
 		// A 500 with no body: the control plane was unreachable for this call.
 		w.WriteHeader(http.StatusInternalServerError)
-	case d.drop != nil && d.drop(r.URL.Path):
+	case drop != nil && drop(r.URL.Path):
 		d.inner.ServeHTTP(httptest.NewRecorder(), r)
+		d.mu.Lock()
 		d.dropped++
+		d.mu.Unlock()
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			// httptest.NewServer is HTTP/1.1, which always supports hijacking.
@@ -298,12 +335,12 @@ func TestALostClaimResponseNeverBecomesASecondClaim(t *testing.T) {
 	worker, dropper := faultyFleet(t, f)
 	s, enq := &countingSender{}, &recordingEnqueuer{}
 
-	dropper.drop = once(remote.PathStepSendClaim)
+	dropper.setDrop(once(remote.PathStepSendClaim))
 	if err := advanceOnce(t, ctx, worker, s, enq, enrollmentID.String(), f.ws.String()); err == nil {
 		t.Fatal("the attempt whose claim response was lost reported success")
 	}
-	if dropper.dropped != 1 {
-		t.Fatalf("the injector dropped %d responses, want 1 — this test proved nothing", dropper.dropped)
+	if dropped, _ := dropper.counts(); dropped != 1 {
+		t.Fatalf("the injector dropped %d responses, want 1 — this test proved nothing", dropped)
 	}
 	if s.sends != 0 {
 		t.Fatalf("sent %d times on an attempt that never learned it held the claim, want 0", s.sends)
@@ -345,12 +382,12 @@ func TestALostDeliveryResponseNeverBecomesADoubleSend(t *testing.T) {
 	worker, dropper := faultyFleet(t, f)
 	s, enq := &countingSender{}, &recordingEnqueuer{}
 
-	dropper.drop = once(remote.PathStepSendDelivered)
+	dropper.setDrop(once(remote.PathStepSendDelivered))
 	if err := advanceOnce(t, ctx, worker, s, enq, enrollmentID.String(), f.ws.String()); err == nil {
 		t.Fatal("the attempt whose delivery response was lost reported success")
 	}
-	if dropper.dropped != 1 {
-		t.Fatalf("the injector dropped %d responses, want 1", dropper.dropped)
+	if dropped, _ := dropper.counts(); dropped != 1 {
+		t.Fatalf("the injector dropped %d responses, want 1", dropped)
 	}
 	if s.sends != 1 {
 		t.Fatalf("sent %d times, want 1 — the message did go out on this attempt", s.sends)
@@ -394,12 +431,12 @@ func TestADeliveryWhoseAdvanceNeverRanRecoversForward(t *testing.T) {
 	worker, dropper := faultyFleet(t, f)
 	s, enq := &countingSender{}, &recordingEnqueuer{}
 
-	dropper.refuse = once(remote.PathStepSendAdvance)
+	dropper.setRefuse(once(remote.PathStepSendAdvance))
 	if err := advanceOnce(t, ctx, worker, s, enq, enrollmentID.String(), f.ws.String()); err == nil {
 		t.Fatal("the attempt whose cursor advance never ran reported success")
 	}
-	if dropper.refused != 1 {
-		t.Fatalf("the injector refused %d calls, want 1", dropper.refused)
+	if _, refused := dropper.counts(); refused != 1 {
+		t.Fatalf("the injector refused %d calls, want 1", refused)
 	}
 	if s.sends != 1 {
 		t.Fatalf("sent %d times, want 1", s.sends)
@@ -463,12 +500,12 @@ func TestALostAdvanceResponseLeavesACursorARepeatCannotMove(t *testing.T) {
 		t.Fatalf("GetStepSendJob: %v", err)
 	}
 
-	dropper.drop = once(remote.PathStepSendAdvance)
+	dropper.setDrop(once(remote.PathStepSendAdvance))
 	if err := advanceOnce(t, ctx, worker, s, enq, enrollmentID.String(), f.ws.String()); err == nil {
 		t.Fatal("the attempt whose advance response was lost reported success")
 	}
-	if dropper.dropped != 1 {
-		t.Fatalf("the injector dropped %d responses, want 1", dropper.dropped)
+	if dropped, _ := dropper.counts(); dropped != 1 {
+		t.Fatalf("the injector dropped %d responses, want 1", dropped)
 	}
 	// The advance DID commit on the control plane.
 	if got := currentStep(t, ctx, f, enrollmentID); got != 1 {
