@@ -51,6 +51,27 @@
 //     and the claim decides what the retry does. Nothing here invents a success
 //     or a zero value on a failed call.
 //
+// Slice 3b (inboxsends.go, inboxsendhandler.go) is the same dangerous work for
+// the mail a HUMAN wrote: the manual reply and compose protocol, whole. Slice 3
+// left it alone on purpose, because ClaimPendingInboxReply is a claim-and-READ
+// hybrid — the lease and the BODY cross in one response — so moving its outcome
+// half without its read half would have reproduced exactly the split slice 3
+// argued against for the step claim.
+//
+// The bar is higher here than on a sequence step, and the code is written to
+// that: a duplicate step is one extra marketing touch, a duplicate manual reply
+// is the operator's own words arriving twice in a conversation they are
+// watching. The claim that holds it is the ROW — a status-guarded transition with
+// a lease, which is also the operator's undo handle — and inboxsends.go carries
+// the per-method audit of what a LOST response costs, including the one case
+// where the honest answer is "the reply is dropped until the lease expires, and
+// that is the correct trade".
+//
+// It is also the ONE place a tenant's own CORRESPONDENCE crosses this wire,
+// which is unavoidable (a worker cannot send a reply it has not been given the
+// text of) and comes with a rule rather than a mitigation: no route logs a body,
+// a subject or a recipient, on either side.
+//
 // No credential crosses this wire, in EITHER direction. A job response carries
 // a mailbox's host, port, username and TLS policy and no secret at all; the
 // worker opens the secret through internal/platform/credbroker, on this same
@@ -255,6 +276,25 @@ const (
 // buffer limit.
 const maxJobRequestBytes = 8 << 20
 
+// The MANUAL MAIL ceilings (slice 3b), both the same number as their job
+// counterparts and both stated separately rather than reused under a name that
+// says "job", because a comment naming the wrong thing is worse than no comment.
+//
+// They bound a HUMAN'S MESSAGE rather than a campaign's: internal/app/inbox caps
+// a reply body at 100,000 bytes (maxReplyBodyLen) and a compose at the same, and
+// encoding/json escapes every < > & to \uXXXX, so a body made entirely of those
+// encodes to ~600 KiB. 8 MiB is therefore an order of magnitude above anything
+// the product can produce, and sizing it tighter would mean an operator who
+// pasted a long reply watched it fail to send on a fleet worker with no
+// explanation they could act on.
+const (
+	// maxMessageRequestBytes caps the record route, the one request carrying a
+	// delivered reply's body back.
+	maxMessageRequestBytes = maxJobRequestBytes
+	// maxMessageResponseBytes caps the two claims that answer WITH a body.
+	maxMessageResponseBytes = jobMaxResponseBytes
+)
+
 // callBudget pairs an http.Client with the response cap that matches the class
 // of call it serves. It exists so post takes a budget instead of two more
 // positional parameters, and so the two classes cannot borrow each other's.
@@ -271,19 +311,22 @@ type callBudget struct {
 // What it does NOT do yet, stated plainly because the opposite is easy to
 // assume from the package existing: it does not remove the worker's database
 // access. cmd/worker still opens a pgxpool for every method this transport has
-// not yet taken over — after slice 3 that is the inbox poll cursor, the
-// manual reply/compose claim family, the warmup receipt, the inbound-message
-// store, and every periodic sweep. The containment claim becomes true when the
-// pool is gone (slice 4), not when this type is constructed.
+// not yet taken over — after slice 3b that is the inbox poll cursor, the
+// inbound-message store, the warmup receipt, and every periodic sweep. The
+// containment claim becomes true when the pool is gone (slice 4), not when this
+// type is constructed.
 type Client struct {
 	baseURL string
 	token   string
 	// check is the budget for a single-fact lookup (IsSuppressed). jobs is the
 	// budget for a job build. outcomes is the budget for a claim/mark/finalize
-	// write. See callBudget.
+	// write. messages is outcomes' timeouts under a body-sized response ceiling,
+	// for the two manual-mail claims that answer with a human's message. See
+	// callBudget.
 	check    callBudget
 	jobs     callBudget
 	outcomes callBudget
+	messages callBudget
 	// creds opens the decrypted credentials the job responses deliberately do
 	// NOT carry. It is the credential broker — the same one this process
 	// already had to be configured with, since a worker may only read coreapi
@@ -315,6 +358,13 @@ func NewClient(baseURL, token string, allowPlaintext bool, creds credbroker.Open
 	if creds == nil {
 		return nil, ErrNoCredentialSource
 	}
+	// ONE http.Client for both write budgets, deliberately. A manual-mail claim is
+	// the same KIND of work as a step-send claim — a short transaction that can
+	// wait on a row lock — so it wants the same timeouts, and a second connection
+	// pool to the same host for identical timings would buy nothing. What differs
+	// is only the response CEILING: this claim answers with a reply body, not an
+	// enum. A fourth pool for a different integer would be ceremony.
+	writes := newHTTPClient(outcomeRequestTimeout, outcomeResponseHeaderTimeout)
 	return &Client{
 		baseURL: base,
 		token:   token,
@@ -327,12 +377,16 @@ func NewClient(baseURL, token string, allowPlaintext bool, creds credbroker.Open
 			maxBytes: jobMaxResponseBytes,
 		},
 		outcomes: callBudget{
-			hc: newHTTPClient(outcomeRequestTimeout, outcomeResponseHeaderTimeout),
+			hc: writes,
 			// An outcome answers with an enum, a counter or a two-field advance.
 			// The same 4 KiB the suppression check uses is already two orders of
 			// magnitude of headroom, and it is the one call class where a tight
 			// cap costs nothing.
 			maxBytes: maxResponseBytes,
+		},
+		messages: callBudget{
+			hc:       writes,
+			maxBytes: maxMessageResponseBytes,
 		},
 		creds: creds,
 	}, nil
@@ -430,6 +484,8 @@ func (c *Client) post(ctx context.Context, b callBudget, path string, in, out an
 		return ErrUnauthorized
 	case http.StatusNotFound:
 		return notFound(path, io.LimitReader(resp.Body, maxResponseBytes))
+	case http.StatusConflict:
+		return conflict(path, io.LimitReader(resp.Body, maxResponseBytes))
 	default:
 		// The status only. The control plane's error text is not ours to relay
 		// into a worker's logs, and relaying it is how an upstream string
@@ -464,5 +520,27 @@ func notFound(path string, body io.Reader) error {
 		return coreapi.ErrNoMatch
 	default:
 		return fmt.Errorf("coreapi remote: %s: control plane returned 404 with no known reason", path)
+	}
+}
+
+// conflict is notFound's counterpart for the manual-mail sentinels: the row is
+// THERE and its state forbids the transition. Same rule — the body is read only
+// to recover the handler's own fixed code, nothing from it is relayed, and an
+// unrecognised body yields a plain error rather than a guess.
+//
+// That last clause carries more weight here than it does on 404. Reading an
+// unexplained conflict as "not claimable" would make a worker treat an
+// intermediary's response as the operator's own undo: it would return nil, report
+// the task done, and silently never send a reply the operator is watching for.
+func conflict(path string, body io.Reader) error {
+	var e errorResponse
+	_ = json.NewDecoder(body).Decode(&e)
+	switch e.Code {
+	case codeNotClaimable:
+		return fmt.Errorf("coreapi remote: %s: %w", path, coreapi.ErrInboxPendingNotClaimable)
+	case codeNoInbound:
+		return fmt.Errorf("coreapi remote: %s: %w", path, coreapi.ErrInboxNoInbound)
+	default:
+		return fmt.Errorf("coreapi remote: %s: control plane returned 409 with no known reason", path)
 	}
 }

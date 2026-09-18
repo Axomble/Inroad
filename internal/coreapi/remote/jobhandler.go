@@ -213,15 +213,29 @@ var (
 // fail maps an implementation error to a status and a FIXED body, and logs the
 // real one.
 //
-// Two sentinels are reported as themselves, because the execution plane
-// branches on them and a generic failure would change what the worker does:
+// FOUR sentinels are reported as themselves, because the execution plane branches
+// on them and a generic failure would change what the worker does. None of the
+// four is logged: every one is an ORDINARY answer rather than a fault, and
+// logging them would emit a line per non-campaign email in the inbox and a line
+// per undone reply.
+//
+// As 404 — the named row is gone or nothing matched:
 //
 //   - coreapi.ErrNoMatch is the ordinary answer for nearly every inbound
-//     message the poller sees. It is not logged at all — it is not an error,
-//     and logging it would emit a line per non-campaign email in the inbox.
+//     message the poller sees.
 //   - pgx.ErrNoRows means the named row is gone (a delivery deleted after its
 //     task was queued, a vanished receipt). The webhook worker drops the task
 //     on it rather than retrying to exhaustion.
+//
+// As 409 — the row is THERE and its state forbids the transition (slice 3b; see
+// wire.go for why these must not share 404):
+//
+//   - coreapi.ErrInboxPendingNotClaimable is the operator's undo, an already-sent
+//     row, one not yet due, or another worker's live lease. worker/inbox stops on
+//     it; anything else would retry an undone reply to exhaustion and write it
+//     into task_dead_letters.
+//   - coreapi.ErrInboxNoInbound is a thread with nothing to reply to. Permanent —
+//     no retry can build that reply.
 //
 // Everything else is a 500 whose body is this package's own string. The
 // implementation's error text is never relayed: it can carry a pg message or
@@ -238,6 +252,10 @@ func (h *handler) fail(w http.ResponseWriter, k failKind, route string, err erro
 		respond(w, http.StatusNotFound, errorResponse{Error: "no matching send", Code: codeNoMatch})
 	case errors.Is(err, pgx.ErrNoRows):
 		respond(w, http.StatusNotFound, errorResponse{Error: "not found", Code: codeNotFound})
+	case errors.Is(err, coreapi.ErrInboxPendingNotClaimable):
+		respond(w, http.StatusConflict, errorResponse{Error: "not claimable", Code: codeNotClaimable})
+	case errors.Is(err, coreapi.ErrInboxNoInbound):
+		respond(w, http.StatusConflict, errorResponse{Error: "no inbound message to reply to", Code: codeNoInbound})
 	default:
 		h.logger.Error(k.logMsg, append(logArgs, "route", route, "err", err)...)
 		respond(w, http.StatusInternalServerError, errorResponse{Error: k.bodyPrefix + route})

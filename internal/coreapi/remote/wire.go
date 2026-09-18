@@ -67,6 +67,39 @@ const (
 	PathWebhookMarkDelivered  = PathPrefix + "webhook-delivery/delivered"
 	PathWebhookMarkRetrying   = PathPrefix + "webhook-delivery/retrying"
 	PathWebhookMarkFailed     = PathPrefix + "webhook-delivery/failed"
+
+	// The MANUAL MAIL routes (slice 3b): the reply/compose protocol for mail a
+	// HUMAN wrote and pressed send on. Slice 3 deliberately left this alone
+	// because ClaimPendingInboxReply is a claim-and-READ hybrid — it takes the
+	// lease and returns the BODY in one call — so moving its outcome half without
+	// its read half would have reproduced exactly the split slice 3 argued
+	// against for the step claim. It moves whole, or not at all.
+	//
+	// The double-send bar is HIGHER here than on a sequence step, not equal: a
+	// duplicate step is one extra marketing touch, a duplicate manual reply is
+	// the operator's own words arriving twice in a customer's thread. What holds
+	// it is the ROW — a status-guarded 'scheduled' -> 'sending' UPDATE with a
+	// lease, which is also the operator's undo handle — never this transport. See
+	// inboxsends.go for the per-method audit of what a lost response costs.
+	//
+	// The first three are the LEGACY drain (worker/inbox.ReplySendHandler),
+	// deleted with it in the release after this one.
+	PathInboxReplyJob     = PathPrefix + "inbox-reply/job"
+	PathInboxReplyClaim   = PathPrefix + "inbox-reply/claim"
+	PathInboxReplyRelease = PathPrefix + "inbox-reply/release"
+	// PathInboxReplyRecord is shared by the drain and the deferred path: both
+	// record the delivered message onto the thread after the provider ACK.
+	PathInboxReplyRecord = PathPrefix + "inbox-reply/record"
+
+	PathInboxPendingReplyClaim   = PathPrefix + "inbox-pending-reply/claim"
+	PathInboxPendingReplySent    = PathPrefix + "inbox-pending-reply/sent"
+	PathInboxPendingReplyRelease = PathPrefix + "inbox-pending-reply/release"
+	PathInboxPendingReplyFail    = PathPrefix + "inbox-pending-reply/fail"
+
+	PathInboxPendingComposeClaim   = PathPrefix + "inbox-pending-compose/claim"
+	PathInboxPendingComposeSent    = PathPrefix + "inbox-pending-compose/sent"
+	PathInboxPendingComposeRelease = PathPrefix + "inbox-pending-compose/release"
+	PathInboxPendingComposeFail    = PathPrefix + "inbox-pending-compose/fail"
 )
 
 // The claim outcome, on the wire.
@@ -104,9 +137,26 @@ const (
 // and stays a plain error. That direction matters more than it looks: mapping
 // an unrecognised 404 to ErrNoRows would make a worker silently discard every
 // webhook delivery against a control plane that had not been upgraded.
+// Two more sentinels join them with slice 3b, on a DIFFERENT status, and the
+// status is the decision worth recording. 404 means "the named row is gone"; the
+// manual-mail pair mean "the row is there and its STATE forbids this", which is
+// 409 Conflict. Keeping them off 404 is not tidiness: a stray 404 from a
+// mis-routed request or an intermediary must never be readable as "the operator
+// cancelled this reply", because that reading makes a worker drop a human's mail
+// and report success. On 409 it cannot be, whatever the body says.
 const (
 	codeNotFound = "not_found" // → pgx.ErrNoRows
 	codeNoMatch  = "no_match"  // → coreapi.ErrNoMatch
+
+	// codeNotClaimable → coreapi.ErrInboxPendingNotClaimable: cancelled, already
+	// sent, not yet due, or held by another worker's live lease. All four mean
+	// "stop and do not retry", which is why the in-process seam gives them one
+	// error and this gives them one code.
+	codeNotClaimable = "not_claimable"
+	// codeNoInbound → coreapi.ErrInboxNoInbound: the thread has no inbound
+	// message to reply to. PERMANENT — both reply handlers log it and fail the
+	// row rather than retrying a reply that can never be built.
+	codeNoInbound = "no_inbound"
 )
 
 // suppressionRequest asks whether ONE named address is suppressed in ONE named
@@ -444,6 +494,116 @@ type advanceResponse struct {
 // capDeferralResponse carries the cap-deferral counter's new value.
 type capDeferralResponse struct {
 	Deferrals int `json:"deferrals"`
+}
+
+// The MANUAL MAIL shapes (slice 3b).
+//
+// # Ids in, values out — and the one direction that carries correspondence
+//
+// Eleven of the twelve routes take IDS ONLY, exactly like every other route on
+// this transport. The twelfth, the record, carries the delivered reply's BODY
+// back, and that is a deliberate exception rather than an oversight: the thread's
+// history is written from it, and the worker is by then holding that exact text
+// because the control plane handed it over on the claim. The wire therefore
+// reveals nothing the caller was not already given, and nothing here can express
+// "rows matching X" — there is no filter, no pattern, no limit and no cursor on
+// any of the twelve.
+//
+// The body travelling at all is what makes these routes different from the rest
+// of the seam, and it is unavoidable: a worker cannot send a reply it has not
+// been given the text of. What follows from it is a rule rather than a
+// mitigation — no route here logs a body, a subject or a recipient on either
+// side, and inboxsendhandler.go's log arguments are ids only.
+
+// threadRequest names one inbox thread whose reply job is wanted.
+type threadRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	ThreadID    string `json:"thread_id"`
+}
+
+// replyTaskRequest names one LEGACY inbox:reply_send task's claim key.
+//
+// TaskID is not a uuid and must not be validated as one: it is the asynq task id
+// minted at enqueue time ("inboxreply:<thread>:<unix-second>"), it is the claim's
+// key rather than a row id, and refusing an unfamiliar shape would strand exactly
+// the in-flight tasks the drain exists to finish.
+type replyTaskRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	TaskID      string `json:"task_id"`
+}
+
+// recordReplyRequest carries one delivered reply back to be written onto the
+// thread.
+//
+// It wraps coreapi.RecordInboxReplyInput itself rather than mirroring its eight
+// fields, the same rule the job requests follow: a field added to the input and
+// forgotten in a hand-written mirror would arrive ZERO-VALUED, and for BodyText
+// that is a thread whose history records an empty message the customer actually
+// received.
+//
+// The workspace is on the envelope AS WELL as inside the input, for the reason
+// stepJobRequest states: the pin is then visible on the wire rather than buried
+// in one field, and the handler has a workspace to parse and refuse BEFORE
+// anything runs. A disagreement is a 400.
+type recordReplyRequest struct {
+	WorkspaceID string                        `json:"workspace_id"`
+	Reply       coreapi.RecordInboxReplyInput `json:"reply"`
+}
+
+// pendingRequest names one deferred row — a reply or a composed email. One shape
+// for both, because the difference between them is which route was called.
+type pendingRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	PendingID   string `json:"pending_id"`
+}
+
+// pendingSentRequest completes one claimed deferred row with the Message-ID the
+// provider assigned.
+type pendingSentRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	PendingID   string `json:"pending_id"`
+	MessageID   string `json:"message_id"`
+}
+
+// pendingReasonRequest releases or fails one claimed deferred row.
+//
+// Reason is a STABLE CLIENT-SAFE TOKEN chosen by internal/worker/inbox, never a
+// provider's error text, and that property is the caller's to keep rather than
+// this transport's to enforce: the row's last_error is served to any inbox:read
+// caller, so the worker already refuses to put an upstream string there (see
+// worker/inbox.releaseAndReturn). It travels verbatim for the parity reason every
+// free-text value on this transport does.
+type pendingReasonRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	PendingID   string `json:"pending_id"`
+	Reason      string `json:"reason"`
+}
+
+// The manual-mail response shapes. Each wraps the coreapi type itself rather
+// than mirroring its fields, same rule and same reason as the job responses.
+
+type inboxReplyJobResponse struct {
+	Job coreapi.InboxReplyJob `json:"job"`
+}
+
+type pendingInboxReplyResponse struct {
+	Pending coreapi.PendingInboxReply `json:"pending"`
+}
+
+type pendingInboxComposeResponse struct {
+	Compose coreapi.PendingInboxCompose `json:"compose"`
+}
+
+// claimedResponse is the legacy drain claim's answer: claimed=false means a
+// prior attempt at this exact task already reached the dial, and the caller must
+// SKIP rather than send again.
+//
+// A struct rather than a bare boolean for the reason suppressionResponse is one,
+// and the field is named rather than reused from that type because the two
+// answers mean opposite things and a shared shape would invite reading one as
+// the other.
+type claimedResponse struct {
+	Claimed bool `json:"claimed"`
 }
 
 // ackResponse is what a route that returns nothing but "this committed" writes.

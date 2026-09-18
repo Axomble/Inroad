@@ -2,6 +2,7 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 // reads through the SAME inbox.Service.GetThread the control-plane HTTP
 // handler reads from (composed once as c.inbox), rather than re-deriving the
 // inbound/outbound merge here.
-func (c client) GetInboxReplyJob(ctx context.Context, threadID, workspaceID string) (coreapi.InboxReplyJob, error) {
+func (c client) localGetInboxReplyJob(ctx context.Context, threadID, workspaceID string) (coreapi.InboxReplyJob, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.InboxReplyJob{}, err
@@ -73,7 +74,7 @@ func inboxReplyJobFrom(detail inbox.ThreadDetail) (coreapi.InboxReplyJob, error)
 // inbox.Service.RecordOutboundReply). Consumed through the narrow
 // worker/inbox.ReplyCore interface, satisfied by type assertion — the same
 // pattern as StoreInboundMessage/coreapi.InboxCaptureClient.
-func (c client) RecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error {
+func (c client) localRecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error {
 	ws, err := uuid.Parse(in.WorkspaceID)
 	if err != nil {
 		return err
@@ -129,7 +130,7 @@ const inboxReplyClaimKeyPrefix = "inbox-reply:"
 // is populated with taskID itself only to satisfy the column's NOT NULL.
 // Claim rows age out via the SAME 24h maintenance sweep as HTTP idempotency
 // rows — no dedicated retention job.
-func (c client) ClaimInboxReply(ctx context.Context, workspaceID, taskID string) (bool, error) {
+func (c client) localClaimInboxReply(ctx context.Context, workspaceID, taskID string) (bool, error) {
 	return c.replyClaims.TryInsert(ctx, workspaceID, inboxReplyClaimKeyPrefix+taskID, []byte(taskID))
 }
 
@@ -138,7 +139,7 @@ func (c client) ClaimInboxReply(ctx context.Context, workspaceID, taskID string)
 // asynq to retry): without releasing first, the retry's own ClaimInboxReply
 // call would see its own abandoned claim as "already sent" and skip
 // forever, permanently dropping a reply that never actually went out.
-func (c client) ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error {
+func (c client) localReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error {
 	return c.replyClaims.Delete(ctx, workspaceID, inboxReplyClaimKeyPrefix+taskID)
 }
 
@@ -157,7 +158,7 @@ func (c client) ReleaseInboxReply(ctx context.Context, workspaceID, taskID strin
 // Returns coreapi.ErrInboxPendingNotClaimable when the transition matched no
 // row: cancelled, already sent, not yet due, or held by a live lease. All four
 // mean "stop and do not retry", so they deliberately share one error.
-func (c client) ClaimPendingInboxReply(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxReply, error) {
+func (c client) localClaimPendingInboxReply(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxReply, error) {
 	ws, err := uuid.Parse(workspaceID)
 	if err != nil {
 		return coreapi.PendingInboxReply{}, fmt.Errorf("parse workspace id: %w", err)
@@ -170,7 +171,7 @@ func (c client) ClaimPendingInboxReply(ctx context.Context, workspaceID, pending
 	// The claim comes FIRST, before reading anything: a read-then-claim
 	// ordering would let two workers both read a claimable row and race.
 	if err := c.inbox.ClaimPendingReply(ctx, ws, id); err != nil {
-		return coreapi.PendingInboxReply{}, err
+		return coreapi.PendingInboxReply{}, notClaimable(err)
 	}
 
 	pending, err := c.inbox.GetPendingReply(ctx, ws, id)
@@ -194,7 +195,7 @@ func (c client) ClaimPendingInboxReply(ctx context.Context, workspaceID, pending
 
 // MarkPendingInboxReplySent completes a claimed deferred reply. Guarded on
 // 'sending' in SQL, so only the worker that claimed it can complete it.
-func (c client) MarkPendingInboxReplySent(ctx context.Context, workspaceID, pendingID, messageID string) error {
+func (c client) localMarkPendingInboxReplySent(ctx context.Context, workspaceID, pendingID, messageID string) error {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return err
@@ -207,7 +208,7 @@ func (c client) MarkPendingInboxReplySent(ctx context.Context, workspaceID, pend
 // retry would find its own abandoned 'sending' row and have to wait out the
 // full lease before trying — turning a momentary SMTP blip into a five-minute
 // delay.
-func (c client) ReleasePendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error {
+func (c client) localReleasePendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return err
@@ -218,12 +219,33 @@ func (c client) ReleasePendingInboxReply(ctx context.Context, workspaceID, pendi
 // FailPendingInboxReply marks a claimed reply permanently failed. The row
 // survives so the outbox can show what happened rather than the reply simply
 // vanishing.
-func (c client) FailPendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error {
+func (c client) localFailPendingInboxReply(ctx context.Context, workspaceID, pendingID, reason string) error {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return err
 	}
 	return c.inbox.FailPendingReply(ctx, ws, id, reason)
+}
+
+// notClaimable translates the inbox domain's own "the guarded UPDATE matched no
+// row" into the coreapi sentinel the EXECUTION plane branches on.
+//
+// The two are different errors.New values — inbox.ErrPendingNotClaimable and
+// coreapi.ErrInboxPendingNotClaimable — so passing the store's error through
+// unchanged made worker/inbox's errors.Is check never match. The ordinary undo
+// path (cancelled, already sent, not yet due, another worker's live lease) was
+// therefore returned to asynq as a failure, retried to exhaustion, and captured
+// into task_dead_letters, instead of ending the task quietly. It is translated
+// HERE because inprocess is the one package that imports both, and because the
+// coreapi seam is where the execution plane's vocabulary is defined.
+//
+// The domain error is WRAPPED rather than replaced: a control-plane caller that
+// already branches on inbox.ErrPendingNotClaimable keeps working.
+func notClaimable(err error) error {
+	if errors.Is(err, inbox.ErrPendingNotClaimable) {
+		return fmt.Errorf("%w: %w", coreapi.ErrInboxPendingNotClaimable, err)
+	}
+	return err
 }
 
 func parsePendingIDs(workspaceID, pendingID string) (ws, id uuid.UUID, err error) {
@@ -243,13 +265,13 @@ func parsePendingIDs(workspaceID, pendingID string) (ws, id uuid.UUID, err error
 // ClaimPendingInboxCompose claims a composed email for delivery. Same
 // claim-then-read ordering as ClaimPendingInboxReply: claiming first is what
 // stops two workers both deciding a row is theirs.
-func (c client) ClaimPendingInboxCompose(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxCompose, error) {
+func (c client) localClaimPendingInboxCompose(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxCompose, error) {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return coreapi.PendingInboxCompose{}, err
 	}
 	if err := c.inbox.ClaimPendingCompose(ctx, ws, id); err != nil {
-		return coreapi.PendingInboxCompose{}, err
+		return coreapi.PendingInboxCompose{}, notClaimable(err)
 	}
 	row, err := c.inbox.GetPendingCompose(ctx, ws, id)
 	if err != nil {
@@ -265,7 +287,7 @@ func (c client) ClaimPendingInboxCompose(ctx context.Context, workspaceID, pendi
 	}, nil
 }
 
-func (c client) MarkPendingInboxComposeSent(ctx context.Context, workspaceID, pendingID, messageID string) error {
+func (c client) localMarkPendingInboxComposeSent(ctx context.Context, workspaceID, pendingID, messageID string) error {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return err
@@ -273,7 +295,7 @@ func (c client) MarkPendingInboxComposeSent(ctx context.Context, workspaceID, pe
 	return c.inbox.MarkPendingComposeSent(ctx, ws, id, messageID)
 }
 
-func (c client) ReleasePendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error {
+func (c client) localReleasePendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return err
@@ -281,7 +303,7 @@ func (c client) ReleasePendingInboxCompose(ctx context.Context, workspaceID, pen
 	return c.inbox.ReleasePendingCompose(ctx, ws, id, reason)
 }
 
-func (c client) FailPendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error {
+func (c client) localFailPendingInboxCompose(ctx context.Context, workspaceID, pendingID, reason string) error {
 	ws, id, err := parsePendingIDs(workspaceID, pendingID)
 	if err != nil {
 		return err

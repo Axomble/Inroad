@@ -166,7 +166,7 @@ func (f *fakeOutcomes) MarkWebhookFailed(context.Context, string, string, int, s
 func serveOutcomes(t *testing.T, out *fakeOutcomes) (*Client, *httptest.Server) {
 	t.Helper()
 	h, err := NewHandler(Deps{
-		Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: out,
+		Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: out, InboxSends: &fakeInboxSends{},
 	}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -809,7 +809,7 @@ func postOutcome(t *testing.T, srv *httptest.Server, path, token, body string) i
 // before it. #216's lesson: half a transport starts, registers its routes, and
 // fails every call to the rest at the first send.
 func TestAHandlerNeedsAnOutcomeWriter(t *testing.T) {
-	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}}, testToken, quietLogger()); err == nil {
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger()); err == nil {
 		t.Error("a handler with no outcome writer was built")
 	}
 }

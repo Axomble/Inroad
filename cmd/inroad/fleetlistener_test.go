@@ -187,6 +187,71 @@ func (f *fakeOutcomeWriter) MarkWebhookFailed(context.Context, string, string, i
 	return nil
 }
 
+// fakeInboxSendWriter is the control plane's manual reply/compose half. Like the
+// two above it answers zero values: this file is about which routes are mounted,
+// behind which token, on which listener.
+type fakeInboxSendWriter struct{ calls int }
+
+func (f *fakeInboxSendWriter) GetInboxReplyJob(context.Context, string, string) (coreapi.InboxReplyJob, error) {
+	f.calls++
+	return coreapi.InboxReplyJob{}, nil
+}
+
+func (f *fakeInboxSendWriter) RecordInboxReply(context.Context, coreapi.RecordInboxReplyInput) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) ClaimInboxReply(context.Context, string, string) (bool, error) {
+	f.calls++
+	return true, nil
+}
+
+func (f *fakeInboxSendWriter) ReleaseInboxReply(context.Context, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) ClaimPendingInboxReply(context.Context, string, string) (coreapi.PendingInboxReply, error) {
+	f.calls++
+	return coreapi.PendingInboxReply{}, nil
+}
+
+func (f *fakeInboxSendWriter) MarkPendingInboxReplySent(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) ReleasePendingInboxReply(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) FailPendingInboxReply(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) ClaimPendingInboxCompose(context.Context, string, string) (coreapi.PendingInboxCompose, error) {
+	f.calls++
+	return coreapi.PendingInboxCompose{}, nil
+}
+
+func (f *fakeInboxSendWriter) MarkPendingInboxComposeSent(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) ReleasePendingInboxCompose(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboxSendWriter) FailPendingInboxCompose(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
 // fleetRoutes is every route the fleet listener is supposed to mount, with a
 // body each accepts. Listing them in ONE place is what makes the "behind the
 // token" and "not on the public router" tests grow with the transport instead
@@ -230,6 +295,22 @@ func fleetRoutes() []struct{ name, path, body string } {
 		{"coreapi: webhook delivered", remote.PathWebhookMarkDelivered, `{"workspace_id":"` + ws + `","delivery_id":"` + id + `","attempts":1,"response_status":200}`},
 		{"coreapi: webhook retrying", remote.PathWebhookMarkRetrying, `{"workspace_id":"` + ws + `","delivery_id":"` + id + `","attempts":1,"last_error":"502","response_status":502,"next_attempt_at":"2026-01-01T00:00:00Z"}`},
 		{"coreapi: webhook failed", remote.PathWebhookMarkFailed, `{"workspace_id":"` + ws + `","delivery_id":"` + id + `","attempts":5,"last_error":"gave up","response_status":null}`},
+
+		// The manual reply/compose routes (slice 3b). The record route carries the
+		// workspace twice — envelope and reply — because the handler refuses a
+		// mismatch before it reaches the writer.
+		{"coreapi: inbox reply job", remote.PathInboxReplyJob, `{"workspace_id":"` + ws + `","thread_id":"` + id + `"}`},
+		{"coreapi: inbox reply record", remote.PathInboxReplyRecord, `{"workspace_id":"` + ws + `","reply":{"workspace_id":"` + ws + `","thread_id":"` + id + `","message_id":"<a@b.test>","from_email":"me@acme.test","from_name":"Acme","to_email":"lead@x.test","subject":"Re: hi","body_text":"hello"}}`},
+		{"coreapi: inbox reply claim", remote.PathInboxReplyClaim, `{"workspace_id":"` + ws + `","task_id":"inboxreply:x:1700000000"}`},
+		{"coreapi: inbox reply release", remote.PathInboxReplyRelease, `{"workspace_id":"` + ws + `","task_id":"inboxreply:x:1700000000"}`},
+		{"coreapi: pending reply claim", remote.PathInboxPendingReplyClaim, `{"workspace_id":"` + ws + `","pending_id":"` + id + `"}`},
+		{"coreapi: pending reply sent", remote.PathInboxPendingReplySent, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","message_id":"<a@b.test>"}`},
+		{"coreapi: pending reply release", remote.PathInboxPendingReplyRelease, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","reason":"transient"}`},
+		{"coreapi: pending reply fail", remote.PathInboxPendingReplyFail, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","reason":"permanent"}`},
+		{"coreapi: pending compose claim", remote.PathInboxPendingComposeClaim, `{"workspace_id":"` + ws + `","pending_id":"` + id + `"}`},
+		{"coreapi: pending compose sent", remote.PathInboxPendingComposeSent, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","message_id":"<a@b.test>"}`},
+		{"coreapi: pending compose release", remote.PathInboxPendingComposeRelease, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","reason":"transient"}`},
+		{"coreapi: pending compose fail", remote.PathInboxPendingComposeFail, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","reason":"permanent"}`},
 	}
 }
 
@@ -249,8 +330,10 @@ func postFleet(t *testing.T, h http.Handler, path, token, body string) int {
 // transports and ONE token authenticates both. A worker holds a single
 // credential and an operator firewalls a single address.
 func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
-	opener, reader, jobs, outcomes := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}, &fakeOutcomeWriter{}
-	h, err := newFleetHandler(fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes},
+	opener, reader, jobs := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}
+	outcomes, sends := &fakeOutcomeWriter{}, &fakeInboxSendWriter{}
+	h, err := newFleetHandler(
+		fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes, inboxSends: sends},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -273,13 +356,18 @@ func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
 	if outcomes.calls != 20 {
 		t.Errorf("outcome writer reached %d times, want 20", outcomes.calls)
 	}
+	if sends.calls != 12 {
+		t.Errorf("inbox send writer reached %d times, want 12", sends.calls)
+	}
 }
 
 // One token means one rotation — and one refusal. A wrong token is rejected on
 // BOTH transports and reaches neither dependency.
 func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
-	opener, reader, jobs, outcomes := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}, &fakeOutcomeWriter{}
-	h, err := newFleetHandler(fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes},
+	opener, reader, jobs := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}
+	outcomes, sends := &fakeOutcomeWriter{}, &fakeInboxSendWriter{}
+	h, err := newFleetHandler(
+		fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes, inboxSends: sends},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -297,9 +385,9 @@ func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
 			}
 		})
 	}
-	if opener.calls != 0 || reader.calls != 0 || jobs.calls != 0 || outcomes.calls != 0 {
-		t.Errorf("dependencies were reached (%d opener, %d reader, %d jobs, %d outcomes) despite rejected tokens",
-			opener.calls, reader.calls, jobs.calls, outcomes.calls)
+	if opener.calls != 0 || reader.calls != 0 || jobs.calls != 0 || outcomes.calls != 0 || sends.calls != 0 {
+		t.Errorf("dependencies were reached (%d opener, %d reader, %d jobs, %d outcomes, %d sends) despite rejected tokens",
+			opener.calls, reader.calls, jobs.calls, outcomes.calls, sends.calls)
 	}
 }
 
@@ -308,7 +396,10 @@ func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
 // whatever a catch-all would do.
 func TestTheFleetListenerServesNothingElse(t *testing.T) {
 	h, err := newFleetHandler(
-		fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}},
+		fleetDeps{
+			credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{},
+			outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{},
+		},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -328,10 +419,11 @@ func TestTheFleetListenerRefusesAMissingTransport(t *testing.T) {
 		name string
 		deps fleetDeps
 	}{
-		{"no credentials", fleetDeps{suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}}},
-		{"no suppression", fleetDeps{credentials: &fakeOpener{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}}},
-		{"no jobs", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, outcomes: &fakeOutcomeWriter{}}},
-		{"no outcomes", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}}},
+		{"no credentials", fleetDeps{suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{}}},
+		{"no suppression", fleetDeps{credentials: &fakeOpener{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{}}},
+		{"no jobs", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{}}},
+		{"no outcomes", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, inboxSends: &fakeInboxSendWriter{}}},
+		{"no inbox sends", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := newFleetHandler(tc.deps, fleetTestToken, discardLogger()); err == nil {
@@ -358,7 +450,10 @@ func TestThePublicAPIRouterServesNoFleetRoute(t *testing.T) {
 // rather than at the first request as a 401 nobody is watching for.
 func TestTheFleetListenerRefusesAWeakToken(t *testing.T) {
 	_, err := newFleetHandler(
-		fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}},
+		fleetDeps{
+			credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{},
+			outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{},
+		},
 		strings.Repeat("a", credbroker.MinTokenLen-1), discardLogger())
 	if err == nil {
 		t.Fatal("newFleetHandler accepted a short token, want an error")
